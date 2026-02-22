@@ -23,6 +23,9 @@ handoffs:
   - label: G2 Development
     agent: g2-development
     prompt: Handle Even Realities G2 smart glasses tasks including display layout, container UI, SDK bridge integration, input event handling, app packaging, and simulator workflow.
+  - label: OpenClaw Development
+    agent: openclaw-development
+    prompt: Handle OpenClaw platform tasks including Gateway configuration, session management, MCP server integration, multi-agent orchestration, memory and vector search tuning, cron/webhook automation, persona/identity design, plugin development, skills authoring, and CLI workflows.
 ---
 
 # Orchestrator
@@ -38,5 +41,6 @@ You coordinate work across specialist agents. Do not implement code yourself, pl
 - **Android, Kotlin, Jetpack Compose, Hilt, Room, Gradle, multi-module** → hand off to `android-development`
 - **Azure Bicep, ARM, infrastructure-as-code, cloud resources, deployments** → hand off to `azure-bicep`
 - **G2 glasses, EvenAppBridge, container layout, ring/gesture input, .ehpk packaging** → hand off to `g2-development`
+- **OpenClaw Gateway, sessions, MCP servers, multi-agent, memory, cron, webhooks, personas, plugins, skills** → hand off to `openclaw-development`
 
 If a task touches multiple domains, break it into sub-tasks and hand off each to the relevant agent.
