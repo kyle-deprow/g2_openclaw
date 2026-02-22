@@ -1,0 +1,14 @@
+{
+  "package_id": "com.g2openclaw.app",
+  "edition": "202601",
+  "name": "OpenClaw",
+  "version": "0.1.0",
+  "min_app_version": "0.1.0",
+  "tagline": "AI assistant for Even Realities G2 glasses",
+  "description": "Voice-controlled AI assistant that connects G2 smart glasses to a local PC gateway running OpenClaw.",
+  "author": "G2 OpenClaw Contributors",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["*"]
+  }
+}

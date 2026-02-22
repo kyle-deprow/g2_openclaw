@@ -389,7 +389,9 @@ Accessed via **double-tap** from response complete. Shows extended content + met
 | 3 | 3 | `p1_footer` | text | 8 | 256 | 560 | 24 | 18 | 0x6 | `"Double-tap: back · Tap: dismiss"` | no | 0 |
 
 **Notes:** Only 3 containers (single full-width header). Full response +
-metadata below divider. **Double-tap** → `setPageFlip(0)`. **Tap** → idle.
+metadata below divider. **Double-tap** → `rebuildPageContainer` (swap back to page 0 summary layout). **Tap** → idle.
+
+> **⚠️ `setPageFlip` does NOT exist in the SDK.** Page switching is implemented at the app layer by maintaining a `currentPage` variable (0 or 1) and calling `rebuildPageContainer` with the alternate page's containers on each double-tap.
 
 **Overflow text:** When a response is truncated on page 0 (due to the ~1800 character limit), page 1 shows the continuation of the truncated response above the metadata divider. The `{response}` field in the `p1_content` container contains the full untruncated response text, allowing the user to scroll through the complete answer.
 
@@ -491,11 +493,50 @@ async function appendDelta(b: EvenAppBridge, delta: string) {
 }
 ```
 
-### 7.4 Page Flip
+### 7.4 Page Toggle (App-Layer)
+
+> **`setPageFlip` does NOT exist in the SDK.** Page navigation is managed
+> entirely in the app by tracking a `currentPage` variable and calling
+> `rebuildPageContainer` to swap between page 0 (summary) and page 1 (detail).
 
 ```typescript
-await bridge.setPageFlip(1); // show detail view (page 1)
-await bridge.setPageFlip(0); // return to main page
+let currentPage: 0 | 1 = 0;
+
+/**
+ * Toggle between page 0 (summary) and page 1 (detail).
+ * Called on DOUBLE_CLICK_EVENT while in the `displaying` state.
+ */
+async function togglePage(
+  b: EvenAppBridge,
+  query: string,
+  response: string,
+  meta: { model: string; elapsed: number; session: string },
+) {
+  currentPage = currentPage === 0 ? 1 : 0;
+
+  if (currentPage === 1) {
+    // Page 1 — detail view: full response + metadata
+    await rebuild(b, [
+      text(1, 'p1_header', 8, 8, 560, 32, 24, 0xF, 'Response Details         [Page 2]'),
+      text(2, 'p1_content', 8, 48, 560, 200, 18, 0xF,
+        `${response}\n\n━━━━━━━━━━━━━━━\nModel: ${meta.model}\nTime: ${meta.elapsed}s\nSession: ${meta.session}`,
+        1),
+      text(3, 'p1_footer', 8, 256, 560, 24, 18, 0x6, 'Double-tap: back · Tap: dismiss'),
+    ]);
+  } else {
+    // Page 0 — summary view: truncated response
+    const queryTrunc = query.length > 25 ? query.slice(0, 22) + '...' : query;
+    const displayText = response.length > 1800
+      ? response.slice(0, 1800) + '… [double-tap for more]'
+      : response;
+    await rebuild(b, [
+      text(1, 'title',   8,   8, 460,  32, 18, 0xA, `You: ${queryTrunc}`),
+      text(2, 'badge', 480,   8,  88,  32, 18, 0x6, '● Done'),
+      text(3, 'content', 8,  48, 560, 200, 18, 0xF, displayText, 1),
+      text(4, 'footer',  8, 256, 560,  24, 18, 0x6, 'Tap to dismiss · Double-tap for more'),
+    ]);
+  }
+}
 ```
 
 ## 8. Transition Table
@@ -508,8 +549,8 @@ await bridge.setPageFlip(0); // return to main page
 | **transcribing** | **thinking** | Gateway sends `transcription` frame + `status:"thinking"` | Show user query text + thinking indicator | `rebuildPageContainer` |
 | **thinking** | **streaming** | First `assistant` delta frame received from Gateway | Swap to streaming layout; begin appending deltas | `rebuildPageContainer` (initial), then `textContainerUpgrade` (deltas) |
 | **streaming** | **displaying** | Gateway sends `end` frame | Strip cursor, update badge + footer text | `textContainerUpgrade` (badge, footer) |
-| **displaying** | **page 1** | Double-tap (`DOUBLE_CLICK_EVENT`) | Flip to detail view | `setPageFlip(1)` |
-| **page 1** | **displaying** | Double-tap (`DOUBLE_CLICK_EVENT`) | Return to main page | `setPageFlip(0)` |
+| **displaying** | **page 1** | Double-tap (`DOUBLE_CLICK_EVENT`) | Swap to detail view (toggle `currentPage` to 1, call `rebuildPageContainer` with page 1 containers) | `rebuildPageContainer` |
+| **page 1** | **displaying** | Double-tap (`DOUBLE_CLICK_EVENT`) | Swap back to summary view (toggle `currentPage` to 0, call `rebuildPageContainer` with page 0 containers) | `rebuildPageContainer` |
 | **displaying** | **idle** | Tap (`CLICK_EVENT`) | Full layout swap back to idle | `rebuildPageContainer` |
 | **any** | **error** | Gateway `error` frame received | Full layout swap to error state | `rebuildPageContainer` |
 | **any** | **disconnected** | WebSocket `close` / `error` event | Full layout swap to disconnected state | `rebuildPageContainer` |

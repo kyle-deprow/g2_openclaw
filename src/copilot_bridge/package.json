@@ -1,0 +1,31 @@
+{
+	"name": "copilot-bridge",
+	"version": "0.1.0",
+	"description": "GitHub Copilot SDK bridge for OpenClaw",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"scripts": {
+		"build": "tsc",
+		"lint": "biome check .",
+		"format": "biome format . --write",
+		"test": "vitest run",
+		"test:integration": "COPILOT_INTEGRATION=1 vitest run tests/integration",
+		"typecheck": "tsc --noEmit",
+		"validate": "tsx scripts/validate-connection.ts",
+		"register": "tsx scripts/register-plugin.ts",
+		"unregister": "tsx scripts/register-plugin.ts --unregister"
+	},
+	"dependencies": {
+		"@github/copilot-sdk": "^0.1.25",
+		"@modelcontextprotocol/sdk": "^1.26.0",
+		"dotenv": "^16.4.7"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.4",
+		"@types/node": "^25.3.0",
+		"tsx": "^4.19.2",
+		"typescript": "^5.7.3",
+		"vitest": "^3.0.5"
+	}
+}

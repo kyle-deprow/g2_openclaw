@@ -356,7 +356,7 @@ The Gateway tracks one `ConnectionState` per active phone connection. Every stat
 
 ### 4.2 PCM Format Expectations
 
-The G2 microphone produces audio via the `onMicData` callback as `Int8Array` chunks. The expected format (and the default values if `start_audio` omits them):
+The G2 microphone produces audio via the `onMicData` callback as `Uint8Array` chunks. The expected format (and the default values if `start_audio` omits them):
 
 | Parameter | Value | Notes |
 |---|---|---|

@@ -102,7 +102,7 @@ G2 OpenClaw bridges Even Realities G2 AR smart glasses to an OpenClaw AI assista
 | Step | Actor | Action | Detail |
 |---:|---|---|---|
 | 1 | **User** | Speaks | Voice enters G2 glasses microphone |
-| 2 | **G2 Glasses** | Streams PCM | Raw PCM Int8Array chunks sent over BLE to iPhone |
+| 2 | **G2 Glasses** | Streams PCM | Raw PCM Uint8Array chunks sent over BLE to iPhone |
 | 3 | **G2 App** | Receives `onMicData` | Callback fires per audio chunk |
 | 4 | **G2 App** | Forwards chunk immediately | Sends raw PCM bytes as a binary WebSocket frame to PC Gateway — no buffering, no processing |
 | 5 | **PC Gateway** | Receives binary frame | Accumulates PCM chunks in a server-side buffer |
@@ -257,7 +257,7 @@ All gesture handling is local to the phone app — gestures do **not** travel to
 │  │  TAP (idle)   │──┼──► Open microphone, send start_audio, stream PCM          │
 │  │  TAP (rec.)   │──┼──► Close mic, send {type:"stop_audio"}; await response    │
 │  │  TAP (disp.)  │──┼──► Dismiss response / return to idle                      │
-│  │  DOUBLE TAP   │──┼──► Toggle page (setPageFlip) or secondary action          │
+│  │  DOUBLE TAP   │──┼──► Toggle page (app-layer swap via rebuildPageContainer)   │
 │  │  SCROLL       │──┼──► Firmware scrolls list/text natively                    │
 │  │               │  │                                                           │
 │  └───────────────┘  │  State: RECORDING (mic active, streaming to Gateway)      │
@@ -276,7 +276,7 @@ All gesture handling is local to the phone app — gestures do **not** travel to
 │                     │                                                           │
 │                     │  SCROLL → firmware auto-scrolls long text/list            │
 │                     │  TAP → dismiss / return to idle                           │
-│                     │  DOUBLE TAP → flip to page 1 (detail view)               │
+│                     │  DOUBLE TAP → swap page content (via rebuildPageContainer)│
 │                     │  SCROLL_BOTTOM_EVENT → load next page or auto-advance     │
 │                     │                                                           │
 └─────────────────────┴───────────────────────────────────────────────────────────┘
@@ -326,7 +326,7 @@ All gesture handling is local to the phone app — gestures do **not** travel to
 │                │                   │  G2 OpenClaw App Handler     │  │
 │                │                   │                              │  │
 │                │                   │  CLICK → select / confirm    │  │
-│                │                   │  DOUBLE_CLICK → page flip    │  │
+│                │                   │  DOUBLE_CLICK_EVENT → swap   │  │
 │                │                   │  SCROLL_TOP → prev page      │  │
 │                │                   │  SCROLL_BOTTOM → next page   │  │
 │                │                   │  audioEvent → forward PCM    │  │
@@ -338,14 +338,14 @@ All gesture handling is local to the phone app — gestures do **not** travel to
 
 ### Page Management
 
-The G2 display supports exactly **two pages** (page 0 and page 1), toggled via `bridge.setPageFlip()`. Each page holds up to **4 containers**.
+The G2 display supports up to **4 containers** per layout. There is no native `setPageFlip` API — dual-page display must be **simulated at the application layer** by calling `bridge.rebuildPageContainer()` to swap container content on double-tap.
 
-| Page | Suggested Use | Max Containers |
+| "Page" | Suggested Use | Implementation |
 |---|---|---|
-| Page 0 | Primary view — conversation, current response | 4 |
-| Page 1 | Detail view — full response, tools used, status | 4 |
+| Page 0 (default) | Primary view — conversation, current response | Initial `setLayout()` call |
+| Page 1 (detail) | Full response, tools used, status | `rebuildPageContainer()` replaces containers on double-tap |
 
-Double-tap is the recommended gesture for flipping between pages.
+Double-tap (`DOUBLE_CLICK_EVENT`) is the recommended gesture for flipping between logical pages.
 
 ---
 
@@ -494,7 +494,7 @@ Raw PCM audio bytes are sent as **binary WebSocket frames** — no JSON wrapping
 
 | Frame Type | Format | Description |
 |---|---|---|
-| Raw PCM | Binary frame (bytes) | Int8Array audio chunk from G2 microphone, forwarded directly |
+| Raw PCM | Binary frame (bytes) | Uint8Array audio chunk from G2 microphone, forwarded directly |
 
 #### JSON Text Frames (Control)
 

@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The G2 OpenClaw App is the thinnest possible bridge between the Even Realities G2 smart glasses and the PC Gateway. It runs inside a WKWebView (`flutter_inappwebview`) on an iPhone, packaged as an EvenHub `.ehpk` app. The app has no intelligence of its own — it captures microphone PCM from the glasses, forwards raw bytes over a single WebSocket to the PC Gateway, receives streamed JSON text responses, and renders them on the 576×288 4-bit greyscale display via `EvenAppBridge.setLayout()`. Physical input from the R1 ring and temple gestures drives navigation and mic control.
+The G2 OpenClaw App is the thinnest possible bridge between the Even Realities G2 smart glasses and the PC Gateway. It runs inside a WKWebView (`flutter_inappwebview`) on an iPhone, packaged as an EvenHub `.ehpk` app. The app has no intelligence of its own — it captures microphone PCM from the glasses, forwards raw bytes over a single WebSocket to the PC Gateway, receives streamed JSON text responses, and renders them on the 576×288 4-bit greyscale display via the EvenAppBridge SDK (`rebuildPageContainer` / `textContainerUpgrade`). Physical input from the R1 ring and temple gestures drives navigation and mic control.
 
 **The phone does NOT:**
 
@@ -20,7 +20,7 @@ All intelligence lives on the PC. The phone is a dumb pipe.
 
 ```
 g2_app/
-├── app.json              ← EvenHub manifest (appId, appName, version, icon, entry)
+├── app.json              ← EvenHub manifest (package_id, name, version, entrypoint, etc.)
 ├── index.html            ← Entry point loaded by WebView
 ├── src/
 │   ├── main.ts           ← App entry: init bridge, connect WS, wire events
@@ -28,9 +28,7 @@ g2_app/
 │   ├── display.ts        ← Display manager: container layout, text rendering, page mgmt
 │   ├── input.ts          ← Event handler: ring/gesture routing, mic control
 │   ├── audio.ts          ← Mic capture: onMicData → forward to gateway
-│   └── state.ts          ← Simple state machine (idle, recording, transcribing, thinking, streaming)
-├── assets/
-│   └── icon.bmp          ← App icon (4-bit greyscale BMP)
+│   └── state.ts          ← Simple state machine (loading, idle, recording, transcribing, thinking, streaming, displaying)
 ├── tsconfig.json
 ├── package.json
 └── vite.config.ts        ← Bundler (output single JS for WebView)
@@ -40,9 +38,9 @@ g2_app/
 
 | Module | Single Responsibility | Key Exports |
 |---|---|---|
-| **main.ts** | Bootstrap: initialize bridge, connect gateway, register event handlers, create startup page | `init()` — async entry point |
+| **main.ts** | Bootstrap: obtain bridge via `waitForEvenAppBridge()`, connect gateway, register event handlers, create startup page (checking `StartUpPageCreateResult`) | `init()` — async entry point |
 | **gateway.ts** | Manage the single WebSocket connection to the PC Gateway. Send binary/JSON frames, receive JSON frames, handle reconnection. | `Gateway` class: `connect()`, `send(data)`, `sendJson(obj)`, `onMessage(cb)`, `disconnect()` |
-| **display.ts** | Build and push `ContainerData` layouts to the glasses. Manage text content, page state, and container specs for each app state. | `Display` class: `showIdle()`, `showRecording()`, `showTranscribing()`, `showThinking()`, `showStreaming(text)`, `showResponse(text)`, `showError(msg)`, `flipPage()` |
+| **display.ts** | Build and push `ContainerData` layouts to the glasses. Manage text content, page state, and container specs for each app state. Uses `rebuildPageContainer` for layout transitions and `textContainerUpgrade` for content updates. | `Display` class: `showIdle()`, `showRecording()`, `showTranscribing()`, `showThinking()`, `showStreaming(text)`, `showResponse(text)`, `showError(msg)`, `swapPage()` |
 | **input.ts** | Route `onEvenHubEvent` callbacks to the correct action based on current app state and event type. Handle all SDK quirks. | `InputHandler` class: `setup(bridge)`, `onAction(cb)` |
 | **audio.ts** | Open/close the G2 microphone via `bridge.audioControl()`. Forward each `onMicData` PCM chunk immediately to the gateway as a binary frame. | `AudioCapture` class: `start(bridge, gateway)`, `stop()` |
 | **state.ts** | Track the app's display state. Transition between states in response to gateway frames and user input. Emit state change events. | `AppState` enum, `StateMachine` class: `transition(newState)`, `current()`, `onChange(cb)` |
@@ -54,7 +52,7 @@ g2_app/
 │ G2       │──────────────►│ audio.ts     │───────────────►│ gateway.ts │──► PC Gateway
 │ Glasses  │               │ (no buffer)  │                │            │
 │          │◄──────────────│ display.ts   │◄───────────────│            │◄── PC Gateway
-│          │  setLayout()  │ (containers) │   JSON frames  │            │
+│          │ rebuildPage() │ (containers) │   JSON frames  │            │
 └──────────┘               └──────────────┘                └────────────┘
                                  ▲
                                  │ state changes
@@ -70,269 +68,84 @@ g2_app/
 
 The G2 display is 576×288 pixels, 4-bit greyscale (16 shades of green, `0x0`–`0xF`). Origin `(0,0)` is top-left. All positioning is absolute pixel coordinates. Maximum **4 containers per page**. Exactly **one container must have `isEventCapture: 1`**.
 
-### 3.1 Idle State (Page 0)
+> **Pixel-level layout specifications** for all application states (idle, recording, transcribing, thinking, streaming, displaying, error, disconnected, loading) are defined in [04-display-layouts.md](04-display-layouts.md). This section describes the layout strategy; see doc 04 for exact coordinates, container IDs, font colors, and font sizes.
 
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=10
-│  │  "OpenClaw Ready"                                    │   │
-│  │  containerID: 1  name: "title"   isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=36
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=56
-│  │  "Hold ring to speak"                                │   │
-│  │  containerID: 2  name: "hint"    isEventCapture: 1   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=28
-│                                                              │
-│                                                              │   288px
-│                        (empty space)                         │
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=258
-│  │  "● Connected"                                       │   │
-│  │  containerID: 3  name: "status"  isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=22
-└──────────────────────────────────────────────────────────────┘
-```
+### 3.1 Delta Buffering During Layout Transitions
 
-| Container | ID | Name | x | y | w | h | fontColor | borderWidth | isEventCapture |
-|---|---|---|---|---|---|---|---|---|---|
-| Title | 1 | `title` | 10 | 10 | 556 | 36 | `0xF` (bright) | 0 | 0 |
-| Hint | 2 | `hint` | 10 | 56 | 556 | 28 | `0x8` (mid-grey) | 0 | 1 |
-| Status | 3 | `status` | 10 | 258 | 556 | 22 | `0x6` (dim) | 0 | 0 |
+When transitioning from thinking to streaming, the app calls `rebuildPageContainer` to swap to the streaming layout. During the BLE round-trip (~50-100ms), incoming assistant deltas must be buffered in a local array. Once `rebuildPageContainer` resolves, flush all buffered deltas via a single `textContainerUpgrade` call, then resume normal per-delta updates.
 
-**Container count:** 3. `containerTotalNum: 3`.
+### 3.2 Markdown Stripping
 
-### 3.2 Recording State (Page 0)
+LLM responses contain markdown (`**bold**`, `` `code` ``, `[links](url)`, `# headings`). Apply a `stripMarkdown()` function to each assistant delta before appending to display text: strip bold/italic markers, convert links to plain text, remove heading markers, strip code fences.
 
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=10
-│  │  "Recording..."                                      │   │
-│  │  containerID: 1  name: "title"   isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=36
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=100
-│  │  "━━━━━━━━━━━━━━━━"   (level bar — greyscale fill)   │   │
-│  │  containerID: 2  name: "level"   isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=30
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=258
-│  │  "◉ Mic active — release to send"                    │   │
-│  │  containerID: 3  name: "status"  isEventCapture: 1   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=22
-└──────────────────────────────────────────────────────────────┘
-```
+### 3.3 Response Length Handling
 
-| Container | ID | Name | x | y | w | h | fontColor | borderWidth | isEventCapture |
-|---|---|---|---|---|---|---|---|---|---|
-| Title | 1 | `title` | 10 | 10 | 556 | 36 | `0xF` | 0 | 0 |
-| Level | 2 | `level` | 60 | 100 | 456 | 30 | `0xA` | 1 (border `0x4`) | 0 |
-| Status | 3 | `status` | 10 | 258 | 556 | 22 | `0xC` | 0 | 1 |
+The `textContainerUpgrade` method supports up to 2000 characters. If accumulated response text exceeds ~1800 characters, truncate the page 0 display with `"… [double-tap for more]"` and manage page state in the app layer — on double-tap, call `rebuildPageContainer` to swap between a page 0 (truncated) and page 1 (continuation) view.
 
-**Level bar:** Built using Unicode block characters (`━`) repeated proportionally to the mic level. Updated via `textContainerUpgrade` on each audio chunk (throttled to max 10 updates/sec to avoid flicker).
+> **Note:** There is no `setPageFlip` method in the SDK. Page management must be done manually by tracking which page is active and calling `rebuildPageContainer` with the appropriate containers.
 
-### 3.3 Transcribing / Thinking State (Page 0)
-
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=10
-│  │  "Transcribing..."  OR  "Thinking..."                │   │
-│  │  containerID: 1  name: "title"   isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=36
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=56
-│  │  "You said: <transcription text>"                    │   │
-│  │  (only shown during thinking state)                  │   │
-│  │  containerID: 2  name: "preview" isEventCapture: 1   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=190
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=258
-│  │  "⏳ Processing..."                                   │   │
-│  │  containerID: 3  name: "status"  isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=22
-└──────────────────────────────────────────────────────────────┘
-```
-
-During **transcribing**, the preview container shows "Listening..." or is empty. When the Gateway sends `{type:"transcription", text:"..."}`, update the preview with the transcribed text, then the title changes to "Thinking..." as the `thinking` status arrives.
-
-### 3.4 Streaming Response State (Page 0)
-
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=0
-│  │                                                      │   │
-│  │  "The capital of France is Paris. It has been the    │   │
-│  │   capital since the 10th century and is the most     │   │
-│  │   populous city in France with over 2 million        │   │
-│  │   inhabitants in the city proper..."                 │   │
-│  │                                                      │   │
-│  │  containerID: 1  name: "response" isEventCapture: 1  │   │
-│  │  (firmware auto-scrolls as text grows)               │   │
-│  └──────────────────────────────────────────────────────┘   │ h=264
-│                                                              │
-│  ┌──────────────────────────────────────────────────────┐   │ y=268
-│  │  "▼ streaming..."                                    │   │
-│  │  containerID: 2  name: "status"  isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=18
-└──────────────────────────────────────────────────────────────┘
-```
-
-| Container | ID | Name | x | y | w | h | fontColor | borderWidth | isEventCapture |
-|---|---|---|---|---|---|---|---|---|---|
-| Response | 1 | `response` | 4 | 0 | 568 | 264 | `0xF` | 0 | 1 |
-| Status | 2 | `status` | 10 | 268 | 556 | 18 | `0x6` | 0 | 0 |
-
-**Streaming strategy:**
-
-1. Accumulate `assistant` delta strings in a local buffer.
-2. On each delta, call `textContainerUpgrade` to append text in-place (using `contentOffset = existingLength`, `contentLength = 0`).
-3. Firmware auto-scrolls the text container because it has `isEventCapture: 1`.
-4. Throttle display updates to max **15/sec** to avoid overwhelming the BLE link.
-5. If accumulated text exceeds **1000 chars** (the `rebuildPageContainer` limit), switch to `textContainerUpgrade` which allows 2000 chars.
-
-### 3.5 Full Response State (Page 0 + Page 1)
-
-After `{type:"end"}` arrives:
-
-**Page 0 — Response summary:**
-
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│  ┌──────────────────────────────────────────────────────┐   │ y=0
-│  │  <Full response text — scrollable>                   │   │
-│  │  containerID: 1  name: "response" isEventCapture: 1  │   │
-│  └──────────────────────────────────────────────────────┘   │ h=264
-│  ┌──────────────────────────────────────────────────────┐   │ y=268
-│  │  "✓ Done — tap to dismiss, double-tap for details"   │   │
-│  │  containerID: 2  name: "status"  isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=18
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Page 1 — Detail / metadata (optional):**
-
-```
-┌─────────────────────────── 576px ───────────────────────────┐
-│  ┌──────────────────────────────────────────────────────┐   │ y=0
-│  │  "You said: <transcription>"                         │   │
-│  │  containerID: 1  name: "query"   isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=60
-│  ┌──────────────────────────────────────────────────────┐   │ y=66
-│  │  <Response continuation or full text>                │   │
-│  │  containerID: 2  name: "detail"  isEventCapture: 1   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=198
-│  ┌──────────────────────────────────────────────────────┐   │ y=268
-│  │  "Page 2/2 — double-tap to go back"                  │   │
-│  │  containerID: 3  name: "footer"  isEventCapture: 0   │   │
-│  └──────────────────────────────────────────────────────┘   │ h=18
-└──────────────────────────────────────────────────────────────┘
-```
-
-Page flip is triggered by double-tap via `bridge.setPageFlip()`.
+> **SDK spelling quirks (use verbatim):** The SDK contains several misspelled identifiers that must be used exactly as-is in code:
+> - `borderRdaius` (not `borderRadius`) in `ContainerData` properties
+> - `ShutDownContaniner` (not `ShutDownContainer`) in shutdown-related enum values
+> - `APP_REQUEST_REBUILD_PAGE_FAILD` (not `FAILED`) in `StartUpPageCreateResult` enum
 
 ---
 
 ## 4. State Machine (App-Side)
 
-The thin client tracks its own display state locally, transitioning in response to Gateway status frames and user input. The state machine mirrors the Gateway's status updates.
+The thin client tracks its own display state locally, transitioning in response to Gateway status frames and user input.
 
 ### State Diagram
 
 ```
-                         ┌────────────────────┐
-                    ┌────│       idle         │◄───────────────────────────┐
-                    │    │                    │                            │
-                    │    │  Display: "Ready"  │                            │
-                    │    │  Input: ring hold  │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  user holds ring                       │
-                    │             │  → audioControl(true)                  │
-                    │             │  → send {type:"start_audio"}           │
-                    │             ▼                                        │
-                    │    ┌────────────────────┐                            │
-                    │    │    recording       │                            │
-                    │    │                    │                            │
-                    │    │  Display: "Rec..." │                            │
-                    │    │  Input: ring       │                            │
-                    │    │    release only    │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  user releases ring                    │
-                    │             │  → audioControl(false)                 │
-                    │             │  → send {type:"stop_audio"}            │
-                    │             ▼                                        │
-                    │    ┌────────────────────┐                            │
-                    │    │   transcribing     │                            │
-                    │    │                    │                            │
-                    │    │  Display: "Trans.."│                            │
-                    │    │  Input: none       │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  Gateway: {type:"status",              │
-                    │             │    status:"thinking"}                  │
-                    │             ▼                                        │
-                    │    ┌────────────────────┐                            │
-                    │    │     thinking       │                            │
-                    │    │                    │                            │
-                    │    │  Display: user     │                            │
-                    │    │   query + wait     │                            │
-                    │    │  Input: none       │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  Gateway: first {type:"assistant"}     │
-                    │             ▼                                        │
-                    │    ┌────────────────────┐                            │
-                    │    │    streaming       │                            │
-                    │    │                    │                            │
-                    │    │  Display: live     │                            │
-                    │    │   response text    │                            │
-                    │    │  Input: scroll     │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  Gateway: {type:"end"}                 │
-                    │             │  → {type:"status", status:"idle"}      │
-                    │             ▼                                        │
-                    │    ┌────────────────────┐                            │
-                    │    │   displaying       │                            │
-                    │    │                    │                            │
-                    │    │  Display: full     │                            │
-                    │    │   response + nav   │                            │
-                    │    │  Input: tap=dismiss│                            │
-                    │    │   dbl-tap=flip pg  │                            │
-                    │    └────────┬───────────┘                            │
-                    │             │                                        │
-                    │             │  user taps to dismiss                  │
-                    │             │  OR user starts new recording          │
-                    │             └────────────────────────────────────────┘
-                    │
-                    │    ┌────────────────────┐
-                    └───►│      error         │
-                         │                    │
-                         │  Display: error    │
-                         │   message          │
-                         │  Input: tap=dismiss│
-                         └────────┬───────────┘
-                                  │  tap to dismiss
-                                  │  → return to idle
-                                  └───────────────────────────────────────►idle
+     ┌─────────────────────────────────────────────────────────────────────────┐
+     │                                                                         │
+     │  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐       │
+     │  │ loading  │────►│   idle   │────►│recording │────►│ transcr. │       │
+     │  └──────────┘     └────┬─────┘     └──────────┘     └────┬─────┘       │
+     │   Gateway sends        │ ▲              tap               │             │
+     │   status:"loading"     │ │           (toggle)             │             │
+     │                        │ │                                ▼             │
+     │                        │ │         ┌──────────┐     ┌──────────┐       │
+     │                        │ │         │displaying│     │ thinking │       │
+     │                        │ │         └────┬─────┘     └────┬─────┘       │
+     │                        │ │   user taps  │                │             │
+     │                        │ └──────────────┘                ▼             │
+     │                        │                            ┌──────────┐       │
+     │                        │                            │streaming │       │
+     │                        │                            └────┬─────┘       │
+     │                        │              {type:"end"}       │             │
+     │                        │              ─────────────►     │             │
+     │                        │                                 ▼             │
+     │                        │                           ┌───────────┐       │
+     │                        │                           │displaying │       │
+     │                        │                           │(app-local)│       │
+     │                        │                           └───────────┘       │
+     │                        │                                               │
+     │  ┌──────────┐          │                                               │
+     └─►│  error   │──────────┘  (tap to dismiss)                             │
+        └──────────┘                                                          │
+        ┌──────────────┐                                                      │
+        │ disconnected │──────────────────────────────────────────────────────┘
+        └──────────────┘   (reconnect success)
 ```
+
+**Full state flow:** `loading → idle → recording → transcribing → thinking → streaming → displaying → idle`
+
+> **Note:** The app does NOT blindly map Gateway status frames to app states. The `displaying` state is app-local and ignores the Gateway's `status:'idle'` frame that follows `{type:'end'}`.
 
 ### State Definitions
 
 | State | Display | Accepted Input | Expected Gateway Frames |
 |---|---|---|---|
-| `idle` | "OpenClaw Ready", hint, status dot | Ring hold → start recording; double-tap → page flip | `{type:"connected"}` on initial connect |
-| `recording` | "Recording...", level bar, mic indicator | Ring release → stop recording | (none — phone is sending) |
+| `loading` | "Loading..." | None (tap ignored — Gateway not ready) | `{type:"connected", version:"1.0"}` on initial connect |
+| `idle` | "OpenClaw Ready", hint, status dot | Tap → start recording | `{type:"status", status:"loading"}` → back to loading |
+| `recording` | "Recording...", level bar, mic indicator | Tap → stop recording | (none — phone is sending) |
 | `transcribing` | "Transcribing..." | None (wait) | `{type:"transcription"}`, `{type:"status", status:"thinking"}` |
 | `thinking` | "Thinking...", shows transcription preview | None (wait) | `{type:"status", status:"streaming"}`, first `{type:"assistant"}` |
 | `streaming` | Live response text, auto-scrolling | Scroll (firmware-native) | `{type:"assistant", delta}` (many), `{type:"end"}` |
-| `displaying` | Full response, navigation hints | Tap → dismiss (idle); double-tap → page flip; ring hold → new recording | `{type:"status", status:"idle"}` (already received) |
-| `error` | Error message | Tap → dismiss (idle) | `{type:"error"}` |
+| `displaying` | Full response, navigation hints | Tap → dismiss (idle); double-tap → swap page via `rebuildPageContainer` | Ignores `{type:"status", status:"idle"}` from Gateway |
+| `error` | Error message | Tap → dismiss (idle) | `{type:"error", code:"...", detail:"..."}` |
 
 ---
 
@@ -370,21 +183,26 @@ On successful reconnect, reset backoff to 1s. During reconnect, display shows "C
 | Frame Type | Format | When Sent |
 |---|---|---|
 | **Binary** (PCM audio) | Raw bytes (`ArrayBuffer`) | Each `onMicData` chunk during recording |
-| `start_audio` | `{type:"start_audio", sampleRate:16000, channels:1, sampleWidth:2}` | User begins recording (ring hold) |
-| `stop_audio` | `{type:"stop_audio"}` | User stops recording (ring release) |
+| `start_audio` | `{type:"start_audio", sampleRate:16000, channels:1, sampleWidth:2}` | User taps ring (from idle or displaying) |
+| `stop_audio` | `{type:"stop_audio"}` | User taps ring again (from recording) |
 | `text` | `{type:"text", message:"..."}` | Text input (future: keyboard/voice-to-text) |
-| `cancel` | `{type:"cancel"}` | Cancel current operation |
+| `pong` | `{type:"pong"}` | Immediately, in response to Gateway `{type:"ping"}` |
 
 #### Inbound: Gateway → Phone
 
 | `type` | Key Fields | App Action |
 |---|---|---|
-| `connected` | `version` | Confirm connection, transition to idle, display "Ready" |
-| `status` | `status` (string) | Transition state machine to matching state, update display |
+| `connected` | `version` (`"1.0"`) | Confirm connection, transition to idle, display "Ready" |
+| `status` | `status` (string) | Transition state machine to matching state, update display. **Exception:** ignore `status:"idle"` when in `displaying` state. |
 | `transcription` | `text` | Store transcription, show "You said: ..." in preview |
-| `assistant` | `delta` | Append delta to response buffer, update display text |
+| `assistant` | `delta` | Strip markdown, append delta to response buffer, update display text |
 | `end` | — | Finalize response display, transition to `displaying` state |
-| `error` | `message`, `code` | Show error on display, transition to `error` state |
+| `error` | `code`, `detail` | Show error on display, transition to `error` state |
+| `ping` | — | Immediately respond with `{type:"pong"}` |
+
+**Ping/pong keep-alive:** When the Gateway sends `{type:'ping'}`, the client immediately responds with `{type:'pong'}`. This is handled transparently — no state change occurs.
+
+**Authentication:** The shared secret is passed as a query parameter on the WebSocket URL (`?token=<secret>`). There is no first-frame auth handshake.
 
 ### Connection Lifecycle
 
@@ -460,17 +278,21 @@ On first successful connection, the resolved URL and token are persisted to `loc
 
 ### Step-by-Step
 
-1. **User holds ring button** → `input.ts` detects CLICK/HOLD event in `idle` state.
+1. **User taps ring (from idle or displaying state)** → `input.ts` detects CLICK_EVENT in `idle` or `displaying` state.
 2. **App sends control frame:** `gateway.sendJson({type:"start_audio", sampleRate:16000, channels:1, sampleWidth:2})`.
 3. **App opens microphone:** `await bridge.audioControl(true)`.
-4. **PCM chunks arrive:** `onEvenHubEvent` fires with `audioEvent.audioPcm` (Uint8Array).
+4. **PCM chunks arrive:** `onEvenHubEvent` fires with `audioEvent.audioPcm` (`Uint8Array`).
    - Real hardware: 40 bytes per frame (10ms, 16kHz, S16LE, mono).
    - Simulator: 3,200 bytes per frame (100ms).
 5. **Each chunk forwarded immediately:** `gateway.send(chunk.buffer)` — no buffering, no accumulation.
-6. **User releases ring button** → `input.ts` detects release.
+6. **User taps ring again (from recording state)** → `input.ts` detects second tap.
 7. **App closes microphone:** `await bridge.audioControl(false)`.
 8. **App sends stop frame:** `gateway.sendJson({type:"stop_audio"})`.
 9. **App updates display:** Transition to `transcribing` state, show "Transcribing..." on glasses.
+
+### PCM Format Clarification
+
+The `Uint8Array` from `onMicData` is a byte-level view of 16-bit PCM S16LE data — each sample spans 2 consecutive bytes. Send the raw bytes as-is; the PC Gateway handles conversion.
 
 ### Critical Design Constraint
 
@@ -490,30 +312,41 @@ On first successful connection, the resolved URL and token are persisted to `loc
 
 `bridge.audioControl()` requires `createStartUpPageContainer` to have been called first. The app must set up the initial display layout before opening the microphone.
 
+> **Important:** Always check the `StartUpPageCreateResult` returned by `createStartUpPageContainer`:
+> - `0` = success
+> - `1` = invalid parameters
+> - `2` = container oversize
+> - `3` = out of memory
+>
+> Proceed with mic capture and event registration only on success (`0`).
+
+> **SDK initialization:** Use `await waitForEvenAppBridge()` to obtain the bridge instance — do **not** use `EvenAppBridge.getInstance()`, which is unreliable and may return before the bridge is ready.
+
 ---
 
 ## 7. Input Mapping
 
 ### Complete Event-to-Action Table
 
-| Event | Value | In State | Action |
-|---|---|---|---|
-| Ring/Temple HOLD | CLICK (0/undefined) | `idle` | Start mic, send `start_audio`, transition → `recording` |
-| Ring/Temple HOLD | CLICK (0/undefined) | `displaying` | Start mic (new question), transition → `recording` |
-| Ring/Temple RELEASE | — | `recording` | Stop mic, send `stop_audio`, transition → `transcribing` |
-| Ring/Temple TAP | CLICK (0/undefined) | `idle` | No-op (or show connectivity info) |
-| Ring/Temple TAP | CLICK (0/undefined) | `streaming` | Ignored (do not interrupt stream) |
-| Ring/Temple TAP | CLICK (0/undefined) | `displaying` | Dismiss response, transition → `idle` |
-| Ring/Temple TAP | CLICK (0/undefined) | `error` | Dismiss error, transition → `idle` |
-| DOUBLE_CLICK | 3 | `displaying` | Toggle page flip (page 0 ↔ page 1) |
-| DOUBLE_CLICK | 3 | `idle` | Toggle page flip (if page 1 has content) |
-| DOUBLE_CLICK | 3 | `streaming` | Ignored |
-| SCROLL (firmware) | — | `streaming` / `displaying` | Firmware handles natively via `isEventCapture` container |
-| SCROLL_BOTTOM | 2 | `displaying` | Indicate end of content (flash status bar) |
-| SCROLL_TOP | 1 | `displaying` | Indicate top of content |
-| FOREGROUND_ENTER | 4 | any | Reconnect WS if closed, refresh display for current state |
-| FOREGROUND_EXIT | 5 | any | Close mic if recording (send `stop_audio`), maintain WS connection |
-| ABNORMAL_EXIT | 6 | any | Clean up: close mic, close WS, reset state |
+| Event | In State | Action |
+|---|---|---|
+| TAP (CLICK_EVENT / undefined) | `loading` | Ignore (Gateway not ready) |
+| TAP | `idle` | Start mic, send `start_audio`, → `recording` |
+| TAP | `recording` | Stop mic, send `stop_audio`, → `transcribing` |
+| TAP | `transcribing` | Ignore |
+| TAP | `thinking` | Ignore |
+| TAP | `streaming` | Ignore |
+| TAP | `displaying` | Dismiss, → `idle` |
+| TAP | `error` | Dismiss, → `idle` |
+| TAP | `disconnected` | Trigger reconnect |
+| DOUBLE_CLICK_EVENT (3) | `displaying` | Swap page view via `rebuildPageContainer` (app-managed page state) |
+| DOUBLE_CLICK_EVENT (3) | other | Ignore |
+| SCROLL_BOTTOM (2) | `displaying` | End of content indicator |
+| SCROLL_TOP (1) | `displaying` | Top of content indicator |
+| FOREGROUND_ENTER (4) | any | Reconnect WS if needed |
+| FOREGROUND_EXIT (5) | `recording` | Stop mic, send `stop_audio` |
+| FOREGROUND_EXIT (5) | other | Maintain WS |
+| ABNORMAL_EXIT (6) | any | Call `bridge.shutDownPageContainer(0)`, close mic, reset state |
 
 ### CLICK_EVENT = 0 / undefined Bug Workaround
 
@@ -529,7 +362,10 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
     event.sysEvent?.eventType;
 
   if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-    handleClick();
+    if (eventType === undefined) {
+      console.warn('Undefined eventType — treating as tap (SDK bug)');
+    }
+    handleTap();
   } else if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     handleDoubleClick();
   } else if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -551,18 +387,20 @@ bridge.onEvenHubEvent((event: EvenHubEvent) => {
 });
 ```
 
-### Hold vs Tap Detection
+### Tap-to-Toggle Input Model
 
-The G2 SDK does not provide distinct HOLD/RELEASE events. The CLICK_EVENT fires on tap. To implement hold-to-record:
+The G2 SDK does not provide distinct HOLD/RELEASE events. All ring/temple interactions fire `CLICK_EVENT`. The app uses a **tap-to-toggle** model:
 
-**Strategy:** Use CLICK as a toggle. First tap starts recording, second tap stops. Alternatively, use DOUBLE_CLICK to cancel. The recommended approach:
-
-| Gesture | Action |
+| State | Tap Action |
 |---|---|
-| Single tap (idle) | Start recording → mic opens, display updates |
-| Single tap (recording) | Stop recording → mic closes, send `stop_audio` |
-| Single tap (displaying) | Dismiss response → return to idle |
-| Double tap | Page flip (when response is displayed) |
+| `idle` | Start recording → mic opens, display updates, → `recording` |
+| `recording` | Stop recording → mic closes, send `stop_audio`, → `transcribing` |
+| `displaying` | Dismiss response → return to `idle` |
+| `error` | Dismiss error → return to `idle` |
+| `loading` / `transcribing` / `thinking` / `streaming` | Ignored |
+
+Double-tap in `displaying` state swaps between page 0 and page 1 views by calling `rebuildPageContainer` with the appropriate layout.
+
 
 ### Scroll Throttling
 
@@ -641,13 +479,11 @@ npm install
 # 2. Build for production (outputs dist/ with single HTML+JS bundle)
 npx vite build
 
-# 3. Copy manifest and assets into dist/
+# 3. Copy manifest into dist/
 cp app.json dist/
-cp -r assets dist/
 
 # 4. Package as .ehpk
-cd dist
-evenhub pack
+evenhub pack app.json dist -o openclaw.ehpk
 
 # 5. Generate QR code for sideloading (use machine's LAN IP)
 evenhub qr --url "http://192.168.1.100:5173"
@@ -672,21 +508,35 @@ evenhub qr --url "http://192.168.1.100:5173"
 
 ```json
 {
-  "appId": "com.g2openclaw.app",
-  "appName": "OpenClaw",
-  "version": "1.0.0",
-  "icon": "assets/icon.bmp",
-  "entry": "index.html"
+  "package_id": "com.g2openclaw.app",
+  "edition": "202601",
+  "name": "OpenClaw",
+  "version": "0.1.0",
+  "min_app_version": "0.1.0",
+  "tagline": "AI assistant for Even Realities G2 glasses",
+  "description": "Voice-controlled AI assistant that connects G2 smart glasses to a local PC gateway running OpenClaw.",
+  "author": "G2 OpenClaw Contributors",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["*"]
+  }
 }
 ```
 
 | Field | Description |
 |---|---|
-| `appId` | Reverse-domain unique identifier |
-| `appName` | Display name in EvenHub app launcher |
+| `package_id` | Reverse-domain unique identifier. Lowercase letters + digits only, each segment starts with a letter. Regex: `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$` |
+| `edition` | Release edition string (e.g. `"202601"`) |
+| `name` | Display name in EvenHub app launcher |
 | `version` | Semantic version string |
-| `icon` | Path to 4-bit greyscale BMP icon |
-| `entry` | HTML file loaded by the WebView |
+| `min_app_version` | Minimum EvenHub app version required to run this app |
+| `tagline` | Short one-line description shown in the app store |
+| `description` | Full description of the app |
+| `author` | Author or organization name |
+| `entrypoint` | HTML file loaded by the WebView |
+| `permissions` | Required permissions (e.g. `{"network": ["*"]}` for WebSocket access) |
+
+> **Note:** The `icon` field is **not** part of the manifest schema and is silently ignored if present. Do not include it.
 
 ### Vite Configuration
 
@@ -732,13 +582,14 @@ export default defineConfig({
 |---|---|---|---|
 | **Gateway unreachable** | `WebSocket.onerror` / `onclose` fires | Auto-reconnect with exponential backoff (1→2→4→8→16→30s max) | "⚠ Connecting to Gateway..." |
 | **Gateway auth failure** | `{type:"error", code:"AUTH_FAILED"}` | Display error, do not reconnect (bad token) | "✗ Auth failed — check token" |
-| **Gateway error frame** | `{type:"error", message:"..."}` | Display error message, transition → `error` state, tap to dismiss | Show `message` from frame |
+| **Gateway error frame** | `{type:"error", code:"...", detail:"..."}` | Display `detail` from frame, transition → `error` state, tap to dismiss | Show `detail` from frame |
 | **Transcription failed** | `{type:"error", code:"TRANSCRIPTION_FAILED"}` | Return to idle, user can retry | "✗ Could not transcribe — try again" |
 | **OpenClaw error** | `{type:"error", code:"OPENCLAW_ERROR"}` | Return to idle | "✗ AI error — try again" |
 | **Mic not available** | `audioControl(true)` fails or no `audioEvent` within 2s | Show error, return to idle | "✗ Mic unavailable" |
 | **BLE disconnect** | `ABNORMAL_EXIT_EVENT` (6) | Close mic, reset state, wait for reconnect | "⚠ Glasses disconnected" |
 | **Foreground exit during recording** | `FOREGROUND_EXIT_EVENT` (5) while `recording` | Close mic, send `stop_audio`, maintain WS | (app backgrounded — no display) |
 | **WebSocket send failure** | `ws.send()` throws (WS not open) | Queue frame or drop, trigger reconnect | "⚠ Reconnecting..." |
+| **Loading state error** | `{type:"error"}` while in `loading` state | Display error, transition → `error`, tap to dismiss | Show error detail |
 
 ### Error Display Layout
 

@@ -18,7 +18,6 @@ ENV/
 uv.lock
 
 # IDE / editor
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -30,7 +29,6 @@ Thumbs.db
 
 # Environment variables
 .env
-.env.*
 
 # Testing / coverage
 .coverage
@@ -42,6 +40,13 @@ htmlcov/
 
 # ruff
 .ruff_cache/
+
+# Node.js
+node_modules/
+package-lock.json
+
+# Vite
+.vite/
 
 # Archive
 .archive/

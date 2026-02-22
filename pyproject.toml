@@ -8,15 +8,20 @@ dependencies = [
     "rich>=13.0",
     "azure-identity>=1.17",
     "azure-mgmt-resource>=23.0",
+    "websockets>=16.0",
+    "python-dotenv>=1.2.1",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 dev = [
     "ruff>=0.5",
     "pytest>=8.0",
+    "pytest-asyncio>=1.3.0",
     "mypy>=1.10",
     "pre-commit>=3.7",
 ]
+whisper = ["faster-whisper>=1.0"]
 
 [project.scripts]
 azure-infra-cli = "infra_cli.main:app"
@@ -26,7 +31,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/infra_cli"]
+packages = ["src/infra_cli", "src/gateway"]
 
 [tool.ruff]
 target-version = "py313"
@@ -43,3 +48,6 @@ mypy_path = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src/gateway"]
+asyncio_mode = "auto"
+
