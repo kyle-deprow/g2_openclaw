@@ -6,13 +6,12 @@ import struct
 
 import numpy as np
 import pytest
-
 from gateway.audio_buffer import AudioBuffer, BufferOverflow
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _silence_bytes(n: int) -> bytes:
     """Return *n* zero bytes (silence in any PCM encoding)."""
@@ -61,7 +60,7 @@ class TestToNumpy:
     def test_to_numpy_shape(self) -> None:
         """Append known bytes, verify output shape matches expected sample count."""
         buf = AudioBuffer()
-        # 100 samples × 2 bytes each = 200 bytes
+        # 100 samples x 2 bytes each = 200 bytes
         buf.append(_silence_bytes(200))
         arr = buf.to_numpy()
         assert arr.shape == (100,)

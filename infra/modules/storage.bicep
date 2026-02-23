@@ -51,7 +51,8 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     allowBlobPublicAccess: false
     publicNetworkAccess: publicNetworkAccess
     networkAcls: {
-      defaultAction: 'Allow'
+      defaultAction: publicNetworkAccess == 'Disabled' ? 'Deny' : 'Allow'
+      bypass: 'AzureServices'
     }
   }
 }
@@ -67,6 +68,42 @@ resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
         enabled: true
       }
     ]
+  }
+}
+
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01' existing = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource blobDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  name: '${storageAccount.name}-blob-diag'
+  scope: blobService
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'StorageRead'
+        enabled: true
+      }
+      {
+        category: 'StorageWrite'
+        enabled: true
+      }
+      {
+        category: 'StorageDelete'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${storageAccount.name}-nodelete'
+  scope: storageAccount
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of Storage Account'
   }
 }
 

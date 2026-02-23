@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 import websockets
-
 from gateway.openclaw_client import OpenClawClient, OpenClawError
-
+from websockets import ServerConnection
+from websockets.asyncio.server import Server
 
 pytestmark = pytest.mark.asyncio
 
@@ -20,13 +21,13 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _mock_openclaw_handler(
-    ws,
+    ws: ServerConnection,
     *,
-    auth_ok=True,
-    deltas=None,
-    error_on_agent=False,
-    disconnect_mid_stream=False,
-):
+    auth_ok: bool = True,
+    deltas: list[str] | None = None,
+    error_on_agent: bool = False,
+    disconnect_mid_stream: bool = False,
+) -> None:
     """Simple handler that mimics OpenClaw protocol."""
     deltas = deltas or ["Hello ", "from ", "OpenClaw."]
 
@@ -35,9 +36,7 @@ async def _mock_openclaw_handler(
         if msg["method"] == "connect":
             if auth_ok:
                 await ws.send(
-                    json.dumps(
-                        {"type": "res", "id": msg["id"], "ok": True, "payload": {}}
-                    )
+                    json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
                 )
             else:
                 await ws.send(
@@ -118,10 +117,10 @@ async def _mock_openclaw_handler(
             )
 
 
-async def _start_mock_server(**kwargs):
+async def _start_mock_server(**kwargs: Any) -> tuple[Server, int]:
     """Start a mock OpenClaw server on an ephemeral port. Returns (server, port)."""
 
-    async def handler(ws):
+    async def handler(ws: ServerConnection) -> None:
         await _mock_openclaw_handler(ws, **kwargs)
 
     server = await websockets.serve(handler, "127.0.0.1", 0)
@@ -135,7 +134,7 @@ async def _start_mock_server(**kwargs):
 
 
 class TestHappyPath:
-    async def test_connect_auth_and_stream_deltas(self):
+    async def test_connect_auth_and_stream_deltas(self) -> None:
         server, port = await _start_mock_server(deltas=["Hello ", "world!"])
         try:
             client = OpenClawClient("127.0.0.1", port, "test-token")
@@ -147,7 +146,7 @@ class TestHappyPath:
             server.close()
             await server.wait_closed()
 
-    async def test_multiple_sequential_messages(self):
+    async def test_multiple_sequential_messages(self) -> None:
         """Send two agent requests on the same connection; both get deltas."""
         server, port = await _start_mock_server(deltas=["A", "B"])
         try:
@@ -166,7 +165,7 @@ class TestHappyPath:
             server.close()
             await server.wait_closed()
 
-    async def test_request_ids_increment(self):
+    async def test_request_ids_increment(self) -> None:
         """Request IDs should monotonically increase across calls."""
         server, port = await _start_mock_server(deltas=["x"])
         try:
@@ -190,7 +189,7 @@ class TestHappyPath:
 
 
 class TestAuthErrors:
-    async def test_auth_rejected(self):
+    async def test_auth_rejected(self) -> None:
         server, port = await _start_mock_server(auth_ok=False)
         try:
             client = OpenClawClient("127.0.0.1", port, "bad-token")
@@ -203,7 +202,7 @@ class TestAuthErrors:
 
 
 class TestAgentErrors:
-    async def test_agent_error_event(self):
+    async def test_agent_error_event(self) -> None:
         server, port = await _start_mock_server(error_on_agent=True)
         try:
             client = OpenClawClient("127.0.0.1", port, "test-token")
@@ -218,7 +217,7 @@ class TestAgentErrors:
 
 
 class TestConnectionErrors:
-    async def test_connection_refused(self):
+    async def test_connection_refused(self) -> None:
         # Use ephemeral port to avoid conflicts
         import socket as _socket
 
@@ -229,7 +228,7 @@ class TestConnectionErrors:
         with pytest.raises(OpenClawError, match="connection refused"):
             await client.send_message("Hi")
 
-    async def test_disconnect_mid_stream(self):
+    async def test_disconnect_mid_stream(self) -> None:
         server, port = await _start_mock_server(disconnect_mid_stream=True)
         try:
             client = OpenClawClient("127.0.0.1", port, "test-token")
@@ -245,7 +244,7 @@ class TestConnectionErrors:
 
 
 class TestClose:
-    async def test_graceful_close(self):
+    async def test_graceful_close(self) -> None:
         server, port = await _start_mock_server()
         try:
             client = OpenClawClient("127.0.0.1", port, "test-token")
@@ -262,15 +261,13 @@ class TestClose:
 class TestMalformedAgentAcceptance:
     """M-9: Malformed (non-JSON) agent acceptance response."""
 
-    async def test_non_json_agent_response(self):
-        async def handler(ws):
+    async def test_non_json_agent_response(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg["method"] == "connect":
                     await ws.send(
-                        json.dumps(
-                            {"type": "res", "id": msg["id"], "ok": True, "payload": {}}
-                        )
+                        json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
                     )
                 elif msg["method"] == "agent":
                     await ws.send("<<<not json>>>")
@@ -290,15 +287,13 @@ class TestMalformedAgentAcceptance:
 class TestAgentAcceptanceIdMismatch:
     """M-10: Agent acceptance response has wrong request ID."""
 
-    async def test_wrong_id_in_agent_response(self):
-        async def handler(ws):
+    async def test_wrong_id_in_agent_response(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg["method"] == "connect":
                     await ws.send(
-                        json.dumps(
-                            {"type": "res", "id": msg["id"], "ok": True, "payload": {}}
-                        )
+                        json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
                     )
                 elif msg["method"] == "agent":
                     await ws.send(

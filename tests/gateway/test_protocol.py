@@ -1,9 +1,9 @@
 """Tests for gateway.protocol."""
 
 import json
+from typing import Any
 
 import pytest
-
 from gateway.protocol import (
     ProtocolError,
     parse_text_frame,
@@ -25,7 +25,7 @@ class TestRoundTripFrames:
         ],
         ids=lambda f: f["type"],
     )
-    def test_inbound_round_trip(self, frame: dict) -> None:
+    def test_inbound_round_trip(self, frame: dict[str, Any]) -> None:
         serialized = serialize(frame)
         parsed = parse_text_frame(serialized)
         assert parsed == frame
@@ -43,7 +43,7 @@ class TestRoundTripFrames:
         ],
         ids=lambda f: f["type"],
     )
-    def test_outbound_round_trip(self, frame: dict) -> None:
+    def test_outbound_round_trip(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
         serialized = serialize(frame)
         assert json.loads(serialized) == frame
@@ -95,7 +95,9 @@ class TestValidateOutbound:
         ],
         ids=["status", "error", "connected", "assistant", "transcription"],
     )
-    def test_missing_required_outbound_field_raises(self, frame: dict, missing_field: str) -> None:
+    def test_missing_required_outbound_field_raises(
+        self, frame: dict[str, Any], missing_field: str
+    ) -> None:
         with pytest.raises(ProtocolError, match=f"missing required field '{missing_field}'"):
             validate_outbound(frame)
 
@@ -124,12 +126,14 @@ class TestFieldTypeValidation:
     """Field type checking in parse_text_frame and validate_outbound."""
 
     def test_inbound_int_field_rejects_string(self) -> None:
-        raw = json.dumps({
-            "type": "start_audio",
-            "sampleRate": "not_an_int",
-            "channels": 1,
-            "sampleWidth": 2,
-        })
+        raw = json.dumps(
+            {
+                "type": "start_audio",
+                "sampleRate": "not_an_int",
+                "channels": 1,
+                "sampleWidth": 2,
+            }
+        )
         with pytest.raises(ProtocolError, match="must be int"):
             parse_text_frame(raw)
 

@@ -135,6 +135,18 @@ const copilotCodeTool: OpenClawToolDef = {
 		required: ["task"],
 	},
 	async execute(args: Record<string, any>): Promise<{ result: string }> {
+		if (typeof args.task !== "string" || args.task.length === 0) {
+			return { result: "## Error\n\n`task` must be a non-empty string" };
+		}
+		if (args.task.length > 50_000) {
+			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
+		}
+		if (args.workingDir !== undefined && typeof args.workingDir !== "string") {
+			return { result: "## Error\n\n`workingDir` must be a string" };
+		}
+		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
+			return { result: "## Error\n\n`timeout` must be a non-negative number" };
+		}
 		try {
 			const bridge = await getBridge();
 			const result = await bridge.runTask({
@@ -171,6 +183,18 @@ const copilotCodeVerboseTool: OpenClawToolDef = {
 		required: ["task"],
 	},
 	async execute(args: Record<string, any>): Promise<{ result: string }> {
+		if (typeof args.task !== "string" || args.task.length === 0) {
+			return { result: "## Error\n\n`task` must be a non-empty string" };
+		}
+		if (args.task.length > 50_000) {
+			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
+		}
+		if (args.workingDir !== undefined && typeof args.workingDir !== "string") {
+			return { result: "## Error\n\n`workingDir` must be a string" };
+		}
+		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
+			return { result: "## Error\n\n`timeout` must be a non-negative number" };
+		}
 		try {
 			const bridge = await getBridge();
 			const startTime = Date.now();
@@ -263,9 +287,16 @@ const copilotOrchestrateTool: OpenClawToolDef = {
 		required: ["task"],
 	},
 	async execute(args: Record<string, unknown>): Promise<{ result: string }> {
+		if (typeof args.task !== "string" || (args.task as string).length === 0) {
+			return { result: "## Error\n\n`task` must be a non-empty string" };
+		}
+		if ((args.task as string).length > 50_000) {
+			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
+		}
 		try {
 			const bridge = await getBridge();
-			const maxConcurrency = typeof args.maxConcurrency === "number" ? args.maxConcurrency : 3;
+			const rawConcurrency = (typeof args.maxConcurrency === "number" && Number.isFinite(args.maxConcurrency)) ? args.maxConcurrency : 3;
+			const maxConcurrency = Math.min(Math.max(1, rawConcurrency), 10);
 			const pool = new SessionPool(bridge, maxConcurrency);
 
 			const orchestrator = new TaskOrchestrator(bridge, pool);

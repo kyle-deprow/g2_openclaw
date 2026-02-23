@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
 import websockets
-
 from gateway.config import GatewayConfig
 from gateway.server import GatewayServer
 
@@ -23,27 +24,30 @@ from gateway.server import GatewayServer
 TIMEOUT = 5.0
 
 
-async def _recv(ws: websockets.ClientConnection) -> dict:
+async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
     """Receive a single JSON frame with a timeout guard."""
     raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
-    return json.loads(raw)
+    result: dict[str, Any] = json.loads(raw)
+    return result
 
 
-async def _consume_handshake(ws: websockets.ClientConnection) -> tuple[dict, dict]:
+async def _consume_handshake(
+    ws: websockets.ClientConnection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Receive and return the (connected, status:idle) handshake pair."""
     connected = await _recv(ws)
     idle = await _recv(ws)
     return connected, idle
 
 
-async def _send_json(ws: websockets.ClientConnection, frame: dict) -> None:
+async def _send_json(ws: websockets.ClientConnection, frame: dict[str, Any]) -> None:
     """Send a JSON text frame."""
     await ws.send(json.dumps(frame))
 
 
-async def _collect_until_idle(ws: websockets.ClientConnection) -> list[dict]:
+async def _collect_until_idle(ws: websockets.ClientConnection) -> list[dict[str, Any]]:
     """Collect all frames until a status:idle frame is received."""
-    frames: list[dict] = []
+    frames: list[dict[str, Any]] = []
     while True:
         frame = await _recv(ws)
         frames.append(frame)
@@ -63,9 +67,7 @@ class FakeTranscriber:
     def __init__(self, result: str = "Hello world") -> None:
         self._result = result
 
-    async def transcribe(
-        self, audio, language: str = "en", timeout: float = 30.0  # noqa: ANN001
-    ) -> str:
+    async def transcribe(self, audio: Any, language: str = "en", timeout: float = 30.0) -> str:
         await asyncio.sleep(0.05)
         return self._result
 
@@ -78,7 +80,7 @@ FAKE_TEXT = "Hello world"
 
 
 @pytest_asyncio.fixture
-async def audio_gateway():
+async def audio_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
     """Start a gateway server with a FakeTranscriber on an ephemeral port.
 
     Yields (ws_url, GatewayServer).
@@ -89,7 +91,7 @@ async def audio_gateway():
         gateway_token="audio-token",
     )
     fake_transcriber = FakeTranscriber(result=FAKE_TEXT)
-    gw = GatewayServer(config, transcriber=fake_transcriber)
+    gw = GatewayServer(config, transcriber=fake_transcriber)  # type: ignore[arg-type]
     server = await websockets.serve(gw.handler, config.gateway_host, 0)
     port = server.sockets[0].getsockname()[1]
     try:
@@ -115,7 +117,7 @@ FAKE_PCM = b"\x00\x01" * 100
 class TestFullAudioPipeline:
     """Happy-path: start_audio → binary PCM → stop_audio → full response sequence."""
 
-    async def test_full_audio_pipeline(self, audio_gateway: tuple) -> None:
+    async def test_full_audio_pipeline(self, audio_gateway: tuple[str, GatewayServer]) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:
             # Handshake
@@ -193,7 +195,7 @@ class TestStartAudioWhileRecording:
     """Sending start_audio while already recording returns INVALID_STATE."""
 
     async def test_start_audio_while_recording_returns_error(
-        self, audio_gateway: tuple
+        self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:
@@ -231,7 +233,7 @@ class TestStopAudioWithoutRecording:
     """Sending stop_audio when not recording returns INVALID_STATE."""
 
     async def test_stop_audio_without_recording_returns_error(
-        self, audio_gateway: tuple
+        self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:
@@ -248,7 +250,7 @@ class TestStopAudioWithNoData:
     """stop_audio immediately after start_audio (no binary data) → TRANSCRIPTION_FAILED."""
 
     async def test_stop_audio_with_no_data_returns_error(
-        self, audio_gateway: tuple
+        self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:
@@ -287,7 +289,7 @@ class TestTextWhileRecording:
     """Sending a text frame while recording returns INVALID_STATE."""
 
     async def test_text_while_recording_returns_error(
-        self, audio_gateway: tuple
+        self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:
@@ -317,7 +319,7 @@ class TestBinaryDataWhileIdle:
     """Binary data sent while idle is silently ignored — no error, session stays functional."""
 
     async def test_binary_data_while_idle_ignored(
-        self, audio_gateway: tuple
+        self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
         async with websockets.connect(_ws_url(url)) as ws:

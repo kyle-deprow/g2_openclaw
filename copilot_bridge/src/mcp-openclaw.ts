@@ -86,7 +86,9 @@ export class OpenClawClient {
 	}
 
 	private _doConnect(): Promise<void> {
-		const url = new URL(`ws://${this.config.host}:${this.config.port}/ws`);
+		const isLocal = this.config.host === "127.0.0.1" || this.config.host === "localhost" || this.config.host === "::1";
+		const scheme = isLocal ? "ws" : "wss";
+		const url = new URL(`${scheme}://${this.config.host}:${this.config.port}/ws`);
 
 		return new Promise<void>((resolve, reject) => {
 			const ws = new WebSocket(url.toString());

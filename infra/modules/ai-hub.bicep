@@ -38,6 +38,13 @@ param hubDescription string = 'Azure AI Foundry Hub for centralised AI resource 
 @description('Resource ID of the Log Analytics workspace for diagnostic settings.')
 param logAnalyticsWorkspaceId string
 
+@description('Allow or deny public network access.')
+@allowed([
+  'Enabled'
+  'Disabled'
+])
+param publicNetworkAccess string = 'Enabled'
+
 // ---------------------------------------------------------------------------
 // Variables
 // ---------------------------------------------------------------------------
@@ -67,7 +74,7 @@ resource aiHub 'Microsoft.MachineLearningServices/workspaces@2024-10-01' = {
     storageAccount: storageAccountId
     keyVault: keyVaultId
     applicationInsights: appInsightsId
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 

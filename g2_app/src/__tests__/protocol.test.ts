@@ -98,11 +98,24 @@ describe('parseFrame', () => {
     );
   });
 
+  // --- Security: field type validation ---
+  it('throws when status field has wrong type', () => {
+    expect(() => parseFrame('{"type":"status","status":123}')).toThrow(
+      'Field "status" must be string',
+    );
+  });
+
+  it('strips __proto__ key (prototype pollution guard)', () => {
+    const frame = parseFrame('{"type":"end","__proto__":{"polluted":true}}');
+    expect(frame.type).toBe('end');
+    expect((frame as any).__proto__).toBe(Object.prototype);
+  });
+
   // --- Extra fields are allowed (forward compatibility) ---
-  it('allows extra fields on a status frame', () => {
+  it('strips extra fields on a status frame (prototype-pollution guard)', () => {
     const frame = parseFrame('{"type":"status","status":"idle","extra":"ok"}');
     expect(frame.type).toBe('status');
-    expect((frame as unknown as Record<string, unknown>).extra).toBe('ok');
+    expect((frame as unknown as Record<string, unknown>).extra).toBeUndefined();
   });
 
   it('allows extra fields on an end frame', () => {

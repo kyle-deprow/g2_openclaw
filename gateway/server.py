@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
@@ -196,7 +197,7 @@ class GatewaySession:
             await self.send_frame(
                 {
                     "type": "error",
-                    "detail": str(exc),
+                    "detail": "Audio buffer overflow",
                     "code": ErrorCode.BUFFER_OVERFLOW,
                 }
             )
@@ -209,7 +210,7 @@ class GatewaySession:
             await self.send_frame(
                 {
                     "type": "error",
-                    "detail": str(exc),
+                    "detail": "Invalid audio data format",
                     "code": ErrorCode.INVALID_FRAME,
                 }
             )
@@ -225,7 +226,9 @@ class GatewaySession:
             await self.send_frame(
                 {
                     "type": "error",
-                    "detail": f"Unsupported sample width: {sample_width} (only 16-bit PCM supported)",
+                    "detail": (
+                        f"Unsupported sample width: {sample_width} (only 16-bit PCM supported)"
+                    ),
                     "code": ErrorCode.INVALID_FRAME,
                 }
             )
@@ -299,7 +302,7 @@ class GatewaySession:
             await self.send_frame(
                 {
                     "type": "error",
-                    "detail": str(exc),
+                    "detail": "Transcription failed",
                     "code": ErrorCode.TRANSCRIPTION_FAILED,
                 }
             )
@@ -423,10 +426,32 @@ class GatewayServer:
         """Handle a new WebSocket connection."""
         # --- token auth ---
         if self.config.gateway_token:
-            assert ws.request is not None, "Expected HTTP request on connection"
-            query = parse_qs(urlparse(ws.request.path).query)
-            tokens = query.get("token", [])
-            if not tokens or not hmac.compare_digest(tokens[0], self.config.gateway_token):
+            authenticated = False
+            # Legacy: check query string token
+            if ws.request is not None:
+                query = parse_qs(urlparse(ws.request.path).query)
+                tokens = query.get("token", [])
+                if tokens and hmac.compare_digest(tokens[0], self.config.gateway_token):
+                    authenticated = True
+                    logger.info("Client authenticated via query string (deprecated)")
+
+            # Preferred: first-message auth handshake
+            if not authenticated:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=self.config.auth_timeout)
+                    if isinstance(raw, str):
+                        auth_frame = json.loads(raw)
+                        if (
+                            isinstance(auth_frame, dict)
+                            and auth_frame.get("type") == "auth"
+                            and isinstance(auth_frame.get("token"), str)
+                            and hmac.compare_digest(auth_frame["token"], self.config.gateway_token)
+                        ):
+                            authenticated = True
+                except (TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
+                    pass
+
+            if not authenticated:
                 await ws.close(4001, "Unauthorized")
                 return
 
@@ -461,7 +486,11 @@ class GatewayServer:
             self.config.gateway_port,
         )
         async with websockets.serve(
-            self.handler, self.config.gateway_host, self.config.gateway_port
+            self.handler,
+            self.config.gateway_host,
+            self.config.gateway_port,
+            max_size=2**16,  # 64 KiB max frame size
+            origins=None,  # TODO: restrict in production
         ):
             await asyncio.Future()  # block forever
 

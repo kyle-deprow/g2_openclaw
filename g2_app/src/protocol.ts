@@ -93,6 +93,15 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   ping: [],
 };
 
+/** Expected types for required fields (runtime validation). */
+const FIELD_TYPES: Record<string, Record<string, string>> = {
+  status: { status: 'string' },
+  transcription: { text: 'string' },
+  assistant: { delta: 'string' },
+  error: { detail: 'string', code: 'string' },
+  connected: { version: 'string' },
+};
+
 export function parseFrame(data: string): InboundFrame {
   let parsed: unknown;
   try {
@@ -117,5 +126,20 @@ export function parseFrame(data: string): InboundFrame {
     }
   }
 
-  return frame as unknown as InboundFrame;
+  // Validate field types
+  const typeChecks = FIELD_TYPES[frame.type as string];
+  if (typeChecks) {
+    for (const [field, expectedType] of Object.entries(typeChecks)) {
+      if (typeof frame[field] !== expectedType) {
+        throw new Error(`Field "${field}" must be ${expectedType}, got ${typeof frame[field]}`);
+      }
+    }
+  }
+
+  // Build a clean object with only known fields to prevent prototype pollution
+  const clean: Record<string, unknown> = { type: frame.type };
+  const knownFields = required ?? [];
+  for (const f of knownFields) { clean[f] = frame[f]; }
+
+  return clean as unknown as InboundFrame;
 }

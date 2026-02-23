@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from unittest.mock import AsyncMock, patch
+from collections.abc import AsyncIterator
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import websockets
-
 from gateway.config import GatewayConfig
 from gateway.openclaw_client import OpenClawClient, OpenClawError
 from gateway.server import (
@@ -19,14 +19,14 @@ from gateway.server import (
     OpenClawResponseHandler,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-async def _recv_json(ws: websockets.ClientConnection) -> dict:
-    return json.loads(await ws.recv())
+async def _recv_json(ws: websockets.ClientConnection) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(await ws.recv())
+    return result
 
 
 class _FakeStream:
@@ -88,9 +88,9 @@ class TestOpenClawResponseHandler:
         client.send_message.return_value = _FakeStream(deltas)
 
         handler = OpenClawResponseHandler(client)
-        frames: list[dict] = []
+        frames: list[dict[str, Any]] = []
 
-        async def capture(frame: dict) -> None:
+        async def capture(frame: dict[str, Any]) -> None:
             frames.append(frame)
 
         await handler.handle("hello", capture)
@@ -107,9 +107,9 @@ class TestOpenClawResponseHandler:
         client.send_message.return_value = _ErrorStream(["ok "], "agent error: model crashed")
 
         handler = OpenClawResponseHandler(client)
-        frames: list[dict] = []
+        frames: list[dict[str, Any]] = []
 
-        async def capture(frame: dict) -> None:
+        async def capture(frame: dict[str, Any]) -> None:
             frames.append(frame)
 
         with pytest.raises(OpenClawError, match="model crashed"):
@@ -153,16 +153,16 @@ class _FakeWebSocket:
         self._closed = True
 
     @property
-    def request(self):
+    def request(self) -> None:
         return None
 
-    def frames(self) -> list[dict]:
+    def frames(self) -> list[dict[str, Any]]:
         return [json.loads(s) for s in self.sent]
 
-    def __aiter__(self):
+    def __aiter__(self) -> _FakeWebSocket:
         return self
 
-    async def __anext__(self):
+    async def __anext__(self) -> str:
         raise StopAsyncIteration
 
 
@@ -221,7 +221,7 @@ class TestHandleTextWithOpenClaw:
 
         handler = OpenClawResponseHandler(client)
         fake_ws = _FakeWebSocket()
-        session = GatewaySession(fake_ws, handler=handler, timeout=1)
+        session = GatewaySession(fake_ws, handler=handler, timeout=1)  # type: ignore[arg-type]
 
         await session._handle_text({"type": "text", "message": "hello"})
 
@@ -305,9 +305,7 @@ class TestFullWebSocketIntegration:
                 msg = json.loads(raw)
                 if msg.get("method") == "connect":
                     await ws.send(
-                        json.dumps(
-                            {"type": "res", "id": msg["id"], "ok": True, "payload": {}}
-                        )
+                        json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
                     )
                 elif msg.get("method") == "agent":
                     await ws.send(

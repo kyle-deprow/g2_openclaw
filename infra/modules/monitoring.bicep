@@ -20,6 +20,13 @@ param tags object
 @maxValue(730)
 param retentionInDays int = 30
 
+@description('Allow or deny public network access. Disable for production.')
+@allowed([
+  'Enabled'
+  'Disabled'
+])
+param publicNetworkAccess string = 'Enabled'
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -33,8 +40,8 @@ resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2025-02
       name: 'PerGB2018'
     }
     retentionInDays: retentionInDays
-    publicNetworkAccessForIngestion: 'Enabled'
-    publicNetworkAccessForQuery: 'Enabled'
+    publicNetworkAccessForIngestion: publicNetworkAccess
+    publicNetworkAccessForQuery: publicNetworkAccess
   }
 }
 
@@ -46,8 +53,26 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
   properties: {
     Application_Type: 'web'
     WorkspaceResourceId: logAnalyticsWorkspace.id
-    publicNetworkAccessForIngestion: 'Enabled'
-    publicNetworkAccessForQuery: 'Enabled'
+    publicNetworkAccessForIngestion: publicNetworkAccess
+    publicNetworkAccessForQuery: publicNetworkAccess
+  }
+}
+
+resource appInsightsLock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${appInsights.name}-nodelete'
+  scope: appInsights
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of Application Insights'
+  }
+}
+
+resource logAnalyticsLock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${logAnalyticsWorkspace.name}-nodelete'
+  scope: logAnalyticsWorkspace
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of Log Analytics workspace'
   }
 }
 
@@ -66,9 +91,6 @@ output appInsightsId string = appInsights.id
 
 @description('Name of the Application Insights instance.')
 output appInsightsName string = appInsights.name
-
-@description('Instrumentation key for Application Insights.')
-output appInsightsInstrumentationKey string = appInsights.properties.InstrumentationKey
 
 @description('Connection string for Application Insights.')
 output appInsightsConnectionString string = appInsights.properties.ConnectionString

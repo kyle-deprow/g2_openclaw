@@ -47,7 +47,7 @@ resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' = {
     enablePurgeProtection: true
     publicNetworkAccess: publicNetworkAccess
     networkAcls: {
-      defaultAction: 'Allow'
+      defaultAction: publicNetworkAccess == 'Disabled' ? 'Deny' : 'Allow'
       bypass: 'AzureServices'
     }
   }
@@ -70,6 +70,15 @@ resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
         enabled: true
       }
     ]
+  }
+}
+
+resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${keyVault.name}-nodelete'
+  scope: keyVault
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of Key Vault'
   }
 }
 

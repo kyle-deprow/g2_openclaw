@@ -1,7 +1,6 @@
 """Tests for gateway.config."""
 
 import pytest
-
 from gateway.config import GatewayConfig, load_config
 
 
@@ -10,7 +9,7 @@ class TestGatewayConfigDefaults:
 
     def test_defaults(self) -> None:
         cfg = GatewayConfig()
-        assert cfg.gateway_host == "0.0.0.0"
+        assert cfg.gateway_host == "127.0.0.1"
         assert cfg.gateway_port == 8765
         assert cfg.gateway_token is None
 
@@ -47,7 +46,7 @@ class TestLoadConfig:
 
         cfg = load_config()
 
-        assert cfg.gateway_host == "0.0.0.0"
+        assert cfg.gateway_host == "127.0.0.1"
         assert cfg.gateway_port == 8765
         assert cfg.gateway_token is None
 

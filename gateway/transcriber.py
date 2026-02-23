@@ -23,7 +23,7 @@ class Transcriber:
         compute_type: str = "int8",
     ) -> None:
         """Load the Whisper model. This blocks during model download/load."""
-        from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+        from faster_whisper import WhisperModel
 
         self._model = WhisperModel(model_name, device=device, compute_type=compute_type)
 

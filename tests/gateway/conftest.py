@@ -1,14 +1,15 @@
 """Shared fixtures for gateway integration tests."""
 
+from collections.abc import AsyncIterator
+
 import pytest_asyncio
 import websockets
-
 from gateway.config import GatewayConfig
 from gateway.server import GatewayServer
 
 
 @pytest_asyncio.fixture
-async def auth_gateway():
+async def auth_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
     """Start a gateway server with token auth, yield (url, server_instance)."""
     config = GatewayConfig(
         gateway_host="127.0.0.1",
@@ -26,7 +27,7 @@ async def auth_gateway():
 
 
 @pytest_asyncio.fixture
-async def noauth_gateway():
+async def noauth_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
     """Start a gateway server without token auth, yield (url, server_instance)."""
     config = GatewayConfig(
         gateway_host="127.0.0.1",

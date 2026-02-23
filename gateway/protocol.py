@@ -51,6 +51,8 @@ class PongFrame(TypedDict):
 
 InboundFrame = StartAudioFrame | StopAudioFrame | TextFrame | PongFrame
 
+MAX_TEXT_MESSAGE_LENGTH = 10_000
+
 
 # ---------------------------------------------------------------------------
 # Gateway → Phone frames
@@ -148,7 +150,7 @@ def _check_fields(data: dict[str, Any], required: list[str], frame_type: str) ->
         expected_type = _FIELD_TYPES.get(field)
         if expected_type is not None and not isinstance(value, expected_type):
             raise ProtocolError(
-                f"Field '{field}' must be {expected_type.__name__}, " f"got {type(value).__name__}"
+                f"Field '{field}' must be {expected_type.__name__}, got {type(value).__name__}"
             )
 
 
@@ -176,6 +178,14 @@ def parse_text_frame(raw: str) -> dict[str, Any]:
         raise ProtocolError(f"Unknown frame type: {frame_type}")
 
     _check_fields(data, required, frame_type)
+
+    if frame_type == "text":
+        msg = data.get("message", "")
+        if isinstance(msg, str) and len(msg) > MAX_TEXT_MESSAGE_LENGTH:
+            raise ProtocolError(
+                f"Text message too long ({len(msg)} chars, max {MAX_TEXT_MESSAGE_LENGTH})"
+            )
+
     return data
 
 

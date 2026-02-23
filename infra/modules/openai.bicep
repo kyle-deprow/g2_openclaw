@@ -80,8 +80,17 @@ resource openAiAccount 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
     disableLocalAuth: disableLocalAuth
     publicNetworkAccess: publicNetworkAccess
     networkAcls: {
-      defaultAction: 'Allow'
+      defaultAction: publicNetworkAccess == 'Disabled' ? 'Deny' : 'Allow'
     }
+  }
+}
+
+resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${openAiAccount.name}-nodelete'
+  scope: openAiAccount
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of Azure OpenAI account'
   }
 }
 

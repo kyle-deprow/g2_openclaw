@@ -174,10 +174,10 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/src/main.ts" });
+			const result = await callback({ path: "src/main.ts" });
 
 			expect(mockSession.rpc["workspace.readFile"]).toHaveBeenCalledWith({
-				path: "/src/main.ts",
+				path: "src/main.ts",
 			});
 			expect(result).toEqual({
 				content: [{ type: "text", text: "file content here" }],
@@ -191,7 +191,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/data.bin" });
+			const result = await callback({ path: "data.bin" });
 
 			expect(result.content[0].text).toContain('"data": "binary"');
 		});
@@ -201,7 +201,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/nonexistent.ts" });
+			const result = await callback({ path: "nonexistent.ts" });
 
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toContain("Error reading file");
@@ -217,16 +217,16 @@ describe("MCP Server", () => {
 			const callback = getToolCallback("copilot_create_file");
 
 			const result = await callback({
-				path: "/src/new.ts",
+				path: "src/new.ts",
 				content: "export const x = 1;",
 			});
 
 			expect(mockSession.rpc["workspace.createFile"]).toHaveBeenCalledWith({
-				path: "/src/new.ts",
+				path: "src/new.ts",
 				content: "export const x = 1;",
 			});
 			expect(result).toEqual({
-				content: [{ type: "text", text: "File created: /src/new.ts" }],
+				content: [{ type: "text", text: "File created: src/new.ts" }],
 			});
 		});
 
@@ -236,7 +236,7 @@ describe("MCP Server", () => {
 			const callback = getToolCallback("copilot_create_file");
 
 			const result = await callback({
-				path: "/etc/secret",
+				path: "etc/secret",
 				content: "data",
 			});
 
@@ -253,10 +253,10 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_list_files");
 
-			const result = await callback({ directory: "/src" });
+			const result = await callback({ directory: "src" });
 
 			expect(mockSession.rpc["workspace.listFiles"]).toHaveBeenCalledWith({
-				directory: "/src",
+				directory: "src",
 			});
 			expect(result.content[0].text).toContain("file1.ts");
 			expect(result.content[0].text).toContain("file2.ts");
@@ -278,7 +278,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_list_files");
 
-			const result = await callback({ directory: "/restricted" });
+			const result = await callback({ directory: "restricted" });
 
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toContain("Error listing files");
@@ -368,7 +368,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			await callback({ path: "/test.ts" });
+			await callback({ path: "test.ts" });
 
 			expect(CopilotBridge).toHaveBeenCalledTimes(1);
 			expect(mockBridge.ensureReady).toHaveBeenCalledTimes(1);
@@ -381,8 +381,8 @@ describe("MCP Server", () => {
 			const readFile = getToolCallback("copilot_read_file");
 			const createFile = getToolCallback("copilot_create_file");
 
-			await readFile({ path: "/a.ts" });
-			await createFile({ path: "/b.ts", content: "x" });
+			await readFile({ path: "a.ts" });
+			await createFile({ path: "b.ts", content: "x" });
 
 			// Only one construction — reused across calls
 			expect(CopilotBridge).toHaveBeenCalledTimes(1);
@@ -399,12 +399,12 @@ describe("MCP Server", () => {
 			const callback = getToolCallback("copilot_read_file");
 
 			// First call fails during init
-			const result1 = await callback({ path: "/test.ts" });
+			const result1 = await callback({ path: "test.ts" });
 			expect(result1.isError).toBe(true);
 			expect(result1.content[0].text).toContain("Connection refused");
 
 			// Second call retries init and succeeds
-			const result2 = await callback({ path: "/test.ts" });
+			const result2 = await callback({ path: "test.ts" });
 			expect(result2.isError).toBeUndefined();
 			expect(CopilotBridge).toHaveBeenCalledTimes(2);
 		});
@@ -417,11 +417,11 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result1 = await callback({ path: "/test.ts" });
+			const result1 = await callback({ path: "test.ts" });
 			expect(result1.isError).toBe(true);
 			expect(result1.content[0].text).toContain("Session creation failed");
 
-			const result2 = await callback({ path: "/test.ts" });
+			const result2 = await callback({ path: "test.ts" });
 			expect(result2.isError).toBeUndefined();
 			expect(result2.content[0].text).toBe("file content here");
 		});
@@ -432,7 +432,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/test.ts" });
+			const result = await callback({ path: "test.ts" });
 			expect(result.isError).toBe(true);
 
 			// Bridge.stop should have been called as cleanup
@@ -528,7 +528,7 @@ describe("MCP Server", () => {
 		it("destroys session, stops bridge, and stops SDK client in order", async () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "/test.ts" });
+			await callback({ path: "test.ts" });
 
 			await shutdown();
 
@@ -552,7 +552,7 @@ describe("MCP Server", () => {
 			// Initialize
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "/test.ts" });
+			await callback({ path: "test.ts" });
 
 			// Should not throw despite all shutdown steps failing
 			await expect(shutdown()).resolves.toBeUndefined();
@@ -565,14 +565,14 @@ describe("MCP Server", () => {
 		it("clears state so next tool call re-initializes", async () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "/test.ts" });
+			await callback({ path: "test.ts" });
 
 			expect(CopilotBridge).toHaveBeenCalledTimes(1);
 
 			await shutdown();
 
 			// Making another call should trigger re-initialization
-			await callback({ path: "/test2.ts" });
+			await callback({ path: "test2.ts" });
 			expect(CopilotBridge).toHaveBeenCalledTimes(2);
 		});
 	});
@@ -637,6 +637,82 @@ describe("MCP Server", () => {
 		});
 	});
 
+	// ── Path validation ─────────────────────────────────────────────────────
+
+	describe("path validation", () => {
+		it("rejects absolute paths in copilot_read_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_read_file");
+			const result = await callback({ path: "/etc/passwd" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Absolute paths are not allowed");
+		});
+
+		it("rejects path traversal in copilot_read_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_read_file");
+			const result = await callback({ path: "../../etc/passwd" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Path traversal is not allowed");
+		});
+
+		it("rejects normalized traversal in copilot_read_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_read_file");
+			const result = await callback({ path: "foo/../../etc/passwd" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Path traversal is not allowed");
+		});
+
+		it("rejects absolute paths in copilot_create_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_create_file");
+			const result = await callback({ path: "/tmp/evil.ts", content: "x" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Absolute paths are not allowed");
+		});
+
+		it("rejects path traversal in copilot_create_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_create_file");
+			const result = await callback({ path: "../outside.ts", content: "x" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Path traversal is not allowed");
+		});
+
+		it("rejects absolute paths in copilot_list_files", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_list_files");
+			const result = await callback({ directory: "/etc" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Absolute paths are not allowed");
+		});
+
+		it("rejects path traversal in copilot_list_files", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_list_files");
+			const result = await callback({ directory: "../../etc" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Path traversal is not allowed");
+		});
+
+		it("allows valid relative paths in copilot_read_file", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_read_file");
+			const result = await callback({ path: "src/main.ts" });
+			expect(result.isError).toBeUndefined();
+			expect(result.content[0].text).toBe("file content here");
+		});
+
+		it("rejects null bytes in paths", async () => {
+			createServer();
+			const callback = getToolCallback("copilot_read_file");
+			const result = await callback({ path: "src/main.ts\0.jpg" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Null bytes are not allowed");
+		});
+	});
+
 	// ── Cycle detection ─────────────────────────────────────────────────────
 
 	describe("cycle detection", () => {
@@ -693,7 +769,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/test.ts", _depth: 2 });
+			const result = await callback({ path: "test.ts", _depth: 2 });
 
 			expect(result.isError).toBeUndefined();
 			expect(result.content[0].text).toBe("file content here");
@@ -703,7 +779,7 @@ describe("MCP Server", () => {
 			createServer();
 			const callback = getToolCallback("copilot_read_file");
 
-			const result = await callback({ path: "/test.ts" });
+			const result = await callback({ path: "test.ts" });
 
 			expect(result.isError).toBeUndefined();
 			expect(result.content[0].text).toBe("file content here");

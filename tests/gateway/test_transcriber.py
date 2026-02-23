@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections.abc import Iterator
 from types import ModuleType
+from typing import Any
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -21,10 +23,10 @@ sys.modules.setdefault("faster_whisper", _mock_fw_module)
 
 from gateway.transcriber import Transcriber, TranscriptionError  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_segment(text: str) -> MagicMock:
     """Return a mock segment whose ``.text`` attribute is *text*."""
@@ -38,7 +40,7 @@ def _make_info() -> MagicMock:
 
 
 @pytest.fixture()
-def mock_model() -> MagicMock:
+def mock_model() -> Iterator[MagicMock]:
     """Yield a fresh mock WhisperModel **instance** wired into the module.
 
     Each test gets its own mock so side-effects don't leak.
@@ -127,7 +129,7 @@ class TestTranscribeErrors:
     async def test_timeout_raises(self, mock_model: MagicMock) -> None:
         """Mock model that blocks beyond timeout, verify asyncio.TimeoutError."""
 
-        def slow_transcribe(*args, **kwargs):
+        def slow_transcribe(*args: Any, **kwargs: Any) -> tuple[Any, MagicMock]:
             time.sleep(5)
             return iter([_make_segment("too late")]), _make_info()
 

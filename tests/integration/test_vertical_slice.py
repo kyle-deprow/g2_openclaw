@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 import websockets
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -19,13 +19,16 @@ import websockets
 TIMEOUT = 5.0
 
 
-async def _recv(ws: websockets.ClientConnection) -> dict:
+async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
     """Receive a single JSON frame with a timeout guard."""
     raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
-    return json.loads(raw)
+    result: dict[str, Any] = json.loads(raw)
+    return result
 
 
-async def _consume_handshake(ws: websockets.ClientConnection) -> tuple[dict, dict]:
+async def _consume_handshake(
+    ws: websockets.ClientConnection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Receive and return the (connected, status:idle) handshake pair."""
     connected = await _recv(ws)
     idle = await _recv(ws)
@@ -37,9 +40,9 @@ async def _send_text(ws: websockets.ClientConnection, message: str) -> None:
     await ws.send(json.dumps({"type": "text", "message": message}))
 
 
-async def _collect_response(ws: websockets.ClientConnection) -> list[dict]:
+async def _collect_response(ws: websockets.ClientConnection) -> list[dict[str, Any]]:
     """Collect all frames from thinking through the final status:idle."""
-    frames: list[dict] = []
+    frames: list[dict[str, Any]] = []
     while True:
         frame = await _recv(ws)
         frames.append(frame)
@@ -56,7 +59,7 @@ async def _collect_response(ws: websockets.ClientConnection) -> list[dict]:
 class TestHappyPathAuth:
     """Full vertical slice with token authentication."""
 
-    async def test_full_sequence(self, auth_gateway: tuple) -> None:
+    async def test_full_sequence(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=integration-token") as ws:
             # Handshake
@@ -96,7 +99,7 @@ class TestHappyPathAuth:
 class TestHappyPathNoAuth:
     """Full vertical slice without token authentication."""
 
-    async def test_full_sequence_noauth(self, noauth_gateway: tuple) -> None:
+    async def test_full_sequence_noauth(self, noauth_gateway: tuple[str, object]) -> None:
         url, _ = noauth_gateway
         async with websockets.connect(url) as ws:
             connected, idle = await _consume_handshake(ws)
@@ -132,7 +135,7 @@ class TestHappyPathNoAuth:
 class TestSequentialRequests:
     """Send multiple requests on one connection, verifying idle between them."""
 
-    async def test_two_sequential_requests(self, auth_gateway: tuple) -> None:
+    async def test_two_sequential_requests(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=integration-token") as ws:
             await _consume_handshake(ws)
@@ -162,7 +165,7 @@ class TestSequentialRequests:
 class TestConnectionReplacement:
     """New connection replaces the existing one (single-connection model)."""
 
-    async def test_client_b_replaces_client_a(self, auth_gateway: tuple) -> None:
+    async def test_client_b_replaces_client_a(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
 
         # Client A connects and completes handshake
@@ -190,7 +193,7 @@ class TestConnectionReplacement:
 class TestErrorRecovery:
     """Session recovers from errors and continues processing."""
 
-    async def test_invalid_json_then_valid_text(self, auth_gateway: tuple) -> None:
+    async def test_invalid_json_then_valid_text(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=integration-token") as ws:
             await _consume_handshake(ws)
@@ -223,14 +226,14 @@ class TestErrorRecovery:
 class TestAuthRejection:
     """Invalid or missing tokens are rejected with close code 4001."""
 
-    async def test_wrong_token_closed_4001(self, auth_gateway: tuple) -> None:
+    async def test_wrong_token_closed_4001(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=wrong-token") as ws:
             with pytest.raises(websockets.ConnectionClosedError) as exc_info:
                 await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
             assert exc_info.value.rcvd.code == 4001  # type: ignore[union-attr]
 
-    async def test_no_token_closed_4001(self, auth_gateway: tuple) -> None:
+    async def test_no_token_closed_4001(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(url) as ws:
             with pytest.raises(websockets.ConnectionClosedError) as exc_info:

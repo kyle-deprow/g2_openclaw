@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -39,7 +40,12 @@ class OpenClawClient:
 
     @property
     def url(self) -> str:
-        return f"ws://{self._host}:{self._port}"
+        # Use wss:// for remote hosts, ws:// for localhost
+        scheme = "ws"
+        if self._host not in ("127.0.0.1", "localhost", "::1"):
+            scheme = "wss"
+            logger.info("Using wss:// for remote OpenClaw host %s", self._host)
+        return f"{scheme}://{self._host}:{self._port}"
 
     async def ensure_connected(self) -> None:
         """Connect and authenticate if not already connected."""
@@ -186,9 +192,7 @@ class OpenClawClient:
 
     async def _close_ws(self) -> None:
         if self._ws is not None:
-            try:
+            with contextlib.suppress(Exception):
                 await self._ws.close()
-            except Exception:
-                pass
             self._ws = None
         self._connected = False

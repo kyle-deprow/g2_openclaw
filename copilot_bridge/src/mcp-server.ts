@@ -5,7 +5,7 @@
  * Exposes GitHub Copilot SDK capabilities as MCP tools for OpenClaw
  * to consume via stdio transport.
  */
-import path from "node:path";
+import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 import { CopilotClient } from "@github/copilot-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -17,6 +17,22 @@ import { DEFAULT_POLICY, createHooks } from "./hooks.js";
 import type { HookConfig } from "./hooks.js";
 import type { ICopilotSession } from "./interfaces.js";
 import type { CodingTaskResult } from "./types.js";
+
+// ─── Path validation ────────────────────────────────────────────────────────
+
+function validateMcpPath(filePath: string): { valid: true } | { valid: false; reason: string } {
+	if (filePath.includes("\0")) {
+		return { valid: false, reason: "Null bytes are not allowed" };
+	}
+	if (nodePath.isAbsolute(filePath)) {
+		return { valid: false, reason: "Absolute paths are not allowed" };
+	}
+	const normalized = nodePath.normalize(filePath);
+	if (normalized.startsWith("..") || normalized.includes(`..${nodePath.sep}`)) {
+		return { valid: false, reason: "Path traversal is not allowed" };
+	}
+	return { valid: true };
+}
 
 // ─── Cycle detection ────────────────────────────────────────────────────────
 
@@ -75,7 +91,7 @@ export async function ensureInitialized(): Promise<InitializedState> {
 			const hookConfig: HookConfig = {
 				auditLogDir:
 					config.auditLogDir ??
-					path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".copilot-bridge", "audit"),
+				nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "..", ".copilot-bridge", "audit"),
 				policy: config.permissionPolicy ?? DEFAULT_POLICY,
 				projectContext: config.projectContext ?? "",
 				maxRetries: config.maxRetries ?? 3,
@@ -251,6 +267,10 @@ export function createServer(): McpServer {
 		async ({ path, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
+			const pathCheck = validateMcpPath(path);
+			if (!pathCheck.valid) {
+				return { content: [{ type: "text" as const, text: `Error: ${pathCheck.reason}` }], isError: true };
+			}
 			try {
 				const { session } = await ensureInitialized();
 				const result: unknown = await session.rpc["workspace.readFile"]({ path });
@@ -279,6 +299,10 @@ export function createServer(): McpServer {
 		async ({ path, content, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
+			const pathCheck = validateMcpPath(path);
+			if (!pathCheck.valid) {
+				return { content: [{ type: "text" as const, text: `Error: ${pathCheck.reason}` }], isError: true };
+			}
 			try {
 				const { session } = await ensureInitialized();
 				await session.rpc["workspace.createFile"]({ path, content });
@@ -307,6 +331,12 @@ export function createServer(): McpServer {
 		async ({ directory, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
+			if (directory) {
+				const dirCheck = validateMcpPath(directory);
+				if (!dirCheck.valid) {
+					return { content: [{ type: "text" as const, text: `Error: ${dirCheck.reason}` }], isError: true };
+				}
+			}
 			try {
 				const { session } = await ensureInitialized();
 				const result: unknown = await session.rpc["workspace.listFiles"]({

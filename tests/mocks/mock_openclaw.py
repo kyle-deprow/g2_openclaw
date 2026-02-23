@@ -55,9 +55,7 @@ async def handler(ws: ServerConnection) -> None:
             continue
 
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg_id, "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg_id, "ok": True, "payload": {}}))
 
         elif method == "agent":
             # Accept the run

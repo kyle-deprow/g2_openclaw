@@ -26,6 +26,8 @@ class AudioBuffer:
         self.sample_width = sample_width  # bytes per sample (2 = 16-bit)
         self._byte_rate = sample_rate * channels * sample_width
         self._max_bytes = self.MAX_DURATION_SECONDS * self._byte_rate
+        # Absolute cap regardless of format parameters (30 MB)
+        self._max_bytes = min(self._max_bytes, 30 * 1024 * 1024)
         self._chunks: list[bytes] = []
         self._total_bytes = 0
 

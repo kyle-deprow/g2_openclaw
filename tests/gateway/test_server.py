@@ -5,23 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import websockets
-from gateway.server import SessionState, main
+from gateway.server import GatewayServer, SessionState, main
 
 pytestmark = pytest.mark.asyncio
 
 
-async def _recv_json(ws: websockets.ClientConnection) -> dict:
-    return json.loads(await ws.recv())
+async def _recv_json(ws: websockets.ClientConnection) -> dict[str, Any]:
+    result: dict[str, Any] = json.loads(await ws.recv())
+    return result
 
 
 class TestConnection:
     """Connection lifecycle tests."""
 
-    async def test_valid_token_receives_connected_and_idle(self, auth_gateway: tuple) -> None:
+    async def test_valid_token_receives_connected_and_idle(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=test-token") as ws:
             connected = await _recv_json(ws)
@@ -30,13 +35,13 @@ class TestConnection:
             status = await _recv_json(ws)
             assert status == {"type": "status", "status": "idle"}
 
-    async def test_wrong_token_rejected(self, auth_gateway: tuple) -> None:
+    async def test_wrong_token_rejected(self, auth_gateway: tuple[str, GatewayServer]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=wrong") as ws:
             with pytest.raises(websockets.ConnectionClosedError):
                 await ws.recv()
 
-    async def test_missing_token_rejected(self, auth_gateway: tuple) -> None:
+    async def test_missing_token_rejected(self, auth_gateway: tuple[str, GatewayServer]) -> None:
         url, _ = auth_gateway
         async with websockets.connect(url) as ws:
             with pytest.raises(websockets.ConnectionClosedError):
@@ -46,7 +51,9 @@ class TestConnection:
 class TestTextMessage:
     """Sending a text message triggers mock response flow."""
 
-    async def test_text_triggers_mock_response(self, auth_gateway: tuple) -> None:
+    async def test_text_triggers_mock_response(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=test-token") as ws:
             # consume handshake frames
@@ -83,7 +90,9 @@ class TestTextMessage:
 class TestInvalidFrames:
     """Server responds with error for bad frames."""
 
-    async def test_invalid_json_returns_error(self, auth_gateway: tuple) -> None:
+    async def test_invalid_json_returns_error(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, _ = auth_gateway
         async with websockets.connect(f"{url}?token=test-token") as ws:
             await ws.recv()  # connected
@@ -99,7 +108,9 @@ class TestInvalidFrames:
 class TestSecondConnection:
     """New connection replaces existing one."""
 
-    async def test_second_connection_replaces_first(self, auth_gateway: tuple) -> None:
+    async def test_second_connection_replaces_first(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, _ = auth_gateway
 
         ws1 = await websockets.connect(f"{url}?token=test-token")
@@ -118,13 +129,16 @@ class TestSecondConnection:
 class TestConcurrentRejection:
     """Text is rejected when session is not idle."""
 
-    async def test_text_rejected_when_thinking(self, auth_gateway: tuple) -> None:
+    async def test_text_rejected_when_thinking(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, gw = auth_gateway
         async with websockets.connect(f"{url}?token=test-token") as ws:
             await ws.recv()  # connected
             await ws.recv()  # idle
 
             # Force session into THINKING state to simulate concurrent request
+            assert gw._current_session is not None
             gw._current_session._state = SessionState.THINKING
 
             await ws.send(json.dumps({"type": "text", "message": "should be rejected"}))
@@ -134,12 +148,15 @@ class TestConcurrentRejection:
             assert error["code"] == "INVALID_STATE"
             assert "busy" in error["detail"].lower()
 
-    async def test_text_rejected_when_streaming(self, auth_gateway: tuple) -> None:
+    async def test_text_rejected_when_streaming(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, gw = auth_gateway
         async with websockets.connect(f"{url}?token=test-token") as ws:
             await ws.recv()  # connected
             await ws.recv()  # idle
 
+            assert gw._current_session is not None
             gw._current_session._state = SessionState.STREAMING
 
             await ws.send(json.dumps({"type": "text", "message": "should be rejected"}))
@@ -153,7 +170,7 @@ class TestNoAuth:
     """Connection without token succeeds when gateway_token is None."""
 
     async def test_noauth_connection_receives_connected_and_idle(
-        self, noauth_gateway: tuple
+        self, noauth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = noauth_gateway
         async with websockets.connect(url) as ws:
@@ -163,7 +180,9 @@ class TestNoAuth:
             status = await _recv_json(ws)
             assert status == {"type": "status", "status": "idle"}
 
-    async def test_noauth_text_triggers_mock_response(self, noauth_gateway: tuple) -> None:
+    async def test_noauth_text_triggers_mock_response(
+        self, noauth_gateway: tuple[str, GatewayServer]
+    ) -> None:
         url, _ = noauth_gateway
         async with websockets.connect(url) as ws:
             await ws.recv()  # connected
@@ -176,7 +195,7 @@ class TestNoAuth:
 
 
 @pytest.fixture()
-def main_mocks():
+def main_mocks() -> Iterator[tuple[MagicMock, MagicMock, AsyncMock]]:
     """Shared mocks for main() tests.
 
     Patches load_config, GatewayServer, and logging.basicConfig so that
@@ -202,7 +221,9 @@ def main_mocks():
 class TestMainTranscriber:
     """main() instantiates Transcriber with graceful fallback."""
 
-    async def test_main_creates_transcriber_on_success(self, main_mocks: tuple) -> None:
+    async def test_main_creates_transcriber_on_success(
+        self, main_mocks: tuple[MagicMock, MagicMock, AsyncMock]
+    ) -> None:
         mock_config, mock_gw_cls, mock_server = main_mocks
         mock_transcriber = MagicMock()
 
@@ -221,7 +242,7 @@ class TestMainTranscriber:
 
     async def test_main_falls_back_when_faster_whisper_missing(
         self,
-        main_mocks: tuple,
+        main_mocks: tuple[MagicMock, MagicMock, AsyncMock],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         mock_config, mock_gw_cls, mock_server = main_mocks
@@ -244,7 +265,7 @@ class TestMainTranscriber:
 
     async def test_main_falls_back_on_generic_exception(
         self,
-        main_mocks: tuple,
+        main_mocks: tuple[MagicMock, MagicMock, AsyncMock],
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         mock_config, mock_gw_cls, mock_server = main_mocks

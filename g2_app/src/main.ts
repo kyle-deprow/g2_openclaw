@@ -116,7 +116,10 @@ function routeFrame(frame: InboundFrame): void {
       if (audio.isRecording) audio.stop();
       console.error(`[Main] Server error: ${frame.detail} (${frame.code})`);
       sm.transition('error');
-      display.showError(frame.detail);
+      // Sanitize and limit error detail before display
+      display.showError(
+        typeof frame.detail === 'string' ? frame.detail.slice(0, 200) : 'Unknown error',
+      );
       break;
 
     // -- Transcription text ------------------------------------------------

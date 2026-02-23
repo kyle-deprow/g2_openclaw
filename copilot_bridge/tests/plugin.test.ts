@@ -502,4 +502,85 @@ describe("OpenClaw Plugin", () => {
 			expect(result).toContain("planning failed: task too vague");
 		});
 	});
+
+	describe("input validation", () => {
+		it("copilot_code rejects empty task", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: "" });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` must be a non-empty string");
+		});
+
+		it("copilot_code rejects non-string task", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: 123 });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` must be a non-empty string");
+		});
+
+		it("copilot_code rejects task exceeding max length", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: "x".repeat(50_001) });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
+		});
+
+		it("copilot_code rejects non-string workingDir", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: "do stuff", workingDir: 42 });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`workingDir` must be a string");
+		});
+
+		it("copilot_code rejects negative timeout", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: "do stuff", timeout: -1 });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`timeout` must be a non-negative number");
+		});
+
+		it("copilot_code rejects non-number timeout", async () => {
+			const tool = findTool("copilot_code")!;
+			const { result } = await tool.execute({ task: "do stuff", timeout: "fast" });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`timeout` must be a non-negative number");
+		});
+
+		it("copilot_code_verbose rejects empty task", async () => {
+			const tool = findTool("copilot_code_verbose")!;
+			const { result } = await tool.execute({ task: "" });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` must be a non-empty string");
+		});
+
+		it("copilot_code_verbose rejects task exceeding max length", async () => {
+			const tool = findTool("copilot_code_verbose")!;
+			const { result } = await tool.execute({ task: "x".repeat(50_001) });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
+		});
+
+		it("copilot_orchestrate rejects empty task", async () => {
+			const tool = findTool("copilot_orchestrate")!;
+			const { result } = await tool.execute({ task: "" });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` must be a non-empty string");
+		});
+
+		it("copilot_orchestrate rejects task exceeding max length", async () => {
+			const tool = findTool("copilot_orchestrate")!;
+			const { result } = await tool.execute({ task: "x".repeat(50_001) });
+			expect(result).toContain("## Error");
+			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
+		});
+
+		it("copilot_orchestrate treats NaN maxConcurrency as default", async () => {
+			const { SessionPool } = await import("../src/orchestrator.js");
+
+			const tool = findTool("copilot_orchestrate")!;
+			await tool.execute({ task: "nan test", maxConcurrency: Number.NaN });
+
+			expect(SessionPool).toHaveBeenCalledWith(expect.anything(), 3);
+		});
+	});
 });

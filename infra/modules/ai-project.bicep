@@ -29,6 +29,13 @@ param projectDescription string = 'Azure AI Foundry Project for model experiment
 @description('Resource ID of the Log Analytics workspace for diagnostic settings.')
 param logAnalyticsWorkspaceId string
 
+@description('Allow or deny public network access.')
+@allowed([
+  'Enabled'
+  'Disabled'
+])
+param publicNetworkAccess string = 'Enabled'
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -49,7 +56,7 @@ resource aiProject 'Microsoft.MachineLearningServices/workspaces@2024-10-01' = {
     friendlyName: friendlyName
     description: projectDescription
     hubResourceId: aiHubId
-    publicNetworkAccess: 'Enabled'
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 

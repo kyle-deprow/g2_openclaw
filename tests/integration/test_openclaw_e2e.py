@@ -8,16 +8,20 @@ Gateway so there are no shared-state side effects.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import socket
+from collections.abc import Callable, Coroutine
+from typing import Any, cast
 
+import numpy as np
 import pytest
-import pytest_asyncio
 import websockets
-
+import websockets.asyncio.server
 from gateway.config import GatewayConfig
 from gateway.openclaw_client import OpenClawClient
 from gateway.server import GatewayServer, OpenClawResponseHandler
+from gateway.transcriber import Transcriber
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,30 +30,37 @@ from gateway.server import GatewayServer, OpenClawResponseHandler
 TIMEOUT = 10.0
 
 
-async def _recv(ws: websockets.ClientConnection) -> dict:
+async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
     """Receive a single JSON frame with a timeout guard."""
     raw = await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
-    return json.loads(raw)
+    result: dict[str, Any] = json.loads(raw)
+    return result
 
 
-async def _recv_until(ws, predicate, timeout=TIMEOUT):
+async def _recv_until(
+    ws: websockets.ClientConnection,
+    predicate: Callable[[dict[str, Any]], bool],
+    timeout: float = TIMEOUT,
+) -> list[dict[str, Any]]:
     """Receive frames until *predicate* returns True on a frame."""
-    frames: list[dict] = []
+    frames: list[dict[str, Any]] = []
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         remaining = deadline - asyncio.get_event_loop().time()
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 2.0))
-            frame = json.loads(raw)
+            frame: dict[str, Any] = json.loads(raw)
             frames.append(frame)
             if predicate(frame):
                 return frames
-        except asyncio.TimeoutError:
+        except TimeoutError:
             break
     return frames
 
 
-async def _consume_handshake(ws: websockets.ClientConnection) -> tuple[dict, dict]:
+async def _consume_handshake(
+    ws: websockets.ClientConnection,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     connected = await _recv(ws)
     idle = await _recv(ws)
     return connected, idle
@@ -59,13 +70,13 @@ async def _send_text(ws: websockets.ClientConnection, message: str) -> None:
     await ws.send(json.dumps({"type": "text", "message": message}))
 
 
-async def _send_json(ws: websockets.ClientConnection, frame: dict) -> None:
+async def _send_json(ws: websockets.ClientConnection, frame: dict[str, Any]) -> None:
     await ws.send(json.dumps(frame))
 
 
-async def _collect_until_idle(ws: websockets.ClientConnection) -> list[dict]:
+async def _collect_until_idle(ws: websockets.ClientConnection) -> list[dict[str, Any]]:
     """Collect all frames until a status:idle frame is received."""
-    frames: list[dict] = []
+    frames: list[dict[str, Any]] = []
     while True:
         frame = await _recv(ws)
         frames.append(frame)
@@ -74,7 +85,7 @@ async def _collect_until_idle(ws: websockets.ClientConnection) -> list[dict]:
     return frames
 
 
-def _is_final_idle(frame: dict) -> bool:
+def _is_final_idle(frame: dict[str, Any]) -> bool:
     return frame.get("type") == "status" and frame.get("status") == "idle"
 
 
@@ -82,7 +93,8 @@ def _free_port() -> int:
     """Return a TCP port that is currently unused."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+        port: int = s.getsockname()[1]
+        return port
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +109,7 @@ class MockTranscriber:
         self._result = result
 
     async def transcribe(
-        self, audio, language: str = "en", timeout: float = 30.0  # noqa: ANN001
+        self, audio: np.ndarray[Any, Any], language: str = "en", timeout: float = 30.0
     ) -> str:
         await asyncio.sleep(0.02)
         return self._result
@@ -114,9 +126,7 @@ async def _standard_oc_handler(ws: websockets.ServerConnection) -> None:
         msg = json.loads(raw)
         method = msg.get("method")
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}}))
         elif method == "agent":
             await ws.send(
                 json.dumps(
@@ -159,9 +169,7 @@ async def _long_response_oc_handler(ws: websockets.ServerConnection) -> None:
         msg = json.loads(raw)
         method = msg.get("method")
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}}))
         elif method == "agent":
             await ws.send(
                 json.dumps(
@@ -207,9 +215,7 @@ async def _hanging_oc_handler(ws: websockets.ServerConnection) -> None:
         msg = json.loads(raw)
         method = msg.get("method")
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}}))
         elif method == "agent":
             await ws.send(
                 json.dumps(
@@ -234,9 +240,7 @@ async def _error_mid_stream_oc_handler(ws: websockets.ServerConnection) -> None:
         msg = json.loads(raw)
         method = msg.get("method")
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}}))
         elif method == "agent":
             await ws.send(
                 json.dumps(
@@ -284,12 +288,12 @@ async def _error_mid_stream_oc_handler(ws: websockets.ServerConnection) -> None:
 
 
 async def _make_openclaw_gateway(
-    oc_handler,
+    oc_handler: Callable[[websockets.ServerConnection], Coroutine[Any, Any, None]],
     *,
     gateway_token: str = "e2e-token",
     agent_timeout: int = 120,
-    transcriber=None,
-):
+    transcriber: Transcriber | MockTranscriber | None = None,
+) -> tuple[str, websockets.asyncio.server.Server, websockets.asyncio.server.Server, OpenClawClient]:
     """Start a mock OpenClaw server and a Gateway pointing to it.
 
     Returns (gw_url, gw_server, oc_server, openclaw_client).
@@ -313,7 +317,11 @@ async def _make_openclaw_gateway(
         openclaw_gateway_token="oc-token",
         agent_timeout=agent_timeout,
     )
-    gw = GatewayServer(config, handler=oc_response_handler, transcriber=transcriber)
+    gw = GatewayServer(
+        config,
+        handler=oc_response_handler,
+        transcriber=cast(Transcriber | None, transcriber),
+    )
     gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)
     gw_port = gw_server.sockets[0].getsockname()[1]
 
@@ -325,7 +333,11 @@ async def _make_openclaw_gateway(
     )
 
 
-async def _cleanup(gw_server, oc_server, client):
+async def _cleanup(
+    gw_server: websockets.asyncio.server.Server,
+    oc_server: websockets.asyncio.server.Server,
+    client: OpenClawClient,
+) -> None:
     """Shutdown servers and client.
 
     Close the OpenClaw *client* first so the mock handler's ``async for``
@@ -336,14 +348,10 @@ async def _cleanup(gw_server, oc_server, client):
     await client.close()
     gw_server.close()
     oc_server.close()
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(gw_server.wait_closed(), timeout=2.0)
-    except asyncio.TimeoutError:
-        pass
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(oc_server.wait_closed(), timeout=2.0)
-    except asyncio.TimeoutError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -356,9 +364,7 @@ class TestFullTextFlow:
     """1. Send text → receive full status/delta/end sequence via mock OpenClaw."""
 
     async def test_full_text_e2e(self) -> None:
-        url, gw_server, oc_server, client = await _make_openclaw_gateway(
-            _standard_oc_handler
-        )
+        url, gw_server, oc_server, client = await _make_openclaw_gateway(_standard_oc_handler)
         try:
             async with websockets.connect(f"{url}?token=e2e-token") as ws:
                 # Handshake
@@ -372,10 +378,7 @@ class TestFullTextFlow:
                 # Collect everything through final idle
                 frames = await _collect_until_idle(ws)
 
-                types = [f["type"] for f in frames]
-                statuses = [
-                    f["status"] for f in frames if f["type"] == "status"
-                ]
+                statuses = [f["status"] for f in frames if f["type"] == "status"]
 
                 # Status progression
                 assert statuses[0] == "thinking"
@@ -434,7 +437,6 @@ class TestFullVoiceFlow:
 
                 # Collect through final idle
                 frames = await _collect_until_idle(ws)
-                types = [f["type"] for f in frames]
 
                 # Must have transcribing status
                 assert {"type": "status", "status": "transcribing"} in frames
@@ -466,9 +468,7 @@ class TestFullVoiceFlow:
                     for i, f in enumerate(frames)
                     if f.get("type") == "status" and f.get("status") == "thinking"
                 )
-                idx_end = next(
-                    i for i, f in enumerate(frames) if f.get("type") == "end"
-                )
+                idx_end = next(i for i, f in enumerate(frames) if f.get("type") == "end")
                 assert idx_transcribing < idx_transcription < idx_thinking < idx_end
         finally:
             await _cleanup(gw_server, oc_server, client)
@@ -476,12 +476,10 @@ class TestFullVoiceFlow:
 
 @pytest.mark.asyncio
 class TestLongResponseTruncation:
-    """3. 100 deltas × 50 chars — all arrive at the phone (no server-side truncation)."""
+    """3. 100 deltas x 50 chars -- all arrive at the phone (no server-side truncation)."""
 
     async def test_100_deltas_all_arrive(self) -> None:
-        url, gw_server, oc_server, client = await _make_openclaw_gateway(
-            _long_response_oc_handler
-        )
+        url, gw_server, oc_server, client = await _make_openclaw_gateway(_long_response_oc_handler)
         try:
             async with websockets.connect(f"{url}?token=e2e-token") as ws:
                 await _consume_handshake(ws)
@@ -510,9 +508,7 @@ class TestMultipleSequentialQueries:
     """4. Two sequential queries — no state leaks between them."""
 
     async def test_two_queries_no_state_leak(self) -> None:
-        url, gw_server, oc_server, client = await _make_openclaw_gateway(
-            _standard_oc_handler
-        )
+        url, gw_server, oc_server, client = await _make_openclaw_gateway(_standard_oc_handler)
         try:
             async with websockets.connect(f"{url}?token=e2e-token") as ws:
                 await _consume_handshake(ws)
@@ -567,9 +563,7 @@ class TestOpenClawNotRunning:
         gw_port = gw_server.sockets[0].getsockname()[1]
 
         try:
-            async with websockets.connect(
-                f"ws://127.0.0.1:{gw_port}?token=e2e-token"
-            ) as ws:
+            async with websockets.connect(f"ws://127.0.0.1:{gw_port}?token=e2e-token") as ws:
                 await _consume_handshake(ws)
 
                 await _send_text(ws, "hello?")
@@ -587,10 +581,8 @@ class TestOpenClawNotRunning:
         finally:
             await client.close()
             gw_server.close()
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(gw_server.wait_closed(), timeout=2.0)
-            except asyncio.TimeoutError:
-                pass
 
 
 @pytest.mark.asyncio
@@ -667,9 +659,7 @@ async def _empty_response_oc_handler(ws: websockets.ServerConnection) -> None:
         msg = json.loads(raw)
         method = msg.get("method")
         if method == "connect":
-            await ws.send(
-                json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
-            )
+            await ws.send(json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}}))
         elif method == "agent":
             await ws.send(
                 json.dumps(
@@ -701,9 +691,7 @@ class TestEmptyResponse:
     """8. Mock OpenClaw sends lifecycle end with zero deltas."""
 
     async def test_empty_response(self) -> None:
-        url, gw_server, oc_server, client = await _make_openclaw_gateway(
-            _empty_response_oc_handler
-        )
+        url, gw_server, oc_server, client = await _make_openclaw_gateway(_empty_response_oc_handler)
         try:
             async with websockets.connect(f"{url}?token=e2e-token") as ws:
                 await _consume_handshake(ws)
@@ -737,9 +725,7 @@ class TestRecoveryAfterError:
                 method = msg.get("method")
                 if method == "connect":
                     await ws.send(
-                        json.dumps(
-                            {"type": "res", "id": msg["id"], "ok": True, "payload": {}}
-                        )
+                        json.dumps({"type": "res", "id": msg["id"], "ok": True, "payload": {}})
                     )
                 elif method == "agent":
                     agent_calls[0] += 1

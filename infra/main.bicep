@@ -117,6 +117,7 @@ module monitoring 'modules/monitoring.bicep' = {
     location: location
     tags: tags
     retentionInDays: logRetentionInDays
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 
@@ -157,7 +158,7 @@ module openAi 'modules/openai.bicep' = {
     openAiAccountName: openAiAccountName
     location: location
     tags: tags
-    disableLocalAuth: false
+    disableLocalAuth: true
     publicNetworkAccess: publicNetworkAccess
     modelDeployments: modelDeployments
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
@@ -177,6 +178,7 @@ module aiHub 'modules/ai-hub.bicep' = {
     appInsightsId: monitoring.outputs.appInsightsId
     openAiAccountId: openAi.outputs.openAiAccountId
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 
@@ -190,6 +192,7 @@ module aiProject 'modules/ai-project.bicep' = {
     tags: tags
     aiHubId: aiHub.outputs.aiHubId
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
+    publicNetworkAccess: publicNetworkAccess
   }
 }
 

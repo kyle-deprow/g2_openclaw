@@ -119,18 +119,40 @@ describe('Gateway', () => {
     });
 
     it('prefers hash over everything', () => {
-      window.location.hash = '#ws://hash:1234';
-      expect(gateway.resolveUrl()).toBe('ws://hash:1234');
+      window.location.hash = '#ws://192.168.1.100:1234';
+      expect(gateway.resolveUrl()).toBe('ws://192.168.1.100:1234');
     });
 
     it('prefers query param over localStorage', () => {
-      window.location.search = '?gateway=ws://query:5678';
-      expect(gateway.resolveUrl()).toBe('ws://query:5678');
+      window.location.search = '?gateway=ws://10.0.0.5:5678';
+      expect(gateway.resolveUrl()).toBe('ws://10.0.0.5:5678');
     });
 
     it('uses localStorage when no hash/query', () => {
-      mockLocalStorage.getItem.mockReturnValue('ws://stored:9999');
-      expect(gateway.resolveUrl()).toBe('ws://stored:9999');
+      mockLocalStorage.getItem.mockReturnValue('ws://127.0.0.1:9999');
+      expect(gateway.resolveUrl()).toBe('ws://127.0.0.1:9999');
+    });
+  });
+
+  describe('URL security', () => {
+    it('rejects ws:// to public hostnames', () => {
+      window.location.hash = '#ws://evil.com:8765';
+      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+    });
+
+    it('rejects ws:// to DNS names starting with private IP prefix', () => {
+      window.location.hash = '#ws://10.evil.com:8765';
+      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+    });
+
+    it('accepts wss:// to public hostnames', () => {
+      window.location.hash = '#wss://api.example.com:443';
+      expect(gateway.resolveUrl()).toBe('wss://api.example.com:443');
+    });
+
+    it('rejects non-ws protocols', () => {
+      window.location.hash = '#http://localhost:8765';
+      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
     });
   });
 

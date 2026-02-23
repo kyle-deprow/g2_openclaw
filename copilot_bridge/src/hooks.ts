@@ -149,7 +149,7 @@ export const DEFAULT_POLICY: PermissionPolicy = {
 };
 
 const SECRET_PATTERN =
-	/(sk-|ghp_|gho_|AKIA[A-Z0-9]|password\s*=\s*"?|api_key\s*=\s*"?|token\s*=\s*"?|secret\s*=\s*"?|Bearer\s+)[^\s"]+/gi;
+	/(sk-|ghp_|gho_|ghs_|ghu_|github_pat_|AKIA[A-Z0-9]|DefaultEndpointsProtocol=|-----BEGIN|password\s*=\s*"?|api_key\s*=\s*"?|token\s*=\s*"?|secret\s*=\s*"?|Bearer\s+|eyJ[A-Za-z0-9_-]{10,})[^\s"]+/gi;
 const MAX_RESULT_LENGTH = 10_000;
 const PATH_ARG_KEYS = [
 	"path",
