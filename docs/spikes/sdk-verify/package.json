@@ -1,0 +1,12 @@
+{
+  "name": "sdk-verify-spike",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@evenrealities/even_hub_sdk": "^0.0.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "package_id": "com.g2openclaw.spike",
+  "edition": "202601",
+  "name": "Spike Test",
+  "version": "1.0.0",
+  "min_app_version": "0.1.0",
+  "tagline": "A test spike app",
+  "description": "A minimal test app for manifest verification",
+  "author": "test",
+  "entrypoint": "index.html",
+  "permissions": {
+    "network": ["*"]
+  }
+}
