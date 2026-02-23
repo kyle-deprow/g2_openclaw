@@ -29,31 +29,34 @@ A multi-component system that bridges [Even Realities G2](https://www.evenrealit
 
 ```
 g2_openclaw/
-├── src/
-│   ├── gateway/           # PC Gateway — Python WebSocket server
-│   ├── g2_app/            # G2 App — TypeScript thin client for iPhone
-│   ├── copilot_bridge/    # Copilot Bridge — GitHub Copilot SDK wrapper
-│   └── infra_cli/         # Infra CLI — Azure deployment tool
-├── infra/                 # Azure Bicep infrastructure-as-code
-│   ├── main.bicep
+├── gateway/               # PC Gateway — Python WebSocket server
+├── g2_app/                # G2 App — TypeScript thin client for iPhone
+├── copilot_bridge/        # Copilot Bridge — GitHub Copilot SDK wrapper
+├── infra/                 # Infra CLI (Python) + Azure Bicep IaC
+│   ├── main.py            # Typer CLI (deploy, what-if, destroy, lint)
+│   ├── azure_ops.py       # Azure CLI wrapper
+│   ├── main.bicep         # Root Bicep template
 │   ├── modules/           # Modular Bicep templates
 │   └── parameters/        # Environment-specific parameters
 ├── tests/
 │   └── gateway/           # Python gateway tests (pytest)
+├── tests/
+│   ├── gateway/           # Python gateway tests (pytest)
+│   ├── integration/       # End-to-end integration tests
+│   └── mocks/             # Mock OpenClaw server
 ├── docs/
-│   ├── 01-architecture-overview.md
-│   ├── 02-pc-gateway-design.md
-│   ├── 03-g2-app-design.md
-│   ├── 04-display-layouts.md
-│   ├── 05-architecture-review.md
-│   └── openclaw_research/  # 8 research docs on OpenClaw internals
+│   ├── design/            # Architecture, protocol, component designs
+│   ├── guides/            # Getting started, development workflow
+│   ├── reference/         # External system docs (OpenClaw, G2 SDK)
+│   ├── decisions/         # Architecture Decision Records
+│   └── implementation/    # Phase plans and progress tracking
 ├── pyproject.toml         # Root project config (Infra CLI)
 └── .pre-commit-config.yaml
 ```
 
 ## Components
 
-### PC Gateway (`src/gateway/`)
+### PC Gateway (`gateway/`)
 
 The heart of the system. A Python WebSocket server that accepts connections from the G2 App, handles audio transcription, communicates with OpenClaw, and streams responses back.
 
@@ -68,7 +71,7 @@ The heart of the system. A Python WebSocket server that accepts connections from
 
 **Current status:** Phase 1 complete — WebSocket server, protocol, config, and mock AI responses are implemented. Whisper transcription and OpenClaw integration are planned for later phases.
 
-### G2 App (`src/g2_app/`)
+### G2 App (`g2_app/`)
 
 TypeScript application running on the iPhone via EvenHub. Acts as the thin client between the G2 glasses and the PC Gateway.
 
@@ -83,7 +86,7 @@ TypeScript application running on the iPhone via EvenHub. Acts as the thin clien
 
 **Display states:** loading, idle, recording, transcribing, thinking, streaming, displaying, error, disconnected — each with a specific layout targeting the 576×288 4-bit greyscale display.
 
-### Copilot Bridge (`src/copilot_bridge/`)
+### Copilot Bridge (`copilot_bridge/`)
 
 A TypeScript wrapper around the `@github/copilot-sdk` for integrating GitHub Copilot as an AI backend.
 
@@ -96,19 +99,20 @@ A TypeScript wrapper around the `@github/copilot-sdk` for integrating GitHub Cop
 
 Supports BYOK (Bring Your Own Key) providers: OpenAI, Azure OpenAI, Anthropic, Ollama.
 
-### Infra CLI (`src/infra_cli/`)
+### Infrastructure (`infra/`)
 
-A Python CLI tool for deploying and managing Azure infrastructure using Bicep templates.
+Azure Bicep templates and a Python CLI tool for deploying and managing cloud resources.
 
-| Module | Purpose |
-|--------|---------|
+| File | Purpose |
+|------|---------||
 | `main.py` | Typer CLI — `deploy`, `what-if`, `destroy`, `validate`, `lint` commands |
 | `azure_ops.py` | Wraps Azure CLI (`az`) for deployments, validation, teardown |
 | `console.py` | Rich console output helpers |
+| `main.bicep` | Root Bicep template |
+| `modules/` | Modular Bicep templates |
+| `parameters/` | Environment-specific `.bicepparam` files |
 
-### Azure Infrastructure (`infra/`)
-
-Bicep templates for provisioning Azure AI resources:
+Bicep templates provision Azure AI resources:
 
 - **AI Hub** (Azure AI Foundry workspace)
 - **AI Project**
@@ -190,7 +194,7 @@ cd g2_openclaw
 ### 2. Set up the PC Gateway
 
 ```bash
-cd src/gateway
+cd gateway
 
 # Install dependencies
 uv sync --extra dev
@@ -211,7 +215,7 @@ The gateway will start listening on `ws://0.0.0.0:8765`. Clients connect with th
 ### 3. Set up the G2 App
 
 ```bash
-cd src/g2_app
+cd g2_app
 
 # Install dependencies
 npm install
@@ -231,7 +235,7 @@ To deploy to G2 glasses, package as `.ehpk` using the EvenHub CLI and sideload v
 ### 4. Set up the Copilot Bridge
 
 ```bash
-cd src/copilot_bridge
+cd copilot_bridge
 
 # Install dependencies
 npm install
@@ -267,14 +271,14 @@ uv run pytest tests/gateway/ -v
 **G2 App tests (TypeScript):**
 
 ```bash
-cd src/g2_app
+cd g2_app
 npm test
 ```
 
 **Copilot Bridge tests (TypeScript):**
 
 ```bash
-cd src/copilot_bridge
+cd copilot_bridge
 npm test
 
 # Integration tests (requires Copilot token)
@@ -295,7 +299,7 @@ uv run ruff format .   # Format
 **TypeScript — Copilot Bridge (Biome):**
 
 ```bash
-cd src/copilot_bridge
+cd copilot_bridge
 npm run lint      # Check
 npm run format    # Fix
 ```
@@ -316,13 +320,13 @@ Configured hooks: `ruff` (lint + format) and `mypy` (type checking).
 
 ```bash
 # Python
-uv run mypy src/
+uv run mypy gateway/ infra/
 
 # G2 App
-cd src/g2_app && npm run typecheck
+cd g2_app && npm run typecheck
 
 # Copilot Bridge
-cd src/copilot_bridge && npm run typecheck
+cd copilot_bridge && npm run typecheck
 ```
 
 ## Infrastructure Deployment
@@ -386,7 +390,14 @@ The Gateway and G2 App communicate via a binary + JSON WebSocket protocol.
 |----------|---------|-------------|
 | `GATEWAY_HOST` | `0.0.0.0` | WebSocket server bind address |
 | `GATEWAY_PORT` | `8765` | WebSocket server port |
-| `GATEWAY_TOKEN` | *(required)* | Authentication token for client connections |
+| `GATEWAY_TOKEN` | *(optional)* | Authentication token for client connections |
+| `WHISPER_MODEL` | `base.en` | Whisper model name |
+| `WHISPER_DEVICE` | `cpu` | Device for inference (`cpu` or `cuda`) |
+| `WHISPER_COMPUTE_TYPE` | `int8` | Compute type for inference |
+| `OPENCLAW_HOST` | `127.0.0.1` | OpenClaw Gateway host |
+| `OPENCLAW_PORT` | `18789` | OpenClaw Gateway port |
+| `OPENCLAW_GATEWAY_TOKEN` | — | OpenClaw auth token (enables real AI; mock without) |
+| `AGENT_TIMEOUT` | `120` | Max seconds for AI response cycle |
 
 ### Copilot Bridge Environment Variables
 
@@ -478,25 +489,25 @@ The G2 App resolves the Gateway WebSocket URL in priority order:
 
 ## Documentation
 
-Comprehensive design docs live in `docs/`:
+Documentation lives in `docs/` — see [docs/README.md](docs/README.md) for the full index.
 
-| Document | Description |
-|----------|-------------|
-| [01-architecture-overview.md](docs/01-architecture-overview.md) | System architecture, data flow, security model, protocol spec |
-| [02-pc-gateway-design.md](docs/02-pc-gateway-design.md) | Gateway module design, state machine, audio pipeline, error handling |
-| [03-g2-app-design.md](docs/03-g2-app-design.md) | G2 App module design, display system, input model, reconnection |
-| [04-display-layouts.md](docs/04-display-layouts.md) | All 9 display state layouts, container specs, greyscale palette |
-| [05-architecture-review.md](docs/05-architecture-review.md) | Architecture review (grade: B+), issues found, risk register |
-| [openclaw_research/](docs/openclaw_research/) | 8 research documents on OpenClaw internals and capabilities |
+| Directory | Contents |
+|-----------|----------|
+| [docs/design/](docs/design/) | Architecture, protocol, gateway, G2 app, display layouts, copilot bridge, Azure infra |
+| [docs/guides/](docs/guides/) | Getting started, development workflow |
+| [docs/reference/](docs/reference/) | External system docs — OpenClaw internals, G2 SDK/hardware reference |
+| [docs/decisions/](docs/decisions/) | Architecture Decision Records (ADRs) |
+| [docs/implementation/](docs/implementation/) | Phase plans (1–4) and progress tracking |
 
 ## Project Status
 
 This project follows a phased implementation plan:
 
-- **Phase 1 (Vertical Slice):** ✅ Complete — Gateway WebSocket server with mock responses, G2 App state machine + display + gateway client, protocol implementation on both sides, full test suites
-- **Phase 2 (Audio Pipeline):** Planned — Whisper transcription via `faster-whisper`, real audio streaming from G2 microphone
-- **Phase 3 (OpenClaw Integration):** Planned — Connect Gateway to OpenClaw for real AI responses, session management
-- **Phase 4 (Polish):** Planned — Error recovery, heartbeat monitoring, performance optimization
+- **Phase 1 (Vertical Slice):** ✅ Complete — Gateway WebSocket server, protocol on both sides, G2 App state machine + display + gateway client, full test suites, mock AI responses
+- **Phase 2 (Audio Pipeline):** ✅ Complete — Audio buffer, Whisper transcriber, mic capture in G2 App, full audio state machine in Gateway, input handler with tap-to-toggle
+- **Phase 3 (OpenClaw Integration):** ✅ Complete — OpenClaw WebSocket client with auth/streaming/lifecycle, agent config (SOUL.md), mock OpenClaw server, delta buffering, response truncation, markdown stripping
+- **Phase 4 (Polish):** 🔧 Partial — Ping/pong defined but heartbeat task not started, reconnection backoff not implemented, graceful shutdown pending
+- **Copilot Bridge:** ✅ Complete — All 5 phases done: Copilot SDK client, MCP servers (both directions), OpenClaw plugin, task orchestrator, audit logging
 
 ## License
 

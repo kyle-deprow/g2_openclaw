@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import websockets
-
-from gateway.server import SessionState
+from gateway.server import SessionState, main
 
 pytestmark = pytest.mark.asyncio
 
@@ -162,9 +163,7 @@ class TestNoAuth:
             status = await _recv_json(ws)
             assert status == {"type": "status", "status": "idle"}
 
-    async def test_noauth_text_triggers_mock_response(
-        self, noauth_gateway: tuple
-    ) -> None:
+    async def test_noauth_text_triggers_mock_response(self, noauth_gateway: tuple) -> None:
         url, _ = noauth_gateway
         async with websockets.connect(url) as ws:
             await ws.recv()  # connected
@@ -174,3 +173,94 @@ class TestNoAuth:
 
             thinking = await _recv_json(ws)
             assert thinking == {"type": "status", "status": "thinking"}
+
+
+@pytest.fixture()
+def main_mocks():
+    """Shared mocks for main() tests.
+
+    Patches load_config, GatewayServer, and logging.basicConfig so that
+    main() can be called without side-effects.  Yields
+    ``(mock_config, mock_gw_cls, mock_server)``.
+    """
+    with (
+        patch("gateway.server.load_config") as mock_load_config,
+        patch("gateway.server.GatewayServer") as mock_gw_cls,
+        patch("logging.basicConfig"),
+    ):
+        mock_config = mock_load_config.return_value
+        mock_config.whisper_model = "base.en"
+        mock_config.whisper_device = "cpu"
+        mock_config.whisper_compute_type = "int8"
+
+        mock_server = AsyncMock()
+        mock_gw_cls.return_value = mock_server
+
+        yield mock_config, mock_gw_cls, mock_server
+
+
+class TestMainTranscriber:
+    """main() instantiates Transcriber with graceful fallback."""
+
+    async def test_main_creates_transcriber_on_success(self, main_mocks: tuple) -> None:
+        mock_config, mock_gw_cls, mock_server = main_mocks
+        mock_transcriber = MagicMock()
+
+        with patch(
+            "gateway.server.Transcriber",
+            return_value=mock_transcriber,
+        ) as mock_cls:
+            await main()
+
+            mock_cls.assert_called_once_with("base.en", "cpu", "int8")
+            mock_gw_cls.assert_called_once_with(
+                mock_config,
+                transcriber=mock_transcriber,
+            )
+            mock_server.serve.assert_awaited_once()
+
+    async def test_main_falls_back_when_faster_whisper_missing(
+        self,
+        main_mocks: tuple,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_config, mock_gw_cls, mock_server = main_mocks
+
+        with (
+            patch(
+                "gateway.server.Transcriber",
+                side_effect=ImportError("No module named 'faster_whisper'"),
+            ),
+            caplog.at_level(logging.WARNING, logger="gateway.server"),
+        ):
+            await main()
+
+            mock_gw_cls.assert_called_once_with(
+                mock_config,
+                transcriber=None,
+            )
+            mock_server.serve.assert_awaited_once()
+            assert "faster-whisper is not installed" in caplog.text
+
+    async def test_main_falls_back_on_generic_exception(
+        self,
+        main_mocks: tuple,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        mock_config, mock_gw_cls, mock_server = main_mocks
+
+        with (
+            patch(
+                "gateway.server.Transcriber",
+                side_effect=RuntimeError("CUDA not available"),
+            ),
+            caplog.at_level(logging.WARNING, logger="gateway.server"),
+        ):
+            await main()
+
+            mock_gw_cls.assert_called_once_with(
+                mock_config,
+                transcriber=None,
+            )
+            mock_server.serve.assert_awaited_once()
+            assert "Failed to load transcriber" in caplog.text

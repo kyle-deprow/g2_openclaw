@@ -103,7 +103,7 @@ All events arrive through a single callback registered via
 `bridge.onEvenHubEvent()`. The function returns an unsubscribe handle.
 
 ```typescript
-import { waitForEvenAppBridge, OsEventTypeList } from 'even-app-bridge';
+import { waitForEvenAppBridge, OsEventTypeList } from '@evenrealities/even_hub_sdk';
 
 async function setupEventListener() {
   const bridge = await waitForEvenAppBridge();
@@ -151,13 +151,13 @@ following fields will be populated per event:
 
 Sent when the user interacts with a list container that has event capture.
 
-| Field                      | Type               | Description                          |
-| -------------------------- | ------------------ | ------------------------------------ |
-| `containerID`              | `number`           | Numeric ID of the list container     |
-| `containerName`            | `string`           | Name of the list container           |
-| `currentSelectItemName`    | `string`           | Display text of selected item        |
-| `currentSelectItemIndex`   | `number`           | 0-based index of selected item       |
-| `eventType`                | `OsEventTypeList`  | Which event occurred                 |
+| Field                      | Type                           | Description                          |
+| -------------------------- | ------------------------------ | ------------------------------------ |
+| `containerID`              | `number \| undefined`          | Numeric ID of the list container     |
+| `containerName`            | `string \| undefined`          | Name of the list container           |
+| `currentSelectItemName`    | `string \| undefined`          | Display text of selected item        |
+| `currentSelectItemIndex`   | `number \| undefined`          | 0-based index of selected item       |
+| `eventType`                | `OsEventTypeList \| undefined` | Which event occurred                 |
 
 ```typescript
 function handleListEvent(listEvent: List_ItemEvent) {
@@ -242,7 +242,7 @@ import {
   waitForEvenAppBridge,
   OsEventTypeList,
   type EvenHubEvent,
-} from 'even-app-bridge';
+} from '@evenrealities/even_hub_sdk';
 
 // --- Scenario A: List container has capture ---
 // Firmware handles scroll highlighting automatically.
@@ -452,6 +452,24 @@ Audio data from the host application arrives in one of these formats:
 The SDK normalizes both formats into a `Uint8Array` accessible via
 `event.audioEvent.audioPcm`. You do not need to decode manually.
 
+### `onMicData` Convenience Method
+
+The bridge exposes an undocumented `onMicData` method at runtime that provides
+a cleaner API for audio-only listeners. It is absent from the SDK `.d.ts` type
+definitions, so you must cast through `any`:
+
+```typescript
+// Undocumented convenience wrapper — available at runtime but absent from .d.ts
+// Provides cleaner API for audio-only listeners
+(bridge as any).onMicData((data: { audioPcm: Uint8Array }) => {
+  processFrame(data.audioPcm);
+});
+```
+
+> **Note:** This is used in `g2_app/src/audio.ts` as the primary audio capture
+> mechanism. Prefer `onMicData` over filtering `onEvenHubEvent` for audio-only
+> use cases.
+
 ---
 
 ## 8. Device Status Monitoring
@@ -482,6 +500,16 @@ const unsubscribe = bridge.onDeviceStatusChanged((status) => {
 | `isWearing`    | `boolean`            | Whether glasses are on the user's face |
 | `isCharging`   | `boolean`            | Whether the glasses are charging       |
 | `isInCase`     | `boolean`            | Whether the glasses are in their case  |
+
+### `DeviceConnectType` Enum Values
+
+| Value               | String               | Description                    |
+| ------------------- | -------------------- | ------------------------------ |
+| `None`              | `'none'`             | No connection state            |
+| `Connecting`        | `'connecting'`       | Connection in progress         |
+| `Connected`         | `'connected'`        | Successfully connected         |
+| `Disconnected`      | `'disconnected'`     | Connection lost                |
+| `ConnectionFailed`  | `'connectionFailed'` | Connection attempt failed      |
 
 ### SIMULATOR WARNING
 
@@ -525,6 +553,7 @@ bridge.onEvenHubEvent((event) => {
     case OsEventTypeList.ABNORMAL_EXIT_EVENT:
       console.log('Abnormal exit — cleaning up');
       emergencyCleanup();
+      bridge.shutDownPageContainer(0);  // Note: SDK class name is "ShutDownContaniner" (typo)
       break;
   }
 });
@@ -538,20 +567,73 @@ intervals/timeouts on `FOREGROUND_EXIT_EVENT`. Restart them on
 
 ## 10. Input Handling Best Practices
 
-1. **Handle clicks from ALL event sources** — never assume one channel:
+1. **Guard against empty/malformed events BEFORE checking `eventType`:**
+   ```typescript
+   // CRITICAL: Guard against empty/malformed events BEFORE checking eventType
+   const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
+   if (!hasEvent) return; // Skip — not a user input event
+
+   // Only THEN check for click (safe because we know a sub-event exists)
+   const et = event.textEvent?.eventType ?? event.listEvent?.eventType ?? event.sysEvent?.eventType;
+   if (et === OsEventTypeList.CLICK_EVENT || et === undefined) { /* ... */ }
+   ```
+   Without this guard, empty events would be misclassified as clicks due to Quirk 1 (`CLICK_EVENT = 0 → undefined`).
+2. **Handle clicks from ALL event sources** — never assume one channel:
    ```typescript
    const et = event.listEvent?.eventType ?? event.textEvent?.eventType ?? event.sysEvent?.eventType;
    ```
-2. **Account for CLICK_EVENT = 0 → undefined:** `if (et === OsEventTypeList.CLICK_EVENT || et === undefined)`
-3. **Throttle scrolls at 300ms** to prevent duplicate actions from rapid gestures.
-4. **Track selected index yourself** — `currentSelectItemIndex` may be missing at index 0.
-5. **Test on real hardware** — simulator event sources and frame sizes differ significantly.
-6. **Use `shutDownPageContainer(1)`** for graceful exit with user confirmation.
-7. **Pair image containers with hidden text** — images lack `isEventCapture`; use a full-screen text container (`content: ' '`, `isEventCapture: 1`) behind the image.
+3. **Account for CLICK_EVENT = 0 → undefined:** `if (et === OsEventTypeList.CLICK_EVENT || et === undefined)`
+4. **Throttle scrolls at 300ms** to prevent duplicate actions from rapid gestures.
+5. **Track selected index yourself** — `currentSelectItemIndex` may be missing at index 0.
+6. **Test on real hardware** — simulator event sources and frame sizes differ significantly.
+7. **Use `shutDownPageContainer(1)`** for graceful exit with user confirmation.
+8. **Pair image containers with hidden text** — images lack `isEventCapture`; use a full-screen text container (`content: ' '`, `isEventCapture: 1`) behind the image.
 
 ---
 
-## 11. Compatible Event Data Formats
+## 11. Tap-to-Toggle Pattern
+
+The G2 SDK provides **no hold/release events** — only `CLICK_EVENT` (single tap)
+and `DOUBLE_CLICK_EVENT` (double tap). This means microphone control cannot
+use a push-to-talk model. Instead, the system uses **tap-to-start / tap-to-stop**
+(walkie-talkie model):
+
+1. **First tap** → start recording (open mic, begin streaming PCM)
+2. **Second tap** → stop recording (close mic, send audio for processing)
+
+### 300ms Tap Debounce
+
+A debounce window of **300 ms** after each tap prevents accidental
+double-tap from being interpreted as start-then-immediately-stop:
+
+```typescript
+let lastTapTime = 0;
+
+function handleTap() {
+  const now = Date.now();
+  if (now - lastTapTime < 300) return; // Debounce — ignore rapid re-tap
+  lastTapTime = now;
+
+  if (isRecording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+```
+
+### 30s Server-Side Silence Timeout
+
+The gateway enforces a **30-second silence timeout** for orphaned recordings.
+If the user starts recording but never taps again to stop, the server
+automatically closes the audio session after 30 s of inactivity.
+
+> **Reference:** See `docs/decisions/002-tap-to-toggle.md` for the full
+> architectural decision record.
+
+---
+
+## 12. Compatible Event Data Formats
 
 The SDK normalizes multiple host payload shapes into `EvenHubEvent`. For debugging:
 `{ type: 'listEvent', jsonData: {...} }`, `{ type: 'list_event', data: {...} }`,
@@ -590,3 +672,16 @@ DEVICE STATUS:       bridge.onDeviceStatusChanged(cb)
 
 LIFECYCLE:           FG_ENTER → resume, FG_EXIT → pause, ABNORMAL → cleanup
 ```
+
+---
+
+## Cross-References
+
+- `g2_app/src/input.ts` — Input handler implementation
+- `g2_app/src/audio.ts` — Audio capture implementation
+- `g2_app/src/state.ts` — State machine
+- `docs/decisions/002-tap-to-toggle.md` — Tap-to-toggle ADR
+- `docs/implementation/phase-2-audio-pipeline.md` — Audio pipeline implementation plan
+- `docs/archive/spikes/phase0-sdk-findings.md` — SDK spike findings
+- `docs/design/g2-app.md` — G2 app design (event×state dispatch table in §7)
+- `docs/reference/g2-platform/evenhub_sdk.md` — Full SDK reference

@@ -128,7 +128,7 @@ evenhub qr --clear
 
 ### `evenhub pack` — Package App
 
-Produces `.ehpk` file using internal WASM packer.
+Produces `.ehpk` file using internal WASM packer. Bundles the `app.json` metadata and the entire built project folder; format is opaque (WASM-packed, no documented internal structure).
 
 #### Arguments and Options
 
@@ -166,6 +166,8 @@ Native Rust binary using LVGL v9 for rendering. Thin Node.js wrapper.
 | `--aid <device>` / `--no-aid` | Choose specific audio device / use default |
 | `--print-config-path` | Print the config file path |
 | `--completions <shell>` | Print shell completions (bash/elvish/fish/powershell/zsh) |
+| `-V, --version` | Print version |
+| `-h, --help` | Print help |
 
 Config file paths: Linux `~/.config`, macOS `~/Library/Application Support`, Windows `AppData/Roaming`.
 
@@ -183,6 +185,10 @@ Platform binaries (optional deps): `@evenrealities/sim-linux-x64`, `@evenrealiti
 | Event source | `sysEvent` for clicks | `textEvent`/`listEvent` |
 | `textContainerUpgrade` | Full visual redraw | Smooth in-place update |
 | User/device info | Hardcoded placeholder values | Real user and device data |
+| Error handling | Error-response handling may differ from hardware | Native error responses |
+| Image processing | Processes images faster, does not enforce size constraints | Enforced size constraints |
+| List index 0 | Missing `currentSelectItemIndex` at list index 0 | Correct index tracking |
+| `CLICK_EVENT = 0` | Deserializes as `undefined` | Correct enum value |
 
 ---
 
@@ -227,6 +233,7 @@ my-app/
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build",
+    "test": "vitest run",
     "qr": "evenhub qr --http --port 5173",
     "pack": "npm run build && evenhub pack app.json dist -o myapp.ehpk"
   },
@@ -235,8 +242,8 @@ my-app/
   },
   "devDependencies": {
     "typescript": "^5.5.0",
-    "vite": "^6.0.0",
-    "@evenrealities/evenhub-cli": "^0.1.5"
+    "vite": "^5.4.0",
+    "vitest": "^2.0.0"
   }
 }
 ```
@@ -251,15 +258,24 @@ export default defineConfig({
     host: true,    // bind to 0.0.0.0 so phone can reach the server
     port: 5173,
   },
+  // G2 WebView requires a single JS bundle — no code-splitting
+  build: {
+    outDir: 'dist',
+    rollupOptions: {
+      output: {
+        inlineDynamicImports: true,    // single JS bundle for WebView
+      },
+    },
+  },
 });
 ```
 
 ### `src/main.ts`
 
 ```typescript
-import { EvenHubSDK } from "@evenrealities/even_hub_sdk";
+import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
 
-const sdk = new EvenHubSDK();
+const bridge = await waitForEvenAppBridge();
 
 // Your app logic here
 console.log("G2 app started");
@@ -302,6 +318,18 @@ console.log("G2 app started");
 **`package_id` rules:** Reverse-domain, each segment starts with lowercase letter, only lowercase letters + numbers. No hyphens. `com.myname.myapp` = valid, `com.my-name.my-app` = invalid.
 
 **`permissions.network`:** List domains. Use `["*"]` for unrestricted.
+
+### Validation Rules
+
+| Field | Rule |
+|---|---|
+| `package_id` | Regex `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$` — minimum 2 segments, no hyphens |
+| `edition` | Must be exactly `"202601"` |
+| `version` | Must be semver `x.y.z` |
+| `tagline` | Max 255 characters |
+| `description` | Max 1024 characters |
+| `permissions` | Optional — packing succeeds without it |
+| Unknown fields | Silently accepted but non-functional; e.g. `icon` is NOT part of the schema |
 
 ---
 
@@ -387,3 +415,16 @@ React 19 component library for settings/config WebView pages (NOT glasses displa
 - Keep apps standalone — should work with just `npm run dev`
 - If app needs backend, put in `server/` with own `package.json` (even-dev auto-detects)
 - Use `@jappyjan/even-realities-ui` for browser settings page consistency
+
+---
+
+## Cross-References
+
+- [docs/reference/g2-platform/evenhub_cli.md](docs/reference/g2-platform/evenhub_cli.md) — Full CLI analysis
+- [docs/reference/g2-platform/evenhub_simulator.md](docs/reference/g2-platform/evenhub_simulator.md) — Full simulator analysis
+- [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Comprehensive G2 reference
+- [docs/archive/spikes/phase0-manifest-findings.md](docs/archive/spikes/phase0-manifest-findings.md) — Manifest verification findings
+- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
+- [docs/design/g2-app.md](docs/design/g2-app.md) — G2 app design document
+- [docs/guides/getting-started.md](docs/guides/getting-started.md) — Getting started guide
+- [docs/guides/development.md](docs/guides/development.md) — Development guide

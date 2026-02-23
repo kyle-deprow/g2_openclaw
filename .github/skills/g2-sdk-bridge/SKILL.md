@@ -70,6 +70,14 @@ init();
 2. Listens for the `'evenAppBridgeReady'` event → resolves on fire.
 3. Fallback: retries every 100ms polling for readiness.
 
+### `ready` Property
+
+```typescript
+bridge.ready // boolean — true after internal init completes
+```
+
+The `ready` getter returns `true` once the bridge has completed its internal initialization. Used by `waitForEvenAppBridge()` to check if the bridge is already available.
+
 ## Public Methods — Complete Reference
 
 ### 1. `static getInstance(): EvenAppBridge`
@@ -124,6 +132,8 @@ if (result === StartUpPageCreateResult.success) { /* ready */ }
 await bridge.rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 1, textObject: [/*...*/] }));
 ```
 
+> **Flicker warning:** `rebuildPageContainer` performs a full redraw — all containers are destroyed and recreated. Internal scroll position and list selection state is lost. Causes brief flicker on real hardware. Prefer `textContainerUpgrade` when only text changes.
+
 ### 10. `updateImageRawData(data: ImageRawDataUpdate): Promise<ImageRawDataUpdateResult>`
 
 Sends raw image data to an image container on the glasses. **Sequential only** — do not call concurrently; wait for each promise to resolve before sending the next.
@@ -170,6 +180,16 @@ await bridge.audioControl(true);  // start
 // ... later
 await bridge.audioControl(false); // stop
 ```
+
+**PCM Audio Format:**
+
+| Parameter | Value |
+|---|---|
+| Sample rate | 16,000 Hz (16 kHz) |
+| Frame duration | 10 ms (hardware), 100 ms (simulator) |
+| Bytes per frame | 40 (hardware), 3,200 (simulator) |
+| Encoding | PCM S16LE (signed 16-bit little-endian) |
+| Channels | Mono |
 
 ### 13. `shutDownPageContainer(exitMode?: number): Promise<boolean>`
 
@@ -270,7 +290,9 @@ All layout positioning properties (`xPosition`, `yPosition`, `width`, `height`, 
 | `itemContainer`   | `ListItemContainerProperty` | Child item config |
 | `isEventCapture`  | `number`                    | 0 or 1            |
 
-Layout properties include: `borderRdaius` (note: typo is intentional — from protobuf), `borderColor`, `backgroundColor`, `fontColor`, `fontSize`, etc.
+Layout properties include: `borderRdaius` (note: typo is intentional — from protobuf), `borderColor`, `fontColor`, `fontSize`, etc.
+
+> **Note:** `fontSize` and `fontColor` are absent from `.d.ts` — requires `as any` cast. Hardware behavior unverified.
 
 ### ListItemContainerProperty
 
@@ -347,6 +369,16 @@ Both share the same structure:
 - `List_ItemEvent` — `containerID`, `containerName`, `currentSelectItemName`, `currentSelectItemIndex`, `eventType`
 - `Text_ItemEvent` — `containerID`, `containerName`, `eventType`
 - `Sys_ItemEvent` — `eventType` only
+
+### Undocumented Protobuf Fields
+
+The following fields exist in the underlying protobuf definitions but are **absent from the SDK's `.d.ts` type declarations**. They require `as any` casts to use, and hardware behavior is unverified.
+
+| Field | Type | Notes | Used in |
+|---|---|---|---|
+| `fontSize` | `number` | Exists in protobuf, absent from `.d.ts`. Requires `(container as any).fontSize = n`. | `g2_app/src/display.ts` |
+| `fontColor` | `number` (0–15) | Same as `fontSize`. Requires `(container as any).fontColor = n`. | `g2_app/src/display.ts` |
+| `onMicData(callback)` | Method | Convenience wrapper around `onEvenHubEvent` for audio frames. Available at runtime, absent from `.d.ts`. Access via `(bridge as any).onMicData(cb)`. | `g2_app/src/audio.ts` |
 
 ## Enums — Complete Reference
 
@@ -446,6 +478,14 @@ Values: `listEvent`, `textEvent`, `sysEvent`, `audioEvent`, `notSet`
 Values: `CLICK_EVENT=0`, `SCROLL_TOP_EVENT=1`, `SCROLL_BOTTOM_EVENT=2`, `DOUBLE_CLICK_EVENT=3`, `FOREGROUND_ENTER_EVENT=4`, `FOREGROUND_EXIT_EVENT=5`, `ABNORMAL_EXIT_EVENT=6`.  
 Helper: `OsEventTypeList.fromJson(value): OsEventTypeList`
 
+## Event Quirks
+
+1. **`CLICK_EVENT = 0` → `undefined`:** The SDK's `fromJson` normalizes the numeric value `0` to `undefined`. Always check: `eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined`. Guard against empty events first.
+2. **Missing `currentSelectItemIndex` at index 0:** When the first list item (index 0) is selected, `currentSelectItemIndex` may be `undefined` due to the same `0`-normalization bug.
+3. **Simulator vs hardware event types:** The simulator sends `sysEvent` for interactions; real hardware sends `textEvent`/`listEvent`. Always handle both paths.
+4. **Scroll events are boundary-only:** `SCROLL_TOP_EVENT` and `SCROLL_BOTTOM_EVENT` fire only when the scroll limit is reached, not per-gesture.
+5. **Rapid-fire scroll throttling:** Scroll events can fire in quick succession. A 300 ms cooldown is recommended to avoid processing duplicates.
+
 ## Type Aliases
 
 ```typescript
@@ -527,6 +567,7 @@ Event data from the Flutter host may arrive in several shapes. The SDK accepts a
 | `ImageContainerProperty.width` range | 20–200 pixels. |
 | `ImageContainerProperty.height` range | 20–100 pixels. |
 | `ListItemContainerProperty.itemName` char limit | Max 64 characters per item name. |
+| `CLICK_EVENT = 0` → `undefined` | SDK's `fromJson` normalizes `0` to `undefined`. Always check: `eventType === OsEventTypeList.CLICK_EVENT \|\| eventType === undefined`. Guard against empty events first. | `g2_app/src/input.ts` |
 
 ## Complete Import Reference
 
@@ -596,3 +637,13 @@ import {
   bytesToJson,
 } from '@evenrealities/even_hub_sdk';
 ```
+
+## Cross-References
+
+- [docs/reference/g2-platform/evenhub_sdk.md](docs/reference/g2-platform/evenhub_sdk.md) — Full SDK analysis
+- [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Comprehensive G2 reference
+- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
+- [docs/design/g2-app.md](docs/design/g2-app.md) — G2 app design (SDK usage patterns)
+- [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
+- [g2_app/src/input.ts](g2_app/src/input.ts) — Input handling implementation
+- [g2_app/src/audio.ts](g2_app/src/audio.ts) — Audio capture implementation

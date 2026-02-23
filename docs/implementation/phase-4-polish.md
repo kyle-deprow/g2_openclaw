@@ -15,12 +15,12 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.1 — Ping/Pong Heartbeat (Gateway)
 
-- **Description:** Implement application-level heartbeat per review §3.1 and doc 01 Appendix A. Gateway sends `{type:"ping"}` every 30 seconds. Phone must respond with `{type:"pong"}` within 10 seconds or connection is considered dead. This catches silent half-close scenarios (phone walks out of WiFi range, router drops idle TCP).
+- **Description:** Implement application-level heartbeat per review §3.1 and [architecture.md](../design/architecture.md) Appendix A. Gateway sends `{type:"ping"}` every 30 seconds. Phone must respond with `{type:"pong"}` within 10 seconds or connection is considered dead. This catches silent half-close scenarios (phone walks out of WiFi range, router drops idle TCP).
 - **Owner:** backend-python
 - **Dependencies:** Phase 3 server.py
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/server.py` (modify — add ping/pong loop)
+  - `gateway/server.py` (modify — add ping/pong loop)
   - `tests/gateway/test_heartbeat.py`
 - **Acceptance criteria:**
   - Background asyncio task sends `{type:"ping"}` every 30 seconds
@@ -38,7 +38,7 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 - **Dependencies:** P1.7 (gateway.ts)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/g2_app/src/gateway.ts` (verify/modify — ensure pong response is reliable)
+  - `g2_app/src/gateway.ts` (verify/modify — ensure pong response is reliable)
 - **Acceptance criteria:**
   - On receiving `{type:"ping"}` frame: immediately send `{type:"pong"}` regardless of app state
   - Pong sent even during recording, streaming, or any other state
@@ -47,17 +47,17 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.3 — Gateway → OpenClaw Reconnection
 
-- **Description:** Harden the OpenClaw client reconnection per doc 02 §5.7. If OpenClaw disconnects mid-stream, the current request fails with an error frame but subsequent requests trigger automatic reconnection. Exponential backoff with jitter.
+- **Description:** Harden the OpenClaw client reconnection per [gateway.md](../design/gateway.md) §5.7. If OpenClaw disconnects mid-stream, the current request fails with an error frame but subsequent requests trigger automatic reconnection. Exponential backoff with jitter.
 - **Owner:** backend-python
 - **Dependencies:** P3.1 (openclaw_client.py)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/gateway/openclaw_client.py` (modify — harden reconnection)
+  - `gateway/openclaw_client.py` (modify — harden reconnection)
   - `tests/gateway/test_openclaw_reconnect.py`
 - **Acceptance criteria:**
   - On `ConnectionClosedError` during stream: clear connection state, raise `OpenClawError` for current request
   - On next `send_message()` call: `ensure_connected()` attempts reconnect with backoff
-  - Backoff: 1s → 2s → 4s → 8s → max 30s, ±20% jitter per doc 02 §5.7
+  - Backoff: 1s → 2s → 4s → 8s → max 30s, ±20% jitter per [gateway.md](../design/gateway.md) §5.7
   - Resets backoff on successful connection
   - Re-authenticates on each new connection (request ID counter also resets)
   - Max attempts: unlimited (keep trying as long as phone is connected)
@@ -65,16 +65,16 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.4 — Phone → Gateway Reconnection Hardening
 
-- **Description:** Harden the app-side reconnection per doc 03 §5. On disconnect, display "Connecting to Gateway..." with countdown. On reconnect, restore to idle state. Handle edge cases: disconnect during recording, disconnect during streaming.
+- **Description:** Harden the app-side reconnection per [g2-app.md](../design/g2-app.md) §5. On disconnect, display "Connecting to Gateway..." with countdown. On reconnect, restore to idle state. Handle edge cases: disconnect during recording, disconnect during streaming.
 - **Owner:** g2-development
 - **Dependencies:** P1.7 (gateway.ts), P2.5 (input.ts)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/gateway.ts` (modify)
-  - `src/g2_app/src/main.ts` (modify — reconnection state handling)
+  - `g2_app/src/gateway.ts` (modify)
+  - `g2_app/src/main.ts` (modify — reconnection state handling)
 - **Acceptance criteria:**
   - On WebSocket close: transition to `disconnected` state, display disconnected layout
-  - Backoff timer countdown shown in footer: "Retry in {n}s..." per doc 04 §4.8
+  - Backoff timer countdown shown in footer: "Retry in {n}s..." per [display-layouts.md](../design/display-layouts.md) §4.8
   - Countdown updates every second via `textContainerUpgrade`
   - Tap during disconnected: force immediate reconnect attempt
   - On reconnect success: send no auth first-frame (token in query param), receive `connected` frame, transition to idle
@@ -84,22 +84,22 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.5 — Remaining Display States: Error + Disconnected + Loading (consolidated from P4.5/P4.6/P4.7 per review C.1)
 
-- **Description:** Implement 3 remaining display layouts in one pass: error (doc 04 §4.7), disconnected (doc 04 §4.8), loading (doc 04 §4.9). Each is ~15 lines of container definitions. Consolidating saves 2 agent calls of overhead.
+- **Description:** Implement 3 remaining display layouts in one pass: error ([display-layouts.md](../design/display-layouts.md) §4.7), disconnected ([display-layouts.md](../design/display-layouts.md) §4.8), loading ([display-layouts.md](../design/display-layouts.md) §4.9). Each is ~15 lines of container definitions. Consolidating saves 2 agent calls of overhead.
 - **Owner:** g2-development
 - **Dependencies:** P1.8 (display.ts)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/display.ts` (modify — add `showError()`, `showDisconnected()`, `showLoading()`, `updateRetryCountdown()`)
+  - `g2_app/src/display.ts` (modify — add `showError()`, `showDisconnected()`, `showLoading()`, `updateRetryCountdown()`)
 - **Acceptance criteria:**
-  - **Error** — `showError(code: string, detail: string)` — 4 containers matching doc 04 §4.7:
+  - **Error** — `showError(code: string, detail: string)` — 4 containers matching [display-layouts.md](../design/display-layouts.md) §4.7:
     - Title: `"OpenClaw"`, Badge: `"✕ Error"` (0xF), Content: `"Error\n\n{message}\n\n{hint}"` (scrollable), Footer: `"Tap to dismiss"` (0xA)
     - Error code → user-friendly message + recovery hint mapping for all 8 error codes (TRANSCRIPTION_FAILED, BUFFER_OVERFLOW, OPENCLAW_ERROR, TIMEOUT, INVALID_FRAME, INVALID_STATE, AUTH_FAILED, INTERNAL_ERROR)
     - Tap to dismiss → idle; error clears any in-progress audio
-  - **Disconnected** — `showDisconnected(retryIn: number)` — 4 containers matching doc 04 §4.8:
+  - **Disconnected** — `showDisconnected(retryIn: number)` — 4 containers matching [display-layouts.md](../design/display-layouts.md) §4.8:
     - Badge: `"○ Offline"` (0x6 muted), Content: WiFi troubleshooting hints, Footer: `"Retry in {n}s..."` (0x6)
     - `updateRetryCountdown(n)` — `textContainerUpgrade` on footer each second
     - Tap → immediate reconnect
-  - **Loading** — `showLoading()` — 4 containers matching doc 04 §4.9:
+  - **Loading** — `showLoading()` — 4 containers matching [display-layouts.md](../design/display-layouts.md) §4.9:
     - Badge: `"● loading"` (0xC accent), Content: `"Starting up..."` (24px, 0xA), Footer: `"Initializing speech model"` (0x6)
     - Ring taps ignored (already handled by input.ts)
     - Auto-transitions to idle on `status:idle`
@@ -109,16 +109,16 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.8 — Page 1 Detail View (app-layer page management)
 
-- **Description:** Implement page 1 layout per doc 04 §5. Shows full response text, metadata (model, elapsed time, session key). Accessible via double-tap from displaying state. Return to page 0 via double-tap. **NOTE:** `setPageFlip()` does NOT exist in the SDK (Phase 0 spike finding). Page navigation is implemented via app-layer state + full container rebuild.
+- **Description:** Implement page 1 layout per [display-layouts.md](../design/display-layouts.md) §5. Shows full response text, metadata (model, elapsed time, session key). Accessible via double-tap from displaying state. Return to page 0 via double-tap. **NOTE:** `setPageFlip()` does NOT exist in the SDK (Phase 0 spike finding). Page navigation is implemented via app-layer state + full container rebuild.
 - **Owner:** g2-development
 - **Dependencies:** P1.8 (display.ts), P3.7 (truncation stores full response)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/display.ts` (modify — add `currentPage` state, `rebuildPageContainer()`, `showPage0()`, `showPage1()`)
+  - `g2_app/src/display.ts` (modify — add `currentPage` state, `rebuildPageContainer()`, `showPage0()`, `showPage1()`)
 - **Acceptance criteria:**
   - Maintain `currentPage` variable (0 or 1) in module state
   - Page 0 = summary (truncated response) — existing `showResponse()` layout
-  - Page 1 layout: 3 containers per doc 04 §5:
+  - Page 1 layout: 3 containers per [display-layouts.md](../design/display-layouts.md) §5:
     - `p1_header`: `"Response Details         [Page 2]"` (24px, 0xF)
     - `p1_content`: `"{response}\n\n━━━━━━━━━━━━━━━\nModel: {model}\nTime: {elapsed}s\nSession: {session}"` (18px, 0xF, scrollable)
     - `p1_footer`: `"Double-tap: back · Tap: dismiss"` (18px, 0x6)
@@ -139,7 +139,7 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 - **Dependencies:** Phase 3 server.py
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/server.py` (modify — add signal handlers)
+  - `gateway/server.py` (modify — add signal handlers)
 - **Acceptance criteria:**
   - Register signal handlers for SIGINT and SIGTERM
   - On shutdown signal: log "Shutting down..."
@@ -156,10 +156,10 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 - **Dependencies:** P3.2 (config with OpenClaw fields)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/config.py` (modify — add LOG_LEVEL, final validation)
-  - `src/gateway/.env.example` (update)
+  - `gateway/config.py` (modify — add LOG_LEVEL, final validation)
+  - `gateway/.env.example` (update)
 - **Acceptance criteria:**
-  - All 11 env vars from doc 02 §6 supported: `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_TOKEN`, `OPENCLAW_HOST`, `OPENCLAW_PORT`, `OPENCLAW_GATEWAY_TOKEN`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `AGENT_TIMEOUT`, `LOG_LEVEL`
+  - All 11 env vars from [gateway.md](../design/gateway.md) §6 supported: `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_TOKEN`, `OPENCLAW_HOST`, `OPENCLAW_PORT`, `OPENCLAW_GATEWAY_TOKEN`, `WHISPER_MODEL`, `WHISPER_DEVICE`, `WHISPER_COMPUTE_TYPE`, `AGENT_TIMEOUT`, `LOG_LEVEL`
   - `load_config()` validates all values (port ranges, valid model names, valid device/compute types)
   - Missing required config → clear error message with env var name
   - `.env.example` has all vars with descriptions and example values
@@ -172,9 +172,9 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 - **Dependencies:** P4.10 (LOG_LEVEL config)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/server.py` (modify — add structured logging throughout)
-  - `src/gateway/openclaw_client.py` (modify)
-  - `src/gateway/transcriber.py` (modify)
+  - `gateway/server.py` (modify — add structured logging throughout)
+  - `gateway/openclaw_client.py` (modify)
+  - `gateway/transcriber.py` (modify)
 - **Acceptance criteria:**
   - Python `logging` configured with `LOG_LEVEL` from config
   - Log format: `%(asctime)s %(levelname)-5s %(message)s`
@@ -187,18 +187,18 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.12 — Build & Packaging (G2 App)
 
-- **Description:** Set up the full build and packaging pipeline per doc 03 §9. Produce a working `.ehpk` file for sideloading via QR code.
+- **Description:** Set up the full build and packaging pipeline per [g2-app.md](../design/g2-app.md) §9. Produce a working `.ehpk` file for sideloading via QR code.
 - **Owner:** g2-development
 - **Dependencies:** Phase 3 app complete
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/assets/icon.bmp` (create — placeholder 4-bit greyscale BMP)
-  - `src/g2_app/package.json` (modify — add build scripts)
-  - `src/g2_app/README.md` (create)
+  - `g2_app/assets/icon.bmp` (create — placeholder 4-bit greyscale BMP)
+  - `g2_app/package.json` (modify — add build scripts)
+  - `g2_app/README.md` (create)
 - **Acceptance criteria:**
   - `npm run build` produces `dist/` with bundled app
   - `app.json` and `assets/` copied to `dist/`
-  - `app.json` validated against **g2-dev-toolchain skill schema** (NOT design doc 03 §9 which has wrong field names — review E.2):
+  - `app.json` validated against **g2-dev-toolchain skill schema** (NOT design [g2-app.md](../design/g2-app.md) §9 which has wrong field names — review E.2):
     - Required fields: `package_id`, `name`, `entrypoint`, `edition`, `min_app_version`, `tagline`, `description`, `author`, `permissions`
     - `package_id` must match `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$` (e.g. `com.openclaw.g2`)
     - Correct field names: `package_id` (not `appId`), `name` (not `appName`), `entrypoint` (not `entry`)
@@ -210,15 +210,15 @@ Production-ready system with comprehensive error handling, reconnection logic, h
 
 ### P4.13 — Gateway README & Quick-Start Guide
 
-- **Description:** Write comprehensive documentation for the Gateway: installation, configuration, running, troubleshooting. Per review §7.3 and doc 02 module architecture.
+- **Description:** Write comprehensive documentation for the Gateway: installation, configuration, running, troubleshooting. Per review §7.3 and [gateway.md](../design/gateway.md) module architecture.
 - **Owner:** backend-python
 - **Dependencies:** P4.10 (config finalized)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/README.md` (create or update)
+  - `gateway/README.md` (create or update)
 - **Acceptance criteria:**
   - Prerequisites: Python 3.12+, uv, OpenClaw running on localhost:18789
-  - Install: `cd src/gateway && uv sync`
+  - Install: `cd gateway && uv sync`
   - Configure: copy `.env.example` → `.env`, set `OPENCLAW_GATEWAY_TOKEN`
   - Run: `uv run python -m gateway.server`
   - Troubleshooting: common errors (missing token, port in use, OpenClaw not running, Whisper model download)
@@ -269,7 +269,7 @@ Final system verification before release:
 
 1. **Full voice pipeline** — tap → record → tap → transcribe → AI response → display → dismiss → repeat
 2. **Text input** — alternative path skipping audio
-3. **Error recovery** — each of the 13 error scenarios from doc 02 §7.2 triggers correct display and recovers to idle
+3. **Error recovery** — each of the 13 error scenarios from [gateway.md](../design/gateway.md) §7.2 triggers correct display and recovers to idle
 4. **Reconnection (phone→GW)** — kill Gateway, app shows "Connecting...", restart Gateway, app recovers to idle
 5. **Reconnection (GW→OpenClaw)** — restart OpenClaw, next query triggers reconnect, response arrives
 6. **Heartbeat** — Gateway detects zombie connection (phone killed without clean close) within 40s
@@ -285,7 +285,7 @@ Final system verification before release:
 ## Definition of Done
 
 - [ ] All unit tests pass: `uv run pytest tests/gateway/`, `npx tsc --noEmit`, and `npx vitest run` (review F.1 — vitest set up in Phase 1)
-- [ ] All 13 error scenarios (doc 02 §7.2) handled with correct error frames and user-friendly display
+- [ ] All 13 error scenarios ([gateway.md](../design/gateway.md) §7.2) handled with correct error frames and user-friendly display
 - [ ] Ping/pong heartbeat detects dead connections within 40 seconds
 - [ ] Phone auto-reconnects after Gateway restart (max time: 30s)
 - [ ] Gateway reconnects to OpenClaw after OpenClaw restart (transparent to user)

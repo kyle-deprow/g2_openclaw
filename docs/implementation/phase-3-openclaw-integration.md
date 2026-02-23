@@ -9,7 +9,7 @@ Full voice-to-AI-response pipeline: speak into glasses → Gateway transcribes �
 - Phase 2 complete: audio capture, transcription, display layouts for recording/transcribing/thinking all working
 - OpenClaw Gateway running on localhost:18789 with a configured agent
 - `OPENCLAW_GATEWAY_TOKEN` set in environment / `.env`
-- Understanding of OpenClaw wire protocol (doc 01 Appendix B, `docs/openclaw_research/02_agent_architecture_and_context.md`)
+- Understanding of OpenClaw wire protocol ([architecture.md](../design/architecture.md) Appendix B, `docs/openclaw_research/02_agent_architecture_and_context.md`)
 
 ## Task Breakdown
 
@@ -30,36 +30,36 @@ Full voice-to-AI-response pipeline: speak into glasses → Gateway transcribes �
 
 ### P3.1 — OpenClaw Client (`openclaw_client.py`)
 
-- **Description:** Implement the WebSocket client to OpenClaw per doc 02 §2.3 and §5. Lazy connection (only connects on first agent message per doc 02 §5.1). Auth handshake with `connect` method (doc 02 §5.2). Request ID management with monotonic counter (doc 02 §5.3). Send `agent` method with `sessionKey` (doc 02 §5.4-5.5). Parse stream events and yield assistant deltas (doc 02 §5.6). Use `phase` field for lifecycle events per review §2.3. Reconnection with exponential backoff (doc 02 §5.7).
+- **Description:** Implement the WebSocket client to OpenClaw per [gateway.md](../design/gateway.md) §2.3 and §5. Lazy connection (only connects on first agent message per [gateway.md](../design/gateway.md) §5.1). Auth handshake with `connect` method ([gateway.md](../design/gateway.md) §5.2). Request ID management with monotonic counter ([gateway.md](../design/gateway.md) §5.3). Send `agent` method with `sessionKey` ([gateway.md](../design/gateway.md) §5.4-5.5). Parse stream events and yield assistant deltas ([gateway.md](../design/gateway.md) §5.6). Use `phase` field for lifecycle events per review §2.3. Reconnection with exponential backoff ([gateway.md](../design/gateway.md) §5.7).
 - **Owner:** backend-python
 - **Dependencies:** P1.1 (protocol.py), P1.3 (config.py)
 - **Complexity:** L
 - **Files created:**
-  - `src/gateway/openclaw_client.py`
+  - `gateway/openclaw_client.py`
   - `tests/gateway/test_openclaw_client.py`
 - **Acceptance criteria:**
   - `OpenClawClient.__init__(host, port, token)` — stores params, no immediate connection
-  - `ensure_connected()` — lazy connect + auth handshake; sends `{type:"req", id:1, method:"connect", params:{auth:{token:"..."}}}` and validates `{ok:true}` response (doc 02 §5.2)
-  - `send_message(text, session_key="agent:claw:g2") -> AsyncIterator[str]` — sends agent request, yields delta strings as they arrive (doc 02 §5.4)
-  - Request ID counter: monotonic int starting at 1, resets on reconnect (doc 02 §5.3)
-  - Session key: defaults to `"agent:claw:g2"` (doc 02 §5.5)
+  - `ensure_connected()` — lazy connect + auth handshake; sends `{type:"req", id:1, method:"connect", params:{auth:{token:"..."}}}` and validates `{ok:true}` response ([gateway.md](../design/gateway.md) §5.2)
+  - `send_message(text, session_key="agent:claw:g2") -> AsyncIterator[str]` — sends agent request, yields delta strings as they arrive ([gateway.md](../design/gateway.md) §5.4)
+  - Request ID counter: monotonic int starting at 1, resets on reconnect ([gateway.md](../design/gateway.md) §5.3)
+  - Session key: defaults to `"agent:claw:g2"` ([gateway.md](../design/gateway.md) §5.5)
   - Parses `{type:"event", event:"agent", payload:{stream:"assistant", delta:"..."}}` → yields delta
   - Parses `{type:"event", event:"agent", payload:{stream:"lifecycle", phase:"end"}}` → signals completion (**note: field is `phase` not `status`** per review §2.3)
   - Parses `{type:"event", event:"agent", payload:{stream:"lifecycle", phase:"error"}}` → raises `OpenClawError`
   - `close()` — gracefully close WebSocket
-  - Reconnection: exponential backoff 1s → 2s → 4s → 8s → max 30s with ±20% jitter (doc 02 §5.7)
-  - Error handling per doc 02 §5.8: connection refused, auth rejected, agent error, unexpected disconnect, malformed response
+  - Reconnection: exponential backoff 1s → 2s → 4s → 8s → max 30s with ±20% jitter ([gateway.md](../design/gateway.md) §5.7)
+  - Error handling per [gateway.md](../design/gateway.md) §5.8: connection refused, auth rejected, agent error, unexpected disconnect, malformed response
   - **Verification checkpoint (review B.4):** Integration test with a real OpenClaw instance confirms lifecycle field name (`phase` vs `status`) before proceeding
   - Tests: mock WebSocket server simulating OpenClaw responses, verify auth handshake, streaming deltas, lifecycle end, error scenarios, reconnection
 
 ### P3.2 — Gateway Config: OpenClaw Settings
 
-- **Description:** Extend `config.py` with OpenClaw connection settings per doc 02 §6. `OPENCLAW_GATEWAY_TOKEN` is required — Gateway refuses to start without it. Add `AGENT_TIMEOUT` for full cycle timeout.
+- **Description:** Extend `config.py` with OpenClaw connection settings per [gateway.md](../design/gateway.md) §6. `OPENCLAW_GATEWAY_TOKEN` is required — Gateway refuses to start without it. Add `AGENT_TIMEOUT` for full cycle timeout.
 - **Owner:** backend-python
 - **Dependencies:** P1.3 (config.py exists)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/gateway/config.py` (modify — add OpenClaw fields)
+  - `gateway/config.py` (modify — add OpenClaw fields)
   - `tests/gateway/test_config.py` (modify)
 - **Acceptance criteria:**
   - `GatewayConfig` gains: `openclaw_host` (default `127.0.0.1`), `openclaw_port` (default `18789`), `openclaw_gateway_token` (required), `agent_timeout` (default `120`)
@@ -74,29 +74,29 @@ Full voice-to-AI-response pipeline: speak into glasses → Gateway transcribes �
 - **Dependencies:** None (can be done early, just config files)
 - **Complexity:** S
 - **Files created:**
-  - `src/gateway/agent_config/SOUL.md` (system prompt: "keep responses under 150 words")
-  - `src/gateway/agent_config/README.md` (documents the agent setup)
+  - `gateway/agent_config/SOUL.md` (system prompt: "keep responses under 150 words")
+  - `gateway/agent_config/README.md` (documents the agent setup)
 - **Acceptance criteria:**
   - System prompt instructs: concise answers (50-150 words), plain text only (no markdown), no code blocks unless explicitly asked
-  - Session key: `agent:claw:g2` (doc 02 §5.5)
+  - Session key: `agent:claw:g2` ([gateway.md](../design/gateway.md) §5.5)
   - Documents which OpenClaw tools are useful vs. useless for G2 (browser/canvas → deny)
   - Notes on response length control for the constrained display
 
 ### P3.3 — Gateway Wiring: Transcribe → OpenClaw → Stream
 
-- **Description:** Replace the mock response in `server.py` with real OpenClaw integration. After transcription (or text input), forward to OpenClaw via `openclaw_client.send_message()`, relay each yielded delta back to phone as `{type:"assistant", delta:"..."}`. Implement agent timeout per doc 02 §7.2 #14. Handle all OpenClaw error scenarios.
+- **Description:** Replace the mock response in `server.py` with real OpenClaw integration. After transcription (or text input), forward to OpenClaw via `openclaw_client.send_message()`, relay each yielded delta back to phone as `{type:"assistant", delta:"..."}`. Implement agent timeout per [gateway.md](../design/gateway.md) §7.2 #14. Handle all OpenClaw error scenarios.
 - **Owner:** backend-python
 - **Dependencies:** P3.1 (openclaw_client), P3.2 (config), P2.3 (server with audio FSM)
 - **Complexity:** L
 - **Files created/modified:**
-  - `src/gateway/server.py` (modify — replace mock response with OpenClaw relay)
+  - `gateway/server.py` (modify — replace mock response with OpenClaw relay)
   - `tests/gateway/test_server_openclaw.py`
 - **Acceptance criteria:**
   - After transcription: `status:thinking` → call `openclaw_client.send_message(text)` → on first delta: `status:streaming` → relay each delta as `{type:"assistant", delta:"..."}` → on lifecycle end: `{type:"end"}` + `status:idle`
   - Text input path: `{type:"text"}` → skip transcription → `status:thinking` → OpenClaw → stream back
-  - Agent timeout: `asyncio.wait_for()` wraps the entire agent cycle with `AGENT_TIMEOUT` seconds (default 120); on timeout: `{type:"error", code:"TIMEOUT"}` → idle (doc 02 §7.2 #14)
+  - Agent timeout: `asyncio.wait_for()` wraps the entire agent cycle with `AGENT_TIMEOUT` seconds (default 120); on timeout: `{type:"error", code:"TIMEOUT"}` → idle ([gateway.md](../design/gateway.md) §7.2 #14)
   - Lazy connection: first agent request triggers `ensure_connected()`
-  - OpenClaw errors mapped to phone error frames per doc 02 §5.8:
+  - OpenClaw errors mapped to phone error frames per [gateway.md](../design/gateway.md) §5.8:
     - Connection refused → `{code:"OPENCLAW_ERROR", detail:"connection refused"}`
     - Auth rejected → `{code:"OPENCLAW_ERROR", detail:"auth rejected"}`
     - Agent error → `{code:"OPENCLAW_ERROR", detail:"agent error"}`
@@ -105,14 +105,14 @@ Full voice-to-AI-response pipeline: speak into glasses → Gateway transcribes �
 
 ### P3.4 — Thinking State Display
 
-- **Description:** Add thinking state layout to `display.ts` per doc 04 §4.4. Shows user query as confirmation + "Thinking..." indicator with animated dots.
+- **Description:** Add thinking state layout to `display.ts` per [display-layouts.md](../design/display-layouts.md) §4.4. Shows user query as confirmation + "Thinking..." indicator with animated dots.
 - **Owner:** g2-development
 - **Dependencies:** P1.8 (display.ts base)
 - **Complexity:** S
 - **Files created/modified:**
-  - `src/g2_app/src/display.ts` (modify — add `showThinking(query)`)
+  - `g2_app/src/display.ts` (modify — add `showThinking(query)`)
 - **Acceptance criteria:**
-  - `showThinking(query: string)` — 4 containers matching doc 04 §4.4:
+  - `showThinking(query: string)` — 4 containers matching [display-layouts.md](../design/display-layouts.md) §4.4:
     - Title: `"OpenClaw"` (24px, 0xF)
     - Badge: `"● Thinking"` (18px, 0xC accent)
     - Content: `"You: {query}\n\n━━━━━━━━━━━━━━━\nThinking..."` (18px, 0xF) — query truncated at ~3 lines
@@ -126,12 +126,12 @@ Zero-dependency pure utility. Available from Phase 1 for mock response testing.
 
 ### P3.6 — Delta Buffering During Layout Transitions
 
-- **Description:** Implement delta buffering per doc 04 §4.5 and review §3.5. When transitioning from thinking to streaming, `rebuildPageContainer` is async (BLE round-trip ~50-100ms). During this time, incoming deltas must be buffered and flushed after rebuild completes.
+- **Description:** Implement delta buffering per [display-layouts.md](../design/display-layouts.md) §4.5 and review §3.5. When transitioning from thinking to streaming, `rebuildPageContainer` is async (BLE round-trip ~50-100ms). During this time, incoming deltas must be buffered and flushed after rebuild completes.
 - **Owner:** g2-development
 - **Dependencies:** P1.8 (display.ts)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/display.ts` (modify — add delta buffer logic)
+  - `g2_app/src/display.ts` (modify — add delta buffer logic)
 - **Acceptance criteria:**
   - `Display` class gains a `_pendingDeltas: string[]` buffer and `_layoutPending: boolean` flag
   - On thinking → streaming transition: set `_layoutPending = true`, start `rebuildPageContainer`, buffer all incoming deltas in `_pendingDeltas`
@@ -141,12 +141,12 @@ Zero-dependency pure utility. Available from Phase 1 for mock response testing.
 
 ### P3.7 — Response Length Truncation
 
-- **Description:** Handle the 2000-character `textContainerUpgrade` limit per doc 04 §4.6 and review §3.4. Truncate page 0 display at ~1800 chars with `"… [double-tap for more]"`. Full response accessible on page 1. Streaming cursor (`█`) management.
+- **Description:** Handle the 2000-character `textContainerUpgrade` limit per [display-layouts.md](../design/display-layouts.md) §4.6 and review §3.4. Truncate page 0 display at ~1800 chars with `"… [double-tap for more]"`. Full response accessible on page 1. Streaming cursor (`█`) management.
 - **Owner:** g2-development
 - **Dependencies:** P1.8 (display.ts), P3.6 (delta buffering)
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/display.ts` (modify — add truncation logic)
+  - `g2_app/src/display.ts` (modify — add truncation logic)
 - **Acceptance criteria:**
   - Track total accumulated response length
   - At ~1800 characters: stop appending to page 0 content, show `"… [double-tap for more]"` at end
@@ -161,7 +161,7 @@ Zero-dependency pure utility. Available from Phase 1 for mock response testing.
 - **Dependencies:** P3.4, P3.6, P3.7, P2.7 (main.ts with audio) _(P3.5 moved to Phase 1 as P1.2.5)_
 - **Complexity:** M
 - **Files created/modified:**
-  - `src/g2_app/src/main.ts` (modify — integrate OpenClaw response flow)
+  - `g2_app/src/main.ts` (modify — integrate OpenClaw response flow)
 - **Acceptance criteria:**
   - `status:thinking` + `transcription` → `display.showThinking(transcription)`
   - First `assistant` delta → trigger thinking-to-streaming transition with delta buffering

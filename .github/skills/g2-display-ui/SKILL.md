@@ -31,8 +31,9 @@ Reference these guidelines when:
 | 3        | Text Containers       | HIGH     | `text-`      |
 | 4        | List Containers       | HIGH     | `list-`      |
 | 5        | Image Containers      | HIGH     | `image-`     |
-| 6        | UI Patterns           | HIGH     | `pattern-`   |
-| 7        | Unsupported Features  | MEDIUM   | `nosup-`     |
+| 6        | Page Lifecycle        | HIGH     | `lifecycle-` |
+| 7        | UI Patterns           | HIGH     | `pattern-`   |
+| 8        | Unsupported Features  | MEDIUM   | `nosup-`     |
 
 ---
 
@@ -97,6 +98,8 @@ Every container — regardless of type — has these common fields:
 | `containerName`   | string | max 16 chars                   | Must be unique within the page  |
 | `isEventCapture`  | number | 0 or 1                         | Exactly one container must be 1 |
 
+> † `isEventCapture` applies to text and list containers only — image containers do not support this property.
+
 ### Border & Decoration (text and list containers only — NOT images)
 
 | Property        | Range                         | Notes                                      |
@@ -109,6 +112,12 @@ Every container — regardless of type — has these common fields:
 > **Important:** There is no background colour and no fill colour. The only
 > visual decoration available is the border. The interior of a container is
 > always transparent (black/off).
+
+> **Known SDK typos (preserved from protobuf):** Use the misspelled names in
+> code — the SDK does not accept the corrected spellings.
+> - `borderRdaius` (not `borderRadius`)
+> - `ShutDownContaniner` (not `ShutDownContainer`)
+> - `APP_REQUEST_REBUILD_PAGE_FAILD` (not `APP_REQUEST_REBUILD_PAGE_FAILED`)
 
 ---
 
@@ -139,7 +148,7 @@ most versatile container type and the building block for most UI patterns.
 ### Example: Creating a Text Container
 
 ```typescript
-import { TextContainerProperty } from "even-glasses";
+import { TextContainerProperty } from "@evenrealities/even_hub_sdk";
 
 const headerContainer: TextContainerProperty = {
   containerID: 1,
@@ -153,7 +162,7 @@ const headerContainer: TextContainerProperty = {
   borderRdaius: 0, // SDK typo — must use this spelling
   paddingLength: 4,
   isEventCapture: 0,
-  textContent: "SpineSense — Patient Overview",
+  content: "SpineSense — Patient Overview",
 };
 
 const bodyContainer: TextContainerProperty = {
@@ -168,7 +177,7 @@ const bodyContainer: TextContainerProperty = {
   borderRdaius: 2,
   paddingLength: 4,
   isEventCapture: 1, // This container receives scroll events
-  textContent: "Loading patient data...",
+  content: "Loading patient data...",
 };
 ```
 
@@ -193,7 +202,7 @@ This is significantly faster than `rebuildPageContainer` and avoids flicker.
 await glassesManager.textContainerUpgrade({
   containerID: 2,
   containerName: "body",
-  textContent: "Name: Jane Doe\nAge: 34\nCondition: L4-L5 Herniation\n\nNext appointment: March 15",
+  content: "Name: Jane Doe\nAge: 34\nCondition: L4-L5 Herniation\n\nNext appointment: March 15",
   contentOffset: 0,
   contentLength: 23, // Length of "Loading patient data..."
 });
@@ -208,11 +217,20 @@ const appendText = "\n--- New Entry ---\nPain level: 4/10";
 await glassesManager.textContainerUpgrade({
   containerID: 2,
   containerName: "body",
-  textContent: appendText,
+  content: appendText,
   contentOffset: existingLength,
   contentLength: 0, // 0 = insert, don't replace
 });
 ```
+
+> **Markdown stripping:** LLM/AI responses typically contain Markdown formatting
+> (bold, italic, code, links, headings) that the G2 display cannot render. Strip
+> Markdown before display. See `stripMarkdown()` in `g2_app/src/display.ts`.
+
+> **Caution (`fontSize` / `fontColor`):** The protobuf schema defines `fontSize`
+> and `fontColor` on text containers, but these are **absent from the published
+> `.d.ts`**. Access requires `(container as any).fontSize = n`. Behavior on real
+> hardware is unverified. See `g2_app/src/display.ts` for usage.
 
 ---
 
@@ -241,7 +259,7 @@ highlighting — you do not manually manage selection state.
 ### Example: Creating a List Container
 
 ```typescript
-import { ListContainerProperty, ListItemContainerProperty } from "even-glasses";
+import { ListContainerProperty, ListItemContainerProperty } from "@evenrealities/even_hub_sdk";
 
 const menuItems: ListItemContainerProperty = {
   itemCount: 5,
@@ -268,7 +286,7 @@ const menuList: ListContainerProperty = {
   borderRdaius: 0,
   paddingLength: 2,
   isEventCapture: 1, // List events arrive as listEvent
-  listItem: menuItems,
+  itemContainer: menuItems,
 };
 ```
 
@@ -306,7 +324,7 @@ Image containers display raster images converted to 4-bit greyscale.
 ### Example: Image Container Flow
 
 ```typescript
-import { ImageContainerProperty } from "even-glasses";
+import { ImageContainerProperty } from "@evenrealities/even_hub_sdk";
 
 // Step 1: Define the image container (placeholder — no image data yet)
 const iconContainer: ImageContainerProperty = {
@@ -322,8 +340,8 @@ const iconContainer: ImageContainerProperty = {
 // Step 2: Build the page with the placeholder
 await glassesManager.createStartUpPageContainer({
   containerTotalNum: 2,
-  textContainers: [eventCaptureContainer], // Hidden text for events
-  imageContainers: [iconContainer],
+  textObject: [eventCaptureContainer], // Hidden text for events
+  imageObject: [iconContainer],
 });
 
 // Step 3: After page is built, send the actual image data
@@ -336,7 +354,7 @@ const imageData: number[] = await prepareGreyscaleImage(
 await glassesManager.updateImageRawData({
   containerID: 3,
   containerName: "icon",
-  imgData: imageData,
+  imageData: imageData,
 });
 ```
 
@@ -346,7 +364,60 @@ Use `sharp` or Canvas to: resize → greyscale (BT.601) → raw pixels → map 8
 
 ---
 
-## 6. UI Patterns (HIGH)
+## 6. Page Lifecycle (HIGH)
+
+The SDK provides five methods for managing page state. Understanding when to
+use each is critical for smooth UX.
+
+### `createStartUpPageContainer()`
+
+Called **exactly once** at app startup to create the initial page layout. Returns
+`StartUpPageCreateResult`:
+- `0` — success
+- `1` — invalid parameters
+- `2` — oversize (containers exceed canvas)
+- `3` — out of memory
+
+You **cannot** send image data during this call — create placeholder image
+containers and follow up with `updateImageRawData` after the page is built.
+
+### `rebuildPageContainer()`
+
+Used for **all subsequent layout changes** after startup. Returns
+`Promise<boolean>`.
+
+> **Flicker warning:** `rebuildPageContainer` performs a full redraw — all
+> containers are destroyed and recreated. This causes a brief flicker on real
+> hardware. Scroll state is lost. Delta buffering may be needed if data arrives
+> while a rebuild is in-flight.
+
+Prefer `textContainerUpgrade` when only text content changes — it avoids the
+full rebuild and is flicker-free.
+
+### `textContainerUpgrade()`
+
+In-place text update — the **preferred** method when only text content changes.
+Returns `Promise<boolean>`. Does not destroy or recreate containers, so there
+is no flicker and scroll state is preserved.
+
+See [Text Containers § Partial Text Updates](#partial-text-updates--textcontainerupgrade)
+for usage details.
+
+### `updateImageRawData()`
+
+Sends image pixel data to an existing image container. Returns
+`ImageRawDataUpdateResult`. Calls **must be sequential** — `await` each call
+before sending the next image.
+
+### `shutDownPageContainer()`
+
+Exits the current page. Takes a mode parameter:
+- `0` — immediate shutdown
+- `1` — shows a confirmation dialog before shutting down
+
+---
+
+## 7. UI Patterns (HIGH)
 
 The G2 display has no buttons, checkboxes, radio groups, or form controls.
 Every interactive UI element must be **faked** using the primitives above.
@@ -372,7 +443,7 @@ function onScrollDown() {
   glassesManager.textContainerUpgrade({
     containerID: 2,
     containerName: "body",
-    textContent: newText,
+    content: newText,
     contentOffset: 0,
     contentLength: previousText.length,
   });
@@ -403,7 +474,7 @@ const slots = [0, 1, 2].map((i) => ({
   borderRdaius: 3,
   paddingLength: 4,
   isEventCapture: i === 0 ? 1 : 0,
-  textContent: slotContents[i],
+    content: slotContents[i],
 }));
 ```
 
@@ -445,7 +516,7 @@ const eventProxy: TextContainerProperty = {
   borderRdaius: 0,
   paddingLength: 0,
   isEventCapture: 1, // Captures all touch/scroll events
-  textContent: " ",  // Single space — invisible but required
+  content: " ",  // Single space — invisible but required
 };
 
 // Image container drawn ON TOP of the event proxy
@@ -461,8 +532,8 @@ const displayImage: ImageContainerProperty = {
 
 await glassesManager.createStartUpPageContainer({
   containerTotalNum: 2,
-  textContainers: [eventProxy],   // Declared first → drawn behind
-  imageContainers: [displayImage], // Declared second → drawn on top
+  textObject: [eventProxy],   // Declared first → drawn behind
+  imageObject: [displayImage], // Declared second → drawn on top
 });
 
 // Events arrive as textEvent, not imageEvent
@@ -511,7 +582,7 @@ showPage(0);
 
 ---
 
-## 7. What the Display System Does NOT Support
+## 8. What the Display System Does NOT Support
 
 Understanding the boundaries prevents wasted effort and impossible designs.
 
@@ -534,7 +605,7 @@ Understanding the boundaries prevents wasted effort and impossible designs.
 
 ---
 
-## 8. Key Constants Quick Reference
+## 9. Key Constants Quick Reference
 
 | Constant                     | Value           |
 | ---------------------------- | --------------- |
@@ -568,3 +639,13 @@ Understanding the boundaries prevents wasted effort and impossible designs.
 8. ☐ No image data in `createStartUpPageContainer` — use `updateImageRawData` after
 9. ☐ Border properties use `borderRdaius` (SDK typo), not `borderRadius`
 10. ☐ Image containers have no border properties
+
+---
+
+## Cross-References
+
+- [docs/reference/g2-platform/evenhub_sdk.md](docs/reference/g2-platform/evenhub_sdk.md) — Full SDK container reference
+- [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Hardware display reference
+- [docs/design/display-layouts.md](docs/design/display-layouts.md) — Display layout design for this project
+- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
+- [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
