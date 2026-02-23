@@ -18,6 +18,10 @@ export class AudioCapture {
 
   /** Store references. Call once after bridge and gateway are ready. */
   init(bridge: EvenAppBridge, gateway: Gateway): void {
+    if (this.bridge) {
+      console.warn('[Audio] Already initialised — ignoring duplicate init()');
+      return;
+    }
     this.bridge = bridge;
     this.gateway = gateway;
 
@@ -29,8 +33,11 @@ export class AudioCapture {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (bridge as any).onMicData((data: { audioPcm: Uint8Array }) => {
       if (this._recording && this.gateway) {
-        // Forward raw PCM bytes as binary WebSocket frame
-        this.gateway.send(data.audioPcm.buffer);
+        // Forward raw PCM bytes as binary WebSocket frame.
+        // Uint8Array may be a view into a larger ArrayBuffer, so we must
+        // respect byteOffset and byteLength when slicing.
+        const { buffer, byteOffset, byteLength } = data.audioPcm;
+        this.gateway.send(buffer.slice(byteOffset, byteOffset + byteLength) as ArrayBuffer);
       }
     });
   }

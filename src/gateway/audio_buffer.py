@@ -31,6 +31,13 @@ class AudioBuffer:
 
     def append(self, chunk: bytes) -> None:
         """Append PCM bytes. Raises BufferOverflow if limit exceeded."""
+        if not chunk:
+            return
+        if len(chunk) % self.sample_width != 0:
+            raise ValueError(
+                f"Chunk size ({len(chunk)}) must be a multiple of "
+                f"sample width ({self.sample_width})"
+            )
         if self._total_bytes + len(chunk) > self._max_bytes:
             raise BufferOverflow(
                 f"Audio buffer overflow: {self._total_bytes + len(chunk)} bytes "
@@ -43,7 +50,14 @@ class AudioBuffer:
         """Convert accumulated PCM to float32 array normalized to [-1.0, 1.0].
 
         Assumes 16-bit signed integer PCM (sample_width=2).
+
+        Raises:
+            ValueError: If sample_width is not 2 (only 16-bit PCM supported).
         """
+        if self.sample_width != 2:
+            raise ValueError(
+                f"to_numpy() requires sample_width=2, got {self.sample_width}"
+            )
         raw = b"".join(self._chunks)
         samples = np.frombuffer(raw, dtype=np.int16)
         return samples.astype(np.float32) / 32768.0

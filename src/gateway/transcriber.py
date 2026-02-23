@@ -42,7 +42,7 @@ class Transcriber:
             TranscriptionError: If transcription is empty.
             asyncio.TimeoutError: If inference exceeds timeout.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _run_inference() -> str:
             segments, _info = self._model.transcribe(

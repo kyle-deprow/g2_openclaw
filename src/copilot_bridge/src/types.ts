@@ -15,6 +15,7 @@ export interface CodingTaskRequest {
 	sessionId?: string;
 	timeout?: number;
 	streaming?: boolean;
+	persistSession?: boolean;
 }
 
 export interface CodingTaskResult {

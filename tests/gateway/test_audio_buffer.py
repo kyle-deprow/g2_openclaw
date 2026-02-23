@@ -96,9 +96,9 @@ class TestOverflow:
         max_bytes = buf.MAX_DURATION_SECONDS * buf._byte_rate
         # Fill right up to the limit
         buf.append(_silence_bytes(max_bytes))
-        # One more byte should overflow
+        # Two more bytes (aligned to sample_width=2) should overflow
         with pytest.raises(BufferOverflow):
-            buf.append(b"\x00")
+            buf.append(b"\x00\x00")
 
     def test_overflow_message_contains_duration(self) -> None:
         """Verify error message mentions duration/bytes."""
@@ -106,7 +106,7 @@ class TestOverflow:
         max_bytes = buf.MAX_DURATION_SECONDS * buf._byte_rate
         buf.append(_silence_bytes(max_bytes))
         with pytest.raises(BufferOverflow, match=r"60s limit"):
-            buf.append(b"\x00")
+            buf.append(b"\x00\x00")
 
 
 class TestReset:
@@ -145,3 +145,44 @@ class TestProperties:
         # 1 second of audio at this rate
         buf.append(_silence_bytes(expected_byte_rate))
         assert buf.duration_seconds == pytest.approx(1.0)
+
+
+class TestChunkValidation:
+    """Tests for odd-byte and empty chunk handling (Issue 5)."""
+
+    def test_odd_byte_chunk_raises_value_error(self) -> None:
+        """Chunk whose size is not a multiple of sample_width raises ValueError."""
+        buf = AudioBuffer()  # sample_width=2
+        with pytest.raises(ValueError, match="must be a multiple"):
+            buf.append(b"\x00\x01\x02")  # 3 bytes, not multiple of 2
+
+    def test_single_byte_chunk_raises_value_error(self) -> None:
+        """A single byte is not valid for 16-bit PCM."""
+        buf = AudioBuffer()
+        with pytest.raises(ValueError, match="must be a multiple"):
+            buf.append(b"\x00")
+
+    def test_empty_chunk_is_noop(self) -> None:
+        """Appending an empty chunk does not modify the buffer."""
+        buf = AudioBuffer()
+        buf.append(b"")
+        assert buf.is_empty
+        assert buf._total_bytes == 0
+
+    def test_even_chunk_accepted(self) -> None:
+        """Valid even-byte chunk is accepted."""
+        buf = AudioBuffer()
+        buf.append(_silence_bytes(100))  # 100 bytes, multiple of 2
+        assert buf._total_bytes == 100
+
+
+class TestToNumpyGuard:
+    """Tests for to_numpy sample_width guard."""
+
+    def test_to_numpy_rejects_non_16bit(self) -> None:
+        """to_numpy() raises ValueError when sample_width != 2."""
+        buf = AudioBuffer(sample_width=3)
+        buf._chunks = [b"\x00" * 6]
+        buf._total_bytes = 6
+        with pytest.raises(ValueError, match="requires sample_width=2"):
+            buf.to_numpy()

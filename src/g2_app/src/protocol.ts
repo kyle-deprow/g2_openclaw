@@ -18,7 +18,6 @@ export interface StatusFrame {
   status: GatewayStatus;
 }
 
-// TODO: Phase 2 — route transcription.text to showThinking(query)
 export interface TranscriptionFrame {
   type: 'transcription';
   text: string;

@@ -11,7 +11,7 @@ from typing import Literal, TypedDict
 # ---------------------------------------------------------------------------
 
 StatusState = Literal[
-    "loading", "recording", "transcribing", "thinking", "streaming", "idle", "error"
+    "loading", "recording", "transcribing", "thinking", "streaming", "idle"
 ]
 
 
@@ -81,7 +81,7 @@ class EndFrame(TypedDict):
 class ErrorFrame(TypedDict):
     type: Literal["error"]
     detail: str
-    code: str
+    code: ErrorCode
 
 
 class ConnectedFrame(TypedDict):

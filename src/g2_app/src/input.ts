@@ -23,6 +23,7 @@ export class InputHandler {
   private gateway!: Gateway;
   private bridge!: EvenAppBridge;
   private _lastScrollTime = 0;
+  private _initialised = false;
   private static readonly SCROLL_COOLDOWN = 300; // ms
 
   init(deps: {
@@ -32,6 +33,11 @@ export class InputHandler {
     gateway: Gateway;
     bridge: EvenAppBridge;
   }): void {
+    if (this._initialised) {
+      console.warn('[Input] Already initialised — ignoring duplicate init()');
+      return;
+    }
+    this._initialised = true;
     this.sm = deps.sm;
     this.display = deps.display;
     this.audio = deps.audio;
@@ -39,6 +45,14 @@ export class InputHandler {
     this.bridge = deps.bridge;
 
     deps.bridge.onEvenHubEvent((event) => {
+      // Guard: if no sub-object exists, this is an empty/malformed event —
+      // do NOT let it fall through as an undefined click.
+      const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
+      if (!hasEvent) {
+        console.warn('[Input] Empty event received — ignoring');
+        return;
+      }
+
       // Check all three event sources
       const eventType =
         event.textEvent?.eventType ??

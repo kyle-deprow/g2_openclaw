@@ -1,5 +1,7 @@
 import { CopilotBridge } from "./client.js";
 import { loadConfig } from "./config.js";
+import { SessionPool, TaskOrchestrator } from "./orchestrator.js";
+import type { OrchestratedResult, SubTaskResult, TaskPlan } from "./orchestrator.js";
 import type { CodingTaskResult, StreamingDelta } from "./types.js";
 
 // --- Local type definitions (since @openclaw/sdk may not be installable) ---
@@ -80,6 +82,27 @@ function formatResult(result: CodingTaskResult): string {
 function formatError(err: unknown): string {
 	const message = err instanceof Error ? err.message : String(err);
 	return `## Error\n\n${message}`;
+}
+
+function formatOrchestratedResult(result: OrchestratedResult): string {
+	const planSection = `## Task Plan\n${result.plan.tasks.map((t) => `- **${t.id}**: ${t.description} [${t.estimatedComplexity}]`).join("\n")}`;
+
+	const taskResults = result.tasks
+		.map((tr: SubTaskResult) => {
+			const icon = tr.status === "success" ? "✅" : tr.status === "failed" ? "❌" : "⏭️";
+			const detail =
+				tr.status === "skipped"
+					? `Skipped: ${tr.skipReason ?? "dependency failed"}`
+					: tr.result.success
+						? `${tr.result.content.slice(0, 500)}${tr.result.content.length > 500 ? "..." : ""}`
+						: `Error: ${tr.result.errors.join(", ")}`;
+			return `### ${icon} ${tr.id}\n${detail}`;
+		})
+		.join("\n\n");
+
+	const statsSection = `## Summary\n${result.summary}\n- Total elapsed: ${(result.totalElapsed / 1000).toFixed(1)}s`;
+
+	return `${planSection}\n\n## Results\n${taskResults}\n\n${statsSection}`;
 }
 
 function summariseArgs(args: Record<string, unknown> | undefined): string {
@@ -217,12 +240,53 @@ const copilotCodeVerboseTool: OpenClawToolDef = {
 	},
 };
 
+const copilotOrchestrateTool: OpenClawToolDef = {
+	name: "copilot_orchestrate",
+	description:
+		"Break a complex coding task into sub-tasks, execute them in parallel where possible, and return synthesized results. Use for multi-file or multi-step coding tasks.",
+	parameters: {
+		type: "object",
+		properties: {
+			task: {
+				type: "string",
+				description: "High-level coding task description to decompose and execute",
+			},
+			maxConcurrency: {
+				type: "number",
+				description: "Maximum parallel sessions (default 3)",
+			},
+			timeout: {
+				type: "number",
+				description: "Timeout per sub-task in milliseconds (default 120000)",
+			},
+		},
+		required: ["task"],
+	},
+	async execute(args: Record<string, unknown>): Promise<{ result: string }> {
+		try {
+			const bridge = await getBridge();
+			const maxConcurrency = typeof args.maxConcurrency === "number" ? args.maxConcurrency : 3;
+			const pool = new SessionPool(bridge, maxConcurrency);
+
+			const orchestrator = new TaskOrchestrator(bridge, pool);
+			const plan = await orchestrator.planTasks(args.task as string);
+			const result = await orchestrator.executePlan(plan);
+
+			await pool.drain();
+
+			return { result: formatOrchestratedResult(result) };
+		} catch (err) {
+			return { result: formatError(err) };
+		}
+	},
+};
+
 // --- Plugin default export ---
 
 const plugin: OpenClawPlugin = {
 	name: "copilot-bridge",
 	version: "1.0.0",
-	tools: [copilotCodeTool, copilotCodeVerboseTool],
+	tools: [copilotCodeTool, copilotCodeVerboseTool, copilotOrchestrateTool],
 	async onLoad() {
 		console.log("[copilot-bridge] Plugin loaded");
 	},

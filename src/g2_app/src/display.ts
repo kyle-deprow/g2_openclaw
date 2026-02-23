@@ -129,6 +129,43 @@ export class DisplayManager {
   /** Last footer text length (for accurate in-place upgrades) */
   private _footerLen = 0;
 
+  /** Deltas buffered while layout rebuild is in progress */
+  private _pendingDeltas: string[] = [];
+
+  /** True while an async rebuild is in flight (showStreaming) */
+  private _layoutPending = false;
+
+  /** Deltas accumulated for debounced flush */
+  private _deltaBatch: string[] = [];
+
+  /** Handle for the 100ms debounce timer */
+  private _deltaTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Whether the display content has been truncated */
+  private _truncated = false;
+
+  /** Debounce interval (ms) for delta batching */
+  private static readonly DELTA_FLUSH_MS = 100;
+
+  /** Character limit before truncation hint is shown */
+  private static readonly TRUNCATION_LIMIT = 1800;
+
+  /** Maximum stream buffer size to prevent unbounded memory growth */
+  private static readonly STREAM_BUFFER_CAP = 50_000;
+
+  // -----------------------------------------------------------------------
+  // Internal helpers
+  // -----------------------------------------------------------------------
+
+  /** Cancel any pending delta-flush timer and discard batched deltas. */
+  private _clearDeltaTimer(): void {
+    if (this._deltaTimer) {
+      clearTimeout(this._deltaTimer);
+      this._deltaTimer = null;
+    }
+    this._deltaBatch = [];
+  }
+
   // -----------------------------------------------------------------------
   // Lifecycle
   // -----------------------------------------------------------------------
@@ -197,8 +234,12 @@ export class DisplayManager {
 
   async showIdle(): Promise<void> {
     const b = this.requireBridge();
+    this._clearDeltaTimer();
     this._streamBuffer = '';
     this._query = '';
+    this._truncated = false;
+    this._pendingDeltas = [];
+    this._layoutPending = false;
     await rebuild(b, [
       text(ID_TITLE,   'title',   8,   8, 460, 32, 24, PRIMARY, 'OpenClaw'),
       text(ID_BADGE,   'badge', 480,   8,  88, 32, 18, MUTED,   '● idle'),
@@ -265,6 +306,10 @@ export class DisplayManager {
     const b = this.requireBridge();
     this._query = query;
     this._streamBuffer = '';
+    this._truncated = false;
+    this._clearDeltaTimer();
+    this._pendingDeltas = [];
+    this._layoutPending = true;
     const queryTrunc = truncateQuery(query);
     await rebuild(b, [
       text(ID_TITLE,   'title',   8,   8, 460,  32, 18, SECOND, `You: ${queryTrunc}`),
@@ -272,6 +317,13 @@ export class DisplayManager {
       text(ID_CONTENT, 'content', 8,  48, 560, 200, 18, PRIMARY, '█', 1),
       text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, MUTED,  'Streaming...'),
     ]);
+    this._layoutPending = false;
+    // Flush any deltas that arrived during the rebuild
+    if (this._pendingDeltas.length > 0) {
+      const merged = this._pendingDeltas.join('');
+      this._pendingDeltas = [];
+      await this.appendDelta(merged);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -279,21 +331,73 @@ export class DisplayManager {
   // -----------------------------------------------------------------------
 
   async appendDelta(delta: string): Promise<void> {
-    const b = this.requireBridge();
+    if (!delta) return;
 
-    // M10: strip markdown from incoming delta before buffering
-    const cleanDelta = stripMarkdown(delta);
-
-    // H3: guard against unbounded buffer growth (SDK content max ~2000)
-    if (this._streamBuffer.length + cleanDelta.length > 1900) {
-      await this.showResponse(this._query, this._streamBuffer);
+    // Buffer deltas while layout transition is in progress
+    if (this._layoutPending) {
+      this._pendingDeltas.push(delta);
       return;
     }
 
-    const offset = this._streamBuffer.length;
+    this._deltaBatch.push(delta);
+    if (!this._deltaTimer) {
+      this._deltaTimer = setTimeout(() => {
+        this._flushDeltas().catch((err) =>
+          console.error('[Display] delta flush failed:', err),
+        );
+      }, DisplayManager.DELTA_FLUSH_MS);
+    }
+  }
+
+  /**
+   * Flush batched deltas to the display.
+   * Handles truncation at TRUNCATION_LIMIT and cursor management.
+   */
+  private async _flushDeltas(): Promise<void> {
+    this._deltaTimer = null;
+    if (this._deltaBatch.length === 0) return;
+
+    const merged = this._deltaBatch.join('');
+    this._deltaBatch = [];
+
+    const b = this.requireBridge();
+    const cleanDelta = stripMarkdown(merged);
+
+    // Capture the actual display length BEFORE extending the buffer:
+    // display shows previousText + '█', so length = _streamBuffer.length + 1
+    const prevDisplayLen = this._streamBuffer.length + 1;
+
+    // Always accumulate in stream buffer (for full text access via page 1)
     this._streamBuffer += cleanDelta;
 
-    // Replace everything from the start to show accumulated text + cursor
+    // Cap unbounded growth (M-3)
+    if (this._streamBuffer.length > DisplayManager.STREAM_BUFFER_CAP) {
+      this._streamBuffer = this._streamBuffer.slice(0, DisplayManager.STREAM_BUFFER_CAP);
+    }
+
+    // If already truncated, don't update display (but keep accumulating)
+    if (this._truncated) return;
+
+    // Check truncation threshold
+    if (this._streamBuffer.length > DisplayManager.TRUNCATION_LIMIT) {
+      this._truncated = true;
+      const truncatedText =
+        this._streamBuffer.slice(0, DisplayManager.TRUNCATION_LIMIT) +
+        '… [double-tap for more]';
+      await b.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: ID_CONTENT,
+          containerName: 'content',
+          contentOffset: 0,
+          contentLength: prevDisplayLen,  // actual chars on display
+          content: truncatedText,
+        }),
+      );
+      return;
+    }
+
+    // Normal append: replace cursor with new text + cursor
+    const offset = this._streamBuffer.length - cleanDelta.length;
     await b.textContainerUpgrade(
       new TextContainerUpgrade({
         containerID: ID_CONTENT,
@@ -344,17 +448,42 @@ export class DisplayManager {
   async finaliseStream(): Promise<void> {
     const b = this.requireBridge();
 
-    // Strip the trailing cursor from content
-    const cursorLen = '█'.length;
-    await b.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ID_CONTENT,
-        containerName: 'content',
-        contentOffset: this._streamBuffer.length,
-        contentLength: cursorLen,
-        content: '', // remove cursor
-      }),
-    );
+    // Clear any pending delta timer and flush remaining deltas synchronously
+    if (this._deltaTimer) {
+      clearTimeout(this._deltaTimer);
+      this._deltaTimer = null;
+    }
+    if (this._deltaBatch.length > 0) {
+      const merged = this._deltaBatch.join('');
+      this._deltaBatch = [];
+      const clean = stripMarkdown(merged);
+      this._streamBuffer += clean;
+      // Send unflushed text to display in place of cursor (no new cursor)
+      if (!this._truncated) {
+        const displayOffset = this._streamBuffer.length - clean.length;
+        await b.textContainerUpgrade(
+          new TextContainerUpgrade({
+            containerID: ID_CONTENT,
+            containerName: 'content',
+            contentOffset: displayOffset,
+            contentLength: 1,  // the trailing '█'
+            content: clean,    // no cursor appended
+          }),
+        );
+      }
+    } else if (!this._truncated) {
+      // No pending batch — just strip the cursor
+      const cursorLen = '█'.length;
+      await b.textContainerUpgrade(
+        new TextContainerUpgrade({
+          containerID: ID_CONTENT,
+          containerName: 'content',
+          contentOffset: this._streamBuffer.length,
+          contentLength: cursorLen,
+          content: '', // remove cursor
+        }),
+      );
+    }
 
     // Update badge: Streaming → Done
     await b.textContainerUpgrade(
@@ -387,6 +516,11 @@ export class DisplayManager {
 
   async showError(message: string, hint = 'Try again'): Promise<void> {
     const b = this.requireBridge();
+    this._clearDeltaTimer();
+    this._pendingDeltas = [];
+    this._layoutPending = false;
+    this._truncated = false;
+    this._streamBuffer = '';
     await rebuild(b, [
       text(ID_TITLE,   'title',   8,   8, 460,  32, 24, PRIMARY, 'OpenClaw'),
       text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, PRIMARY, '✕ Error'),
@@ -402,6 +536,11 @@ export class DisplayManager {
 
   async showDisconnected(retrySeconds?: number): Promise<void> {
     const b = this.requireBridge();
+    this._clearDeltaTimer();
+    this._pendingDeltas = [];
+    this._layoutPending = false;
+    this._truncated = false;
+    this._streamBuffer = '';
     const footerText = retrySeconds !== undefined
       ? `Retry in ${retrySeconds}s...`
       : 'Reconnecting...';

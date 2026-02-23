@@ -6,8 +6,8 @@
  *   2. Initialising the DisplayManager and showing a loading screen
  *   3. Creating a Gateway and connecting to the PC gateway server
  *   4. Creating a StateMachine for lifecycle tracking
- *   5. Wiring inbound frame routing (Gateway → StateMachine + Display)
- *   6. Wiring gateway-level events (disconnect / reconnect)
+ *   5. Initialising the AudioCapture pipeline (mic → PCM → gateway)
+ *   6. Initialising the InputHandler (R1 ring → tap/gesture routing)
  *
  * Architecture:
  *   waitForEvenAppBridge() → bridge
@@ -19,9 +19,11 @@
 
 import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
 
+import { AudioCapture } from './audio';
 import { DisplayManager } from './display';
 import { Gateway } from './gateway';
 import type { GatewayEvent } from './gateway';
+import { InputHandler } from './input';
 import type { InboundFrame } from './protocol';
 import { StateMachine } from './state';
 
@@ -31,6 +33,8 @@ import { StateMachine } from './state';
 let display: DisplayManager;
 let gateway: Gateway;
 let sm: StateMachine;
+let audio: AudioCapture;
+let input: InputHandler;
 
 /**
  * The most recent user query text.  Updated when a transcription frame
@@ -65,8 +69,9 @@ function routeFrame(frame: InboundFrame): void {
     // -- Server status change --------------------------------------------
     case 'status': {
       // Guard: ignore status:idle while we are showing a completed response
-      if (frame.status === 'idle' && sm.current === 'displaying') {
-        console.log('[Main] Ignoring status:idle — currently in displaying state');
+      // or displaying an error — the user must dismiss manually.
+      if (frame.status === 'idle' && (sm.current === 'displaying' || sm.current === 'error')) {
+        console.log(`[Main] Ignoring status:idle — currently in ${sm.current} state`);
         return;
       }
 
@@ -108,14 +113,13 @@ function routeFrame(frame: InboundFrame): void {
 
     // -- Error from server -------------------------------------------------
     case 'error':
+      if (audio.isRecording) audio.stop();
       console.error(`[Main] Server error: ${frame.detail} (${frame.code})`);
       sm.transition('error');
       display.showError(frame.detail);
       break;
 
     // -- Transcription text ------------------------------------------------
-    // TODO: Phase 2 — route transcription.text as the active query and
-    //       update the display header accordingly.
     case 'transcription':
       currentQuery = frame.text;
       console.log(`[Main] Transcription received: "${frame.text}"`);
@@ -144,6 +148,7 @@ function routeEvent(event: GatewayEvent): void {
       break;
 
     case 'disconnected':
+      if (audio.isRecording) audio.stop();
       console.warn('[Main] Gateway disconnected');
       sm.transition('disconnected');
       display.showDisconnected();
@@ -188,8 +193,15 @@ async function boot(): Promise<void> {
   console.log('[Main] Connecting to gateway...');
   gateway.connect();
 
-  // TODO: Phase 2 — initialise R1 ring input handling
-  // TODO: Phase 2 — register audio capture pipeline
+  // 5. Initialise audio capture pipeline
+  audio = new AudioCapture();
+  audio.init(bridge, gateway);
+  console.log('[Main] AudioCapture initialised');
+
+  // 6. Initialise R1 ring input handling
+  input = new InputHandler();
+  input.init({ sm, display, audio, gateway, bridge });
+  console.log('[Main] InputHandler initialised');
 }
 
 // ---------------------------------------------------------------------------

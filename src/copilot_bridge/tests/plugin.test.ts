@@ -33,6 +33,25 @@ vi.mock("../src/client.js", () => ({
 	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
 }));
 
+const { mockOrchestrator, mockPool } = vi.hoisted(() => {
+	const mockOrchestrator = {
+		planTasks: vi.fn(),
+		executePlan: vi.fn(),
+		on: vi.fn().mockReturnValue(vi.fn()),
+	};
+	const mockPool = {
+		drain: vi.fn().mockResolvedValue(undefined),
+		execute: vi.fn(),
+		getActiveCount: vi.fn().mockReturnValue(0),
+	};
+	return { mockOrchestrator, mockPool };
+});
+
+vi.mock("../src/orchestrator.js", () => ({
+	TaskOrchestrator: vi.fn().mockImplementation(() => mockOrchestrator),
+	SessionPool: vi.fn().mockImplementation(() => mockPool),
+}));
+
 const { default: plugin, _resetBridge } = await import("../src/plugin.js");
 const { CopilotBridge } = await import("../src/client.js");
 
@@ -83,7 +102,7 @@ describe("OpenClaw Plugin", () => {
 			expect(plugin.name).toBe("copilot-bridge");
 			expect(plugin.version).toBe("1.0.0");
 			expect(Array.isArray(plugin.tools)).toBe(true);
-			expect(plugin.tools?.length).toBe(2);
+			expect(plugin.tools?.length).toBe(3);
 		});
 
 		it("has an onLoad function", () => {
@@ -91,13 +110,14 @@ describe("OpenClaw Plugin", () => {
 		});
 
 		it("onLoad resolves without throwing", async () => {
-			await expect(plugin.onLoad!({})).resolves.toBeUndefined();
+			await expect(plugin.onLoad?.({})).resolves.toBeUndefined();
 		});
 
 		it("tool names match expected", () => {
 			const names = plugin.tools?.map((t) => t.name);
 			expect(names).toContain("copilot_code");
 			expect(names).toContain("copilot_code_verbose");
+			expect(names).toContain("copilot_orchestrate");
 		});
 	});
 
@@ -105,9 +125,9 @@ describe("OpenClaw Plugin", () => {
 		it("copilot_code has correct parameters", () => {
 			const tool = findTool("copilot_code");
 			expect(tool).toBeDefined();
-			expect(tool!.parameters.type).toBe("object");
-			expect(tool!.parameters.required).toEqual(["task"]);
-			expect(Object.keys(tool!.parameters.properties)).toEqual(
+			expect(tool?.parameters.type).toBe("object");
+			expect(tool?.parameters.required).toEqual(["task"]);
+			expect(Object.keys(tool?.parameters.properties)).toEqual(
 				expect.arrayContaining(["task", "workingDir", "model", "timeout"]),
 			);
 		});
@@ -115,9 +135,9 @@ describe("OpenClaw Plugin", () => {
 		it("copilot_code_verbose has correct parameters", () => {
 			const tool = findTool("copilot_code_verbose");
 			expect(tool).toBeDefined();
-			expect(tool!.parameters.type).toBe("object");
-			expect(tool!.parameters.required).toEqual(["task"]);
-			expect(Object.keys(tool!.parameters.properties)).toEqual(
+			expect(tool?.parameters.type).toBe("object");
+			expect(tool?.parameters.required).toEqual(["task"]);
+			expect(Object.keys(tool?.parameters.properties)).toEqual(
 				expect.arrayContaining(["task", "workingDir", "model", "timeout"]),
 			);
 		});
@@ -367,6 +387,119 @@ describe("OpenClaw Plugin", () => {
 
 			expect(result).toContain("not json");
 			expect(result).not.toContain("## Error");
+		});
+	});
+
+	describe("copilot_orchestrate", () => {
+		const mockPlan = {
+			tasks: [
+				{ id: "t1", description: "Create utils", estimatedComplexity: "S" },
+				{ id: "t2", description: "Add tests", estimatedComplexity: "M" },
+			],
+			dependencies: new Map([["t2", ["t1"]]]),
+		};
+
+		const mockOrchestratedResult = {
+			tasks: [
+				{
+					id: "t1",
+					result: {
+						success: true,
+						content: "Utils created",
+						toolCalls: [],
+						errors: [],
+						sessionId: "s1",
+						elapsed: 1000,
+					},
+					status: "success" as const,
+				},
+				{
+					id: "t2",
+					result: {
+						success: true,
+						content: "Tests added",
+						toolCalls: [],
+						errors: [],
+						sessionId: "s2",
+						elapsed: 2000,
+					},
+					status: "success" as const,
+				},
+			],
+			totalElapsed: 3000,
+			summary: "2/2 tasks succeeded, 0 skipped, 0 failed",
+			plan: mockPlan,
+		};
+
+		beforeEach(() => {
+			mockOrchestrator.planTasks.mockResolvedValue(mockPlan);
+			mockOrchestrator.executePlan.mockResolvedValue(mockOrchestratedResult);
+		});
+
+		it("has correct tool schema", () => {
+			const tool = findTool("copilot_orchestrate");
+			expect(tool).toBeDefined();
+			expect(tool?.parameters.type).toBe("object");
+			expect(tool?.parameters.required).toEqual(["task"]);
+			expect(Object.keys(tool?.parameters.properties)).toEqual(
+				expect.arrayContaining(["task", "maxConcurrency", "timeout"]),
+			);
+		});
+
+		it("decomposes task, executes plan, and returns formatted result", async () => {
+			const tool = findTool("copilot_orchestrate")!;
+			const { result } = await tool.execute({ task: "build a REST API" });
+
+			expect(mockOrchestrator.planTasks).toHaveBeenCalledWith("build a REST API");
+			expect(mockOrchestrator.executePlan).toHaveBeenCalledWith(mockPlan);
+
+			expect(result).toContain("## Task Plan");
+			expect(result).toContain("**t1**: Create utils [S]");
+			expect(result).toContain("**t2**: Add tests [M]");
+			expect(result).toContain("## Results");
+			expect(result).toContain("✅ t1");
+			expect(result).toContain("Utils created");
+			expect(result).toContain("✅ t2");
+			expect(result).toContain("Tests added");
+			expect(result).toContain("## Summary");
+			expect(result).toContain("2/2 tasks succeeded");
+			expect(result).toContain("Total elapsed: 3.0s");
+		});
+
+		it("uses custom maxConcurrency when provided", async () => {
+			const { SessionPool } = await import("../src/orchestrator.js");
+
+			const tool = findTool("copilot_orchestrate")!;
+			await tool.execute({ task: "parallel work", maxConcurrency: 5 });
+
+			expect(SessionPool).toHaveBeenCalledWith(expect.anything(), 5);
+		});
+
+		it("drains pool after execution", async () => {
+			const tool = findTool("copilot_orchestrate")!;
+			await tool.execute({ task: "drain test" });
+
+			expect(mockPool.drain).toHaveBeenCalledTimes(1);
+		});
+
+		it("returns error message on orchestrator failure", async () => {
+			mockOrchestrator.executePlan.mockRejectedValue(new Error("orchestrator crashed"));
+
+			const tool = findTool("copilot_orchestrate")!;
+			const { result } = await tool.execute({ task: "will fail" });
+
+			expect(result).toContain("## Error");
+			expect(result).toContain("orchestrator crashed");
+		});
+
+		it("falls back gracefully when plan fails", async () => {
+			mockOrchestrator.planTasks.mockRejectedValue(new Error("planning failed: task too vague"));
+
+			const tool = findTool("copilot_orchestrate")!;
+			const { result } = await tool.execute({ task: "do something" });
+
+			expect(result).toContain("## Error");
+			expect(result).toContain("planning failed: task too vague");
 		});
 	});
 });

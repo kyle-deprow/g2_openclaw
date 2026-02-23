@@ -117,4 +117,37 @@ describe('AudioCapture', () => {
   it('start without init throws', () => {
     expect(() => audio.start()).toThrow('[Audio] Not initialised — call init() first');
   });
+
+  it('mic data respects Uint8Array byteOffset when forwarding', () => {
+    audio.init(bridge, gateway);
+    audio.start();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const micCallback = (bridge as any).onMicData.mock.calls[0][0];
+
+    // Create a Uint8Array view into a larger backing buffer at a non-zero offset
+    const backing = new ArrayBuffer(10);
+    const view = new Uint8Array(backing, 3, 4); // byteOffset=3, byteLength=4
+    view.set([10, 20, 30, 40]);
+
+    micCallback({ audioPcm: view });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sentBuffer = (gateway as any).send.mock.calls[0][0] as ArrayBuffer;
+    expect(sentBuffer.byteLength).toBe(4);
+    expect(new Uint8Array(sentBuffer)).toEqual(new Uint8Array([10, 20, 30, 40]));
+  });
+
+  it('double init is ignored with warning', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    audio.init(bridge, gateway);
+    audio.init(bridge, gateway);
+
+    expect(warnSpy).toHaveBeenCalledWith('[Audio] Already initialised — ignoring duplicate init()');
+    // onMicData should only have been registered once
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((bridge as any).onMicData).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
 });

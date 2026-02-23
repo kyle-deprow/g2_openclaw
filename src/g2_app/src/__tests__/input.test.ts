@@ -233,4 +233,46 @@ describe('InputHandler', () => {
 
     vi.useRealTimers();
   });
+
+  // -----------------------------------------------------------------------
+  // Double-init guard
+  // -----------------------------------------------------------------------
+
+  it('double init is ignored with warning', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // handler was already init'd in beforeEach — call again
+    handler.init({
+      sm: sm as unknown as StateMachine,
+      display: display as unknown as DisplayManager,
+      audio: audio as unknown as AudioCapture,
+      gateway: gateway as unknown as Gateway,
+      bridge: bridge as unknown as EvenAppBridge,
+    });
+
+    expect(warnSpy).toHaveBeenCalledWith('[Input] Already initialised — ignoring duplicate init()');
+    // onEvenHubEvent should only have been registered once (from beforeEach)
+    expect(bridge.onEvenHubEvent).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
+  });
+
+  // -----------------------------------------------------------------------
+  // Empty event guard
+  // -----------------------------------------------------------------------
+
+  it('empty event (no sub-object) is ignored', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Retrieve the onEvenHubEvent callback registered during init
+    const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
+
+    // Fire an event with no textEvent, listEvent, or sysEvent
+    eventCallback({});
+
+    expect(warnSpy).toHaveBeenCalledWith('[Input] Empty event received — ignoring');
+    // _handleEvent should NOT have been called — verify no state change
+    expect(sm.transition).not.toHaveBeenCalled();
+    expect(audio.start).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
 });
