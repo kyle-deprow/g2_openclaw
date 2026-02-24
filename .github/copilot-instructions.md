@@ -50,3 +50,5 @@ cd copilot_bridge && npm install && npm test
 - Do not create raw SQL strings with f-strings or `.format()`.
 - Do not store or compare timestamps in local time. Always use UTC.
 - Do not add dependencies without also adding them to `pyproject.toml` (Python) or `package.json` (TypeScript).
+- Do not put `defaultQuery` or other unsupported keys in OpenClaw provider config — the Zod schema rejects them. See the `openclaw-azure-config` skill.
+- Do not commit raw API keys. Use `env:VAR_NAME` placeholders in repo config; the push script resolves them at deploy time.

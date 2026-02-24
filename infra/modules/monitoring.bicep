@@ -92,5 +92,4 @@ output appInsightsId string = appInsights.id
 @description('Name of the Application Insights instance.')
 output appInsightsName string = appInsights.name
 
-@description('Connection string for Application Insights.')
-output appInsightsConnectionString string = appInsights.properties.ConnectionString
+

@@ -107,26 +107,78 @@ cd ../..   # Back to repo root
 
 ### 4. OpenClaw (optional — real AI responses)
 
-Without OpenClaw the gateway returns mock (hardcoded) responses. To get real AI responses:
+Without OpenClaw the gateway returns mock (hardcoded) responses. To get real AI responses you need OpenClaw installed, onboarded, and configured with the Azure OpenAI provider.
 
-1. **Install OpenClaw** following [its README](https://github.com/open-claw/open-claw).
+#### 4a. Install & onboard
 
-2. **Set the gateway token** so the gateway can authenticate with OpenClaw. Add to your `.env`:
+```bash
+# Install OpenClaw globally (requires Node.js 22+)
+sudo npm install -g openclaw
 
-   ```
-   OPENCLAW_HOST=127.0.0.1
-   OPENCLAW_PORT=18789
-   OPENCLAW_GATEWAY_TOKEN=your-openclaw-token
-   ```
+# Run the onboarding wizard — creates ~/.openclaw/ with base config
+openclaw onboard --local
+```
 
-3. **Copy the agent config** into your OpenClaw setup. The directory `gateway/agent_config/` contains:
+#### 4b. Set the Azure API key
 
-   - `SOUL.md` — a system prompt optimised for the G2's tiny display (short, plain-text answers)
-   - `README.md` — notes on session keys and which OpenClaw tools to disable
+Option A — fetch from Azure (requires `az login`):
 
-   Configure your OpenClaw agent to use the `SOUL.md` prompt and the session key `agent:claw:g2`. The gateway does **not** inject the prompt at runtime — it must be set on the OpenClaw side.
+```bash
+az cognitiveservices account keys list \
+  --name oai-ss-aisense-dev-eastus \
+  --resource-group rg-ss-aisense-dev-eastus \
+  --query key1 -o tsv \
+  | xargs -I{} sh -c 'echo "AZURE_OPENAI_API_KEY={}" > gateway/openclaw_config/.env'
+```
 
-4. **Start OpenClaw** on port `18789` (default), then restart the gateway.
+Option B — copy manually:
+
+```bash
+cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
+# Edit the file and paste the key
+```
+
+#### 4c. Push the repo config
+
+```bash
+bash scripts/push-openclaw-config.sh
+```
+
+The push script deep-merges the repo-managed overlay (`gateway/openclaw_config/openclaw.json`) into the local OpenClaw config, resolves the `env:AZURE_OPENAI_API_KEY` placeholder to the real key, copies `SOUL.md` and the api-version preload module, and validates with `openclaw models status`.
+
+#### 4d. Enable the Azure api-version preload
+
+Azure OpenAI requires `?api-version=` on every request. OpenClaw's standard SDK client doesn't add it, so a fetch preload module handles it:
+
+```bash
+# Add to your shell profile for persistence
+echo 'export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+#### 4e. Set the gateway token
+
+Add to your repo-root `.env`:
+
+```
+OPENCLAW_HOST=127.0.0.1
+OPENCLAW_PORT=18789
+OPENCLAW_GATEWAY_TOKEN=your-openclaw-token
+```
+
+The token is shown after `openclaw onboard --local`. You can also find it in `~/.openclaw/openclaw.json` under `gateway.auth.token`.
+
+#### 4f. Verify
+
+```bash
+openclaw agent --local --agent main -m "Say hello in exactly 5 words."
+```
+
+You should see a five-word greeting. If you get HTTP 404, check that `NODE_OPTIONS` is set. If HTTP 401, re-run the push script.
+
+> **Re-running:** The push script is idempotent — safe to run after config changes or key rotations.
+
+For full details see `gateway/openclaw_config/README.md` and the [openclaw-azure-config skill](../../.github/skills/openclaw-azure-config/SKILL.md).
 
 ---
 

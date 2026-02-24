@@ -45,6 +45,8 @@ export class InputHandler {
     this.bridge = deps.bridge;
 
     deps.bridge.onEvenHubEvent((event) => {
+      console.log('[Input] Event received:', JSON.stringify(event));
+
       // Guard: if no sub-object exists, this is an empty/malformed event —
       // do NOT let it fall through as an undefined click.
       const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
@@ -117,15 +119,24 @@ export class InputHandler {
   }
 
   private _handleTap(): void {
+    console.log('[Input] _handleTap() — current state:', this.sm.current);
     const state = this.sm.current;
     switch (state) {
       case 'idle':
-        this.audio.start();
+        try {
+          this.audio.start();
+        } catch (err) {
+          console.error('[Input] audio.start() failed — continuing with state transition:', err);
+        }
         this.sm.transition('recording');
         this.display.showRecording();
         break;
       case 'recording':
-        this.audio.stop();
+        try {
+          this.audio.stop();
+        } catch (err) {
+          console.error('[Input] audio.stop() failed:', err);
+        }
         // Server will send status:transcribing
         break;
       case 'displaying':

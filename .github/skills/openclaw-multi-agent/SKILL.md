@@ -1,14 +1,7 @@
-```skill
 ---
 name: openclaw-multi-agent
 description:
-  OpenClaw multi-agent orchestration — spawning subagents, inter-agent
-  communication, session tools, agent routing, and delegation patterns. Use
-  when designing multi-agent architectures, configuring agent routing across
-  channels, setting up subagent tool access and sandbox visibility, implementing
-  delegation/supervisor/pipeline patterns, or debugging inter-agent communication.
-  Triggers on tasks involving sessions_spawn, sessions_send, agent allowlists,
-  sandbox visibility, channel-agent bindings, or multi-agent config.
+  OpenClaw multi-agent orchestration — spawning subagents, inter-agent communication, session tools, agent routing, and delegation patterns. Use when designing multi-agent architectures, configuring agent routing across channels, setting up subagent tool access and sandbox visibility, implementing delegation/supervisor/pipeline patterns, or debugging inter-agent communication. Triggers on tasks involving sessions_spawn, sessions_send, agent allowlists, sandbox visibility, channel-agent bindings, or multi-agent config.
 ---
 
 # OpenClaw Multi-Agent Orchestration

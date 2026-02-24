@@ -158,7 +158,7 @@ module openAi 'modules/openai.bicep' = {
     openAiAccountName: openAiAccountName
     location: location
     tags: tags
-    disableLocalAuth: true
+    disableLocalAuth: false
     publicNetworkAccess: publicNetworkAccess
     modelDeployments: modelDeployments
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
@@ -215,8 +215,7 @@ output openAiEndpoint string = openAi.outputs.openAiEndpoint
 @description('Name of the Azure OpenAI account.')
 output openAiAccountName string = openAi.outputs.openAiAccountName
 
-@description('Application Insights connection string.')
-output appInsightsConnectionString string = monitoring.outputs.appInsightsConnectionString
+@description('Primary API key for the Azure OpenAI account — treat as secret.')
+output openAiApiKey string = openAi.outputs.openAiApiKey
 
-@description('Key Vault URI.')
-output keyVaultUri string = keyVault.outputs.keyVaultUri
+

@@ -80,6 +80,15 @@ resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
   }
 }
 
+resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
+  name: '${aiProject.name}-nodelete'
+  scope: aiProject
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Prevent accidental deletion of AI Project'
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Outputs
 // ---------------------------------------------------------------------------

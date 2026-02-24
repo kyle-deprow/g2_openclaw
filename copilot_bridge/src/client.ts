@@ -177,8 +177,8 @@ export class CopilotBridge implements ICopilotClient {
 
 	private async saveSessionsFile(sessions: SessionMetadata[]): Promise<void> {
 		const filePath = this.getSessionsFilePath();
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, JSON.stringify(sessions, null, "\t"), "utf-8");
+		await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+		await fs.writeFile(filePath, JSON.stringify(sessions, null, "\t"), { encoding: "utf-8", mode: 0o600 });
 	}
 
 	private async persistSession(metadata: SessionMetadata): Promise<void> {
@@ -277,7 +277,7 @@ export class CopilotBridge implements ICopilotClient {
 			if (request.persistSession) {
 				await this.persistSession({
 					sessionId,
-					task: request.prompt,
+					task: request.prompt.slice(0, 200),
 					startTime: new Date(startTime).toISOString(),
 					lastActivity: new Date().toISOString(),
 					providerType: provider?.type,

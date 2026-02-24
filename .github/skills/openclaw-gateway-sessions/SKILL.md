@@ -1,13 +1,7 @@
-```skill
 ---
 name: openclaw-gateway-sessions
 description:
-  OpenClaw Gateway architecture, session lifecycle, context management, and
-  pruning strategies. Use when configuring the Gateway daemon, designing session
-  scoping, managing context windows, tuning pruning or compaction, or
-  troubleshooting session resets and transcript storage. Triggers on tasks
-  involving session keys, DM scoping, context pruning, compaction config,
-  Gateway wire protocol, or WebSocket control plane issues.
+  OpenClaw Gateway architecture, session lifecycle, context management, and pruning strategies. Use when configuring the Gateway daemon, designing session scoping, managing context windows, tuning pruning or compaction, or troubleshooting session resets and transcript storage. Triggers on tasks involving session keys, DM scoping, context pruning, compaction config, Gateway wire protocol, or WebSocket control plane issues.
 ---
 
 # OpenClaw Gateway & Sessions
@@ -372,4 +366,3 @@ Use `seq` to detect missed events and request replay if needed.
 - https://docs.openclaw.ai/concepts/session-pruning
 - https://docs.openclaw.ai/concepts/agent-loop
 - https://docs.openclaw.ai/concepts/streaming
-```

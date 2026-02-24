@@ -25,6 +25,7 @@ whisper = ["faster-whisper>=1.0"]
 
 [project.scripts]
 azure-infra-cli = "infra.main:app"
+gateway-cli = "gateway.cli:app"
 
 [build-system]
 requires = ["hatchling"]

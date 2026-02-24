@@ -185,3 +185,31 @@ class TestToNumpyGuard:
         buf._total_bytes = 6
         with pytest.raises(ValueError, match="requires sample_width=2"):
             buf.to_numpy()
+
+
+class TestAbsoluteByteCap:
+    """Tests for the 5 MB absolute buffer cap."""
+
+    def test_high_rate_format_capped_at_5mb(self) -> None:
+        """High sample rate format should still be capped at 5 MB."""
+        # 48 kHz stereo 16-bit → 192,000 bytes/s → 60s = 11.52 MB
+        # but absolute cap is 5 MB
+        buf = AudioBuffer(sample_rate=48_000, channels=2, sample_width=2)
+        assert buf._max_bytes == 5 * 1024 * 1024
+
+    def test_low_rate_format_uses_duration_limit(self) -> None:
+        """Low sample rate format uses duration-based limit (below 5 MB)."""
+        # 16 kHz mono 16-bit → 32,000 bytes/s → 60s = 1.92 MB < 5 MB
+        buf = AudioBuffer(sample_rate=16_000, channels=1, sample_width=2)
+        expected = 60 * 16_000 * 1 * 2  # 1,920,000
+        assert buf._max_bytes == expected
+
+    def test_5mb_cap_enforced_on_append(self) -> None:
+        """Cannot exceed 5 MB even with high sample rate format."""
+        buf = AudioBuffer(sample_rate=48_000, channels=2, sample_width=2)
+        cap = 5 * 1024 * 1024
+        # Fill to cap
+        buf.append(_silence_bytes(cap))
+        # Next append should overflow
+        with pytest.raises(BufferOverflow):
+            buf.append(b"\x00\x00")

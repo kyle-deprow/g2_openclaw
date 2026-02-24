@@ -63,9 +63,14 @@ export class AudioCapture {
       sampleWidth: 2,
     });
 
-    // Enable microphone
-    this.bridge.audioControl(true);
+    // Enable microphone — set flag first so state is consistent even if
+    // audioControl throws (e.g. in the simulator environment).
     this._recording = true;
+    try {
+      this.bridge.audioControl(true);
+    } catch (err) {
+      console.error('[Audio] bridge.audioControl(true) failed — mic may not be active:', err);
+    }
     console.log('[Audio] Recording started');
   }
 
@@ -74,8 +79,12 @@ export class AudioCapture {
     if (!this.bridge || !this.gateway) return;
     if (!this._recording) return;
 
-    this.bridge.audioControl(false);
     this._recording = false;
+    try {
+      this.bridge.audioControl(false);
+    } catch (err) {
+      console.error('[Audio] bridge.audioControl(false) failed:', err);
+    }
 
     this.gateway.sendJson({ type: 'stop_audio' });
     console.log('[Audio] Recording stopped');

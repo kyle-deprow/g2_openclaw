@@ -34,6 +34,8 @@ _MOCK_DELTAS = [
     "from the gateway.",
 ]
 
+_MAX_RECORDING_SECONDS = 90
+
 
 class SessionState(StrEnum):
     """Gateway session processing states."""
@@ -55,6 +57,10 @@ class ResponseHandler(Protocol):
         self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None: ...
 
+    async def close(self) -> None:
+        """Release resources held by this handler."""
+        ...
+
 
 class MockResponseHandler:
     """Default mock handler that returns canned responses."""
@@ -67,6 +73,9 @@ class MockResponseHandler:
         for delta in _MOCK_DELTAS:
             await send_frame({"type": "assistant", "delta": delta})
         await send_frame({"type": "end"})
+
+    async def close(self) -> None:
+        """No-op for mock handler."""
 
 
 class OpenClawResponseHandler:
@@ -88,6 +97,10 @@ class OpenClawResponseHandler:
 
         await send_frame({"type": "end"})
 
+    async def close(self) -> None:
+        """Close the underlying OpenClaw client connection."""
+        await self._client.close()
+
 
 class GatewaySession:
     """Manages a single WebSocket connection."""
@@ -105,6 +118,7 @@ class GatewaySession:
         self._transcriber = transcriber
         self._audio_buffer: AudioBuffer | None = None
         self._timeout = timeout
+        self._recording_start: float | None = None
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
@@ -188,6 +202,25 @@ class GatewaySession:
         if self._audio_buffer is None:
             logger.warning("Binary frame received but no audio buffer — ignoring")
             return
+        # M-4: recording timeout
+        if self._recording_start is not None:
+            elapsed = asyncio.get_event_loop().time() - self._recording_start
+            if elapsed > _MAX_RECORDING_SECONDS:
+                logger.warning(
+                    "Recording exceeded %ss limit — auto-stopping", _MAX_RECORDING_SECONDS
+                )
+                self._audio_buffer.reset()
+                self._recording_start = None
+                self._state = SessionState.IDLE
+                await self.send_frame(
+                    {
+                        "type": "error",
+                        "detail": f"Recording exceeded {_MAX_RECORDING_SECONDS}s limit",
+                        "code": ErrorCode.BUFFER_OVERFLOW,
+                    }
+                )
+                await self.send_frame({"type": "status", "status": "idle"})
+                return
         try:
             self._audio_buffer.append(data)
         except BufferOverflow as exc:
@@ -233,11 +266,11 @@ class GatewaySession:
                 }
             )
             return
-        if not (1 <= sample_rate <= 192_000):
+        if not (8_000 <= sample_rate <= 48_000):
             await self.send_frame(
                 {
                     "type": "error",
-                    "detail": f"Invalid sample rate: {sample_rate}",
+                    "detail": f"Invalid sample rate: {sample_rate} (expected 8000-48000)",
                     "code": ErrorCode.INVALID_FRAME,
                 }
             )
@@ -257,12 +290,14 @@ class GatewaySession:
             channels=channels,
             sample_width=sample_width,
         )
+        self._recording_start = asyncio.get_event_loop().time()
         self._state = SessionState.RECORDING
         await self.send_frame({"type": "status", "status": "recording"})
 
     async def _handle_stop_audio(self) -> None:
         """Stop recording and run transcription pipeline."""
         self._state = SessionState.TRANSCRIBING
+        self._recording_start = None
         await self.send_frame({"type": "status", "status": "transcribing"})
 
         buf = self._audio_buffer
@@ -349,8 +384,7 @@ class GatewaySession:
             )
         except TimeoutError:
             logger.error("Agent cycle timed out after %ss", self._timeout)
-            if isinstance(self._handler, OpenClawResponseHandler):
-                await self._handler._client.close()
+            await self._handler.close()
             try:
                 await self.send_frame(
                     {
@@ -363,8 +397,7 @@ class GatewaySession:
                 logger.debug("Failed to send timeout error frame", exc_info=True)
         except OpenClawError as exc:
             logger.error("OpenClaw error: %s", exc)
-            if isinstance(self._handler, OpenClawResponseHandler):
-                await self._handler._client.close()
+            await self._handler.close()
             try:
                 await self.send_frame(
                     {
@@ -377,8 +410,7 @@ class GatewaySession:
                 logger.debug("Failed to send OpenClaw error frame", exc_info=True)
         except Exception:
             logger.exception("Response handler error")
-            if isinstance(self._handler, OpenClawResponseHandler):
-                await self._handler._client.close()
+            await self._handler.close()
             try:
                 await self.send_frame(
                     {
@@ -426,30 +458,30 @@ class GatewayServer:
         """Handle a new WebSocket connection."""
         # --- token auth ---
         if self.config.gateway_token:
-            authenticated = False
-            # Legacy: check query string token
+            # Deprecation warning for query-string token
             if ws.request is not None:
                 query = parse_qs(urlparse(ws.request.path).query)
-                tokens = query.get("token", [])
-                if tokens and hmac.compare_digest(tokens[0], self.config.gateway_token):
-                    authenticated = True
-                    logger.info("Client authenticated via query string (deprecated)")
+                if query.get("token"):
+                    logger.warning(
+                        "Client attempted query-string token auth (deprecated and disabled). "
+                        "Use the first-message auth handshake instead."
+                    )
 
-            # Preferred: first-message auth handshake
-            if not authenticated:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=self.config.auth_timeout)
-                    if isinstance(raw, str):
-                        auth_frame = json.loads(raw)
-                        if (
-                            isinstance(auth_frame, dict)
-                            and auth_frame.get("type") == "auth"
-                            and isinstance(auth_frame.get("token"), str)
-                            and hmac.compare_digest(auth_frame["token"], self.config.gateway_token)
-                        ):
-                            authenticated = True
-                except (TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
-                    pass
+            # First-message auth handshake (only supported method)
+            authenticated = False
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=self.config.auth_timeout)
+                if isinstance(raw, str):
+                    auth_frame = json.loads(raw)
+                    if (
+                        isinstance(auth_frame, dict)
+                        and auth_frame.get("type") == "auth"
+                        and isinstance(auth_frame.get("token"), str)
+                        and hmac.compare_digest(auth_frame["token"], self.config.gateway_token)
+                    ):
+                        authenticated = True
+            except (TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
+                pass
 
             if not authenticated:
                 await ws.close(4001, "Unauthorized")
@@ -463,8 +495,7 @@ class GatewayServer:
         self._current_session = session  # claim the slot first
         if old_session is not None:
             logger.info("Replacing existing connection")
-            if isinstance(self._handler, OpenClawResponseHandler):
-                await self._handler._client.close()
+            await self._handler.close()
             try:
                 await old_session.ws.close(1000, "Replaced by new connection")
             except Exception:
@@ -485,12 +516,16 @@ class GatewayServer:
             self.config.gateway_host,
             self.config.gateway_port,
         )
+        serve_kwargs: dict[str, object] = {
+            "max_size": 2**16,  # 64 KiB max frame size
+        }
+        if self.config.allowed_origins is not None:
+            serve_kwargs["origins"] = self.config.allowed_origins
         async with websockets.serve(
             self.handler,
             self.config.gateway_host,
             self.config.gateway_port,
-            max_size=2**16,  # 64 KiB max frame size
-            origins=None,  # TODO: restrict in production
+            **serve_kwargs,  # type: ignore[arg-type]
         ):
             await asyncio.Future()  # block forever
 

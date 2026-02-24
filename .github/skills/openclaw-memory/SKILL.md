@@ -1,14 +1,7 @@
-```skill
 ---
 name: openclaw-memory
 description:
-  OpenClaw memory system — Markdown-based storage, vector search, embedding
-  providers, hybrid retrieval, and knowledge management. Use when configuring
-  memory backends, tuning vector search parameters, choosing embedding providers,
-  designing memory workflows, managing pre-compaction flush, or debugging
-  memory search quality. Triggers on tasks involving memory files, MEMORY.md,
-  vector indexing, BM25, MMR re-ranking, temporal decay, embedding cache, or
-  session memory indexing.
+  OpenClaw memory system — Markdown-based storage, vector search, embedding providers, hybrid retrieval, and knowledge management. Use when configuring memory backends, tuning vector search parameters, choosing embedding providers, designing memory workflows, managing pre-compaction flush, or debugging memory search quality. Triggers on tasks involving memory files, MEMORY.md, vector indexing, BM25, MMR re-ranking, temporal decay, embedding cache, or session memory indexing.
 ---
 
 # OpenClaw Memory System
@@ -467,4 +460,3 @@ If similar information exists, update rather than duplicate.
 - https://docs.openclaw.ai/concepts/session-pruning
 - https://docs.openclaw.ai/concepts/compaction
 - https://docs.openclaw.ai/reference/configuration
-```

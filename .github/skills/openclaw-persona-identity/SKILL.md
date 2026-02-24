@@ -1,13 +1,7 @@
-```skill
 ---
 name: openclaw-persona-identity
 description:
-  OpenClaw agent persona design through bootstrap Markdown files — SOUL.md,
-  IDENTITY.md, AGENTS.md, USER.md, TOOLS.md, and BOOTSTRAP.md. Use when
-  creating or refining agent personalities, writing behavioral rules, setting up
-  identity cards, configuring per-agent personas in multi-agent deployments, or
-  debugging personality drift. Triggers on tasks involving bootstrap templates,
-  agent vibe, personality persistence, first-run rituals, or user knowledge files.
+  OpenClaw agent persona design through bootstrap Markdown files — SOUL.md, IDENTITY.md, AGENTS.md, USER.md, TOOLS.md, and BOOTSTRAP.md. Use when creating or refining agent personalities, writing behavioral rules, setting up identity cards, configuring per-agent personas in multi-agent deployments, or debugging personality drift. Triggers on tasks involving bootstrap templates, agent vibe, personality persistence, first-run rituals, or user knowledge files.
 ---
 
 # OpenClaw Persona & Identity Design
@@ -465,4 +459,3 @@ write, and tone before you draft.
 - https://docs.openclaw.ai/concepts/agents
 - https://docs.openclaw.ai/concepts/user
 - https://docs.openclaw.ai/concepts/system-prompt
-```

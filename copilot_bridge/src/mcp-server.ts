@@ -261,7 +261,7 @@ export function createServer(): McpServer {
 		"copilot_read_file",
 		"Read a file from the workspace via GitHub Copilot",
 		{
-			path: z.string().describe("File path to read"),
+			path: z.string().max(1000).describe("File path to read"),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
 		async ({ path, _depth }) => {
@@ -292,8 +292,8 @@ export function createServer(): McpServer {
 		"copilot_create_file",
 		"Create a file in the workspace via GitHub Copilot",
 		{
-			path: z.string().describe("File path to create"),
-			content: z.string().describe("File content to write"),
+			path: z.string().max(1000).describe("File path to create"),
+			content: z.string().max(500_000).describe("File content to write"),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
 		async ({ path, content, _depth }) => {
@@ -325,7 +325,7 @@ export function createServer(): McpServer {
 		"copilot_list_files",
 		"List files in a workspace directory via GitHub Copilot",
 		{
-			directory: z.string().optional().describe("Directory to list, defaults to workspace root"),
+			directory: z.string().max(1000).optional().describe("Directory to list, defaults to workspace root"),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
 		async ({ directory, _depth }) => {
@@ -361,8 +361,8 @@ export function createServer(): McpServer {
 		"Agent-mediated coding task. Results are non-deterministic. " +
 			"Sends a natural language prompt to GitHub Copilot and returns the response.",
 		{
-			prompt: z.string().describe("Natural language coding task prompt"),
-			workingDir: z.string().optional().describe("Working directory for the task"),
+			prompt: z.string().max(500_000).describe("Natural language coding task prompt"),
+			workingDir: z.string().max(1000).optional().describe("Working directory for the task"),
 			timeout: z.number().optional().default(120_000).describe("Timeout in milliseconds"),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},

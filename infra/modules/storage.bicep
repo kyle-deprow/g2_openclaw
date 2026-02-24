@@ -49,6 +49,8 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     supportsHttpsTrafficOnly: true
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
     publicNetworkAccess: publicNetworkAccess
     networkAcls: {
       defaultAction: publicNetworkAccess == 'Disabled' ? 'Deny' : 'Allow'
@@ -71,9 +73,19 @@ resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-pr
   }
 }
 
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01' existing = {
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2025-01-01' = {
   parent: storageAccount
   name: 'default'
+  properties: {
+    deleteRetentionPolicy: {
+      enabled: true
+      days: 30
+    }
+    containerDeleteRetentionPolicy: {
+      enabled: true
+      days: 30
+    }
+  }
 }
 
 resource blobDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {

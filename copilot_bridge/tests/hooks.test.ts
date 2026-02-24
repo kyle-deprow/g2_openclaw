@@ -106,7 +106,7 @@ describe("hooks", () => {
 			await logger.write(entry2);
 			await logger.flush();
 
-			expect(mockMkdir).toHaveBeenCalledWith("/tmp/logs", { recursive: true });
+			expect(mockMkdir).toHaveBeenCalledWith("/tmp/logs", { recursive: true, mode: 0o700 });
 			expect(mockAppendFile).toHaveBeenCalledTimes(1);
 
 			const written = mockAppendFile.mock.calls[0]?.[1] as string;

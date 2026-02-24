@@ -1,0 +1,1476 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "10762406830383674649"
+    }
+  },
+  "definitions": {
+    "modelDeploymentConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "metadata": {
+            "description": "Unique name for the deployment."
+          }
+        },
+        "modelName": {
+          "type": "string",
+          "metadata": {
+            "description": "Model name (e.g., gpt-5)."
+          }
+        },
+        "modelVersion": {
+          "type": "string",
+          "metadata": {
+            "description": "Model version (e.g., 2025-03-01)."
+          }
+        },
+        "capacity": {
+          "type": "int",
+          "metadata": {
+            "description": "Deployment capacity in thousands of tokens per minute (TPM)."
+          }
+        },
+        "rateLimitPerMinute": {
+          "type": "int",
+          "metadata": {
+            "description": "Rate limit in requests per minute (RPM)."
+          }
+        }
+      },
+      "metadata": {
+        "description": "Configuration for an OpenAI model deployment."
+      }
+    }
+  },
+  "parameters": {
+    "prefix": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 6,
+      "metadata": {
+        "description": "Short prefix used in resource names (e.g., org abbreviation)."
+      }
+    },
+    "workload": {
+      "type": "string",
+      "defaultValue": "aisense",
+      "metadata": {
+        "description": "Workload identifier used in resource names."
+      }
+    },
+    "environment": {
+      "type": "string",
+      "allowedValues": [
+        "dev",
+        "staging",
+        "prod"
+      ],
+      "metadata": {
+        "description": "Deployment environment. Used in naming and tags."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "metadata": {
+        "description": "Azure region for all resources."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "metadata": {
+        "description": "Mandatory resource tags applied to every resource."
+      }
+    },
+    "modelDeployments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/modelDeploymentConfig"
+      },
+      "metadata": {
+        "description": "Array of OpenAI model deployment configurations."
+      }
+    },
+    "publicNetworkAccess": {
+      "type": "string",
+      "defaultValue": "Enabled",
+      "allowedValues": [
+        "Enabled",
+        "Disabled"
+      ],
+      "metadata": {
+        "description": "Allow or deny public network access on applicable resources."
+      }
+    },
+    "storageSkuName": {
+      "type": "string",
+      "defaultValue": "Standard_LRS",
+      "allowedValues": [
+        "Standard_LRS",
+        "Standard_GRS",
+        "Standard_ZRS"
+      ],
+      "metadata": {
+        "description": "SKU for the Storage Account."
+      }
+    },
+    "logRetentionInDays": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 30,
+      "maxValue": 730,
+      "metadata": {
+        "description": "Retention period in days for Log Analytics data."
+      }
+    }
+  },
+  "variables": {
+    "baseName": "[format('{0}-{1}-{2}-{3}', parameters('prefix'), parameters('workload'), parameters('environment'), parameters('location'))]",
+    "resourceGroupName": "[format('rg-{0}', variables('baseName'))]",
+    "storageAccountName": "[take(replace(format('st{0}{1}{2}', parameters('prefix'), parameters('workload'), parameters('environment')), '-', ''), 24)]",
+    "keyVaultName": "[take(format('kv-{0}', variables('baseName')), 24)]",
+    "logAnalyticsName": "[format('log-{0}', variables('baseName'))]",
+    "appInsightsName": "[format('appi-{0}', variables('baseName'))]",
+    "openAiAccountName": "[format('oai-{0}', variables('baseName'))]",
+    "aiHubName": "[format('aihub-{0}', variables('baseName'))]",
+    "aiProjectName": "[format('aiproj-{0}', variables('baseName'))]"
+  },
+  "resources": {
+    "resourceGroup": {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2024-03-01",
+      "name": "[variables('resourceGroupName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]"
+    },
+    "monitoring": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-monitoring",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "logAnalyticsName": {
+            "value": "[variables('logAnalyticsName')]"
+          },
+          "appInsightsName": {
+            "value": "[variables('appInsightsName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "retentionInDays": {
+            "value": "[parameters('logRetentionInDays')]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "14536963245715777380"
+            }
+          },
+          "parameters": {
+            "logAnalyticsName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Log Analytics workspace."
+              }
+            },
+            "appInsightsName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Application Insights instance."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the monitoring resources."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "retentionInDays": {
+              "type": "int",
+              "defaultValue": 30,
+              "minValue": 30,
+              "maxValue": 730,
+              "metadata": {
+                "description": "Retention period in days for Log Analytics data."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access. Disable for production."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2025-02-01",
+              "name": "[parameters('logAnalyticsName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": "[parameters('retentionInDays')]",
+                "publicNetworkAccessForIngestion": "[parameters('publicNetworkAccess')]",
+                "publicNetworkAccessForQuery": "[parameters('publicNetworkAccess')]"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/components",
+              "apiVersion": "2020-02-02",
+              "name": "[parameters('appInsightsName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "web",
+              "properties": {
+                "Application_Type": "web",
+                "WorkspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
+                "publicNetworkAccessForIngestion": "[parameters('publicNetworkAccess')]",
+                "publicNetworkAccessForQuery": "[parameters('publicNetworkAccess')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]",
+              "name": "[format('{0}-nodelete', parameters('appInsightsName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Application Insights"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]",
+              "name": "[format('{0}-nodelete', parameters('logAnalyticsName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Log Analytics workspace"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace."
+              },
+              "value": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('logAnalyticsName'))]"
+            },
+            "logAnalyticsWorkspaceName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Log Analytics workspace."
+              },
+              "value": "[parameters('logAnalyticsName')]"
+            },
+            "appInsightsId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Application Insights instance."
+              },
+              "value": "[resourceId('Microsoft.Insights/components', parameters('appInsightsName'))]"
+            },
+            "appInsightsName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Application Insights instance."
+              },
+              "value": "[parameters('appInsightsName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "resourceGroup"
+      ]
+    },
+    "storage": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-storage",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "storageAccountName": {
+            "value": "[variables('storageAccountName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "skuName": {
+            "value": "[parameters('storageSkuName')]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "2892186726891622348"
+            }
+          },
+          "parameters": {
+            "storageAccountName": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 24,
+              "metadata": {
+                "description": "Name of the storage account. Must be globally unique, 3-24 lowercase alphanumeric."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the storage account."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "defaultValue": "Standard_LRS",
+              "allowedValues": [
+                "Standard_LRS",
+                "Standard_GRS",
+                "Standard_ZRS"
+              ],
+              "metadata": {
+                "description": "Storage account SKU name."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access. Disable for production."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Storage/storageAccounts",
+              "apiVersion": "2025-01-01",
+              "name": "[parameters('storageAccountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "StorageV2",
+              "sku": {
+                "name": "[parameters('skuName')]"
+              },
+              "properties": {
+                "accessTier": "Hot",
+                "supportsHttpsTrafficOnly": true,
+                "minimumTlsVersion": "TLS1_2",
+                "allowBlobPublicAccess": false,
+                "allowSharedKeyAccess": false,
+                "defaultToOAuthAuthentication": true,
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "networkAcls": {
+                  "defaultAction": "[if(equals(parameters('publicNetworkAccess'), 'Disabled'), 'Deny', 'Allow')]",
+                  "bypass": "AzureServices"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+              "name": "[format('{0}-diag', parameters('storageAccountName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "metrics": [
+                  {
+                    "category": "Transaction",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Storage/storageAccounts/blobServices",
+              "apiVersion": "2025-01-01",
+              "name": "[format('{0}/{1}', parameters('storageAccountName'), 'default')]",
+              "properties": {
+                "deleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 30
+                },
+                "containerDeleteRetentionPolicy": {
+                  "enabled": true,
+                  "days": 30
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]",
+              "name": "[format('{0}-blob-diag', parameters('storageAccountName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "category": "StorageRead",
+                    "enabled": true
+                  },
+                  {
+                    "category": "StorageWrite",
+                    "enabled": true
+                  },
+                  {
+                    "category": "StorageDelete",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts/blobServices', parameters('storageAccountName'), 'default')]",
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+              "name": "[format('{0}-nodelete', parameters('storageAccountName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Storage Account"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "storageAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the storage account."
+              },
+              "value": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+            },
+            "storageAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the storage account."
+              },
+              "value": "[parameters('storageAccountName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "monitoring",
+        "resourceGroup"
+      ]
+    },
+    "keyVault": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-keyvault",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "keyVaultName": {
+            "value": "[variables('keyVaultName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "enableRbacAuthorization": {
+            "value": true
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "18295861233609714156"
+            }
+          },
+          "parameters": {
+            "keyVaultName": {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 24,
+              "metadata": {
+                "description": "Name of the Key Vault. Must be globally unique, 3-24 characters."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the Key Vault."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "enableRbacAuthorization": {
+              "type": "bool",
+              "defaultValue": true,
+              "metadata": {
+                "description": "Enable RBAC authorization model for the Key Vault."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access. Disable for production."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.KeyVault/vaults",
+              "apiVersion": "2024-11-01",
+              "name": "[parameters('keyVaultName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "properties": {
+                "sku": {
+                  "family": "A",
+                  "name": "standard"
+                },
+                "tenantId": "[tenant().tenantId]",
+                "enableRbacAuthorization": "[parameters('enableRbacAuthorization')]",
+                "enableSoftDelete": true,
+                "softDeleteRetentionInDays": 90,
+                "enablePurgeProtection": true,
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "networkAcls": {
+                  "defaultAction": "[if(equals(parameters('publicNetworkAccess'), 'Disabled'), 'Deny', 'Allow')]",
+                  "bypass": "AzureServices"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "name": "[format('{0}-diag', parameters('keyVaultName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+              "name": "[format('{0}-nodelete', parameters('keyVaultName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Key Vault"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "keyVaultId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Key Vault."
+              },
+              "value": "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+            },
+            "keyVaultName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Key Vault."
+              },
+              "value": "[parameters('keyVaultName')]"
+            },
+            "keyVaultUri": {
+              "type": "string",
+              "metadata": {
+                "description": "URI of the Key Vault."
+              },
+              "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), '2024-11-01').vaultUri]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "monitoring",
+        "resourceGroup"
+      ]
+    },
+    "openAi": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-openai",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "openAiAccountName": {
+            "value": "[variables('openAiAccountName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "disableLocalAuth": {
+            "value": false
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          },
+          "modelDeployments": {
+            "value": "[parameters('modelDeployments')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "languageVersion": "2.0",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "2927124004232065063"
+            }
+          },
+          "definitions": {
+            "modelDeploymentConfig": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Unique name for the deployment."
+                  }
+                },
+                "modelName": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Model name (e.g., gpt-5)."
+                  }
+                },
+                "modelVersion": {
+                  "type": "string",
+                  "metadata": {
+                    "description": "Model version (e.g., 2025-03-01)."
+                  }
+                },
+                "capacity": {
+                  "type": "int",
+                  "metadata": {
+                    "description": "Deployment capacity in thousands of tokens per minute (TPM)."
+                  }
+                },
+                "rateLimitPerMinute": {
+                  "type": "int",
+                  "metadata": {
+                    "description": "Rate limit in requests per minute (RPM)."
+                  }
+                }
+              },
+              "metadata": {
+                "description": "Configuration for an OpenAI model deployment."
+              }
+            }
+          },
+          "parameters": {
+            "openAiAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure OpenAI account."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the OpenAI account."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "disableLocalAuth": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Disable local (API key) authentication. True enforces Entra-only auth."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access. Disable for production."
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "defaultValue": "S0",
+              "allowedValues": [
+                "S0"
+              ],
+              "metadata": {
+                "description": "SKU name for the OpenAI account."
+              }
+            },
+            "modelDeployments": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/modelDeploymentConfig"
+              },
+              "metadata": {
+                "description": "Array of model deployment configurations."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            }
+          },
+          "resources": {
+            "openAiAccount": {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('openAiAccountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "OpenAI",
+              "sku": {
+                "name": "[parameters('skuName')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "customSubDomainName": "[parameters('openAiAccountName')]",
+                "disableLocalAuth": "[parameters('disableLocalAuth')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "networkAcls": {
+                  "defaultAction": "[if(equals(parameters('publicNetworkAccess'), 'Disabled'), 'Deny', 'Allow')]"
+                }
+              }
+            },
+            "lock": {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]",
+              "name": "[format('{0}-nodelete', parameters('openAiAccountName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Azure OpenAI account"
+              },
+              "dependsOn": [
+                "openAiAccount"
+              ]
+            },
+            "modelDeployment": {
+              "copy": {
+                "name": "modelDeployment",
+                "count": "[length(parameters('modelDeployments'))]",
+                "mode": "serial",
+                "batchSize": 1
+              },
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2024-10-01",
+              "name": "[format('{0}/{1}', parameters('openAiAccountName'), parameters('modelDeployments')[copyIndex()].name)]",
+              "sku": {
+                "name": "Standard",
+                "capacity": "[parameters('modelDeployments')[copyIndex()].capacity]"
+              },
+              "properties": {
+                "model": {
+                  "format": "OpenAI",
+                  "name": "[parameters('modelDeployments')[copyIndex()].modelName]",
+                  "version": "[parameters('modelDeployments')[copyIndex()].modelVersion]"
+                },
+                "raiPolicyName": "Microsoft.DefaultV2",
+                "rateLimits": [
+                  {
+                    "key": "request",
+                    "renewalPeriod": 60,
+                    "count": "[parameters('modelDeployments')[copyIndex()].rateLimitPerMinute]"
+                  }
+                ]
+              },
+              "dependsOn": [
+                "openAiAccount"
+              ]
+            },
+            "diagnosticSettings": {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]",
+              "name": "[format('{0}-diag', parameters('openAiAccountName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "openAiAccount"
+              ]
+            }
+          },
+          "outputs": {
+            "openAiAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Azure OpenAI account."
+              },
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]"
+            },
+            "openAiAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure OpenAI account."
+              },
+              "value": "[parameters('openAiAccountName')]"
+            },
+            "openAiEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Endpoint of the Azure OpenAI account."
+              },
+              "value": "[reference('openAiAccount').endpoint]"
+            },
+            "openAiPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the OpenAI account system-assigned managed identity."
+              },
+              "value": "[reference('openAiAccount', '2024-10-01', 'full').identity.principalId]"
+            },
+            "openAiApiKey": {
+              "type": "string",
+              "metadata": {
+                "description": "Primary API key — treat as secret."
+              },
+              "value": "[listKeys('openAiAccount', '2024-10-01').key1]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "monitoring",
+        "resourceGroup"
+      ]
+    },
+    "aiHub": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-ai-hub",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "aiHubName": {
+            "value": "[variables('aiHubName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "storageAccountId": {
+            "value": "[reference('storage').outputs.storageAccountId.value]"
+          },
+          "keyVaultId": {
+            "value": "[reference('keyVault').outputs.keyVaultId.value]"
+          },
+          "appInsightsId": {
+            "value": "[reference('monitoring').outputs.appInsightsId.value]"
+          },
+          "openAiAccountId": {
+            "value": "[reference('openAi').outputs.openAiAccountId.value]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "4909175878796956152"
+            }
+          },
+          "parameters": {
+            "aiHubName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure AI Hub workspace."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the AI Hub."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "storageAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Storage Account linked to the AI Hub."
+              }
+            },
+            "keyVaultId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Key Vault linked to the AI Hub."
+              }
+            },
+            "appInsightsId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Application Insights instance linked to the AI Hub."
+              }
+            },
+            "openAiAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Azure OpenAI account for RBAC assignment."
+              }
+            },
+            "friendlyName": {
+              "type": "string",
+              "defaultValue": "AI Hub",
+              "metadata": {
+                "description": "Friendly display name for the AI Hub."
+              }
+            },
+            "hubDescription": {
+              "type": "string",
+              "defaultValue": "Azure AI Foundry Hub for centralised AI resource management.",
+              "metadata": {
+                "description": "Description of the AI Hub workspace."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access."
+              }
+            }
+          },
+          "variables": {
+            "cognitiveServicesOpenAiUserRoleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.MachineLearningServices/workspaces",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('aiHubName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "Hub",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "sku": {
+                "name": "Basic",
+                "tier": "Basic"
+              },
+              "properties": {
+                "friendlyName": "[parameters('friendlyName')]",
+                "description": "[parameters('hubDescription')]",
+                "storageAccount": "[parameters('storageAccountId')]",
+                "keyVault": "[parameters('keyVaultId')]",
+                "applicationInsights": "[parameters('appInsightsId')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]"
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', last(split(parameters('openAiAccountId'), '/')))]",
+              "name": "[guid(parameters('openAiAccountId'), resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName')), variables('cognitiveServicesOpenAiUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAiUserRoleId'))]",
+                "principalId": "[reference(resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName')), '2024-10-01', 'full').identity.principalId]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]",
+              "name": "[format('{0}-diag', parameters('aiHubName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]",
+              "name": "[format('{0}-nodelete', parameters('aiHubName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of AI Hub"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "aiHubId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the AI Hub workspace."
+              },
+              "value": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName'))]"
+            },
+            "aiHubName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the AI Hub workspace."
+              },
+              "value": "[parameters('aiHubName')]"
+            },
+            "aiHubPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the AI Hub system-assigned managed identity."
+              },
+              "value": "[reference(resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiHubName')), '2024-10-01', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "keyVault",
+        "monitoring",
+        "openAi",
+        "resourceGroup",
+        "storage"
+      ]
+    },
+    "aiProject": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-ai-project",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "aiProjectName": {
+            "value": "[variables('aiProjectName')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "aiHubId": {
+            "value": "[reference('aiHub').outputs.aiHubId.value]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "10585227222751146832"
+            }
+          },
+          "parameters": {
+            "aiProjectName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure AI Project workspace."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the AI Project."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "aiHubId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the parent AI Hub workspace."
+              }
+            },
+            "friendlyName": {
+              "type": "string",
+              "defaultValue": "AI Project",
+              "metadata": {
+                "description": "Friendly display name for the AI Project."
+              }
+            },
+            "projectDescription": {
+              "type": "string",
+              "defaultValue": "Azure AI Foundry Project for model experimentation and deployment.",
+              "metadata": {
+                "description": "Description of the AI Project workspace."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.MachineLearningServices/workspaces",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('aiProjectName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "Project",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "sku": {
+                "name": "Basic",
+                "tier": "Basic"
+              },
+              "properties": {
+                "friendlyName": "[parameters('friendlyName')]",
+                "description": "[parameters('projectDescription')]",
+                "hubResourceId": "[parameters('aiHubId')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]"
+              }
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiProjectName'))]",
+              "name": "[format('{0}-diag', parameters('aiProjectName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiProjectName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiProjectName'))]",
+              "name": "[format('{0}-nodelete', parameters('aiProjectName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of AI Project"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiProjectName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "aiProjectId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the AI Project workspace."
+              },
+              "value": "[resourceId('Microsoft.MachineLearningServices/workspaces', parameters('aiProjectName'))]"
+            },
+            "aiProjectName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the AI Project workspace."
+              },
+              "value": "[parameters('aiProjectName')]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "aiHub",
+        "monitoring",
+        "resourceGroup"
+      ]
+    }
+  },
+  "outputs": {
+    "resourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the deployed resource group."
+      },
+      "value": "[variables('resourceGroupName')]"
+    },
+    "aiHubId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the AI Hub workspace."
+      },
+      "value": "[reference('aiHub').outputs.aiHubId.value]"
+    },
+    "aiProjectId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the AI Project workspace."
+      },
+      "value": "[reference('aiProject').outputs.aiProjectId.value]"
+    },
+    "openAiEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Endpoint of the Azure OpenAI account."
+      },
+      "value": "[reference('openAi').outputs.openAiEndpoint.value]"
+    },
+    "openAiAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Azure OpenAI account."
+      },
+      "value": "[reference('openAi').outputs.openAiAccountName.value]"
+    },
+    "openAiApiKey": {
+      "type": "string",
+      "metadata": {
+        "description": "Primary API key for the Azure OpenAI account — treat as secret."
+      },
+      "value": "[reference('openAi').outputs.openAiApiKey.value]"
+    }
+  }
+}

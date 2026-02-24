@@ -93,6 +93,15 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   ping: [],
 };
 
+/** Valid status values (matches GatewayStatus union). */
+const VALID_STATUSES = new Set(['loading', 'idle', 'recording', 'transcribing', 'thinking', 'streaming']);
+
+/** Valid error codes (matches ErrorCode union). */
+const VALID_ERROR_CODES = new Set([
+  'AUTH_FAILED', 'TRANSCRIPTION_FAILED', 'BUFFER_OVERFLOW', 'OPENCLAW_ERROR',
+  'INVALID_FRAME', 'INVALID_STATE', 'TIMEOUT', 'INTERNAL_ERROR',
+]);
+
 /** Expected types for required fields (runtime validation). */
 const FIELD_TYPES: Record<string, Record<string, string>> = {
   status: { status: 'string' },
@@ -140,6 +149,16 @@ export function parseFrame(data: string): InboundFrame {
   const clean: Record<string, unknown> = { type: frame.type };
   const knownFields = required ?? [];
   for (const f of knownFields) { clean[f] = frame[f]; }
+
+  // M-5: Validate status value against known union
+  if (clean.type === 'status' && !VALID_STATUSES.has(clean.status as string)) {
+    throw new Error(`Invalid status value: "${clean.status}"`);
+  }
+
+  // M-6: Validate error code against known union
+  if (clean.type === 'error' && !VALID_ERROR_CODES.has(clean.code as string)) {
+    throw new Error(`Invalid error code: "${clean.code}"`);
+  }
 
   return clean as unknown as InboundFrame;
 }

@@ -24,7 +24,7 @@ param modelDeployments = [
     name: 'gpt-41'
     modelName: 'gpt-4.1'
     modelVersion: '2025-04-14'
-    capacity: 15
+    capacity: 50
     rateLimitPerMinute: 100
   }
 ]

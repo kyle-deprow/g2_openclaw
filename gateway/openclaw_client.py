@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import ssl
 from collections.abc import AsyncIterator
 
 import websockets
@@ -25,10 +26,13 @@ class OpenClawClient:
     Auth handshake with monotonic request IDs.
     """
 
-    def __init__(self, host: str, port: int, token: str) -> None:
+    def __init__(
+        self, host: str, port: int, token: str, ssl_context: ssl.SSLContext | None = None
+    ) -> None:
         self._host = host
         self._port = port
         self._token = token
+        self._ssl_context = ssl_context
         self._ws: ClientConnection | None = None
         self._next_id: int = 1
         self._connected: bool = False
@@ -60,7 +64,10 @@ class OpenClawClient:
         self._next_id = 1
 
         try:
-            self._ws = await websockets.connect(self.url)
+            connect_kwargs: dict[str, object] = {}
+            if self._ssl_context is not None:
+                connect_kwargs["ssl"] = self._ssl_context
+            self._ws = await websockets.connect(self.url, **connect_kwargs)  # type: ignore[arg-type]
         except (OSError, websockets.WebSocketException) as exc:
             raise OpenClawError(f"connection refused: {exc}") from exc
 

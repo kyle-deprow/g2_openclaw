@@ -44,6 +44,12 @@
         },
         "use-resource-symbol-reference": {
           "level": "warning"
+        },
+        "outputs-should-not-contain-secrets": {
+          "level": "error"
+        },
+        "use-secure-value-for-secure-inputs": {
+          "level": "error"
         }
       }
     }

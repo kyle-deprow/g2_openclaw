@@ -1,0 +1,246 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "2927124004232065063"
+    }
+  },
+  "definitions": {
+    "modelDeploymentConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "metadata": {
+            "description": "Unique name for the deployment."
+          }
+        },
+        "modelName": {
+          "type": "string",
+          "metadata": {
+            "description": "Model name (e.g., gpt-5)."
+          }
+        },
+        "modelVersion": {
+          "type": "string",
+          "metadata": {
+            "description": "Model version (e.g., 2025-03-01)."
+          }
+        },
+        "capacity": {
+          "type": "int",
+          "metadata": {
+            "description": "Deployment capacity in thousands of tokens per minute (TPM)."
+          }
+        },
+        "rateLimitPerMinute": {
+          "type": "int",
+          "metadata": {
+            "description": "Rate limit in requests per minute (RPM)."
+          }
+        }
+      },
+      "metadata": {
+        "description": "Configuration for an OpenAI model deployment."
+      }
+    }
+  },
+  "parameters": {
+    "openAiAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Azure OpenAI account."
+      }
+    },
+    "location": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure region for the OpenAI account."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "metadata": {
+        "description": "Resource tags applied to all resources."
+      }
+    },
+    "disableLocalAuth": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Disable local (API key) authentication. True enforces Entra-only auth."
+      }
+    },
+    "publicNetworkAccess": {
+      "type": "string",
+      "defaultValue": "Enabled",
+      "allowedValues": [
+        "Enabled",
+        "Disabled"
+      ],
+      "metadata": {
+        "description": "Allow or deny public network access. Disable for production."
+      }
+    },
+    "skuName": {
+      "type": "string",
+      "defaultValue": "S0",
+      "allowedValues": [
+        "S0"
+      ],
+      "metadata": {
+        "description": "SKU name for the OpenAI account."
+      }
+    },
+    "modelDeployments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/modelDeploymentConfig"
+      },
+      "metadata": {
+        "description": "Array of model deployment configurations."
+      }
+    },
+    "logAnalyticsWorkspaceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+      }
+    }
+  },
+  "resources": {
+    "openAiAccount": {
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2024-10-01",
+      "name": "[parameters('openAiAccountName')]",
+      "location": "[parameters('location')]",
+      "tags": "[parameters('tags')]",
+      "kind": "OpenAI",
+      "sku": {
+        "name": "[parameters('skuName')]"
+      },
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "customSubDomainName": "[parameters('openAiAccountName')]",
+        "disableLocalAuth": "[parameters('disableLocalAuth')]",
+        "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+        "networkAcls": {
+          "defaultAction": "[if(equals(parameters('publicNetworkAccess'), 'Disabled'), 'Deny', 'Allow')]"
+        }
+      }
+    },
+    "lock": {
+      "type": "Microsoft.Authorization/locks",
+      "apiVersion": "2020-05-01",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]",
+      "name": "[format('{0}-nodelete', parameters('openAiAccountName'))]",
+      "properties": {
+        "level": "CanNotDelete",
+        "notes": "Prevent accidental deletion of Azure OpenAI account"
+      },
+      "dependsOn": [
+        "openAiAccount"
+      ]
+    },
+    "modelDeployment": {
+      "copy": {
+        "name": "modelDeployment",
+        "count": "[length(parameters('modelDeployments'))]",
+        "mode": "serial",
+        "batchSize": 1
+      },
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2024-10-01",
+      "name": "[format('{0}/{1}', parameters('openAiAccountName'), parameters('modelDeployments')[copyIndex()].name)]",
+      "sku": {
+        "name": "Standard",
+        "capacity": "[parameters('modelDeployments')[copyIndex()].capacity]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[parameters('modelDeployments')[copyIndex()].modelName]",
+          "version": "[parameters('modelDeployments')[copyIndex()].modelVersion]"
+        },
+        "raiPolicyName": "Microsoft.DefaultV2",
+        "rateLimits": [
+          {
+            "key": "request",
+            "renewalPeriod": 60,
+            "count": "[parameters('modelDeployments')[copyIndex()].rateLimitPerMinute]"
+          }
+        ]
+      },
+      "dependsOn": [
+        "openAiAccount"
+      ]
+    },
+    "diagnosticSettings": {
+      "type": "Microsoft.Insights/diagnosticSettings",
+      "apiVersion": "2021-05-01-preview",
+      "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]",
+      "name": "[format('{0}-diag', parameters('openAiAccountName'))]",
+      "properties": {
+        "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+        "logs": [
+          {
+            "categoryGroup": "allLogs",
+            "enabled": true
+          }
+        ],
+        "metrics": [
+          {
+            "category": "AllMetrics",
+            "enabled": true
+          }
+        ]
+      },
+      "dependsOn": [
+        "openAiAccount"
+      ]
+    }
+  },
+  "outputs": {
+    "openAiAccountId": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource ID of the Azure OpenAI account."
+      },
+      "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAiAccountName'))]"
+    },
+    "openAiAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Azure OpenAI account."
+      },
+      "value": "[parameters('openAiAccountName')]"
+    },
+    "openAiEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Endpoint of the Azure OpenAI account."
+      },
+      "value": "[reference('openAiAccount').endpoint]"
+    },
+    "openAiPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Principal ID of the OpenAI account system-assigned managed identity."
+      },
+      "value": "[reference('openAiAccount', '2024-10-01', 'full').identity.principalId]"
+    },
+    "openAiApiKey": {
+      "type": "string",
+      "metadata": {
+        "description": "Primary API key — treat as secret."
+      },
+      "value": "[listKeys('openAiAccount', '2024-10-01').key1]"
+    }
+  }
+}

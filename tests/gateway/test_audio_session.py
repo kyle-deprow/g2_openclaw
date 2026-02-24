@@ -412,8 +412,8 @@ class TestStartAudioValidation:
         assert "sample rate" in errors[0]["detail"].lower()
 
     async def test_invalid_sample_rate_too_high_returns_error(self) -> None:
-        """start_audio with sample_rate > 192000 → INVALID_FRAME error."""
-        ws = FakeWebSocket(messages=[_start_audio_frame(sample_rate=200_000)])
+        """start_audio with sample_rate > 48000 → INVALID_FRAME error."""
+        ws = FakeWebSocket(messages=[_start_audio_frame(sample_rate=96_000)])
         session = GatewaySession(ws)  # type: ignore[arg-type]
         await session.handle()
 
@@ -485,6 +485,9 @@ class TestHandlerException:
                 self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
             ) -> None:
                 raise RuntimeError("handler exploded")
+
+            async def close(self) -> None:
+                pass
 
         ws = FakeWebSocket(messages=[_text_frame("boom")])
         session = GatewaySession(ws, handler=ExplodingHandler())  # type: ignore[arg-type]

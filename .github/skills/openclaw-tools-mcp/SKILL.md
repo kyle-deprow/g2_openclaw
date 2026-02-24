@@ -1,13 +1,7 @@
-```skill
 ---
 name: openclaw-tools-mcp
 description:
-  OpenClaw tool system, MCP server integration, plugin development, and skills
-  authoring. Use when configuring tool profiles, connecting MCP servers, building
-  custom plugins, writing SKILL.md manifests, managing tool allow/deny policies,
-  or debugging tool execution issues. Triggers on tasks involving tool groups,
-  MCP transport config, plugin TypeScript modules, ClawHub skills, tool
-  streaming, or provider-specific tool policies.
+  OpenClaw tool system, MCP server integration, plugin development, and skills authoring. Use when configuring tool profiles, connecting MCP servers, building custom plugins, writing SKILL.md manifests, managing tool allow/deny policies, or debugging tool execution issues. Triggers on tasks involving tool groups, MCP transport config, plugin TypeScript modules, ClawHub skills, tool streaming, or provider-specific tool policies.
 ---
 
 # OpenClaw Tools, MCP & Plugins
@@ -532,4 +526,3 @@ parameter validation, result filtering, or cost tracking.
 - https://docs.openclaw.ai/concepts/browser
 - https://docs.openclaw.ai/concepts/plugins
 - https://docs.openclaw.ai/reference/configuration
-```

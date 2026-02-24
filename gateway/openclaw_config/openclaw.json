@@ -1,0 +1,48 @@
+{
+  "models": {
+    "providers": {
+      "azure-oai-g2": {
+        "baseUrl": "https://oai-ss-aisense-dev-eastus.openai.azure.com/openai/deployments/gpt-41",
+        "api": "openai-completions",
+        "apiKey": "env:AZURE_OPENAI_API_KEY",
+        "models": [
+          {
+            "id": "gpt-41",
+            "name": "GPT-4.1 (Azure, eastus)",
+            "contextWindow": 1047576,
+            "maxTokens": 32768,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "azure-oai-g2/gpt-41"
+      },
+      "compaction": {
+        "mode": "safeguard"
+      },
+      "maxConcurrent": 4,
+      "subagents": {
+        "maxConcurrent": 8
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "messages": {
+    "ackReactionScope": "group-mentions"
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  }
+}

@@ -456,6 +456,140 @@ Shorthand aliases for common models:
     └── embeddings/          # Embedding cache
 ```
 
+## Azure OpenAI Custom Provider
+
+OpenClaw can use Azure OpenAI deployments via the custom provider mechanism in
+`models.providers`. This is the recommended approach for Azure-hosted models.
+
+### Config Structure
+
+```json
+{
+  "models": {
+    "providers": {
+      "<provider-id>": {
+        "baseUrl": "https://<resource>.openai.azure.com/",
+        "api": "openai-completions",
+        "apiKey": "env:AZURE_OPENAI_API_KEY",
+        "models": [
+          {
+            "id": "<deployment-name>",
+            "name": "Human-readable label",
+            "contextWindow": 1047576,
+            "maxTokens": 32768,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+### Key Points
+
+| Field | Description |
+|---|---|
+| `baseUrl` | The Azure OpenAI resource endpoint (must end in `/`) |
+| `api` | Always `"openai-completions"` — the `"openai-responses"` type is not available for custom providers |
+| `apiKey` | Supports `"env:VAR_NAME"` syntax to read from environment at runtime |
+| `models[].id` | Must match the Azure **deployment name** (not the model family name) |
+| `models[].contextWindow` | Max input tokens the model accepts |
+| `models[].maxTokens` | Max output tokens per response |
+| `models[].reasoning` | Set `true` for o-series models (o1, o3, etc.) |
+
+### Azure URL Detection
+
+OpenClaw has built-in Azure URL detection via `isAzureUrl()`. It recognises:
+
+- `*.openai.azure.com`
+- `*.services.ai.azure.com`
+
+When an Azure URL is detected, `transformAzureUrl(baseUrl, modelId)` rewrites
+the request URL to:
+
+```
+<baseUrl>/openai/deployments/<modelId>
+```
+
+This means the `models[].id` field must exactly match your Azure deployment
+name (e.g., `gpt-41`).
+
+### Provider ID Derivation
+
+When OpenClaw encounters a custom provider, `buildEndpointIdFromUrl()` derives
+an internal endpoint ID from the hostname. For example:
+
+```
+https://oai-ss-aisense-dev-eastus.openai.azure.com/
+  → custom-oai-ss-aisense-dev-eastus-openai-azure-com
+```
+
+You reference the model in agent config as `<provider-id>/<model-id>`, e.g.:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "azure-oai-g2/gpt-41"
+      }
+    }
+  }
+}
+```
+
+### API Key via `env:` Syntax
+
+The `"env:VAR_NAME"` syntax tells OpenClaw to read the value from an
+environment variable at startup. This avoids embedding secrets in config files:
+
+```json
+{
+  "apiKey": "env:AZURE_OPENAI_API_KEY"
+}
+```
+
+Ensure the variable is exported before starting the OpenClaw daemon.
+
+### Complete Example — Azure OpenAI GPT-4.1
+
+```json
+{
+  "models": {
+    "providers": {
+      "azure-oai-g2": {
+        "baseUrl": "https://oai-ss-aisense-dev-eastus.openai.azure.com/",
+        "api": "openai-completions",
+        "apiKey": "env:AZURE_OPENAI_API_KEY",
+        "models": [
+          {
+            "id": "gpt-41",
+            "name": "GPT-4.1 (Azure, eastus)",
+            "contextWindow": 1047576,
+            "maxTokens": 32768,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "reasoning": false
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "azure-oai-g2/gpt-41"
+      }
+    }
+  }
+}
+```
+
+---
+
 ## References
 
 - [Configuration Reference](https://docs.openclaw.ai/reference/configuration)

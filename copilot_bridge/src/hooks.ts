@@ -188,7 +188,7 @@ export class AuditLogger {
 		if (this.buffer.length === 0) return;
 
 		if (!this.dirCreated) {
-			await fs.mkdir(this.logDir, { recursive: true });
+			await fs.mkdir(this.logDir, { recursive: true, mode: 0o700 });
 			this.dirCreated = true;
 		}
 
@@ -199,7 +199,7 @@ export class AuditLogger {
 		const lines = `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`;
 
 		try {
-			await fs.appendFile(logPath, lines, "utf-8");
+			await fs.appendFile(logPath, lines, { encoding: "utf-8", mode: 0o600 });
 		} catch (err) {
 			// Restore entries that failed to persist
 			this.buffer = entries.concat(this.buffer);

@@ -21,6 +21,13 @@ async def _recv_json(ws: websockets.ClientConnection) -> dict[str, Any]:
     return result
 
 
+async def _auth_connect(url: str, token: str = "test-token") -> websockets.ClientConnection:
+    """Connect and send first-message auth handshake."""
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    return ws
+
+
 class TestConnection:
     """Connection lifecycle tests."""
 
@@ -28,7 +35,8 @@ class TestConnection:
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=test-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             connected = await _recv_json(ws)
             assert connected == {"type": "connected", "version": "1.0"}
 
@@ -37,7 +45,8 @@ class TestConnection:
 
     async def test_wrong_token_rejected(self, auth_gateway: tuple[str, GatewayServer]) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=wrong") as ws:
+        ws = await _auth_connect(url, token="wrong")
+        async with ws:
             with pytest.raises(websockets.ConnectionClosedError):
                 await ws.recv()
 
@@ -55,7 +64,8 @@ class TestTextMessage:
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=test-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             # consume handshake frames
             await ws.recv()  # connected
             await ws.recv()  # status:idle
@@ -94,7 +104,8 @@ class TestInvalidFrames:
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=test-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await ws.recv()  # connected
             await ws.recv()  # idle
 
@@ -113,11 +124,12 @@ class TestSecondConnection:
     ) -> None:
         url, _ = auth_gateway
 
-        ws1 = await websockets.connect(f"{url}?token=test-token")
+        ws1 = await _auth_connect(url)
         await ws1.recv()  # connected
         await ws1.recv()  # idle
 
-        async with websockets.connect(f"{url}?token=test-token") as ws2:
+        ws2 = await _auth_connect(url)
+        async with ws2:
             connected = await _recv_json(ws2)
             assert connected["type"] == "connected"
 
@@ -133,7 +145,8 @@ class TestConcurrentRejection:
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, gw = auth_gateway
-        async with websockets.connect(f"{url}?token=test-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await ws.recv()  # connected
             await ws.recv()  # idle
 
@@ -152,7 +165,8 @@ class TestConcurrentRejection:
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, gw = auth_gateway
-        async with websockets.connect(f"{url}?token=test-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await ws.recv()  # connected
             await ws.recv()  # idle
 

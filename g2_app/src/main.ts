@@ -114,7 +114,7 @@ function routeFrame(frame: InboundFrame): void {
     // -- Error from server -------------------------------------------------
     case 'error':
       if (audio.isRecording) audio.stop();
-      console.error(`[Main] Server error: ${frame.detail} (${frame.code})`);
+      console.error('[Main] Server error: %s (%s)', frame.detail.slice(0, 100), frame.code);
       sm.transition('error');
       // Sanitize and limit error detail before display
       display.showError(
@@ -125,7 +125,7 @@ function routeFrame(frame: InboundFrame): void {
     // -- Transcription text ------------------------------------------------
     case 'transcription':
       currentQuery = frame.text;
-      console.log(`[Main] Transcription received: "${frame.text}"`);
+      console.log('[Main] Transcription received (%d chars)', frame.text.length);
       break;
 
     // -- Ping is handled by Gateway itself; should never arrive here -------

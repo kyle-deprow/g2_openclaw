@@ -39,7 +39,7 @@ param location string
 param tags object
 
 @description('Disable local (API key) authentication. True enforces Entra-only auth.')
-param disableLocalAuth bool = true
+param disableLocalAuth bool = false
 
 @description('Allow or deny public network access. Disable for production.')
 @allowed([
@@ -157,3 +157,7 @@ output openAiEndpoint string = openAiAccount.properties.endpoint
 
 @description('Principal ID of the OpenAI account system-assigned managed identity.')
 output openAiPrincipalId string = openAiAccount.identity.principalId
+
+@description('Primary API key — treat as secret.')
+#disable-next-line outputs-should-not-contain-secrets
+output openAiApiKey string = openAiAccount.listKeys().key1

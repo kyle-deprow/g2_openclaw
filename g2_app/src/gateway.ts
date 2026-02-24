@@ -80,12 +80,20 @@ export class Gateway {
   resolveUrl(): string {
     // Hash: #ws://192.168.1.100:8765?token=abc
     const hash = window.location.hash.slice(1);
-    if (hash && hash.startsWith('ws') && isAllowedUrl(hash)) return hash;
+    if (hash && hash.startsWith('ws') && isAllowedUrl(hash)) {
+      // Clear sensitive URL fragment from browser history
+      window.history?.replaceState(null, '', window.location.pathname);
+      return hash;
+    }
 
     // Query: ?gateway=ws://...
     const params = new URLSearchParams(window.location.search);
     const qGateway = params.get('gateway');
-    if (qGateway && isAllowedUrl(qGateway)) return qGateway;
+    if (qGateway && isAllowedUrl(qGateway)) {
+      // Clear sensitive URL params from browser history
+      window.history?.replaceState(null, '', window.location.pathname);
+      return qGateway;
+    }
 
     // localStorage
     const stored = localStorage.getItem('g2_gateway_url');
@@ -119,7 +127,7 @@ export class Gateway {
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onopen = () => {
-      console.log(`[Gateway] Connected to ${this.url}`);
+      console.log('[Gateway] Connected');
       this.backoff = INITIAL_BACKOFF;
       // Send auth handshake if token available
       if (this.token) {

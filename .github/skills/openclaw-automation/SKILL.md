@@ -1,13 +1,7 @@
-```skill
 ---
 name: openclaw-automation
 description:
-  OpenClaw automation through cron jobs, hooks, webhooks, and heartbeats. Use
-  when scheduling recurring agent tasks, building event-driven handlers,
-  configuring HTTP webhook endpoints, integrating external services via hooks,
-  or setting up proactive agent behaviors. Triggers on tasks involving cron
-  schedules, hook event handlers, webhook mapped hooks, Gmail Pub/Sub, heartbeat
-  nudges, or CI/CD agent integration.
+  OpenClaw automation through cron jobs, hooks, webhooks, and heartbeats. Use when scheduling recurring agent tasks, building event-driven handlers, configuring HTTP webhook endpoints, integrating external services via hooks, or setting up proactive agent behaviors. Triggers on tasks involving cron schedules, hook event handlers, webhook mapped hooks, Gmail Pub/Sub, heartbeat nudges, or CI/CD agent integration.
 ---
 
 # OpenClaw Automation & Event System
@@ -501,4 +495,3 @@ Combine hooks and webhooks for escalation workflows:
 - https://docs.openclaw.ai/concepts/hooks
 - https://docs.openclaw.ai/concepts/webhook
 - https://docs.openclaw.ai/reference/configuration
-```

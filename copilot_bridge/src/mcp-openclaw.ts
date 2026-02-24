@@ -86,7 +86,7 @@ export class OpenClawClient {
 	}
 
 	private _doConnect(): Promise<void> {
-		const isLocal = this.config.host === "127.0.0.1" || this.config.host === "localhost" || this.config.host === "::1";
+		const isLocal = this.config.host === "127.0.0.1" || this.config.host === "::1";
 		const scheme = isLocal ? "ws" : "wss";
 		const url = new URL(`${scheme}://${this.config.host}:${this.config.port}/ws`);
 
