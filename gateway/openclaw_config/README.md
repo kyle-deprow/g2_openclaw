@@ -8,7 +8,7 @@ configuration used by the G2 Gateway.
 | File | Purpose |
 |---|---|
 | `openclaw.json` | Model provider, agent defaults, session settings |
-| `.env.example` | Template for the required `AZURE_OPENAI_API_KEY` secret |
+| `.env.example` | Template for the required `AZURE_AI_SERVICES_API_KEY` secret |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `README.md` | This file |
 
@@ -24,25 +24,22 @@ openclaw onboard --local
 # 3. Set the Azure API key (pick one)
 #    Option A: fetch from Azure
 az cognitiveservices account keys list \
-  --name oai-ss-aisense-dev-eastus \
+  --name aisvc-ss-aisense-dev-eastus2 \
   --resource-group rg-ss-aisense-dev-eastus \
   --query key1 -o tsv \
-  | xargs -I{} sh -c 'echo "AZURE_OPENAI_API_KEY={}" > gateway/openclaw_config/.env'
+  | xargs -I{} sh -c 'echo "AZURE_AI_SERVICES_API_KEY={}" > gateway/openclaw_config/.env'
 #    Option B: copy and edit
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 4. Push config (merges provider, resolves API key, copies preload + SOUL.md)
-bash scripts/push-openclaw-config.sh
+# 4. Push config + restart daemon (merges provider, resolves API key, copies preload + SOUL.md)
+uv run python -m gateway push-config
 
-# 5. Enable the api-version preload (persist in shell profile)
-echo 'export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"' >> ~/.bashrc
-source ~/.bashrc
-
-# 6. Verify
-openclaw agent --local --agent main -m "Say hello in exactly 5 words."
+# 5. Launch everything (OpenClaw daemon started automatically with preload)
+uv run python -m gateway launch
 ```
 
-Steps 4-5 are idempotent — re-run them after any config change or key rotation.
+Step 4 is idempotent — re-run it after any config change or key rotation.
+The `launch` command handles `NODE_OPTIONS` for the OpenClaw daemon automatically.
 
 ## How It Works
 
@@ -58,8 +55,8 @@ these settings into the local config with `jq`, preserving everything else.
 
 ### What is managed here
 
-- **Custom provider** `azure-oai-g2` — points at the Azure OpenAI deployment
-  (`gpt-41` on `oai-ss-aisense-dev-eastus.openai.azure.com`).
+- **Custom provider** `azure-oai-g2` — points at the Azure AI Services model-router
+  deployment (`model-router` on `aisvc-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent defaults** — primary model, compaction mode, concurrency limits,
   denied tools (browser, canvas, etc.).
 - **Session / command settings** — DM scope, reaction scope, command modes.
@@ -87,7 +84,7 @@ Or retrieve it from Azure:
 
 ```bash
 az cognitiveservices account keys list \
-  --name oai-ss-aisense-dev-eastus \
+  --name aisvc-ss-aisense-dev-eastus2 \
   --resource-group rg-ss-aisense-dev-eastus \
   --query key1 -o tsv
 ```
@@ -97,6 +94,16 @@ az cognitiveservices account keys list \
 From the repo root:
 
 ```bash
+# One-liner: push config and restart the daemon
+uv run python -m gateway push-config
+
+# Or push-only (no daemon restart)
+uv run python -m gateway push-config --no-restart
+```
+
+Or run the underlying shell script directly:
+
+```bash
 bash scripts/push-openclaw-config.sh
 ```
 
@@ -104,7 +111,7 @@ The script will:
 
 1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
 2. Deep-merge the repo config into the local config (local-only keys preserved)
-3. Resolve `env:AZURE_OPENAI_API_KEY` → actual key value in the provider block
+3. Resolve `env:AZURE_AI_SERVICES_API_KEY` → actual key value in the provider block
 4. Copy `SOUL.md` and `azure-api-version-preload.cjs` to `~/.openclaw/`
 5. Validate the result with `openclaw models status`
 
@@ -112,26 +119,28 @@ The script is idempotent — safe to run repeatedly.
 
 ### 3. Enable the api-version preload
 
+The `gateway launch` command sets `NODE_OPTIONS` automatically when spawning the
+OpenClaw daemon. If running OpenClaw standalone:
+
 ```bash
 export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
+openclaw daemon
 ```
-
-Add to `~/.bashrc` or `~/.zshrc` for persistence.
 
 ## Azure OpenAI Provider Details
 
 | Setting | Value |
 |---|---|
-| Endpoint | `https://oai-ss-aisense-dev-eastus.openai.azure.com/` |
-| Deployment name | `gpt-41` |
-| Model | GPT-4.1 (`2025-04-14`) |
+| Endpoint | `https://aisvc-ss-aisense-dev-eastus2.openai.azure.com/` |
+| Deployment name | `model-router` |
+| Model | Model Router (Azure AI Services, intelligently routes to best model) |
 | API type | `openai-completions` (OpenClaw's label for OpenAI-compatible APIs) |
 | Context window | 1 047 576 tokens |
 | Max output tokens | 32 768 |
 
 OpenClaw auto-detects `*.openai.azure.com` URLs and rewrites them internally
 to `<baseUrl>/openai/deployments/<modelId>`, so the deployment name must match
-the model ID in the config (`gpt-41`).
+the model ID in the config (`model-router`).
 
 ## Azure API-Version Preload Workaround
 
@@ -147,7 +156,7 @@ OpenClaw's config schema is validated with Zod and rejects unknown keys like
 
 `azure-api-version-preload.cjs` is a tiny CommonJS module that monkey-patches
 `globalThis.fetch`. For any request whose hostname matches
-`*.openai.azure.com`, it appends `?api-version=2024-10-21` if the parameter
+`*.openai.azure.com`, it appends `?api-version=2024-12-01-preview` if the parameter
 is not already present. All other requests pass through untouched.
 
 ### Enabling the preload

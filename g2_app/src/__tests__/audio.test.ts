@@ -150,4 +150,99 @@ describe('AudioCapture', () => {
     expect((bridge as any).onMicData).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
   });
+
+  // -------------------------------------------------------------------------
+  // onEvenHubEvent fallback (simulator mode — no onMicData)
+  // -------------------------------------------------------------------------
+
+  describe('onEvenHubEvent fallback', () => {
+    function createSimulatorBridge() {
+      return {
+        audioControl: vi.fn(),
+        // no onMicData — simulates the simulator environment
+        onEvenHubEvent: vi.fn(),
+      } as unknown as EvenAppBridge;
+    }
+
+    it('registers onEvenHubEvent when onMicData is absent', () => {
+      const simBridge = createSimulatorBridge();
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      audio.init(simBridge, gateway);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((simBridge as any).onEvenHubEvent).toHaveBeenCalledOnce();
+      expect(logSpy).toHaveBeenCalledWith(
+        '[Audio] onMicData not available — using onEvenHubEvent fallback for audio frames',
+      );
+      logSpy.mockRestore();
+    });
+
+    it('forwards audio frames via onEvenHubEvent when recording', () => {
+      const simBridge = createSimulatorBridge();
+      audio.init(simBridge, gateway);
+      audio.start();
+
+      // Retrieve the onEvenHubEvent callback
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const eventCallback = (simBridge as any).onEvenHubEvent.mock.calls[0][0];
+
+      const pcmData = new Uint8Array([10, 20, 30, 40]);
+      eventCallback({ audioEvent: { audioPcm: pcmData } });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((gateway as any).send).toHaveBeenCalledWith(pcmData.buffer);
+    });
+
+    it('ignores audio frames via onEvenHubEvent when not recording', () => {
+      const simBridge = createSimulatorBridge();
+      audio.init(simBridge, gateway);
+      // NOT started
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const eventCallback = (simBridge as any).onEvenHubEvent.mock.calls[0][0];
+
+      const pcmData = new Uint8Array([10, 20, 30, 40]);
+      eventCallback({ audioEvent: { audioPcm: pcmData } });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((gateway as any).send).not.toHaveBeenCalled();
+    });
+
+    it('ignores non-audio events in onEvenHubEvent fallback', () => {
+      const simBridge = createSimulatorBridge();
+      audio.init(simBridge, gateway);
+      audio.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const eventCallback = (simBridge as any).onEvenHubEvent.mock.calls[0][0];
+
+      // Fire a non-audio event — should be silently ignored
+      eventCallback({ textEvent: { eventType: 0, textContent: 'hello' } });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((gateway as any).send).not.toHaveBeenCalled();
+    });
+
+    it('respects Uint8Array byteOffset in onEvenHubEvent fallback', () => {
+      const simBridge = createSimulatorBridge();
+      audio.init(simBridge, gateway);
+      audio.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const eventCallback = (simBridge as any).onEvenHubEvent.mock.calls[0][0];
+
+      // Create a view into a larger buffer at a non-zero offset
+      const backing = new ArrayBuffer(10);
+      const view = new Uint8Array(backing, 3, 4);
+      view.set([10, 20, 30, 40]);
+
+      eventCallback({ audioEvent: { audioPcm: view } });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const sentBuffer = (gateway as any).send.mock.calls[0][0] as ArrayBuffer;
+      expect(sentBuffer.byteLength).toBe(4);
+      expect(new Uint8Array(sentBuffer)).toEqual(new Uint8Array([10, 20, 30, 40]));
+    });
+  });
 });

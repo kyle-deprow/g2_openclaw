@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
+import { ConversationHistory } from '../conversation';
 
 // ---------------------------------------------------------------------------
 // Mock the SDK
@@ -10,6 +11,8 @@ vi.mock('@evenrealities/even_hub_sdk', () => ({
   StartUpPageCreateResult: { success: 0 },
   TextContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
   TextContainerUpgrade: vi.fn().mockImplementation((args: unknown) => args),
+  ListContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
+  ListItemContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
   OsEventTypeList: {
     CLICK_EVENT: 0,
     SCROLL_TOP_EVENT: 1,
@@ -44,11 +47,12 @@ function createMockBridge() {
   } as unknown as EvenAppBridge;
 }
 
-async function initDisplay(): Promise<{ dm: DisplayManager; bridge: ReturnType<typeof createMockBridge> }> {
+async function initDisplay(): Promise<{ dm: DisplayManager; bridge: ReturnType<typeof createMockBridge>; conversation: ConversationHistory }> {
   const dm = new DisplayManager();
   const bridge = createMockBridge();
-  await dm.init(bridge as unknown as EvenAppBridge);
-  return { dm, bridge: bridge as unknown as ReturnType<typeof createMockBridge> };
+  const conversation = new ConversationHistory();
+  await dm.init(bridge as unknown as EvenAppBridge, conversation);
+  return { dm, bridge: bridge as unknown as ReturnType<typeof createMockBridge>, conversation };
 }
 
 // Cast to get access to mock methods on the bridge
@@ -82,10 +86,10 @@ describe('DisplayManager', () => {
       expect(typeof dm.showThinking).toBe('function');
     });
 
-    it('rebuilds with thinking layout', async () => {
+    it('updates status and footer for thinking layout', async () => {
       const { dm, bridge } = await initDisplay();
-      await dm.showThinking('test query');
-      expect(asMock(bridge).rebuildPageContainer).toHaveBeenCalled();
+      await dm.showThinking();
+      expect(asMock(bridge).textContainerUpgrade).toHaveBeenCalled();
     });
   });
 
@@ -94,7 +98,7 @@ describe('DisplayManager', () => {
   // -----------------------------------------------------------------------
   describe('delta buffering during layout transition (P3.6)', () => {
     it('buffers deltas arriving during showStreaming rebuild and flushes them', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       // Make rebuild take time so we can inject deltas during it
@@ -104,26 +108,22 @@ describe('DisplayManager', () => {
       );
 
       // Start showStreaming (will block on rebuild)
-      const streamingPromise = dm.showStreaming('hello');
-
-      // While rebuild is pending, push deltas
-      await dm.appendDelta('chunk1');
-      await dm.appendDelta('chunk2');
-
-      // textContainerUpgrade should NOT have been called yet (still rebuilding)
-      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
-
-      // Resolve rebuild
-      resolveRebuild(true);
+      const streamingPromise = dm.showStreaming();
       await streamingPromise;
 
-      // After showStreaming resolves, the flushed delta will be in the batch
+      // Push deltas after streaming is set up
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('chunk1');
+      await dm.appendDelta('chunk1');
+      conversation.appendToLastAssistant('chunk2');
+      await dm.appendDelta('chunk2');
+
       // Advance timers to trigger the debounce flush
       await vi.advanceTimersByTimeAsync(100);
 
       // Now the merged deltas should have been sent
       expect(mock.textContainerUpgrade).toHaveBeenCalled();
-      // streamBuffer should contain both chunks
+      // streamBuffer should contain both chunks via conversation
       expect(dm.streamBuffer).toBe('chunk1chunk2');
     });
 
@@ -131,22 +131,12 @@ describe('DisplayManager', () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      let resolveRebuild!: (v: boolean) => void;
-      mock.rebuildPageContainer.mockImplementation(
-        () => new Promise<boolean>((r) => { resolveRebuild = r; }),
-      );
-
-      const streamingPromise = dm.showStreaming('test');
-
-      // No deltas pushed during rebuild
-      resolveRebuild(true);
-      await streamingPromise;
+      await dm.showStreaming();
 
       // Advance timer — nothing should crash
       await vi.advanceTimersByTimeAsync(100);
 
-      // No textContainerUpgrade calls (no deltas to flush)
-      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+      // streamBuffer is empty (no conversation entries)
       expect(dm.streamBuffer).toBe('');
     });
   });
@@ -155,57 +145,32 @@ describe('DisplayManager', () => {
   // Task 3: Truncation + Delta Batching (P3.7)
   // -----------------------------------------------------------------------
   describe('truncation (P3.7)', () => {
-    it('triggers truncation hint when response exceeds 1800 chars', async () => {
+    it('triggers rebuild when cumulative deltas exceed budget', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+      mock.rebuildPageContainer.mockClear();
 
-      // Send a large delta that exceeds the truncation limit
-      const bigDelta = 'x'.repeat(1850);
+      // Send a large delta that exceeds the upgrade budget
+      // New budget: _transcriptLen + delta > UPGRADE_CHAR_LIMIT - 100 (1900)
+      const bigDelta = 'x'.repeat(1870);
       await dm.appendDelta(bigDelta);
 
       // Flush the debounce timer
       await vi.advanceTimersByTimeAsync(100);
 
-      // Should have called textContainerUpgrade with truncation hint
-      const calls = mock.textContainerUpgrade.mock.calls;
-      expect(calls.length).toBeGreaterThan(0);
-
-      const lastCall = calls[calls.length - 1][0];
-      expect(lastCall.content).toContain('… [double-tap for more]');
+      // Should have triggered a rebuild (appendToTranscript falls back)
+      expect(mock.rebuildPageContainer).toHaveBeenCalled();
     });
 
-    it('still accumulates full text in streamBuffer after truncation', async () => {
+    it('appends normally when under budget limit', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
-
-      // First delta exceeds limit
-      const bigDelta = 'x'.repeat(1850);
-      await dm.appendDelta(bigDelta);
-      await vi.advanceTimersByTimeAsync(100);
-
-      // Additional delta after truncation
-      await dm.appendDelta('more');
-      await vi.advanceTimersByTimeAsync(100);
-
-      // streamBuffer should contain ALL text (not truncated)
-      expect(dm.streamBuffer).toBe(bigDelta + 'more');
-
-      // The second flush should NOT call textContainerUpgrade again
-      // (already truncated — one call from first flush only)
-      const upgradeCallsAfterFirstFlush = mock.textContainerUpgrade.mock.calls.length;
-      // Only 1 call from the first truncation flush
-      expect(upgradeCallsAfterFirstFlush).toBe(1);
-    });
-
-    it('shows normal content with cursor when under truncation limit', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      await dm.showStreaming('hi');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
 
       await dm.appendDelta('hello');
       await vi.advanceTimersByTimeAsync(100);
@@ -213,8 +178,8 @@ describe('DisplayManager', () => {
       const calls = mock.textContainerUpgrade.mock.calls;
       expect(calls.length).toBe(1);
       const call = calls[0][0];
-      expect(call.content).toBe('hello█');
-      expect(call.containerID).toBe(3); // ID_CONTENT
+      expect(call.content).toBe('hello');
+      expect(call.containerID).toBe(3); // ID_TRANSCRIPT
     });
   });
 
@@ -223,14 +188,15 @@ describe('DisplayManager', () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
 
       // Rapid-fire deltas within the 100ms window
       await dm.appendDelta('a');
       await dm.appendDelta('b');
       await dm.appendDelta('c');
 
-      // Before timer fires, no display update
+      // Before timer fires, no additional display update
       expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
 
       // Advance timer to trigger flush
@@ -239,28 +205,29 @@ describe('DisplayManager', () => {
       // Should be exactly one textContainerUpgrade call with merged content
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(1);
       const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.content).toBe('abc█');
+      expect(call.content).toBe('abc');
     });
 
     it('batches deltas separately across timer windows', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
 
       // First batch
       await dm.appendDelta('x');
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(1);
-      expect(mock.textContainerUpgrade.mock.calls[0][0].content).toBe('x█');
+      expect(mock.textContainerUpgrade.mock.calls[0][0].content).toBe('x');
 
       // Second batch
       await dm.appendDelta('y');
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(2);
-      expect(mock.textContainerUpgrade.mock.calls[1][0].content).toBe('y█');
+      expect(mock.textContainerUpgrade.mock.calls[1][0].content).toBe('y');
     });
   });
 
@@ -269,30 +236,31 @@ describe('DisplayManager', () => {
   // -----------------------------------------------------------------------
   describe('finaliseStream', () => {
     it('flushes pending batch deltas before finalising', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
 
       // Send a delta but don't let the timer fire
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('abc');
       await dm.appendDelta('abc');
 
       // Finalise immediately — should flush the batch
       await dm.finaliseStream();
 
-      // streamBuffer should contain the flushed delta
+      // streamBuffer should contain the flushed delta via conversation
       expect(dm.streamBuffer).toBe('abc');
 
       // finaliseStream should have called textContainerUpgrade
-      // (batch flush + badge + footer = 3 calls)
-      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(3);
+      // (batch flush + replaceTranscript + status + footer = 4 calls)
+      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(4);
 
-      // Validate the batch flush call sends unflushed text replacing cursor
+      // Validate the batch flush call appends text
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
       expect(contentCall.containerID).toBe(3);
-      expect(contentCall.contentOffset).toBe(0);
-      expect(contentCall.contentLength).toBe(1); // the cursor
-      expect(contentCall.content).toBe('abc');   // no cursor appended
+      expect(contentCall.content).toBe('abc');
     });
   });
 
@@ -304,7 +272,9 @@ describe('DisplayManager', () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+
       await dm.appendDelta('');
       await vi.advanceTimersByTimeAsync(100);
 
@@ -317,40 +287,37 @@ describe('DisplayManager', () => {
   // finaliseStream edge cases (M-5)
   // -----------------------------------------------------------------------
   describe('finaliseStream edge cases (M-5)', () => {
-    it('strips cursor with empty streamBuffer', async () => {
+    it('finalises with empty streamBuffer (no deltas)', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+
       // No deltas — finalise immediately
       await dm.finaliseStream();
 
-      // Should strip cursor (offset 0, length 1) + badge + footer = 3
+      // Should update replaceTranscript + status + footer = 3 calls
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(3);
-      const cursorCall = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(cursorCall.containerID).toBe(3);
-      expect(cursorCall.contentOffset).toBe(0);
-      expect(cursorCall.contentLength).toBe(1);
-      expect(cursorCall.content).toBe('');
     });
 
-    it('skips cursor strip after truncation', async () => {
+    it('finalises after large delta that triggered rebuild', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
 
-      // Trigger truncation
-      await dm.appendDelta('x'.repeat(1850));
+      // Trigger rebuild via large delta
+      await dm.appendDelta('x'.repeat(1870));
       await vi.advanceTimersByTimeAsync(100);
 
       mock.textContainerUpgrade.mockClear();
 
-      // Finalise — should NOT strip cursor (display is truncated)
+      // Finalise
       await dm.finaliseStream();
 
-      // Only badge + footer updates (no cursor strip)
-      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(2);
+      // replaceTranscript + status + footer = 3 calls
+      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -358,27 +325,28 @@ describe('DisplayManager', () => {
   // showError / showDisconnected state reset (H1)
   // -----------------------------------------------------------------------
   describe('showError state reset (H1)', () => {
-    it('resets all streaming state', async () => {
+    it('clears delta timer on error', async () => {
       const { dm, bridge } = await initDisplay();
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
       await dm.appendDelta('hello');
       await vi.advanceTimersByTimeAsync(100);
 
       await dm.showError('Something failed');
+      // streamBuffer delegates to conversation — should be empty since no conversation entry
       expect(dm.streamBuffer).toBe('');
     });
   });
 
   describe('showDisconnected state reset (H1)', () => {
-    it('resets all streaming state', async () => {
+    it('clears delta timer on disconnect', async () => {
       const { dm, bridge } = await initDisplay();
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
       await dm.appendDelta('hello');
       await vi.advanceTimersByTimeAsync(100);
 
-      await dm.showDisconnected(5);
+      await dm.showDisconnected();
       expect(dm.streamBuffer).toBe('');
     });
   });
@@ -387,29 +355,33 @@ describe('DisplayManager', () => {
   // Truncation boundary (M-5)
   // -----------------------------------------------------------------------
   describe('truncation boundary (M-5)', () => {
-    it('does NOT truncate at exactly 1800 chars', async () => {
+    it('does NOT trigger rebuild at budget boundary (1867 chars)', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
-      await dm.appendDelta('x'.repeat(1800));
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+      mock.rebuildPageContainer.mockClear();
+
+      await dm.appendDelta('x'.repeat(1867));
       await vi.advanceTimersByTimeAsync(100);
 
-      const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.content).toBe('x'.repeat(1800) + '█');
-      expect(call.content).not.toContain('… [double-tap for more]');
+      // Should append normally, not rebuild
+      expect(mock.textContainerUpgrade).toHaveBeenCalled();
+      expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
     });
 
-    it('truncates at 1801 chars', async () => {
+    it('triggers rebuild at 1868 chars (exceeds budget)', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
-      await dm.appendDelta('x'.repeat(1801));
+      await dm.showStreaming();
+      mock.rebuildPageContainer.mockClear();
+
+      await dm.appendDelta('x'.repeat(1868));
       await vi.advanceTimersByTimeAsync(100);
 
-      const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.content).toContain('… [double-tap for more]');
+      expect(mock.rebuildPageContainer).toHaveBeenCalled();
     });
   });
 
@@ -417,63 +389,54 @@ describe('DisplayManager', () => {
   // Offset and contentLength validation (M-4)
   // -----------------------------------------------------------------------
   describe('offset and contentLength validation (M-4)', () => {
-    it('uses correct offset and contentLength for first delta', async () => {
+    it('appends first delta at end of transcript', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+
       await dm.appendDelta('hello');
       await vi.advanceTimersByTimeAsync(100);
 
       const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.contentOffset).toBe(0); // streamBuffer was empty
-      expect(call.contentLength).toBe(1); // replacing cursor '█'
-      expect(call.content).toBe('hello█');
+      expect(call.contentLength).toBe(0); // appending (not replacing)
+      expect(call.content).toBe('hello');
     });
 
-    it('uses correct offset for second delta', async () => {
+    it('appends second delta at correct offset', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+
       await dm.appendDelta('abc');
       await vi.advanceTimersByTimeAsync(100);
+
+      const firstOffset = mock.textContainerUpgrade.mock.calls[0][0].contentOffset;
 
       await dm.appendDelta('def');
       await vi.advanceTimersByTimeAsync(100);
 
       const call = mock.textContainerUpgrade.mock.calls[1][0];
-      expect(call.contentOffset).toBe(3); // 'abc' length
-      expect(call.contentLength).toBe(1); // cursor
-      expect(call.content).toBe('def█');
+      expect(call.contentOffset).toBe(firstOffset + 3); // after 'abc'
+      expect(call.contentLength).toBe(0); // appending
+      expect(call.content).toBe('def');
     });
 
-    it('truncation uses prevDisplayLen as contentLength', async () => {
+    it('finaliseStream with pending batch flushes correctly', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      await dm.showStreaming('test');
-      await dm.appendDelta('x'.repeat(1850));
-      await vi.advanceTimersByTimeAsync(100);
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
 
-      const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.contentOffset).toBe(0);
-      // Display had '█' (1 char) before this flush
-      expect(call.contentLength).toBe(1);
-    });
-
-    it('finaliseStream with pending batch uses correct offset', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      await dm.showStreaming('test');
       await dm.appendDelta('abc');
       await dm.finaliseStream();
 
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
       expect(contentCall.containerID).toBe(3);
-      expect(contentCall.contentOffset).toBe(0);
-      expect(contentCall.contentLength).toBe(1);
       expect(contentCall.content).toBe('abc');
     });
   });

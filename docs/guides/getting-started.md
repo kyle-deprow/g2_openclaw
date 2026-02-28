@@ -146,17 +146,7 @@ bash scripts/push-openclaw-config.sh
 
 The push script deep-merges the repo-managed overlay (`gateway/openclaw_config/openclaw.json`) into the local OpenClaw config, resolves the `env:AZURE_OPENAI_API_KEY` placeholder to the real key, copies `SOUL.md` and the api-version preload module, and validates with `openclaw models status`.
 
-#### 4d. Enable the Azure api-version preload
-
-Azure OpenAI requires `?api-version=` on every request. OpenClaw's standard SDK client doesn't add it, so a fetch preload module handles it:
-
-```bash
-# Add to your shell profile for persistence
-echo 'export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-#### 4e. Set the gateway token
+#### 4d. Set the gateway token
 
 Add to your repo-root `.env`:
 
@@ -168,13 +158,22 @@ OPENCLAW_GATEWAY_TOKEN=your-openclaw-token
 
 The token is shown after `openclaw onboard --local`. You can also find it in `~/.openclaw/openclaw.json` under `gateway.auth.token`.
 
-#### 4f. Verify
+#### 4e. Verify
+
+The `launch` command starts the OpenClaw daemon automatically (with the Azure api-version preload injected via `NODE_OPTIONS`):
 
 ```bash
-openclaw agent --local --agent main -m "Say hello in exactly 5 words."
+uv run python -m gateway launch
 ```
 
-You should see a five-word greeting. If you get HTTP 404, check that `NODE_OPTIONS` is set. If HTTP 401, re-run the push script.
+Or test OpenClaw standalone:
+
+```bash
+NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs" \
+  openclaw agent --local --agent main -m "Say hello in exactly 5 words."
+```
+
+You should see a five-word greeting. If you get HTTP 404, the preload isn't active. If HTTP 401, re-run the push script.
 
 > **Re-running:** The push script is idempotent — safe to run after config changes or key rotations.
 

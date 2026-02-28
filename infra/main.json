@@ -6,7 +6,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.40.2.10011",
-      "templateHash": "10762406830383674649"
+      "templateHash": "1539179329576892189"
     }
   },
   "definitions": {
@@ -129,6 +129,20 @@
       "metadata": {
         "description": "Retention period in days for Log Analytics data."
       }
+    },
+    "aiServicesLocation": {
+      "type": "string",
+      "defaultValue": "eastus2",
+      "metadata": {
+        "description": "Azure region for the AI Services account (model-router). Must differ from primary location when model is region-restricted."
+      }
+    },
+    "modelRouterCapacity": {
+      "type": "int",
+      "defaultValue": 100,
+      "metadata": {
+        "description": "Deployment capacity for the model-router (tokens per minute, thousands)."
+      }
     }
   },
   "variables": {
@@ -140,7 +154,8 @@
     "appInsightsName": "[format('appi-{0}', variables('baseName'))]",
     "openAiAccountName": "[format('oai-{0}', variables('baseName'))]",
     "aiHubName": "[format('aihub-{0}', variables('baseName'))]",
-    "aiProjectName": "[format('aiproj-{0}', variables('baseName'))]"
+    "aiProjectName": "[format('aiproj-{0}', variables('baseName'))]",
+    "aiServicesName": "[format('aisvc-{0}-{1}-{2}-{3}', parameters('prefix'), parameters('workload'), parameters('environment'), parameters('aiServicesLocation'))]"
   },
   "resources": {
     "resourceGroup": {
@@ -1011,6 +1026,241 @@
         "resourceGroup"
       ]
     },
+    "aiServices": {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "deploy-ai-services",
+      "resourceGroup": "[variables('resourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "aiServicesAccountName": {
+            "value": "[variables('aiServicesName')]"
+          },
+          "location": {
+            "value": "[parameters('aiServicesLocation')]"
+          },
+          "tags": {
+            "value": "[parameters('tags')]"
+          },
+          "disableLocalAuth": {
+            "value": false
+          },
+          "publicNetworkAccess": {
+            "value": "[parameters('publicNetworkAccess')]"
+          },
+          "modelRouterCapacity": {
+            "value": "[parameters('modelRouterCapacity')]"
+          },
+          "logAnalyticsWorkspaceId": {
+            "value": "[reference('monitoring').outputs.logAnalyticsWorkspaceId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "8124312627072829480"
+            }
+          },
+          "parameters": {
+            "aiServicesAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure AI Services account."
+              }
+            },
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Azure region for the AI Services account."
+              }
+            },
+            "tags": {
+              "type": "object",
+              "metadata": {
+                "description": "Resource tags applied to all resources."
+              }
+            },
+            "disableLocalAuth": {
+              "type": "bool",
+              "defaultValue": false,
+              "metadata": {
+                "description": "Disable local (API key) authentication. True enforces Entra-only auth."
+              }
+            },
+            "publicNetworkAccess": {
+              "type": "string",
+              "defaultValue": "Enabled",
+              "allowedValues": [
+                "Enabled",
+                "Disabled"
+              ],
+              "metadata": {
+                "description": "Allow or deny public network access. Disable for production."
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "defaultValue": "S0",
+              "allowedValues": [
+                "S0"
+              ],
+              "metadata": {
+                "description": "SKU name for the AI Services account."
+              }
+            },
+            "modelRouterCapacity": {
+              "type": "int",
+              "defaultValue": 100,
+              "metadata": {
+                "description": "Deployment capacity for the model-router (tokens per minute, thousands)."
+              }
+            },
+            "modelRouterVersion": {
+              "type": "string",
+              "defaultValue": "2025-11-18",
+              "metadata": {
+                "description": "Model version for the model-router deployment."
+              }
+            },
+            "logAnalyticsWorkspaceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Log Analytics workspace for diagnostic settings."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2024-10-01",
+              "name": "[parameters('aiServicesAccountName')]",
+              "location": "[parameters('location')]",
+              "tags": "[parameters('tags')]",
+              "kind": "AIServices",
+              "sku": {
+                "name": "[parameters('skuName')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "customSubDomainName": "[parameters('aiServicesAccountName')]",
+                "disableLocalAuth": "[parameters('disableLocalAuth')]",
+                "publicNetworkAccess": "[parameters('publicNetworkAccess')]",
+                "networkAcls": {
+                  "defaultAction": "[if(equals(parameters('publicNetworkAccess'), 'Disabled'), 'Deny', 'Allow')]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/locks",
+              "apiVersion": "2020-05-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]",
+              "name": "[format('{0}-nodelete', parameters('aiServicesAccountName'))]",
+              "properties": {
+                "level": "CanNotDelete",
+                "notes": "Prevent accidental deletion of Azure AI Services account"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2024-10-01",
+              "name": "[format('{0}/{1}', parameters('aiServicesAccountName'), 'model-router')]",
+              "sku": {
+                "name": "GlobalStandard",
+                "capacity": "[parameters('modelRouterCapacity')]"
+              },
+              "properties": {
+                "model": {
+                  "format": "OpenAI",
+                  "name": "model-router",
+                  "version": "[parameters('modelRouterVersion')]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Insights/diagnosticSettings",
+              "apiVersion": "2021-05-01-preview",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]",
+              "name": "[format('{0}-diag', parameters('aiServicesAccountName'))]",
+              "properties": {
+                "workspaceId": "[parameters('logAnalyticsWorkspaceId')]",
+                "logs": [
+                  {
+                    "categoryGroup": "allLogs",
+                    "enabled": true
+                  }
+                ],
+                "metrics": [
+                  {
+                    "category": "AllMetrics",
+                    "enabled": true
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "aiServicesAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the Azure AI Services account."
+              },
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName'))]"
+            },
+            "aiServicesAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the Azure AI Services account."
+              },
+              "value": "[parameters('aiServicesAccountName')]"
+            },
+            "aiServicesEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Endpoint of the Azure AI Services account."
+              },
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName')), '2024-10-01').endpoint]"
+            },
+            "aiServicesPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the AI Services account system-assigned managed identity."
+              },
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName')), '2024-10-01', 'full').identity.principalId]"
+            },
+            "aiServicesApiKey": {
+              "type": "string",
+              "metadata": {
+                "description": "Primary API key — treat as secret."
+              },
+              "value": "[listKeys(resourceId('Microsoft.CognitiveServices/accounts', parameters('aiServicesAccountName')), '2024-10-01').key1]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "monitoring",
+        "resourceGroup"
+      ]
+    },
     "aiHub": {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2025-04-01",
@@ -1471,6 +1721,20 @@
         "description": "Primary API key for the Azure OpenAI account — treat as secret."
       },
       "value": "[reference('openAi').outputs.openAiApiKey.value]"
+    },
+    "aiServicesEndpoint": {
+      "type": "string",
+      "metadata": {
+        "description": "Endpoint of the Azure AI Services account (model-router)."
+      },
+      "value": "[reference('aiServices').outputs.aiServicesEndpoint.value]"
+    },
+    "aiServicesApiKey": {
+      "type": "string",
+      "metadata": {
+        "description": "Primary API key for the Azure AI Services account — treat as secret."
+      },
+      "value": "[reference('aiServices').outputs.aiServicesApiKey.value]"
     }
   }
 }

@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- TODO: tighten CSP for production (remove 'unsafe-inline', connect-src 'self') -->
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; script-src 'self'; connect-src ws: wss:; style-src 'self';" />
+    content="default-src 'none'; script-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline';" />
   <title>OpenClaw</title>
 </head>
 <body>

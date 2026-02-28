@@ -1,6 +1,6 @@
 // === Status types ===
 export type GatewayStatus = 'loading' | 'idle' | 'recording' | 'transcribing' | 'thinking' | 'streaming';
-export type AppStatus = GatewayStatus | 'displaying' | 'error' | 'disconnected';
+export type AppStatus = GatewayStatus | 'error' | 'disconnected';
 
 export type ErrorCode =
   | 'AUTH_FAILED'

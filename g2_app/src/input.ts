@@ -11,7 +11,6 @@ import type { StateMachine } from './state';
  * Tap-to-toggle model:
  *   idle → start recording
  *   recording → stop recording
- *   displaying → dismiss (return to idle)
  *   error → dismiss
  *   disconnected → force reconnect
  *   loading/transcribing/thinking/streaming → ignored
@@ -47,11 +46,18 @@ export class InputHandler {
     deps.bridge.onEvenHubEvent((event) => {
       console.log('[Input] Event received:', JSON.stringify(event));
 
-      // Guard: if no sub-object exists, this is an empty/malformed event —
-      // do NOT let it fall through as an undefined click.
+      // Audio events are handled by AudioCapture — not an input event.
+      if (event.audioEvent) {
+        return;
+      }
+
       const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
       if (!hasEvent) {
-        console.warn('[Input] Empty event received — ignoring');
+        // Simulator (and possibly hardware) can send bare events with no
+        // sub-object for simple actions like tap/click.  Treat as a click
+        // rather than discarding.
+        console.log('[Input] Bare event (no sub-object) — treating as click');
+        this._handleEvent(undefined);
         return;
       }
 
@@ -84,8 +90,7 @@ export class InputHandler {
       // App going to background — stop mic if recording
       if (this.audio.isRecording) {
         this.audio.stop();
-        this.sm.transition('idle');
-        this.display.showIdle();
+        // Don't transition to idle — server will drive transcribing → thinking → streaming → end → idle
       }
       return;
     }
@@ -139,10 +144,6 @@ export class InputHandler {
         }
         // Server will send status:transcribing
         break;
-      case 'displaying':
-        this.sm.transition('idle');
-        this.display.showIdle();
-        break;
       case 'error':
         this.sm.transition('idle');
         this.display.showIdle();
@@ -157,13 +158,6 @@ export class InputHandler {
   }
 
   private _handleDoubleTap(): void {
-    if (this.sm.current === 'displaying') {
-      // Toggle detail page via rebuildPageContainer (no setPageFlip)
-      this.display.showDetailPage(this.display.streamBuffer, {
-        model: 'mock',
-        elapsed: 0,
-        session: 'local',
-      });
-    }
+    // TODO: Phase 4 — double-tap scroll-to-bottom or other action
   }
 }

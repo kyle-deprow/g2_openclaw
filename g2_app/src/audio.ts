@@ -31,15 +31,28 @@ export class AudioCapture {
     // the published .d.ts (version ≥ 0.0.7). We cast through `any` to
     // suppress the type-checker while keeping the runtime call correct.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (bridge as any).onMicData((data: { audioPcm: Uint8Array }) => {
-      if (this._recording && this.gateway) {
-        // Forward raw PCM bytes as binary WebSocket frame.
-        // Uint8Array may be a view into a larger ArrayBuffer, so we must
-        // respect byteOffset and byteLength when slicing.
-        const { buffer, byteOffset, byteLength } = data.audioPcm;
-        this.gateway.send(buffer.slice(byteOffset, byteOffset + byteLength) as ArrayBuffer);
-      }
-    });
+    // Guard: onMicData may not exist in the simulator environment
+    if (typeof (bridge as any).onMicData === 'function') {
+      (bridge as any).onMicData((data: { audioPcm: Uint8Array }) => {
+        if (this._recording && this.gateway) {
+          // Forward raw PCM bytes as binary WebSocket frame.
+          // Uint8Array may be a view into a larger ArrayBuffer, so we must
+          // respect byteOffset and byteLength when slicing.
+          const { buffer, byteOffset, byteLength } = data.audioPcm;
+          this.gateway.send(buffer.slice(byteOffset, byteOffset + byteLength) as ArrayBuffer);
+        }
+      });
+    } else {
+      // Fallback: use onEvenHubEvent for audio frames (simulator mode)
+      console.log('[Audio] onMicData not available — using onEvenHubEvent fallback for audio frames');
+      bridge.onEvenHubEvent((event: any) => {
+        if (event.audioEvent && this._recording && this.gateway) {
+          const pcm: Uint8Array = event.audioEvent.audioPcm;
+          const { buffer, byteOffset, byteLength } = pcm;
+          this.gateway.send(buffer.slice(byteOffset, byteOffset + byteLength) as ArrayBuffer);
+        }
+      });
+    }
   }
 
   /**

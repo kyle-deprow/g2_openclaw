@@ -76,6 +76,12 @@ param storageSkuName string = 'Standard_LRS'
 @maxValue(730)
 param logRetentionInDays int = 30
 
+@description('Azure region for the AI Services account (model-router). Must differ from primary location when model is region-restricted.')
+param aiServicesLocation string = 'eastus2'
+
+@description('Deployment capacity for the model-router (tokens per minute, thousands).')
+param modelRouterCapacity int = 100
+
 // ---------------------------------------------------------------------------
 // Variables — Naming convention: {prefix}-{workload}-{env}-{region}-{instance}
 // ---------------------------------------------------------------------------
@@ -92,6 +98,7 @@ var appInsightsName = 'appi-${baseName}'
 var openAiAccountName = 'oai-${baseName}'
 var aiHubName = 'aihub-${baseName}'
 var aiProjectName = 'aiproj-${baseName}'
+var aiServicesName = 'aisvc-${prefix}-${workload}-${environment}-${aiServicesLocation}'
 
 // ---------------------------------------------------------------------------
 // Resource Group
@@ -165,7 +172,22 @@ module openAi 'modules/openai.bicep' = {
   }
 }
 
-// 5. AI Hub — depends on storage, keyVault, monitoring, openAi
+// 5. AI Services (model-router) — depends on monitoring (diagnostic settings)
+module aiServices 'modules/ai-services.bicep' = {
+  name: 'deploy-ai-services'
+  scope: resourceGroup
+  params: {
+    aiServicesAccountName: aiServicesName
+    location: aiServicesLocation
+    tags: tags
+    disableLocalAuth: false
+    publicNetworkAccess: publicNetworkAccess
+    modelRouterCapacity: modelRouterCapacity
+    logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
+  }
+}
+
+// 6. AI Hub — depends on storage, keyVault, monitoring, openAi
 module aiHub 'modules/ai-hub.bicep' = {
   name: 'deploy-ai-hub'
   scope: resourceGroup
@@ -182,7 +204,7 @@ module aiHub 'modules/ai-hub.bicep' = {
   }
 }
 
-// 6. AI Project — depends on aiHub
+// 7. AI Project — depends on aiHub
 module aiProject 'modules/ai-project.bicep' = {
   name: 'deploy-ai-project'
   scope: resourceGroup
@@ -217,5 +239,11 @@ output openAiAccountName string = openAi.outputs.openAiAccountName
 
 @description('Primary API key for the Azure OpenAI account — treat as secret.')
 output openAiApiKey string = openAi.outputs.openAiApiKey
+
+@description('Endpoint of the Azure AI Services account (model-router).')
+output aiServicesEndpoint string = aiServices.outputs.aiServicesEndpoint
+
+@description('Primary API key for the Azure AI Services account — treat as secret.')
+output aiServicesApiKey string = aiServices.outputs.aiServicesApiKey
 
 

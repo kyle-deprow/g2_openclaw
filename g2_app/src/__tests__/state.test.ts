@@ -47,7 +47,7 @@ describe('StateMachine', () => {
 
   it('follows full happy-path flow', () => {
     const sm = new StateMachine();
-    const states: AppStatus[] = ['idle', 'recording', 'transcribing', 'thinking', 'streaming', 'displaying', 'idle'];
+    const states: AppStatus[] = ['idle', 'recording', 'transcribing', 'thinking', 'streaming', 'idle'];
     for (const s of states) {
       expect(sm.transition(s)).toBe(true);
       expect(sm.current).toBe(s);
@@ -55,7 +55,7 @@ describe('StateMachine', () => {
   });
 
   it('allows error from any active state', () => {
-    const activeStates: AppStatus[] = ['idle', 'recording', 'transcribing', 'thinking', 'streaming', 'displaying'];
+    const activeStates: AppStatus[] = ['idle', 'recording', 'transcribing', 'thinking', 'streaming'];
     for (const state of activeStates) {
       const sm = new StateMachine();
       sm.transition('idle');
@@ -65,7 +65,6 @@ describe('StateMachine', () => {
         if (state === 'transcribing') { sm.transition('recording'); sm.transition('transcribing'); }
         if (state === 'thinking') { sm.transition('recording'); sm.transition('transcribing'); sm.transition('thinking'); }
         if (state === 'streaming') { sm.transition('recording'); sm.transition('transcribing'); sm.transition('thinking'); sm.transition('streaming'); }
-        if (state === 'displaying') { sm.transition('recording'); sm.transition('transcribing'); sm.transition('thinking'); sm.transition('streaming'); sm.transition('displaying'); }
       }
       expect(sm.current).toBe(state);
       expect(sm.transition('error')).toBe(true);
@@ -86,14 +85,13 @@ describe('StateMachine', () => {
     expect(sm.transition('loading')).toBe(true);
   });
 
-  it('displaying → idle on dismiss', () => {
+  it('streaming → idle on end', () => {
     const sm = new StateMachine();
     sm.transition('idle');
     sm.transition('recording');
     sm.transition('transcribing');
     sm.transition('thinking');
     sm.transition('streaming');
-    sm.transition('displaying');
     expect(sm.transition('idle')).toBe(true);
   });
 });

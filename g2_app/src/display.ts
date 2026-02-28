@@ -1,14 +1,16 @@
 /**
- * G2 OpenClaw — Display Manager
+ * G2 OpenClaw — Display Manager (Conversation Transcript Mode)
  *
- * Renders application state layouts on the G2 576×288 micro-LED display.
- * Uses the EvenAppBridge SDK for all display operations.
+ * Renders a scrollable conversation transcript on the G2 576×288 micro-LED
+ * display.  The layout is fixed: status bar + transcript + footer.  State
+ * changes only update the status bar and footer text in-place via
+ * textContainerUpgrade — no full rebuild except when the transcript
+ * content exceeds the upgrade character limit and needs a fresh page.
  *
  * Greyscale palette (4-bit, renders as shades of green on hardware):
  *   0x0 = Background (black/off)
- *   0x3 = Border (subtle dividers)
- *   0x6 = Muted (hints, placeholders, inactive badges)
- *   0xA = Secondary (subtitles, labels, instructional text)
+ *   0x6 = Muted (hints, placeholders)
+ *   0xA = Secondary (labels, status)
  *   0xC = Accent (active-state indicators)
  *   0xF = Primary (main content, headings)
  */
@@ -16,44 +18,40 @@
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import {
   CreateStartUpPageContainer,
+  ListContainerProperty,
+  ListItemContainerProperty,
   RebuildPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import { stripMarkdown } from './utils';
+import type { ConversationHistory } from './conversation';
 
 // ---------------------------------------------------------------------------
 // Greyscale constants
 // ---------------------------------------------------------------------------
-const BG      = 0x0; // Background (black / off)
-const MUTED   = 0x6; // Hints, disabled, placeholders
-const SECOND  = 0xA; // Secondary text, labels
-const ACCENT  = 0xC; // Active-state indicators
-const PRIMARY = 0xF; // Main content, headings
+const MUTED   = 0x6;
+const SECOND  = 0xA;
+const PRIMARY = 0xF;
 
 // ---------------------------------------------------------------------------
-// Container ID constants (consistent across all layouts)
+// Container IDs (stable across all rebuilds)
 // ---------------------------------------------------------------------------
-const ID_TITLE   = 1;
-const ID_BADGE   = 2;
-const ID_CONTENT = 3;
-const ID_FOOTER  = 4;
+const ID_STATUS         = 1;
+const ID_TRANSCRIPT     = 3;
+const ID_FOOTER         = 4;
+const ID_EVENT_CAPTURE  = 5;
+
+// ---------------------------------------------------------------------------
+// Character limits
+// ---------------------------------------------------------------------------
+/** Max chars for text content at createStartUp / rebuild */
+const REBUILD_CHAR_LIMIT = 1000;
+/** Max chars for textContainerUpgrade */
+const UPGRADE_CHAR_LIMIT = 2000;
 
 // ---------------------------------------------------------------------------
 // Helper: build a TextContainerProperty
-//
-// UNDOCUMENTED PROTOBUF FIELDS — fontSize & fontColor
-// ---------------------------------------------------
-// The official SDK .d.ts does NOT expose `fontSize` or `fontColor` on
-// TextContainerProperty.  However, both fields exist in the underlying
-// protobuf schema and are serialised by `toJson()`.  We patch them onto
-// the constructed instance via `as any`.
-//
-// ⚠  Behaviour on real G2 hardware is UNVERIFIED.  If the glasses firmware
-//    ignores these fields, all text will render at the default size and
-//    colour — visual hierarchy will be flat, but the content remains
-//    readable on the 576×136-per-eye micro-LED display.
 // ---------------------------------------------------------------------------
 function text(
   id: number,
@@ -90,25 +88,28 @@ function text(
 }
 
 // ---------------------------------------------------------------------------
-// Helper: full-page rebuild
+// Helper: invisible list container for event capture (simulator compat)
 // ---------------------------------------------------------------------------
-async function rebuild(
-  bridge: EvenAppBridge,
-  containers: TextContainerProperty[],
-): Promise<boolean> {
-  return bridge.rebuildPageContainer(
-    new RebuildPageContainer({
-      containerTotalNum: containers.length,
-      textObject: containers,
+function eventCaptureList(): ListContainerProperty {
+  return new ListContainerProperty({
+    xPosition: 0,
+    yPosition: 0,
+    width: 1,
+    height: 1,
+    borderWidth: 0,
+    borderColor: 0,
+    borderRdaius: 0, // SDK typo — intentional
+    paddingLength: 0,
+    containerID: ID_EVENT_CAPTURE,
+    containerName: 'capture',
+    isEventCapture: 1,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1,
+      itemWidth: 1,
+      isItemSelectBorderEn: 0,
+      itemName: ['tap'],
     }),
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Truncate a query string for the header (≤25 chars)
-// ---------------------------------------------------------------------------
-function truncateQuery(query: string, maxLen = 25): string {
-  return query.length > maxLen ? query.slice(0, maxLen - 3) + '...' : query;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -116,95 +117,64 @@ function truncateQuery(query: string, maxLen = 25): string {
 // ---------------------------------------------------------------------------
 export class DisplayManager {
   private bridge: EvenAppBridge | null = null;
-
-  /** Whether createStartUpPageContainer has been called successfully */
   private _started = false;
 
-  /** Accumulated response text during streaming */
-  private _streamBuffer = '';
+  /** Reference to the shared conversation model */
+  private conversation: ConversationHistory | null = null;
 
-  /** Current query (stored for layout reuse) */
-  private _query = '';
-
-  /** Last footer text length (for accurate in-place upgrades) */
+  /** Tracked lengths for in-place textContainerUpgrade */
+  private _statusLen = 0;
   private _footerLen = 0;
+  private _transcriptLen = 0;
 
-  /** Deltas buffered while layout rebuild is in progress */
-  private _pendingDeltas: string[] = [];
+  /** Total chars appended since last rebuild (to decide when a rebuild is needed) */
+  private _transcriptCharBudgetUsed = 0;
 
-  /** True while an async rebuild is in flight (showStreaming) */
-  private _layoutPending = false;
-
-  /** Deltas accumulated for debounced flush */
+  /** Debounce for streaming delta flushes */
   private _deltaBatch: string[] = [];
-
-  /** Handle for the 100ms debounce timer */
   private _deltaTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Whether the display content has been truncated */
-  private _truncated = false;
-
-  /** Debounce interval (ms) for delta batching */
   private static readonly DELTA_FLUSH_MS = 100;
-
-  /** Character limit before truncation hint is shown */
-  private static readonly TRUNCATION_LIMIT = 1800;
-
-  /** Maximum stream buffer size to prevent unbounded memory growth */
-  private static readonly STREAM_BUFFER_CAP = 50_000;
-
-  // -----------------------------------------------------------------------
-  // Internal helpers
-  // -----------------------------------------------------------------------
-
-  /** Cancel any pending delta-flush timer and discard batched deltas. */
-  private _clearDeltaTimer(): void {
-    if (this._deltaTimer) {
-      clearTimeout(this._deltaTimer);
-      this._deltaTimer = null;
-    }
-    this._deltaBatch = [];
-  }
+  private _opQueue: Promise<void> = Promise.resolve();
 
   // -----------------------------------------------------------------------
   // Lifecycle
   // -----------------------------------------------------------------------
 
-  /**
-   * Store bridge reference and register the startup page container.
-   * Must be called once after waitForEvenAppBridge().
-   * The SDK requires createStartUpPageContainer() to be called exactly once
-   * before rebuildPageContainer or audioControl will work.
-   */
-  async init(bridge: EvenAppBridge): Promise<void> {
+  async init(bridge: EvenAppBridge, conv: ConversationHistory): Promise<void> {
     this.bridge = bridge;
-    await this.createStartup();
+    this.conversation = conv;
+    await this._createStartup();
   }
 
-  /**
-   * Call createStartUpPageContainer with a minimal loading layout.
-   * Sets `_started` on success; throws on failure.
-   */
-  private async createStartup(): Promise<void> {
+  private async _createStartup(): Promise<void> {
     const b = this.bridge;
-    if (!b) throw new Error('[Display] Bridge not set before createStartup()');
+    if (!b) throw new Error('[Display] Bridge not set');
+
+    const statusText = 'OpenClaw  ● Loading';
+    const transcriptText = 'Starting up...';
+    const footerText = 'Initialising';
 
     const result = await b.createStartUpPageContainer(
       new CreateStartUpPageContainer({
         containerTotalNum: 4,
         textObject: [
-          text(ID_TITLE,   'title',   8,   8, 460, 32, 24, PRIMARY, 'OpenClaw'),
-          text(ID_BADGE,   'badge', 480,   8,  88, 32, 18, ACCENT,  '● loading'),
-          text(ID_CONTENT, 'content', 8, 100, 560, 80, 24, SECOND,  'Starting up...', 1),
-          text(ID_FOOTER,  'footer',  8, 256, 560, 24, 18, MUTED,   'Initializing speech model'),
+          text(ID_STATUS,     'status',     8,   4, 560,  22, 16, SECOND, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  30, 560, 228, 18, PRIMARY, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 262, 560,  22, 14, MUTED,  footerText),
         ],
+        listObject: [eventCaptureList()],
       }),
     );
 
     if (result !== StartUpPageCreateResult.success) {
       throw new Error(`[Display] createStartUpPageContainer failed (code ${result})`);
     }
+
     this._started = true;
+    this._statusLen = statusText.length;
+    this._transcriptLen = transcriptText.length;
+    this._footerLen = footerText.length;
+    this._transcriptCharBudgetUsed = 0;
   }
 
   private requireBridge(): EvenAppBridge {
@@ -214,131 +184,142 @@ export class DisplayManager {
     return this.bridge;
   }
 
-  // -----------------------------------------------------------------------
-  // Layout: Loading (§4.9)
-  // -----------------------------------------------------------------------
-
-  async showLoading(): Promise<void> {
-    const b = this.requireBridge();
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460, 32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88, 32, 18, ACCENT,  '● loading'),
-      text(ID_CONTENT, 'content', 8, 100, 560, 80, 24, SECOND,  'Starting up...', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560, 24, 18, MUTED,   'Initializing speech model'),
-    ]);
+  private enqueue(fn: () => Promise<void>): Promise<void> {
+    this._opQueue = this._opQueue.then(fn, fn);
+    return this._opQueue;
   }
 
   // -----------------------------------------------------------------------
-  // Layout: Idle (§4.1)
+  // Full rebuild (used sparingly — causes flicker & scroll reset)
   // -----------------------------------------------------------------------
 
-  async showIdle(): Promise<void> {
+  async rebuildTranscript(statusLabel: string, footerHint: string): Promise<void> {
+    return this.enqueue(() => this._doRebuild(statusLabel, footerHint));
+  }
+
+  private async _doRebuild(statusLabel: string, footerHint: string): Promise<void> {
+    this.clearDeltaTimer();
     const b = this.requireBridge();
-    this._clearDeltaTimer();
-    this._streamBuffer = '';
-    this._query = '';
-    this._truncated = false;
-    this._pendingDeltas = [];
-    this._layoutPending = false;
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460, 32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88, 32, 18, MUTED,   '● idle'),
-      text(ID_CONTENT, 'content', 8, 100, 560, 80, 24, SECOND,  'Tap ring to speak', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560, 24, 18, MUTED,   'Ready'),
-    ]);
+
+    const statusText = `OpenClaw  ● ${statusLabel}`;
+    const transcriptText = this.conversation
+      ? this.conversation.formatTail(REBUILD_CHAR_LIMIT - 50)
+      : 'Ready.\n\nTap ring to ask anything.';
+
+    await b.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 4,
+        textObject: [
+          text(ID_STATUS,     'status',     8,   4, 560,  22, 16, SECOND, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  30, 560, 228, 18, PRIMARY, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 262, 560,  22, 14, MUTED,  footerHint),
+        ],
+        listObject: [eventCaptureList()],
+      }),
+    );
+
+    this._statusLen = statusText.length;
+    this._transcriptLen = transcriptText.length;
+    this._footerLen = footerHint.length;
+    this._transcriptCharBudgetUsed = 0;
   }
 
   // -----------------------------------------------------------------------
-  // Layout: Recording (§4.2)
+  // In-place updates (preferred — no flicker, preserves scroll)
   // -----------------------------------------------------------------------
 
-  async showRecording(): Promise<void> {
+  async updateStatus(label: string): Promise<void> {
     const b = this.requireBridge();
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, ACCENT,  '● Recording'),
-      text(ID_CONTENT, 'content', 8,  80, 560, 160, 24, PRIMARY, 'Listening...\n\n████████░░░░░░░░', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, SECOND,  'Tap to stop'),
-    ]);
+    const newText = `OpenClaw  ● ${label}`;
+    await b.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: ID_STATUS,
+        containerName: 'status',
+        contentOffset: 0,
+        contentLength: this._statusLen,
+        content: newText,
+      }),
+    );
+    this._statusLen = newText.length;
   }
 
-  // -----------------------------------------------------------------------
-  // Layout: Transcribing (§4.3)
-  // TODO: Phase 4 — animated dots via 500ms textContainerUpgrade cycle
-  // -----------------------------------------------------------------------
-
-  async showTranscribing(): Promise<void> {
+  async updateFooter(hint: string): Promise<void> {
     const b = this.requireBridge();
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460, 32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88, 32, 18, ACCENT,  '● Transcribing'),
-      text(ID_CONTENT, 'content', 8, 100, 560, 80, 24, SECOND,  'Transcribing audio...', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560, 24, 18, MUTED,   'Processing speech'),
-    ]);
+    await b.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: ID_FOOTER,
+        containerName: 'footer',
+        contentOffset: 0,
+        contentLength: this._footerLen,
+        content: hint,
+      }),
+    );
+    this._footerLen = hint.length;
   }
 
-  // -----------------------------------------------------------------------
-  // Layout: Thinking (§4.4)
-  // -----------------------------------------------------------------------
-
-  async showThinking(query: string): Promise<void> {
-    const b = this.requireBridge();
-    this._query = query;
-    // H4: template overhead is ~40 chars; keep total content ≤ 1000
-    const maxQueryLen = 960;
-    const safeQuery = query.length > maxQueryLen
-      ? query.slice(0, maxQueryLen - 1) + '…'
-      : query;
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, ACCENT,  '● Thinking'),
-      text(ID_CONTENT, 'content', 8,  48, 560, 200, 18, PRIMARY,
-        `You: ${safeQuery}\n\n━━━━━━━━━━━━━━━\nThinking...`, 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, MUTED,   'Waiting for response'),
-    ]);
+  /**
+   * Replace the entire transcript content in-place.
+   * Falls back to a full rebuild if the text is too long.
+   */
+  async replaceTranscript(transcriptText: string): Promise<void> {
+    return this.enqueue(() => this._doReplace(transcriptText));
   }
 
-  // -----------------------------------------------------------------------
-  // Layout: Streaming (§4.5)
-  // -----------------------------------------------------------------------
-
-  async showStreaming(query: string): Promise<void> {
-    const b = this.requireBridge();
-    this._query = query;
-    this._streamBuffer = '';
-    this._truncated = false;
-    this._clearDeltaTimer();
-    this._pendingDeltas = [];
-    this._layoutPending = true;
-    const queryTrunc = truncateQuery(query);
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 18, SECOND, `You: ${queryTrunc}`),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, ACCENT, '● Streaming'),
-      text(ID_CONTENT, 'content', 8,  48, 560, 200, 18, PRIMARY, '█', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, MUTED,  'Streaming...'),
-    ]);
-    this._layoutPending = false;
-    // Flush any deltas that arrived during the rebuild
-    if (this._pendingDeltas.length > 0) {
-      const merged = this._pendingDeltas.join('');
-      this._pendingDeltas = [];
-      await this.appendDelta(merged);
+  private async _doReplace(transcriptText: string): Promise<void> {
+    if (transcriptText.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this._doRebuild('idle', 'Tap to speak');
+      return;
     }
+    const b = this.requireBridge();
+    await b.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: ID_TRANSCRIPT,
+        containerName: 'transcript',
+        contentOffset: 0,
+        contentLength: this._transcriptLen,
+        content: transcriptText,
+      }),
+    );
+    this._transcriptLen = transcriptText.length;
+    this._transcriptCharBudgetUsed = 0;
+  }
+
+  /**
+   * Append text to the end of the transcript (for streaming deltas).
+   * Triggers a rebuild if the cumulative appended text is too large.
+   */
+  async appendToTranscript(appendText: string): Promise<void> {
+    return this.enqueue(() => this._doAppend(appendText));
+  }
+
+  private async _doAppend(appendText: string): Promise<void> {
+    if (!appendText) return;
+
+    if (this._transcriptLen + appendText.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this._doRebuild('Streaming', 'Streaming...');
+      return;
+    }
+
+    const b = this.requireBridge();
+    await b.textContainerUpgrade(
+      new TextContainerUpgrade({
+        containerID: ID_TRANSCRIPT,
+        containerName: 'transcript',
+        contentOffset: this._transcriptLen,
+        contentLength: 0,
+        content: appendText,
+      }),
+    );
+    this._transcriptLen += appendText.length;
+    this._transcriptCharBudgetUsed += appendText.length;
   }
 
   // -----------------------------------------------------------------------
-  // Streaming: append delta via textContainerUpgrade
+  // Streaming delta batching (100ms debounce)
   // -----------------------------------------------------------------------
 
   async appendDelta(delta: string): Promise<void> {
     if (!delta) return;
-
-    // Buffer deltas while layout transition is in progress
-    if (this._layoutPending) {
-      this._pendingDeltas.push(delta);
-      return;
-    }
-
     this._deltaBatch.push(delta);
     if (!this._deltaTimer) {
       this._deltaTimer = setTimeout(() => {
@@ -349,106 +330,23 @@ export class DisplayManager {
     }
   }
 
-  /**
-   * Flush batched deltas to the display.
-   * Handles truncation at TRUNCATION_LIMIT and cursor management.
-   */
   private async _flushDeltas(): Promise<void> {
     this._deltaTimer = null;
     if (this._deltaBatch.length === 0) return;
-
     const merged = this._deltaBatch.join('');
     this._deltaBatch = [];
-
-    const b = this.requireBridge();
-    const cleanDelta = stripMarkdown(merged);
-
-    // Capture the actual display length BEFORE extending the buffer:
-    // display shows previousText + '█', so length = _streamBuffer.length + 1
-    const prevDisplayLen = this._streamBuffer.length + 1;
-
-    // Always accumulate in stream buffer (for full text access via page 1)
-    this._streamBuffer += cleanDelta;
-
-    // Cap unbounded growth (M-3)
-    if (this._streamBuffer.length > DisplayManager.STREAM_BUFFER_CAP) {
-      this._streamBuffer = this._streamBuffer.slice(0, DisplayManager.STREAM_BUFFER_CAP);
-    }
-
-    // If already truncated, don't update display (but keep accumulating)
-    if (this._truncated) return;
-
-    // Check truncation threshold
-    if (this._streamBuffer.length > DisplayManager.TRUNCATION_LIMIT) {
-      this._truncated = true;
-      const truncatedText =
-        this._streamBuffer.slice(0, DisplayManager.TRUNCATION_LIMIT) +
-        '… [double-tap for more]';
-      await b.textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: ID_CONTENT,
-          containerName: 'content',
-          contentOffset: 0,
-          contentLength: prevDisplayLen,  // actual chars on display
-          content: truncatedText,
-        }),
-      );
-      return;
-    }
-
-    // Normal append: replace cursor with new text + cursor
-    const offset = this._streamBuffer.length - cleanDelta.length;
-    await b.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ID_CONTENT,
-        containerName: 'content',
-        contentOffset: offset,
-        contentLength: 1, // replace the trailing cursor character
-        content: cleanDelta + '█',
-      }),
-    );
+    await this.appendToTranscript(merged);
   }
 
-  // -----------------------------------------------------------------------
-  // Layout: Response Complete / Displaying (§4.6)
-  // -----------------------------------------------------------------------
-
-  async showResponse(query: string, response: string): Promise<void> {
-    const b = this.requireBridge();
-    this._query = query;
-    this._streamBuffer = response;
-    const queryTrunc = truncateQuery(query);
-
-    // M10: strip markdown before display
-    const clean = stripMarkdown(response);
-
-    // C2: SDK TextContainerProperty.content max is 1000 chars at rebuild.
-    // The suffix '… [double-tap for more]' is 22 chars → 978 + 22 = 1000.
-    const displayText = clean.length > 978
-      ? clean.slice(0, 978) + '… [double-tap for more]'
-      : clean;
-
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 18, SECOND, `You: ${queryTrunc}`),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, MUTED,  '● Done'),
-      text(ID_CONTENT, 'content', 8,  48, 560, 200, 18, PRIMARY, displayText, 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, MUTED,  'Tap to dismiss · Double-tap for more'),
-    ]);
+  clearDeltaTimer(): void {
+    if (this._deltaTimer) {
+      clearTimeout(this._deltaTimer);
+      this._deltaTimer = null;
+    }
+    this._deltaBatch = [];
   }
 
-  /**
-   * Transition from streaming → displaying in-place (badge + footer only).
-   * Strips the cursor and updates badge/footer without a full rebuild.
-   *
-   * NOTE (M8): The badge text shrinks from '● Streaming' (11 chars) to
-   * '● Done' (6 chars). We assume the SDK handles shorter replacement text
-   * correctly via textContainerUpgrade. If this produces rendering artefacts
-   * on hardware, replace this method body with a full `rebuild()` call.
-   */
-  async finaliseStream(): Promise<void> {
-    const b = this.requireBridge();
-
-    // Clear any pending delta timer and flush remaining deltas synchronously
+  async flushRemainingDeltas(): Promise<void> {
     if (this._deltaTimer) {
       clearTimeout(this._deltaTimer);
       this._deltaTimer = null;
@@ -456,155 +354,106 @@ export class DisplayManager {
     if (this._deltaBatch.length > 0) {
       const merged = this._deltaBatch.join('');
       this._deltaBatch = [];
-      const clean = stripMarkdown(merged);
-      this._streamBuffer += clean;
-      // Send unflushed text to display in place of cursor (no new cursor)
-      if (!this._truncated) {
-        const displayOffset = this._streamBuffer.length - clean.length;
-        await b.textContainerUpgrade(
-          new TextContainerUpgrade({
-            containerID: ID_CONTENT,
-            containerName: 'content',
-            contentOffset: displayOffset,
-            contentLength: 1,  // the trailing '█'
-            content: clean,    // no cursor appended
-          }),
-        );
-      }
-    } else if (!this._truncated) {
-      // No pending batch — just strip the cursor
-      const cursorLen = '█'.length;
-      await b.textContainerUpgrade(
-        new TextContainerUpgrade({
-          containerID: ID_CONTENT,
-          containerName: 'content',
-          contentOffset: this._streamBuffer.length,
-          contentLength: cursorLen,
-          content: '', // remove cursor
-        }),
-      );
+      await this.appendToTranscript(merged);
     }
-
-    // Update badge: Streaming → Done
-    await b.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ID_BADGE,
-        containerName: 'badge',
-        contentOffset: 0,
-        contentLength: '● Streaming'.length,
-        content: '● Done',
-      }),
-    );
-
-    // Update footer
-    const footerContent = 'Tap to dismiss · Double-tap for more';
-    await b.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ID_FOOTER,
-        containerName: 'footer',
-        contentOffset: 0,
-        contentLength: this._footerLen || 'Streaming...'.length,
-        content: footerContent,
-      }),
-    );
-    this._footerLen = footerContent.length;
   }
 
   // -----------------------------------------------------------------------
-  // Layout: Error (§4.7)
+  // High-level state display methods
   // -----------------------------------------------------------------------
 
-  async showError(message: string, hint = 'Try again'): Promise<void> {
-    const b = this.requireBridge();
-    this._clearDeltaTimer();
-    this._pendingDeltas = [];
-    this._layoutPending = false;
-    this._truncated = false;
-    this._streamBuffer = '';
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, PRIMARY, '✕ Error'),
-      text(ID_CONTENT, 'content', 8,  48, 560, 200, 18, PRIMARY,
-        `Error\n\n${message}\n\n${hint}`, 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, SECOND,  'Tap to dismiss'),
-    ]);
+  async showIdle(): Promise<void> {
+    this.clearDeltaTimer();
+    const transcript = this.conversation
+      ? this.conversation.format()
+      : 'Ready.\n\nTap ring to ask anything.';
+
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this.rebuildTranscript('Idle', 'Tap to speak · Scroll to read');
+    } else {
+      await this.replaceTranscript(transcript);
+      await this.updateStatus('Idle');
+      await this.updateFooter('Tap to speak · Scroll to read');
+    }
+  }
+
+  async showRecording(): Promise<void> {
+    await this.updateStatus('Recording');
+    await this.updateFooter('Tap to stop');
+  }
+
+  async showTranscribing(): Promise<void> {
+    await this.updateStatus('Transcribing');
+    await this.updateFooter('Processing speech...');
+  }
+
+  async showTranscription(): Promise<void> {
+    const transcript = this.conversation ? this.conversation.format() : '';
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this.rebuildTranscript('Transcribing', 'Sending to OpenClaw...');
+    } else {
+      await this.replaceTranscript(transcript);
+    }
+    await this.updateFooter('Sending to OpenClaw...');
+  }
+
+  async showThinking(): Promise<void> {
+    await this.updateStatus('Thinking');
+    await this.updateFooter('Waiting for response...');
+  }
+
+  async showStreaming(): Promise<void> {
+    await this.updateStatus('Streaming');
+    await this.updateFooter('Streaming...');
+    const transcript = this.conversation ? this.conversation.format() : '';
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 200) {
+      await this.rebuildTranscript('Streaming', 'Streaming...');
+    } else {
+      await this.replaceTranscript(transcript);
+    }
+  }
+
+  async finaliseStream(): Promise<void> {
+    await this.flushRemainingDeltas();
+    const transcript = this.conversation ? this.conversation.format() : '';
+    await this.replaceTranscript(transcript);
+    await this.updateStatus('Idle');
+    await this.updateFooter('Tap to speak · Scroll to read');
+  }
+
+  async showError(message: string, hint = 'Tap to continue'): Promise<void> {
+    this.clearDeltaTimer();
+    await this.updateStatus('Error');
+    const transcript = this.conversation ? this.conversation.format() : '';
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this.rebuildTranscript('Error', hint);
+    } else {
+      await this.replaceTranscript(transcript);
+      await this.updateFooter(hint);
+    }
+  }
+
+  async showDisconnected(): Promise<void> {
+    this.clearDeltaTimer();
+    await this.updateStatus('Offline');
+    await this.updateFooter('Reconnecting...');
+  }
+
+  async showLoading(): Promise<void> {
+    await this.updateStatus('Loading');
+    await this.updateFooter('Initialising speech model');
   }
 
   // -----------------------------------------------------------------------
-  // Layout: Disconnected (§4.8)
+  // Accessors (backward compat for InputHandler)
   // -----------------------------------------------------------------------
 
-  async showDisconnected(retrySeconds?: number): Promise<void> {
-    const b = this.requireBridge();
-    this._clearDeltaTimer();
-    this._pendingDeltas = [];
-    this._layoutPending = false;
-    this._truncated = false;
-    this._streamBuffer = '';
-    const footerText = retrySeconds !== undefined
-      ? `Retry in ${retrySeconds}s...`
-      : 'Reconnecting...';
-
-    await rebuild(b, [
-      text(ID_TITLE,   'title',   8,   8, 460,  32, 24, PRIMARY, 'OpenClaw'),
-      text(ID_BADGE,   'badge', 480,   8,  88,  32, 18, MUTED,   '○ Offline'),
-      text(ID_CONTENT, 'content', 8,  60, 560, 180, 18, SECOND,
-        'Connecting to Gateway...\n\n━━━━━━━━━━━━━━━\n\nMake sure your PC is on\nand connected to the same\nWiFi network.', 1),
-      text(ID_FOOTER,  'footer',  8, 256, 560,  24, 18, MUTED,   footerText),
-    ]);
-    // M5: track actual footer length for in-place upgrades
-    this._footerLen = footerText.length;
-  }
-
-  /**
-   * Update disconnected footer countdown in-place.
-   */
-  async updateRetryCountdown(seconds: number): Promise<void> {
-    const b = this.requireBridge();
-    const newText = `Retry in ${seconds}s...`;
-    // M5: use tracked footer length instead of hardcoded value
-    await b.textContainerUpgrade(
-      new TextContainerUpgrade({
-        containerID: ID_FOOTER,
-        containerName: 'footer',
-        contentOffset: 0,
-        contentLength: this._footerLen || newText.length,
-        content: newText,
-      }),
-    );
-    this._footerLen = newText.length;
-  }
-
-  // -----------------------------------------------------------------------
-  // Page 1: Detail View (§5)
-  // -----------------------------------------------------------------------
-
-  async showDetailPage(
-    response: string,
-    meta: { model: string; elapsed: number; session: string },
-  ): Promise<void> {
-    const b = this.requireBridge();
-    await rebuild(b, [
-      text(1, 'p1_header',  8,   8, 560,  32, 24, PRIMARY,
-        'Response Details         [Page 2]'),
-      text(2, 'p1_content', 8,  48, 560, 200, 18, PRIMARY,
-        `${response}\n\n━━━━━━━━━━━━━━━\nModel: ${meta.model}\nTime: ${meta.elapsed}s\nSession: ${meta.session}`, 1),
-      text(3, 'p1_footer',  8, 256, 560,  24, 18, MUTED,
-        'Double-tap: back · Tap: dismiss'),
-    ]);
-  }
-
-  // -----------------------------------------------------------------------
-  // Accessors for external use (e.g., page toggle logic)
-  // -----------------------------------------------------------------------
-
-  /** Get the accumulated stream buffer content */
   get streamBuffer(): string {
-    return this._streamBuffer;
+    return this.conversation ? this.conversation.lastAssistantText : '';
   }
 
-  /** Get the current query */
   get query(): string {
-    return this._query;
+    if (!this.conversation) return '';
+    return this.conversation.lastUserText;
   }
 }

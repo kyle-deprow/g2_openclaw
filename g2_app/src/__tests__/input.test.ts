@@ -117,13 +117,6 @@ describe('InputHandler', () => {
     expect(audio.stop).toHaveBeenCalled();
   });
 
-  it('tap in displaying dismisses', () => {
-    sm._current = 'displaying';
-    handler._handleEvent(CLICK);
-    expect(sm.transition).toHaveBeenCalledWith('idle');
-    expect(display.showIdle).toHaveBeenCalled();
-  });
-
   it('tap in error dismisses', () => {
     sm._current = 'error';
     handler._handleEvent(CLICK);
@@ -177,14 +170,11 @@ describe('InputHandler', () => {
   // Double-tap
   // -----------------------------------------------------------------------
 
-  it('double tap in displaying shows detail', () => {
-    sm._current = 'displaying';
+  it('double tap is a no-op (phase 4 placeholder)', () => {
+    sm._current = 'idle';
     handler._handleEvent(DOUBLE_CLICK);
-    expect(display.showDetailPage).toHaveBeenCalledWith('test response', {
-      model: 'mock',
-      elapsed: 0,
-      session: 'local',
-    });
+    // No action expected — double-tap is a placeholder for Phase 4
+    expect(display.showIdle).not.toHaveBeenCalled();
   });
 
   // -----------------------------------------------------------------------
@@ -196,8 +186,9 @@ describe('InputHandler', () => {
     audio._isRecording = true;
     handler._handleEvent(FG_EXIT);
     expect(audio.stop).toHaveBeenCalled();
-    expect(sm.transition).toHaveBeenCalledWith('idle');
-    expect(display.showIdle).toHaveBeenCalled();
+    // Should NOT transition to idle — server drives the state flow
+    expect(sm.transition).not.toHaveBeenCalled();
+    expect(display.showIdle).not.toHaveBeenCalled();
   });
 
   it('foreground enter reconnects if disconnected', () => {
@@ -257,22 +248,39 @@ describe('InputHandler', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Empty event guard
+  // Bare event (no sub-object) treated as click
   // -----------------------------------------------------------------------
 
-  it('empty event (no sub-object) is ignored', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('bare event (no sub-object) treated as click', () => {
+    sm._current = 'idle';
 
     // Retrieve the onEvenHubEvent callback registered during init
     const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
 
-    // Fire an event with no textEvent, listEvent, or sysEvent
+    // Fire an event with no textEvent, listEvent, sysEvent, or audioEvent
     eventCallback({});
 
-    expect(warnSpy).toHaveBeenCalledWith('[Input] Empty event received — ignoring');
-    // _handleEvent should NOT have been called — verify no state change
+    // Should be treated as a click → starts recording in idle state
+    expect(audio.start).toHaveBeenCalled();
+    expect(sm.transition).toHaveBeenCalledWith('recording');
+  });
+
+  // -----------------------------------------------------------------------
+  // Audio event NOT treated as click
+  // -----------------------------------------------------------------------
+
+  it('audio event is not treated as a click', () => {
+    sm._current = 'recording';
+
+    // Retrieve the onEvenHubEvent callback registered during init
+    const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
+
+    // Fire an event with only audioEvent populated (simulates PCM frame)
+    eventCallback({ audioEvent: { audioPcm: new Uint8Array(3200) } });
+
+    // Should NOT stop recording or trigger any state change
+    expect(audio.stop).not.toHaveBeenCalled();
     expect(sm.transition).not.toHaveBeenCalled();
-    expect(audio.start).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(display.showIdle).not.toHaveBeenCalled();
   });
 });

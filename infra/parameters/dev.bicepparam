@@ -28,3 +28,6 @@ param modelDeployments = [
     rateLimitPerMinute: 100
   }
 ]
+
+param aiServicesLocation = 'eastus2'
+param modelRouterCapacity = 100

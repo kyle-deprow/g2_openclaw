@@ -2,15 +2,15 @@
   "models": {
     "providers": {
       "azure-oai-g2": {
-        "baseUrl": "https://oai-ss-aisense-dev-eastus.openai.azure.com/openai/deployments/gpt-41",
+        "baseUrl": "https://aisvc-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/model-router",
         "api": "openai-completions",
-        "apiKey": "env:AZURE_OPENAI_API_KEY",
+        "apiKey": "env:AZURE_AI_SERVICES_API_KEY",
         "models": [
           {
-            "id": "gpt-41",
-            "name": "GPT-4.1 (Azure, eastus)",
+            "id": "model-router",
+            "name": "Model Router (Azure AI Services, eastus2)",
             "contextWindow": 1047576,
-            "maxTokens": 32768,
+            "maxTokens": 16384,
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
             "reasoning": false
@@ -22,7 +22,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "azure-oai-g2/gpt-41"
+        "primary": "azure-oai-g2/model-router"
       },
       "compaction": {
         "mode": "safeguard"

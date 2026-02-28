@@ -2,7 +2,7 @@
  * azure-api-version-preload.cjs
  *
  * Node.js CommonJS preload module that monkey-patches globalThis.fetch to
- * inject `api-version=2024-10-21` into Azure OpenAI requests.
+ * inject `api-version=2024-12-01-preview` into Azure OpenAI requests.
  *
  * WHY: OpenClaw uses the standard OpenAI SDK client (not AzureOpenAI).
  * The standard client doesn't append the mandatory `api-version` query
@@ -19,7 +19,7 @@
 
 "use strict";
 
-const AZURE_API_VERSION = "2024-10-21";
+const AZURE_API_VERSION = "2024-12-01-preview";
 const AZURE_HOST_PATTERN = /\.openai\.azure\.com$/i;
 const debug = process.env.AZURE_PRELOAD_DEBUG === "1";
 

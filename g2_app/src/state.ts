@@ -7,8 +7,7 @@ const TRANSITIONS: Record<AppStatus, AppStatus[]> = {
   recording:    ['transcribing', 'idle', 'error', 'disconnected'],
   transcribing: ['thinking', 'idle', 'error', 'disconnected'],
   thinking:     ['streaming', 'idle', 'error', 'disconnected'],
-  streaming:    ['displaying', 'idle', 'error', 'disconnected'],
-  displaying:   ['idle', 'recording', 'error', 'disconnected'],
+  streaming:    ['idle', 'error', 'disconnected'],
   error:        ['idle', 'disconnected'],
   disconnected: ['loading', 'idle', 'error'],
 };

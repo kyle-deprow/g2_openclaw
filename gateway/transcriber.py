@@ -53,6 +53,7 @@ class Transcriber:
                 temperature=0.0,
                 condition_on_previous_text=False,
                 vad_filter=True,
+                vad_parameters={"threshold": 0.3},
             )
             return " ".join(seg.text.strip() for seg in segments).strip()
 

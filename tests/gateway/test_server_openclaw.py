@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -11,12 +12,14 @@ from unittest.mock import AsyncMock
 import pytest
 import websockets
 from gateway.config import GatewayConfig
+from gateway.device_identity import _generate_identity
 from gateway.openclaw_client import OpenClawClient, OpenClawError
 from gateway.server import (
     GatewayServer,
     GatewaySession,
     MockResponseHandler,
     OpenClawResponseHandler,
+    SessionState,
 )
 
 # ---------------------------------------------------------------------------
@@ -252,6 +255,80 @@ class TestHandleTextWithOpenClaw:
 
 
 # ---------------------------------------------------------------------------
+# Empty transcription guard
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestEmptyTranscriptionSkipsOpenClaw:
+    """_handle_stop_audio returns early when transcription is empty/whitespace."""
+
+    @pytest.mark.parametrize("transcription_text", ["", "   ", "\n", " \t "])
+    async def test_empty_transcription_sends_error_and_idle(self, transcription_text: str) -> None:
+        """Empty/whitespace transcription → error frame → idle, no _handle_text."""
+        mock_transcriber = AsyncMock()
+        mock_transcriber.transcribe.return_value = transcription_text
+
+        handler = MockResponseHandler()
+        fake_ws = _FakeWebSocket()
+        session = GatewaySession(
+            fake_ws,  # type: ignore[arg-type]
+            handler=handler,
+            transcriber=mock_transcriber,
+        )
+
+        # Simulate a recording in progress with a non-empty buffer
+        buf = AsyncMock()
+        buf.is_empty = False
+        buf.to_numpy.return_value = "fake-audio"
+        session._audio_buffer = buf
+        session._state = SessionState.RECORDING
+
+        await session._handle_stop_audio()
+
+        frames = fake_ws.frames()
+
+        # Expected: transcribing status → transcription("") → error → idle
+        assert frames[0] == {"type": "status", "status": "transcribing"}
+        assert {"type": "transcription", "text": ""} in frames
+        error_frames = [f for f in frames if f["type"] == "error"]
+        assert len(error_frames) == 1
+        assert error_frames[0]["code"] == "TRANSCRIPTION_FAILED"
+        assert "no speech" in error_frames[0]["detail"].lower()
+        assert frames[-1] == {"type": "status", "status": "idle"}
+
+        # Must NOT have called _handle_text (no thinking/streaming status)
+        assert "thinking" not in [f.get("status") for f in frames if f["type"] == "status"]
+
+    async def test_nonempty_transcription_proceeds_normally(self) -> None:
+        """Non-empty transcription → forwards to _handle_text."""
+        mock_transcriber = AsyncMock()
+        mock_transcriber.transcribe.return_value = "hello world"
+
+        handler = MockResponseHandler()
+        fake_ws = _FakeWebSocket()
+        session = GatewaySession(
+            fake_ws,  # type: ignore[arg-type]
+            handler=handler,
+            transcriber=mock_transcriber,
+        )
+
+        buf = AsyncMock()
+        buf.is_empty = False
+        buf.to_numpy.return_value = "fake-audio"
+        session._audio_buffer = buf
+        session._state = SessionState.RECORDING
+
+        await session._handle_stop_audio()
+
+        frames = fake_ws.frames()
+
+        # Should have transcription frame then proceed to thinking
+        assert {"type": "transcription", "text": "hello world"} in frames
+        assert "thinking" in [f.get("status") for f in frames if f["type"] == "status"]
+
+
+# ---------------------------------------------------------------------------
 # GatewayServer auto-handler selection
 # ---------------------------------------------------------------------------
 
@@ -301,6 +378,17 @@ class TestFullWebSocketIntegration:
         # Inline minimal mock OpenClaw handler (same protocol as tests/mocks)
         async def mock_oc_handler(ws: websockets.ServerConnection) -> None:
             deltas = ["Hello ", "from ", "mock ", "Open", "Claw."]
+            # Send challenge nonce immediately on connect
+            nonce = secrets.token_urlsafe(16)
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "event",
+                        "event": "connect.challenge",
+                        "payload": {"nonce": nonce},
+                    }
+                )
+            )
             async for raw in ws:
                 msg = json.loads(raw)
                 if msg.get("method") == "connect":
@@ -352,6 +440,7 @@ class TestFullWebSocketIntegration:
                 host="127.0.0.1",
                 port=oc_port,
                 token="test-token",
+                device_identity=_generate_identity(),
             )
             oc_handler = OpenClawResponseHandler(client)
             config = GatewayConfig(

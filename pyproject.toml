@@ -11,6 +11,7 @@ dependencies = [
     "websockets>=16.0",
     "python-dotenv>=1.2.1",
     "numpy>=1.26",
+    "sounddevice>=0.5.5",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +22,11 @@ dev = [
     "mypy>=1.10",
     "pre-commit>=3.7",
 ]
-whisper = ["faster-whisper>=1.0"]
+whisper = [
+    "faster-whisper>=1.0",
+    "nvidia-cublas-cu12>=12.4",
+    "nvidia-cudnn-cu12>=9.1",
+]
 
 [project.scripts]
 azure-infra-cli = "infra.main:app"

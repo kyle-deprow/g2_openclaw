@@ -6,8 +6,12 @@ import asyncio
 import hmac
 import json
 import logging
+import sys
+import wave
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
@@ -88,11 +92,13 @@ class OpenClawResponseHandler:
         self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
         """Forward message to OpenClaw, relay streamed deltas, send end frame."""
+        logger.info("Sending to OpenClaw: %s", message[:100])
         stream = await self._client.send_message(message)
 
         await send_frame({"type": "status", "status": "streaming"})
 
         async for delta in stream:
+            logger.debug("OpenClaw delta: %s", delta[:50] if delta else "")
             await send_frame({"type": "assistant", "delta": delta})
 
         await send_frame({"type": "end"})
@@ -111,6 +117,8 @@ class GatewaySession:
         handler: ResponseHandler | None = None,
         transcriber: Transcriber | None = None,
         timeout: int = 120,
+        local_audio: bool = False,
+        test_wav: str | None = None,
     ) -> None:
         self.ws = ws
         self._state = SessionState.IDLE
@@ -119,10 +127,25 @@ class GatewaySession:
         self._audio_buffer: AudioBuffer | None = None
         self._timeout = timeout
         self._recording_start: float | None = None
+        self._local_audio = local_audio
+        self._local_stream: Any = None  # sounddevice.InputStream when active
+        self._test_wav = test_wav
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
         await self.ws.send(serialize(frame))
+
+    def _stop_local_stream(self) -> None:
+        """Stop and close the local sounddevice stream if active."""
+        if self._local_stream is not None:
+            try:
+                self._local_stream.stop()
+                self._local_stream.close()
+                logger.info("Local audio capture stopped")
+            except Exception:
+                logger.debug("Error stopping local audio stream", exc_info=True)
+            finally:
+                self._local_stream = None
 
     async def handle(self) -> None:
         await self.send_frame({"type": "connected", "version": "1.0"})
@@ -196,6 +219,10 @@ class GatewaySession:
 
     async def _handle_binary(self, data: bytes) -> None:
         """Handle binary frame (PCM audio data)."""
+        if self._local_audio:
+            # In local-audio mode the mic stream feeds the buffer directly —
+            # silently discard binary frames from the WebSocket.
+            return
         if self._state != SessionState.RECORDING:
             logger.warning("Binary frame received while not recording — ignoring")
             return
@@ -285,6 +312,12 @@ class GatewaySession:
             )
             return
 
+        logger.info(
+            "start_audio: sample_rate=%d, channels=%d, sample_width=%d",
+            sample_rate,
+            channels,
+            sample_width,
+        )
         self._audio_buffer = AudioBuffer(
             sample_rate=sample_rate,
             channels=channels,
@@ -292,18 +325,91 @@ class GatewaySession:
         )
         self._recording_start = asyncio.get_event_loop().time()
         self._state = SessionState.RECORDING
+
+        # Start local mic capture when --local-audio is enabled
+        if self._local_audio:
+            try:
+                import sounddevice as sd  # type: ignore[import-not-found]  # lazy import
+
+                def _audio_callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
+                    if status:
+                        logger.warning("Local audio stream status: %s", status)
+                    if self._audio_buffer is not None:
+                        self._audio_buffer.append(indata.tobytes())
+
+                self._local_stream = sd.InputStream(
+                    samplerate=sample_rate,
+                    channels=channels,
+                    dtype="int16",
+                    blocksize=sample_rate // 10,  # 100 ms chunks
+                    callback=_audio_callback,
+                )
+                self._local_stream.start()
+                logger.info(
+                    "Local audio capture started (rate=%d, ch=%d, blocksize=%d)",
+                    sample_rate,
+                    channels,
+                    sample_rate // 10,
+                )
+            except Exception:
+                logger.exception("Failed to start local audio capture")
+                self._local_stream = None
+
         await self.send_frame({"type": "status", "status": "recording"})
 
     async def _handle_stop_audio(self) -> None:
         """Stop recording and run transcription pipeline."""
+        # Stop local mic stream if active
+        self._stop_local_stream()
+
         self._state = SessionState.TRANSCRIBING
         self._recording_start = None
         await self.send_frame({"type": "status", "status": "transcribing"})
 
-        buf = self._audio_buffer
-        self._audio_buffer = None
+        # --test-wav mode: load WAV file instead of recorded audio
+        if self._test_wav:
+            logger.info("TEST WAV MODE: loading %s instead of recorded audio", self._test_wav)
+            self._audio_buffer = None
+            try:
+                import numpy as np
 
-        if buf is None or buf.is_empty:
+                with wave.open(self._test_wav, "rb") as wf:
+                    if wf.getsampwidth() != 2:
+                        raise ValueError(
+                            f"Test WAV must be 16-bit PCM, got {wf.getsampwidth() * 8}-bit"
+                        )
+                    frames = wf.readframes(wf.getnframes())
+                    samples = np.frombuffer(frames, dtype=np.int16)
+                    # Mix to mono if stereo
+                    if wf.getnchannels() > 1:
+                        samples = (
+                            samples.reshape(-1, wf.getnchannels()).mean(axis=1).astype(np.int16)
+                        )
+                    audio_array = samples.astype(np.float32) / 32768.0
+                    logger.info(
+                        "TEST WAV: %d samples, %.1fs at %dHz",
+                        len(audio_array),
+                        len(audio_array) / wf.getframerate(),
+                        wf.getframerate(),
+                    )
+            except Exception:
+                logger.exception("Failed to load test WAV file: %s", self._test_wav)
+                self._state = SessionState.IDLE
+                await self.send_frame(
+                    {
+                        "type": "error",
+                        "detail": "Failed to load test WAV file",
+                        "code": ErrorCode.INTERNAL_ERROR,
+                    }
+                )
+                await self.send_frame({"type": "status", "status": "idle"})
+                return
+        else:
+            # Normal mode: use recorded audio buffer
+            buf = self._audio_buffer
+            self._audio_buffer = None
+
+        if not self._test_wav and (buf is None or buf.is_empty):
             self._state = SessionState.IDLE
             await self.send_frame(
                 {
@@ -329,7 +435,41 @@ class GatewaySession:
             return
 
         try:
-            audio_array = buf.to_numpy()
+            if self._test_wav:
+                # audio_array already loaded above
+                pass
+            else:
+                assert buf is not None  # narrowed by guard above
+                audio_array = buf.to_numpy()
+                try:
+                    import numpy as _np
+
+                    rms = float(_np.sqrt(_np.mean(audio_array**2)))
+                    peak = float(_np.max(_np.abs(audio_array)))
+                    logger.info(
+                        "Pre-transcription audio: samples=%d, RMS=%.4f, Peak=%.4f",
+                        len(audio_array),
+                        rms,
+                        peak,
+                    )
+                    # Save diagnostic WAV for debugging audio issues
+                    import time as _time
+                    import wave as _wave
+
+                    _diag_path = f"/tmp/gateway_audio_{int(_time.time())}.wav"
+                    with _wave.open(_diag_path, "wb") as _wf:
+                        _wf.setnchannels(buf.channels)
+                        _wf.setsampwidth(buf.sample_width)
+                        _wf.setframerate(buf.sample_rate)
+                        _wf.writeframes((audio_array * 32768).astype(_np.int16).tobytes())
+                    logger.info(
+                        "Diagnostic WAV saved: %s (sr=%d ch=%d)",
+                        _diag_path,
+                        buf.sample_rate,
+                        buf.channels,
+                    )
+                except Exception:
+                    pass  # diagnostic only — never block transcription
             text = await self._transcriber.transcribe(audio_array)
         except TranscriptionError as exc:
             logger.error("Transcription failed: %s", exc)
@@ -363,6 +503,21 @@ class GatewaySession:
                     "type": "error",
                     "detail": "Internal transcription error",
                     "code": ErrorCode.INTERNAL_ERROR,
+                }
+            )
+            await self.send_frame({"type": "status", "status": "idle"})
+            return
+
+        # Skip OpenClaw when transcription is empty (silence / no speech)
+        if not text.strip():
+            logger.debug("Empty transcription — no speech detected")
+            self._state = SessionState.IDLE
+            await self.send_frame({"type": "transcription", "text": ""})
+            await self.send_frame(
+                {
+                    "type": "error",
+                    "detail": "No speech detected — try again",
+                    "code": ErrorCode.TRANSCRIPTION_FAILED,
                 }
             )
             await self.send_frame({"type": "status", "status": "idle"})
@@ -489,7 +644,12 @@ class GatewayServer:
 
         # --- replace existing session (single-connection model) ---
         session = GatewaySession(
-            ws, self._handler, self._transcriber, timeout=self.config.agent_timeout
+            ws,
+            self._handler,
+            self._transcriber,
+            timeout=self.config.agent_timeout,
+            local_audio=self.config.local_audio,
+            test_wav=self.config.test_wav,
         )
         old_session = self._current_session
         self._current_session = session  # claim the slot first
@@ -506,6 +666,8 @@ class GatewayServer:
         except websockets.ConnectionClosed:
             logger.info("Connection closed")
         finally:
+            # Clean up local audio stream on disconnect
+            session._stop_local_stream()
             if self._current_session is session:
                 self._current_session = None
 
@@ -530,13 +692,90 @@ class GatewayServer:
             await asyncio.Future()  # block forever
 
 
+def _setup_cuda_library_paths() -> None:
+    """Pre-load CUDA shared libraries so ctranslate2/faster-whisper can find them.
+
+    Setting LD_LIBRARY_PATH after process start has no effect on dlopen(),
+    so we use ctypes.CDLL with RTLD_GLOBAL to make the symbols available
+    before ctranslate2 is imported.
+    """
+    import ctypes
+
+    search_roots = [
+        # 1. Current venv site-packages
+        *sorted(Path(sys.prefix).glob("lib/python*/site-packages/nvidia")),
+        # 2. uv cache
+        Path.home() / ".cache" / "uv",
+        # 3. System CUDA installs
+        *sorted(Path("/usr/local").glob("cuda*/lib64")),
+        # 4. Distro multiarch lib dir
+        Path("/usr/lib/x86_64-linux-gnu"),
+    ]
+
+    # Libraries to pre-load (order matters — cublas before cudnn)
+    targets = ["libcublasLt.so.12", "libcublas.so.12", "libcudnn.so"]
+
+    for lib_name in targets:
+        # Check if already loadable
+        try:
+            ctypes.CDLL(lib_name)
+            logger.info("CUDA lib %s: already loadable", lib_name)
+            continue
+        except OSError:
+            pass
+
+        # Search for the library file
+        found = False
+        for root in search_roots:
+            if not root.exists() or root.is_file():
+                continue
+            matches = list(root.rglob(lib_name))
+            if matches:
+                lib_path = matches[0]
+                try:
+                    ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+                    logger.info("CUDA lib %s pre-loaded from %s", lib_name, lib_path)
+                    found = True
+                except OSError as exc:
+                    logger.warning(
+                        "CUDA lib %s found at %s but failed to load: %s", lib_name, lib_path, exc
+                    )
+                break
+
+        if not found:
+            logger.warning("CUDA lib %s not found — GPU transcription may fail", lib_name)
+
+
 async def main() -> None:
     """Entry point: load config, initialise transcriber, and start serving."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # File handler — captures DEBUG-level output to logs/gateway.log
+    _project_root = Path(__file__).resolve().parent.parent
+    _log_dir = _project_root / "logs"
+    _log_dir.mkdir(exist_ok=True)
+    _file_handler = RotatingFileHandler(
+        _log_dir / "gateway.log",
+        maxBytes=5_000_000,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _file_handler.setLevel(logging.DEBUG)
+    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(_file_handler)
+
     config = load_config()
+
+    if config.local_audio:
+        logger.info("Local audio capture mode ENABLED — mic audio captured by gateway")
+
+    if config.test_wav:
+        logger.info("TEST WAV MODE ENABLED — using %s instead of real audio", config.test_wav)
+
+    _setup_cuda_library_paths()
 
     transcriber: Transcriber | None = None
     try:

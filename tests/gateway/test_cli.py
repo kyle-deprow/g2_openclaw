@@ -287,7 +287,7 @@ class TestInitEnvCommand:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="192.168.1.99"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         env_file = tmp_path / ".env"
         assert env_file.exists()
@@ -297,7 +297,7 @@ class TestInitEnvCommand:
 
     def test_existing_env_without_force(self, tmp_path: Path) -> None:
         (tmp_path / ".env").write_text("OLD=value\n")
-        result = runner.invoke(app, ["--project-root", str(tmp_path)])
+        result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 1
         assert "already" in result.output and "exists" in result.output
         # Original file untouched
@@ -310,7 +310,7 @@ class TestInitEnvCommand:
             patch("gateway.cli._read_openclaw_config", return_value=("oc-tok", 19000)),
             patch("gateway.cli._get_local_ip", return_value="10.0.0.1"),
         ):
-            result = runner.invoke(app, ["--force", "--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--force", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         content = (tmp_path / ".env").read_text()
         assert "WHISPER_DEVICE=cuda" in content
@@ -323,7 +323,7 @@ class TestInitEnvCommand:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="10.0.0.1"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         content = (tmp_path / ".env").read_text()
         assert "WHISPER_DEVICE=cuda" in content
@@ -336,7 +336,7 @@ class TestInitEnvCommand:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="192.168.1.10"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         assert "init-env summary" in result.output
 
@@ -346,7 +346,7 @@ class TestInitEnvCommand:
             patch("gateway.cli._read_openclaw_config", return_value=("tok-x", 18789)),
             patch("gateway.cli._get_local_ip", return_value="172.16.0.5"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         values = dotenv_values(tmp_path / ".env")
         assert values["GATEWAY_HOST"] == "0.0.0.0"
@@ -370,7 +370,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._get_local_ip", return_value="192.168.1.50"),
             patch("gateway.cli.secrets.token_hex", return_value="aabbccdd" * 6),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         env_local = tmp_path / "g2_app" / ".env.local"
         assert env_local.exists()
@@ -385,7 +385,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="192.168.1.50"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         assert not (tmp_path / "g2_app" / ".env.local").exists()
 
@@ -398,7 +398,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="10.0.0.5"),
         ):
-            result = runner.invoke(app, ["--force", "--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--force", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         content = (g2_dir / ".env.local").read_text()
         assert "VITE_GATEWAY_URL=ws://10.0.0.5:8765?token=" in content
@@ -413,7 +413,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="10.0.0.5"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         # Original file untouched
         assert (g2_dir / ".env.local").read_text() == "KEEP=1\n"
@@ -427,7 +427,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._get_local_ip", return_value="172.16.0.1"),
             patch("gateway.cli.secrets.token_hex", return_value="deadbeef" * 6),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         values = dotenv_values(tmp_path / "g2_app" / ".env.local")
         expected_url = "ws://172.16.0.1:8765?token=" + "deadbeef" * 6
@@ -440,7 +440,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="10.0.0.1"),
         ):
-            result = runner.invoke(app, ["--project-root", str(tmp_path)])
+            result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])
         assert result.exit_code == 0
         assert "G2 app env" in result.output
 
@@ -453,3 +453,94 @@ class TestGetLocalIp:
         assert isinstance(ip, str)
         parts = ip.split(".")
         assert len(parts) == 4
+
+
+# ---------------------------------------------------------------------------
+# push-config command
+# ---------------------------------------------------------------------------
+
+
+class TestPushConfig:
+    """Tests for the push-config command."""
+
+    def test_push_script_not_found(self, tmp_path: Path) -> None:
+        """Error when the push script does not exist."""
+        fake_root = tmp_path / "repo"
+        fake_root.mkdir()
+        with patch("gateway.cli._PROJECT_ROOT", fake_root):
+            result = runner.invoke(app, ["push-config"])
+        assert result.exit_code == 1
+        assert "Push script not found" in result.output
+
+    def test_push_script_fails(self) -> None:
+        """Error when the push script exits non-zero."""
+        fake_result = MagicMock(returncode=2)
+        with (
+            patch("gateway.cli._PROJECT_ROOT", Path("/fake")),
+            patch(
+                "gateway.cli.Path.is_file",
+                side_effect=lambda self=None: True,
+            ),
+            patch("gateway.cli.subprocess.run", return_value=fake_result),
+        ):
+            result = runner.invoke(app, ["push-config"])
+        assert result.exit_code == 1
+        assert "Push script failed" in result.output
+
+    def test_push_only_no_restart(self, tmp_path: Path) -> None:
+        """--no-restart pushes config without restarting the daemon."""
+        # Create a fake push script
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        push_script = scripts_dir / "push-openclaw-config.sh"
+        push_script.write_text("#!/bin/bash\nexit 0\n")
+        push_script.chmod(0o755)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            calls.append(cmd)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("gateway.cli._PROJECT_ROOT", tmp_path),
+            patch("gateway.cli.subprocess.run", side_effect=_fake_run),
+            patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
+            patch("gateway.cli._is_port_open", return_value=False),
+        ):
+            result = runner.invoke(app, ["push-config", "--no-restart"])
+
+        assert result.exit_code == 0
+        assert "Skipped (--no-restart)" in result.output
+        # Should NOT have called openclaw daemon restart
+        for call in calls:
+            assert "restart" not in call, f"Unexpected restart call: {call}"
+
+    def test_push_and_restart(self, tmp_path: Path) -> None:
+        """Push config then restart the daemon."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        push_script = scripts_dir / "push-openclaw-config.sh"
+        push_script.write_text("#!/bin/bash\nexit 0\n")
+        push_script.chmod(0o755)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            calls.append(cmd)
+            return MagicMock(returncode=0)
+
+        with (
+            patch("gateway.cli._PROJECT_ROOT", tmp_path),
+            patch("gateway.cli.subprocess.run", side_effect=_fake_run),
+            patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
+            patch("gateway.cli._wait_for_port", return_value=True),
+            patch("gateway.cli._is_port_open", return_value=True),
+        ):
+            result = runner.invoke(app, ["push-config"])
+
+        assert result.exit_code == 0
+        # Should have called openclaw daemon restart
+        restart_calls = [c for c in calls if "restart" in c]
+        assert len(restart_calls) == 1
+        assert restart_calls[0] == ["openclaw", "daemon", "restart"]

@@ -210,6 +210,12 @@ EOF
 uv run python -m gateway
 ```
 
+To push OpenClaw config changes and restart the daemon in one step:
+
+```bash
+uv run python -m gateway push-config
+```
+
 The gateway will start listening on `ws://0.0.0.0:8765`. Clients connect with the token as a query parameter: `ws://host:8765?token=your-secret-token`.
 
 ### 3. Set up the G2 App

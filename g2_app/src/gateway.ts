@@ -110,6 +110,14 @@ export class Gateway {
   connect(url?: string): void {
     const resolved = url ?? this.resolveUrl();
     this.token = extractToken(resolved);
+    // If the resolved URL has no token (e.g. localStorage stripped it),
+    // fall back to the build-time env var which includes the token.
+    if (!this.token) {
+      const envUrl = import.meta.env?.VITE_GATEWAY_URL;
+      if (envUrl) {
+        this.token = extractToken(envUrl);
+      }
+    }
     this.url = stripToken(resolved);
     this.intentionalClose = false;
     this._connect();
