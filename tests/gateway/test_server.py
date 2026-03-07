@@ -8,6 +8,7 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 import websockets
@@ -299,3 +300,57 @@ class TestMainTranscriber:
             )
             mock_server.serve.assert_awaited_once()
             assert "Failed to load transcriber" in caplog.text
+
+
+class TestHealthCheck:
+    """Tests for the /healthz HTTP health check endpoint."""
+
+    async def test_healthz_returns_200(self, noauth_gateway: tuple[str, GatewayServer]) -> None:
+        """GET /healthz should return 200 OK without upgrading to WebSocket."""
+        url, _ = noauth_gateway
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+
+        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            writer.write(
+                b"GET /healthz HTTP/1.1\r\n" b"Host: localhost\r\n" b"Connection: close\r\n\r\n"
+            )
+            await writer.drain()
+            data = await asyncio.wait_for(reader.read(4096), timeout=5)
+            response_text = data.decode()
+            assert "200 OK" in response_text
+            assert response_text.endswith("OK\n")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_websocket_still_works_after_healthz(
+        self, noauth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """WebSocket connections should still work alongside health checks."""
+        url, _ = noauth_gateway
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+
+        # Health check first
+        reader, writer = await asyncio.open_connection(host, port)
+        try:
+            writer.write(
+                b"GET /healthz HTTP/1.1\r\n" b"Host: localhost\r\n" b"Connection: close\r\n\r\n"
+            )
+            await writer.drain()
+            data = await asyncio.wait_for(reader.read(4096), timeout=5)
+            assert "200 OK" in data.decode()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+        # Then normal WebSocket
+        async with websockets.connect(url) as ws:
+            connected = await asyncio.wait_for(ws.recv(), timeout=5)
+            assert json.loads(connected)["type"] == "connected"
+            idle = await asyncio.wait_for(ws.recv(), timeout=5)
+            assert json.loads(idle) == {"type": "status", "status": "idle"}

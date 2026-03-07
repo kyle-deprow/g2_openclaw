@@ -203,11 +203,12 @@ class TestStopAudio:
         transcription_frame = next(f for f in frames if f["type"] == "transcription")
         assert transcription_frame["text"] == "hello world"
 
-        # Should have gone through: recording → transcribing → thinking → streaming → idle
+        # Should have gone through: recording → transcribing → idle (user must confirm)
         statuses = [f["status"] for f in frames if f["type"] == "status"]
         assert "recording" in statuses
         assert "transcribing" in statuses
-        assert "thinking" in statuses
+        # Must NOT auto-forward to thinking (user confirms explicitly)
+        assert "thinking" not in statuses
         # ends with idle
         assert statuses[-1] == "idle"
 
@@ -349,26 +350,16 @@ class TestFullPipeline:
 
         # Expected sequence:
         # connected, status:idle, status:recording, status:transcribing,
-        # transcription, status:thinking, status:streaming,
-        # assistant x3, end, status:idle
+        # transcription, status:idle
         assert types[0] == "connected"
         assert frames[1] == {"type": "status", "status": "idle"}
         assert frames[2] == {"type": "status", "status": "recording"}
         assert frames[3] == {"type": "status", "status": "transcribing"}
         assert frames[4] == {"type": "transcription", "text": "hello"}
-        assert frames[5] == {"type": "status", "status": "thinking"}
-        assert frames[6] == {"type": "status", "status": "streaming"}
+        assert frames[5] == {"type": "status", "status": "idle"}
 
-        # Mock handler sends 3 assistant deltas + end
-        assistant_frames = [f for f in frames if f["type"] == "assistant"]
-        assert len(assistant_frames) == 3
-
-        assert {"type": "end"} in frames
-        # Final status is idle
-        statuses = [f for f in frames if f["type"] == "status"]
-        assert statuses[-1]["status"] == "idle"
-
-        # Session should be back to idle
+        # Session returns to idle — user must explicitly confirm
+        assert "thinking" not in [f.get("status") for f in frames if f["type"] == "status"]
         assert session._state == SessionState.IDLE
 
 

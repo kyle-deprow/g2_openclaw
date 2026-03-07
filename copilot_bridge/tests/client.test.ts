@@ -51,6 +51,7 @@ function makeConfig(overrides: Partial<BridgeConfig> = {}): BridgeConfig {
 		logLevel: "warning",
 		openclawHost: "127.0.0.1",
 		openclawPort: 18789,
+		projectsRoot: "/home/test/repos",
 		...overrides,
 	};
 }
@@ -87,6 +88,46 @@ describe("CopilotBridge", () => {
 		mockClient.createSession.mockResolvedValue(mockSession);
 
 		bridge = new CopilotBridge(makeConfig());
+	});
+
+	describe("resolveWorkingDir", () => {
+		it("resolves bare project name against projectsRoot", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("my-api");
+			expect(resolved).toBe("/home/user/repos/my-api");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/home/user/repos/my-api", { recursive: true });
+		});
+
+		it("uses absolute path as-is", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("/opt/projects/special");
+			expect(resolved).toBe("/opt/projects/special");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/opt/projects/special", { recursive: true });
+		});
+
+		it("resolves nested relative path against projectsRoot", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("org/my-api");
+			expect(resolved).toBe("/home/user/repos/org/my-api");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/home/user/repos/org/my-api", { recursive: true });
+		});
+
+		it("creates directory if it doesn't exist", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			await bridge.resolveWorkingDir("new-project");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/home/user/repos/new-project", { recursive: true });
+		});
+
+		it("uses default projectsRoot from config if not overridden", async () => {
+			const config = makeConfig({ projectsRoot: "/default/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("test-project");
+			expect(resolved).toBe("/default/repos/test-project");
+		});
 	});
 
 	describe("constructor", () => {

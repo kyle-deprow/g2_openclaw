@@ -1,19 +1,40 @@
 # Copilot Bridge — Tool Usage Guide
 
-You have access to two coding tools powered by GitHub Copilot:
+You have access to coding tools powered by GitHub Copilot, organised around **persistent sessions**:
 
 | Tool | Purpose |
 |------|---------|
-| `copilot_code` | Delegate a coding task and receive the final result |
-| `copilot_code_verbose` | Same, but includes a step-by-step execution log |
+| `copilot_code_start` | Start a new coding session (requires `task` + `workingDir`) |
+| `copilot_code_message` | Send a follow-up message into an existing session |
+| `copilot_code_verbose` | Same as message, but includes a step-by-step execution log |
+| `copilot_code_transcript` | Retrieve the recent transcript of a session |
+| `copilot_list_sessions` | List all active sessions |
+| `copilot_destroy_session` | End a session and free resources |
 
-Both tools accept a `task` parameter (required) with optional `workingDir`, `model`, and `timeout`.
+---
+
+## Session Workflow
+
+1. **Always start with `copilot_code_start`** — pass the project name as `workingDir`.
+2. Bare names like `"my-api"` resolve to `~/repos/my-api` automatically.
+3. Absolute paths like `/home/dev/repos/g2_openclaw` are used as-is.
+4. The directory is created automatically if it doesn't exist.
+5. After starting, use `copilot_code_message` for follow-ups — no need to pass `workingDir` again.
+
+```
+# Start a session
+copilot_code_start(task: "Set up a new Express API", workingDir: "my-api")
+
+# Follow up in the same session
+copilot_code_message(task: "Add a /health endpoint")
+copilot_code_message(task: "Write unit tests for the health endpoint")
+```
 
 ---
 
 ## When to Delegate vs Handle Directly
 
-**Delegate to `copilot_code` / `copilot_code_verbose`:**
+**Delegate to Copilot tools:**
 
 - Writing, generating, or scaffolding code
 - Refactoring or restructuring existing files
@@ -36,11 +57,11 @@ Both tools accept a `task` parameter (required) with optional `workingDir`, `mod
 
 ---
 
-## Choosing Between the Two Tools
+## Choosing Between Tools
 
-### `copilot_code` — Fast & Focused
+### `copilot_code_start` → `copilot_code_message` — Session-Based Flow
 
-Use for straightforward single-purpose tasks where you only need the outcome:
+Use for all coding work. Start a session, then iterate:
 
 - Write a function, class, or module
 - Fix a known bug
@@ -72,34 +93,40 @@ The quality of the `task` parameter directly determines the quality of the resul
 
 ## Example Prompts
 
-### 1. Generate a utility function
+### 1. Start a new project session
 
 ```
-task: "Write a Python function `parse_iso_date(raw: str) -> datetime` in gateway/utils.py that parses ISO 8601 date strings and returns UTC datetimes. Raise ValueError for invalid input. Include a docstring."
+copilot_code_start(
+    task: "Set up a TypeScript Express API with health check, error middleware, and tests",
+    workingDir: "my-api"
+)
 ```
 
-### 2. Fix a bug
+### 2. Follow up — fix a bug
 
 ```
-task: "In copilot_bridge/src/client.ts, the `runTask` method doesn't respect the timeout parameter — the fetch call has no AbortSignal. Add an AbortController that cancels after `options.timeout` ms."
+copilot_code_message(task: "The /health endpoint returns 500 when the DB is down. Add a try-catch and return 503 with a diagnostic payload.")
 ```
 
-### 3. Add tests
+### 3. Follow up — add tests
 
 ```
-task: "Write pytest unit tests for the `validate_token` function in gateway/server.py. Cover: valid token, expired token, malformed token, and missing token. Place tests in tests/gateway/test_server.py following existing patterns."
+copilot_code_message(task: "Write pytest unit tests for the `validate_token` function in gateway/server.py. Cover: valid token, expired token, malformed token, and missing token.")
 ```
 
-### 4. Multi-file refactoring (use verbose)
+### 4. Verbose — multi-file refactoring
 
 ```
-task: "Rename the `CopilotBridge` class to `CopilotClient` across all files in copilot_bridge/. Update imports, type references, and test files. Don't change the public plugin API."
+copilot_code_verbose(task: "Rename the `CopilotBridge` class to `CopilotClient` across all files in copilot_bridge/. Update imports, type references, and test files. Don't change the public plugin API.")
 ```
 
-### 5. Code review
+### 5. Work on an existing repo (absolute path)
 
 ```
-task: "Review gateway/protocol.py for potential security issues: injection risks, missing input validation, and unsafe deserialization. Return a numbered list of findings with severity and suggested fix."
+copilot_code_start(
+    task: "Review gateway/protocol.py for potential security issues: injection risks, missing input validation, and unsafe deserialization.",
+    workingDir: "/home/dev/repos/g2_openclaw"
+)
 ```
 
 ---
@@ -117,7 +144,7 @@ task: "Review gateway/protocol.py for potential security issues: injection risks
 
 ## Tips
 
-- You can chain multiple `copilot_code` calls in sequence for multi-step work — each call is stateless.
-- Set `workingDir` when the task involves relative file paths so Copilot resolves them correctly.
+- Set `workingDir` to the project name when starting a session — Copilot resolves relative file paths from there.
 - For long-running tasks (large refactors, full test suites), increase `timeout` beyond the 120 000 ms default.
 - When in doubt, prefer `copilot_code_verbose` — the execution log costs little and helps you verify correctness.
+- Use `copilot_list_sessions` to see what sessions are active and `copilot_destroy_session` to clean up.

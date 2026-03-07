@@ -82,10 +82,16 @@ let mockLocalStorage: {
   store: Record<string, string>;
 };
 
+let savedViteGatewayUrl: string | undefined;
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal('WebSocket', MockWebSocket);
   MockWebSocket.last = null;
+
+  // Clear build-time env so .env.local doesn't override test expectations
+  savedViteGatewayUrl = import.meta.env?.VITE_GATEWAY_URL;
+  import.meta.env.VITE_GATEWAY_URL = '';
 
   const store: Record<string, string> = {};
   mockLocalStorage = {
@@ -105,6 +111,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Restore build-time env
+  if (savedViteGatewayUrl !== undefined) {
+    import.meta.env.VITE_GATEWAY_URL = savedViteGatewayUrl;
+  }
   vi.restoreAllMocks();
   vi.useRealTimers();
 });

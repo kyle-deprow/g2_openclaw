@@ -1,6 +1,5 @@
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import type { AudioCapture } from './audio';
 import type { DisplayManager } from './display';
 import type { Gateway } from './gateway';
 import type { StateMachine } from './state';
@@ -8,27 +7,25 @@ import type { StateMachine } from './state';
 /**
  * InputHandler — routes R1 ring and temple gesture events to app actions.
  *
- * Tap-to-toggle model:
- *   idle → start recording
- *   recording → stop recording
- *   error → dismiss
- *   disconnected → force reconnect
- *   loading/transcribing/thinking/streaming → ignored
+ * HIL recording flow:
+ *   idle → tap → start recording (send start_audio)
+ *   recording → tap → stop recording (send stop_audio with hilText)
+ *   confirming → tap → confirm (send text frame)
+ *   confirming → double-tap → reject (back to idle)
  */
 export class InputHandler {
   private sm!: StateMachine;
   private display!: DisplayManager;
-  private audio!: AudioCapture;
   private gateway!: Gateway;
   private bridge!: EvenAppBridge;
   private _lastScrollTime = 0;
   private _initialised = false;
+  private _pendingTranscription: string | null = null;
   private static readonly SCROLL_COOLDOWN = 300; // ms
 
   init(deps: {
     sm: StateMachine;
     display: DisplayManager;
-    audio: AudioCapture;
     gateway: Gateway;
     bridge: EvenAppBridge;
   }): void {
@@ -39,29 +36,24 @@ export class InputHandler {
     this._initialised = true;
     this.sm = deps.sm;
     this.display = deps.display;
-    this.audio = deps.audio;
     this.gateway = deps.gateway;
     this.bridge = deps.bridge;
 
     deps.bridge.onEvenHubEvent((event) => {
       console.log('[Input] Event received:', JSON.stringify(event));
 
-      // Audio events are handled by AudioCapture — not an input event.
+      // Audio events are ignored in HIL mode.
       if (event.audioEvent) {
         return;
       }
 
       const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
       if (!hasEvent) {
-        // Simulator (and possibly hardware) can send bare events with no
-        // sub-object for simple actions like tap/click.  Treat as a click
-        // rather than discarding.
         console.log('[Input] Bare event (no sub-object) — treating as click');
         this._handleEvent(undefined);
         return;
       }
 
-      // Check all three event sources
       const eventType =
         event.textEvent?.eventType ??
         event.listEvent?.eventType ??
@@ -69,6 +61,84 @@ export class InputHandler {
 
       this._handleEvent(eventType);
     });
+  }
+
+  /** Store transcription text for the confirming state. */
+  setPendingTranscription(text: string): void {
+    this._pendingTranscription = text;
+  }
+
+  /** Get the current pending transcription (if any). */
+  get pendingTranscription(): string | null {
+    return this._pendingTranscription;
+  }
+
+  /** Send a text message to the gateway. Does not touch the DOM. */
+  sendText(message: string): boolean {
+    const trimmed = message.trim();
+    if (!trimmed) return false;
+    if (this.sm.current !== 'idle' && this.sm.current !== 'confirming') {
+      console.warn('[Input] Cannot send — state is', this.sm.current);
+      return false;
+    }
+    this.gateway.sendJson({ type: 'text', message: trimmed });
+    return true;
+  }
+
+  /** Start a recording session — sends start_audio to gateway. */
+  startRecording(): boolean {
+    if (this.sm.current !== 'idle') {
+      console.warn('[Input] Cannot start recording — state is', this.sm.current);
+      return false;
+    }
+    this.gateway.sendJson({
+      type: 'start_audio',
+      sampleRate: 16000,
+      channels: 1,
+      sampleWidth: 2,
+    });
+    return true;
+  }
+
+  /** Stop recording — sends stop_audio to gateway with optional hilText. */
+  stopRecording(hilText?: string): boolean {
+    if (this.sm.current !== 'recording') {
+      console.warn('[Input] Cannot stop recording — state is', this.sm.current);
+      return false;
+    }
+    const frame: { type: 'stop_audio'; hilText?: string } = { type: 'stop_audio' };
+    if (hilText?.trim()) {
+      frame.hilText = hilText.trim();
+    }
+    this.gateway.sendJson(frame);
+    return true;
+  }
+
+  /** Confirm the pending transcription — sends text frame to gateway. */
+  confirmTranscription(): boolean {
+    if (this.sm.current !== 'confirming') {
+      console.warn('[Input] Cannot confirm — state is', this.sm.current);
+      return false;
+    }
+    if (!this._pendingTranscription) {
+      console.warn('[Input] No pending transcription to confirm');
+      return false;
+    }
+    this.gateway.sendJson({ type: 'text', message: this._pendingTranscription });
+    this._pendingTranscription = null;
+    return true;
+  }
+
+  /** Reject the pending transcription — return to idle. */
+  rejectTranscription(): boolean {
+    if (this.sm.current !== 'confirming') {
+      console.warn('[Input] Cannot reject — state is', this.sm.current);
+      return false;
+    }
+    this._pendingTranscription = null;
+    this.sm.transition('idle');
+    this.display.showIdle();
+    return true;
   }
 
   _handleEvent(eventType: number | undefined): void {
@@ -87,16 +157,10 @@ export class InputHandler {
     }
 
     if (eventType === OsEventTypeList.FOREGROUND_EXIT_EVENT) {
-      // App going to background — stop mic if recording
-      if (this.audio.isRecording) {
-        this.audio.stop();
-        // Don't transition to idle — server will drive transcribing → thinking → streaming → end → idle
-      }
       return;
     }
 
     if (eventType === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
-      // App returning to foreground — reconnect if needed
       if (!this.gateway.isConnected) {
         this.gateway.connect();
       }
@@ -104,7 +168,6 @@ export class InputHandler {
     }
 
     if (eventType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
-      // Cleanup — use stored bridge reference (SDK typo is intentional)
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this.bridge as any).shutDownContaniner(0);
       return;
@@ -118,7 +181,6 @@ export class InputHandler {
       const now = Date.now();
       if (now - this._lastScrollTime < InputHandler.SCROLL_COOLDOWN) return;
       this._lastScrollTime = now;
-      // TODO: Phase 4 — implement scroll in displaying state
       return;
     }
   }
@@ -128,21 +190,16 @@ export class InputHandler {
     const state = this.sm.current;
     switch (state) {
       case 'idle':
-        try {
-          this.audio.start();
-        } catch (err) {
-          console.error('[Input] audio.start() failed — continuing with state transition:', err);
-        }
-        this.sm.transition('recording');
-        this.display.showRecording();
+        // Tap in idle starts recording
+        this.startRecording();
         break;
       case 'recording':
-        try {
-          this.audio.stop();
-        } catch (err) {
-          console.error('[Input] audio.stop() failed:', err);
-        }
-        // Server will send status:transcribing
+        // Tap during recording stops it
+        this.stopRecording(this._getHilText());
+        break;
+      case 'confirming':
+        // Tap in confirming state confirms the transcription
+        this.confirmTranscription();
         break;
       case 'error':
         this.sm.transition('idle');
@@ -152,12 +209,35 @@ export class InputHandler {
         this.gateway.connect();
         break;
       default:
-        // loading, transcribing, thinking, streaming — ignored
+        // loading, thinking, streaming, transcribing — ignored
         break;
     }
   }
 
   private _handleDoubleTap(): void {
-    // TODO: Phase 4 — double-tap scroll-to-bottom or other action
+    const state = this.sm.current;
+    if (state === 'confirming') {
+      this.rejectTranscription();
+    } else if (state === 'thinking' || state === 'streaming') {
+      this.cancelResponse();
+    }
+  }
+
+  /** Cancel an in-progress AI response — return to idle. */
+  cancelResponse(): boolean {
+    if (this.sm.current !== 'thinking' && this.sm.current !== 'streaming') {
+      console.warn('[Input] Cannot cancel — state is', this.sm.current);
+      return false;
+    }
+    console.log('[Input] Cancelling response');
+    this.sm.transition('idle');
+    this.display.showIdle();
+    return true;
+  }
+
+  /** Read the HIL text input value (if present in DOM). */
+  private _getHilText(): string | undefined {
+    const input = document.getElementById('hil-text') as HTMLInputElement | null;
+    return input?.value?.trim() || undefined;
   }
 }

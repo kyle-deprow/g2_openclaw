@@ -21,16 +21,6 @@ def _run_server() -> None:
         os.environ["G2_LOCAL_AUDIO"] = "true"
         sys.argv.remove("--local-audio")
 
-    # Handle --test-wav PATH flag (inject WAV file for pipeline testing)
-    if "--test-wav" in sys.argv:
-        idx = sys.argv.index("--test-wav")
-        if idx + 1 < len(sys.argv):
-            os.environ["G2_TEST_WAV"] = sys.argv[idx + 1]
-            del sys.argv[idx : idx + 2]
-        else:
-            print("Error: --test-wav requires a file path argument", file=sys.stderr)
-            sys.exit(1)
-
     from gateway.server import main
 
     asyncio.run(main())

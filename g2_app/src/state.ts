@@ -3,11 +3,12 @@ import type { AppStatus } from './protocol';
 // Valid transitions map: from → allowed targets
 const TRANSITIONS: Record<AppStatus, AppStatus[]> = {
   loading:      ['idle', 'error', 'disconnected'],
-  idle:         ['recording', 'thinking', 'error', 'disconnected', 'loading'],
+  idle:         ['recording', 'thinking', 'error', 'disconnected', 'loading', 'confirming'],
   recording:    ['transcribing', 'idle', 'error', 'disconnected'],
-  transcribing: ['thinking', 'idle', 'error', 'disconnected'],
+  transcribing: ['thinking', 'idle', 'error', 'disconnected', 'confirming'],
   thinking:     ['streaming', 'idle', 'error', 'disconnected'],
   streaming:    ['idle', 'error', 'disconnected'],
+  confirming:   ['thinking', 'idle', 'error', 'disconnected'],
   error:        ['idle', 'disconnected'],
   disconnected: ['loading', 'idle', 'error'],
 };

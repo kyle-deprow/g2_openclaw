@@ -6,13 +6,11 @@
  *   2. Initialising the DisplayManager with a ConversationHistory
  *   3. Creating a Gateway and connecting to the PC gateway server
  *   4. Creating a StateMachine for lifecycle tracking
- *   5. Initialising the AudioCapture pipeline (mic → PCM → gateway)
- *   6. Initialising the InputHandler (R1 ring → tap/gesture routing)
+ *   5. Initialising the InputHandler (R1 ring → tap/gesture routing)
  */
 
 import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
 
-import { AudioCapture } from './audio';
 import { ConversationHistory } from './conversation';
 import { DisplayManager } from './display';
 import { Gateway } from './gateway';
@@ -27,7 +25,6 @@ import { StateMachine } from './state';
 let display: DisplayManager;
 let gateway: Gateway;
 let sm: StateMachine;
-let audio: AudioCapture;
 let input: InputHandler;
 let conversation: ConversationHistory;
 
@@ -49,6 +46,12 @@ function routeFrame(frame: InboundFrame): void {
       // Guard: ignore status:idle while in error — user must dismiss.
       if (frame.status === 'idle' && sm.current === 'error') {
         console.log('[Main] Ignoring status:idle — currently in error state');
+        return;
+      }
+
+      // Guard: ignore status:idle while confirming — user must confirm/reject.
+      if (frame.status === 'idle' && sm.current === 'confirming') {
+        console.log('[Main] Ignoring status:idle — waiting for user confirmation');
         return;
       }
 
@@ -90,13 +93,14 @@ function routeFrame(frame: InboundFrame): void {
 
     // -- Response complete -------------------------------------------------
     case 'end':
-      sm.transition('idle');
-      display.finaliseStream().catch(err => console.error('[Main] Display error:', err));
+      if (sm.current === 'streaming') {
+        sm.transition('idle');
+        display.finaliseStream().catch(err => console.error('[Main] Display error:', err));
+      }
       break;
 
     // -- Error from server -------------------------------------------------
     case 'error':
-      if (audio.isRecording) audio.stop();
       console.error('[Main] Server error: %s (%s)', frame.detail.slice(0, 100), frame.code);
       const errorMsg = typeof frame.detail === 'string' ? frame.detail.slice(0, 200) : 'Unknown error';
       conversation.addSystem(`Error: ${errorMsg}`);
@@ -107,9 +111,15 @@ function routeFrame(frame: InboundFrame): void {
     // -- Transcription text ------------------------------------------------
     case 'transcription':
       console.log('[Main] Transcription received (%d chars)', frame.text.length);
+      if (sm.current !== 'transcribing' && sm.current !== 'recording' && sm.current !== 'idle') {
+        console.warn('[Main] Ignoring transcription in state:', sm.current);
+        break;
+      }
       if (frame.text.trim()) {
         conversation.addUser(frame.text);
-        display.showTranscription().catch(err => console.error('[Main] Display error:', err));
+        input.setPendingTranscription(frame.text);
+        sm.transition('confirming');
+        display.showConfirming(frame.text).catch(err => console.error('[Main] Display error:', err));
       }
       break;
 
@@ -129,7 +139,6 @@ function routeEvent(event: GatewayEvent): void {
       break;
 
     case 'disconnected':
-      if (audio.isRecording) audio.stop();
       console.warn('[Main] Gateway disconnected');
       sm.transition('disconnected');
       display.showDisconnected().catch(err => console.error('[Main] Display error:', err));
@@ -174,15 +183,24 @@ async function boot(): Promise<void> {
   console.log('[Main] Connecting to gateway...');
   gateway.connect();
 
-  // 5. Initialise audio capture pipeline
-  audio = new AudioCapture();
-  audio.init(bridge, gateway);
-  console.log('[Main] AudioCapture initialised');
-
-  // 6. Initialise R1 ring input handling
+  // 5. Initialise R1 ring input handling
   input = new InputHandler();
-  input.init({ sm, display, audio, gateway, bridge });
+  input.init({ sm, display, gateway, bridge });
   console.log('[Main] InputHandler initialised');
+
+  // Expose dev hook for the HIL bar (tree-shaken out of production builds)
+  if (import.meta.env.DEV) {
+    (window as any).__g2Dev = {
+      sendText: (msg: string) => input.sendText(msg),
+      startRecording: () => input.startRecording(),
+      stopRecording: (hilText?: string) => input.stopRecording(hilText),
+      confirmTranscription: () => input.confirmTranscription(),
+      rejectTranscription: () => input.rejectTranscription(),
+      cancelResponse: () => input.cancelResponse(),
+      getState: () => sm.current,
+      getPendingTranscription: () => input.pendingTranscription,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from enum import StrEnum
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 # ---------------------------------------------------------------------------
 # Status states & error codes
@@ -38,6 +38,7 @@ class StartAudioFrame(TypedDict):
 
 class StopAudioFrame(TypedDict):
     type: Literal["stop_audio"]
+    hilText: NotRequired[str]
 
 
 class TextFrame(TypedDict):
@@ -127,6 +128,7 @@ _FIELD_TYPES: dict[str, type] = {
     "code": str,
     "version": str,
     "status": str,
+    "hilText": str,
 }
 
 

@@ -323,9 +323,12 @@ class TestEmptyTranscriptionSkipsOpenClaw:
 
         frames = fake_ws.frames()
 
-        # Should have transcription frame then proceed to thinking
+        # Should have transcription frame then return to idle (user confirms explicitly)
         assert {"type": "transcription", "text": "hello world"} in frames
-        assert "thinking" in [f.get("status") for f in frames if f["type"] == "status"]
+        # After transcription, should return to idle (user confirms explicitly)
+        statuses = [f.get("status") for f in frames if f["type"] == "status"]
+        assert statuses[-1] == "idle"
+        assert "thinking" not in statuses
 
 
 # ---------------------------------------------------------------------------

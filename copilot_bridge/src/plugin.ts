@@ -114,22 +114,21 @@ function summariseArgs(args: Record<string, unknown> | undefined): string {
 
 // --- Tool definitions ---
 
-const copilotCodeTool: OpenClawToolDef = {
-	name: "copilot_code",
+const copilotCodeMessageTool: OpenClawToolDef = {
+	name: "copilot_code_message",
 	description:
-		"Delegate a coding task to GitHub Copilot. Returns the result as markdown including tool calls and stats.",
+		"Message into an existing Copilot session. If sessionId is omitted, messages into the most recent session. Use copilot_code_start to begin a new session.",
 	parameters: {
 		type: "object",
 		properties: {
-			task: { type: "string", description: "The coding task prompt to send to Copilot" },
-			workingDir: {
-				type: "string",
-				description: "Working directory for the task (optional)",
-			},
-			model: { type: "string", description: "Model to use (optional)" },
+			task: { type: "string", description: "The message to send to the Copilot session" },
 			timeout: {
 				type: "number",
 				description: "Timeout in milliseconds (default 120000)",
+			},
+			sessionId: {
+				type: "string",
+				description: "Session ID to continue a previous conversation. Omit to use the most recent session.",
 			},
 		},
 		required: ["task"],
@@ -141,20 +140,23 @@ const copilotCodeTool: OpenClawToolDef = {
 		if (args.task.length > 50_000) {
 			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
 		}
-		if (args.workingDir !== undefined && typeof args.workingDir !== "string") {
-			return { result: "## Error\n\n`workingDir` must be a string" };
-		}
 		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
 			return { result: "## Error\n\n`timeout` must be a non-negative number" };
 		}
+		if (args.sessionId !== undefined && (typeof args.sessionId !== "string" || args.sessionId.length === 0 || args.sessionId.length > 200)) {
+			return { result: "## Error\n\n`sessionId` must be a non-empty string (max 200 chars)" };
+		}
 		try {
 			const bridge = await getBridge();
-			const result = await bridge.runTask({
-				prompt: args.task as string,
-				workingDir: args.workingDir as string | undefined,
-				model: args.model as string | undefined,
-				timeout: (args.timeout as number | undefined) ?? 120_000,
-			});
+			let targetSessionId = args.sessionId as string | undefined;
+			if (!targetSessionId) {
+				const recent = await bridge.getMostRecentSession();
+				if (!recent) {
+					return { result: "## Error\n\nNo active sessions. Use copilot_code_start to begin a new session." };
+				}
+				targetSessionId = recent.sessionId;
+			}
+			const result = await bridge.resumeTask(targetSessionId, args.task as string, (args.timeout as number | undefined) ?? 120_000);
 			return { result: formatResult(result) };
 		} catch (err) {
 			return { result: formatError(err) };
@@ -165,19 +167,18 @@ const copilotCodeTool: OpenClawToolDef = {
 const copilotCodeVerboseTool: OpenClawToolDef = {
 	name: "copilot_code_verbose",
 	description:
-		"Delegate a coding task to GitHub Copilot with verbose step-by-step logging of every tool call.",
+		"Message into an existing Copilot session with verbose step-by-step logging. If sessionId is omitted, uses the most recent session. Use copilot_code_start to begin a new session.",
 	parameters: {
 		type: "object",
 		properties: {
-			task: { type: "string", description: "The coding task prompt to send to Copilot" },
-			workingDir: {
-				type: "string",
-				description: "Working directory for the task (optional)",
-			},
-			model: { type: "string", description: "Model to use (optional)" },
+			task: { type: "string", description: "The message to send to the Copilot session" },
 			timeout: {
 				type: "number",
 				description: "Timeout in milliseconds (default 120000)",
+			},
+			sessionId: {
+				type: "string",
+				description: "Session ID to continue a previous conversation. Omit to use the most recent session.",
 			},
 		},
 		required: ["task"],
@@ -189,75 +190,28 @@ const copilotCodeVerboseTool: OpenClawToolDef = {
 		if (args.task.length > 50_000) {
 			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
 		}
-		if (args.workingDir !== undefined && typeof args.workingDir !== "string") {
-			return { result: "## Error\n\n`workingDir` must be a string" };
-		}
 		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
 			return { result: "## Error\n\n`timeout` must be a non-negative number" };
 		}
+		if (args.sessionId !== undefined && (typeof args.sessionId !== "string" || args.sessionId.length === 0 || args.sessionId.length > 200)) {
+			return { result: "## Error\n\n`sessionId` must be a non-empty string (max 200 chars)" };
+		}
 		try {
 			const bridge = await getBridge();
-			const startTime = Date.now();
 
-			const logEntries: string[] = [];
-			let stepNum = 0;
-			let aggregatedText = "";
-
-			const stream = bridge.runTaskStreaming({
-				prompt: args.task as string,
-				workingDir: args.workingDir as string | undefined,
-				model: args.model as string | undefined,
-				timeout: (args.timeout as number | undefined) ?? 120_000,
-				streaming: true,
-			});
-
-			let currentTool: string | undefined;
-			let currentToolArgs: string | undefined;
-
-			for await (const delta of stream) {
-				switch (delta.type) {
-					case "text":
-						aggregatedText += delta.content;
-						break;
-					case "tool_start":
-						currentTool = delta.tool ?? "unknown";
-						currentToolArgs = delta.content || undefined;
-						break;
-					case "tool_end": {
-						stepNum++;
-						const toolName = delta.tool ?? currentTool ?? "unknown";
-						let argsSummary = "";
-						if (currentToolArgs) {
-							try {
-								argsSummary = summariseArgs(JSON.parse(currentToolArgs));
-							} catch {
-								argsSummary = currentToolArgs;
-							}
-						}
-						const resultLen = delta.content?.length ?? 0;
-						logEntries.push(
-							`${stepNum}. 🔧 Called \`${toolName}\`(${argsSummary}) — ${resultLen} chars result`,
-						);
-						currentTool = undefined;
-						currentToolArgs = undefined;
-						break;
-					}
-					case "error":
-						stepNum++;
-						logEntries.push(`${stepNum}. ❌ Error: ${delta.content}`);
-						break;
-					case "done": {
-						const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-						stepNum++;
-						logEntries.push(`${stepNum}. ✅ Complete (${elapsed}s)`);
-						break;
-					}
+			// Resolve target session
+			let targetSessionId = args.sessionId as string | undefined;
+			if (!targetSessionId) {
+				const recent = await bridge.getMostRecentSession();
+				if (!recent) {
+					return { result: "## Error\n\nNo active sessions. Use copilot_code_start to begin a new session." };
 				}
+				targetSessionId = recent.sessionId;
 			}
 
-			const logSection = `## Execution Log\n${logEntries.join("\n")}`;
-			const resultSection = `\n\n## Result\n${aggregatedText}`;
-			return { result: `${logSection}${resultSection}` };
+			// Session resume uses non-streaming resumeTask
+			const result = await bridge.resumeTask(targetSessionId, args.task as string, (args.timeout as number | undefined) ?? 120_000);
+			return { result: `> Note: Session resume uses non-streaming mode; step-by-step log unavailable.\n\n${formatResult(result)}` };
 		} catch (err) {
 			return { result: formatError(err) };
 		}
@@ -314,10 +268,143 @@ const copilotOrchestrateTool: OpenClawToolDef = {
 
 // --- Plugin default export ---
 
+const copilotCodeStartTool: OpenClawToolDef = {
+	name: "copilot_code_start",
+	description: "Start a new Copilot coding session with an initial message. Creates a persistent session for follow-up messages via copilot_code_message.",
+	parameters: {
+		type: "object",
+		properties: {
+			task: { type: "string", description: "Initial message to start the session" },
+			workingDir: { type: "string", description: "Project name or path. Bare names (e.g. 'my-api') resolve to ~/repos/my-api. Absolute paths used as-is. Created if missing." },
+			model: { type: "string", description: "Model to use (optional)" },
+			timeout: { type: "number", description: "Timeout in milliseconds (default 120000)" },
+		},
+		required: ["task", "workingDir"],
+	},
+	async execute(args: Record<string, any>): Promise<{ result: string }> {
+		if (typeof args.task !== "string" || args.task.length === 0) {
+			return { result: "## Error\n\n`task` must be a non-empty string" };
+		}
+		if (args.task.length > 50_000) {
+			return { result: "## Error\n\n`task` exceeds maximum length (50000 chars)" };
+		}
+		if (typeof args.workingDir !== "string" || args.workingDir.length === 0) {
+			return { result: "## Error\n\n`workingDir` is required. Pass a project name (e.g. 'my-api') or absolute path." };
+		}
+		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
+			return { result: "## Error\n\n`timeout` must be a non-negative number" };
+		}
+		try {
+			const bridge = await getBridge();
+			const resolvedDir = await bridge.resolveWorkingDir(args.workingDir as string);
+			const result = await bridge.runTask({
+				prompt: args.task as string,
+				workingDir: resolvedDir,
+				model: args.model as string | undefined,
+				timeout: (args.timeout as number | undefined) ?? 120_000,
+				persistSession: true,
+			});
+			return { result: formatResult(result) };
+		} catch (err) {
+			return { result: formatError(err) };
+		}
+	},
+};
+
+const copilotCodeTranscriptTool: OpenClawToolDef = {
+	name: "copilot_code_transcript",
+	description: "Get the recent transcript of a Copilot session. Returns the last N messages (default 2).",
+	parameters: {
+		type: "object",
+		properties: {
+			sessionId: { type: "string", description: "Session ID to get transcript for. Omit to use the most recent session." },
+			count: { type: "number", description: "Number of recent messages to return (default 2)" },
+		},
+	},
+	async execute(args: Record<string, any>): Promise<{ result: string }> {
+		if (args.sessionId !== undefined && (typeof args.sessionId !== "string" || args.sessionId.length === 0)) {
+			return { result: "## Error\n\n`sessionId` must be a non-empty string" };
+		}
+		if (args.count !== undefined && (typeof args.count !== "number" || args.count < 1)) {
+			return { result: "## Error\n\n`count` must be a positive number" };
+		}
+		try {
+			const bridge = await getBridge();
+			let targetSessionId = args.sessionId as string | undefined;
+			if (!targetSessionId) {
+				const recent = await bridge.getMostRecentSession();
+				if (!recent) {
+					return { result: "## Error\n\nNo active sessions. Use copilot_code_start to begin a new session." };
+				}
+				targetSessionId = recent.sessionId;
+			}
+			const count = (args.count as number | undefined) ?? 2;
+			const messages = await bridge.getSessionTranscript(targetSessionId, count);
+			if (messages.length === 0) {
+				return { result: `No messages in session ${targetSessionId}.` };
+			}
+			const text = messages.map(m => `**${m.role}** (${m.timestamp}):\n${m.content}`).join("\n\n---\n\n");
+			return { result: `## Transcript\n\n${text}` };
+		} catch (err) {
+			return { result: formatError(err) };
+		}
+	},
+};
+
+const copilotListSessionsTool: OpenClawToolDef = {
+	name: "copilot_list_sessions",
+	description: "List active Copilot sessions with their IDs, task summaries, and timestamps.",
+	parameters: {
+		type: "object",
+		properties: {},
+	},
+	async execute(): Promise<{ result: string }> {
+		try {
+			const bridge = await getBridge();
+			const sessions = await bridge.listPersistedSessions();
+			if (sessions.length === 0) {
+				return { result: "No active sessions." };
+			}
+			const lines = sessions.map(s =>
+				`- **${s.sessionId}** | Task: ${s.task} | Last: ${s.lastActivity}`
+			);
+			return { result: `## Active Sessions\n${lines.join("\n")}` };
+		} catch (err) {
+			return { result: formatError(err) };
+		}
+	},
+};
+
+const copilotDestroySessionTool: OpenClawToolDef = {
+	name: "copilot_destroy_session",
+	description: "Destroy a Copilot session to end a conversation and free resources.",
+	parameters: {
+		type: "object",
+		properties: {
+			sessionId: { type: "string", description: "Session ID to destroy" },
+		},
+		required: ["sessionId"],
+	},
+	async execute(args: Record<string, any>): Promise<{ result: string }> {
+		if (typeof args.sessionId !== "string" || args.sessionId.length === 0) {
+			return { result: "## Error\n\n`sessionId` must be a non-empty string" };
+		}
+		try {
+			const bridge = await getBridge();
+			await bridge.destroyPersistedSession(args.sessionId);
+			return { result: `Session ${args.sessionId} destroyed.` };
+		} catch (err) {
+			return { result: formatError(err) };
+		}
+	},
+};
+
+// --- Plugin default export ---
+
 const plugin: OpenClawPlugin = {
 	name: "copilot-bridge",
 	version: "1.0.0",
-	tools: [copilotCodeTool, copilotCodeVerboseTool, copilotOrchestrateTool],
+	tools: [copilotCodeStartTool, copilotCodeMessageTool, copilotCodeVerboseTool, copilotOrchestrateTool, copilotCodeTranscriptTool, copilotListSessionsTool, copilotDestroySessionTool],
 	async onLoad() {
 		console.log("[copilot-bridge] Plugin loaded");
 	},

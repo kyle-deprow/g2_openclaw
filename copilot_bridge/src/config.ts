@@ -1,4 +1,6 @@
 import "dotenv/config";
+import os from "node:os";
+import path from "node:path";
 import type { PermissionPolicy } from "./hooks.js";
 
 export interface BridgeConfig {
@@ -11,6 +13,7 @@ export interface BridgeConfig {
 	logLevel: "debug" | "info" | "warning" | "error" | "none" | "all";
 	openclawHost: string;
 	openclawPort: number;
+	projectsRoot: string;
 	openclawToken?: string;
 	auditLogDir?: string;
 	permissionPolicy?: PermissionPolicy;
@@ -63,6 +66,7 @@ export function loadConfig(): BridgeConfig {
 		logLevel: logLevel as BridgeConfig["logLevel"],
 		openclawHost: process.env.OPENCLAW_HOST ?? "127.0.0.1",
 		openclawPort: port,
+		projectsRoot: process.env.COPILOT_PROJECTS_ROOT || path.join(os.homedir(), "repos"),
 		openclawToken: process.env.OPENCLAW_GATEWAY_TOKEN || undefined,
 		auditLogDir: process.env.COPILOT_AUDIT_LOG_DIR || undefined,
 		projectContext: process.env.COPILOT_PROJECT_CONTEXT || undefined,

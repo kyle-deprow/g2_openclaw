@@ -7,6 +7,7 @@ by detecting system capabilities and reading OpenClaw configuration.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import json
 import os
 import re
@@ -77,6 +78,51 @@ def _parse_gpu_output(output: str) -> tuple[str | None, float]:
     except ValueError:
         return gpu_name, 0.0
     return gpu_name, vram_mb / 1024.0
+
+
+# ---------------------------------------------------------------------------
+# CUDA library validation
+# ---------------------------------------------------------------------------
+
+
+_CUDA_TARGETS = ["libcublasLt.so.12", "libcublas.so.12", "libcudnn.so.9"]
+
+
+def _validate_cuda_libraries() -> dict[str, Path | None]:
+    """Check whether the CUDA shared libraries needed for GPU transcription are findable.
+
+    Returns a dict mapping library name to the path where it was found, or
+    *None* if the library could not be located.
+    """
+    search_roots: list[Path] = [
+        *sorted(Path(sys.prefix).glob("lib/python*/site-packages/nvidia")),
+        Path.home() / ".cache" / "uv",
+        *sorted(Path("/usr/local").glob("cuda*/lib64")),
+        Path("/usr/lib/x86_64-linux-gnu"),
+    ]
+
+    results: dict[str, Path | None] = {}
+    for lib_name in _CUDA_TARGETS:
+        # Already loadable by the dynamic linker?
+        try:
+            ctypes.CDLL(lib_name)
+            results[lib_name] = Path("(system)")
+            continue
+        except OSError:
+            pass
+
+        # Walk search roots
+        found_path: Path | None = None
+        for root in search_roots:
+            if not root.exists() or root.is_file():
+                continue
+            matches = list(root.rglob(lib_name))
+            if matches:
+                found_path = matches[0]
+                break
+        results[lib_name] = found_path
+
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +292,24 @@ def init_env(
     else:
         gpu_label = "No NVIDIA GPU detected (CPU mode)"
 
+    # --- CUDA library validation -------------------------------------------------
+    cuda_label = "N/A (CPU mode)"
+    if has_gpu:
+        cuda_results = _validate_cuda_libraries()
+        found_libs = [n for n, p in cuda_results.items() if p is not None]
+        missing_libs = [n for n, p in cuda_results.items() if p is None]
+        if missing_libs:
+            names = ", ".join(missing_libs)
+            console.print(
+                f"[bold yellow]\u26a0  Missing CUDA libraries: {names}[/bold yellow]\n"
+                "  GPU transcription may fail. Run [bold]uv sync[/bold] to install CUDA packages.",
+            )
+            cuda_label = f"MISSING: {names}"
+        else:
+            short = ", ".join(n.split(".so")[0].removeprefix("lib") for n in found_libs)
+            console.print(f"[green]\u2713[/green] CUDA libraries: {short} loaded successfully")
+            cuda_label = f"{short} \u2713"
+
     # --- Gateway token -----------------------------------------------------------
     gateway_token = secrets.token_hex(24)
 
@@ -297,6 +361,7 @@ def init_env(
         f"[bold]GPU:[/bold]            {gpu_label}",
         f"[bold]Whisper:[/bold]        {whisper_model} on {whisper_device}"
         f" ({whisper_compute_type})",
+        f"[bold]CUDA libs:[/bold]      {cuda_label}",
         f"[bold]Gateway token:[/bold]  {gateway_token[:8]}…",
         f"[bold]OpenClaw port:[/bold]  {openclaw_port}",
         f"[bold]OpenClaw token:[/bold] {'(set)' if openclaw_token else '(not set)'}",
@@ -396,16 +461,31 @@ def _proc_has_env(pid: int, var_name: str) -> bool:
     return False
 
 
-def _wait_for_port(port: int, timeout: float, label: str, host: str = "127.0.0.1") -> bool:
-    """Poll until *port* is open or *timeout* seconds elapse."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+def _wait_for_port(
+    port: int, label: str, host: str = "127.0.0.1", *, report_interval: float = 10.0
+) -> None:
+    """Poll until *port* is open, printing status every *report_interval* seconds.
+
+    Blocks indefinitely — the user can press Ctrl+C to abort.
+    """
+    start = time.monotonic()
+    next_report = start + report_interval
+    while True:
         if _is_port_open(port, host):
-            console.print(f"  [green]✓[/green] {label} ready on port {port}")
-            return True
+            elapsed = time.monotonic() - start
+            console.print(
+                f"  [green]✓[/green] {label} ready on port {port}" f"  [dim]({elapsed:.0f}s)[/dim]"
+            )
+            return
+        now = time.monotonic()
+        if now >= next_report:
+            elapsed = now - start
+            console.print(
+                f"  [dim]…[/dim] waiting for {label} on port {port}"
+                f"  [dim]({elapsed:.0f}s, Ctrl+C to abort)[/dim]"
+            )
+            next_report = now + report_interval
         time.sleep(0.5)
-    console.print(f"  [red]✗[/red] {label} did not start within {timeout:.0f}s")
-    return False
 
 
 def _terminate_procs(procs: list[subprocess.Popen[str]]) -> None:
@@ -613,13 +693,8 @@ def push_config(
             check=False,
             capture_output=True,
         )
-        if _wait_for_port(openclaw_port, timeout=30, label="OpenClaw daemon"):
-            daemon_restarted = True
-        else:
-            console.print(
-                "  [red]✗[/red] Daemon did not come back — check "
-                "`journalctl --user -u openclaw-gateway`"
-            )
+        _wait_for_port(openclaw_port, label="OpenClaw daemon")
+        daemon_restarted = True
 
     # -- Summary ---------------------------------------------------------------
     port_ok = _is_port_open(openclaw_port)
@@ -668,11 +743,6 @@ _local_audio_option = typer.Option(
     "--local-audio",
     help="Capture audio from the local mic instead of receiving it over WebSocket.",
 )
-_test_wav_option = typer.Option(
-    None,
-    "--test-wav",
-    help="Path to a WAV file to feed through the pipeline instead of real audio.",
-)
 
 
 @app.command()
@@ -682,7 +752,6 @@ def launch(
     no_openclaw: bool = _no_openclaw_daemon_option,
     list_audio_devices: bool = _list_audio_devices_option,
     local_audio: bool = _local_audio_option,
-    test_wav: str | None = _test_wav_option,
 ) -> None:
     """Start the gateway, G2 dev server, and simulator together."""
 
@@ -789,9 +858,7 @@ def launch(
                     check=False,
                     capture_output=True,
                 )
-            if not _wait_for_port(openclaw_port, timeout=30, label="OpenClaw daemon"):
-                _cleanup()
-                raise typer.Exit(code=1)
+            _wait_for_port(openclaw_port, label="OpenClaw daemon")
 
         # -- 2. Gateway ------------------------------------------------------------
         console.print("[bold]2/4 Gateway[/bold]")
@@ -804,8 +871,6 @@ def launch(
             gw_env = {**os.environ}
             if local_audio:
                 gw_env["G2_LOCAL_AUDIO"] = "true"
-            if test_wav:
-                gw_env["G2_TEST_WAV"] = test_wav
             # Ensure CUDA libraries are discoverable by the gateway subprocess
             _cuda_lib_dirs = [
                 p
@@ -832,9 +897,7 @@ def launch(
             )
             spawned.append(gw_proc)
             gateway_started_by_us = True
-            if not _wait_for_port(gateway_port, timeout=30, label="Gateway"):
-                _cleanup()
-                raise typer.Exit(code=1)
+            _wait_for_port(gateway_port, label="Gateway")
 
         # -- 3. Vite dev server ----------------------------------------------------
         console.print("[bold]3/4 Vite dev server[/bold]")
@@ -862,9 +925,7 @@ def launch(
                     daemon=True,
                 ).start()
             if not _is_port_open(vite_port):
-                if not _wait_for_port(vite_port, timeout=15, label="Vite dev server"):
-                    _cleanup()
-                    raise typer.Exit(code=1)
+                _wait_for_port(vite_port, label="Vite dev server")
             else:
                 console.print(f"  [green]✓[/green] Vite dev server ready on port {vite_port}")
 
@@ -909,8 +970,7 @@ def launch(
         ]
         if local_audio:
             rows.append("[bold]Local audio:[/bold]  [green]enabled[/green]")
-        if test_wav:
-            rows.append(f"[bold]Test WAV:[/bold]     {test_wav}")
+
         console.print(Panel("\n".join(rows), title="G2 OpenClaw", border_style="green"))
         console.print(f"[dim]Logs → {_log_dir.relative_to(_PROJECT_ROOT)}/[/dim]")
         console.print("Press [bold]Ctrl+C[/bold] to stop all services.")

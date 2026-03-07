@@ -23,6 +23,7 @@ export interface SessionMetadata {
 	providerType?: string;
 	providerBaseUrl?: string;
 	workingDir?: string;
+	messages: Array<{ role: "user" | "assistant"; content: string; timestamp: string }>;
 }
 
 function log(level: string, message: string, data?: Record<string, unknown>): void {
@@ -192,6 +193,22 @@ export class CopilotBridge implements ICopilotClient {
 		await this.saveSessionsFile(sessions);
 	}
 
+	/**
+	 * Resolve a workingDir value to an absolute path.
+	 * - If absolute, use as-is.
+	 * - If relative/bare name, resolve against projectsRoot.
+	 * - Creates the directory if it doesn't exist (mkdir -p).
+	 * Returns the resolved absolute path.
+	 */
+	async resolveWorkingDir(workingDir: string): Promise<string> {
+		const resolved = path.isAbsolute(workingDir)
+			? workingDir
+			: path.join(this.config.projectsRoot, workingDir);
+		await fs.mkdir(resolved, { recursive: true });
+		log("info", `Resolved workingDir: "${workingDir}" → "${resolved}"`);
+		return resolved;
+	}
+
 	async runTask(request: CodingTaskRequest): Promise<CodingTaskResult> {
 		const startTime = Date.now();
 		const toolCalls: ToolCallRecord[] = [];
@@ -283,6 +300,10 @@ export class CopilotBridge implements ICopilotClient {
 					providerType: provider?.type,
 					providerBaseUrl: provider?.baseUrl,
 					workingDir: request.workingDir,
+					messages: [
+						{ role: "user", content: request.prompt, timestamp: new Date(startTime).toISOString() },
+						{ role: "assistant", content, timestamp: new Date().toISOString() },
+					],
 				});
 			}
 
@@ -423,7 +444,7 @@ export class CopilotBridge implements ICopilotClient {
 		}
 	}
 
-	async resumeTask(sessionId: string, prompt: string): Promise<CodingTaskResult> {
+	async resumeTask(sessionId: string, prompt: string, timeout?: number): Promise<CodingTaskResult> {
 		const sessions = await this.loadSessionsFile();
 		const meta = sessions.find((s) => s.sessionId === sessionId);
 		if (!meta) {
@@ -450,13 +471,42 @@ export class CopilotBridge implements ICopilotClient {
 			sessionId,
 			provider,
 			workingDir: meta.workingDir,
+			timeout,
 		});
 
-		// Update lastActivity
+		// Append new messages and update lastActivity
+		meta.messages = meta.messages ?? [];
+		meta.messages.push(
+			{ role: "user", content: prompt, timestamp: new Date().toISOString() },
+			{ role: "assistant", content: result.content, timestamp: new Date().toISOString() },
+		);
 		meta.lastActivity = new Date().toISOString();
 		await this.persistSession(meta);
 
 		return result;
+	}
+
+	async getMostRecentSession(): Promise<SessionMetadata | null> {
+		const sessions = await this.loadSessionsFile();
+		if (sessions.length === 0) return null;
+		return sessions.reduce((latest, s) =>
+			new Date(s.lastActivity) > new Date(latest.lastActivity) ? s : latest
+		);
+	}
+
+	async getSessionTranscript(sessionId: string, count = 2): Promise<Array<{ role: "user" | "assistant"; content: string; timestamp: string }>> {
+		const sessions = await this.loadSessionsFile();
+		const meta = sessions.find(s => s.sessionId === sessionId);
+		if (!meta) {
+			throw new BridgeError(
+				`No persisted session found with ID: ${sessionId}`,
+				"SESSION_NOT_FOUND",
+				{ sessionId },
+				false,
+			);
+		}
+		const messages = meta.messages ?? [];
+		return messages.slice(-count);
 	}
 
 	async listPersistedSessions(): Promise<SessionMetadata[]> {

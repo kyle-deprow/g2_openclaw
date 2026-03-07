@@ -1,6 +1,6 @@
 // === Status types ===
 export type GatewayStatus = 'loading' | 'idle' | 'recording' | 'transcribing' | 'thinking' | 'streaming';
-export type AppStatus = GatewayStatus | 'error' | 'disconnected';
+export type AppStatus = GatewayStatus | 'error' | 'disconnected' | 'confirming';
 
 export type ErrorCode =
   | 'AUTH_FAILED'
@@ -57,17 +57,6 @@ export type InboundFrame =
   | PingFrame;
 
 // === Outbound frames (App → Gateway) ===
-export interface StartAudioFrame {
-  type: 'start_audio';
-  sampleRate: number;
-  channels: number;
-  sampleWidth: number;
-}
-
-export interface StopAudioFrame {
-  type: 'stop_audio';
-}
-
 export interface TextFrame {
   type: 'text';
   message: string;
@@ -77,7 +66,19 @@ export interface PongFrame {
   type: 'pong';
 }
 
-export type OutboundFrame = StartAudioFrame | StopAudioFrame | TextFrame | PongFrame;
+export interface StartAudioFrame {
+  type: 'start_audio';
+  sampleRate: number;
+  channels: number;
+  sampleWidth: number;
+}
+
+export interface StopAudioFrame {
+  type: 'stop_audio';
+  hilText?: string;
+}
+
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame;
 
 // === Frame parsing ===
 const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping']);

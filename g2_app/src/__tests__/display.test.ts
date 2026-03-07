@@ -154,8 +154,9 @@ describe('DisplayManager', () => {
       mock.rebuildPageContainer.mockClear();
 
       // Send a large delta that exceeds the upgrade budget
-      // New budget: _transcriptLen + delta > UPGRADE_CHAR_LIMIT - 100 (1900)
-      const bigDelta = 'x'.repeat(1870);
+      // Budget: _transcriptLen + delta > UPGRADE_CHAR_LIMIT - 100 (1900)
+      // After showStreaming() with empty conversation, _transcriptLen = 6 ('Ready.')
+      const bigDelta = 'x'.repeat(1895);
       await dm.appendDelta(bigDelta);
 
       // Flush the debounce timer
@@ -307,8 +308,8 @@ describe('DisplayManager', () => {
 
       await dm.showStreaming();
 
-      // Trigger rebuild via large delta
-      await dm.appendDelta('x'.repeat(1870));
+      // Trigger rebuild via large delta (must exceed 1894 effective budget)
+      await dm.appendDelta('x'.repeat(1895));
       await vi.advanceTimersByTimeAsync(100);
 
       mock.textContainerUpgrade.mockClear();
@@ -355,7 +356,7 @@ describe('DisplayManager', () => {
   // Truncation boundary (M-5)
   // -----------------------------------------------------------------------
   describe('truncation boundary (M-5)', () => {
-    it('does NOT trigger rebuild at budget boundary (1867 chars)', async () => {
+    it('does NOT trigger rebuild at budget boundary (1894 chars)', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
@@ -363,7 +364,8 @@ describe('DisplayManager', () => {
       mock.textContainerUpgrade.mockClear();
       mock.rebuildPageContainer.mockClear();
 
-      await dm.appendDelta('x'.repeat(1867));
+      // 6 (_transcriptLen after 'Ready.') + 1894 = 1900, NOT > 1900
+      await dm.appendDelta('x'.repeat(1894));
       await vi.advanceTimersByTimeAsync(100);
 
       // Should append normally, not rebuild
@@ -371,14 +373,15 @@ describe('DisplayManager', () => {
       expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
     });
 
-    it('triggers rebuild at 1868 chars (exceeds budget)', async () => {
+    it('triggers rebuild at 1895 chars (exceeds budget)', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
       mock.rebuildPageContainer.mockClear();
 
-      await dm.appendDelta('x'.repeat(1868));
+      // 6 (_transcriptLen after 'Ready.') + 1895 = 1901, > 1900 → rebuild
+      await dm.appendDelta('x'.repeat(1895));
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.rebuildPageContainer).toHaveBeenCalled();

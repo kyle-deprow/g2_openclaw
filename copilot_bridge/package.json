@@ -5,6 +5,9 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
+	"engines": {
+		"node": ">=22.0.0"
+	},
 	"scripts": {
 		"build": "tsc",
 		"lint": "biome check .",
@@ -21,7 +24,8 @@
 	"dependencies": {
 		"@github/copilot-sdk": "^0.1.25",
 		"@modelcontextprotocol/sdk": "^1.26.0",
-		"dotenv": "^16.4.7"
+		"dotenv": "^16.4.7",
+		"zod": "^4.3.0"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^1.9.4",

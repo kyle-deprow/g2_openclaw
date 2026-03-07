@@ -4,8 +4,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Mock the SDK — must be before any import that transitively references it
 // ---------------------------------------------------------------------------
 const mockBridge = {
-  audioControl: vi.fn(),
-  onMicData: vi.fn(),
   onEvenHubEvent: vi.fn(),
 };
 
@@ -71,18 +69,9 @@ vi.mock('../state', () => ({
   StateMachine: vi.fn(() => mockSm),
 }));
 
-const mockAudio = {
-  init: vi.fn(),
-  start: vi.fn(),
-  stop: vi.fn(),
-  isRecording: false,
-};
-vi.mock('../audio', () => ({
-  AudioCapture: vi.fn(() => mockAudio),
-}));
-
 const mockInput = {
   init: vi.fn(),
+  sendTextFromInput: vi.fn(),
   _handleEvent: vi.fn(),
 };
 vi.mock('../input', () => ({
@@ -104,10 +93,8 @@ describe('main.ts boot()', () => {
    * Each test should call this then flush microtasks.
    */
   async function runBoot() {
-    // Bust the module cache so boot() runs fresh each time
     vi.resetModules();
 
-    // Re-apply mocks after resetModules
     vi.doMock('@evenrealities/even_hub_sdk', () => ({
       waitForEvenAppBridge: vi.fn(() => Promise.resolve(mockBridge)),
       OsEventTypeList: {
@@ -129,51 +116,31 @@ describe('main.ts boot()', () => {
     vi.doMock('../state', () => ({
       StateMachine: vi.fn(() => mockSm),
     }));
-    vi.doMock('../audio', () => ({
-      AudioCapture: vi.fn(() => mockAudio),
-    }));
     vi.doMock('../input', () => ({
       InputHandler: vi.fn(() => mockInput),
     }));
 
     await import('../main');
-    // Flush all pending microtasks (boot() is async)
     await vi.dynamicImportSettled?.() ?? new Promise((r) => setTimeout(r, 50));
   }
 
-  it('initialises AudioCapture with bridge and gateway during boot', async () => {
-    await runBoot();
-
-    expect(mockAudio.init).toHaveBeenCalledOnce();
-    expect(mockAudio.init).toHaveBeenCalledWith(mockBridge, mockGateway);
-  });
-
-  it('initialises InputHandler with all dependencies during boot', async () => {
+  it('initialises InputHandler with dependencies (no audio) during boot', async () => {
     await runBoot();
 
     expect(mockInput.init).toHaveBeenCalledOnce();
     expect(mockInput.init).toHaveBeenCalledWith({
       sm: mockSm,
       display: mockDisplay,
-      audio: mockAudio,
       gateway: mockGateway,
       bridge: mockBridge,
     });
   });
 
-  it('initialises audio before input handler', async () => {
-    await runBoot();
-
-    const audioOrder = mockAudio.init.mock.invocationCallOrder[0];
-    const inputOrder = mockInput.init.mock.invocationCallOrder[0];
-    expect(audioOrder).toBeLessThan(inputOrder);
-  });
-
-  it('connects gateway before initialising audio', async () => {
+  it('connects gateway before initialising input handler', async () => {
     await runBoot();
 
     const connectOrder = mockGateway.connect.mock.invocationCallOrder[0];
-    const audioOrder = mockAudio.init.mock.invocationCallOrder[0];
-    expect(connectOrder).toBeLessThan(audioOrder);
+    const inputOrder = mockInput.init.mock.invocationCallOrder[0];
+    expect(connectOrder).toBeLessThan(inputOrder);
   });
 });

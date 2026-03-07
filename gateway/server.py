@@ -7,7 +7,6 @@ import hmac
 import json
 import logging
 import sys
-import wave
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from logging.handlers import RotatingFileHandler
@@ -16,6 +15,7 @@ from typing import Any, Protocol
 from urllib.parse import parse_qs, urlparse
 
 import websockets
+import websockets.http11
 from websockets import ServerConnection
 
 from gateway.audio_buffer import AudioBuffer, BufferOverflow
@@ -118,7 +118,6 @@ class GatewaySession:
         transcriber: Transcriber | None = None,
         timeout: int = 120,
         local_audio: bool = False,
-        test_wav: str | None = None,
     ) -> None:
         self.ws = ws
         self._state = SessionState.IDLE
@@ -129,7 +128,6 @@ class GatewaySession:
         self._recording_start: float | None = None
         self._local_audio = local_audio
         self._local_stream: Any = None  # sounddevice.InputStream when active
-        self._test_wav = test_wav
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
@@ -207,7 +205,7 @@ class GatewaySession:
                     }
                 )
                 return
-            await self._handle_stop_audio()
+            await self._handle_stop_audio(frame)
         else:
             await self.send_frame(
                 {
@@ -357,7 +355,7 @@ class GatewaySession:
 
         await self.send_frame({"type": "status", "status": "recording"})
 
-    async def _handle_stop_audio(self) -> None:
+    async def _handle_stop_audio(self, frame: dict[str, Any] | None = None) -> None:
         """Stop recording and run transcription pipeline."""
         # Stop local mic stream if active
         self._stop_local_stream()
@@ -366,50 +364,44 @@ class GatewaySession:
         self._recording_start = None
         await self.send_frame({"type": "status", "status": "transcribing"})
 
-        # --test-wav mode: load WAV file instead of recorded audio
-        if self._test_wav:
-            logger.info("TEST WAV MODE: loading %s instead of recorded audio", self._test_wav)
-            self._audio_buffer = None
+        # HIL mode: synthesize text → fill buffer for transcription
+        hil_text = frame.get("hilText") if frame else None
+        if hil_text:
             try:
-                import numpy as np
+                from gateway.tts import synthesize_pcm
 
-                with wave.open(self._test_wav, "rb") as wf:
-                    if wf.getsampwidth() != 2:
-                        raise ValueError(
-                            f"Test WAV must be 16-bit PCM, got {wf.getsampwidth() * 8}-bit"
-                        )
-                    frames = wf.readframes(wf.getnframes())
-                    samples = np.frombuffer(frames, dtype=np.int16)
-                    # Mix to mono if stereo
-                    if wf.getnchannels() > 1:
-                        samples = (
-                            samples.reshape(-1, wf.getnchannels()).mean(axis=1).astype(np.int16)
-                        )
-                    audio_array = samples.astype(np.float32) / 32768.0
-                    logger.info(
-                        "TEST WAV: %d samples, %.1fs at %dHz",
-                        len(audio_array),
-                        len(audio_array) / wf.getframerate(),
-                        wf.getframerate(),
-                    )
+                logger.info("HIL TTS: synthesizing %d chars", len(hil_text))
+                pcm_bytes, tts_rate = await synthesize_pcm(hil_text)
+                # Create a fresh buffer and fill it with the TTS audio
+                from gateway.audio_buffer import AudioBuffer
+
+                self._audio_buffer = AudioBuffer(
+                    sample_rate=tts_rate,
+                    channels=1,
+                    sample_width=2,
+                )
+                self._audio_buffer.append(pcm_bytes)
+                logger.info(
+                    "HIL TTS: buffer filled (%.1fs of audio)",
+                    self._audio_buffer.duration_seconds,
+                )
             except Exception:
-                logger.exception("Failed to load test WAV file: %s", self._test_wav)
+                logger.exception("HIL TTS synthesis failed")
                 self._state = SessionState.IDLE
                 await self.send_frame(
                     {
                         "type": "error",
-                        "detail": "Failed to load test WAV file",
+                        "detail": "TTS synthesis failed",
                         "code": ErrorCode.INTERNAL_ERROR,
                     }
                 )
                 await self.send_frame({"type": "status", "status": "idle"})
                 return
-        else:
-            # Normal mode: use recorded audio buffer
-            buf = self._audio_buffer
-            self._audio_buffer = None
 
-        if not self._test_wav and (buf is None or buf.is_empty):
+        buf = self._audio_buffer
+        self._audio_buffer = None
+
+        if buf is None or buf.is_empty:
             self._state = SessionState.IDLE
             await self.send_frame(
                 {
@@ -435,41 +427,36 @@ class GatewaySession:
             return
 
         try:
-            if self._test_wav:
-                # audio_array already loaded above
-                pass
-            else:
-                assert buf is not None  # narrowed by guard above
-                audio_array = buf.to_numpy()
-                try:
-                    import numpy as _np
+            audio_array = buf.to_numpy()
+            try:
+                import numpy as _np
 
-                    rms = float(_np.sqrt(_np.mean(audio_array**2)))
-                    peak = float(_np.max(_np.abs(audio_array)))
-                    logger.info(
-                        "Pre-transcription audio: samples=%d, RMS=%.4f, Peak=%.4f",
-                        len(audio_array),
-                        rms,
-                        peak,
-                    )
-                    # Save diagnostic WAV for debugging audio issues
-                    import time as _time
-                    import wave as _wave
+                rms = float(_np.sqrt(_np.mean(audio_array**2)))
+                peak = float(_np.max(_np.abs(audio_array)))
+                logger.info(
+                    "Pre-transcription audio: samples=%d, RMS=%.4f, Peak=%.4f",
+                    len(audio_array),
+                    rms,
+                    peak,
+                )
+                # Save diagnostic WAV for debugging audio issues
+                import time as _time
+                import wave as _wave
 
-                    _diag_path = f"/tmp/gateway_audio_{int(_time.time())}.wav"
-                    with _wave.open(_diag_path, "wb") as _wf:
-                        _wf.setnchannels(buf.channels)
-                        _wf.setsampwidth(buf.sample_width)
-                        _wf.setframerate(buf.sample_rate)
-                        _wf.writeframes((audio_array * 32768).astype(_np.int16).tobytes())
-                    logger.info(
-                        "Diagnostic WAV saved: %s (sr=%d ch=%d)",
-                        _diag_path,
-                        buf.sample_rate,
-                        buf.channels,
-                    )
-                except Exception:
-                    pass  # diagnostic only — never block transcription
+                _diag_path = f"/tmp/gateway_audio_{int(_time.time())}.wav"
+                with _wave.open(_diag_path, "wb") as _wf:
+                    _wf.setnchannels(buf.channels)
+                    _wf.setsampwidth(buf.sample_width)
+                    _wf.setframerate(buf.sample_rate)
+                    _wf.writeframes((audio_array * 32768).astype(_np.int16).tobytes())
+                logger.info(
+                    "Diagnostic WAV saved: %s (sr=%d ch=%d)",
+                    _diag_path,
+                    buf.sample_rate,
+                    buf.channels,
+                )
+            except Exception:
+                pass  # diagnostic only — never block transcription
             text = await self._transcriber.transcribe(audio_array)
         except TranscriptionError as exc:
             logger.error("Transcription failed: %s", exc)
@@ -523,11 +510,10 @@ class GatewaySession:
             await self.send_frame({"type": "status", "status": "idle"})
             return
 
-        # Send transcription to client
+        # Send transcription to client and return to idle for user confirmation
         await self.send_frame({"type": "transcription", "text": text})
-
-        # Now handle the transcribed text as if it were a text message
-        await self._handle_text({"type": "text", "message": text})
+        self._state = SessionState.IDLE
+        await self.send_frame({"type": "status", "status": "idle"})
 
     async def _handle_text(self, frame: dict[str, Any]) -> None:
         self._state = SessionState.THINKING
@@ -649,7 +635,6 @@ class GatewayServer:
             self._transcriber,
             timeout=self.config.agent_timeout,
             local_audio=self.config.local_audio,
-            test_wav=self.config.test_wav,
         )
         old_session = self._current_session
         self._current_session = session  # claim the slot first
@@ -671,6 +656,20 @@ class GatewayServer:
             if self._current_session is session:
                 self._current_session = None
 
+    async def _process_request(
+        self,
+        connection: ServerConnection,
+        request: websockets.http11.Request,
+    ) -> websockets.http11.Response | None:
+        """Handle HTTP requests before WebSocket upgrade.
+
+        Returns an HTTP response for /healthz; returns None for
+        all other paths to let the WebSocket handshake proceed.
+        """
+        if request.path == "/healthz":
+            return connection.respond(200, "OK\n")
+        return None
+
     async def serve(self) -> None:
         """Start the server and run forever."""
         logger.info(
@@ -680,6 +679,7 @@ class GatewayServer:
         )
         serve_kwargs: dict[str, object] = {
             "max_size": 2**16,  # 64 KiB max frame size
+            "process_request": self._process_request,
         }
         if self.config.allowed_origins is not None:
             serve_kwargs["origins"] = self.config.allowed_origins
@@ -713,7 +713,7 @@ def _setup_cuda_library_paths() -> None:
     ]
 
     # Libraries to pre-load (order matters — cublas before cudnn)
-    targets = ["libcublasLt.so.12", "libcublas.so.12", "libcudnn.so"]
+    targets = ["libcublasLt.so.12", "libcublas.so.12", "libcudnn.so.9"]
 
     for lib_name in targets:
         # Check if already loadable
@@ -771,9 +771,6 @@ async def main() -> None:
 
     if config.local_audio:
         logger.info("Local audio capture mode ENABLED — mic audio captured by gateway")
-
-    if config.test_wav:
-        logger.info("TEST WAV MODE ENABLED — using %s instead of real audio", config.test_wav)
 
     _setup_cuda_library_paths()
 

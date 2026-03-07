@@ -27,7 +27,6 @@ class GatewayConfig:
     auth_timeout: float = 5.0
     allowed_origins: list[str] | None = None
     local_audio: bool = False
-    test_wav: str | None = None
 
 
 _WEAK_TOKENS = {"changeme", "test", "password", "secret", "token", "admin", ""}
@@ -64,7 +63,6 @@ def load_config() -> GatewayConfig:
     - ``AUTH_TIMEOUT`` (default ``5.0``)
     - ``ALLOWED_ORIGINS`` (default ``None`` — comma-separated list of allowed origins)
     - ``G2_LOCAL_AUDIO`` (default ``false`` — capture audio from local mic instead of WebSocket)
-    - ``G2_TEST_WAV`` (default ``None`` — path to a WAV file to use instead of real audio)
     """
     load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -95,14 +93,6 @@ def load_config() -> GatewayConfig:
 
     local_audio = os.environ.get("G2_LOCAL_AUDIO", "false").lower() in ("true", "1", "yes")
 
-    test_wav_raw = os.environ.get("G2_TEST_WAV")
-    test_wav: str | None = None
-    if test_wav_raw:
-        test_wav_path = Path(test_wav_raw)
-        if not test_wav_path.is_file():
-            raise ValueError(f"G2_TEST_WAV file not found: {test_wav_raw}")
-        test_wav = str(test_wav_path.resolve())
-
     cfg = GatewayConfig(
         gateway_host=host,
         gateway_port=port,
@@ -117,7 +107,6 @@ def load_config() -> GatewayConfig:
         auth_timeout=auth_timeout,
         allowed_origins=allowed_origins,
         local_audio=local_audio,
-        test_wav=test_wav,
     )
 
     if cfg.gateway_token is None:

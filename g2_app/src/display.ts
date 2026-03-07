@@ -204,7 +204,7 @@ export class DisplayManager {
     const statusText = `OpenClaw  ● ${statusLabel}`;
     const transcriptText = this.conversation
       ? this.conversation.formatTail(REBUILD_CHAR_LIMIT - 50)
-      : 'Ready.\n\nTap ring to ask anything.';
+      : 'Ready.';
 
     await b.rebuildPageContainer(
       new RebuildPageContainer({
@@ -267,7 +267,7 @@ export class DisplayManager {
 
   private async _doReplace(transcriptText: string): Promise<void> {
     if (transcriptText.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this._doRebuild('idle', 'Tap to speak');
+      await this._doRebuild('idle', 'Tap to interact');
       return;
     }
     const b = this.requireBridge();
@@ -366,14 +366,14 @@ export class DisplayManager {
     this.clearDeltaTimer();
     const transcript = this.conversation
       ? this.conversation.format()
-      : 'Ready.\n\nTap ring to ask anything.';
+      : 'Ready.';
 
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this.rebuildTranscript('Idle', 'Tap to speak · Scroll to read');
+      await this.rebuildTranscript('Idle', 'Tap to interact');
     } else {
       await this.replaceTranscript(transcript);
       await this.updateStatus('Idle');
-      await this.updateFooter('Tap to speak · Scroll to read');
+      await this.updateFooter('Tap to interact');
     }
   }
 
@@ -397,6 +397,17 @@ export class DisplayManager {
     await this.updateFooter('Sending to OpenClaw...');
   }
 
+  async showConfirming(transcriptionText: string): Promise<void> {
+    const transcript = this.conversation ? this.conversation.format() : transcriptionText;
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this.rebuildTranscript('Confirm?', 'Tap ✓  Double-tap ✗');
+    } else {
+      await this.replaceTranscript(transcript);
+      await this.updateStatus('Confirm?');
+      await this.updateFooter('Tap ✓  Double-tap ✗');
+    }
+  }
+
   async showThinking(): Promise<void> {
     await this.updateStatus('Thinking');
     await this.updateFooter('Waiting for response...');
@@ -418,7 +429,7 @@ export class DisplayManager {
     const transcript = this.conversation ? this.conversation.format() : '';
     await this.replaceTranscript(transcript);
     await this.updateStatus('Idle');
-    await this.updateFooter('Tap to speak · Scroll to read');
+    await this.updateFooter('Tap to interact');
   }
 
   async showError(message: string, hint = 'Tap to continue'): Promise<void> {

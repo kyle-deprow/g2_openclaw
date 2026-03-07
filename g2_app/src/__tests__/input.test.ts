@@ -1,25 +1,18 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+// @vitest-environment jsdom
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { InputHandler } from '../input';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
-import type { AudioCapture } from '../audio';
 import type { DisplayManager } from '../display';
 import type { Gateway } from '../gateway';
 import type { StateMachine } from '../state';
 
-// ---------------------------------------------------------------------------
-// Event type constants (matching SDK enum values, aliased for readability)
-// ---------------------------------------------------------------------------
-const CLICK        = OsEventTypeList.CLICK_EVENT;            // 0
-const DOUBLE_CLICK = OsEventTypeList.DOUBLE_CLICK_EVENT;     // 3
-const SCROLL_TOP   = OsEventTypeList.SCROLL_TOP_EVENT;       // 1
-const SCROLL_BOTTOM = OsEventTypeList.SCROLL_BOTTOM_EVENT;   // 2
-const FG_ENTER     = OsEventTypeList.FOREGROUND_ENTER_EVENT; // 4
-const FG_EXIT      = OsEventTypeList.FOREGROUND_EXIT_EVENT;  // 5
-
-// ---------------------------------------------------------------------------
-// Mock factories
-// ---------------------------------------------------------------------------
+const CLICK        = OsEventTypeList.CLICK_EVENT;
+const DOUBLE_CLICK = OsEventTypeList.DOUBLE_CLICK_EVENT;
+const SCROLL_TOP   = OsEventTypeList.SCROLL_TOP_EVENT;
+const SCROLL_BOTTOM = OsEventTypeList.SCROLL_BOTTOM_EVENT;
+const FG_ENTER     = OsEventTypeList.FOREGROUND_ENTER_EVENT;
+const FG_EXIT      = OsEventTypeList.FOREGROUND_EXIT_EVENT;
 
 function createMockSm(initial = 'idle') {
   const obj = {
@@ -40,24 +33,17 @@ function createMockDisplay() {
     showIdle: vi.fn(),
     showRecording: vi.fn(),
     showTranscribing: vi.fn(),
+    showConfirming: vi.fn(),
     showDetailPage: vi.fn(),
     _streamBuffer: 'test response',
     get streamBuffer() { return this._streamBuffer; },
   };
 }
 
-function createMockAudio() {
-  return {
-    start: vi.fn(),
-    stop: vi.fn(),
-    _isRecording: false,
-    get isRecording() { return this._isRecording; },
-  };
-}
-
 function createMockGateway() {
   return {
     connect: vi.fn(),
+    sendJson: vi.fn(),
     _isConnected: true,
     get isConnected() { return this._isConnected; },
   };
@@ -70,15 +56,10 @@ function createMockBridge() {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe('InputHandler', () => {
   let handler: InputHandler;
   let sm: ReturnType<typeof createMockSm>;
   let display: ReturnType<typeof createMockDisplay>;
-  let audio: ReturnType<typeof createMockAudio>;
   let gateway: ReturnType<typeof createMockGateway>;
   let bridge: ReturnType<typeof createMockBridge>;
 
@@ -86,36 +67,150 @@ describe('InputHandler', () => {
     handler = new InputHandler();
     sm = createMockSm('idle');
     display = createMockDisplay();
-    audio = createMockAudio();
     gateway = createMockGateway();
     bridge = createMockBridge();
 
     handler.init({
       sm: sm as unknown as StateMachine,
       display: display as unknown as DisplayManager,
-      audio: audio as unknown as AudioCapture,
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Tap behaviour per state
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Recording flow
+  // ---------------------------------------------------------------------------
 
-  it('tap in idle starts recording', () => {
-    sm._current = 'idle';
-    handler._handleEvent(CLICK);
-    expect(audio.start).toHaveBeenCalled();
-    expect(sm.transition).toHaveBeenCalledWith('recording');
-    expect(display.showRecording).toHaveBeenCalled();
+  describe('recording flow', () => {
+    it('tap in idle sends start_audio', () => {
+      sm._current = 'idle';
+      handler._handleEvent(CLICK);
+      expect(gateway.sendJson).toHaveBeenCalledWith({
+        type: 'start_audio',
+        sampleRate: 16000,
+        channels: 1,
+        sampleWidth: 2,
+      });
+    });
+
+    it('tap in recording sends stop_audio', () => {
+      sm._current = 'recording';
+      handler._handleEvent(CLICK);
+      expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'stop_audio' });
+    });
+
+    it('tap in recording sends stop_audio with hilText from DOM', () => {
+      sm._current = 'recording';
+      const input = document.createElement('input');
+      input.id = 'hil-text';
+      input.value = 'hello world';
+      document.body.appendChild(input);
+
+      handler._handleEvent(CLICK);
+      expect(gateway.sendJson).toHaveBeenCalledWith({
+        type: 'stop_audio',
+        hilText: 'hello world',
+      });
+
+      input.remove();
+    });
+
+    it('startRecording returns false when not idle', () => {
+      sm._current = 'recording';
+      expect(handler.startRecording()).toBe(false);
+    });
+
+    it('stopRecording returns false when not recording', () => {
+      sm._current = 'idle';
+      expect(handler.stopRecording()).toBe(false);
+    });
   });
 
-  it('tap in recording stops audio', () => {
-    sm._current = 'recording';
-    handler._handleEvent(CLICK);
-    expect(audio.stop).toHaveBeenCalled();
+  // ---------------------------------------------------------------------------
+  // Confirming flow
+  // ---------------------------------------------------------------------------
+
+  describe('confirming flow', () => {
+    it('setPendingTranscription stores text', () => {
+      handler.setPendingTranscription('hello');
+      expect(handler.pendingTranscription).toBe('hello');
+    });
+
+    it('tap in confirming sends text frame with pending transcription', () => {
+      sm._current = 'confirming';
+      handler.setPendingTranscription('confirmed text');
+      handler._handleEvent(CLICK);
+      expect(gateway.sendJson).toHaveBeenCalledWith({
+        type: 'text',
+        message: 'confirmed text',
+      });
+      expect(handler.pendingTranscription).toBeNull();
+    });
+
+    it('double-tap in confirming rejects and returns to idle', () => {
+      sm._current = 'confirming';
+      handler.setPendingTranscription('rejected text');
+      handler._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+      expect(handler.pendingTranscription).toBeNull();
+    });
+
+    it('confirmTranscription returns false without pending text', () => {
+      sm._current = 'confirming';
+      expect(handler.confirmTranscription()).toBe(false);
+    });
+
+    it('confirmTranscription returns false when not confirming', () => {
+      sm._current = 'idle';
+      handler.setPendingTranscription('text');
+      expect(handler.confirmTranscription()).toBe(false);
+    });
+
+    it('rejectTranscription returns false when not confirming', () => {
+      sm._current = 'idle';
+      expect(handler.rejectTranscription()).toBe(false);
+    });
   });
+
+  // ---------------------------------------------------------------------------
+  // sendText
+  // ---------------------------------------------------------------------------
+
+  describe('sendText', () => {
+    it('sends text frame when idle', () => {
+      sm._current = 'idle';
+      expect(handler.sendText('hello')).toBe(true);
+      expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'text', message: 'hello' });
+    });
+
+    it('sends text frame when confirming', () => {
+      sm._current = 'confirming';
+      expect(handler.sendText('hello')).toBe(true);
+      expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'text', message: 'hello' });
+    });
+
+    it('returns false for empty string', () => {
+      sm._current = 'idle';
+      expect(handler.sendText('')).toBe(false);
+    });
+
+    it('returns false when thinking', () => {
+      sm._current = 'thinking';
+      expect(handler.sendText('hello')).toBe(false);
+    });
+
+    it('trims whitespace', () => {
+      sm._current = 'idle';
+      handler.sendText('  trimmed  ');
+      expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'text', message: 'trimmed' });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Other tap states
+  // ---------------------------------------------------------------------------
 
   it('tap in error dismisses', () => {
     sm._current = 'error';
@@ -133,62 +228,89 @@ describe('InputHandler', () => {
   it('tap ignored in thinking', () => {
     sm._current = 'thinking';
     handler._handleEvent(CLICK);
-    expect(audio.start).not.toHaveBeenCalled();
-    expect(audio.stop).not.toHaveBeenCalled();
-    expect(sm.transition).not.toHaveBeenCalled();
-    expect(display.showIdle).not.toHaveBeenCalled();
+    expect(gateway.sendJson).not.toHaveBeenCalled();
   });
 
   it('tap ignored in streaming', () => {
     sm._current = 'streaming';
     handler._handleEvent(CLICK);
-    expect(audio.start).not.toHaveBeenCalled();
-    expect(audio.stop).not.toHaveBeenCalled();
-    expect(sm.transition).not.toHaveBeenCalled();
-    expect(display.showIdle).not.toHaveBeenCalled();
+    expect(gateway.sendJson).not.toHaveBeenCalled();
   });
 
-  // -----------------------------------------------------------------------
-  // SDK CLICK_EVENT = 0 → undefined quirk
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // SDK quirks
+  // ---------------------------------------------------------------------------
 
   it('undefined event treated as click', () => {
     sm._current = 'idle';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
     handler._handleEvent(undefined);
-
-    expect(audio.start).toHaveBeenCalled();
-    expect(sm.transition).toHaveBeenCalledWith('recording');
-    expect(warnSpy).toHaveBeenCalledWith(
-      '[Input] Received undefined eventType — treating as CLICK_EVENT (SDK bug)',
-    );
+    expect(gateway.sendJson).toHaveBeenCalledWith({
+      type: 'start_audio',
+      sampleRate: 16000,
+      channels: 1,
+      sampleWidth: 2,
+    });
     warnSpy.mockRestore();
   });
 
-  // -----------------------------------------------------------------------
-  // Double-tap
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Double-tap (non-confirming)
+  // ---------------------------------------------------------------------------
 
-  it('double tap is a no-op (phase 4 placeholder)', () => {
+  it('double tap in idle is a no-op', () => {
     sm._current = 'idle';
     handler._handleEvent(DOUBLE_CLICK);
-    // No action expected — double-tap is a placeholder for Phase 4
     expect(display.showIdle).not.toHaveBeenCalled();
   });
 
-  // -----------------------------------------------------------------------
-  // Lifecycle events
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Cancel response (double-tap in thinking/streaming)
+  // ---------------------------------------------------------------------------
 
-  it('foreground exit stops recording', () => {
-    sm._current = 'recording';
-    audio._isRecording = true;
+  describe('cancelResponse', () => {
+    it('double-tap in thinking cancels and returns to idle', () => {
+      sm._current = 'thinking';
+      handler._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('double-tap in streaming cancels and returns to idle', () => {
+      sm._current = 'streaming';
+      handler._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('cancelResponse returns false when not in thinking/streaming', () => {
+      sm._current = 'idle';
+      expect(handler.cancelResponse()).toBe(false);
+    });
+
+    it('cancelResponse returns true when thinking', () => {
+      sm._current = 'thinking';
+      expect(handler.cancelResponse()).toBe(true);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('cancelResponse returns true when streaming', () => {
+      sm._current = 'streaming';
+      expect(handler.cancelResponse()).toBe(true);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle events
+  // ---------------------------------------------------------------------------
+
+  it('foreground exit is a no-op', () => {
+    sm._current = 'idle';
     handler._handleEvent(FG_EXIT);
-    expect(audio.stop).toHaveBeenCalled();
-    // Should NOT transition to idle — server drives the state flow
     expect(sm.transition).not.toHaveBeenCalled();
-    expect(display.showIdle).not.toHaveBeenCalled();
   });
 
   it('foreground enter reconnects if disconnected', () => {
@@ -197,90 +319,64 @@ describe('InputHandler', () => {
     expect(gateway.connect).toHaveBeenCalled();
   });
 
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Scroll throttling
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   it('scroll throttled within 300ms', () => {
     vi.useFakeTimers();
-
-    // First scroll at t=0 — should pass through
     handler._handleEvent(SCROLL_TOP);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const firstTime = (handler as any)._lastScrollTime;
     expect(firstTime).toBeGreaterThan(0);
 
-    // Second scroll 100ms later — should be throttled
     vi.advanceTimersByTime(100);
     handler._handleEvent(SCROLL_BOTTOM);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((handler as any)._lastScrollTime).toBe(firstTime);
 
-    // Third scroll 200ms later (total 300ms) — should pass through
     vi.advanceTimersByTime(200);
     handler._handleEvent(SCROLL_TOP);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((handler as any)._lastScrollTime).toBeGreaterThan(firstTime);
 
     vi.useRealTimers();
   });
 
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
   // Double-init guard
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
 
   it('double init is ignored with warning', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    // handler was already init'd in beforeEach — call again
     handler.init({
       sm: sm as unknown as StateMachine,
       display: display as unknown as DisplayManager,
-      audio: audio as unknown as AudioCapture,
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
     });
-
     expect(warnSpy).toHaveBeenCalledWith('[Input] Already initialised — ignoring duplicate init()');
-    // onEvenHubEvent should only have been registered once (from beforeEach)
     expect(bridge.onEvenHubEvent).toHaveBeenCalledTimes(1);
     warnSpy.mockRestore();
   });
 
-  // -----------------------------------------------------------------------
-  // Bare event (no sub-object) treated as click
-  // -----------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // Bare event and audio event
+  // ---------------------------------------------------------------------------
 
-  it('bare event (no sub-object) treated as click', () => {
+  it('bare event treated as click', () => {
     sm._current = 'idle';
-
-    // Retrieve the onEvenHubEvent callback registered during init
     const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
-
-    // Fire an event with no textEvent, listEvent, sysEvent, or audioEvent
     eventCallback({});
-
-    // Should be treated as a click → starts recording in idle state
-    expect(audio.start).toHaveBeenCalled();
-    expect(sm.transition).toHaveBeenCalledWith('recording');
+    expect(gateway.sendJson).toHaveBeenCalledWith({
+      type: 'start_audio',
+      sampleRate: 16000,
+      channels: 1,
+      sampleWidth: 2,
+    });
   });
 
-  // -----------------------------------------------------------------------
-  // Audio event NOT treated as click
-  // -----------------------------------------------------------------------
-
-  it('audio event is not treated as a click', () => {
-    sm._current = 'recording';
-
-    // Retrieve the onEvenHubEvent callback registered during init
+  it('audio event is ignored', () => {
+    sm._current = 'idle';
     const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
-
-    // Fire an event with only audioEvent populated (simulates PCM frame)
     eventCallback({ audioEvent: { audioPcm: new Uint8Array(3200) } });
-
-    // Should NOT stop recording or trigger any state change
-    expect(audio.stop).not.toHaveBeenCalled();
-    expect(sm.transition).not.toHaveBeenCalled();
-    expect(display.showIdle).not.toHaveBeenCalled();
+    expect(gateway.sendJson).not.toHaveBeenCalled();
   });
 });

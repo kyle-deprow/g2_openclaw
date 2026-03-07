@@ -62,7 +62,7 @@ export class ConversationHistory {
   /** Format the entire transcript for display. */
   format(): string {
     if (this.entries.length === 0) {
-      return 'Ready.\n\nTap ring to ask anything.';
+      return 'Ready.';
     }
     return this.entries.map((entry) => {
       switch (entry.role) {
