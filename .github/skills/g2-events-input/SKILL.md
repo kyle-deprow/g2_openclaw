@@ -466,9 +466,10 @@ definitions, so you must cast through `any`:
 });
 ```
 
-> **Note:** This is used in `g2_app/src/audio.ts` as the primary audio capture
-> mechanism. Prefer `onMicData` over filtering `onEvenHubEvent` for audio-only
-> use cases.
+> **Note:** In this project, audio capture is delegated to the gateway — the G2
+> app sends `start_audio` / `stop_audio` control frames over WebSocket (see
+> `g2_app/src/input.ts`). The `onMicData` method is available in the SDK for
+> apps that need direct client-side audio access.
 
 ---
 
@@ -567,17 +568,21 @@ intervals/timeouts on `FOREGROUND_EXIT_EVENT`. Restart them on
 
 ## 10. Input Handling Best Practices
 
-1. **Guard against empty/malformed events BEFORE checking `eventType`:**
+1. **Handle bare events (no sub-object) as clicks:**
    ```typescript
-   // CRITICAL: Guard against empty/malformed events BEFORE checking eventType
+   // Check whether any sub-event is populated
    const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
-   if (!hasEvent) return; // Skip — not a user input event
+   if (!hasEvent) {
+     console.log('[Input] Bare event (no sub-object) — treating as click');
+     handleClick(event);
+     return;
+   }
 
-   // Only THEN check for click (safe because we know a sub-event exists)
+   // Sub-event exists — extract eventType normally
    const et = event.textEvent?.eventType ?? event.listEvent?.eventType ?? event.sysEvent?.eventType;
    if (et === OsEventTypeList.CLICK_EVENT || et === undefined) { /* ... */ }
    ```
-   Without this guard, empty events would be misclassified as clicks due to Quirk 1 (`CLICK_EVENT = 0 → undefined`).
+   On some firmware versions, taps arrive as bare events with no sub-event populated. Treating them as clicks (rather than discarding them) ensures taps are never silently dropped.
 2. **Handle clicks from ALL event sources** — never assume one channel:
    ```typescript
    const et = event.listEvent?.eventType ?? event.textEvent?.eventType ?? event.sysEvent?.eventType;
@@ -601,32 +606,39 @@ use a push-to-talk model. Instead, the system uses **tap-to-start / tap-to-stop*
 1. **First tap** → start recording (open mic, begin streaming PCM)
 2. **Second tap** → stop recording (close mic, send audio for processing)
 
-### 300ms Tap Debounce
+### Scroll Cooldown (300ms)
 
-A debounce window of **300 ms** after each tap prevents accidental
-double-tap from being interpreted as start-then-immediately-stop:
+Scroll events use a **300 ms** cooldown (`SCROLL_COOLDOWN` in `input.ts`) to
+prevent rapid-fire boundary events from triggering multiple page changes:
 
 ```typescript
-let lastTapTime = 0;
+const SCROLL_COOLDOWN = 300;
+let lastScrollTime = 0;
 
-function handleTap() {
+function handleScroll(eventType: OsEventTypeList) {
   const now = Date.now();
-  if (now - lastTapTime < 300) return; // Debounce — ignore rapid re-tap
-  lastTapTime = now;
+  if (now - lastScrollTime < SCROLL_COOLDOWN) return; // Discard rapid duplicates
+  lastScrollTime = now;
 
-  if (isRecording) {
-    stopRecording();
-  } else {
-    startRecording();
+  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
+    // Navigate to previous page
+  } else if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    // Navigate to next page
   }
 }
 ```
 
-### 30s Server-Side Silence Timeout
+**Tap debounce is NOT implemented** — the firmware natively distinguishes
+between `CLICK_EVENT` (single tap) and `DOUBLE_CLICK_EVENT` (double tap),
+so application-level tap debounce is unnecessary.
 
-The gateway enforces a **30-second silence timeout** for orphaned recordings.
+### Server-Side Recording Limits
+
+The gateway enforces a **90-second maximum recording duration**
+(`_MAX_RECORDING_SECONDS` in `gateway/server.py`) and the audio buffer caps at
+**60 seconds** (`AudioBuffer.MAX_DURATION_SECONDS` in `gateway/audio_buffer.py`).
 If the user starts recording but never taps again to stop, the server
-automatically closes the audio session after 30 s of inactivity.
+automatically closes the audio session after 90 s.
 
 > **Reference:** See `docs/decisions/002-tap-to-toggle.md` for the full
 > architectural decision record.
@@ -678,7 +690,8 @@ LIFECYCLE:           FG_ENTER → resume, FG_EXIT → pause, ABNORMAL → cleanu
 ## Cross-References
 
 - `g2_app/src/input.ts` — Input handler implementation
-- `g2_app/src/audio.ts` — Audio capture implementation
+- `g2_app/src/conversation.ts` — Conversation history and formatting
+- `g2_app/src/utils.ts` — Utility functions (stripMarkdown, etc.)
 - `g2_app/src/state.ts` — State machine
 - `docs/decisions/002-tap-to-toggle.md` — Tap-to-toggle ADR
 - `docs/implementation/phase-2-audio-pipeline.md` — Audio pipeline implementation plan

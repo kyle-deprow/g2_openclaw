@@ -231,7 +231,8 @@ my-app/
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
+    "dev": "vite",
+    "dev:network": "vite --host 0.0.0.0",
     "build": "vite build",
     "test": "vitest run",
     "qr": "evenhub qr --http --port 5173",
@@ -255,7 +256,7 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   server: {
-    host: true,    // bind to 0.0.0.0 so phone can reach the server
+    host: 'localhost',    // localhost by default; use `npm run dev:network` or `--host 0.0.0.0` for phone access
     port: 5173,
   },
   // G2 WebView requires a single JS bundle — no code-splitting
@@ -338,7 +339,7 @@ console.log("G2 app started");
 ```
 1. npm install @evenrealities/even_hub_sdk
 2. Code your web app (any framework — just HTML + TS + SDK)
-3. npm run dev (Vite on port 5173 with --host 0.0.0.0)
+3. npm run dev (Vite on port 5173, localhost only) — or npm run dev:network to bind 0.0.0.0 for phone access
 4. Terminal 2: npx evenhub qr --url "http://<local-ip>:5173"
 5. Scan QR with Even App on iPhone
 6. App loads on glasses; Vite HMR works for live changes
@@ -363,7 +364,8 @@ Add `*.ehpk` to `.gitignore`.
 ```json
 {
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
+    "dev": "vite",
+    "dev:network": "vite --host 0.0.0.0",
     "build": "vite build",
     "qr": "evenhub qr --http --port 5173",
     "pack": "npm run build && evenhub pack app.json dist -o myapp.ehpk"

@@ -225,7 +225,7 @@ await glassesManager.textContainerUpgrade({
 
 > **Markdown stripping:** LLM/AI responses typically contain Markdown formatting
 > (bold, italic, code, links, headings) that the G2 display cannot render. Strip
-> Markdown before display. See `stripMarkdown()` in `g2_app/src/display.ts`.
+> Markdown before display. See `stripMarkdown()` in `g2_app/src/utils.ts` (used by `g2_app/src/conversation.ts`).
 
 > **Caution (`fontSize` / `fontColor`):** The protobuf schema defines `fontSize`
 > and `fontColor` on text containers, but these are **absent from the published
@@ -649,3 +649,5 @@ Understanding the boundaries prevents wasted effort and impossible designs.
 - [docs/design/display-layouts.md](docs/design/display-layouts.md) — Display layout design for this project
 - [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
 - [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
+- [g2_app/src/utils.ts](g2_app/src/utils.ts) — Utility helpers (`stripMarkdown`, etc.)
+- [g2_app/src/conversation.ts](g2_app/src/conversation.ts) — Conversation rendering (uses `stripMarkdown`)

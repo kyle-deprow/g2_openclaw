@@ -378,7 +378,7 @@ The following fields exist in the underlying protobuf definitions but are **abse
 |---|---|---|---|
 | `fontSize` | `number` | Exists in protobuf, absent from `.d.ts`. Requires `(container as any).fontSize = n`. | `g2_app/src/display.ts` |
 | `fontColor` | `number` (0–15) | Same as `fontSize`. Requires `(container as any).fontColor = n`. | `g2_app/src/display.ts` |
-| `onMicData(callback)` | Method | Convenience wrapper around `onEvenHubEvent` for audio frames. Available at runtime, absent from `.d.ts`. Access via `(bridge as any).onMicData(cb)`. | `g2_app/src/audio.ts` |
+| `onMicData(callback)` | Method | Convenience wrapper around `onEvenHubEvent` for audio frames. Available at runtime, absent from `.d.ts`. Access via `(bridge as any).onMicData(cb)`. | Not used in this project (audio is gateway-managed) |
 
 ## Enums — Complete Reference
 
@@ -645,5 +645,6 @@ import {
 - [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
 - [docs/design/g2-app.md](docs/design/g2-app.md) — G2 app design (SDK usage patterns)
 - [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
-- [g2_app/src/input.ts](g2_app/src/input.ts) — Input handling implementation
-- [g2_app/src/audio.ts](g2_app/src/audio.ts) — Audio capture implementation
+- [g2_app/src/input.ts](g2_app/src/input.ts) — Input and audio control implementation
+- [g2_app/src/utils.ts](g2_app/src/utils.ts) — Utility functions
+- [g2_app/src/conversation.ts](g2_app/src/conversation.ts) — Conversation history and formatting
