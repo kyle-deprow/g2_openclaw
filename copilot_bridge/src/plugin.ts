@@ -98,7 +98,7 @@ const copilotTool: OpenClawToolDef = {
 			persona: {
 				type: "string",
 				description:
-					"Behavioral directives prepended to the prompt (e.g., role, constraints, output format). Leave empty for default Copilot behavior.",
+					"System-level instructions appended to Copilot's system prompt. Applied when a new session starts for this workingDir.",
 			},
 			workingDir: {
 				type: "string",
@@ -107,10 +107,6 @@ const copilotTool: OpenClawToolDef = {
 			timeout: {
 				type: "number",
 				description: "Timeout in milliseconds (default 120000)",
-			},
-			sessionId: {
-				type: "string",
-				description: "Session ID to resume. Omit for a new session. The session retains full conversation context.",
 			},
 		},
 		required: ["prompt", "workingDir"],
@@ -139,87 +135,18 @@ const copilotTool: OpenClawToolDef = {
 				result: "## Error\n\n`persona` must be a string (max 50000 chars)",
 			};
 		}
-		if (
-			args.sessionId !== undefined &&
-			(typeof args.sessionId !== "string" || args.sessionId.length > 200)
-		) {
-			return {
-				result: "## Error\n\n`sessionId` must be a string (max 200 chars)",
-			};
-		}
 		try {
 			const bridge = await getBridge();
 			const resolvedDir = await bridge.resolveWorkingDir(args.workingDir as string);
 
-			const prompt = args.persona
-				? `${args.persona}\n\n---\n\n${args.prompt}`
-				: (args.prompt as string);
-
 			const result = await bridge.runTask({
-				prompt,
+				prompt: args.prompt as string,
 				workingDir: resolvedDir,
 				timeout: (args.timeout as number | undefined) ?? 120_000,
-				sessionId: args.sessionId as string | undefined,
+				sessionId: resolvedDir,
+				systemMessage: (args.persona as string | undefined) || undefined,
 			});
 			return { result: formatResult(result) };
-		} catch (err) {
-			return { result: formatError(err) };
-		}
-	},
-};
-
-// --- Session management tools ---
-
-const copilotSessionsTool: OpenClawToolDef = {
-	name: "copilot_sessions",
-	description: "List all active Copilot sessions with metadata (ID, working directory, created time, message count).",
-	parameters: {
-		type: "object",
-		properties: {},
-		required: [],
-	},
-	async execute(): Promise<{ result: string }> {
-		try {
-			const bridge = await getBridge();
-			const sessions = bridge.listSessions();
-			if (sessions.length === 0) {
-				return { result: "No active sessions." };
-			}
-			const header = "| Session ID | Working Dir | Created | Messages |\n|---|---|---|---|";
-			const rows = sessions.map(
-				(s) => `| ${s.sessionId} | ${s.workingDir ?? "—"} | ${s.createdAt} | ${s.messageCount} |`,
-			);
-			return { result: `${header}\n${rows.join("\n")}` };
-		} catch (err) {
-			return { result: formatError(err) };
-		}
-	},
-};
-
-const copilotSessionDestroyTool: OpenClawToolDef = {
-	name: "copilot_session_destroy",
-	description: "Destroy a specific Copilot session by ID, freeing its resources.",
-	parameters: {
-		type: "object",
-		properties: {
-			sessionId: {
-				type: "string",
-				description: "The session ID to destroy.",
-			},
-		},
-		required: ["sessionId"],
-	},
-	async execute(args: Record<string, any>): Promise<{ result: string }> {
-		if (typeof args.sessionId !== "string" || args.sessionId.length === 0) {
-			return { result: "## Error\n\n`sessionId` is required." };
-		}
-		try {
-			const bridge = await getBridge();
-			const destroyed = await bridge.destroySession(args.sessionId as string);
-			if (destroyed) {
-				return { result: `Session ${args.sessionId} destroyed.` };
-			}
-			return { result: `Session ${args.sessionId} not found.` };
 		} catch (err) {
 			return { result: formatError(err) };
 		}
@@ -231,7 +158,7 @@ const copilotSessionDestroyTool: OpenClawToolDef = {
 const plugin: OpenClawPlugin = {
 	name: "copilot-bridge",
 	version: "1.0.0",
-	tools: [copilotTool, copilotSessionsTool, copilotSessionDestroyTool],
+	tools: [copilotTool],
 	async onLoad() {
 		console.log("[copilot-bridge] Plugin loaded");
 	},

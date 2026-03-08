@@ -24,18 +24,38 @@ vi.mock('@evenrealities/even_hub_sdk', () => ({
 // Mock internal modules
 // ---------------------------------------------------------------------------
 
+const mockConversation = {
+  clear: vi.fn(),
+  addUser: vi.fn(),
+  addAssistant: vi.fn(),
+  addSystem: vi.fn(),
+  startAssistantStream: vi.fn(),
+  appendToLastAssistant: vi.fn(),
+  replayHistory: vi.fn(),
+  formatReverse: vi.fn().mockReturnValue('Ready.'),
+  format: vi.fn().mockReturnValue('Ready.'),
+  get length() { return 0; },
+};
+vi.mock('../conversation', () => ({
+  ConversationHistory: vi.fn(() => mockConversation),
+}));
+
 const mockDisplay = {
   init: vi.fn(() => Promise.resolve()),
   showLoading: vi.fn(() => Promise.resolve()),
-  showIdle: vi.fn(),
-  showRecording: vi.fn(),
-  showThinking: vi.fn(),
-  showTranscribing: vi.fn(),
-  showStreaming: vi.fn(),
-  showDisconnected: vi.fn(),
-  showError: vi.fn(),
-  appendDelta: vi.fn(),
-  finaliseStream: vi.fn(),
+  showIdle: vi.fn(() => Promise.resolve()),
+  showRecording: vi.fn(() => Promise.resolve()),
+  showThinking: vi.fn(() => Promise.resolve()),
+  showTranscribing: vi.fn(() => Promise.resolve()),
+  showStreaming: vi.fn(() => Promise.resolve()),
+  showDisconnected: vi.fn(() => Promise.resolve()),
+  showError: vi.fn(() => Promise.resolve()),
+  showConfirming: vi.fn(() => Promise.resolve()),
+  showSessionMenu: vi.fn(() => Promise.resolve()),
+  showSessionReset: vi.fn(() => Promise.resolve()),
+  exitMenuMode: vi.fn(() => Promise.resolve()),
+  appendDelta: vi.fn(() => Promise.resolve()),
+  finaliseStream: vi.fn(() => Promise.resolve()),
 };
 vi.mock('../display', () => ({
   DisplayManager: vi.fn(() => mockDisplay),
@@ -47,6 +67,8 @@ const mockGateway = {
   onEvent: vi.fn(),
   send: vi.fn(),
   sendJson: vi.fn(),
+  requestStatus: vi.fn(),
+  requestSessionList: vi.fn(),
   isConnected: true,
 };
 vi.mock('../gateway', () => ({
@@ -73,6 +95,13 @@ const mockInput = {
   init: vi.fn(),
   sendTextFromInput: vi.fn(),
   _handleEvent: vi.fn(),
+  setSessionList: vi.fn(),
+  closeSessionMenu: vi.fn(function () {
+    mockSm._current = 'idle';
+    return true;
+  }),
+  setPendingTranscription: vi.fn(),
+  get pendingTranscription() { return null; },
 };
 vi.mock('../input', () => ({
   InputHandler: vi.fn(() => mockInput),
@@ -107,6 +136,9 @@ describe('main.ts boot()', () => {
         ABNORMAL_EXIT_EVENT: 6,
       },
     }));
+    vi.doMock('../conversation', () => ({
+      ConversationHistory: vi.fn(() => mockConversation),
+    }));
     vi.doMock('../display', () => ({
       DisplayManager: vi.fn(() => mockDisplay),
     }));
@@ -124,6 +156,11 @@ describe('main.ts boot()', () => {
     await vi.dynamicImportSettled?.() ?? new Promise((r) => setTimeout(r, 50));
   }
 
+  /** Get the routeFrame callback registered on the gateway. */
+  function getRouteFrame(): (frame: Record<string, unknown>) => void {
+    return mockGateway.onMessage.mock.calls[0][0];
+  }
+
   it('initialises InputHandler with dependencies (no audio) during boot', async () => {
     await runBoot();
 
@@ -133,6 +170,7 @@ describe('main.ts boot()', () => {
       display: mockDisplay,
       gateway: mockGateway,
       bridge: mockBridge,
+      conversation: mockConversation,
     });
   });
 
@@ -142,5 +180,104 @@ describe('main.ts boot()', () => {
     const connectOrder = mockGateway.connect.mock.invocationCallOrder[0];
     const inputOrder = mockInput.init.mock.invocationCallOrder[0];
     expect(connectOrder).toBeLessThan(inputOrder);
+  });
+
+  // -----------------------------------------------------------------------
+  // Session frame routing (P2-12)
+  // -----------------------------------------------------------------------
+  describe('session frame routing', () => {
+    it('session_list frame in menu state calls display.showSessionMenu', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'menu';
+
+      const sessions = [
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Chat 1', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Chat 1', messageCount: 2 },
+      ];
+
+      routeFrame({
+        type: 'session_list',
+        sessions,
+        activeSessionKey: 'k1',
+      });
+
+      expect(mockInput.setSessionList).toHaveBeenCalledWith(sessions);
+      expect(mockDisplay.showSessionMenu).toHaveBeenCalledWith(sessions);
+    });
+
+    it('session_list frame outside menu state stores list but does not show menu', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'idle';
+
+      routeFrame({
+        type: 'session_list',
+        sessions: [],
+        activeSessionKey: '',
+      });
+
+      expect(mockInput.setSessionList).toHaveBeenCalledWith([]);
+      expect(mockDisplay.showSessionMenu).not.toHaveBeenCalled();
+    });
+
+    it('session_switched frame from menu clears conversation, closes menu, skips showIdle', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'menu';
+
+      routeFrame({
+        type: 'session_switched',
+        sessionKey: 'key-new',
+        sessionId: 'sess-new',
+      });
+
+      expect(mockConversation.clear).toHaveBeenCalled();
+      expect(mockInput.closeSessionMenu).toHaveBeenCalled();
+      // showIdle should NOT be called — exitMenuMode already rebuilt the layout
+      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+    });
+
+    it('session_switched frame from non-menu calls showIdle', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'idle';
+
+      routeFrame({
+        type: 'session_switched',
+        sessionKey: 'key-abc',
+      });
+
+      expect(mockConversation.clear).toHaveBeenCalled();
+      expect(mockInput.closeSessionMenu).not.toHaveBeenCalled();
+      expect(mockDisplay.showIdle).toHaveBeenCalled();
+    });
+
+    it('ignores status:idle while in menu state', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'menu';
+
+      routeFrame({ type: 'status', status: 'idle' });
+
+      // State should remain menu — the guard prevents the transition
+      expect(mockSm.current).toBe('menu');
+      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+    });
+
+    it('session_switched without sessionId does not crash localStorage', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'idle';
+
+      // Should not throw even though sessionId is missing
+      expect(() => {
+        routeFrame({
+          type: 'session_switched',
+          sessionKey: 'key-only',
+        });
+      }).not.toThrow();
+
+      expect(mockConversation.clear).toHaveBeenCalled();
+    });
   });
 });

@@ -104,7 +104,7 @@ pre-commit: ## Run all pre-commit hooks
 # Gateway Operations
 # ============================================================================
 
-.PHONY: init-env launch stop push-config
+.PHONY: init-env launch stop sim restart push-config
 
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
@@ -114,6 +114,12 @@ launch: ## Start the gateway server
 
 stop: ## Stop all G2 OpenClaw processes
 	@uv run python -m gateway stop
+
+sim: ## Stop all services and re-launch the full sim stack
+	@uv run python -m gateway stop
+	@uv run python -m gateway launch
+
+restart: sim ## Alias for sim
 
 push-config: ## Push OpenClaw config to the gateway
 	@uv run python -m gateway push-config

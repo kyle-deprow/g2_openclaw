@@ -272,6 +272,67 @@ class GatewaySession:
         frame = self._build_status_frame(include_metadata=True)
         await self.send_frame(frame)
 
+    async def _handle_session_list_request(self) -> None:
+        """Return the full session list to the client."""
+        try:
+            from gateway.session_history import list_session_summaries
+
+            summaries = list_session_summaries(agent_id=self._agent_id)
+            await self.send_frame(
+                {
+                    "type": "session_list",
+                    "sessions": [
+                        {
+                            "sessionKey": s.session_key,
+                            "sessionId": s.session_id,
+                            "updatedAt": s.updated_at,
+                            "preview": s.preview,
+                            "messageCount": s.message_count,
+                            "label": s.preview[:40] if s.preview else s.session_key,
+                            "isActive": s.session_key == self._session_key,
+                        }
+                        for s in summaries
+                    ],
+                    "activeSessionKey": self._session_key,
+                }
+            )
+        except Exception:
+            logger.warning("Failed to list sessions", exc_info=True)
+            await self.send_frame(
+                {
+                    "type": "error",
+                    "detail": "Failed to list sessions",
+                    "code": ErrorCode.INTERNAL_ERROR,
+                }
+            )
+
+    async def _handle_session_switch(self, frame: dict[str, Any]) -> None:
+        """Switch to an existing session."""
+        target_key = frame["sessionKey"]
+        if self._server is None:
+            await self.send_frame(
+                {
+                    "type": "error",
+                    "detail": "Session management not available",
+                    "code": ErrorCode.INTERNAL_ERROR,
+                }
+            )
+            return
+        await self._server.switch_session(target_key)
+
+    async def _handle_session_create(self) -> None:
+        """Create a new session and switch to it."""
+        if self._server is None:
+            await self.send_frame(
+                {
+                    "type": "error",
+                    "detail": "Session management not available",
+                    "code": ErrorCode.INTERNAL_ERROR,
+                }
+            )
+            return
+        await self._server.create_session()
+
     async def handle(self) -> None:
         connected_frame: dict[str, Any] = {"type": "connected", "version": "1.0"}
         meta = resolve_session(
@@ -364,6 +425,30 @@ class GatewaySession:
                 return
             if self._server is not None:
                 await self._server.reset_session("user_request")
+        elif frame_type == "session_list_request":
+            await self._handle_session_list_request()
+        elif frame_type == "session_switch":
+            if self._state != SessionState.IDLE:
+                await self.send_frame(
+                    {
+                        "type": "error",
+                        "detail": "Cannot switch session while busy",
+                        "code": ErrorCode.INVALID_STATE,
+                    }
+                )
+                return
+            await self._handle_session_switch(frame)
+        elif frame_type == "session_create":
+            if self._state != SessionState.IDLE:
+                await self.send_frame(
+                    {
+                        "type": "error",
+                        "detail": "Cannot create session while busy",
+                        "code": ErrorCode.INVALID_STATE,
+                    }
+                )
+                return
+            await self._handle_session_create()
         else:
             await self.send_frame(
                 {
@@ -967,6 +1052,97 @@ class GatewayServer:
                 )
             except Exception:
                 logger.debug("Failed to send session_reset frame", exc_info=True)
+
+    async def switch_session(self, target_key: str) -> None:
+        """Switch the active session to an existing session key.
+
+        Validates the key exists in sessions.json before switching.
+        Discards any inflight buffer, closes the OpenClaw client connection
+        (forcing reconnect on next message), sends session_switched + history.
+        """
+        # Early return if already on this session — skip expensive reconnect
+        if target_key == self._session_key:
+            session = self._current_session
+            if session is not None:
+                meta = resolve_session(
+                    session_key=target_key, agent_id=self.config.openclaw_agent_id
+                )
+                switched_frame: dict[str, Any] = {
+                    "type": "session_switched",
+                    "sessionKey": target_key,
+                }
+                if meta is not None:
+                    if meta.session_id:
+                        switched_frame["sessionId"] = meta.session_id
+                    if meta.updated_at:
+                        switched_frame["sessionStartedAt"] = meta.updated_at
+                await session.send_frame(switched_frame)
+            return
+
+        meta = resolve_session(session_key=target_key, agent_id=self.config.openclaw_agent_id)
+        if meta is None:
+            if self._current_session is not None:
+                await self._current_session.send_frame(
+                    {
+                        "type": "error",
+                        "detail": f"Session not found: {target_key}",
+                        "code": ErrorCode.INVALID_FRAME,
+                    }
+                )
+            return
+
+        old_key = self._session_key
+        self._session_key = target_key
+        logger.info("Session switch: %s → %s", old_key, target_key)
+
+        await self._discard_inflight()
+        await self._handler.close()
+
+        session = self._current_session
+        if session is not None:
+            session._session_key = target_key
+
+            sw_frame: dict[str, Any] = {
+                "type": "session_switched",
+                "sessionKey": meta.session_key,
+            }
+            if meta.session_id:
+                sw_frame["sessionId"] = meta.session_id
+            if meta.updated_at:
+                sw_frame["sessionStartedAt"] = meta.updated_at
+            await session.send_frame(sw_frame)
+
+            await session._send_history()
+
+    async def create_session(self) -> None:
+        """Generate a new session key and switch to it.
+
+        The session won't appear in sessions.json until the first OpenClaw
+        message is sent (OpenClaw creates the entry on first use).
+        """
+        new_key = _generate_session_key()
+        old_key = self._session_key
+        self._session_key = new_key
+        logger.info("Session created: %s (was %s)", new_key, old_key)
+
+        await self._discard_inflight()
+        await self._handler.close()
+
+        session = self._current_session
+        if session is not None:
+            session._session_key = new_key
+            await session.send_frame(
+                {
+                    "type": "session_switched",
+                    "sessionKey": new_key,
+                }
+            )
+            await session.send_frame(
+                {
+                    "type": "history",
+                    "entries": [],
+                }
+            )
 
     async def _check_daily_reset(self) -> None:
         """Check if the date has rolled over since the last interaction."""

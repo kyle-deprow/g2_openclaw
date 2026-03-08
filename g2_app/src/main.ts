@@ -58,8 +58,9 @@ function routeFrame(frame: InboundFrame): void {
         } catch { /* localStorage full or unavailable — non-fatal */ }
       }
 
-      sm.transition('idle');
-      display.showIdle().catch(err => console.error('[Main] Display error:', err));
+      sm.transition('menu');
+      gateway.requestSessionList();
+      display.showSessionMenu([]).catch(err => console.error('[Main] Display error:', err));
       break;
     }
 
@@ -74,6 +75,12 @@ function routeFrame(frame: InboundFrame): void {
       // Guard: ignore status:idle while confirming — user must confirm/reject.
       if (frame.status === 'idle' && sm.current === 'confirming') {
         console.log('[Main] Ignoring status:idle — waiting for user confirmation');
+        return;
+      }
+
+      // Guard: ignore status:idle while in menu — user must select or dismiss.
+      if (frame.status === 'idle' && sm.current === 'menu') {
+        console.log('[Main] Ignoring status:idle — currently in menu state');
         return;
       }
 
@@ -154,7 +161,7 @@ function routeFrame(frame: InboundFrame): void {
     case 'history': {
       console.log(`[Main] History replay: ${frame.entries.length} entries`);
       conversation.replayHistory(frame.entries);
-      if (frame.entries.length > 0) {
+      if (frame.entries.length > 0 && sm.current !== 'menu') {
         display.showIdle().catch(err => console.error('[Main] Display error:', err));
       }
       break;
@@ -169,6 +176,39 @@ function routeFrame(frame: InboundFrame): void {
       conversation.addSystem(label);
       if (sm.current !== 'idle') sm.transition('idle');
       display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
+      break;
+    }
+
+    // -- Session list response ------------------------------------------
+    case 'session_list': {
+      console.log(`[Main] Session list: ${frame.sessions.length} sessions`);
+      input.setSessionList(frame.sessions);
+      if (sm.current === 'menu') {
+        display.showSessionMenu(frame.sessions)
+          .catch(err => console.error('[Main] Display error:', err));
+      }
+      break;
+    }
+
+    // -- Session switched confirmation ----------------------------------
+    case 'session_switched': {
+      console.log(`[Main] Switched to session: ${frame.sessionKey}`);
+      conversation.clear();
+      if (frame.sessionId) {
+        try {
+          localStorage.setItem(SESSION_ID_KEY, frame.sessionId);
+        } catch { /* non-fatal */ }
+      }
+      // Transition from menu → idle
+      const wasMenu = sm.current === 'menu';
+      if (wasMenu) {
+        input.closeSessionMenu();
+      }
+      if (sm.current !== 'idle') sm.transition('idle');
+      // Skip showIdle when exitMenuMode already rebuilt the transcript layout
+      if (!wasMenu) {
+        display.showIdle().catch(err => console.error('[Main] Display error:', err));
+      }
       break;
     }
   }
@@ -231,7 +271,7 @@ async function boot(): Promise<void> {
 
   // 5. Initialise R1 ring input handling
   input = new InputHandler();
-  input.init({ sm, display, gateway, bridge });
+  input.init({ sm, display, gateway, bridge, conversation });
   console.log('[Main] InputHandler initialised');
 
   // Expose dev hook for the HIL bar (tree-shaken out of production builds)
@@ -244,6 +284,8 @@ async function boot(): Promise<void> {
       rejectTranscription: () => input.rejectTranscription(),
       cancelResponse: () => input.cancelResponse(),
       resetSession: () => input.resetSession(),
+      openSessionMenu: () => input.openSessionMenu(),
+      closeSessionMenu: () => input.closeSessionMenu(),
       getState: () => sm.current,
       getPendingTranscription: () => input.pendingTranscription,
     };

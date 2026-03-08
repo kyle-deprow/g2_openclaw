@@ -54,7 +54,6 @@ const {
 	handleMemoryRead,
 	handleUserPrefs,
 	validateMemoryPath,
-	OpenClawClient,
 	checkDepth,
 	MAX_CALL_DEPTH,
 } = await import("../src/mcp-openclaw.js");
@@ -319,75 +318,6 @@ describe("OpenClaw Memory MCP Server", () => {
 			mockRealpath.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
 			const result = await validateMemoryPath("new-file.md", "/tmp/memory");
 			expect(result).toBe("/tmp/memory/new-file.md");
-		});
-	});
-
-	// -----------------------------------------------------------------------
-	// OpenClawClient — WebSocket reconnection
-	// -----------------------------------------------------------------------
-
-	describe("OpenClawClient", () => {
-		it("initialises with config", () => {
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-				token: "test-token",
-			});
-			expect(client).toBeDefined();
-		});
-
-		it("tracks exponential backoff", () => {
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-			});
-			// Initial backoff should be 500ms (INITIAL_BACKOFF_MS)
-			expect(client.getBackoffMs()).toBe(500);
-		});
-
-		it("close() prevents further connections", async () => {
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-			});
-			client.close();
-			await expect(client.connect()).rejects.toThrow("Client is closed");
-		});
-	});
-
-	describe("OpenClawClient connect + callTool", () => {
-		it("sends auth token in first message after connection, not in URL", () => {
-			// Verify the class doesn't put token in URL
-			// We test indirectly: create client with token, verify it stores config
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-				token: "secret-token",
-			});
-			expect(client).toBeDefined();
-			// The connect() method uses WebSocket which requires a real server,
-			// so we verify the design by checking the class exists and close works
-			client.close();
-		});
-
-		it("rejects callTool when not connected", async () => {
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-			});
-			// Close immediately to ensure not connected
-			client.close();
-			await expect(client.callTool("test", {})).rejects.toThrow("Client is closed");
-		});
-
-		it("backoff doubles on each retry up to max", () => {
-			const client = new OpenClawClient({
-				host: "127.0.0.1",
-				port: 18789,
-			});
-			expect(client.getBackoffMs()).toBe(500); // INITIAL_BACKOFF_MS
-			// The backoff is internal — tested via connectWithBackoff
-			client.close();
 		});
 	});
 

@@ -58,6 +58,19 @@ class ResetSessionFrame(TypedDict):
     type: Literal["reset_session"]
 
 
+class SessionListRequestFrame(TypedDict):
+    type: Literal["session_list_request"]
+
+
+class SessionSwitchFrame(TypedDict):
+    type: Literal["session_switch"]
+    sessionKey: str
+
+
+class SessionCreateFrame(TypedDict):
+    type: Literal["session_create"]
+
+
 InboundFrame = (
     StartAudioFrame
     | StopAudioFrame
@@ -65,6 +78,9 @@ InboundFrame = (
     | PongFrame
     | StatusRequestFrame
     | ResetSessionFrame
+    | SessionListRequestFrame
+    | SessionSwitchFrame
+    | SessionCreateFrame
 )
 
 MAX_TEXT_MESSAGE_LENGTH = 10_000
@@ -131,6 +147,29 @@ class SessionResetFrame(TypedDict):
     reason: str
 
 
+class SessionSummaryDict(TypedDict):
+    sessionKey: str
+    sessionId: str
+    updatedAt: str | None
+    preview: str
+    messageCount: int
+    label: str
+    isActive: bool
+
+
+class SessionListFrame(TypedDict):
+    type: Literal["session_list"]
+    sessions: list[SessionSummaryDict]
+    activeSessionKey: str
+
+
+class SessionSwitchedFrame(TypedDict):
+    type: Literal["session_switched"]
+    sessionKey: str
+    sessionId: NotRequired[str]
+    sessionStartedAt: NotRequired[str]
+
+
 # ---------------------------------------------------------------------------
 # Required fields per frame type (excluding the 'type' key itself)
 # ---------------------------------------------------------------------------
@@ -142,6 +181,9 @@ _INBOUND_FIELDS: dict[str, list[str]] = {
     "pong": [],
     "status_request": [],
     "reset_session": [],
+    "session_list_request": [],
+    "session_switch": ["sessionKey"],
+    "session_create": [],
 }
 
 _OUTBOUND_FIELDS: dict[str, list[str]] = {
@@ -154,6 +196,8 @@ _OUTBOUND_FIELDS: dict[str, list[str]] = {
     "ping": [],
     "history": ["entries"],
     "session_reset": ["reason"],
+    "session_list": ["sessions", "activeSessionKey"],
+    "session_switched": ["sessionKey"],
 }
 
 _ALL_FIELDS: dict[str, list[str]] = {**_INBOUND_FIELDS, **_OUTBOUND_FIELDS}
@@ -178,6 +222,10 @@ _FIELD_TYPES: dict[str, type] = {
     "elapsedMs": int,
     "phase": str,
     "reason": str,
+    "sessions": list,
+    "activeSessionKey": str,
+    "messageCount": int,
+    "preview": str,
 }
 
 
@@ -235,6 +283,13 @@ def parse_text_frame(raw: str) -> dict[str, Any]:
         if isinstance(msg, str) and len(msg) > MAX_TEXT_MESSAGE_LENGTH:
             raise ProtocolError(
                 f"Text message too long ({len(msg)} chars, max {MAX_TEXT_MESSAGE_LENGTH})"
+            )
+
+    if frame_type == "session_switch":
+        key = data.get("sessionKey", "")
+        if isinstance(key, str) and (not key or len(key) > 200):
+            raise ProtocolError(
+                f"sessionKey must be non-empty and at most 200 characters (got {len(key)})"
             )
 
     return data

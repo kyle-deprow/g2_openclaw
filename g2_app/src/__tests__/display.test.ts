@@ -612,4 +612,161 @@ describe('DisplayManager', () => {
       expect(mock.textContainerUpgrade).toHaveBeenCalled();
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Session menu mode
+  // -----------------------------------------------------------------------
+  describe('showSessionMenu', () => {
+    it('calls rebuildPageContainer with list container', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      mock.rebuildPageContainer.mockClear();
+
+      await dm.showSessionMenu([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Session One', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session One', messageCount: 0 },
+        { sessionKey: 'k2', sessionId: 'id2', label: 'Session Two', updatedAt: '2026-03-07T09:00:00Z', isActive: true, preview: 'Session Two', messageCount: 3 },
+      ]);
+
+      expect(mock.rebuildPageContainer).toHaveBeenCalledOnce();
+      const arg = mock.rebuildPageContainer.mock.calls[0][0];
+      expect(arg.containerTotalNum).toBe(3);
+      expect(arg.listObject).toHaveLength(1);
+      expect(arg.listObject[0].isEventCapture).toBe(1);
+      expect(arg.listObject[0].containerName).toBe('menu-list');
+
+      // Check item names
+      const items = arg.listObject[0].itemContainer.itemName;
+      expect(items[0]).toContain('New Session');
+      expect(items[1]).toContain('Session One');
+      expect(items[2]).toContain('Session Two');
+    });
+
+    it('respects max 20 items (19 sessions + 1 New Session)', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      const sessions = Array.from({ length: 25 }, (_, i) => ({
+        sessionKey: `k${i}`,
+        sessionId: `id${i}`,
+        label: `Session ${i}`,
+        updatedAt: '2026-03-07T10:00:00Z',
+        isActive: false,
+        preview: `Session ${i}`,
+        messageCount: 0,
+      }));
+
+      mock.rebuildPageContainer.mockClear();
+      await dm.showSessionMenu(sessions);
+
+      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
+      expect(items).toHaveLength(20); // 1 new + 19 sessions
+      expect(items[0]).toContain('New Session');
+    });
+
+    it('marks active session with ● prefix', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      mock.rebuildPageContainer.mockClear();
+      await dm.showSessionMenu([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Active One', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Active One', messageCount: 0 },
+        { sessionKey: 'k2', sessionId: 'id2', label: 'Other', updatedAt: '2026-03-07T09:00:00Z', isActive: false, preview: 'Other', messageCount: 0 },
+      ]);
+
+      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
+      expect(items[1]).toMatch(/^● /);
+      expect(items[2]).toMatch(/^ {2}/);
+    });
+
+    it('sets mode to menu', async () => {
+      const { dm } = await initDisplay();
+      expect(dm.mode).toBe('transcript');
+      await dm.showSessionMenu([]);
+      expect(dm.mode).toBe('menu');
+    });
+
+    it('shows "Loading sessions..." when empty list', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      mock.rebuildPageContainer.mockClear();
+      await dm.showSessionMenu([]);
+
+      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
+      expect(items).toHaveLength(1);
+      expect(items[0]).toBe('Loading sessions...');
+    });
+  });
+
+  describe('exitMenuMode', () => {
+    it('restores transcript layout', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
+      const mock = asMock(bridge);
+
+      conversation.addUser('Hello');
+      await dm.showSessionMenu([]);
+      expect(dm.mode).toBe('menu');
+
+      mock.rebuildPageContainer.mockClear();
+      await dm.exitMenuMode();
+
+      expect(dm.mode).toBe('transcript');
+      expect(mock.rebuildPageContainer).toHaveBeenCalledOnce();
+      const arg = mock.rebuildPageContainer.mock.calls[0][0];
+      expect(arg.containerTotalNum).toBe(4);
+      expect(arg.textObject).toHaveLength(3);
+      expect(arg.listObject).toHaveLength(1);
+      // Transcript container should be a text container with event capture
+      const transcript = arg.textObject.find((t: any) => t.containerName === 'transcript');
+      expect(transcript).toBeDefined();
+      expect(transcript.isEventCapture).toBe(1);
+    });
+
+    it('is no-op when not in menu mode', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      mock.rebuildPageContainer.mockClear();
+      await dm.exitMenuMode();
+
+      expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
+      expect(dm.mode).toBe('transcript');
+    });
+  });
+
+  describe('text methods no-op in menu mode', () => {
+    it('updateStatus is no-op in menu mode', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showSessionMenu([]);
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.updateStatus('Should not update');
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+    });
+
+    it('updateFooter is no-op in menu mode', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showSessionMenu([]);
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.updateFooter('Should not update');
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+    });
+
+    it('replaceTranscript is no-op in menu mode', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showSessionMenu([]);
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.replaceTranscript('Should not update');
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+    });
+  });
 });

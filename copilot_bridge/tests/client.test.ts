@@ -4,7 +4,7 @@ import type { CodingTaskRequest } from "../src/types.js";
 
 // --- SDK Mock (vi.hoisted ensures these exist before vi.mock factory runs) ---
 
-const { mockClient, mockSession, mockFs } = vi.hoisted(() => {
+const { mockClient, mockSession, mockFs, mockExistsSync } = vi.hoisted(() => {
 	const mockSession = {
 		sendAndWait: vi.fn(),
 		on: vi.fn().mockReturnValue(vi.fn()), // returns unsubscribe fn
@@ -29,7 +29,9 @@ const { mockClient, mockSession, mockFs } = vi.hoisted(() => {
 		appendFile: vi.fn().mockResolvedValue(undefined),
 	};
 
-	return { mockClient, mockSession, mockFs };
+	const mockExistsSync = vi.fn().mockReturnValue(false);
+
+	return { mockClient, mockSession, mockFs, mockExistsSync };
 });
 
 vi.mock("@github/copilot-sdk", () => ({
@@ -39,6 +41,10 @@ vi.mock("@github/copilot-sdk", () => ({
 vi.mock("node:fs/promises", () => ({
 	default: mockFs,
 	...mockFs,
+}));
+
+vi.mock("node:fs", () => ({
+	existsSync: mockExistsSync,
 }));
 
 const { CopilotClient: MockedCopilotClient } = await import("@github/copilot-sdk");
@@ -76,6 +82,7 @@ describe("CopilotBridge", () => {
 		mockSession.on.mockReturnValue(vi.fn());
 		mockSession.destroy.mockResolvedValue(undefined);
 		mockSession.getMessages.mockResolvedValue([]);
+		mockExistsSync.mockReturnValue(false);
 
 		mockClient.ping.mockResolvedValue({
 			message: "health",
@@ -356,6 +363,50 @@ describe("CopilotBridge", () => {
 			expect(mockSession.sendAndWait).toHaveBeenCalledWith({ prompt: "test prompt" });
 		});
 
+		it("passes systemMessage to createSession as append config", async () => {
+			await bridge.runTask(makeRequest({ systemMessage: "You are a planner." }));
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.systemMessage).toEqual({
+				type: "append",
+				content: "You are a planner.",
+			});
+		});
+
+		it("omits systemMessage from session config when not provided", async () => {
+			await bridge.runTask(makeRequest());
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.systemMessage).toBeUndefined();
+		});
+
+		it("sets skillDirectories when .github/skills/ exists in workingDir", async () => {
+			mockExistsSync.mockReturnValue(true);
+
+			await bridge.runTask(makeRequest({ workingDir: "/home/user/repos/my-app" }));
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.skillDirectories).toEqual(["/home/user/repos/my-app/.github/skills"]);
+			expect(mockExistsSync).toHaveBeenCalledWith("/home/user/repos/my-app/.github/skills");
+		});
+
+		it("does not set skillDirectories when .github/skills/ does not exist", async () => {
+			mockExistsSync.mockReturnValue(false);
+
+			await bridge.runTask(makeRequest({ workingDir: "/home/user/repos/no-skills" }));
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.skillDirectories).toBeUndefined();
+		});
+
+		it("does not set skillDirectories when no workingDir provided", async () => {
+			await bridge.runTask(makeRequest());
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.skillDirectories).toBeUndefined();
+			expect(mockExistsSync).not.toHaveBeenCalled();
+		});
+
 		it("destroys session after task when no sessionId provided", async () => {
 			await bridge.runTask(makeRequest());
 
@@ -438,10 +489,12 @@ describe("CopilotBridge", () => {
 			expect(a!.workingDir).toBe("/home/a");
 			expect(a!.messageCount).toBe(1);
 			expect(a!.createdAt).toBeTruthy();
+			expect(a!.lastAccessedAt).toBeTruthy();
 
 			const b = sessions.find(s => s.sessionId === "sess-b");
 			expect(b).toBeDefined();
 			expect(b!.workingDir).toBe("/home/b");
+			expect(b!.lastAccessedAt).toBeTruthy();
 		});
 
 		it("destroySession removes session from store and calls session.destroy()", async () => {
@@ -478,6 +531,43 @@ describe("CopilotBridge", () => {
 			expect(mockSession.destroy).toHaveBeenCalled();
 			expect(bridge.listSessions()).toHaveLength(0);
 			expect(mockClient.stop).toHaveBeenCalled();
+		});
+
+		it("lastAccessedAt is updated on session reuse", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "access-test" }));
+			const sessions1 = bridge.listSessions();
+			const first = sessions1.find(s => s.sessionId === "access-test")!;
+			const firstAccess = first.lastAccessedAt;
+
+			// Small delay to ensure different timestamp
+			await new Promise(r => setTimeout(r, 10));
+
+			await bridge.runTask(makeRequest({ sessionId: "access-test", prompt: "follow up" }));
+			const sessions2 = bridge.listSessions();
+			const second = sessions2.find(s => s.sessionId === "access-test")!;
+
+			expect(new Date(second.lastAccessedAt).getTime()).toBeGreaterThanOrEqual(
+				new Date(firstAccess).getTime()
+			);
+		});
+
+		it("LRU eviction destroys oldest session when maxSessions reached", async () => {
+			const smallBridge = new CopilotBridge(makeConfig({ maxSessions: 2 }));
+
+			// Create two sessions at capacity
+			await smallBridge.runTask(makeRequest({ sessionId: "old-sess", prompt: "first" }));
+			// Small delay so timestamps differ
+			await new Promise(r => setTimeout(r, 10));
+			await smallBridge.runTask(makeRequest({ sessionId: "mid-sess", prompt: "second" }));
+			expect(smallBridge.listSessions()).toHaveLength(2);
+
+			// Adding a third should evict "old-sess" (oldest lastAccessedAt)
+			await smallBridge.runTask(makeRequest({ sessionId: "new-sess", prompt: "third" }));
+			const sessions = smallBridge.listSessions();
+			expect(sessions).toHaveLength(2);
+			expect(sessions.map(s => s.sessionId).sort()).toEqual(["mid-sess", "new-sess"]);
+			// session.destroy should have been called for eviction
+			expect(mockSession.destroy).toHaveBeenCalled();
 		});
 	});
 
@@ -564,6 +654,59 @@ describe("CopilotBridge", () => {
 				baseUrl: "https://api.openai.com",
 				model: "gpt-4o",
 			});
+		});
+
+		it("passes systemMessage to streaming session config", async () => {
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const gen = bridge.runTaskStreaming(makeRequest({ systemMessage: "You are a planner." }));
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.systemMessage).toEqual({
+				type: "append",
+				content: "You are a planner.",
+			});
+		});
+
+		it("sets skillDirectories in streaming when .github/skills/ exists", async () => {
+			mockExistsSync.mockReturnValue(true);
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const gen = bridge.runTaskStreaming(makeRequest({ workingDir: "/home/user/repos/my-app" }));
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.skillDirectories).toEqual(["/home/user/repos/my-app/.github/skills"]);
+		});
+
+		it("does not set skillDirectories in streaming when .github/skills/ missing", async () => {
+			mockExistsSync.mockReturnValue(false);
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const gen = bridge.runTaskStreaming(makeRequest({ workingDir: "/home/user/repos/no-skills" }));
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.skillDirectories).toBeUndefined();
 		});
 	});
 

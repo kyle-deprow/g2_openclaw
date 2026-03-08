@@ -5,34 +5,12 @@
  * Exposes GitHub Copilot SDK capabilities as MCP tools for OpenClaw
  * to consume via stdio transport.
  */
-import nodePath from "node:path";
-import { fileURLToPath } from "node:url";
-import { CopilotClient } from "@github/copilot-sdk";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { CopilotBridge } from "./client.js";
 import { loadConfig } from "./config.js";
-import { DEFAULT_POLICY, createHooks } from "./hooks.js";
-import type { HookConfig } from "./hooks.js";
-import type { ICopilotSession } from "./interfaces.js";
 import type { CodingTaskResult } from "./types.js";
-
-// ─── Path validation ────────────────────────────────────────────────────────
-
-function validateMcpPath(filePath: string): { valid: true } | { valid: false; reason: string } {
-	if (filePath.includes("\0")) {
-		return { valid: false, reason: "Null bytes are not allowed" };
-	}
-	if (nodePath.isAbsolute(filePath)) {
-		return { valid: false, reason: "Absolute paths are not allowed" };
-	}
-	const normalized = nodePath.normalize(filePath);
-	if (normalized.startsWith("..") || normalized.includes(`..${nodePath.sep}`)) {
-		return { valid: false, reason: "Path traversal is not allowed" };
-	}
-	return { valid: true };
-}
 
 // ─── Cycle detection ────────────────────────────────────────────────────────
 
@@ -71,31 +49,19 @@ function log(level: string, message: string, data?: Record<string, unknown>): vo
 // ─── Lazy-init singleton state ──────────────────────────────────────────────
 
 let bridge: CopilotBridge | null = null;
-let session: ICopilotSession | null = null;
-let sdkClient: InstanceType<typeof CopilotClient> | null = null;
 let initPromise: Promise<void> | null = null;
 
 export interface InitializedState {
 	bridge: CopilotBridge;
-	session: ICopilotSession;
 }
 
 export async function ensureInitialized(): Promise<InitializedState> {
-	if (bridge && session) return { bridge, session };
+	if (bridge) return { bridge };
 
 	if (!initPromise) {
 		initPromise = (async () => {
 			log("info", "Initializing Copilot Bridge...");
 			const config = loadConfig();
-
-			const hookConfig: HookConfig = {
-				auditLogDir:
-					config.auditLogDir ??
-				nodePath.join(nodePath.dirname(fileURLToPath(import.meta.url)), "..", ".copilot-bridge", "audit"),
-				policy: config.permissionPolicy ?? DEFAULT_POLICY,
-				projectContext: config.projectContext ?? "",
-				maxRetries: config.maxRetries ?? 3,
-			};
 
 			if (!config.githubToken) {
 				throw new Error(
@@ -104,26 +70,12 @@ export async function ensureInitialized(): Promise<InitializedState> {
 			}
 
 			let localBridge: CopilotBridge | null = null;
-			let localClient: InstanceType<typeof CopilotClient> | null = null;
 
 			try {
 				localBridge = new CopilotBridge(config);
 				await localBridge.ensureReady();
 
-				localClient = new CopilotClient({
-					githubToken: config.githubToken,
-					cliPath: config.cliPath,
-					logLevel: config.logLevel,
-					autoRestart: true,
-				});
-
-				session = (await localClient.createSession({
-					hooks: createHooks(hookConfig) as unknown as Record<string, unknown>,
-					streaming: false,
-				})) as unknown as ICopilotSession;
-
 				bridge = localBridge;
-				sdkClient = localClient;
 				log("info", "Initialization complete");
 			} catch (err) {
 				// Clean up partially-created resources
@@ -134,16 +86,7 @@ export async function ensureInitialized(): Promise<InitializedState> {
 						/* best effort */
 					}
 				}
-				if (localClient) {
-					try {
-						await localClient.stop();
-					} catch {
-						/* best effort */
-					}
-				}
 				bridge = null;
-				session = null;
-				sdkClient = null;
 				throw err;
 			}
 		})();
@@ -156,28 +99,16 @@ export async function ensureInitialized(): Promise<InitializedState> {
 		throw err;
 	}
 
-	return { bridge: bridge!, session: session! };
+	return { bridge: bridge! };
 }
 
 export async function shutdown(): Promise<void> {
 	log("info", "Shutting down...");
 
-	const currentSession = session;
 	const currentBridge = bridge;
-	const currentClient = sdkClient;
 
-	session = null;
 	bridge = null;
-	sdkClient = null;
 	initPromise = null;
-
-	if (currentSession) {
-		try {
-			await currentSession.destroy();
-		} catch (err) {
-			log("warn", `Error destroying session: ${err instanceof Error ? err.message : String(err)}`);
-		}
-	}
 
 	if (currentBridge) {
 		try {
@@ -187,22 +118,12 @@ export async function shutdown(): Promise<void> {
 		}
 	}
 
-	if (currentClient) {
-		try {
-			await currentClient.stop();
-		} catch (err) {
-			log("warn", `Error stopping client: ${err instanceof Error ? err.message : String(err)}`);
-		}
-	}
-
 	log("info", "Shutdown complete");
 }
 
 /** Reset all internal state — for testing only. */
 export function _resetState(): void {
 	bridge = null;
-	session = null;
-	sdkClient = null;
 	initPromise = null;
 }
 
@@ -255,105 +176,6 @@ export function formatResult(result: CodingTaskResult): string {
 export function createServer(): McpServer {
 	const server = new McpServer({ name: "copilot-bridge", version: "1.0.0" });
 
-	// ── copilot_read_file ──────────────────────────────────────────────────
-
-	server.tool(
-		"copilot_read_file",
-		"Read a file from the workspace via GitHub Copilot",
-		{
-			path: z.string().max(1000).describe("File path to read"),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ path, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			const pathCheck = validateMcpPath(path);
-			if (!pathCheck.valid) {
-				return { content: [{ type: "text" as const, text: `Error: ${pathCheck.reason}` }], isError: true };
-			}
-			try {
-				const { session } = await ensureInitialized();
-				const result: unknown = await session.rpc["workspace.readFile"]({ path });
-				const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-				return { content: [{ type: "text" as const, text }] };
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [{ type: "text" as const, text: `Error reading file: ${message}` }],
-					isError: true,
-				};
-			}
-		},
-	);
-
-	// ── copilot_create_file ────────────────────────────────────────────────
-
-	server.tool(
-		"copilot_create_file",
-		"Create a file in the workspace via GitHub Copilot",
-		{
-			path: z.string().max(1000).describe("File path to create"),
-			content: z.string().max(500_000).describe("File content to write"),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ path, content, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			const pathCheck = validateMcpPath(path);
-			if (!pathCheck.valid) {
-				return { content: [{ type: "text" as const, text: `Error: ${pathCheck.reason}` }], isError: true };
-			}
-			try {
-				const { session } = await ensureInitialized();
-				await session.rpc["workspace.createFile"]({ path, content });
-				return {
-					content: [{ type: "text" as const, text: `File created: ${path}` }],
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [{ type: "text" as const, text: `Error creating file: ${message}` }],
-					isError: true,
-				};
-			}
-		},
-	);
-
-	// ── copilot_list_files ─────────────────────────────────────────────────
-
-	server.tool(
-		"copilot_list_files",
-		"List files in a workspace directory via GitHub Copilot",
-		{
-			directory: z.string().max(1000).optional().describe("Directory to list, defaults to workspace root"),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ directory, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			if (directory) {
-				const dirCheck = validateMcpPath(directory);
-				if (!dirCheck.valid) {
-					return { content: [{ type: "text" as const, text: `Error: ${dirCheck.reason}` }], isError: true };
-				}
-			}
-			try {
-				const { session } = await ensureInitialized();
-				const result: unknown = await session.rpc["workspace.listFiles"]({
-					directory,
-				});
-				const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-				return { content: [{ type: "text" as const, text }] };
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [{ type: "text" as const, text: `Error listing files: ${message}` }],
-					isError: true,
-				};
-			}
-		},
-	);
-
 	// ── copilot ────────────────────────────────────────────────────────────
 
 	server.tool(
@@ -361,21 +183,19 @@ export function createServer(): McpServer {
 		"Execute a coding task via GitHub Copilot. OpenClaw constructs the full prompt including any persona directives, task context, and instructions. Copilot handles planning, implementation, review, and fixes autonomously.",
 		{
 			prompt: z.string().max(500_000).describe("The full task prompt. Include all context, constraints, and instructions."),
-			persona: z.string().max(50_000).optional().describe("Behavioral directives prepended to the prompt (e.g., role, constraints, output format). Leave empty for default Copilot behavior."),
+			persona: z.string().max(50_000).optional().describe("System-level instructions appended to Copilot's system prompt. Applied when a new session starts for this workingDir. Use for role, constraints, output format directives."),
 			workingDir: z.string().max(1000).describe("Project name or absolute path. Bare names resolve to ~/repos/<name>."),
 			timeout: z.number().optional().default(120_000).describe("Timeout in milliseconds"),
-			sessionId: z.string().max(200).optional().describe("Session ID to resume. Omit for a new session."),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
-		async ({ prompt, persona, workingDir, timeout, sessionId, _depth }) => {
+		async ({ prompt, persona, workingDir, timeout, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
 			const release = await acquireMutex();
 			try {
 				const { bridge } = await ensureInitialized();
 				const resolvedDir = await bridge.resolveWorkingDir(workingDir);
-				const fullPrompt = persona ? `${persona}\n\n---\n\n${prompt}` : prompt;
-				const result = await bridge.runTask({ prompt: fullPrompt, workingDir: resolvedDir, timeout, sessionId });
+				const result = await bridge.runTask({ prompt, workingDir: resolvedDir, timeout, sessionId: resolvedDir, systemMessage: persona || undefined });
 				return { content: [{ type: "text" as const, text: formatResult(result) }] };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
@@ -386,54 +206,42 @@ export function createServer(): McpServer {
 		},
 	);
 
-	// ── copilot_sessions ──────────────────────────────────────────────────
+	// ── copilot_sessions ─────────────────────────────────────────────────────
 
 	server.tool(
 		"copilot_sessions",
-		"List all active Copilot sessions with metadata (ID, working directory, created time, message count).",
+		"List or destroy Copilot coding sessions. Sessions are keyed by project directory and retain full conversation context. Destroy a session to start fresh in that project.",
 		{
+			action: z.enum(["list", "destroy"]).describe("'list' shows all active sessions. 'destroy' removes a session (next copilot call to that project starts fresh)."),
+			project: z.string().max(1000).optional().describe("Project name or path to destroy. Required for action='destroy'. Omit with action='list'."),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
-		async ({ _depth }) => {
+		async ({ action, project, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
 			try {
 				const { bridge } = await ensureInitialized();
-				const sessions = bridge.listSessions();
-				if (sessions.length === 0) {
-					return { content: [{ type: "text" as const, text: "No active sessions." }] };
+				if (action === "list") {
+					const sessions = bridge.listSessions();
+					if (sessions.length === 0) {
+						return { content: [{ type: "text" as const, text: "No active Copilot sessions." }] };
+					}
+					const lines = sessions.map(s =>
+						`- ${s.workingDir ?? "unknown"} (messages: ${s.messageCount}, created: ${s.createdAt})`
+					);
+					return { content: [{ type: "text" as const, text: `Active sessions:\n${lines.join("\n")}` }] };
+				} else {
+					// action === "destroy"
+					if (!project) {
+						return { content: [{ type: "text" as const, text: "Error: 'project' is required for action='destroy'." }], isError: true };
+					}
+					const resolved = await bridge.resolveWorkingDir(project);
+					const destroyed = await bridge.destroySession(resolved);
+					if (destroyed) {
+						return { content: [{ type: "text" as const, text: `Session for ${project} destroyed. Next copilot call will start a fresh session.` }] };
+					}
+					return { content: [{ type: "text" as const, text: `No active session for ${project}.` }] };
 				}
-				const header = "| Session ID | Working Dir | Created | Messages |\n|---|---|---|---|";
-				const rows = sessions.map(
-					(s) => `| ${s.sessionId} | ${s.workingDir ?? "\u2014"} | ${s.createdAt} | ${s.messageCount} |`,
-				);
-				return { content: [{ type: "text" as const, text: `${header}\n${rows.join("\n")}` }] };
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
-			}
-		},
-	);
-
-	// ── copilot_session_destroy ────────────────────────────────────────────
-
-	server.tool(
-		"copilot_session_destroy",
-		"Destroy a specific Copilot session by ID, freeing its resources.",
-		{
-			sessionId: z.string().max(200).describe("The session ID to destroy."),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ sessionId, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			try {
-				const { bridge } = await ensureInitialized();
-				const destroyed = await bridge.destroySession(sessionId);
-				if (destroyed) {
-					return { content: [{ type: "text" as const, text: `Session ${sessionId} destroyed.` }] };
-				}
-				return { content: [{ type: "text" as const, text: `Session ${sessionId} not found.` }] };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };

@@ -6,14 +6,7 @@ export type { BridgeConfig } from "./config.js";
 export { CopilotBridge } from "./client.js";
 export type { SessionInfo } from "./client.js";
 
-export type {
-	ICopilotClient,
-	ICopilotSession,
-	IPermissionHandler,
-	IPermissionRequest,
-	IPermissionResponse,
-	IProviderConfig,
-} from "./interfaces.js";
+export type { ICopilotClient } from "./interfaces.js";
 
 export { BridgeError } from "./types.js";
 export type {

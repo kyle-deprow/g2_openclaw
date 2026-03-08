@@ -1,6 +1,6 @@
 // === Status types ===
 export type GatewayStatus = 'loading' | 'idle' | 'recording' | 'transcribing' | 'thinking' | 'streaming';
-export type AppStatus = GatewayStatus | 'error' | 'disconnected' | 'confirming';
+export type AppStatus = GatewayStatus | 'error' | 'disconnected' | 'confirming' | 'menu';
 
 export type ErrorCode =
   | 'AUTH_FAILED'
@@ -69,6 +69,29 @@ export interface SessionResetFrame {
   reason: 'user_request' | 'daily_reset';
 }
 
+export interface SessionListEntry {
+  sessionKey: string;
+  sessionId: string;
+  updatedAt: string;
+  preview: string;
+  messageCount: number;
+  label: string;
+  isActive: boolean;
+}
+
+export interface SessionListFrame {
+  type: 'session_list';
+  sessions: SessionListEntry[];
+  activeSessionKey: string;
+}
+
+export interface SessionSwitchedFrame {
+  type: 'session_switched';
+  sessionKey: string;
+  sessionId?: string;
+  sessionStartedAt?: string;
+}
+
 export type InboundFrame =
   | StatusFrame
   | TranscriptionFrame
@@ -78,7 +101,9 @@ export type InboundFrame =
   | ConnectedFrame
   | PingFrame
   | HistoryFrame
-  | SessionResetFrame;
+  | SessionResetFrame
+  | SessionListFrame
+  | SessionSwitchedFrame;
 
 // === Outbound frames (App → Gateway) ===
 export interface TextFrame {
@@ -110,10 +135,23 @@ export interface ResetSessionFrame {
   type: 'reset_session';
 }
 
-export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame;
+export interface SessionListRequestFrame {
+  type: 'session_list_request';
+}
+
+export interface SessionSwitchFrame {
+  type: 'session_switch';
+  sessionKey: string;
+}
+
+export interface SessionCreateFrame {
+  type: 'session_create';
+}
+
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame;
 
 // === Frame parsing ===
-const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset']);
+const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched']);
 
 /** Required fields per inbound frame type (mirrors Python gateway validation). */
 const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -126,6 +164,8 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   ping: [],
   history: ['entries'],
   session_reset: ['reason'],
+  session_list: ['sessions', 'activeSessionKey'],
+  session_switched: ['sessionKey'],
 };
 
 /** Valid status values (matches GatewayStatus union). */
@@ -151,6 +191,8 @@ const FIELD_TYPES: Record<string, Record<string, string>> = {
   connected: { version: 'string', sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
   history: { entries: 'object' },
   session_reset: { reason: 'string' },
+  session_list: { sessions: 'object', activeSessionKey: 'string' },
+  session_switched: { sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
 };
 
 export function parseFrame(data: string): InboundFrame {
@@ -227,6 +269,40 @@ export function parseFrame(data: string): InboundFrame {
       const r = e as Record<string, unknown>;
       return { role: r.role as string, text: r.text as string, ts: r.ts as number };
     });
+  }
+
+  // Copy session_list sessions array (filter out malformed entries)
+  if (clean.type === 'session_list') {
+    if (!Array.isArray(frame.sessions)) {
+      throw new Error('session_list.sessions must be an array');
+    }
+    const activeKey = typeof clean.activeSessionKey === 'string' ? (clean.activeSessionKey as string) : '';
+    clean.sessions = (frame.sessions as unknown[]).filter((entry): entry is Record<string, unknown> => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.sessionKey !== 'string') return false;
+      if (typeof e.updatedAt !== 'string') return false;
+      return true;
+    }).map(e => {
+      const r = e as Record<string, unknown>;
+      const sessionKey = r.sessionKey as string;
+      const preview = typeof r.preview === 'string' ? r.preview : '';
+      return {
+        sessionKey,
+        sessionId: typeof r.sessionId === 'string' ? (r.sessionId as string) : '',
+        updatedAt: r.updatedAt as string,
+        preview,
+        messageCount: typeof r.messageCount === 'number' ? (r.messageCount as number) : 0,
+        label: preview || sessionKey.split(':').pop() || sessionKey,
+        isActive: sessionKey === activeKey,
+      };
+    });
+  }
+
+  // Copy optional session_switched fields
+  if (clean.type === 'session_switched') {
+    if (typeof frame.sessionId === 'string') clean.sessionId = frame.sessionId;
+    if (typeof frame.sessionStartedAt === 'string') clean.sessionStartedAt = frame.sessionStartedAt;
   }
 
   // M-5: Validate status value against known union

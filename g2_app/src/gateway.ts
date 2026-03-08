@@ -207,6 +207,21 @@ export class Gateway {
     this.sendJson({ type: 'status_request' });
   }
 
+  /** Request the list of available sessions from the gateway. */
+  requestSessionList(): void {
+    this.sendJson({ type: 'session_list_request' });
+  }
+
+  /** Request switching to a different session. */
+  switchSession(sessionKey: string): void {
+    this.sendJson({ type: 'session_switch', sessionKey });
+  }
+
+  /** Request creation of a new session. */
+  createNewSession(): void {
+    this.sendJson({ type: 'session_create' });
+  }
+
   onMessage(cb: FrameCallback): void {
     this.frameCallbacks.push(cb);
   }

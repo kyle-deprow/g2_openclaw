@@ -144,4 +144,35 @@ describe('ConversationHistory', () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // removeLastUser
+  // -----------------------------------------------------------------------
+  describe('removeLastUser', () => {
+    it('removes the last user entry entirely', () => {
+      conv.addUser('Hello');
+      conv.addAssistant('Hi');
+      conv.addUser('Goodbye');
+      expect(conv.removeLastUser()).toBe(true);
+      expect(conv.format()).not.toContain('Goodbye');
+      // Earlier user entry should be untouched
+      expect(conv.format()).toContain('» Hello');
+      expect(conv.length).toBe(2);
+    });
+
+    it('returns false when no user entries exist', () => {
+      conv.addAssistant('only assistant');
+      expect(conv.removeLastUser()).toBe(false);
+    });
+
+    it('returns false on empty conversation', () => {
+      expect(conv.removeLastUser()).toBe(false);
+    });
+
+    it('removes the only user entry', () => {
+      conv.addUser('solo');
+      expect(conv.removeLastUser()).toBe(true);
+      expect(conv.length).toBe(0);
+    });
+  });
+
 });

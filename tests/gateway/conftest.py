@@ -39,6 +39,11 @@ def _no_real_session_resolver() -> Iterator[None]:
     with (
         patch("gateway.server.resolve_session", return_value=None),
         patch("gateway.session_history.read_history", return_value=[]),
+        patch(
+            "gateway.session_history.list_session_summaries",
+            return_value=[],
+        ),
+        patch("gateway.session_resolver.list_sessions", return_value=[]),
     ):
         yield
 

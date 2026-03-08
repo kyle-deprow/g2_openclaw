@@ -155,6 +155,17 @@ export class ConversationHistory {
     this.entries = [];
   }
 
+  /** Remove the last user entry (e.g. rejected transcription). */
+  removeLastUser(): boolean {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      if (this.entries[i].role === 'user') {
+        this.entries.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Replace all entries with history from the gateway. */
   replayHistory(entries: Array<{ role: 'user' | 'assistant'; text: string; ts: number }>): void {
     this.clear();

@@ -128,11 +128,8 @@ function register(): void {
 	info("Restart the Gateway to pick up changes:");
 	console.log("  openclaw gateway restart");
 	console.log("");
-	info("The following MCP tools will be available:");
-	console.log("  - copilot_read_file");
-	console.log("  - copilot_create_file");
-	console.log("  - copilot_list_files");
-	console.log("  - copilot_code_task");
+	info("The following MCP tool will be available:");
+	console.log("  - copilot");
 }
 
 // ---------------------------------------------------------------------------

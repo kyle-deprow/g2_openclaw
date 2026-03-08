@@ -24,6 +24,15 @@
       "model": {
         "primary": "azure-oai-g2/model-router"
       },
+      "tools": {
+        "profile": "full",
+        "allow": [
+          "Read", "Write", "Glob", "Grep",
+          "memory_search", "memory_write",
+          "web_search", "web_fetch",
+          "copilot_copilot", "copilot_copilot_sessions"
+        ]
+      },
       "compaction": {
         "mode": "safeguard"
       },
@@ -44,5 +53,13 @@
     "nativeSkills": "auto",
     "restart": true,
     "ownerDisplay": "raw"
+  },
+  "mcp": {
+    "servers": {
+      "copilot": {
+        "command": "npx",
+        "args": ["tsx", "copilot_bridge/src/mcp-server.ts"]
+      }
+    }
   }
 }

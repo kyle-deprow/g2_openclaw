@@ -8,7 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from gateway.session_resolver import SessionMeta, resolve_session
+from gateway.session_resolver import SessionMeta, list_sessions, resolve_session
 
 
 def _write_sessions(tmp_path: Path, data: Any, agent_id: str = "claw") -> Path:
@@ -175,3 +175,140 @@ class TestResolveSession:
         # Must be an ISO 8601 string, not a number
         assert isinstance(result.updated_at, str)
         assert "T" in result.updated_at  # basic ISO 8601 check
+
+
+class TestListSessions:
+    """list_sessions returns all valid entries from sessions.json."""
+
+    def test_returns_all_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        sessions = {
+            "agent:claw:g2": {
+                "sessionId": "ses_1",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "agent:claw:g2:123:abc": {
+                "sessionId": "ses_2",
+                "updatedAt": "2026-03-07T12:00:00Z",
+            },
+        }
+        path = _write_sessions(tmp_path, sessions)
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert len(result) == 2
+        # Most recent first
+        assert result[0].session_id == "ses_2"
+        assert result[1].session_id == "ses_1"
+
+    def test_skips_invalid_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        sessions: dict[str, Any] = {
+            "agent:claw:g2": {
+                "sessionId": "ses_valid",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "agent:claw:no_id": {
+                "updatedAt": "2026-03-07T11:00:00Z",
+            },
+            "agent:claw:bad_id": {
+                "sessionId": 12345,
+            },
+            "agent:claw:not_dict": "just_a_string",
+        }
+        path = _write_sessions(tmp_path, sessions)
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert len(result) == 1
+        assert result[0].session_id == "ses_valid"
+
+    def test_sorted_by_updated_at_descending(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions = {
+            "key:old": {
+                "sessionId": "ses_old",
+                "updatedAt": "2026-03-01T00:00:00Z",
+            },
+            "key:new": {
+                "sessionId": "ses_new",
+                "updatedAt": "2026-03-07T00:00:00Z",
+            },
+            "key:mid": {
+                "sessionId": "ses_mid",
+                "updatedAt": "2026-03-04T00:00:00Z",
+            },
+        }
+        path = _write_sessions(tmp_path, sessions)
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert [r.session_id for r in result] == ["ses_new", "ses_mid", "ses_old"]
+
+    def test_returns_empty_for_empty_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _write_sessions(tmp_path, {})
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert result == []
+
+    def test_returns_empty_when_file_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        missing = tmp_path / "nonexistent" / "sessions.json"
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": missing
+        )
+
+        result = list_sessions()
+        assert result == []
+
+    def test_handles_ms_timestamps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """JS Date.now() style timestamps (milliseconds) are parsed correctly."""
+        sessions = {
+            "agent:claw:g2": {
+                "sessionId": "ses_ms",
+                "updatedAt": 1772028800000,  # ms timestamp
+            },
+        }
+        path = _write_sessions(tmp_path, sessions)
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert len(result) == 1
+        assert result[0].session_id == "ses_ms"
+        assert isinstance(result[0].updated_at, str)
+        assert "T" in result[0].updated_at
+
+    def test_none_updated_at_sorted_last(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sessions: dict[str, Any] = {
+            "key:with_ts": {
+                "sessionId": "ses_ts",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "key:no_ts": {
+                "sessionId": "ses_no_ts",
+            },
+        }
+        path = _write_sessions(tmp_path, sessions)
+        monkeypatch.setattr(
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+        )
+
+        result = list_sessions()
+        assert len(result) == 2
+        assert result[0].session_id == "ses_ts"
+        assert result[1].session_id == "ses_no_ts"

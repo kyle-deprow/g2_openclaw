@@ -9,9 +9,11 @@ from typing import Any
 
 from gateway.session_history import (
     HistoryEntry,
-    _strip_timestamp_prefix,
+    _strip_bracket_prefixes,
+    list_session_summaries,
     read_history,
     resolve_session_file,
+    session_summary,
 )
 
 # ---------------------------------------------------------------------------
@@ -255,7 +257,7 @@ class TestReadHistory:
 
 
 # ---------------------------------------------------------------------------
-# _strip_timestamp_prefix
+# _strip_bracket_prefixes
 # ---------------------------------------------------------------------------
 
 
@@ -296,9 +298,256 @@ class TestIsoTimestampParsing:
         assert entries[1].ts == expected_ts_1
 
 
-class TestStripTimestampPrefix:
-    def test_standard(self) -> None:
-        assert _strip_timestamp_prefix("[2026-03-07 10:00 UTC] Hello") == "Hello"
+class TestStripBracketPrefixes:
+    def test_single_bracket(self) -> None:
+        assert _strip_bracket_prefixes("[2026-03-07 10:00 UTC] Hello") == "Hello"
+
+    def test_multiple_brackets(self) -> None:
+        assert (
+            _strip_bracket_prefixes("[2024-03-07T12:00:00Z] [Subagent Context] actual message")
+            == "actual message"
+        )
 
     def test_no_prefix(self) -> None:
-        assert _strip_timestamp_prefix("Hello world") == "Hello world"
+        assert _strip_bracket_prefixes("Hello world") == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# session_summary
+# ---------------------------------------------------------------------------
+
+
+class TestSessionSummary:
+    def test_returns_preview_and_count(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_1")
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [
+                _msg("user", "What is the capital of France?"),
+                _msg("assistant", "Paris"),
+                _msg("user", "And Germany?"),
+                _msg("assistant", "Berlin"),
+            ],
+        )
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+            session_id="ses_1",
+            updated_at="2026-03-07T10:00:00Z",
+        )
+        assert result is not None
+        assert result.preview == "What is the capital of France?"
+        assert result.message_count == 4
+        assert result.session_id == "ses_1"
+        assert result.updated_at == "2026-03-07T10:00:00Z"
+
+    def test_truncates_long_preview(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_1")
+        long_text = "A" * 200
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [_msg("user", long_text)],
+        )
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+            preview_max_len=80,
+        )
+        assert result is not None
+        assert len(result.preview) == 80
+
+    def test_returns_none_for_missing_transcript(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_missing")
+        # Not creating the JSONL file
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+        )
+        assert result is None
+
+    def test_empty_transcript_returns_zero_count(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_empty")
+        _write_jsonl(sd, "ses_empty", [])
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+            session_id="ses_empty",
+        )
+        assert result is not None
+        assert result.preview == ""
+        assert result.message_count == 0
+
+    def test_strips_timestamp_prefix_from_preview(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_1")
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [_msg("user", "[2026-03-07 10:00 UTC] What time?")],
+        )
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+        )
+        assert result is not None
+        assert result.preview == "What time?"
+
+    def test_skips_system_injected_user_messages(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_1")
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [
+                _msg(
+                    "user",
+                    "[2026-03-07T10:00:00Z] [Subagent Context] You are running as a subagent...",
+                ),
+                _msg("user", "What is the weather today?"),
+                _msg("assistant", "Sunny!"),
+            ],
+        )
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+        )
+        assert result is not None
+        assert result.preview == "What is the weather today?"
+        assert result.message_count == 3
+
+    def test_strips_multiple_bracket_prefixes_from_preview(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_1")
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [_msg("user", "[2026-03-07 10:00 UTC] [Context] What time?")],
+        )
+
+        result = session_summary(
+            session_key="agent:claw:g2",
+            agent_id="claw",
+            base_path=tmp_path,
+        )
+        assert result is not None
+        assert result.preview == "What time?"
+
+
+# ---------------------------------------------------------------------------
+# list_session_summaries
+# ---------------------------------------------------------------------------
+
+
+class TestListSessionSummaries:
+    def test_combines_resolver_and_history_data(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+
+        # Write sessions.json with two entries
+        store = {
+            "agent:claw:g2": {
+                "sessionId": "ses_1",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "agent:claw:g2:2": {
+                "sessionId": "ses_2",
+                "updatedAt": "2026-03-07T12:00:00Z",
+            },
+        }
+        (sd / "sessions.json").write_text(json.dumps(store))
+
+        _write_jsonl(
+            sd,
+            "ses_1",
+            [_msg("user", "Hello"), _msg("assistant", "Hi")],
+        )
+        _write_jsonl(
+            sd,
+            "ses_2",
+            [_msg("user", "Goodbye")],
+        )
+
+        from unittest.mock import patch
+
+        from gateway.session_resolver import SessionMeta
+
+        metas = [
+            SessionMeta(
+                session_id="ses_2",
+                session_key="agent:claw:g2:2",
+                updated_at="2026-03-07T12:00:00Z",
+            ),
+            SessionMeta(
+                session_id="ses_1",
+                session_key="agent:claw:g2",
+                updated_at="2026-03-07T10:00:00Z",
+            ),
+        ]
+        with patch("gateway.session_resolver.list_sessions", return_value=metas):
+            result = list_session_summaries(agent_id="claw", base_path=tmp_path)
+
+        assert len(result) == 2
+        assert result[0].session_key == "agent:claw:g2:2"
+        assert result[0].preview == "Goodbye"
+        assert result[0].message_count == 1
+        assert result[1].session_key == "agent:claw:g2"
+        assert result[1].preview == "Hello"
+        assert result[1].message_count == 2
+
+    def test_filters_stale_sessions(self, tmp_path: Path) -> None:
+        """Sessions with no JSONL file are excluded from the list."""
+        sd = _make_sessions_dir(tmp_path)
+
+        store = {
+            "agent:claw:g2": {
+                "sessionId": "ses_exists",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "agent:claw:stale": {
+                "sessionId": "ses_stale",
+                "updatedAt": "2026-03-06T10:00:00Z",
+            },
+        }
+        (sd / "sessions.json").write_text(json.dumps(store))
+
+        # Only create JSONL for ses_exists
+        _write_jsonl(sd, "ses_exists", [_msg("user", "Hello")])
+
+        from unittest.mock import patch
+
+        from gateway.session_resolver import SessionMeta
+
+        metas = [
+            SessionMeta(
+                session_id="ses_exists",
+                session_key="agent:claw:g2",
+                updated_at="2026-03-07T10:00:00Z",
+            ),
+            SessionMeta(
+                session_id="ses_stale",
+                session_key="agent:claw:stale",
+                updated_at="2026-03-06T10:00:00Z",
+            ),
+        ]
+        with patch("gateway.session_resolver.list_sessions", return_value=metas):
+            result = list_session_summaries(agent_id="claw", base_path=tmp_path)
+
+        assert len(result) == 1
+        assert result[0].session_key == "agent:claw:g2"

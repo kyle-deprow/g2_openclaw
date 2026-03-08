@@ -2,15 +2,16 @@ import type { AppStatus } from './protocol';
 
 // Valid transitions map: from → allowed targets
 const TRANSITIONS: Record<AppStatus, AppStatus[]> = {
-  loading:      ['idle', 'error', 'disconnected'],
-  idle:         ['recording', 'thinking', 'streaming', 'error', 'disconnected', 'loading', 'confirming'],
+  loading:      ['idle', 'error', 'disconnected', 'menu'],
+  idle:         ['recording', 'thinking', 'streaming', 'error', 'disconnected', 'loading', 'confirming', 'menu'],
   recording:    ['transcribing', 'idle', 'error', 'disconnected'],
   transcribing: ['thinking', 'idle', 'error', 'disconnected', 'confirming'],
   thinking:     ['streaming', 'idle', 'error', 'disconnected'],
   streaming:    ['idle', 'error', 'disconnected'],
   confirming:   ['thinking', 'idle', 'error', 'disconnected'],
-  error:        ['idle', 'disconnected'],
+  error:        ['idle', 'disconnected', 'menu'],
   disconnected: ['loading', 'idle', 'error'],
+  menu:         ['idle', 'error', 'disconnected'],
 };
 
 export type StateChangeCallback = (newState: AppStatus, oldState: AppStatus) => void;

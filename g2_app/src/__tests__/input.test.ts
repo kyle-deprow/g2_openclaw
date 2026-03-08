@@ -5,6 +5,7 @@ import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import type { DisplayManager } from '../display';
 import type { Gateway } from '../gateway';
+import type { ConversationHistory } from '../conversation';
 import type { StateMachine } from '../state';
 
 const CLICK        = OsEventTypeList.CLICK_EVENT;
@@ -35,6 +36,8 @@ function createMockDisplay() {
     showTranscribing: vi.fn(),
     showConfirming: vi.fn(),
     showDetailPage: vi.fn(),
+    showSessionMenu: vi.fn().mockResolvedValue(undefined),
+    exitMenuMode: vi.fn().mockResolvedValue(undefined),
     _streamBuffer: 'test response',
     get streamBuffer() { return this._streamBuffer; },
   };
@@ -44,8 +47,22 @@ function createMockGateway() {
   return {
     connect: vi.fn(),
     sendJson: vi.fn(),
+    requestSessionList: vi.fn(),
+    switchSession: vi.fn(),
+    createNewSession: vi.fn(),
     _isConnected: true,
     get isConnected() { return this._isConnected; },
+  };
+}
+
+function createMockConversation() {
+  return {
+    removeLastUser: vi.fn().mockReturnValue(true),
+    addUser: vi.fn(),
+    addAssistant: vi.fn(),
+    addSystem: vi.fn(),
+    clear: vi.fn(),
+    format: vi.fn().mockReturnValue('Ready.'),
   };
 }
 
@@ -64,6 +81,7 @@ describe('InputHandler', () => {
   let display: ReturnType<typeof createMockDisplay>;
   let gateway: ReturnType<typeof createMockGateway>;
   let bridge: ReturnType<typeof createMockBridge>;
+  let conversation: ReturnType<typeof createMockConversation>;
 
   beforeEach(() => {
     handler = new InputHandler();
@@ -72,12 +90,14 @@ describe('InputHandler', () => {
     display = createMockDisplay();
     gateway = createMockGateway();
     bridge = createMockBridge();
+    conversation = createMockConversation();
 
     handler.init({
       sm: sm as unknown as StateMachine,
       display: display as unknown as DisplayManager,
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
+      conversation: conversation as unknown as ConversationHistory,
     });
   });
 
@@ -155,6 +175,7 @@ describe('InputHandler', () => {
       sm._current = 'confirming';
       handler.setPendingTranscription('rejected text');
       handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(conversation.removeLastUser).toHaveBeenCalled();
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
       expect(handler.pendingTranscription).toBeNull();
@@ -261,10 +282,12 @@ describe('InputHandler', () => {
   // Double-tap (non-confirming)
   // ---------------------------------------------------------------------------
 
-  it('double tap in idle sends reset_session frame', () => {
+  it('double tap in idle opens session menu', () => {
     sm._current = 'idle';
     handlerAny._handleEvent(DOUBLE_CLICK);
-    expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'reset_session' });
+    expect(sm.transition).toHaveBeenCalledWith('menu');
+    expect(gateway.requestSessionList).toHaveBeenCalled();
+    expect(display.showSessionMenu).toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------
@@ -377,6 +400,7 @@ describe('InputHandler', () => {
       display: display as unknown as DisplayManager,
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
+      conversation: conversation as unknown as ConversationHistory,
     });
     expect(warnSpy).toHaveBeenCalledWith('[Input] Already initialised — ignoring duplicate init()');
     expect(bridge.onEvenHubEvent).toHaveBeenCalledTimes(1);
@@ -404,5 +428,150 @@ describe('InputHandler', () => {
     const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
     eventCallback({ audioEvent: { audioPcm: new Uint8Array(3200) } });
     expect(gateway.sendJson).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Reject transcription marks conversation
+  // ---------------------------------------------------------------------------
+
+  describe('rejectTranscription marks conversation', () => {
+    it('rejectTranscription calls removeLastUser', () => {
+      sm._current = 'confirming';
+      handler.setPendingTranscription('some text');
+      expect(handler.rejectTranscription()).toBe(true);
+      expect(conversation.removeLastUser).toHaveBeenCalled();
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('double-tap in confirming removes entry from conversation', () => {
+      sm._current = 'confirming';
+      handler.setPendingTranscription('will be rejected');
+      handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(conversation.removeLastUser).toHaveBeenCalled();
+      expect(handler.pendingTranscription).toBeNull();
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Session menu interactions
+  // ---------------------------------------------------------------------------
+
+  describe('session menu', () => {
+    it('double-tap in idle opens session menu', () => {
+      sm._current = 'idle';
+      expect(handler.openSessionMenu()).toBe(true);
+      expect(sm.transition).toHaveBeenCalledWith('menu');
+      expect(gateway.requestSessionList).toHaveBeenCalled();
+      expect(display.showSessionMenu).toHaveBeenCalled();
+    });
+
+    it('openSessionMenu returns false when not idle', () => {
+      sm._current = 'recording';
+      expect(handler.openSessionMenu()).toBe(false);
+    });
+
+    it('double-tap in menu closes menu', () => {
+      sm._current = 'menu';
+      handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.exitMenuMode).toHaveBeenCalled();
+    });
+
+    it('closeSessionMenu returns false when not in menu', () => {
+      sm._current = 'idle';
+      expect(handler.closeSessionMenu()).toBe(false);
+    });
+
+    it('tap in menu on "New Session" (index 0) creates new session', () => {
+      sm._current = 'menu';
+      handler.setSessionList([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Test', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Test', messageCount: 0 },
+      ]);
+      handlerAny._handleEvent(CLICK, {
+        listEvent: { eventType: CLICK, currentSelectItemIndex: 0, currentSelectItemName: '✦ New Session' },
+      });
+      expect(gateway.createNewSession).toHaveBeenCalled();
+    });
+
+    it('tap in menu selects a session', () => {
+      sm._current = 'menu';
+      handler.setSessionList([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Session 1', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session 1', messageCount: 0 },
+        { sessionKey: 'k2', sessionId: 'id2', label: 'Session 2', updatedAt: '2026-03-07T09:00:00Z', isActive: false, preview: 'Session 2', messageCount: 0 },
+      ]);
+      handlerAny._handleEvent(CLICK, {
+        listEvent: { eventType: CLICK, currentSelectItemIndex: 2, currentSelectItemName: '  Session 2' },
+      });
+      expect(gateway.switchSession).toHaveBeenCalledWith('k2');
+    });
+
+    it('tap on active session closes menu instead of switching', () => {
+      sm._current = 'menu';
+      handler.setSessionList([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Active', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Active', messageCount: 0 },
+      ]);
+      handlerAny._handleEvent(CLICK, {
+        listEvent: { eventType: CLICK, currentSelectItemIndex: 1, currentSelectItemName: '● Active' },
+      });
+      expect(gateway.switchSession).not.toHaveBeenCalled();
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+    });
+
+    it('menu tap with undefined index (Quirk 2) falls back to trackedMenuIndex', () => {
+      sm._current = 'menu';
+      handler.setSessionList([
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Session', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session', messageCount: 0 },
+      ]);
+      // trackedMenuIndex defaults to 0, so this should trigger "New Session"
+      handlerAny._handleEvent(undefined, {
+        listEvent: { eventType: undefined },
+      });
+      expect(gateway.createNewSession).toHaveBeenCalled();
+    });
+
+    it('setSessionList stores sessions', () => {
+      const sessions = [
+        { sessionKey: 'k1', sessionId: 'id1', label: 'Test', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Test', messageCount: 0 },
+      ];
+      handler.setSessionList(sessions);
+      // Verify by triggering a menu tap that uses the stored list
+      sm._current = 'menu';
+      handlerAny._handleEvent(CLICK, {
+        listEvent: { eventType: CLICK, currentSelectItemIndex: 1, currentSelectItemName: '  Test' },
+      });
+      expect(gateway.switchSession).toHaveBeenCalledWith('k1');
+    });
+
+    it('double-tap in confirming still rejects', () => {
+      sm._current = 'confirming';
+      handler.setPendingTranscription('text');
+      handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(conversation.removeLastUser).toHaveBeenCalled();
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(handler.pendingTranscription).toBeNull();
+    });
+
+    it('double-tap in streaming still cancels', () => {
+      sm._current = 'streaming';
+      handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('tap in menu with no session list is graceful no-op (loading guard)', () => {
+      sm._current = 'menu';
+      // Don't set session list — _sessionList is null
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      handlerAny._handleEvent(CLICK, {
+        listEvent: { eventType: CLICK, currentSelectItemIndex: 3 },
+      });
+      // Should not crash, and should not call any gateway method
+      expect(gateway.switchSession).not.toHaveBeenCalled();
+      expect(gateway.createNewSession).not.toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledWith('[Input] Menu tap ignored — session list not yet loaded');
+      logSpy.mockRestore();
+    });
   });
 });

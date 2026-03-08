@@ -114,7 +114,7 @@ function register(): void {
 	info("  1. Restart the Gateway:  openclaw gateway restart");
 	info('  2. Verify tools:         openclaw agent --message "List your tools"');
 	info("");
-	info("Expected tools: copilot_code, copilot_code_verbose");
+	info("Expected tool: copilot");
 }
 
 // ---------------------------------------------------------------------------

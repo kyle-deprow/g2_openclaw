@@ -269,4 +269,32 @@ describe('Gateway', () => {
       expect(warnSpy).toHaveBeenCalledWith('[Gateway] Binary frame received — ignoring');
     });
   });
+
+  // -----------------------------------------------------------------------
+  // Session menu methods
+  // -----------------------------------------------------------------------
+  describe('session menu methods', () => {
+    it('requestSessionList sends correct frame', () => {
+      gateway.connect('ws://test:1234');
+      MockWebSocket.last!.simulateOpen();
+      gateway.requestSessionList();
+      expect(MockWebSocket.last!.sent).toContain('{"type":"session_list_request"}');
+    });
+
+    it('switchSession sends correct frame with sessionKey', () => {
+      gateway.connect('ws://test:1234');
+      MockWebSocket.last!.simulateOpen();
+      gateway.switchSession('agent:claw:g2:abc123');
+      expect(MockWebSocket.last!.sent).toContain(
+        '{"type":"session_switch","sessionKey":"agent:claw:g2:abc123"}',
+      );
+    });
+
+    it('createNewSession sends correct frame', () => {
+      gateway.connect('ws://test:1234');
+      MockWebSocket.last!.simulateOpen();
+      gateway.createNewSession();
+      expect(MockWebSocket.last!.sent).toContain('{"type":"session_create"}');
+    });
+  });
 });

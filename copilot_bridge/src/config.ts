@@ -19,6 +19,7 @@ export interface BridgeConfig {
 	permissionPolicy?: PermissionPolicy;
 	projectContext?: string;
 	maxRetries?: number;
+	maxSessions?: number;
 }
 
 const VALID_LOG_LEVELS = new Set(["debug", "info", "warning", "error", "none", "all"]);
@@ -56,6 +57,17 @@ export function loadConfig(): BridgeConfig {
 		}
 	}
 
+	const maxSessionsStr = process.env.COPILOT_MAX_SESSIONS || undefined;
+	let maxSessions: number | undefined;
+	if (maxSessionsStr !== undefined) {
+		maxSessions = Number.parseInt(maxSessionsStr, 10);
+		if (Number.isNaN(maxSessions) || maxSessions < 1) {
+			throw new Error(
+				`Invalid COPILOT_MAX_SESSIONS: "${maxSessionsStr}". Must be a positive integer`,
+			);
+		}
+	}
+
 	return {
 		githubToken: process.env.COPILOT_GITHUB_TOKEN || undefined,
 		byokProvider: byokProvider as BridgeConfig["byokProvider"],
@@ -71,5 +83,6 @@ export function loadConfig(): BridgeConfig {
 		auditLogDir: process.env.COPILOT_AUDIT_LOG_DIR || undefined,
 		projectContext: process.env.COPILOT_PROJECT_CONTEXT || undefined,
 		maxRetries,
+		maxSessions,
 	};
 }

@@ -90,13 +90,15 @@ fi
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
 echo "Merged repo config into ${LOCAL_CONFIG}"
 
-# ── Copy SOUL.md if present ─────────────────────────────────────────────────
-SOUL_SRC="${REPO_ROOT}/gateway/agent_config/SOUL.md"
-SOUL_DST="${OPENCLAW_HOME}/SOUL.md"
-if [[ -f "${SOUL_SRC}" ]]; then
-  cp "${SOUL_SRC}" "${SOUL_DST}"
-  echo "Copied SOUL.md → ${SOUL_DST}"
-fi
+# ── Copy bootstrap files ────────────────────────────────────────────────────
+for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
+  SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"
+  DST="${OPENCLAW_HOME}/${FILE}"
+  if [[ -f "${SRC}" ]]; then
+    cp "${SRC}" "${DST}"
+    echo "Copied ${FILE} → ${DST}"
+  fi
+done
 
 # ── Copy Azure API-version preload if present ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
@@ -104,6 +106,15 @@ PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
+fi
+
+# ── Merge MCP server config ─────────────────────────────────────────────────
+MCP_CONFIG="${REPO_ROOT}/copilot_bridge/openclaw-mcp-config.json"
+if [[ -f "${MCP_CONFIG}" ]]; then
+  CURRENT=$(cat "${LOCAL_CONFIG}")
+  MERGED_MCP=$(echo "${CURRENT}" | jq --slurpfile mcp "${MCP_CONFIG}" '. * $mcp[0]')
+  echo "${MERGED_MCP}" | jq . > "${LOCAL_CONFIG}"
+  echo "Merged MCP config from ${MCP_CONFIG}"
 fi
 
 # ── Validate ─────────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_AGENT_ID = "claw"
 _OPENCLAW_BASE = Path.home() / ".openclaw" / "agents"
 DEFAULT_HISTORY_LIMIT = 10
+_DEFAULT_PREVIEW_MAX_LEN = 80
 
 
 @dataclass(frozen=True)
@@ -38,9 +39,22 @@ def _extract_text(content: object) -> str:
     return ""
 
 
-def _strip_timestamp_prefix(text: str) -> str:
-    """Remove the OpenClaw-injected timestamp prefix from user messages."""
-    return re.sub(r"^\[.*?\]\s*", "", text, count=1)
+# Known system-injected prefixes to skip when picking session previews
+_SYSTEM_PREFIXES = (
+    "you are running as a subagent",
+    "subagent context",
+    "system context",
+    "context:",
+)
+
+
+def _strip_bracket_prefixes(text: str) -> str:
+    """Remove all leading [...] bracket tags from user messages.
+
+    OpenClaw injects timestamp and context prefixes like:
+      [2024-03-07T12:00:00Z] [Subagent Context] actual message...
+    """
+    return re.sub(r"^(\[.*?\]\s*)+", "", text)
 
 
 def resolve_session_file(
@@ -128,7 +142,7 @@ def read_history(
                     continue
 
                 if role == "user":
-                    text = _strip_timestamp_prefix(text)
+                    text = _strip_bracket_prefixes(text)
 
                 ts = msg.get("timestamp", 0)
                 if isinstance(ts, str):
@@ -144,3 +158,129 @@ def read_history(
         return []
 
     return entries[-limit:]
+
+
+# ---------------------------------------------------------------------------
+# Session summaries for the session menu
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """Lightweight summary of a session for the session list."""
+
+    session_key: str
+    session_id: str
+    updated_at: str | None
+    preview: str
+    message_count: int
+
+
+def session_summary(
+    session_key: str,
+    agent_id: str = _DEFAULT_AGENT_ID,
+    base_path: Path | None = None,
+    preview_max_len: int = _DEFAULT_PREVIEW_MAX_LEN,
+    *,
+    session_id: str | None = None,
+    updated_at: str | None = None,
+) -> SessionSummary | None:
+    """Build a lightweight summary for one session.
+
+    Reads the JSONL transcript to count messages and extract a preview.
+    Returns None if the transcript file is missing.
+    """
+    jsonl_path = resolve_session_file(
+        session_key=session_key,
+        agent_id=agent_id,
+        base_path=base_path,
+    )
+    if jsonl_path is None:
+        return None
+
+    first_user_text: str | None = None
+    message_count = 0
+
+    try:
+        with jsonl_path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if obj.get("type") != "message":
+                    continue
+
+                msg = obj.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                role = msg.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+
+                content = msg.get("content", "")
+                text = _extract_text(content).strip()
+
+                if role == "assistant" and not text:
+                    continue
+                if role == "assistant" and msg.get("stopReason") == "error":
+                    continue
+
+                message_count += 1
+
+                if role == "user" and first_user_text is None:
+                    text = _strip_bracket_prefixes(text)
+                    # Skip system-injected context messages
+                    if text and not text.lower().startswith(_SYSTEM_PREFIXES):
+                        first_user_text = text
+    except OSError as exc:
+        logger.warning("Failed to read JSONL transcript for summary: %s", exc)
+        return None
+
+    preview = first_user_text or ""
+    if len(preview) > preview_max_len:
+        preview = preview[:preview_max_len]
+
+    # Resolve session_id from sessions.json if not provided
+    resolved_session_id = session_id
+    if resolved_session_id is None:
+        # Fallback: extract from the jsonl filename
+        resolved_session_id = jsonl_path.stem
+
+    return SessionSummary(
+        session_key=session_key,
+        session_id=resolved_session_id,
+        updated_at=updated_at,
+        preview=preview,
+        message_count=message_count,
+    )
+
+
+def list_session_summaries(
+    agent_id: str = _DEFAULT_AGENT_ID,
+    base_path: Path | None = None,
+    preview_max_len: int = _DEFAULT_PREVIEW_MAX_LEN,
+) -> list[SessionSummary]:
+    """Return summaries for all sessions, sorted by updatedAt descending."""
+    from gateway.session_resolver import list_sessions
+
+    metas = list_sessions(agent_id=agent_id)
+    summaries: list[SessionSummary] = []
+    for meta in metas:
+        summary = session_summary(
+            session_key=meta.session_key,
+            agent_id=agent_id,
+            base_path=base_path,
+            preview_max_len=preview_max_len,
+            session_id=meta.session_id,
+            updated_at=meta.updated_at,
+        )
+        if summary is not None:
+            summaries.append(summary)
+
+    return summaries

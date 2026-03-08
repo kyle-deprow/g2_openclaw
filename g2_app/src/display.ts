@@ -26,6 +26,7 @@ import {
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
 import type { ConversationHistory } from './conversation';
+import type { SessionListEntry } from './protocol';
 
 // ---------------------------------------------------------------------------
 // Greyscale constants
@@ -41,6 +42,7 @@ const ID_STATUS         = 1;
 const ID_TRANSCRIPT     = 3;
 const ID_FOOTER         = 4;
 const ID_EVENT_CAPTURE  = 5;
+const ID_MENU_LIST      = 6;
 
 // ---------------------------------------------------------------------------
 // Character limits
@@ -118,6 +120,7 @@ function eventCaptureList(): ListContainerProperty {
 export class DisplayManager {
   private bridge: EvenAppBridge | null = null;
   private _started = false;
+  private _mode: 'transcript' | 'menu' = 'transcript';
 
   /** Reference to the shared conversation model */
   private conversation: ConversationHistory | null = null;
@@ -160,9 +163,9 @@ export class DisplayManager {
       new CreateStartUpPageContainer({
         containerTotalNum: 4,
         textObject: [
-          text(ID_STATUS,     'status',     8,   4, 560,  22, 16, SECOND, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  30, 560, 228, 18, PRIMARY, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 262, 560,  22, 14, MUTED,  footerText),
+          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerText),
         ],
         listObject: [eventCaptureList()],
       }),
@@ -199,6 +202,7 @@ export class DisplayManager {
   }
 
   private async _doRebuild(statusLabel: string, footerHint: string): Promise<void> {
+    this._mode = 'transcript';
     this.clearDeltaTimer();
     const b = this.requireBridge();
 
@@ -211,9 +215,9 @@ export class DisplayManager {
       new RebuildPageContainer({
         containerTotalNum: 4,
         textObject: [
-          text(ID_STATUS,     'status',     8,   4, 560,  22, 16, SECOND, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  30, 560, 228, 18, PRIMARY, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 262, 560,  22, 14, MUTED,  footerHint),
+          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerHint),
         ],
         listObject: [eventCaptureList()],
       }),
@@ -229,6 +233,7 @@ export class DisplayManager {
   // -----------------------------------------------------------------------
 
   async updateStatus(label: string): Promise<void> {
+    if (this._mode !== 'transcript') return;
     const b = this.requireBridge();
     const newText = `OpenClaw  ● ${label}`;
     await b.textContainerUpgrade(
@@ -244,6 +249,7 @@ export class DisplayManager {
   }
 
   async updateFooter(hint: string): Promise<void> {
+    if (this._mode !== 'transcript') return;
     const b = this.requireBridge();
     await b.textContainerUpgrade(
       new TextContainerUpgrade({
@@ -262,6 +268,7 @@ export class DisplayManager {
    * Falls back to a full rebuild if the text is too long.
    */
   async replaceTranscript(transcriptText: string): Promise<void> {
+    if (this._mode !== 'transcript') return;
     return this.enqueue(() => this._doReplace(transcriptText));
   }
 
@@ -288,6 +295,7 @@ export class DisplayManager {
    * Triggers a rebuild if the cumulative appended text is too large.
    */
   async appendToTranscript(appendText: string): Promise<void> {
+    if (this._mode !== 'transcript') return;
     return this.enqueue(() => this._doAppend(appendText));
   }
 
@@ -318,6 +326,7 @@ export class DisplayManager {
 
   async appendDelta(delta: string): Promise<void> {
     if (!delta) return;
+    if (this._mode !== 'transcript') return;
     this._deltaBatch.push(delta);
     if (!this._deltaTimer) {
       this._deltaTimer = setTimeout(() => {
@@ -408,11 +417,11 @@ export class DisplayManager {
     this.clearResetTimer();
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : transcriptionText;
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this.rebuildTranscript('Confirm?', 'Tap ✓  Double-tap ✗');
+      await this.rebuildTranscript('Confirm?', 'Tap = send · 2×tap = reject');
     } else {
       await this.replaceTranscript(transcript);
       await this.updateStatus('Confirm?');
-      await this.updateFooter('Tap ✓  Double-tap ✗');
+      await this.updateFooter('Tap = send · 2×tap = reject');
     }
   }
 
@@ -445,6 +454,9 @@ export class DisplayManager {
   async showError(message: string, hint = 'Tap to continue'): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
+    if (this._mode === 'menu') {
+      await this.exitMenuMode();
+    }
     await this.updateStatus('Error');
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     const displayText = transcript || message || 'Error';
@@ -459,6 +471,9 @@ export class DisplayManager {
   async showDisconnected(): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
+    if (this._mode === 'menu') {
+      await this.exitMenuMode();
+    }
     await this.updateStatus('Offline');
     await this.updateFooter('Reconnecting...');
   }
@@ -491,6 +506,114 @@ export class DisplayManager {
       clearTimeout(this._resetTimer);
       this._resetTimer = null;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Session menu (list mode)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Build the list item names for the session menu.
+   * First item is always "✦ New Session", followed by up to 19 sessions.
+   */
+  private _buildSessionListItems(sessions: SessionListEntry[]): string[] {
+    if (sessions.length === 0) {
+      return ['Loading sessions...'];
+    }
+    const items: string[] = ['✦ New Session'];
+    for (const s of sessions.slice(0, 19)) {
+      const prefix = s.isActive ? '● ' : '  ';
+      const label = s.label.slice(0, 60);
+      items.push(`${prefix}${label}`);
+    }
+    return items;
+  }
+
+  /**
+   * Rebuild the display in menu (list) mode.
+   * Replaces the transcript text container with a ListContainer.
+   */
+  async showSessionMenu(sessions: SessionListEntry[]): Promise<void> {
+    this.clearDeltaTimer();
+    this.clearResetTimer();
+    this._mode = 'menu';
+
+    const b = this.requireBridge();
+    const items = this._buildSessionListItems(sessions);
+
+    const statusText = 'OpenClaw  ● Sessions';
+    const footerText = 'Tap to select · 2×tap back';
+
+    await b.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 3,
+        textObject: [
+          text(ID_STATUS, 'status', 8, 2, 560, 24, 16, SECOND, statusText),
+          text(ID_FOOTER, 'footer', 8, 256, 560, 26, 14, MUTED, footerText),
+        ],
+        listObject: [
+          new ListContainerProperty({
+            xPosition: 8,
+            yPosition: 34,
+            width: 560,
+            height: 212,
+            borderWidth: 0,
+            borderColor: 0,
+            borderRdaius: 0,
+            paddingLength: 0,
+            containerID: ID_MENU_LIST,
+            containerName: 'menu-list',
+            isEventCapture: 1,
+            itemContainer: new ListItemContainerProperty({
+              itemCount: items.length,
+              itemWidth: 560,
+              isItemSelectBorderEn: 1,
+              itemName: items,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    this._statusLen = statusText.length;
+    this._footerLen = footerText.length;
+  }
+
+  /**
+   * Return to transcript mode from menu mode.
+   * Triggers a full rebuild to swap list → text containers.
+   */
+  async exitMenuMode(): Promise<void> {
+    if (this._mode !== 'menu') return;
+    this._mode = 'transcript';
+
+    const b = this.requireBridge();
+    const statusText = 'OpenClaw  ● Idle';
+    const transcriptText = this.conversation
+      ? this.conversation.formatReverse(REBUILD_CHAR_LIMIT - 50)
+      : 'Ready.';
+    const footerText = 'Tap to interact';
+
+    await b.rebuildPageContainer(
+      new RebuildPageContainer({
+        containerTotalNum: 4,
+        textObject: [
+          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerText),
+        ],
+        listObject: [eventCaptureList()],
+      }),
+    );
+
+    this._statusLen = statusText.length;
+    this._transcriptLen = transcriptText.length;
+    this._footerLen = footerText.length;
+  }
+
+  /** Get the current display mode. */
+  get mode(): 'transcript' | 'menu' {
+    return this._mode;
   }
 
   // -----------------------------------------------------------------------

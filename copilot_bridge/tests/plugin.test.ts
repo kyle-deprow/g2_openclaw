@@ -64,11 +64,9 @@ describe("plugin shape", () => {
 		expect(plugin.version).toBe("1.0.0");
 	});
 
-	it("exposes exactly three tools", () => {
-		expect(plugin.tools).toHaveLength(3);
+	it("exposes exactly one tool", () => {
+		expect(plugin.tools).toHaveLength(1);
 		expect(plugin.tools?.[0].name).toBe("copilot");
-		expect(plugin.tools?.[1].name).toBe("copilot_sessions");
-		expect(plugin.tools?.[2].name).toBe("copilot_session_destroy");
 	});
 
 	it("has an onLoad hook", () => {
@@ -84,16 +82,15 @@ describe("tool parameter schema", () => {
 		expect(tool.parameters.required).toEqual(["prompt", "workingDir"]);
 	});
 
-	it("defines prompt, persona, workingDir, timeout, and sessionId properties", () => {
+	it("defines prompt, persona, workingDir, and timeout properties", () => {
 		const props = plugin.tools![0].parameters.properties;
 		expect(Object.keys(props).sort()).toEqual(
-			["persona", "prompt", "sessionId", "timeout", "workingDir"].sort(),
+			["persona", "prompt", "timeout", "workingDir"].sort(),
 		);
 		expect(props.prompt.type).toBe("string");
 		expect(props.persona.type).toBe("string");
 		expect(props.workingDir.type).toBe("string");
 		expect(props.timeout.type).toBe("number");
-		expect(props.sessionId.type).toBe("string");
 	});
 });
 
@@ -124,7 +121,7 @@ describe("bridge singleton", () => {
 // ─── Happy path ─────────────────────────────────────────────────────────────
 
 describe("happy path", () => {
-	it("prompt only — forwards prompt and default timeout", async () => {
+	it("prompt only — forwards prompt, default timeout, and resolvedDir as sessionId", async () => {
 		const tool = plugin.tools![0];
 		const { result } = await tool.execute({ prompt: "hello", workingDir: "proj" });
 
@@ -133,12 +130,14 @@ describe("happy path", () => {
 			prompt: "hello",
 			workingDir: "/resolved/proj",
 			timeout: 120_000,
+			sessionId: "/resolved/proj",
+			systemMessage: undefined,
 		});
 		expect(result).toContain("## Result");
 		expect(result).toContain("Hello world");
 	});
 
-	it("prompt with persona — prepends persona with separator", async () => {
+	it("prompt with persona — passes persona as systemMessage, not in prompt", async () => {
 		const tool = plugin.tools![0];
 		const persona = "You are a senior engineer.";
 		const prompt = "refactor module X";
@@ -147,9 +146,19 @@ describe("happy path", () => {
 
 		expect(mockBridge.runTask).toHaveBeenCalledWith(
 			expect.objectContaining({
-				prompt: `${persona}\n\n---\n\n${prompt}`,
+				prompt,
+				systemMessage: persona,
 			}),
 		);
+	});
+
+	it("systemMessage is undefined when no persona provided", async () => {
+		const tool = plugin.tools![0];
+		await tool.execute({ prompt: "do stuff", workingDir: "proj" });
+
+		const call = mockBridge.runTask.mock.calls[0][0];
+		expect(call.prompt).toBe("do stuff");
+		expect(call.systemMessage).toBeUndefined();
 	});
 
 	it("custom timeout is forwarded", async () => {
@@ -161,23 +170,6 @@ describe("happy path", () => {
 		);
 	});
 
-	it("sessionId is passed through to runTask", async () => {
-		const tool = plugin.tools![0];
-		await tool.execute({ prompt: "continue", workingDir: "proj", sessionId: "sess-xyz" });
-
-		expect(mockBridge.runTask).toHaveBeenCalledWith(
-			expect.objectContaining({ sessionId: "sess-xyz" }),
-		);
-	});
-
-	it("sessionId is undefined when omitted", async () => {
-		const tool = plugin.tools![0];
-		await tool.execute({ prompt: "new task", workingDir: "proj" });
-
-		expect(mockBridge.runTask).toHaveBeenCalledWith(
-			expect.objectContaining({ sessionId: undefined }),
-		);
-	});
 });
 
 // ─── Result formatting ──────────────────────────────────────────────────────
@@ -334,86 +326,6 @@ describe("input validation", () => {
 		expect(result).toContain("`persona` must be a string");
 	});
 
-	it("rejects non-string sessionId", async () => {
-		const { result } = await exec({ prompt: "go", workingDir: "proj", sessionId: 42 });
-		expect(result).toContain("## Error");
-		expect(result).toContain("`sessionId` must be a string");
-	});
-
-	it("rejects too-long sessionId (>200 chars)", async () => {
-		const { result } = await exec({
-			prompt: "go",
-			workingDir: "proj",
-			sessionId: "x".repeat(201),
-		});
-		expect(result).toContain("## Error");
-		expect(result).toContain("`sessionId` must be a string");
-	});
 });
 
-// ─── copilot_sessions tool ────────────────────────────────────────────────────────
 
-describe("copilot_sessions tool", () => {
-	it("returns 'No active sessions.' when empty", async () => {
-		mockBridge.listSessions.mockReturnValue([]);
-		const tool = plugin.tools![1];
-		const { result } = await tool.execute({});
-		expect(result).toBe("No active sessions.");
-	});
-
-	it("returns a markdown table when sessions exist", async () => {
-		mockBridge.listSessions.mockReturnValue([
-			{ sessionId: "s1", workingDir: "/home/proj", createdAt: "2026-03-07T00:00:00.000Z", messageCount: 3 },
-			{ sessionId: "s2", workingDir: undefined, createdAt: "2026-03-07T01:00:00.000Z", messageCount: 1 },
-		]);
-		const tool = plugin.tools![1];
-		const { result } = await tool.execute({});
-		expect(result).toContain("| Session ID |");
-		expect(result).toContain("s1");
-		expect(result).toContain("s2");
-		expect(result).toContain("/home/proj");
-		expect(result).toContain("3");
-	});
-
-	it("returns ## Error on bridge failure", async () => {
-		mockBridge.ensureReady.mockRejectedValueOnce(new Error("init fail"));
-		const tool = plugin.tools![1];
-		const { result } = await tool.execute({});
-		expect(result).toContain("## Error");
-		expect(result).toContain("init fail");
-	});
-});
-
-// ─── copilot_session_destroy tool ──────────────────────────────────────────────────
-
-describe("copilot_session_destroy tool", () => {
-	it("destroys a session and returns confirmation", async () => {
-		mockBridge.destroySession.mockResolvedValue(true);
-		const tool = plugin.tools![2];
-		const { result } = await tool.execute({ sessionId: "dead-sess" });
-		expect(result).toContain("dead-sess");
-		expect(result).toContain("destroyed");
-		expect(mockBridge.destroySession).toHaveBeenCalledWith("dead-sess");
-	});
-
-	it("returns 'not found' for unknown session", async () => {
-		mockBridge.destroySession.mockResolvedValue(false);
-		const tool = plugin.tools![2];
-		const { result } = await tool.execute({ sessionId: "unknown" });
-		expect(result).toContain("not found");
-	});
-
-	it("rejects empty sessionId", async () => {
-		const tool = plugin.tools![2];
-		const { result } = await tool.execute({ sessionId: "" });
-		expect(result).toContain("## Error");
-		expect(result).toContain("`sessionId` is required");
-	});
-
-	it("rejects missing sessionId", async () => {
-		const tool = plugin.tools![2];
-		const { result } = await tool.execute({});
-		expect(result).toContain("## Error");
-		expect(result).toContain("`sessionId` is required");
-	});
-});

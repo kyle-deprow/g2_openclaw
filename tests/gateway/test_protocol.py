@@ -125,6 +125,8 @@ class TestInboundOnly:
             "ping",
             "history",
             "session_reset",
+            "session_list",
+            "session_switched",
         ],
     )
     def test_outbound_type_rejected_by_parse(self, frame_type: str) -> None:
@@ -304,3 +306,131 @@ class TestHistoryFrameWrongType:
     def test_history_entries_wrong_type(self) -> None:
         with pytest.raises(ProtocolError, match="must be list"):
             validate_outbound({"type": "history", "entries": "not_a_list"})
+
+
+class TestSessionListRequestFrame:
+    """session_list_request inbound frame validation."""
+
+    def test_session_list_request_round_trip(self) -> None:
+        frame: dict[str, Any] = {"type": "session_list_request"}
+        serialized = serialize(frame)
+        parsed = parse_text_frame(serialized)
+        assert parsed == frame
+
+
+class TestSessionSwitchFrame:
+    """session_switch inbound frame validation."""
+
+    def test_session_switch_round_trip(self) -> None:
+        frame: dict[str, Any] = {"type": "session_switch", "sessionKey": "agent:claw:g2:123:abc"}
+        serialized = serialize(frame)
+        parsed = parse_text_frame(serialized)
+        assert parsed == frame
+
+    def test_session_switch_missing_key_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'sessionKey'"):
+            parse_text_frame('{"type":"session_switch"}')
+
+
+class TestSessionCreateFrame:
+    """session_create inbound frame validation."""
+
+    def test_session_create_round_trip(self) -> None:
+        frame: dict[str, Any] = {"type": "session_create"}
+        serialized = serialize(frame)
+        parsed = parse_text_frame(serialized)
+        assert parsed == frame
+
+
+class TestSessionListFrame:
+    """session_list outbound frame validation."""
+
+    def test_session_list_outbound_valid(self) -> None:
+        validate_outbound(
+            {
+                "type": "session_list",
+                "sessions": [
+                    {
+                        "sessionKey": "agent:claw:g2",
+                        "sessionId": "ses_abc",
+                        "updatedAt": "2026-03-07T10:00:00Z",
+                        "preview": "Hello",
+                        "messageCount": 5,
+                    },
+                ],
+                "activeSessionKey": "agent:claw:g2",
+            }
+        )
+
+    def test_session_list_empty_sessions_valid(self) -> None:
+        validate_outbound(
+            {
+                "type": "session_list",
+                "sessions": [],
+                "activeSessionKey": "agent:claw:g2",
+            }
+        )
+
+    def test_session_list_missing_sessions_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'sessions'"):
+            validate_outbound(
+                {
+                    "type": "session_list",
+                    "activeSessionKey": "agent:claw:g2",
+                }
+            )
+
+    def test_session_list_missing_active_key_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'activeSessionKey'"):
+            validate_outbound(
+                {
+                    "type": "session_list",
+                    "sessions": [],
+                }
+            )
+
+
+class TestSessionSwitchedFrame:
+    """session_switched outbound frame validation."""
+
+    def test_session_switched_outbound_valid(self) -> None:
+        validate_outbound(
+            {
+                "type": "session_switched",
+                "sessionKey": "agent:claw:g2:123:abc",
+            }
+        )
+
+    def test_session_switched_with_optional_fields(self) -> None:
+        validate_outbound(
+            {
+                "type": "session_switched",
+                "sessionKey": "agent:claw:g2:123:abc",
+                "sessionId": "ses_abc",
+                "sessionStartedAt": "2026-03-07T10:00:00Z",
+            }
+        )
+
+    def test_session_switched_missing_key_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'sessionKey'"):
+            validate_outbound({"type": "session_switched"})
+
+
+class TestSessionSwitchKeyValidation:
+    """session_switch sessionKey length and emptiness validation."""
+
+    def test_empty_session_key_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="sessionKey must be non-empty"):
+            parse_text_frame('{"type":"session_switch","sessionKey":""}')
+
+    def test_session_key_too_long_raises(self) -> None:
+        long_key = "x" * 201
+        raw = json.dumps({"type": "session_switch", "sessionKey": long_key})
+        with pytest.raises(ProtocolError, match="at most 200 characters"):
+            parse_text_frame(raw)
+
+    def test_session_key_at_max_length_accepted(self) -> None:
+        key = "x" * 200
+        raw = json.dumps({"type": "session_switch", "sessionKey": key})
+        result = parse_text_frame(raw)
+        assert result["sessionKey"] == key

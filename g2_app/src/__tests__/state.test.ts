@@ -94,4 +94,92 @@ describe('StateMachine', () => {
     sm.transition('streaming');
     expect(sm.transition('idle')).toBe(true);
   });
+
+  // -----------------------------------------------------------------------
+  // Menu state transitions
+  // -----------------------------------------------------------------------
+
+  describe('menu state transitions', () => {
+    it('loading → menu is valid', () => {
+      const sm = new StateMachine();
+      expect(sm.transition('menu')).toBe(true);
+      expect(sm.current).toBe('menu');
+    });
+
+    it('idle → menu is valid', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      expect(sm.transition('menu')).toBe(true);
+      expect(sm.current).toBe('menu');
+    });
+
+    it('menu → idle is valid', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('menu');
+      expect(sm.transition('idle')).toBe(true);
+      expect(sm.current).toBe('idle');
+    });
+
+    it('menu → error is valid', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('menu');
+      expect(sm.transition('error')).toBe(true);
+      expect(sm.current).toBe('error');
+    });
+
+    it('menu → disconnected is valid', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('menu');
+      expect(sm.transition('disconnected')).toBe(true);
+      expect(sm.current).toBe('disconnected');
+    });
+
+    it('recording → menu is rejected', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('recording');
+      expect(sm.transition('menu')).toBe(false);
+      expect(sm.current).toBe('recording');
+    });
+
+    it('streaming → menu is rejected', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('recording');
+      sm.transition('transcribing');
+      sm.transition('thinking');
+      sm.transition('streaming');
+      expect(sm.transition('menu')).toBe(false);
+      expect(sm.current).toBe('streaming');
+    });
+
+    it('thinking → menu is rejected', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('recording');
+      sm.transition('transcribing');
+      sm.transition('thinking');
+      expect(sm.transition('menu')).toBe(false);
+      expect(sm.current).toBe('thinking');
+    });
+
+    it('error → menu is valid', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('error');
+      expect(sm.transition('menu')).toBe(true);
+      expect(sm.current).toBe('menu');
+    });
+
+    it('menu → recording is rejected', () => {
+      const sm = new StateMachine();
+      sm.transition('idle');
+      sm.transition('menu');
+      expect(sm.transition('recording')).toBe(false);
+      expect(sm.current).toBe('menu');
+    });
+  });
 });

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CopilotClient } from "@github/copilot-sdk";
@@ -18,6 +19,7 @@ export interface SessionInfo {
 	sessionId: string;
 	workingDir?: string;
 	createdAt: string; // ISO timestamp
+	lastAccessedAt: string; // ISO timestamp
 	messageCount: number;
 }
 
@@ -26,6 +28,7 @@ interface StoredSession {
 	unsubscribe: () => void;
 	workingDir?: string;
 	createdAt: string;
+	lastAccessedAt: number;
 	messageCount: number;
 }
 
@@ -55,10 +58,12 @@ export class CopilotBridge implements ICopilotClient {
 	private config: BridgeConfig;
 	private authMethod = "unknown";
 	private sessions = new Map<string, StoredSession>();
+	private maxSessions: number;
 
 	constructor(config: BridgeConfig) {
 		this.config = config;
 		this.defaultProvider = buildDefaultProvider(config);
+		this.maxSessions = config.maxSessions ?? 8;
 
 		// BYOK provider is NOT passed to the CopilotClient constructor.
 		// It is a session-level config passed to createSession().
@@ -201,8 +206,24 @@ export class CopilotBridge implements ICopilotClient {
 		if (stored) {
 			// Reuse existing session
 			session = stored.session;
+			stored.lastAccessedAt = Date.now();
 			log("debug", "Reusing stored session", { sessionId, messageCount: stored.messageCount });
 		} else {
+			// LRU eviction: if at capacity, destroy the least-recently-accessed session
+			if (this.sessions.size >= this.maxSessions) {
+				let oldestKey: string | null = null;
+				let oldestTime = Number.POSITIVE_INFINITY;
+				for (const [key, s] of this.sessions) {
+					if (s.lastAccessedAt < oldestTime) {
+						oldestTime = s.lastAccessedAt;
+						oldestKey = key;
+					}
+				}
+				if (oldestKey) {
+					log("info", "LRU eviction: destroying oldest session", { sessionId: oldestKey });
+					await this.destroySession(oldestKey);
+				}
+			}
 			// Create a new session
 			const hooks = createHooks(this.buildHookConfig());
 
@@ -216,6 +237,22 @@ export class CopilotBridge implements ICopilotClient {
 
 			if (request.workingDir) {
 				sessionConfig.workingDirectory = request.workingDir;
+			}
+
+			// Auto-discover skills from .github/skills/ in the working directory
+			const workDir = sessionConfig.workingDirectory as string | undefined;
+			if (workDir) {
+				const skillsPath = path.join(workDir, '.github', 'skills');
+				if (existsSync(skillsPath)) {
+					sessionConfig.skillDirectories = [skillsPath];
+				}
+			}
+
+			if (request.systemMessage) {
+				sessionConfig.systemMessage = {
+					type: "append",
+					content: request.systemMessage,
+				};
 			}
 			if (request.tools) {
 				sessionConfig.tools = request.tools;
@@ -287,6 +324,7 @@ export class CopilotBridge implements ICopilotClient {
 					unsubscribe: () => {}, // per-session unsub is a no-op; per-call unsub is in finally
 					workingDir: request.workingDir,
 					createdAt: new Date().toISOString(),
+					lastAccessedAt: Date.now(),
 					messageCount: 1,
 				});
 			} else if (stored) {
@@ -313,6 +351,7 @@ export class CopilotBridge implements ICopilotClient {
 					unsubscribe: () => {},
 					workingDir: request.workingDir,
 					createdAt: new Date().toISOString(),
+					lastAccessedAt: Date.now(),
 					messageCount: 1,
 				});
 			} else if (stored) {
@@ -339,6 +378,7 @@ export class CopilotBridge implements ICopilotClient {
 			sessionId: id,
 			workingDir: stored.workingDir,
 			createdAt: stored.createdAt,
+			lastAccessedAt: new Date(stored.lastAccessedAt).toISOString(),
 			messageCount: stored.messageCount,
 		}));
 	}
@@ -389,6 +429,22 @@ export class CopilotBridge implements ICopilotClient {
 
 		if (request.workingDir) {
 			sessionConfig.workingDirectory = request.workingDir;
+		}
+
+		// Auto-discover skills from .github/skills/ in the working directory
+		const workDir = sessionConfig.workingDirectory as string | undefined;
+		if (workDir) {
+			const skillsPath = path.join(workDir, '.github', 'skills');
+			if (existsSync(skillsPath)) {
+				sessionConfig.skillDirectories = [skillsPath];
+			}
+		}
+
+		if (request.systemMessage) {
+			sessionConfig.systemMessage = {
+				type: "append",
+				content: request.systemMessage,
+			};
 		}
 		if (request.tools) {
 			sessionConfig.tools = request.tools;

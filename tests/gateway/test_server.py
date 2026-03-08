@@ -317,9 +317,7 @@ class TestHealthCheck:
 
         reader, writer = await asyncio.open_connection(host, port)
         try:
-            writer.write(
-                b"GET /healthz HTTP/1.1\r\n" b"Host: localhost\r\n" b"Connection: close\r\n\r\n"
-            )
+            writer.write(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             await writer.drain()
             data = await asyncio.wait_for(reader.read(4096), timeout=5)
             response_text = data.decode()
@@ -341,9 +339,7 @@ class TestHealthCheck:
         # Health check first
         reader, writer = await asyncio.open_connection(host, port)
         try:
-            writer.write(
-                b"GET /healthz HTTP/1.1\r\n" b"Host: localhost\r\n" b"Connection: close\r\n\r\n"
-            )
+            writer.write(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
             await writer.drain()
             data = await asyncio.wait_for(reader.read(4096), timeout=5)
             assert "200 OK" in data.decode()
@@ -658,3 +654,336 @@ class TestResetSessionCleansUpInflight:
             assert reset_frame == {"type": "session_reset", "reason": "user_request"}
 
             assert gw._session_key.startswith("agent:claw:g2:")
+
+
+class TestSessionMenu:
+    """Session menu: list, switch, create."""
+
+    async def test_session_list_request_returns_list(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Send session_list_request → receive session_list with activeSessionKey."""
+        from gateway.session_history import SessionSummary
+
+        url, gw = auth_gateway
+        summaries = [
+            SessionSummary(
+                session_key="agent:claw:g2",
+                session_id="ses_1",
+                updated_at="2026-03-07T10:00:00Z",
+                preview="Hello world",
+                message_count=5,
+            ),
+        ]
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch(
+                "gateway.session_history.list_session_summaries",
+                return_value=summaries,
+            ):
+                await ws.send(json.dumps({"type": "session_list_request"}))
+                resp = await _recv_json(ws)
+
+            assert resp["type"] == "session_list"
+            assert resp["activeSessionKey"] == gw._session_key
+            assert len(resp["sessions"]) == 1
+            assert resp["sessions"][0]["sessionKey"] == "agent:claw:g2"
+            assert resp["sessions"][0]["preview"] == "Hello world"
+            assert resp["sessions"][0]["messageCount"] == 5
+            assert resp["sessions"][0]["updatedAt"] == "2026-03-07T10:00:00Z"
+            assert resp["sessions"][0]["label"] == "Hello world"
+            assert resp["sessions"][0]["isActive"] is True
+
+    async def test_session_list_request_allowed_while_busy(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """session_list_request works even during streaming state (read-only)."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            # Force session into STREAMING state
+            assert gw._current_session is not None
+            gw._current_session._state = SessionState.STREAMING
+
+            with patch(
+                "gateway.session_history.list_session_summaries",
+                return_value=[],
+            ):
+                await ws.send(json.dumps({"type": "session_list_request"}))
+                resp = await _recv_json(ws)
+
+            assert resp["type"] == "session_list"
+
+    async def test_session_switch_valid_key(self, auth_gateway: tuple[str, GatewayServer]) -> None:
+        """Send session_switch → receive session_switched + history."""
+        url, gw = auth_gateway
+        meta = SessionMeta(
+            session_id="ses_target",
+            session_key="agent:claw:g2:target",
+            updated_at="2026-03-07T12:00:00Z",
+        )
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch("gateway.server.resolve_session", return_value=meta):
+                await ws.send(
+                    json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:target"})
+                )
+                switched = await _recv_json(ws)
+                history = await _recv_json(ws)
+
+            assert switched["type"] == "session_switched"
+            assert switched["sessionKey"] == "agent:claw:g2:target"
+            assert switched["sessionId"] == "ses_target"
+            assert switched["sessionStartedAt"] == "2026-03-07T12:00:00Z"
+            assert history["type"] == "history"
+            assert gw._session_key == "agent:claw:g2:target"
+
+    async def test_session_switch_unknown_key(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Send session_switch with bogus key → error frame."""
+        url, _gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch("gateway.server.resolve_session", return_value=None):
+                await ws.send(json.dumps({"type": "session_switch", "sessionKey": "bogus:key"}))
+                error = await _recv_json(ws)
+
+            assert error["type"] == "error"
+            assert error["code"] == "INVALID_FRAME"
+            assert "bogus:key" in error["detail"]
+
+    async def test_session_switch_while_busy_rejected(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """During streaming → INVALID_STATE error."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            assert gw._current_session is not None
+            gw._current_session._state = SessionState.STREAMING
+
+            await ws.send(json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:xxx"}))
+            error = await _recv_json(ws)
+            assert error["type"] == "error"
+            assert error["code"] == "INVALID_STATE"
+
+    async def test_session_create_generates_new_key(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Send session_create → receive session_switched + empty history."""
+        url, gw = auth_gateway
+        old_key = gw._session_key
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            await ws.send(json.dumps({"type": "session_create"}))
+            switched = await _recv_json(ws)
+            history = await _recv_json(ws)
+
+            assert switched["type"] == "session_switched"
+            assert switched["sessionKey"] != old_key
+            assert switched["sessionKey"].startswith("agent:claw:g2:")
+            assert history["type"] == "history"
+            assert history["entries"] == []
+            assert gw._session_key == switched["sessionKey"]
+
+    async def test_session_create_while_busy_rejected(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """During streaming → INVALID_STATE error."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            assert gw._current_session is not None
+            gw._current_session._state = SessionState.STREAMING
+
+            await ws.send(json.dumps({"type": "session_create"}))
+            error = await _recv_json(ws)
+            assert error["type"] == "error"
+            assert error["code"] == "INVALID_STATE"
+
+    async def test_session_switch_updates_session_key(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """After switch, the server's session key is updated for OpenClaw."""
+        url, gw = auth_gateway
+        meta = SessionMeta(
+            session_id="ses_new",
+            session_key="agent:claw:g2:new",
+            updated_at="2026-03-07T14:00:00Z",
+        )
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch("gateway.server.resolve_session", return_value=meta):
+                await ws.send(
+                    json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:new"})
+                )
+                await _recv_json(ws)  # session_switched
+                await _recv_json(ws)  # history
+
+            assert gw._session_key == "agent:claw:g2:new"
+            assert gw._current_session is not None
+            assert gw._current_session._session_key == "agent:claw:g2:new"
+
+    async def test_session_create_then_message(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Create a new session, then send a text message using the new session."""
+        url, gw = auth_gateway
+        old_key = gw._session_key
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            # 1. Create a new session
+            await ws.send(json.dumps({"type": "session_create"}))
+            switched = await _recv_json(ws)
+            history = await _recv_json(ws)
+
+            assert switched["type"] == "session_switched"
+            new_key = switched["sessionKey"]
+            assert new_key != old_key
+            assert history["type"] == "history"
+            assert history["entries"] == []
+
+            # 2. Verify server and session use the new key
+            assert gw._session_key == new_key
+            assert gw._current_session is not None
+            assert gw._current_session._session_key == new_key
+
+            # 3. Send a text message on the new session
+            await ws.send(json.dumps({"type": "text", "message": "hello"}))
+            thinking = await _recv_json(ws)
+            assert thinking == {"type": "status", "status": "thinking"}
+
+            streaming = await _recv_json(ws)
+            assert streaming == {"type": "status", "status": "streaming"}
+
+            deltas: list[str] = []
+            for _ in range(3):
+                frame = await _recv_json(ws)
+                assert frame["type"] == "assistant"
+                deltas.append(frame["delta"])
+
+            end = await _recv_json(ws)
+            assert end == {"type": "end"}
+
+            idle = await _recv_json(ws)
+            assert idle == {"type": "status", "status": "idle"}
+
+            # 4. Session key should still be the new one
+            assert gw._session_key == new_key
+
+    async def test_session_list_request_error_returns_internal_error(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """list_session_summaries raising → error frame with INTERNAL_ERROR."""
+        url, _gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch(
+                "gateway.session_history.list_session_summaries",
+                side_effect=RuntimeError("disk error"),
+            ):
+                await ws.send(json.dumps({"type": "session_list_request"}))
+                error = await _recv_json(ws)
+
+            assert error["type"] == "error"
+            assert error["code"] == "INTERNAL_ERROR"
+
+    async def test_session_switch_to_active_session_skips_reconnect(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Switching to the already-active session sends session_switched without reconnect."""
+        url, gw = auth_gateway
+        current_key = gw._session_key
+        meta = SessionMeta(
+            session_id="ses_current",
+            session_key=current_key,
+            updated_at="2026-03-07T10:00:00Z",
+        )
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch("gateway.server.resolve_session", return_value=meta):
+                await ws.send(json.dumps({"type": "session_switch", "sessionKey": current_key}))
+                switched = await _recv_json(ws)
+
+            assert switched["type"] == "session_switched"
+            assert switched["sessionKey"] == current_key
+            assert switched["sessionId"] == "ses_current"
+            # No history frame follows — reconnect was skipped
+            assert gw._session_key == current_key
+
+    async def test_session_list_null_updated_at(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Sessions with no updatedAt send None, not empty string."""
+        from gateway.session_history import SessionSummary
+
+        url, _gw = auth_gateway
+        summaries = [
+            SessionSummary(
+                session_key="agent:claw:g2:no_ts",
+                session_id="ses_no_ts",
+                updated_at=None,
+                preview="",
+                message_count=0,
+            ),
+        ]
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            with patch(
+                "gateway.session_history.list_session_summaries",
+                return_value=summaries,
+            ):
+                await ws.send(json.dumps({"type": "session_list_request"}))
+                resp = await _recv_json(ws)
+
+            assert resp["sessions"][0]["updatedAt"] is None
+            assert resp["sessions"][0]["label"] == "agent:claw:g2:no_ts"
