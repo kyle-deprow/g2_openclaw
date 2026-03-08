@@ -1,23 +1,23 @@
 ---
 name: backend-python
 description:
-  Python backend development with TDD, Pydantic, Alembic, and clean architecture principles. Use when building API endpoints, domain models, database migrations, service layers, or writing tests for the SpineSense Python backend. Triggers on tasks involving Python modules, pytest, SQLAlchemy, Pydantic schemas, or Alembic migrations.
+  Python backend development with TDD, typed dataclasses, and clean architecture principles. Use when building gateway modules, protocol definitions, session management, audio processing, or writing tests for the G2 OpenClaw Gateway. Triggers on tasks involving Python modules, pytest, TypedDict schemas, asyncio WebSockets, or gateway service layers.
 ---
 
 # Backend Python
 
-Principles and patterns for building the SpineSense Python backend. Test-driven
-development, strong typing, disciplined migrations, and pragmatic design.
+Principles and patterns for building the G2 OpenClaw Gateway. Test-driven
+development, strong typing, asyncio WebSockets, and pragmatic design.
 
 ## When to Apply
 
 Reference these guidelines when:
 
-- Writing or modifying Python modules under `src/spine_sense/`
-- Creating or updating tests under `tests/`
-- Designing Pydantic models for API request/response schemas
-- Creating or reviewing Alembic migration scripts
-- Adding new service-layer or repository functions
+- Writing or modifying Python modules under `gateway/`
+- Creating or updating tests under `tests/gateway/`
+- Designing TypedDict or dataclass schemas for protocol frames
+- Adding new gateway service modules (audio, transcription, session management)
+- Working with asyncio WebSocket server or client code
 - Reviewing code for type safety, test coverage, or design smell
 
 ## Rule Categories by Priority
@@ -27,7 +27,7 @@ Reference these guidelines when:
 | 1        | Test-Driven Dev      | CRITICAL | `tdd-`      |
 | 2        | Type Safety          | CRITICAL | `typing-`   |
 | 3        | Design Principles    | HIGH     | `design-`   |
-| 4        | Database Migrations  | HIGH     | `alembic-`  |
+| 4        | Gateway Patterns     | HIGH     | `gateway-`  |
 | 5        | Project Conventions  | MEDIUM   | `project-`  |
 
 ## Quick Reference
@@ -57,18 +57,18 @@ Reference these guidelines when:
 - `design-dependency-inversion` - Depend on protocols, not concrete implementations
 - `design-fail-fast` - Validate inputs at boundaries; raise immediately on invalid state
 
-### 4. Database & Alembic (HIGH)
+### 4. Gateway Patterns (HIGH)
 
-- `alembic-one-change-per-migration` - Each migration does one logical schema change
-- `alembic-always-downgrade` - Every upgrade has a working downgrade
-- `alembic-no-data-in-schema` - Separate schema migrations from data migrations
-- `alembic-descriptive-names` - Migration messages describe the change, not a ticket number
+- `gateway-protocol-frames` - All WebSocket frames use TypedDict with Literal type discriminators
+- `gateway-session-lifecycle` - Session resolution, switching, and history replay are atomic operations
+- `gateway-asyncio-tasks` - Use structured concurrency; cancel tasks on disconnect
+- `gateway-timestamp-utc` - OpenClaw timestamps may be in milliseconds; auto-detect with `> 1e12` threshold
 
 ### 5. Project Conventions (MEDIUM)
 
-- `project-src-layout` - All source under `src/spine_sense/`, tests under `tests/`
+- `project-src-layout` - All source under `gateway/`, tests under `tests/gateway/` with `test_` prefix
 - `project-uv-only` - Use `uv` for all dependency management; never pip/poetry
-- `project-no-raw-sql` - No f-string or .format() SQL; use parameterized queries or ORM
+- `project-no-bloat` - Remove dead code, legacy fallbacks, and unused files immediately
 
 ## How to Use
 
@@ -76,7 +76,7 @@ Read individual rule files for detailed explanations and code examples:
 
 ```
 rules/tdd-red-green-refactor.md
-rules/typing-strict-models.md
+rules/gateway-protocol-frames.md
 ```
 
 Each rule file contains:

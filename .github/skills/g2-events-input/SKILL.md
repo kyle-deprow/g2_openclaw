@@ -653,6 +653,80 @@ or `['list_event', {...}]`. Audio: `{ type: 'audioEvent', jsonData: { audioPcm: 
 
 ---
 
+## 13. Session Menu Interaction Pattern
+
+The G2 app supports a **session menu** for listing, switching, and creating
+OpenClaw sessions. The menu is displayed as a `ListContainerProperty` and uses
+the same event system as any list.
+
+### Boot-to-Menu
+
+On boot, the app transitions directly to `menu` state (not `idle`). The session
+picker is the first screen the user sees:
+
+```typescript
+// main.ts — on connected frame
+state.transition('menu');
+gateway.requestSessionList();
+display.showSessionMenu(['Loading...']);
+```
+
+### Double-Tap to Open Menu
+
+In `idle` state, a **double-tap** opens the session menu instead of resetting
+the session:
+
+```typescript
+if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+  if (state.current === 'idle') {
+    state.transition('menu');
+    gateway.requestSessionList();
+    display.showSessionMenu(['Loading...']);
+  }
+}
+```
+
+### Menu Tap Handling
+
+When in `menu` state, single taps select a session from the list. The last
+item is always "+ New Session":
+
+```typescript
+function handleMenuTap(index: number, items: string[]): void {
+  const safeIndex = index ?? 0;  // Quirk 2: index 0 may be undefined
+  if (safeIndex === items.length - 1) {
+    gateway.createNewSession();
+  } else {
+    const sessionKey = sessionKeys[safeIndex];
+    gateway.switchSession(sessionKey);
+  }
+}
+```
+
+**Important:** Use the Quirk 2 workaround (`?? 0`) for index 0.
+
+### Rejected Transcription Removal
+
+When a user rejects a transcription (tap during `confirming` state), the last
+user message is **fully removed** from the conversation — no marking, no prefix:
+
+```typescript
+// conversation.ts
+removeLastUser(): void {
+  for (let i = this.entries.length - 1; i >= 0; i--) {
+    if (this.entries[i].role === 'user') {
+      this.entries.splice(i, 1);
+      return;
+    }
+  }
+}
+```
+
+This uses `splice()` to physically remove the entry, keeping the conversation
+clean. The display is then refreshed with `formatReverse()`.
+
+---
+
 ## Quick Reference Card
 
 ```
@@ -661,6 +735,12 @@ HARDWARE LIMITS:     No camera, no speaker on glasses
 
 EVENT VALUES:        CLICK=0  SCROLL_TOP=1  SCROLL_BOTTOM=2  DOUBLE_CLICK=3
                      FG_ENTER=4  FG_EXIT=5  ABNORMAL=6
+
+STATES:          LOADING → MENU (boot) → IDLE → RECORDING → ...
+MENU:            Double-tap in idle opens session menu
+                 Boot lands on menu (session picker)
+                 Tap in menu selects session; last item = "+ New Session"
+REJECT:          Tap in confirming → removeLastUser() → splice, no mark
 
 SUBSCRIBE:           const unsub = bridge.onEvenHubEvent(cb)
 UNSUBSCRIBE:         unsub()

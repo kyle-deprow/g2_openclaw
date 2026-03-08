@@ -580,6 +580,86 @@ bridge.onEvenHubEvent((event) => {
 showPage(0);
 ```
 
+### Pattern 7: Reverse Chronological Display (Newest First)
+
+The G2 display has **no programmatic scroll control** — you cannot scroll to
+the bottom. For chat/conversation UIs, this means the latest message would be
+off-screen. The solution is **reverse chronological order**: newest messages at
+the top, oldest at the bottom.
+
+```typescript
+// Format conversation with newest first
+function formatReverse(entries: { role: string; text: string }[]): string {
+  const lines: string[] = [];
+  // Iterate backwards — newest entry first
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    const prefix = e.role === 'user' ? '> ' : '';
+    lines.push(`${prefix}${e.text}`);
+    if (i > 0) lines.push('---');
+  }
+  return lines.join('\n');
+}
+```
+
+Key rules:
+- **Always use `formatReverse()`** for conversation display on G2.
+- During streaming, call `replaceTranscript(formatReverse(...))` on each delta
+  flush — not `appendDelta()`, because the entire layout must be re-rendered
+  in the new order.
+- User messages are prefixed with `> ` for visual distinction.
+- Entries are separated by `---` dividers.
+
+> **Reference:** `g2_app/src/conversation.ts` — `formatReverse()` implementation.
+
+### Pattern 8: Dual-Mode Display (Transcript + Menu)
+
+A `DisplayManager` can operate in two modes using a single page of containers:
+
+| Mode | Container Type | Purpose |
+|------|---------------|--------|
+| `transcript` | `TextContainerProperty` | Conversation text display |
+| `menu` | `ListContainerProperty` | Session picker or option list |
+
+Switching modes requires a full `rebuildPageContainer` because the container
+type changes. Track the current mode to avoid redundant rebuilds:
+
+```typescript
+class DisplayManager {
+  private _mode: 'transcript' | 'menu' = 'transcript';
+
+  showSessionMenu(items: string[]): void {
+    this._mode = 'menu';
+    bridge.rebuildPageContainer(new RebuildPageContainer({
+      containerTotalNum: 1,
+      listObject: [new ListContainerProperty({
+        containerID: 1, containerName: 'menu',
+        xPosition: 0, yPosition: 0, width: 576, height: 288,
+        isEventCapture: 1,
+        itemContainer: new ListItemContainerProperty({
+          itemCount: items.length,
+          itemWidth: 0,
+          isItemSelectBorderEn: 1,
+          itemName: items,
+        }),
+      })],
+    }));
+  }
+
+  exitMenuMode(): void {
+    this._mode = 'transcript';
+    // Rebuild with text container
+  }
+}
+```
+
+**Critical rule:** Error and disconnect states must call `exitMenuMode()` before
+showing their own content — otherwise the error text goes to a list container
+that can't display it. Always transition back to transcript mode on error or
+disconnect.
+
+> **Reference:** `g2_app/src/display.ts` — `DisplayManager` implementation.
+
 ---
 
 ## 8. What the Display System Does NOT Support
@@ -598,6 +678,7 @@ Understanding the boundaries prevents wasted effort and impossible designs.
   size, same colour.
 - **No programmatic scroll control.** You cannot set scroll position from code.
   Firmware manages scroll state internally.
+  **Workaround for chat UIs:** Use reverse chronological order (newest first) — see Pattern 7.
 - **No animations or transitions.** No fade, slide, or scale effects.
   Containers appear or disappear instantly on rebuild.
 - **No z-index.** Drawing order is determined solely by declaration order in the

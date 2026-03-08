@@ -348,6 +348,51 @@ console.log("G2 app started");
 
 ---
 
+## G2 OpenClaw Sim Stack
+
+The G2 OpenClaw project has a unified command to start (or restart) the full
+simulator stack: gateway → Vite dev server → simulator. This is the recommended
+way to run the project during development.
+
+### Unified Restart
+
+```bash
+# Kill any running services, then launch the full stack
+make sim
+
+# Alias
+make restart
+
+# CLI equivalent
+uv run python -m gateway launch --restart
+```
+
+### What `make sim` does (in order):
+
+1. **Stop** — kills any running gateway, Vite, and simulator processes
+2. **Start OpenClaw daemon** — `openclaw daemon start` (if not already running)
+3. **Start Gateway** — Python WebSocket server on port 8765
+4. **Start Vite** — G2 app dev server on port 5173
+5. **Start Simulator** — `evenhub-simulator http://localhost:5173`
+
+### Individual Controls
+
+```bash
+make launch         # Start without killing first
+make stop           # Stop all services
+```
+
+### Direct Python CLI
+
+```bash
+uv run python -m gateway launch              # full stack
+uv run python -m gateway launch --restart    # stop + full stack
+uv run python -m gateway launch --no-simulator  # without simulator
+uv run python -m gateway stop                # stop all
+```
+
+---
+
 ## Production Packaging
 
 ```bash
