@@ -1,63 +1,42 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// ─── Hoisted mocks (available before vi.mock factories run) ─────────────────
+// ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-const { mockSession, mockSdkClient, mockBridge, mockToolFn } = vi.hoisted(() => {
+const { mockBridge, mockSession, mockRpc, mockToolFn } = vi.hoisted(() => {
+	const mockRpc: Record<string, ReturnType<typeof vi.fn>> = {
+		"workspace.readFile": vi.fn(),
+		"workspace.createFile": vi.fn(),
+		"workspace.listFiles": vi.fn(),
+	};
 	const mockSession = {
-		rpc: {
-			"workspace.readFile": vi.fn(),
-			"workspace.createFile": vi.fn(),
-			"workspace.listFiles": vi.fn(),
-		} as Record<string, ReturnType<typeof vi.fn>>,
-		destroy: vi.fn().mockResolvedValue(undefined),
 		sendAndWait: vi.fn(),
 		on: vi.fn().mockReturnValue(vi.fn()),
-		getMessages: vi.fn().mockResolvedValue([]),
+		destroy: vi.fn().mockResolvedValue(undefined),
+		rpc: mockRpc,
 	};
-
-	const mockSdkClient = {
-		createSession: vi.fn().mockResolvedValue(mockSession),
-		stop: vi.fn().mockResolvedValue([]),
-		forceStop: vi.fn().mockResolvedValue(undefined),
-	};
-
 	const mockBridge = {
 		ensureReady: vi.fn().mockResolvedValue(undefined),
 		runTask: vi.fn(),
-		resumeTask: vi.fn(),
-		listPersistedSessions: vi.fn(),
-		destroyPersistedSession: vi.fn(),
 		stop: vi.fn().mockResolvedValue(undefined),
 		isReady: vi.fn().mockResolvedValue(true),
-		getMostRecentSession: vi.fn(),
-		getSessionTranscript: vi.fn(),
-		resolveWorkingDir: vi.fn().mockImplementation(async (dir: string) => `/resolved/${dir}`),
+		getStatus: vi.fn().mockResolvedValue({ connected: true }),
+		resolveWorkingDir: vi.fn().mockImplementation(async (d: string) => `/resolved/${d}`),
+		listSessions: vi.fn().mockReturnValue([]),
+		destroySession: vi.fn().mockResolvedValue(true),
+		destroyAllSessions: vi.fn().mockResolvedValue(0),
 	};
-
 	const mockToolFn = vi.fn();
-
-	return { mockSession, mockSdkClient, mockBridge, mockToolFn };
+	return { mockBridge, mockSession, mockRpc, mockToolFn };
 });
 
-// ─── Module mocks ───────────────────────────────────────────────────────────
-
 vi.mock("@github/copilot-sdk", () => ({
-	CopilotClient: vi.fn().mockImplementation(() => mockSdkClient),
-}));
-
-vi.mock("../src/client.js", () => ({
-	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
-}));
-
-vi.mock("../src/config.js", () => ({
-	loadConfig: vi.fn().mockReturnValue({
-		githubToken: "test-token",
-		cliPath: undefined,
-		logLevel: "warning",
-		openclawHost: "127.0.0.1",
-		openclawPort: 18789,
-		projectsRoot: "/home/test/repos",
-	}),
+	CopilotClient: vi.fn().mockImplementation(() => ({
+		ping: vi.fn().mockResolvedValue({ message: "ok" }),
+		getAuthStatus: vi.fn().mockResolvedValue({ isAuthenticated: true, authType: "user" }),
+		stop: vi.fn().mockResolvedValue([]),
+		forceStop: vi.fn(),
+		createSession: vi.fn().mockResolvedValue(mockSession),
+	})),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
@@ -68,1085 +47,586 @@ vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
-	StdioServerTransport: vi.fn().mockImplementation(() => ({})),
+	StdioServerTransport: vi.fn(),
 }));
 
-// ─── Import module under test (after mocks are in place) ────────────────────
+vi.mock("../src/config.js", () => ({
+	loadConfig: vi.fn().mockReturnValue({
+		githubToken: "ghu_test",
+		logLevel: "warning",
+		openclawHost: "127.0.0.1",
+		openclawPort: 18789,
+		projectsRoot: "/home/test/repos",
+	}),
+}));
+
+vi.mock("../src/hooks.js", () => ({
+	DEFAULT_POLICY: { allowedTools: [], blockedTools: [], askTools: [], blockedPatterns: [] },
+	createHooks: vi.fn().mockReturnValue({}),
+}));
+
+vi.mock("../src/client.js", () => ({
+	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
+}));
+
+// ─── Import module under test ───────────────────────────────────────────────
 
 const {
 	createServer,
 	ensureInitialized,
 	shutdown,
 	_resetState,
-	acquireMutex,
 	_resetMutex,
-	formatResult,
 	checkDepth,
 	MAX_CALL_DEPTH,
+	acquireMutex,
+	formatResult,
 } = await import("../src/mcp-server.js");
-
-const { CopilotBridge } = await import("../src/client.js");
-const { CopilotClient } = await import("@github/copilot-sdk");
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-interface ToolResult {
-	content: Array<{ type: string; text: string }>;
-	isError?: boolean;
+function getToolCallback(toolName: string) {
+	const call = mockToolFn.mock.calls.find((c: unknown[]) => c[0] === toolName);
+	if (!call) throw new Error(`Tool "${toolName}" not registered`);
+	// server.tool(name, description, schema, callback) — callback is at index 3
+	return call[3] as Function;
 }
 
-type ToolCallback = (args: Record<string, unknown>, extra?: unknown) => Promise<ToolResult>;
-
-function getToolCallback(name: string): ToolCallback {
-	const call = mockToolFn.mock.calls.find((c: unknown[]) => c[0] === name);
-	if (!call) {
-		throw new Error(
-			`Tool "${name}" not found. Registered: ${mockToolFn.mock.calls.map((c: unknown[]) => c[0]).join(", ")}`,
-		);
-	}
-	// server.tool(name, description, schema, callback) — callback is arg index 3
-	return call[3] as ToolCallback;
+function resetMockDefaults() {
+	mockBridge.ensureReady.mockResolvedValue(undefined);
+	mockBridge.runTask.mockReset();
+	mockBridge.stop.mockResolvedValue(undefined);
+	mockBridge.isReady.mockResolvedValue(true);
+	mockBridge.getStatus.mockResolvedValue({ connected: true });
+	mockBridge.resolveWorkingDir.mockImplementation(async (d: string) => `/resolved/${d}`);
+	mockBridge.listSessions.mockReturnValue([]);
+	mockBridge.destroySession.mockResolvedValue(true);
+	mockBridge.destroyAllSessions.mockResolvedValue(0);
+	mockSession.destroy.mockResolvedValue(undefined);
+	mockSession.on.mockReturnValue(vi.fn());
+	mockRpc["workspace.readFile"].mockReset();
+	mockRpc["workspace.createFile"].mockReset();
+	mockRpc["workspace.listFiles"].mockReset();
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("MCP Server", () => {
 	beforeEach(() => {
+		_resetState();
+		_resetMutex();
 		vi.clearAllMocks();
-		_resetState();
-		_resetMutex();
-
-		// Re-establish default mock implementations
-		mockSession.rpc["workspace.readFile"].mockResolvedValue("file content here");
-		mockSession.rpc["workspace.createFile"].mockResolvedValue(undefined);
-		mockSession.rpc["workspace.listFiles"].mockResolvedValue(["file1.ts", "file2.ts"]);
-		mockSession.destroy.mockResolvedValue(undefined);
-		mockSdkClient.createSession.mockResolvedValue(mockSession);
-		mockSdkClient.stop.mockResolvedValue([]);
-		mockBridge.ensureReady.mockResolvedValue(undefined);
-		mockBridge.runTask.mockResolvedValue({
-			success: true,
-			content: "Generated code output",
-			toolCalls: [],
-			errors: [],
-			sessionId: "sess-abc",
-			elapsed: 2000,
-		});
-		mockBridge.resumeTask.mockResolvedValue({
-			success: true,
-			content: "Resumed response",
-			toolCalls: [],
-			errors: [],
-			sessionId: "sess-existing",
-			elapsed: 1000,
-		});
-		mockBridge.listPersistedSessions.mockResolvedValue([]);
-		mockBridge.destroyPersistedSession.mockResolvedValue(undefined);
-		mockBridge.stop.mockResolvedValue(undefined);
-		mockBridge.getMostRecentSession.mockResolvedValue(null);
-		mockBridge.getSessionTranscript.mockResolvedValue([]);
-		mockBridge.resolveWorkingDir.mockImplementation(async (dir: string) => `/resolved/${dir}`);
+		resetMockDefaults();
+		createServer();
 	});
 
-	afterEach(() => {
-		_resetState();
-		_resetMutex();
+	afterEach(async () => {
+		await shutdown();
 	});
 
-	// ── Tool discovery ──────────────────────────────────────────────────────
+	// ── Server creation ─────────────────────────────────────────────────────
 
-	describe("tool discovery", () => {
-		it("registers exactly 8 tools", () => {
-			createServer();
-			expect(mockToolFn).toHaveBeenCalledTimes(8);
+	describe("createServer", () => {
+		it("registers exactly 6 tools", () => {
+			const toolNames = mockToolFn.mock.calls.map((c: unknown[]) => c[0]);
+			expect(toolNames).toEqual([
+				"copilot_read_file",
+				"copilot_create_file",
+				"copilot_list_files",
+				"copilot",
+				"copilot_sessions",
+				"copilot_session_destroy",
+			]);
 		});
 
-		it("registers tools with the expected names", () => {
-			createServer();
-			const names = mockToolFn.mock.calls.map((c: unknown[]) => c[0]);
-			expect(names).toEqual(
-				expect.arrayContaining([
-					"copilot_read_file",
-					"copilot_create_file",
-					"copilot_list_files",
-					"copilot_code_start",
-					"copilot_code_message",
-					"copilot_code_transcript",
-					"copilot_list_sessions",
-					"copilot_destroy_session",
-				]),
-			);
-		});
-
-		it("registers tools with descriptions and _depth in schema", () => {
-			createServer();
-			for (const call of mockToolFn.mock.calls as unknown[][]) {
-				const description = call[1] as string;
-				expect(typeof description).toBe("string");
-				expect(description.length).toBeGreaterThan(0);
-
-				const schema = call[2] as Record<string, unknown>;
-				expect(schema).toHaveProperty("_depth");
-			}
+		it("returns an McpServer instance", () => {
+			// createServer was already called in beforeEach; calling again is fine
+			_resetState();
+			vi.clearAllMocks();
+			const server = createServer();
+			expect(server).toBeDefined();
+			expect(server.tool).toBe(mockToolFn);
 		});
 	});
 
 	// ── copilot_read_file ───────────────────────────────────────────────────
 
 	describe("copilot_read_file", () => {
-		it("calls workspace.readFile with the provided path", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "src/main.ts" });
-
-			expect(mockSession.rpc["workspace.readFile"]).toHaveBeenCalledWith({
-				path: "src/main.ts",
-			});
+		it("reads file content (happy path)", async () => {
+			mockRpc["workspace.readFile"].mockResolvedValue("file contents here");
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "src/index.ts" });
 			expect(result).toEqual({
-				content: [{ type: "text", text: "file content here" }],
+				content: [{ type: "text", text: "file contents here" }],
+			});
+			expect(mockRpc["workspace.readFile"]).toHaveBeenCalledWith({ path: "src/index.ts" });
+		});
+
+		it("JSON-stringifies non-string RPC results", async () => {
+			mockRpc["workspace.readFile"].mockResolvedValue({ lines: ["a", "b"] });
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "data.json" });
+			expect(result.content[0].text).toBe(JSON.stringify({ lines: ["a", "b"] }, null, 2));
+		});
+
+		it("rejects absolute paths", async () => {
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "/etc/passwd" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error: Absolute paths are not allowed" }],
+				isError: true,
+			});
+			expect(mockRpc["workspace.readFile"]).not.toHaveBeenCalled();
+		});
+
+		it("rejects path traversal", async () => {
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "../secret.txt" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error: Path traversal is not allowed" }],
+				isError: true,
 			});
 		});
 
-		it("handles non-string results by JSON-serializing them", async () => {
-			mockSession.rpc["workspace.readFile"].mockResolvedValue({
-				data: "binary",
+		it("rejects null bytes", async () => {
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "file\0.txt" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error: Null bytes are not allowed" }],
+				isError: true,
 			});
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "data.bin" });
-
-			expect(result.content[0].text).toContain('"data": "binary"');
 		});
 
-		it("returns isError when readFile throws", async () => {
-			mockSession.rpc["workspace.readFile"].mockRejectedValue(new Error("File not found"));
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
+		it("returns error on RPC failure", async () => {
+			mockRpc["workspace.readFile"].mockRejectedValue(new Error("File not found"));
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "missing.ts" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error reading file: File not found" }],
+				isError: true,
+			});
+		});
 
-			const result = await callback({ path: "nonexistent.ts" });
-
+		it("returns cycle detection error when _depth >= MAX_CALL_DEPTH", async () => {
+			const cb = getToolCallback("copilot_read_file");
+			const result = await cb({ path: "file.ts", _depth: 3 });
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Error reading file");
-			expect(result.content[0].text).toContain("File not found");
+			expect(result.content[0].text).toContain("Maximum call depth exceeded");
+			expect(mockRpc["workspace.readFile"]).not.toHaveBeenCalled();
 		});
 	});
 
 	// ── copilot_create_file ─────────────────────────────────────────────────
 
 	describe("copilot_create_file", () => {
-		it("calls workspace.createFile with path and content", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_create_file");
-
-			const result = await callback({
-				path: "src/new.ts",
-				content: "export const x = 1;",
-			});
-
-			expect(mockSession.rpc["workspace.createFile"]).toHaveBeenCalledWith({
-				path: "src/new.ts",
-				content: "export const x = 1;",
-			});
+		it("creates a file (happy path)", async () => {
+			mockRpc["workspace.createFile"].mockResolvedValue(undefined);
+			const cb = getToolCallback("copilot_create_file");
+			const result = await cb({ path: "src/new.ts", content: "export {}" });
 			expect(result).toEqual({
 				content: [{ type: "text", text: "File created: src/new.ts" }],
 			});
+			expect(mockRpc["workspace.createFile"]).toHaveBeenCalledWith({
+				path: "src/new.ts",
+				content: "export {}",
+			});
 		});
 
-		it("returns isError when createFile throws", async () => {
-			mockSession.rpc["workspace.createFile"].mockRejectedValue(new Error("Permission denied"));
-			createServer();
-			const callback = getToolCallback("copilot_create_file");
-
-			const result = await callback({
-				path: "etc/secret",
-				content: "data",
+		it("rejects absolute path", async () => {
+			const cb = getToolCallback("copilot_create_file");
+			const result = await cb({ path: "/tmp/evil.sh", content: "rm -rf /" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error: Absolute paths are not allowed" }],
+				isError: true,
 			});
+			expect(mockRpc["workspace.createFile"]).not.toHaveBeenCalled();
+		});
 
+		it("rejects path traversal", async () => {
+			const cb = getToolCallback("copilot_create_file");
+			const result = await cb({ path: "../../escape.txt", content: "bad" });
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Error creating file");
-			expect(result.content[0].text).toContain("Permission denied");
+			expect(result.content[0].text).toContain("Path traversal is not allowed");
+		});
+
+		it("returns error on RPC failure", async () => {
+			mockRpc["workspace.createFile"].mockRejectedValue(new Error("Permission denied"));
+			const cb = getToolCallback("copilot_create_file");
+			const result = await cb({ path: "src/new.ts", content: "data" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error creating file: Permission denied" }],
+				isError: true,
+			});
+		});
+
+		it("returns cycle detection error when _depth >= MAX_CALL_DEPTH", async () => {
+			const cb = getToolCallback("copilot_create_file");
+			const result = await cb({ path: "file.ts", content: "x", _depth: 5 });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Maximum call depth exceeded");
 		});
 	});
 
 	// ── copilot_list_files ──────────────────────────────────────────────────
 
 	describe("copilot_list_files", () => {
-		it("calls workspace.listFiles with the given directory", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_list_files");
-
-			const result = await callback({ directory: "src" });
-
-			expect(mockSession.rpc["workspace.listFiles"]).toHaveBeenCalledWith({
-				directory: "src",
-			});
-			expect(result.content[0].text).toContain("file1.ts");
-			expect(result.content[0].text).toContain("file2.ts");
+		it("lists files at workspace root when no directory given", async () => {
+			mockRpc["workspace.listFiles"].mockResolvedValue(["a.ts", "b.ts"]);
+			const cb = getToolCallback("copilot_list_files");
+			const result = await cb({});
+			expect(result.content[0].text).toBe(JSON.stringify(["a.ts", "b.ts"], null, 2));
+			expect(mockRpc["workspace.listFiles"]).toHaveBeenCalledWith({ directory: undefined });
 		});
 
-		it("passes undefined directory for workspace root", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_list_files");
-
-			await callback({ directory: undefined });
-
-			expect(mockSession.rpc["workspace.listFiles"]).toHaveBeenCalledWith({
-				directory: undefined,
+		it("lists files in a specific directory", async () => {
+			mockRpc["workspace.listFiles"].mockResolvedValue("file1.ts\nfile2.ts");
+			const cb = getToolCallback("copilot_list_files");
+			const result = await cb({ directory: "src" });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "file1.ts\nfile2.ts" }],
 			});
+			expect(mockRpc["workspace.listFiles"]).toHaveBeenCalledWith({ directory: "src" });
 		});
 
-		it("returns isError when listFiles throws", async () => {
-			mockSession.rpc["workspace.listFiles"].mockRejectedValue(new Error("Access denied"));
-			createServer();
-			const callback = getToolCallback("copilot_list_files");
-
-			const result = await callback({ directory: "restricted" });
-
+		it("rejects absolute directory path", async () => {
+			const cb = getToolCallback("copilot_list_files");
+			const result = await cb({ directory: "/etc" });
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Error listing files");
-			expect(result.content[0].text).toContain("Access denied");
+			expect(result.content[0].text).toContain("Absolute paths are not allowed");
+		});
+
+		it("returns error on RPC failure", async () => {
+			mockRpc["workspace.listFiles"].mockRejectedValue(new Error("Access denied"));
+			const cb = getToolCallback("copilot_list_files");
+			const result = await cb({});
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error listing files: Access denied" }],
+				isError: true,
+			});
+		});
+
+		it("returns cycle detection error when _depth >= MAX_CALL_DEPTH", async () => {
+			const cb = getToolCallback("copilot_list_files");
+			const result = await cb({ _depth: 3 });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Maximum call depth exceeded");
 		});
 	});
 
-	// ── copilot_code_message ────────────────────────────────────────────────
+	// ── copilot tool ────────────────────────────────────────────────────────
 
-	describe("copilot_code_message", () => {
-		it("calls bridge.resumeTask when sessionId is provided", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
+	describe("copilot", () => {
+		const taskResult = {
+			success: true,
+			content: "Done",
+			toolCalls: [],
+			errors: [],
+			sessionId: "sess-1",
+			elapsed: 2000,
+		};
 
-			const result = await callback({
-				prompt: "Continue working on the bug",
-				sessionId: "sess-existing",
-				timeout: 60_000,
-			});
-
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-existing", "Continue working on the bug", 60_000);
-			expect(mockBridge.runTask).not.toHaveBeenCalled();
-			expect(result.content[0].text).toContain("Resumed response");
-			expect(result.content[0].text).toContain("sess-existing");
-		});
-
-		it("returns error when no sessions exist and no sessionId provided", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue(null);
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result = await callback({
-				prompt: "Do something",
-				timeout: 120_000,
-			});
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("No active sessions");
-			expect(result.content[0].text).toContain("copilot_code_start");
-			expect(mockBridge.runTask).not.toHaveBeenCalled();
-			expect(mockBridge.resumeTask).not.toHaveBeenCalled();
-		});
-
-		it("auto-selects most recent session when no sessionId provided", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Previous task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result = await callback({
-				prompt: "Continue",
-				timeout: 60_000,
-			});
-
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-recent", "Continue", 60_000);
-			expect(result.content[0].text).toContain("Resumed response");
-		});
-
-		it("uses provided sessionId even when sessions exist", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Previous task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			await callback({
-				prompt: "Continue",
-				sessionId: "sess-specific",
-				timeout: 60_000,
-			});
-
-			expect(mockBridge.getMostRecentSession).not.toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-specific", "Continue", 60_000);
-		});
-
-		it("returns isError when resumeTask throws", async () => {
-			mockBridge.resumeTask.mockRejectedValue(new Error("Copilot unavailable"));
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Previous",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result = await callback({
-				prompt: "Do something",
-				timeout: 120_000,
-			});
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Copilot unavailable");
-		});
-
-		it("includes tool calls and errors in formatted output", async () => {
-			mockBridge.resumeTask.mockResolvedValue({
-				success: false,
-				content: "Partial result",
-				toolCalls: [
-					{
-						tool: "readFile",
-						args: { path: "x.ts" },
-						result: "ok",
-						timestamp: 0,
-					},
-				],
-				errors: ["Something went wrong"],
-				sessionId: "sess-xyz",
-				elapsed: 5000,
-			});
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result = await callback({
-				prompt: "Complex task",
-				sessionId: "sess-xyz",
-				timeout: 120_000,
-			});
-
-			expect(result.content[0].text).toContain("readFile");
-			expect(result.content[0].text).toContain("Something went wrong");
-			expect(result.content[0].text).toContain("Success: false");
-			expect(result.content[0].text).toContain("5.0s");
-		});
-
-		it("returns isError when resumeTask throws for unknown session", async () => {
-			mockBridge.resumeTask.mockRejectedValue(new Error("No persisted session found with ID: sess-gone"));
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-			const result = await callback({ prompt: "continue", sessionId: "sess-gone", timeout: 120_000 });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("No persisted session found");
-		});
-	});
-
-	// ── copilot_code_start ─────────────────────────────────────────────────
-
-	describe("copilot_code_start", () => {
-		it("calls bridge.runTask with persistSession: true", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_start");
-
-			const result = await callback({
-				prompt: "Start a new project",
-				workingDir: "/project",
-				timeout: 60_000,
-			});
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("/project");
-			expect(mockBridge.runTask).toHaveBeenCalledWith({
-				prompt: "Start a new project",
-				workingDir: "/resolved//project",
-				timeout: 60_000,
-				persistSession: true,
-			});
-			expect(result.content[0].text).toContain("Generated code output");
+		it("executes a coding task (happy path)", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			const result = await cb({ prompt: "fix the bug", workingDir: "myproject", timeout: 120000 });
+			expect(result.content[0].text).toContain("Done");
 			expect(result.content[0].text).toContain("Success: true");
+			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("myproject");
+			expect(mockBridge.runTask).toHaveBeenCalledWith({
+				prompt: "fix the bug",
+				workingDir: "/resolved/myproject",
+				timeout: 120000,
+			});
 		});
 
-		it("resolves bare project name via resolveWorkingDir", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_start");
-
-			await callback({
-				prompt: "Start",
-				workingDir: "my-api",
-				timeout: 120_000,
+		it("prepends persona with separator", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			await cb({
+				prompt: "do the thing",
+				persona: "You are an expert",
+				workingDir: "proj",
+				timeout: 60000,
 			});
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("my-api");
 			expect(mockBridge.runTask).toHaveBeenCalledWith(
-				expect.objectContaining({ workingDir: "/resolved/my-api" }),
+				expect.objectContaining({
+					prompt: "You are an expert\n\n---\n\ndo the thing",
+				}),
 			);
 		});
 
-		it("passes absolute path through resolveWorkingDir", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_start");
-
-			await callback({
-				prompt: "Start",
-				workingDir: "/home/dev/repos/my-project",
-				timeout: 120_000,
-			});
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("/home/dev/repos/my-project");
+		it("uses prompt only when no persona provided", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			await cb({ prompt: "just do it", workingDir: "proj", timeout: 120000 });
 			expect(mockBridge.runTask).toHaveBeenCalledWith(
-				expect.objectContaining({ workingDir: "/resolved//home/dev/repos/my-project" }),
+				expect.objectContaining({
+					prompt: "just do it",
+				}),
 			);
 		});
 
-		it("returns isError when runTask throws", async () => {
-			mockBridge.runTask.mockRejectedValue(new Error("Copilot unavailable"));
-			createServer();
-			const callback = getToolCallback("copilot_code_start");
-
-			const result = await callback({
-				prompt: "Start",
-				workingDir: "my-api",
-				timeout: 120_000,
-			});
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Copilot unavailable");
+		it("forwards custom timeout", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			await cb({ prompt: "task", workingDir: "proj", timeout: 300000 });
+			expect(mockBridge.runTask).toHaveBeenCalledWith(
+				expect.objectContaining({ timeout: 300000 }),
+			);
 		});
 
-		it("rejects at depth >= MAX_CALL_DEPTH", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_start");
+		it("passes sessionId to bridge.runTask", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			await cb({ prompt: "continue", workingDir: "proj", timeout: 120000, sessionId: "sess-abc" });
+			expect(mockBridge.runTask).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: "sess-abc" }),
+			);
+		});
 
-			const result = await callback({
-				prompt: "Start",
-				workingDir: "my-api",
-				timeout: 120_000,
-				_depth: 5,
-			});
+		it("sessionId is undefined when omitted", async () => {
+			mockBridge.runTask.mockResolvedValue(taskResult);
+			const cb = getToolCallback("copilot");
+			await cb({ prompt: "new task", workingDir: "proj", timeout: 120000 });
+			expect(mockBridge.runTask).toHaveBeenCalledWith(
+				expect.objectContaining({ sessionId: undefined }),
+			);
+		});
 
+		it("returns cycle detection error", async () => {
+			const cb = getToolCallback("copilot");
+			const result = await cb({ prompt: "task", workingDir: "proj", timeout: 120000, _depth: 3 });
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toContain("Maximum call depth exceeded");
 			expect(mockBridge.runTask).not.toHaveBeenCalled();
 		});
-	});
 
-	// ── copilot_code_transcript ────────────────────────────────────────────
-
-	describe("copilot_code_transcript", () => {
-		it("returns transcript messages for given sessionId", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "Hello", timestamp: "2026-02-27T10:00:00Z" },
-				{ role: "assistant", content: "Hi there", timestamp: "2026-02-27T10:00:01Z" },
-			]);
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ sessionId: "sess-1", count: 2 });
-
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toContain("**user**");
-			expect(result.content[0].text).toContain("Hello");
-			expect(result.content[0].text).toContain("**assistant**");
-			expect(result.content[0].text).toContain("Hi there");
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-1", 2);
-		});
-
-		it("defaults to most recent session when no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Recent",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
+		it("returns error on bridge failure", async () => {
+			mockBridge.runTask.mockRejectedValue(new Error("Bridge timeout"));
+			const cb = getToolCallback("copilot");
+			const result = await cb({ prompt: "task", workingDir: "proj", timeout: 120000 });
+			expect(result).toEqual({
+				content: [{ type: "text", text: "Error: Bridge timeout" }],
+				isError: true,
 			});
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "Test", timestamp: "2026-02-27T10:00:00Z" },
-			]);
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ count: 2 });
-
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-recent", 2);
-			expect(result.content[0].text).toContain("Test");
 		});
 
-		it("returns error when no sessions exist and no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue(null);
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ count: 2 });
-
+		it("handles non-Error thrown values", async () => {
+			mockBridge.runTask.mockRejectedValue("string error");
+			const cb = getToolCallback("copilot");
+			const result = await cb({ prompt: "task", workingDir: "proj", timeout: 120000 });
+			expect(result.content[0].text).toBe("Error: string error");
 			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("No active sessions");
+		});
+	});
+	// ── copilot_sessions ───────────────────────────────────────────────────
+
+	describe("copilot_sessions", () => {
+		it("returns 'No active sessions.' when empty", async () => {
+			mockBridge.listSessions.mockReturnValue([]);
+			const cb = getToolCallback("copilot_sessions");
+			const result = await cb({});
+			expect(result.content[0].text).toBe("No active sessions.");
 		});
 
-		it("passes count parameter", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "msg", timestamp: "2026-02-27T10:00:00Z" },
+		it("returns markdown table when sessions exist", async () => {
+			mockBridge.listSessions.mockReturnValue([
+				{ sessionId: "s1", workingDir: "/proj", createdAt: "2026-03-07T00:00:00Z", messageCount: 2 },
 			]);
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			await callback({ sessionId: "sess-1", count: 5 });
-
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-1", 5);
+			const cb = getToolCallback("copilot_sessions");
+			const result = await cb({});
+			expect(result.content[0].text).toContain("| Session ID |");
+			expect(result.content[0].text).toContain("s1");
+			expect(result.content[0].text).toContain("/proj");
 		});
 
-		it("returns empty message for session with no messages", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([]);
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ sessionId: "sess-empty", count: 2 });
-
-			expect(result.content[0].text).toContain("No messages in session sess-empty");
-		});
-
-		it("returns isError when getSessionTranscript throws", async () => {
-			mockBridge.getSessionTranscript.mockRejectedValue(new Error("Session not found"));
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ sessionId: "sess-bad", count: 2 });
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Session not found");
-		});
-
-		it("rejects at depth >= MAX_CALL_DEPTH", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_transcript");
-
-			const result = await callback({ sessionId: "sess-1", count: 2, _depth: 4 });
-
+		it("returns cycle detection error when _depth >= MAX_CALL_DEPTH", async () => {
+			const cb = getToolCallback("copilot_sessions");
+			const result = await cb({ _depth: 3 });
 			expect(result.isError).toBe(true);
 			expect(result.content[0].text).toContain("Maximum call depth exceeded");
 		});
 	});
 
-	// ── Lazy initialization ─────────────────────────────────────────────────
+	// ── copilot_session_destroy ───────────────────────────────────────────
 
-	describe("lazy initialization", () => {
-		it("does not create bridge or session at import time", () => {
-			// After _resetState in beforeEach, nothing should be constructed
-			expect(CopilotBridge).not.toHaveBeenCalled();
-			expect(CopilotClient).not.toHaveBeenCalled();
+	describe("copilot_session_destroy", () => {
+		it("destroys session and returns confirmation", async () => {
+			mockBridge.destroySession.mockResolvedValue(true);
+			const cb = getToolCallback("copilot_session_destroy");
+			const result = await cb({ sessionId: "dead-sess" });
+			expect(result.content[0].text).toContain("dead-sess");
+			expect(result.content[0].text).toContain("destroyed");
+			expect(mockBridge.destroySession).toHaveBeenCalledWith("dead-sess");
 		});
 
-		it("creates bridge and session on first tool call", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			await callback({ path: "test.ts" });
-
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-			expect(mockBridge.ensureReady).toHaveBeenCalledTimes(1);
-			expect(CopilotClient).toHaveBeenCalledTimes(1);
-			expect(mockSdkClient.createSession).toHaveBeenCalledTimes(1);
+		it("returns 'not found' for unknown session", async () => {
+			mockBridge.destroySession.mockResolvedValue(false);
+			const cb = getToolCallback("copilot_session_destroy");
+			const result = await cb({ sessionId: "unknown" });
+			expect(result.content[0].text).toContain("not found");
 		});
 
-		it("reuses bridge and session across subsequent calls", async () => {
-			createServer();
-			const readFile = getToolCallback("copilot_read_file");
-			const createFile = getToolCallback("copilot_create_file");
-
-			await readFile({ path: "a.ts" });
-			await createFile({ path: "b.ts", content: "x" });
-
-			// Only one construction — reused across calls
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-			expect(CopilotClient).toHaveBeenCalledTimes(1);
-			expect(mockSdkClient.createSession).toHaveBeenCalledTimes(1);
-		});
-
-		it("retries initialization after a failure", async () => {
-			mockBridge.ensureReady
-				.mockRejectedValueOnce(new Error("Connection refused"))
-				.mockResolvedValue(undefined);
-
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			// First call fails during init
-			const result1 = await callback({ path: "test.ts" });
-			expect(result1.isError).toBe(true);
-			expect(result1.content[0].text).toContain("Connection refused");
-
-			// Second call retries init and succeeds
-			const result2 = await callback({ path: "test.ts" });
-			expect(result2.isError).toBeUndefined();
-			expect(CopilotBridge).toHaveBeenCalledTimes(2);
-		});
-
-		it("retries initialization after createSession failure", async () => {
-			mockSdkClient.createSession
-				.mockRejectedValueOnce(new Error("Session creation failed"))
-				.mockResolvedValue(mockSession);
-
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result1 = await callback({ path: "test.ts" });
-			expect(result1.isError).toBe(true);
-			expect(result1.content[0].text).toContain("Session creation failed");
-
-			const result2 = await callback({ path: "test.ts" });
-			expect(result2.isError).toBeUndefined();
-			expect(result2.content[0].text).toBe("file content here");
-		});
-
-		it("cleans up bridge on createSession failure", async () => {
-			mockSdkClient.createSession.mockRejectedValueOnce(new Error("createSession failed"));
-
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "test.ts" });
+		it("returns cycle detection error when _depth >= MAX_CALL_DEPTH", async () => {
+			const cb = getToolCallback("copilot_session_destroy");
+			const result = await cb({ sessionId: "x", _depth: 3 });
 			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("Maximum call depth exceeded");
+		});
 
-			// Bridge.stop should have been called as cleanup
-			expect(mockBridge.stop).toHaveBeenCalledTimes(1);
+		it("returns error on bridge failure", async () => {
+			mockBridge.destroySession.mockRejectedValue(new Error("destroy failed"));
+			const cb = getToolCallback("copilot_session_destroy");
+			const result = await cb({ sessionId: "sess-x" });
+			expect(result.isError).toBe(true);
+			expect(result.content[0].text).toContain("destroy failed");
 		});
 	});
+	// ── checkDepth ──────────────────────────────────────────────────────────
 
-	// ── Mutex ───────────────────────────────────────────────────────────────
-
-	describe("mutex", () => {
-		it("serializes concurrent copilot_code_message calls", async () => {
-			const executionOrder: number[] = [];
-			let callCount = 0;
-
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-
-			mockBridge.resumeTask.mockImplementation(async () => {
-				const myOrder = ++callCount;
-				// Simulate async work
-				await new Promise((resolve) => setTimeout(resolve, 50));
-				executionOrder.push(myOrder);
-				return {
-					success: true,
-					content: `Result ${myOrder}`,
-					toolCalls: [],
-					errors: [],
-					sessionId: `sess-${myOrder}`,
-					elapsed: 50,
-				};
-			});
-
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			// Launch two concurrent calls
-			const p1 = callback({ prompt: "Task 1", timeout: 120_000 });
-			const p2 = callback({ prompt: "Task 2", timeout: 120_000 });
-
-			await Promise.all([p1, p2]);
-
-			// Both executed, but sequentially (1 before 2)
-			expect(executionOrder).toEqual([1, 2]);
+	describe("checkDepth", () => {
+		it("returns null when depth is undefined", () => {
+			expect(checkDepth(undefined)).toBeNull();
 		});
 
-		it("releases mutex when copilot_code_message fails", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.resumeTask.mockRejectedValueOnce(new Error("first call fails")).mockResolvedValue({
-				success: true,
-				content: "recovered",
-				toolCalls: [],
-				errors: [],
-				sessionId: "sess-recover",
-				elapsed: 100,
-			});
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result1 = await callback({ prompt: "Fail", timeout: 120_000 });
-			expect(result1.isError).toBe(true);
-
-			// Second call should proceed (mutex was released in finally block)
-			const result2 = await callback({ prompt: "Succeed", timeout: 120_000 });
-			expect(result2.isError).toBeUndefined();
-			expect(result2.content[0].text).toContain("recovered");
+		it("returns null when depth is 0", () => {
+			expect(checkDepth(0)).toBeNull();
 		});
 
-		it("acquireMutex returns a working release function", async () => {
-			const order: string[] = [];
-
-			const release1 = await acquireMutex();
-			order.push("acquired-1");
-
-			// Second acquire should not resolve until release1 is called
-			let acquired2 = false;
-			const p2 = acquireMutex().then((release2) => {
-				acquired2 = true;
-				order.push("acquired-2");
-				release2();
-			});
-
-			// Give microtasks a chance to run
-			await new Promise((resolve) => setTimeout(resolve, 10));
-			expect(acquired2).toBe(false);
-
-			release1();
-			await p2;
-
-			expect(acquired2).toBe(true);
-			expect(order).toEqual(["acquired-1", "acquired-2"]);
-		});
-	});
-
-	// ── Shutdown ────────────────────────────────────────────────────────────
-
-	describe("shutdown", () => {
-		it("destroys session, stops bridge, and stops SDK client in order", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "test.ts" });
-
-			await shutdown();
-
-			expect(mockSession.destroy).toHaveBeenCalledTimes(1);
-			expect(mockBridge.stop).toHaveBeenCalledTimes(1);
-			expect(mockSdkClient.stop).toHaveBeenCalledTimes(1);
-
-			// Verify order: session destroyed → bridge stopped → client stopped
-			const destroyOrder = mockSession.destroy.mock.invocationCallOrder[0]!;
-			const bridgeOrder = mockBridge.stop.mock.invocationCallOrder[0]!;
-			const clientOrder = mockSdkClient.stop.mock.invocationCallOrder[0]!;
-			expect(destroyOrder).toBeLessThan(bridgeOrder);
-			expect(bridgeOrder).toBeLessThan(clientOrder);
+		it("returns null when depth < MAX_CALL_DEPTH", () => {
+			expect(checkDepth(MAX_CALL_DEPTH - 1)).toBeNull();
 		});
 
-		it("handles errors during shutdown gracefully", async () => {
-			mockSession.destroy.mockRejectedValue(new Error("destroy failed"));
-			mockBridge.stop.mockRejectedValue(new Error("stop failed"));
-			mockSdkClient.stop.mockRejectedValue(new Error("client stop failed"));
-
-			// Initialize
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "test.ts" });
-
-			// Should not throw despite all shutdown steps failing
-			await expect(shutdown()).resolves.toBeUndefined();
+		it("returns error when depth equals MAX_CALL_DEPTH", () => {
+			const result = checkDepth(MAX_CALL_DEPTH);
+			expect(result).not.toBeNull();
+			expect(result!.isError).toBe(true);
+			expect(result!.content[0].text).toContain("Maximum call depth exceeded");
+			expect(result!.content[0].text).toContain(`Depth: ${MAX_CALL_DEPTH}`);
 		});
 
-		it("is safe to call when not initialized", async () => {
-			await expect(shutdown()).resolves.toBeUndefined();
-		});
-
-		it("clears state so next tool call re-initializes", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			await callback({ path: "test.ts" });
-
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-
-			await shutdown();
-
-			// Making another call should trigger re-initialization
-			await callback({ path: "test2.ts" });
-			expect(CopilotBridge).toHaveBeenCalledTimes(2);
+		it("returns error when depth exceeds MAX_CALL_DEPTH", () => {
+			const result = checkDepth(MAX_CALL_DEPTH + 5);
+			expect(result).not.toBeNull();
+			expect(result!.isError).toBe(true);
 		});
 	});
 
 	// ── formatResult ────────────────────────────────────────────────────────
 
 	describe("formatResult", () => {
-		it("formats a successful result with no tool calls or errors", () => {
-			const text = formatResult({
+		it("formats a full result with content, tool calls, errors, and stats", () => {
+			const result = formatResult({
 				success: true,
-				content: "Hello world",
+				content: "All good",
+				toolCalls: [
+					{ tool: "read", args: { path: "a.ts" }, result: "ok", timestamp: 0 },
+					{ tool: "write", args: { path: "b.ts" }, result: "done", timestamp: 1 },
+				],
+				errors: ["warning: lint issue"],
+				sessionId: "sess-123",
+				elapsed: 1500,
+			});
+			expect(result).toContain("All good");
+			expect(result).toContain("Tool Calls:");
+			expect(result).toContain('- read({"path":"a.ts"}) → ok');
+			expect(result).toContain('- write({"path":"b.ts"}) → done');
+			expect(result).toContain("Errors:");
+			expect(result).toContain("- warning: lint issue");
+			expect(result).toContain("Success: true | Elapsed: 1.5s | Session: sess-123");
+		});
+
+		it("omits tool calls section when empty", () => {
+			const result = formatResult({
+				success: true,
+				content: "Done",
 				toolCalls: [],
 				errors: [],
 				sessionId: "sess-1",
-				elapsed: 1500,
-			});
-
-			expect(text).toContain("Hello world");
-			expect(text).toContain("Success: true");
-			expect(text).toContain("1.5s");
-			expect(text).toContain("sess-1");
-			expect(text).not.toContain("Tool Calls:");
-			expect(text).not.toContain("Errors:");
-		});
-
-		it("includes tool calls section when present", () => {
-			const text = formatResult({
-				success: true,
-				content: "Done",
-				toolCalls: [
-					{
-						tool: "readFile",
-						args: { path: "x.ts" },
-						result: "content",
-						timestamp: 0,
-					},
-				],
-				errors: [],
-				sessionId: "sess-2",
-				elapsed: 2000,
-			});
-
-			expect(text).toContain("Tool Calls:");
-			expect(text).toContain("readFile");
-			expect(text).toContain("x.ts");
-		});
-
-		it("includes errors section when present", () => {
-			const text = formatResult({
-				success: false,
-				content: "",
-				toolCalls: [],
-				errors: ["Something broke", "Another issue"],
-				sessionId: "sess-3",
 				elapsed: 500,
 			});
-
-			expect(text).toContain("Errors:");
-			expect(text).toContain("Something broke");
-			expect(text).toContain("Another issue");
-			expect(text).toContain("Success: false");
-		});
-	});
-
-	// ── Path validation ─────────────────────────────────────────────────────
-
-	describe("path validation", () => {
-		it("rejects absolute paths in copilot_read_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			const result = await callback({ path: "/etc/passwd" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Absolute paths are not allowed");
+			expect(result).not.toContain("Tool Calls:");
+			expect(result).toContain("Done");
+			expect(result).toContain("Success: true | Elapsed: 0.5s | Session: sess-1");
 		});
 
-		it("rejects path traversal in copilot_read_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			const result = await callback({ path: "../../etc/passwd" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Path traversal is not allowed");
-		});
-
-		it("rejects normalized traversal in copilot_read_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			const result = await callback({ path: "foo/../../etc/passwd" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Path traversal is not allowed");
-		});
-
-		it("rejects absolute paths in copilot_create_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_create_file");
-			const result = await callback({ path: "/tmp/evil.ts", content: "x" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Absolute paths are not allowed");
-		});
-
-		it("rejects path traversal in copilot_create_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_create_file");
-			const result = await callback({ path: "../outside.ts", content: "x" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Path traversal is not allowed");
-		});
-
-		it("rejects absolute paths in copilot_list_files", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_list_files");
-			const result = await callback({ directory: "/etc" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Absolute paths are not allowed");
-		});
-
-		it("rejects path traversal in copilot_list_files", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_list_files");
-			const result = await callback({ directory: "../../etc" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Path traversal is not allowed");
-		});
-
-		it("allows valid relative paths in copilot_read_file", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			const result = await callback({ path: "src/main.ts" });
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toBe("file content here");
-		});
-
-		it("rejects null bytes in paths", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-			const result = await callback({ path: "src/main.ts\0.jpg" });
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Null bytes are not allowed");
-		});
-	});
-
-	// ── Cycle detection ─────────────────────────────────────────────────────
-
-	describe("cycle detection", () => {
-		it("checkDepth returns error at depth >= MAX_CALL_DEPTH", () => {
-			const result = checkDepth(3);
-			expect(result).not.toBeNull();
-			expect(result?.isError).toBe(true);
-			expect(result?.content[0].text).toContain("Maximum call depth exceeded");
-			expect(result?.content[0].text).toContain("cycle detected");
-		});
-
-		it("checkDepth returns null at depth < MAX_CALL_DEPTH", () => {
-			expect(checkDepth(0)).toBeNull();
-			expect(checkDepth(1)).toBeNull();
-			expect(checkDepth(2)).toBeNull();
-		});
-
-		it("checkDepth defaults to 0 when undefined", () => {
-			expect(checkDepth(undefined)).toBeNull();
-		});
-
-		it("MAX_CALL_DEPTH is 3", () => {
-			expect(MAX_CALL_DEPTH).toBe(3);
-		});
-
-		it("rejects copilot_read_file at depth >= MAX_CALL_DEPTH", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "/test.ts", _depth: 3 });
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Maximum call depth exceeded");
-			// Should NOT have called ensureInitialized / session
-			expect(mockSession.rpc["workspace.readFile"]).not.toHaveBeenCalled();
-		});
-
-		it("rejects copilot_code_message at depth >= MAX_CALL_DEPTH", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_code_message");
-
-			const result = await callback({
-				prompt: "Do something",
-				timeout: 120_000,
-				_depth: 5,
+		it("omits errors section when empty", () => {
+			const result = formatResult({
+				success: false,
+				content: "Partial",
+				toolCalls: [{ tool: "t", args: {}, result: "r", timestamp: 0 }],
+				errors: [],
+				sessionId: "s-2",
+				elapsed: 3000,
 			});
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Maximum call depth exceeded");
-			expect(mockBridge.runTask).not.toHaveBeenCalled();
+			expect(result).not.toContain("Errors:");
+			expect(result).toContain("Tool Calls:");
+			expect(result).toContain("Success: false | Elapsed: 3.0s | Session: s-2");
 		});
 
-		it("allows calls at depth < MAX_CALL_DEPTH", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "test.ts", _depth: 2 });
-
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toBe("file content here");
-		});
-
-		it("defaults _depth to 0 when not provided", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_read_file");
-
-			const result = await callback({ path: "test.ts" });
-
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toBe("file content here");
+		it("includes both sections when both have entries", () => {
+			const result = formatResult({
+				success: true,
+				content: "output",
+				toolCalls: [{ tool: "x", args: {}, result: "y", timestamp: 0 }],
+				errors: ["e1"],
+				sessionId: "s",
+				elapsed: 100,
+			});
+			expect(result).toContain("Tool Calls:");
+			expect(result).toContain("Errors:");
 		});
 	});
 
-	// ── copilot_list_sessions ──────────────────────────────────────────────
+	// ── mutex ───────────────────────────────────────────────────────────────
 
-	describe("copilot_list_sessions", () => {
-		it("returns session list when sessions exist", async () => {
-			mockBridge.listPersistedSessions.mockResolvedValue([
-				{ sessionId: "sess-1", task: "Fix bugs", lastActivity: "2026-02-27T10:00:00Z" },
-				{ sessionId: "sess-2", task: "Add tests", lastActivity: "2026-02-27T11:00:00Z" },
-			]);
-			createServer();
-			const callback = getToolCallback("copilot_list_sessions");
+	describe("acquireMutex", () => {
+		it("serializes concurrent calls", async () => {
+			const order: number[] = [];
 
-			const result = await callback({});
+			const run = async (id: number, delayMs: number) => {
+				const release = await acquireMutex();
+				try {
+					order.push(id);
+					await new Promise((resolve) => setTimeout(resolve, delayMs));
+				} finally {
+					release();
+				}
+			};
 
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toContain("sess-1");
-			expect(result.content[0].text).toContain("Fix bugs");
-			expect(result.content[0].text).toContain("sess-2");
-			expect(result.content[0].text).toContain("Add tests");
+			// Start two concurrent tasks — the second should wait for the first
+			const p1 = run(1, 50);
+			const p2 = run(2, 10);
+
+			await Promise.all([p1, p2]);
+
+			expect(order).toEqual([1, 2]);
 		});
 
-		it("returns empty message when no sessions exist", async () => {
-			mockBridge.listPersistedSessions.mockResolvedValue([]);
-			createServer();
-			const callback = getToolCallback("copilot_list_sessions");
+		it("releases mutex even when task throws", async () => {
+			const release = await acquireMutex();
+			// Simulate a task that errors but still releases
+			await expect(
+				(async () => {
+					try {
+						throw new Error("boom");
+					} finally {
+						release();
+					}
+				})(),
+			).rejects.toThrow("boom");
 
-			const result = await callback({});
-
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toBe("No active sessions.");
-		});
-
-		it("returns isError when listPersistedSessions throws", async () => {
-			mockBridge.listPersistedSessions.mockRejectedValue(new Error("File read failed"));
-			createServer();
-			const callback = getToolCallback("copilot_list_sessions");
-
-			const result = await callback({});
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("File read failed");
+			// Should be able to acquire again after error
+			const release2 = await acquireMutex();
+			release2();
 		});
 	});
 
-	// ── copilot_destroy_session ────────────────────────────────────────────
+	// ── MAX_CALL_DEPTH constant ─────────────────────────────────────────────
 
-	describe("copilot_destroy_session", () => {
-		it("calls destroyPersistedSession and returns success", async () => {
-			createServer();
-			const callback = getToolCallback("copilot_destroy_session");
-
-			const result = await callback({ sessionId: "sess-to-destroy" });
-
-			expect(mockBridge.destroyPersistedSession).toHaveBeenCalledWith("sess-to-destroy");
-			expect(result.isError).toBeUndefined();
-			expect(result.content[0].text).toBe("Session sess-to-destroy destroyed.");
-		});
-
-		it("returns isError when destroyPersistedSession throws", async () => {
-			mockBridge.destroyPersistedSession.mockRejectedValue(new Error("Session not found"));
-			createServer();
-			const callback = getToolCallback("copilot_destroy_session");
-
-			const result = await callback({ sessionId: "sess-missing" });
-
-			expect(result.isError).toBe(true);
-			expect(result.content[0].text).toContain("Session not found");
+	describe("MAX_CALL_DEPTH", () => {
+		it("is 3", () => {
+			expect(MAX_CALL_DEPTH).toBe(3);
 		});
 	});
 });

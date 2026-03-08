@@ -27,6 +27,8 @@ class GatewayConfig:
     auth_timeout: float = 5.0
     allowed_origins: list[str] | None = None
     local_audio: bool = False
+    history_limit: int = 10
+    openclaw_agent_id: str = "claw"
 
 
 _WEAK_TOKENS = {"changeme", "test", "password", "secret", "token", "admin", ""}
@@ -92,6 +94,8 @@ def load_config() -> GatewayConfig:
             allowed_origins = None
 
     local_audio = os.environ.get("G2_LOCAL_AUDIO", "false").lower() in ("true", "1", "yes")
+    history_limit = _parse_int_env("HISTORY_LIMIT", "10")
+    openclaw_agent_id = os.environ.get("OPENCLAW_AGENT_ID", "claw")
 
     cfg = GatewayConfig(
         gateway_host=host,
@@ -107,6 +111,8 @@ def load_config() -> GatewayConfig:
         auth_timeout=auth_timeout,
         allowed_origins=allowed_origins,
         local_audio=local_audio,
+        history_limit=history_limit,
+        openclaw_agent_id=openclaw_agent_id,
     )
 
     if cfg.gateway_token is None:

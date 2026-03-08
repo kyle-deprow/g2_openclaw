@@ -145,32 +145,35 @@ describe('DisplayManager', () => {
   // Task 3: Truncation + Delta Batching (P3.7)
   // -----------------------------------------------------------------------
   describe('truncation (P3.7)', () => {
-    it('triggers rebuild when cumulative deltas exceed budget', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('triggers rebuild when transcript exceeds upgrade budget', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      // Build a conversation that exceeds the 1900 char budget
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('x'.repeat(1950));
+
       mock.textContainerUpgrade.mockClear();
       mock.rebuildPageContainer.mockClear();
 
-      // Send a large delta that exceeds the upgrade budget
-      // Budget: _transcriptLen + delta > UPGRADE_CHAR_LIMIT - 100 (1900)
-      // After showStreaming() with empty conversation, _transcriptLen = 6 ('Ready.')
-      const bigDelta = 'x'.repeat(1895);
-      await dm.appendDelta(bigDelta);
-
-      // Flush the debounce timer
+      await dm.appendDelta('z');
       await vi.advanceTimersByTimeAsync(100);
 
-      // Should have triggered a rebuild (appendToTranscript falls back)
+      // replaceTranscript falls back to rebuild when over budget
       expect(mock.rebuildPageContainer).toHaveBeenCalled();
     });
 
-    it('appends normally when under budget limit', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('replaces normally when under budget limit', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('hello');
+
       mock.textContainerUpgrade.mockClear();
 
       await dm.appendDelta('hello');
@@ -179,17 +182,25 @@ describe('DisplayManager', () => {
       const calls = mock.textContainerUpgrade.mock.calls;
       expect(calls.length).toBe(1);
       const call = calls[0][0];
-      expect(call.content).toBe('hello');
+      // Full replace: content is formatReverse output, offset 0
       expect(call.containerID).toBe(3); // ID_TRANSCRIPT
+      expect(call.contentOffset).toBe(0);
+      expect(call.content).toContain('hello');
     });
   });
 
   describe('delta batching (P3.7)', () => {
     it('merges multiple rapid deltas into a single display update', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('a');
+      conversation.appendToLastAssistant('b');
+      conversation.appendToLastAssistant('c');
+
       mock.textContainerUpgrade.mockClear();
 
       // Rapid-fire deltas within the 100ms window
@@ -203,17 +214,23 @@ describe('DisplayManager', () => {
       // Advance timer to trigger flush
       await vi.advanceTimersByTimeAsync(100);
 
-      // Should be exactly one textContainerUpgrade call with merged content
+      // Should be exactly one textContainerUpgrade call (full replace)
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(1);
       const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.content).toBe('abc');
+      // Content is the full formatReverse output containing 'abc'
+      expect(call.content).toContain('abc');
+      expect(call.contentOffset).toBe(0); // full replace
     });
 
     it('batches deltas separately across timer windows', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('x');
+
       mock.textContainerUpgrade.mockClear();
 
       // First batch
@@ -221,14 +238,15 @@ describe('DisplayManager', () => {
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(1);
-      expect(mock.textContainerUpgrade.mock.calls[0][0].content).toBe('x');
+      expect(mock.textContainerUpgrade.mock.calls[0][0].content).toContain('x');
 
       // Second batch
+      conversation.appendToLastAssistant('y');
       await dm.appendDelta('y');
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(2);
-      expect(mock.textContainerUpgrade.mock.calls[1][0].content).toBe('y');
+      expect(mock.textContainerUpgrade.mock.calls[1][0].content).toContain('xy');
     });
   });
 
@@ -255,13 +273,14 @@ describe('DisplayManager', () => {
       expect(dm.streamBuffer).toBe('abc');
 
       // finaliseStream should have called textContainerUpgrade
-      // (batch flush + replaceTranscript + status + footer = 4 calls)
+      // (batch flush replace + replaceTranscript + status + footer = 4 calls)
       expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(4);
 
-      // Validate the batch flush call appends text
+      // Validate the batch flush does a full replace (offset 0)
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
       expect(contentCall.containerID).toBe(3);
-      expect(contentCall.content).toBe('abc');
+      expect(contentCall.contentOffset).toBe(0);
+      expect(contentCall.content).toContain('abc');
     });
   });
 
@@ -303,13 +322,15 @@ describe('DisplayManager', () => {
     });
 
     it('finalises after large delta that triggered rebuild', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
 
-      // Trigger rebuild via large delta (must exceed 1894 effective budget)
-      await dm.appendDelta('x'.repeat(1895));
+      // Build a conversation that exceeds the budget
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('x'.repeat(1950));
+      await dm.appendDelta('x'.repeat(1950));
       await vi.advanceTimersByTimeAsync(100);
 
       mock.textContainerUpgrade.mockClear();
@@ -317,8 +338,9 @@ describe('DisplayManager', () => {
       // Finalise
       await dm.finaliseStream();
 
-      // replaceTranscript + status + footer = 3 calls
-      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(3);
+      // replaceTranscript falls back to rebuild (transcript baked in),
+      // then status + footer = 2 textContainerUpgrade calls
+      expect(mock.textContainerUpgrade).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -356,32 +378,40 @@ describe('DisplayManager', () => {
   // Truncation boundary (M-5)
   // -----------------------------------------------------------------------
   describe('truncation boundary (M-5)', () => {
-    it('does NOT trigger rebuild at budget boundary (1894 chars)', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('does NOT trigger rebuild when formatReverse output is under budget', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      // Add content that stays under 1900 chars
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('x'.repeat(100));
+
       mock.textContainerUpgrade.mockClear();
       mock.rebuildPageContainer.mockClear();
 
-      // 6 (_transcriptLen after 'Ready.') + 1894 = 1900, NOT > 1900
-      await dm.appendDelta('x'.repeat(1894));
+      await dm.appendDelta('x');
       await vi.advanceTimersByTimeAsync(100);
 
-      // Should append normally, not rebuild
+      // Should replace normally, not rebuild
       expect(mock.textContainerUpgrade).toHaveBeenCalled();
       expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
     });
 
-    it('triggers rebuild at 1895 chars (exceeds budget)', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('triggers rebuild when formatReverse output exceeds budget', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      // Add content that exceeds the 1900 char budget
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('x'.repeat(1950));
+
       mock.rebuildPageContainer.mockClear();
 
-      // 6 (_transcriptLen after 'Ready.') + 1895 = 1901, > 1900 → rebuild
-      await dm.appendDelta('x'.repeat(1895));
+      await dm.appendDelta('x');
       await vi.advanceTimersByTimeAsync(100);
 
       expect(mock.rebuildPageContainer).toHaveBeenCalled();
@@ -392,47 +422,57 @@ describe('DisplayManager', () => {
   // Offset and contentLength validation (M-4)
   // -----------------------------------------------------------------------
   describe('offset and contentLength validation (M-4)', () => {
-    it('appends first delta at end of transcript', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('does a full replace (offset 0) for first delta flush', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('hello');
+
       mock.textContainerUpgrade.mockClear();
 
       await dm.appendDelta('hello');
       await vi.advanceTimersByTimeAsync(100);
 
       const call = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(call.contentLength).toBe(0); // appending (not replacing)
-      expect(call.content).toBe('hello');
+      expect(call.contentOffset).toBe(0); // full replace
+      expect(call.content).toContain('hello');
     });
 
-    it('appends second delta at correct offset', async () => {
-      const { dm, bridge } = await initDisplay();
+    it('does a full replace for second delta flush too', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('abc');
+
       mock.textContainerUpgrade.mockClear();
 
       await dm.appendDelta('abc');
       await vi.advanceTimersByTimeAsync(100);
 
-      const firstOffset = mock.textContainerUpgrade.mock.calls[0][0].contentOffset;
-
+      conversation.appendToLastAssistant('def');
       await dm.appendDelta('def');
       await vi.advanceTimersByTimeAsync(100);
 
       const call = mock.textContainerUpgrade.mock.calls[1][0];
-      expect(call.contentOffset).toBe(firstOffset + 3); // after 'abc'
-      expect(call.contentLength).toBe(0); // appending
-      expect(call.content).toBe('def');
+      expect(call.contentOffset).toBe(0); // full replace
+      expect(call.content).toContain('abcdef');
     });
 
     it('finaliseStream with pending batch flushes correctly', async () => {
-      const { dm, bridge } = await initDisplay();
+      const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
       await dm.showStreaming();
+
+      conversation.startAssistantStream();
+      conversation.appendToLastAssistant('abc');
+
       mock.textContainerUpgrade.mockClear();
 
       await dm.appendDelta('abc');
@@ -440,7 +480,136 @@ describe('DisplayManager', () => {
 
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
       expect(contentCall.containerID).toBe(3);
-      expect(contentCall.content).toBe('abc');
+      expect(contentCall.contentOffset).toBe(0);
+      expect(contentCall.content).toContain('abc');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // showSessionReset
+  // -----------------------------------------------------------------------
+  describe('showSessionReset', () => {
+    it('displays the reset label in the transcript', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
+      const mock = asMock(bridge);
+
+      conversation.addSystem('Session reset');
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.showSessionReset('Session reset');
+
+      // Should update status to "New Session"
+      const statusCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(statusCall).toBeDefined();
+      expect(statusCall![0].content).toContain('New Session');
+
+      // Should update transcript with conversation content containing the label
+      const transcriptCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 3,
+      );
+      expect(transcriptCall).toBeDefined();
+      expect(transcriptCall![0].content).toContain('Session reset');
+    });
+
+    it('clears the delta timer', async () => {
+      const { dm, bridge } = await initDisplay();
+
+      // Start streaming and queue a delta
+      await dm.showStreaming();
+      await dm.appendDelta('pending');
+
+      const mock = asMock(bridge);
+      mock.textContainerUpgrade.mockClear();
+
+      // showSessionReset should NOT flush the pending streaming delta
+      // because it clears delta timer via the status → replaceTranscript path
+      await dm.showSessionReset('New day, new session');
+
+      // Advance past the delta timer window — the old delta batch should be gone
+      await vi.advanceTimersByTimeAsync(150);
+
+      // The 'pending' text should not appear in any transcript update from
+      // the delta flush (the batch was cleared by the status update path)
+      const allCalls = mock.textContainerUpgrade.mock.calls;
+      const deltaFlushCall = allCalls.find(
+        (c: any[]) => c[0].containerID === 3 && c[0].content === 'pending',
+      );
+      expect(deltaFlushCall).toBeUndefined();
+    });
+
+    it('auto-reverts to idle display after 2 s timeout', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
+      const mock = asMock(bridge);
+
+      conversation.addSystem('Session reset');
+      await dm.showSessionReset('Session reset');
+
+      // Clear to isolate the auto-revert calls
+      mock.textContainerUpgrade.mockClear();
+      mock.rebuildPageContainer.mockClear();
+
+      // Advance past the 2 000ms auto-revert timeout
+      await vi.advanceTimersByTimeAsync(2100);
+
+      // showIdle uses replaceTranscript (no scroll-to-bottom hack)
+      // Transcript replace + status + footer = 3 textContainerUpgrade calls
+      expect(mock.textContainerUpgrade).toHaveBeenCalled();
+
+      const transcriptReplace = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 3,
+      );
+      expect(transcriptReplace).toBeDefined();
+      expect(transcriptReplace![0].content).toContain('Session reset');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // showIdle uses replaceTranscript (no scroll-to-bottom hack)
+  // -----------------------------------------------------------------------
+  describe('showIdle', () => {
+    it('uses replaceTranscript for normal showIdle', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
+      const mock = asMock(bridge);
+
+      conversation.addUser('Hello');
+      conversation.addAssistant('World');
+      mock.rebuildPageContainer.mockClear();
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.showIdle();
+
+      // Should NOT rebuild — uses in-place replace
+      expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
+      expect(mock.textContainerUpgrade).toHaveBeenCalled();
+
+      // Transcript should be a full replace (offset 0)
+      const transcriptCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 3,
+      );
+      expect(transcriptCall).toBeDefined();
+      expect(transcriptCall![0].contentOffset).toBe(0);
+      // Reverse order: World first, then Hello
+      const content = transcriptCall![0].content;
+      expect(content.indexOf('World')).toBeLessThan(content.indexOf('Hello'));
+    });
+
+    it('does NOT rebuild on consecutive showIdle calls', async () => {
+      const { dm, bridge, conversation } = await initDisplay();
+      const mock = asMock(bridge);
+
+      conversation.addUser('Hello');
+
+      await dm.showIdle();
+
+      mock.rebuildPageContainer.mockClear();
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.showIdle();
+
+      expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
+      expect(mock.textContainerUpgrade).toHaveBeenCalled();
     });
   });
 });

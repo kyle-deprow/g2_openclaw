@@ -354,25 +354,28 @@ export function createServer(): McpServer {
 		},
 	);
 
-	// ── copilot_code_start ─────────────────────────────────────────────────
+	// ── copilot ────────────────────────────────────────────────────────────
 
 	server.tool(
-		"copilot_code_start",
-		"Start a new Copilot coding session with an initial message. Creates a persistent session for follow-up messages via copilot_code_message.",
+		"copilot",
+		"Execute a coding task via GitHub Copilot. OpenClaw constructs the full prompt including any persona directives, task context, and instructions. Copilot handles planning, implementation, review, and fixes autonomously.",
 		{
-			prompt: z.string().max(500_000).describe("Initial message to start the session"),
-			workingDir: z.string().max(1000).describe("Project name or path. Bare names (e.g. 'my-api') are resolved to ~/repos/my-api. Absolute paths are used as-is. Directory is created if it doesn't exist."),
+			prompt: z.string().max(500_000).describe("The full task prompt. Include all context, constraints, and instructions."),
+			persona: z.string().max(50_000).optional().describe("Behavioral directives prepended to the prompt (e.g., role, constraints, output format). Leave empty for default Copilot behavior."),
+			workingDir: z.string().max(1000).describe("Project name or absolute path. Bare names resolve to ~/repos/<name>."),
 			timeout: z.number().optional().default(120_000).describe("Timeout in milliseconds"),
+			sessionId: z.string().max(200).optional().describe("Session ID to resume. Omit for a new session."),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
-		async ({ prompt, workingDir, timeout, _depth }) => {
+		async ({ prompt, persona, workingDir, timeout, sessionId, _depth }) => {
 			const depthError = checkDepth(_depth);
 			if (depthError) return depthError;
 			const release = await acquireMutex();
 			try {
 				const { bridge } = await ensureInitialized();
 				const resolvedDir = await bridge.resolveWorkingDir(workingDir);
-				const result = await bridge.runTask({ prompt, workingDir: resolvedDir, timeout, persistSession: true });
+				const fullPrompt = persona ? `${persona}\n\n---\n\n${prompt}` : prompt;
+				const result = await bridge.runTask({ prompt: fullPrompt, workingDir: resolvedDir, timeout, sessionId });
 				return { content: [{ type: "text" as const, text: formatResult(result) }] };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
@@ -383,88 +386,11 @@ export function createServer(): McpServer {
 		},
 	);
 
-	// ── copilot_code_message ───────────────────────────────────────────────
+	// ── copilot_sessions ──────────────────────────────────────────────────
 
 	server.tool(
-		"copilot_code_message",
-		"Message into an existing Copilot session. If sessionId is omitted, messages into the most recent session. Use copilot_code_start to begin a new session.",
-		{
-			prompt: z.string().max(500_000).describe("Natural language coding task prompt"),
-			timeout: z.number().optional().default(120_000).describe("Timeout in milliseconds"),
-			sessionId: z.string().min(1).max(200).optional().describe("Session ID to continue a previous conversation. Omit to use the most recent session."),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ prompt, timeout, sessionId, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			const release = await acquireMutex();
-			try {
-				const { bridge } = await ensureInitialized();
-				let targetSessionId = sessionId;
-				if (!targetSessionId) {
-					const recent = await bridge.getMostRecentSession();
-					if (!recent) {
-						return { content: [{ type: "text" as const, text: "No active sessions. Use copilot_code_start to begin a new session." }], isError: true };
-					}
-					targetSessionId = recent.sessionId;
-				}
-				const result = await bridge.resumeTask(targetSessionId, prompt, timeout);
-				return {
-					content: [{ type: "text" as const, text: formatResult(result) }],
-				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return {
-					content: [{ type: "text" as const, text: `Error: ${message}` }],
-					isError: true,
-				};
-			} finally {
-				release();
-			}
-		},
-	);
-
-	// ── copilot_code_transcript ────────────────────────────────────────────
-
-	server.tool(
-		"copilot_code_transcript",
-		"Get the recent transcript of a Copilot session. Returns the last N messages (default 2).",
-		{
-			sessionId: z.string().min(1).max(200).optional().describe("Session ID to get transcript for. Omit to use the most recent session."),
-			count: z.number().min(1).max(100).optional().default(2).describe("Number of recent messages to return"),
-			_depth: z.number().optional().describe("Call depth for cycle detection"),
-		},
-		async ({ sessionId, count, _depth }) => {
-			const depthError = checkDepth(_depth);
-			if (depthError) return depthError;
-			try {
-				const { bridge } = await ensureInitialized();
-				let targetSessionId = sessionId;
-				if (!targetSessionId) {
-					const recent = await bridge.getMostRecentSession();
-					if (!recent) {
-						return { content: [{ type: "text" as const, text: "No active sessions. Use copilot_code_start to begin a new session." }], isError: true };
-					}
-					targetSessionId = recent.sessionId;
-				}
-				const messages = await bridge.getSessionTranscript(targetSessionId, count);
-				if (messages.length === 0) {
-					return { content: [{ type: "text" as const, text: `No messages in session ${targetSessionId}.` }] };
-				}
-				const text = messages.map(m => `**${m.role}** (${m.timestamp}):\n${m.content}`).join("\n\n---\n\n");
-				return { content: [{ type: "text" as const, text }] };
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
-				return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
-			}
-		},
-	);
-
-	// ── copilot_list_sessions ─────────────────────────────────────────────
-
-	server.tool(
-		"copilot_list_sessions",
-		"List active Copilot sessions. Returns session IDs, tasks, and timestamps.",
+		"copilot_sessions",
+		"List all active Copilot sessions with metadata (ID, working directory, created time, message count).",
 		{
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
@@ -473,14 +399,15 @@ export function createServer(): McpServer {
 			if (depthError) return depthError;
 			try {
 				const { bridge } = await ensureInitialized();
-				const sessions = await bridge.listPersistedSessions();
+				const sessions = bridge.listSessions();
 				if (sessions.length === 0) {
 					return { content: [{ type: "text" as const, text: "No active sessions." }] };
 				}
-				const text = sessions.map(s =>
-					`- **${s.sessionId}** | Task: ${s.task} | Last: ${s.lastActivity}`
-				).join("\n");
-				return { content: [{ type: "text" as const, text }] };
+				const header = "| Session ID | Working Dir | Created | Messages |\n|---|---|---|---|";
+				const rows = sessions.map(
+					(s) => `| ${s.sessionId} | ${s.workingDir ?? "\u2014"} | ${s.createdAt} | ${s.messageCount} |`,
+				);
+				return { content: [{ type: "text" as const, text: `${header}\n${rows.join("\n")}` }] };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };
@@ -488,13 +415,13 @@ export function createServer(): McpServer {
 		},
 	);
 
-	// ── copilot_destroy_session ───────────────────────────────────────────
+	// ── copilot_session_destroy ────────────────────────────────────────────
 
 	server.tool(
-		"copilot_destroy_session",
-		"Destroy a Copilot session. Use to end a conversation and free resources.",
+		"copilot_session_destroy",
+		"Destroy a specific Copilot session by ID, freeing its resources.",
 		{
-			sessionId: z.string().min(1).max(200).describe("Session ID to destroy"),
+			sessionId: z.string().max(200).describe("The session ID to destroy."),
 			_depth: z.number().optional().describe("Call depth for cycle detection"),
 		},
 		async ({ sessionId, _depth }) => {
@@ -502,8 +429,11 @@ export function createServer(): McpServer {
 			if (depthError) return depthError;
 			try {
 				const { bridge } = await ensureInitialized();
-				await bridge.destroyPersistedSession(sessionId);
-				return { content: [{ type: "text" as const, text: `Session ${sessionId} destroyed.` }] };
+				const destroyed = await bridge.destroySession(sessionId);
+				if (destroyed) {
+					return { content: [{ type: "text" as const, text: `Session ${sessionId} destroyed.` }] };
+				}
+				return { content: [{ type: "text" as const, text: `Session ${sessionId} not found.` }] };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				return { content: [{ type: "text" as const, text: `Error: ${message}` }], isError: true };

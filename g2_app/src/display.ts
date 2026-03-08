@@ -127,14 +127,16 @@ export class DisplayManager {
   private _footerLen = 0;
   private _transcriptLen = 0;
 
-  /** Total chars appended since last rebuild (to decide when a rebuild is needed) */
-  private _transcriptCharBudgetUsed = 0;
+
 
   /** Debounce for streaming delta flushes */
   private _deltaBatch: string[] = [];
   private _deltaTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly DELTA_FLUSH_MS = 100;
   private _opQueue: Promise<void> = Promise.resolve();
+
+  /** Timer for auto-reverting the session-reset banner */
+  private _resetTimer: ReturnType<typeof setTimeout> | null = null;
 
   // -----------------------------------------------------------------------
   // Lifecycle
@@ -174,7 +176,6 @@ export class DisplayManager {
     this._statusLen = statusText.length;
     this._transcriptLen = transcriptText.length;
     this._footerLen = footerText.length;
-    this._transcriptCharBudgetUsed = 0;
   }
 
   private requireBridge(): EvenAppBridge {
@@ -203,7 +204,7 @@ export class DisplayManager {
 
     const statusText = `OpenClaw  ● ${statusLabel}`;
     const transcriptText = this.conversation
-      ? this.conversation.formatTail(REBUILD_CHAR_LIMIT - 50)
+      ? this.conversation.formatReverse(REBUILD_CHAR_LIMIT - 50)
       : 'Ready.';
 
     await b.rebuildPageContainer(
@@ -221,7 +222,6 @@ export class DisplayManager {
     this._statusLen = statusText.length;
     this._transcriptLen = transcriptText.length;
     this._footerLen = footerHint.length;
-    this._transcriptCharBudgetUsed = 0;
   }
 
   // -----------------------------------------------------------------------
@@ -281,7 +281,6 @@ export class DisplayManager {
       }),
     );
     this._transcriptLen = transcriptText.length;
-    this._transcriptCharBudgetUsed = 0;
   }
 
   /**
@@ -311,7 +310,6 @@ export class DisplayManager {
       }),
     );
     this._transcriptLen += appendText.length;
-    this._transcriptCharBudgetUsed += appendText.length;
   }
 
   // -----------------------------------------------------------------------
@@ -333,9 +331,13 @@ export class DisplayManager {
   private async _flushDeltas(): Promise<void> {
     this._deltaTimer = null;
     if (this._deltaBatch.length === 0) return;
-    const merged = this._deltaBatch.join('');
     this._deltaBatch = [];
-    await this.appendToTranscript(merged);
+    // Reverse mode: re-render from conversation model so newest
+    // (currently streaming) entry stays at the top.
+    const transcript = this.conversation
+      ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
+      : '';
+    await this.replaceTranscript(transcript);
   }
 
   clearDeltaTimer(): void {
@@ -352,9 +354,11 @@ export class DisplayManager {
       this._deltaTimer = null;
     }
     if (this._deltaBatch.length > 0) {
-      const merged = this._deltaBatch.join('');
       this._deltaBatch = [];
-      await this.appendToTranscript(merged);
+      const transcript = this.conversation
+        ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
+        : '';
+      await this.replaceTranscript(transcript);
     }
   }
 
@@ -364,8 +368,9 @@ export class DisplayManager {
 
   async showIdle(): Promise<void> {
     this.clearDeltaTimer();
+    this.clearResetTimer();
     const transcript = this.conversation
-      ? this.conversation.format()
+      ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
       : 'Ready.';
 
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
@@ -378,17 +383,19 @@ export class DisplayManager {
   }
 
   async showRecording(): Promise<void> {
+    this.clearResetTimer();
     await this.updateStatus('Recording');
     await this.updateFooter('Tap to stop');
   }
 
   async showTranscribing(): Promise<void> {
+    this.clearResetTimer();
     await this.updateStatus('Transcribing');
     await this.updateFooter('Processing speech...');
   }
 
   async showTranscription(): Promise<void> {
-    const transcript = this.conversation ? this.conversation.format() : '';
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript('Transcribing', 'Sending to OpenClaw...');
     } else {
@@ -398,7 +405,8 @@ export class DisplayManager {
   }
 
   async showConfirming(transcriptionText: string): Promise<void> {
-    const transcript = this.conversation ? this.conversation.format() : transcriptionText;
+    this.clearResetTimer();
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : transcriptionText;
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript('Confirm?', 'Tap ✓  Double-tap ✗');
     } else {
@@ -409,15 +417,17 @@ export class DisplayManager {
   }
 
   async showThinking(): Promise<void> {
+    this.clearResetTimer();
     await this.updateStatus('Thinking');
     await this.updateFooter('Waiting for response...');
   }
 
   async showStreaming(): Promise<void> {
+    this.clearResetTimer();
     await this.updateStatus('Streaming');
     await this.updateFooter('Streaming...');
-    const transcript = this.conversation ? this.conversation.format() : '';
-    if (transcript.length > UPGRADE_CHAR_LIMIT - 200) {
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript('Streaming', 'Streaming...');
     } else {
       await this.replaceTranscript(transcript);
@@ -426,7 +436,7 @@ export class DisplayManager {
 
   async finaliseStream(): Promise<void> {
     await this.flushRemainingDeltas();
-    const transcript = this.conversation ? this.conversation.format() : '';
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     await this.replaceTranscript(transcript);
     await this.updateStatus('Idle');
     await this.updateFooter('Tap to interact');
@@ -434,18 +444,21 @@ export class DisplayManager {
 
   async showError(message: string, hint = 'Tap to continue'): Promise<void> {
     this.clearDeltaTimer();
+    this.clearResetTimer();
     await this.updateStatus('Error');
-    const transcript = this.conversation ? this.conversation.format() : '';
-    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
+    const displayText = transcript || message || 'Error';
+    if (displayText.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript('Error', hint);
     } else {
-      await this.replaceTranscript(transcript);
+      await this.replaceTranscript(displayText);
       await this.updateFooter(hint);
     }
   }
 
   async showDisconnected(): Promise<void> {
     this.clearDeltaTimer();
+    this.clearResetTimer();
     await this.updateStatus('Offline');
     await this.updateFooter('Reconnecting...');
   }
@@ -453,6 +466,31 @@ export class DisplayManager {
   async showLoading(): Promise<void> {
     await this.updateStatus('Loading');
     await this.updateFooter('Initialising speech model');
+  }
+
+  async showSessionReset(label: string): Promise<void> {
+    this.clearDeltaTimer();
+    this.clearResetTimer();
+    await this.updateStatus('New Session');
+    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : label;
+    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+      await this.rebuildTranscript('New Session', 'Session cleared · Tap to talk');
+    } else {
+      await this.replaceTranscript(transcript);
+      await this.updateFooter('Session cleared · Tap to talk');
+    }
+    // After 2 seconds, revert to normal idle display
+    this._resetTimer = setTimeout(() => {
+      this._resetTimer = null;
+      this.showIdle().catch(err => console.error('[Display] Error reverting from reset:', err));
+    }, 2000);
+  }
+
+  private clearResetTimer(): void {
+    if (this._resetTimer) {
+      clearTimeout(this._resetTimer);
+      this._resetTimer = null;
+    }
   }
 
   // -----------------------------------------------------------------------

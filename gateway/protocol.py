@@ -50,7 +50,22 @@ class PongFrame(TypedDict):
     type: Literal["pong"]
 
 
-InboundFrame = StartAudioFrame | StopAudioFrame | TextFrame | PongFrame
+class StatusRequestFrame(TypedDict):
+    type: Literal["status_request"]
+
+
+class ResetSessionFrame(TypedDict):
+    type: Literal["reset_session"]
+
+
+InboundFrame = (
+    StartAudioFrame
+    | StopAudioFrame
+    | TextFrame
+    | PongFrame
+    | StatusRequestFrame
+    | ResetSessionFrame
+)
 
 MAX_TEXT_MESSAGE_LENGTH = 10_000
 
@@ -63,6 +78,9 @@ MAX_TEXT_MESSAGE_LENGTH = 10_000
 class StatusFrame(TypedDict):
     type: Literal["status"]
     status: StatusState
+    question: NotRequired[str]
+    elapsedMs: NotRequired[int]
+    phase: NotRequired[str]
 
 
 class TranscriptionFrame(TypedDict):
@@ -88,10 +106,29 @@ class ErrorFrame(TypedDict):
 class ConnectedFrame(TypedDict):
     type: Literal["connected"]
     version: str
+    sessionId: NotRequired[str]
+    sessionKey: NotRequired[str]
+    sessionStartedAt: NotRequired[str]
 
 
 class PingFrame(TypedDict):
     type: Literal["ping"]
+
+
+class HistoryEntryDict(TypedDict):
+    role: str
+    text: str
+    ts: int
+
+
+class HistoryFrame(TypedDict):
+    type: Literal["history"]
+    entries: list[HistoryEntryDict]
+
+
+class SessionResetFrame(TypedDict):
+    type: Literal["session_reset"]
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +140,8 @@ _INBOUND_FIELDS: dict[str, list[str]] = {
     "stop_audio": [],
     "text": ["message"],
     "pong": [],
+    "status_request": [],
+    "reset_session": [],
 }
 
 _OUTBOUND_FIELDS: dict[str, list[str]] = {
@@ -113,6 +152,8 @@ _OUTBOUND_FIELDS: dict[str, list[str]] = {
     "error": ["detail", "code"],
     "connected": ["version"],
     "ping": [],
+    "history": ["entries"],
+    "session_reset": ["reason"],
 }
 
 _ALL_FIELDS: dict[str, list[str]] = {**_INBOUND_FIELDS, **_OUTBOUND_FIELDS}
@@ -129,6 +170,14 @@ _FIELD_TYPES: dict[str, type] = {
     "version": str,
     "status": str,
     "hilText": str,
+    "sessionId": str,
+    "sessionKey": str,
+    "sessionStartedAt": str,
+    "entries": list,
+    "question": str,
+    "elapsedMs": int,
+    "phase": str,
+    "reason": str,
 }
 
 

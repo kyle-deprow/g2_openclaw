@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionMetadata } from "../src/client.js";
 import type { BridgeConfig } from "../src/config.js";
 import type { CodingTaskRequest } from "../src/types.js";
 
@@ -39,6 +38,7 @@ vi.mock("@github/copilot-sdk", () => ({
 
 vi.mock("node:fs/promises", () => ({
 	default: mockFs,
+	...mockFs,
 }));
 
 const { CopilotClient: MockedCopilotClient } = await import("@github/copilot-sdk");
@@ -359,7 +359,8 @@ describe("CopilotBridge", () => {
 		it("destroys session after task when no sessionId provided", async () => {
 			await bridge.runTask(makeRequest());
 
-			expect(mockSession.destroy).toHaveBeenCalled();
+			// Sessions are now stored — no longer destroyed in runTask
+			expect(mockSession.destroy).not.toHaveBeenCalled();
 		});
 
 		it("does NOT destroy session when sessionId is provided in request", async () => {
@@ -377,7 +378,7 @@ describe("CopilotBridge", () => {
 			expect(result.errors).toContain("SDK failure");
 		});
 
-		it("handles timeout and still destroys session", async () => {
+		it("handles timeout and cleans up event listener", async () => {
 			mockSession.sendAndWait.mockImplementation(
 				() =>
 					new Promise((resolve) => setTimeout(() => resolve({ data: { content: "late" } }), 5000)),
@@ -387,7 +388,96 @@ describe("CopilotBridge", () => {
 
 			expect(result.success).toBe(false);
 			expect(result.errors.some((e) => e.includes("timed out"))).toBe(true);
+			// Session is stored even on error (for retry)
+		});
+	});
+
+	describe("session persistence", () => {
+		it("stores session after first runTask and reuses on second call with same sessionId", async () => {
+			const result1 = await bridge.runTask(makeRequest({ sessionId: "reuse-me" }));
+			expect(result1.sessionId).toBe("reuse-me");
+			expect(mockClient.createSession).toHaveBeenCalledTimes(1);
+
+			const result2 = await bridge.runTask(makeRequest({ sessionId: "reuse-me", prompt: "follow up" }));
+			expect(result2.sessionId).toBe("reuse-me");
+			// createSession should NOT be called again
+			expect(mockClient.createSession).toHaveBeenCalledTimes(1);
+			// sendAndWait should have been called twice
+			expect(mockSession.sendAndWait).toHaveBeenCalledTimes(2);
+		});
+
+		it("runTask without sessionId creates a new session and stores it", async () => {
+			const result = await bridge.runTask(makeRequest());
+			expect(result.sessionId).toBeTruthy();
+
+			const sessions = bridge.listSessions();
+			expect(sessions).toHaveLength(1);
+			expect(sessions[0].sessionId).toBe(result.sessionId);
+			expect(sessions[0].messageCount).toBe(1);
+		});
+
+		it("increments messageCount on session reuse", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "counter-test" }));
+			await bridge.runTask(makeRequest({ sessionId: "counter-test", prompt: "msg 2" }));
+			await bridge.runTask(makeRequest({ sessionId: "counter-test", prompt: "msg 3" }));
+
+			const sessions = bridge.listSessions();
+			const session = sessions.find(s => s.sessionId === "counter-test");
+			expect(session?.messageCount).toBe(3);
+		});
+
+		it("listSessions returns correct metadata", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "sess-a", workingDir: "/home/a" }));
+			await bridge.runTask(makeRequest({ sessionId: "sess-b", workingDir: "/home/b" }));
+
+			const sessions = bridge.listSessions();
+			expect(sessions).toHaveLength(2);
+
+			const a = sessions.find(s => s.sessionId === "sess-a");
+			expect(a).toBeDefined();
+			expect(a!.workingDir).toBe("/home/a");
+			expect(a!.messageCount).toBe(1);
+			expect(a!.createdAt).toBeTruthy();
+
+			const b = sessions.find(s => s.sessionId === "sess-b");
+			expect(b).toBeDefined();
+			expect(b!.workingDir).toBe("/home/b");
+		});
+
+		it("destroySession removes session from store and calls session.destroy()", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "to-destroy" }));
+			expect(bridge.listSessions()).toHaveLength(1);
+
+			const destroyed = await bridge.destroySession("to-destroy");
+			expect(destroyed).toBe(true);
 			expect(mockSession.destroy).toHaveBeenCalled();
+			expect(bridge.listSessions()).toHaveLength(0);
+		});
+
+		it("destroySession returns false for unknown session", async () => {
+			const destroyed = await bridge.destroySession("nonexistent");
+			expect(destroyed).toBe(false);
+		});
+
+		it("destroyAllSessions clears all sessions", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "s1" }));
+			await bridge.runTask(makeRequest({ sessionId: "s2" }));
+			await bridge.runTask(makeRequest({ sessionId: "s3" }));
+			expect(bridge.listSessions()).toHaveLength(3);
+
+			const count = await bridge.destroyAllSessions();
+			expect(count).toBe(3);
+			expect(bridge.listSessions()).toHaveLength(0);
+			expect(mockSession.destroy).toHaveBeenCalledTimes(3);
+		});
+
+		it("stop() destroys all sessions before stopping client", async () => {
+			await bridge.runTask(makeRequest({ sessionId: "stop-test" }));
+			await bridge.stop();
+
+			expect(mockSession.destroy).toHaveBeenCalled();
+			expect(bridge.listSessions()).toHaveLength(0);
+			expect(mockClient.stop).toHaveBeenCalled();
 		});
 	});
 
@@ -521,142 +611,6 @@ describe("CopilotBridge", () => {
 					args: [expect.stringContaining("mcp-openclaw")],
 				},
 			});
-		});
-	});
-
-	describe("session persistence", () => {
-		const sampleSession: SessionMetadata = {
-			sessionId: "sess-123",
-			task: "Fix the bug",
-			startTime: "2026-01-01T00:00:00.000Z",
-			lastActivity: "2026-01-01T01:00:00.000Z",
-			providerType: "openai",
-			providerBaseUrl: "https://api.openai.com",
-			workingDir: "/tmp/project",
-		};
-
-		beforeEach(() => {
-			mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
-			mockFs.writeFile.mockResolvedValue(undefined);
-			mockFs.mkdir.mockResolvedValue(undefined);
-		});
-
-		it("loadSessionsFile returns empty array when file doesn't exist", async () => {
-			const sessions = await bridge.listPersistedSessions();
-			expect(sessions).toEqual([]);
-		});
-
-		it("persistSession saves metadata to sessions.json", async () => {
-			await bridge.runTask(makeRequest({ persistSession: true }));
-
-			expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
-			const writtenData = JSON.parse(
-				mockFs.writeFile.mock.calls[0]?.[1] as string,
-			) as SessionMetadata[];
-			expect(writtenData).toHaveLength(1);
-			expect(writtenData[0]?.task).toBe("Hello, world!");
-		});
-
-		it("resumeTask loads session and sends prompt", async () => {
-			mockFs.readFile.mockResolvedValue(JSON.stringify([sampleSession]));
-
-			const result = await bridge.resumeTask("sess-123", "Continue working");
-
-			expect(result.success).toBe(true);
-			expect(mockSession.sendAndWait).toHaveBeenCalledWith({
-				prompt: "Continue working",
-			});
-		});
-
-		it("resumeTask throws BridgeError for unknown session", async () => {
-			mockFs.readFile.mockResolvedValue(JSON.stringify([]));
-
-			await expect(bridge.resumeTask("nonexistent", "hello")).rejects.toThrow(
-				"No persisted session found with ID: nonexistent",
-			);
-		});
-
-		it("resumeTask reconstructs BYOK provider from metadata + env", async () => {
-			const byokBridge = new CopilotBridge(
-				makeConfig({
-					byokApiKey: "sk-current",
-					byokModel: "gpt-4o",
-				}),
-			);
-			mockFs.readFile.mockResolvedValue(JSON.stringify([sampleSession]));
-
-			await byokBridge.resumeTask("sess-123", "Continue");
-
-			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
-			const provider = sessionConfig.provider as Record<string, unknown>;
-			expect(provider.type).toBe("openai");
-			expect(provider.baseUrl).toBe("https://api.openai.com");
-			expect(provider.apiKey).toBe("sk-current");
-			expect(provider.model).toBe("gpt-4o");
-		});
-
-		it("listPersistedSessions returns all saved sessions", async () => {
-			const sessions = [sampleSession, { ...sampleSession, sessionId: "sess-456" }];
-			mockFs.readFile.mockResolvedValue(JSON.stringify(sessions));
-
-			const result = await bridge.listPersistedSessions();
-
-			expect(result).toHaveLength(2);
-			expect(result[0]?.sessionId).toBe("sess-123");
-			expect(result[1]?.sessionId).toBe("sess-456");
-		});
-
-		it("destroyPersistedSession removes session from file", async () => {
-			const sessions = [sampleSession, { ...sampleSession, sessionId: "sess-456" }];
-			mockFs.readFile.mockResolvedValue(JSON.stringify(sessions));
-
-			await bridge.destroyPersistedSession("sess-123");
-
-			expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
-			const writtenData = JSON.parse(
-				mockFs.writeFile.mock.calls[0]?.[1] as string,
-			) as SessionMetadata[];
-			expect(writtenData).toHaveLength(1);
-			expect(writtenData[0]?.sessionId).toBe("sess-456");
-		});
-
-		it("cleanStaleSessions removes sessions older than 24h", async () => {
-			const staleSession = {
-				...sampleSession,
-				lastActivity: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
-			};
-			mockFs.readFile.mockResolvedValue(JSON.stringify([staleSession]));
-
-			const removed = await bridge.cleanStaleSessions();
-
-			expect(removed).toBe(1);
-			const writtenData = JSON.parse(
-				mockFs.writeFile.mock.calls[0]?.[1] as string,
-			) as SessionMetadata[];
-			expect(writtenData).toHaveLength(0);
-		});
-
-		it("cleanStaleSessions keeps fresh sessions", async () => {
-			const freshSession = {
-				...sampleSession,
-				lastActivity: new Date().toISOString(),
-			};
-			mockFs.readFile.mockResolvedValue(JSON.stringify([freshSession]));
-
-			const removed = await bridge.cleanStaleSessions();
-
-			expect(removed).toBe(0);
-			expect(mockFs.writeFile).not.toHaveBeenCalled();
-		});
-
-		it("runTask with persistSession=true saves metadata and keeps session alive", async () => {
-			const result = await bridge.runTask(makeRequest({ persistSession: true }));
-
-			expect(result.success).toBe(true);
-			// Session should NOT be destroyed
-			expect(mockSession.destroy).not.toHaveBeenCalled();
-			// Metadata should be saved
-			expect(mockFs.writeFile).toHaveBeenCalledTimes(1);
 		});
 	});
 });

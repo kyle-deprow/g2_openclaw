@@ -137,11 +137,11 @@ export class InputHandler {
     }
     this._pendingTranscription = null;
     this.sm.transition('idle');
-    this.display.showIdle();
+    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     return true;
   }
 
-  _handleEvent(eventType: number | undefined): void {
+  private _handleEvent(eventType: number | undefined): void {
     // CLICK_EVENT = 0 bug: SDK deserializes 0 as undefined
     if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
       if (eventType === undefined) {
@@ -203,7 +203,7 @@ export class InputHandler {
         break;
       case 'error':
         this.sm.transition('idle');
-        this.display.showIdle();
+        this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
         break;
       case 'disconnected':
         this.gateway.connect();
@@ -216,7 +216,9 @@ export class InputHandler {
 
   private _handleDoubleTap(): void {
     const state = this.sm.current;
-    if (state === 'confirming') {
+    if (state === 'idle') {
+      this.resetSession();
+    } else if (state === 'confirming') {
       this.rejectTranscription();
     } else if (state === 'thinking' || state === 'streaming') {
       this.cancelResponse();
@@ -231,7 +233,18 @@ export class InputHandler {
     }
     console.log('[Input] Cancelling response');
     this.sm.transition('idle');
-    this.display.showIdle();
+    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    return true;
+  }
+
+  /** Request a session reset from the gateway. */
+  resetSession(): boolean {
+    if (this.sm.current !== 'idle') {
+      console.warn('[Input] Cannot reset session — state is', this.sm.current);
+      return false;
+    }
+    this.gateway.sendJson({ type: 'reset_session' });
+    console.log('[Input] Session reset requested');
     return true;
   }
 

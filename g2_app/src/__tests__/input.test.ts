@@ -30,7 +30,7 @@ function createMockSm(initial = 'idle') {
 
 function createMockDisplay() {
   return {
-    showIdle: vi.fn(),
+    showIdle: vi.fn().mockResolvedValue(undefined),
     showRecording: vi.fn(),
     showTranscribing: vi.fn(),
     showConfirming: vi.fn(),
@@ -58,6 +58,8 @@ function createMockBridge() {
 
 describe('InputHandler', () => {
   let handler: InputHandler;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let handlerAny: any;
   let sm: ReturnType<typeof createMockSm>;
   let display: ReturnType<typeof createMockDisplay>;
   let gateway: ReturnType<typeof createMockGateway>;
@@ -65,6 +67,7 @@ describe('InputHandler', () => {
 
   beforeEach(() => {
     handler = new InputHandler();
+    handlerAny = handler as any;
     sm = createMockSm('idle');
     display = createMockDisplay();
     gateway = createMockGateway();
@@ -85,7 +88,7 @@ describe('InputHandler', () => {
   describe('recording flow', () => {
     it('tap in idle sends start_audio', () => {
       sm._current = 'idle';
-      handler._handleEvent(CLICK);
+      handlerAny._handleEvent(CLICK);
       expect(gateway.sendJson).toHaveBeenCalledWith({
         type: 'start_audio',
         sampleRate: 16000,
@@ -96,7 +99,7 @@ describe('InputHandler', () => {
 
     it('tap in recording sends stop_audio', () => {
       sm._current = 'recording';
-      handler._handleEvent(CLICK);
+      handlerAny._handleEvent(CLICK);
       expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'stop_audio' });
     });
 
@@ -107,7 +110,7 @@ describe('InputHandler', () => {
       input.value = 'hello world';
       document.body.appendChild(input);
 
-      handler._handleEvent(CLICK);
+      handlerAny._handleEvent(CLICK);
       expect(gateway.sendJson).toHaveBeenCalledWith({
         type: 'stop_audio',
         hilText: 'hello world',
@@ -140,7 +143,7 @@ describe('InputHandler', () => {
     it('tap in confirming sends text frame with pending transcription', () => {
       sm._current = 'confirming';
       handler.setPendingTranscription('confirmed text');
-      handler._handleEvent(CLICK);
+      handlerAny._handleEvent(CLICK);
       expect(gateway.sendJson).toHaveBeenCalledWith({
         type: 'text',
         message: 'confirmed text',
@@ -151,7 +154,7 @@ describe('InputHandler', () => {
     it('double-tap in confirming rejects and returns to idle', () => {
       sm._current = 'confirming';
       handler.setPendingTranscription('rejected text');
-      handler._handleEvent(DOUBLE_CLICK);
+      handlerAny._handleEvent(DOUBLE_CLICK);
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
       expect(handler.pendingTranscription).toBeNull();
@@ -214,26 +217,26 @@ describe('InputHandler', () => {
 
   it('tap in error dismisses', () => {
     sm._current = 'error';
-    handler._handleEvent(CLICK);
+    handlerAny._handleEvent(CLICK);
     expect(sm.transition).toHaveBeenCalledWith('idle');
     expect(display.showIdle).toHaveBeenCalled();
   });
 
   it('tap in disconnected reconnects', () => {
     sm._current = 'disconnected';
-    handler._handleEvent(CLICK);
+    handlerAny._handleEvent(CLICK);
     expect(gateway.connect).toHaveBeenCalled();
   });
 
   it('tap ignored in thinking', () => {
     sm._current = 'thinking';
-    handler._handleEvent(CLICK);
+    handlerAny._handleEvent(CLICK);
     expect(gateway.sendJson).not.toHaveBeenCalled();
   });
 
   it('tap ignored in streaming', () => {
     sm._current = 'streaming';
-    handler._handleEvent(CLICK);
+    handlerAny._handleEvent(CLICK);
     expect(gateway.sendJson).not.toHaveBeenCalled();
   });
 
@@ -244,7 +247,7 @@ describe('InputHandler', () => {
   it('undefined event treated as click', () => {
     sm._current = 'idle';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    handler._handleEvent(undefined);
+    handlerAny._handleEvent(undefined);
     expect(gateway.sendJson).toHaveBeenCalledWith({
       type: 'start_audio',
       sampleRate: 16000,
@@ -258,10 +261,10 @@ describe('InputHandler', () => {
   // Double-tap (non-confirming)
   // ---------------------------------------------------------------------------
 
-  it('double tap in idle is a no-op', () => {
+  it('double tap in idle sends reset_session frame', () => {
     sm._current = 'idle';
-    handler._handleEvent(DOUBLE_CLICK);
-    expect(display.showIdle).not.toHaveBeenCalled();
+    handlerAny._handleEvent(DOUBLE_CLICK);
+    expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'reset_session' });
   });
 
   // ---------------------------------------------------------------------------
@@ -271,14 +274,14 @@ describe('InputHandler', () => {
   describe('cancelResponse', () => {
     it('double-tap in thinking cancels and returns to idle', () => {
       sm._current = 'thinking';
-      handler._handleEvent(DOUBLE_CLICK);
+      handlerAny._handleEvent(DOUBLE_CLICK);
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
     });
 
     it('double-tap in streaming cancels and returns to idle', () => {
       sm._current = 'streaming';
-      handler._handleEvent(DOUBLE_CLICK);
+      handlerAny._handleEvent(DOUBLE_CLICK);
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
     });
@@ -304,18 +307,41 @@ describe('InputHandler', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Reset session (double-tap in idle)
+  // ---------------------------------------------------------------------------
+
+  describe('resetSession', () => {
+    it('resetSession sends reset_session when idle', () => {
+      sm._current = 'idle';
+      expect(handler.resetSession()).toBe(true);
+      expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'reset_session' });
+    });
+
+    it('resetSession returns false when not idle', () => {
+      sm._current = 'thinking';
+      expect(handler.resetSession()).toBe(false);
+      expect(gateway.sendJson).not.toHaveBeenCalled();
+    });
+
+    it('resetSession returns false when recording', () => {
+      sm._current = 'recording';
+      expect(handler.resetSession()).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Lifecycle events
   // ---------------------------------------------------------------------------
 
   it('foreground exit is a no-op', () => {
     sm._current = 'idle';
-    handler._handleEvent(FG_EXIT);
+    handlerAny._handleEvent(FG_EXIT);
     expect(sm.transition).not.toHaveBeenCalled();
   });
 
   it('foreground enter reconnects if disconnected', () => {
     gateway._isConnected = false;
-    handler._handleEvent(FG_ENTER);
+    handlerAny._handleEvent(FG_ENTER);
     expect(gateway.connect).toHaveBeenCalled();
   });
 
@@ -325,16 +351,16 @@ describe('InputHandler', () => {
 
   it('scroll throttled within 300ms', () => {
     vi.useFakeTimers();
-    handler._handleEvent(SCROLL_TOP);
+    handlerAny._handleEvent(SCROLL_TOP);
     const firstTime = (handler as any)._lastScrollTime;
     expect(firstTime).toBeGreaterThan(0);
 
     vi.advanceTimersByTime(100);
-    handler._handleEvent(SCROLL_BOTTOM);
+    handlerAny._handleEvent(SCROLL_BOTTOM);
     expect((handler as any)._lastScrollTime).toBe(firstTime);
 
     vi.advanceTimersByTime(200);
-    handler._handleEvent(SCROLL_TOP);
+    handlerAny._handleEvent(SCROLL_TOP);
     expect((handler as any)._lastScrollTime).toBeGreaterThan(firstTime);
 
     vi.useRealTimers();

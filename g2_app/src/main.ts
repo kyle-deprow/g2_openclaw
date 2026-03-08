@@ -28,6 +28,8 @@ let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
 
+const SESSION_ID_KEY = 'g2_last_session_id';
+
 // ---------------------------------------------------------------------------
 // Frame routing
 // ---------------------------------------------------------------------------
@@ -35,11 +37,31 @@ let conversation: ConversationHistory;
 function routeFrame(frame: InboundFrame): void {
   switch (frame.type) {
     // -- Connection established ------------------------------------------
-    case 'connected':
+    case 'connected': {
       console.log(`[Main] Gateway connected (server v${frame.version})`);
+
+      // Session change detection
+      if (frame.sessionId) {
+        let lastSessionId: string | null = null;
+        try {
+          lastSessionId = localStorage.getItem(SESSION_ID_KEY);
+        } catch { /* sandboxed or unavailable — treat as no prior session */ }
+
+        if (lastSessionId && lastSessionId !== frame.sessionId) {
+          console.log('[Main] Session changed: %s → %s', lastSessionId, frame.sessionId);
+          conversation.clear();
+          conversation.addSystem('New session started');
+        }
+
+        try {
+          localStorage.setItem(SESSION_ID_KEY, frame.sessionId);
+        } catch { /* localStorage full or unavailable — non-fatal */ }
+      }
+
       sm.transition('idle');
       display.showIdle().catch(err => console.error('[Main] Display error:', err));
       break;
+    }
 
     // -- Server status change --------------------------------------------
     case 'status': {
@@ -100,13 +122,14 @@ function routeFrame(frame: InboundFrame): void {
       break;
 
     // -- Error from server -------------------------------------------------
-    case 'error':
+    case 'error': {
       console.error('[Main] Server error: %s (%s)', frame.detail.slice(0, 100), frame.code);
-      const errorMsg = typeof frame.detail === 'string' ? frame.detail.slice(0, 200) : 'Unknown error';
+      const errorMsg = frame.detail.slice(0, 200);
       conversation.addSystem(`Error: ${errorMsg}`);
       sm.transition('error');
       display.showError(errorMsg).catch(err => console.error('[Main] Display error:', err));
       break;
+    }
 
     // -- Transcription text ------------------------------------------------
     case 'transcription':
@@ -126,6 +149,28 @@ function routeFrame(frame: InboundFrame): void {
     // -- Ping is handled by Gateway itself; should never arrive here -------
     case 'ping':
       break;
+
+    // -- Conversation history replay on reconnect --------------------------
+    case 'history': {
+      console.log(`[Main] History replay: ${frame.entries.length} entries`);
+      conversation.replayHistory(frame.entries);
+      if (frame.entries.length > 0) {
+        display.showIdle().catch(err => console.error('[Main] Display error:', err));
+      }
+      break;
+    }
+
+    // -- Session reset notification --------------------------------------
+    case 'session_reset': {
+      const reason = frame.reason;
+      console.log('[Main] Session reset (%s)', reason);
+      conversation.clear();
+      const label = reason === 'daily_reset' ? 'New day, new session' : 'Session reset';
+      conversation.addSystem(label);
+      if (sm.current !== 'idle') sm.transition('idle');
+      display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
+      break;
+    }
   }
 }
 
@@ -136,6 +181,7 @@ function routeFrame(frame: InboundFrame): void {
 function routeEvent(event: GatewayEvent): void {
   switch (event) {
     case 'connected':
+      gateway.requestStatus();
       break;
 
     case 'disconnected':
@@ -197,6 +243,7 @@ async function boot(): Promise<void> {
       confirmTranscription: () => input.confirmTranscription(),
       rejectTranscription: () => input.rejectTranscription(),
       cancelResponse: () => input.cancelResponse(),
+      resetSession: () => input.resetSession(),
       getState: () => sm.current,
       getPendingTranscription: () => input.pendingTranscription,
     };

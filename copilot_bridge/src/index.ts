@@ -4,16 +4,7 @@ export { loadConfig } from "./config.js";
 export type { BridgeConfig } from "./config.js";
 
 export { CopilotBridge } from "./client.js";
-export type { SessionMetadata } from "./client.js";
-
-export { TaskOrchestrator, SessionPool, topologicalSort } from "./orchestrator.js";
-export type {
-	SubTask,
-	TaskPlan,
-	SubTaskResult,
-	OrchestratedResult,
-	OrchestratorEvent,
-} from "./orchestrator.js";
+export type { SessionInfo } from "./client.js";
 
 export type {
 	ICopilotClient,

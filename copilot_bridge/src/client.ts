@@ -1,4 +1,3 @@
-import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CopilotClient } from "@github/copilot-sdk";
@@ -15,15 +14,19 @@ import type {
 } from "./types.js";
 import { BridgeError } from "./types.js";
 
-export interface SessionMetadata {
+export interface SessionInfo {
 	sessionId: string;
-	task: string;
-	startTime: string; // ISO 8601 UTC
-	lastActivity: string; // ISO 8601 UTC
-	providerType?: string;
-	providerBaseUrl?: string;
 	workingDir?: string;
-	messages: Array<{ role: "user" | "assistant"; content: string; timestamp: string }>;
+	createdAt: string; // ISO timestamp
+	messageCount: number;
+}
+
+interface StoredSession {
+	session: any;
+	unsubscribe: () => void;
+	workingDir?: string;
+	createdAt: string;
+	messageCount: number;
 }
 
 function log(level: string, message: string, data?: Record<string, unknown>): void {
@@ -51,6 +54,7 @@ export class CopilotBridge implements ICopilotClient {
 	private defaultProvider: ProviderConfig | undefined;
 	private config: BridgeConfig;
 	private authMethod = "unknown";
+	private sessions = new Map<string, StoredSession>();
 
 	constructor(config: BridgeConfig) {
 		this.config = config;
@@ -122,6 +126,8 @@ export class CopilotBridge implements ICopilotClient {
 	async stop(): Promise<void> {
 		log("info", "Stopping CopilotBridge...");
 
+		await this.destroyAllSessions();
+
 		try {
 			const errors = await this.client.stop();
 			if (errors && errors.length > 0) {
@@ -162,37 +168,6 @@ export class CopilotBridge implements ICopilotClient {
 		};
 	}
 
-	private getSessionsFilePath(): string {
-		const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "/tmp";
-		return path.join(homeDir, ".copilot-bridge", "sessions.json");
-	}
-
-	private async loadSessionsFile(): Promise<SessionMetadata[]> {
-		try {
-			const data = await fs.readFile(this.getSessionsFilePath(), "utf-8");
-			return JSON.parse(data) as SessionMetadata[];
-		} catch {
-			return [];
-		}
-	}
-
-	private async saveSessionsFile(sessions: SessionMetadata[]): Promise<void> {
-		const filePath = this.getSessionsFilePath();
-		await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-		await fs.writeFile(filePath, JSON.stringify(sessions, null, "\t"), { encoding: "utf-8", mode: 0o600 });
-	}
-
-	private async persistSession(metadata: SessionMetadata): Promise<void> {
-		const sessions = await this.loadSessionsFile();
-		const idx = sessions.findIndex((s) => s.sessionId === metadata.sessionId);
-		if (idx >= 0) {
-			sessions[idx] = metadata;
-		} else {
-			sessions.push(metadata);
-		}
-		await this.saveSessionsFile(sessions);
-	}
-
 	/**
 	 * Resolve a workingDir value to an absolute path.
 	 * - If absolute, use as-is.
@@ -201,10 +176,11 @@ export class CopilotBridge implements ICopilotClient {
 	 * Returns the resolved absolute path.
 	 */
 	async resolveWorkingDir(workingDir: string): Promise<string> {
+		const { mkdir } = await import("node:fs/promises");
 		const resolved = path.isAbsolute(workingDir)
 			? workingDir
 			: path.join(this.config.projectsRoot, workingDir);
-		await fs.mkdir(resolved, { recursive: true });
+		await mkdir(resolved, { recursive: true });
 		log("info", `Resolved workingDir: "${workingDir}" → "${resolved}"`);
 		return resolved;
 	}
@@ -217,36 +193,49 @@ export class CopilotBridge implements ICopilotClient {
 
 		const provider = request.provider ?? this.defaultProvider;
 
-		const hooks = createHooks(this.buildHookConfig());
+		// Check if we can reuse an existing stored session
+		const stored = this.sessions.get(sessionId);
+		let session: any;
+		let isNewSession = false;
 
-		const sessionConfig: Record<string, unknown> = {
-			model: request.model,
-			provider,
-			streaming: false,
-			hooks,
-			sessionId,
-		};
+		if (stored) {
+			// Reuse existing session
+			session = stored.session;
+			log("debug", "Reusing stored session", { sessionId, messageCount: stored.messageCount });
+		} else {
+			// Create a new session
+			const hooks = createHooks(this.buildHookConfig());
 
-		if (request.workingDir) {
-			sessionConfig.workingDirectory = request.workingDir;
+			const sessionConfig: Record<string, unknown> = {
+				model: request.model,
+				provider,
+				streaming: false,
+				hooks,
+				sessionId,
+			};
+
+			if (request.workingDir) {
+				sessionConfig.workingDirectory = request.workingDir;
+			}
+			if (request.tools) {
+				sessionConfig.tools = request.tools;
+			}
+
+			// Add MCP servers config — the SDK spawns them per-session
+			sessionConfig.mcpServers = {
+				openclaw: {
+					type: "local",
+					command: "node",
+					args: [this.getMcpServerPath()],
+				},
+			};
+
+			log("debug", "Creating session", { sessionId });
+			session = await this.client.createSession(sessionConfig);
+			isNewSession = true;
 		}
-		if (request.tools) {
-			sessionConfig.tools = request.tools;
-		}
 
-		// Add MCP servers config — the SDK spawns them per-session
-		sessionConfig.mcpServers = {
-			openclaw: {
-				type: "local",
-				command: "node",
-				args: [this.getMcpServerPath()],
-			},
-		};
-
-		log("debug", "Creating session", { sessionId });
-		const session = await this.client.createSession(sessionConfig);
-
-		// Subscribe to tool execution events
+		// Subscribe to tool execution events for this call
 		const unsubscribe = session.on((event: any) => {
 			if (event.type === "tool.execution_start") {
 				toolCalls.push({
@@ -291,20 +280,17 @@ export class CopilotBridge implements ICopilotClient {
 
 			const elapsed = Date.now() - startTime;
 
-			if (request.persistSession) {
-				await this.persistSession({
-					sessionId,
-					task: request.prompt.slice(0, 200),
-					startTime: new Date(startTime).toISOString(),
-					lastActivity: new Date().toISOString(),
-					providerType: provider?.type,
-					providerBaseUrl: provider?.baseUrl,
+			// Store the session (create or update)
+			if (isNewSession) {
+				this.sessions.set(sessionId, {
+					session,
+					unsubscribe: () => {}, // per-session unsub is a no-op; per-call unsub is in finally
 					workingDir: request.workingDir,
-					messages: [
-						{ role: "user", content: request.prompt, timestamp: new Date(startTime).toISOString() },
-						{ role: "assistant", content, timestamp: new Date().toISOString() },
-					],
+					createdAt: new Date().toISOString(),
+					messageCount: 1,
 				});
+			} else if (stored) {
+				stored.messageCount++;
 			}
 
 			return {
@@ -320,6 +306,19 @@ export class CopilotBridge implements ICopilotClient {
 			const message = err instanceof Error ? err.message : String(err);
 			errors.push(message);
 
+			// Still store the session even on error so it can be retried
+			if (isNewSession) {
+				this.sessions.set(sessionId, {
+					session,
+					unsubscribe: () => {},
+					workingDir: request.workingDir,
+					createdAt: new Date().toISOString(),
+					messageCount: 1,
+				});
+			} else if (stored) {
+				stored.messageCount++;
+			}
+
 			return {
 				success: false,
 				content: "",
@@ -329,14 +328,49 @@ export class CopilotBridge implements ICopilotClient {
 				elapsed,
 			};
 		} finally {
+			// Only unsubscribe the per-call event listener — sessions are long-lived
 			unsubscribe();
-			// Only destroy session if no sessionId was provided in the request
-			// (caller-managed sessions are kept alive)
-			if (!request.sessionId && !request.persistSession) {
-				await session.destroy();
-				log("debug", "Session destroyed", { sessionId });
-			}
 		}
+	}
+
+	/** List all active sessions with metadata */
+	listSessions(): SessionInfo[] {
+		return Array.from(this.sessions.entries()).map(([id, stored]) => ({
+			sessionId: id,
+			workingDir: stored.workingDir,
+			createdAt: stored.createdAt,
+			messageCount: stored.messageCount,
+		}));
+	}
+
+	/** Destroy a specific session by ID */
+	async destroySession(sessionId: string): Promise<boolean> {
+		const stored = this.sessions.get(sessionId);
+		if (!stored) return false;
+		try {
+			await stored.session.destroy();
+		} catch (err) {
+			log("warn", `Error destroying session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		this.sessions.delete(sessionId);
+		log("debug", "Session destroyed", { sessionId });
+		return true;
+	}
+
+	/** Destroy all sessions */
+	async destroyAllSessions(): Promise<number> {
+		const count = this.sessions.size;
+		const destroyPromises = Array.from(this.sessions.entries()).map(async ([id, stored]) => {
+			try {
+				await stored.session.destroy();
+			} catch (err) {
+				log("warn", `Error destroying session ${id}: ${err instanceof Error ? err.message : String(err)}`);
+			}
+		});
+		await Promise.all(destroyPromises);
+		this.sessions.clear();
+		log("debug", `Destroyed ${count} session(s)`);
+		return count;
 	}
 
 	async *runTaskStreaming(request: CodingTaskRequest): AsyncGenerator<StreamingDelta> {
@@ -444,93 +478,4 @@ export class CopilotBridge implements ICopilotClient {
 		}
 	}
 
-	async resumeTask(sessionId: string, prompt: string, timeout?: number): Promise<CodingTaskResult> {
-		const sessions = await this.loadSessionsFile();
-		const meta = sessions.find((s) => s.sessionId === sessionId);
-		if (!meta) {
-			throw new BridgeError(
-				`No persisted session found with ID: ${sessionId}`,
-				"SESSION_NOT_FOUND",
-				{ sessionId },
-				false,
-			);
-		}
-
-		// Reconstruct provider from metadata + current env
-		const provider = meta.providerType
-			? {
-					type: meta.providerType as ProviderConfig["type"],
-					baseUrl: meta.providerBaseUrl,
-					apiKey: this.config.byokApiKey, // API key always from current env, never persisted
-					model: this.config.byokModel,
-				}
-			: this.defaultProvider;
-
-		const result = await this.runTask({
-			prompt,
-			sessionId,
-			provider,
-			workingDir: meta.workingDir,
-			timeout,
-		});
-
-		// Append new messages and update lastActivity
-		meta.messages = meta.messages ?? [];
-		meta.messages.push(
-			{ role: "user", content: prompt, timestamp: new Date().toISOString() },
-			{ role: "assistant", content: result.content, timestamp: new Date().toISOString() },
-		);
-		meta.lastActivity = new Date().toISOString();
-		await this.persistSession(meta);
-
-		return result;
-	}
-
-	async getMostRecentSession(): Promise<SessionMetadata | null> {
-		const sessions = await this.loadSessionsFile();
-		if (sessions.length === 0) return null;
-		return sessions.reduce((latest, s) =>
-			new Date(s.lastActivity) > new Date(latest.lastActivity) ? s : latest
-		);
-	}
-
-	async getSessionTranscript(sessionId: string, count = 2): Promise<Array<{ role: "user" | "assistant"; content: string; timestamp: string }>> {
-		const sessions = await this.loadSessionsFile();
-		const meta = sessions.find(s => s.sessionId === sessionId);
-		if (!meta) {
-			throw new BridgeError(
-				`No persisted session found with ID: ${sessionId}`,
-				"SESSION_NOT_FOUND",
-				{ sessionId },
-				false,
-			);
-		}
-		const messages = meta.messages ?? [];
-		return messages.slice(-count);
-	}
-
-	async listPersistedSessions(): Promise<SessionMetadata[]> {
-		const sessions = await this.loadSessionsFile();
-		return sessions;
-	}
-
-	async destroyPersistedSession(sessionId: string): Promise<void> {
-		const sessions = await this.loadSessionsFile();
-		const filtered = sessions.filter((s) => s.sessionId !== sessionId);
-		await this.saveSessionsFile(filtered);
-	}
-
-	async cleanStaleSessions(maxAgeMs = 24 * 60 * 60 * 1000): Promise<number> {
-		const sessions = await this.loadSessionsFile();
-		const now = Date.now();
-		const fresh = sessions.filter((s) => {
-			const lastActivity = new Date(s.lastActivity).getTime();
-			return now - lastActivity < maxAgeMs;
-		});
-		const removed = sessions.length - fresh.length;
-		if (removed > 0) {
-			await this.saveSessionsFile(fresh);
-		}
-		return removed;
-	}
 }

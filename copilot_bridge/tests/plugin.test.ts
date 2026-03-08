@@ -1,38 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
-// --- Hoisted mocks ---
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const { mockBridge } = vi.hoisted(() => {
 	const mockBridge = {
 		ensureReady: vi.fn().mockResolvedValue(undefined),
 		runTask: vi.fn(),
-		runTaskStreaming: vi.fn(),
-		resumeTask: vi.fn(),
-		listPersistedSessions: vi.fn(),
-		destroyPersistedSession: vi.fn(),
 		stop: vi.fn().mockResolvedValue(undefined),
 		isReady: vi.fn().mockResolvedValue(true),
 		getStatus: vi.fn().mockResolvedValue({ connected: true, authMethod: "user" }),
-		getMostRecentSession: vi.fn(),
-		getSessionTranscript: vi.fn(),
 		resolveWorkingDir: vi.fn().mockImplementation(async (dir: string) => `/resolved/${dir}`),
+		listSessions: vi.fn().mockReturnValue([]),
+		destroySession: vi.fn().mockResolvedValue(true),
+		destroyAllSessions: vi.fn().mockResolvedValue(0),
 	};
 	return { mockBridge };
 });
 
 vi.mock("../src/config.js", () => ({
 	loadConfig: vi.fn().mockReturnValue({
-		githubToken: undefined,
-		byokProvider: undefined,
-		byokApiKey: undefined,
-		byokBaseUrl: undefined,
-		byokModel: undefined,
-		cliPath: undefined,
-		logLevel: "warning",
-		openclawHost: "127.0.0.1",
-		openclawPort: 18789,
-		projectsRoot: "/home/test/repos",
-		openclawToken: undefined,
+		githubToken: "ghu_test",
+		editorVersion: "vscode/1.90.0",
 	}),
 }));
 
@@ -40,912 +26,394 @@ vi.mock("../src/client.js", () => ({
 	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
 }));
 
-const { mockOrchestrator, mockPool } = vi.hoisted(() => {
-	const mockOrchestrator = {
-		planTasks: vi.fn(),
-		executePlan: vi.fn(),
-		on: vi.fn().mockReturnValue(vi.fn()),
-	};
-	const mockPool = {
-		drain: vi.fn().mockResolvedValue(undefined),
-		execute: vi.fn(),
-		getActiveCount: vi.fn().mockReturnValue(0),
-	};
-	return { mockOrchestrator, mockPool };
+import { CopilotBridge } from "../src/client.js";
+import type { OpenClawPlugin } from "../src/plugin.js";
+
+let plugin: OpenClawPlugin;
+let _resetBridge: () => Promise<void>;
+
+beforeEach(async () => {
+	const mod = await import("../src/plugin.js");
+	plugin = mod.default;
+	_resetBridge = mod._resetBridge;
+
+	await _resetBridge();
+	vi.clearAllMocks();
+
+	mockBridge.ensureReady.mockResolvedValue(undefined);
+	mockBridge.stop.mockResolvedValue(undefined);
+	mockBridge.resolveWorkingDir.mockImplementation(async (dir: string) => `/resolved/${dir}`);
+	mockBridge.listSessions.mockReturnValue([]);
+	mockBridge.destroySession.mockResolvedValue(true);
+	mockBridge.destroyAllSessions.mockResolvedValue(0);
+	mockBridge.runTask.mockResolvedValue({
+		success: true,
+		content: "Hello world",
+		toolCalls: [],
+		errors: [],
+		sessionId: "sess-123",
+		elapsed: 1500,
+	});
 });
 
-vi.mock("../src/orchestrator.js", () => ({
-	TaskOrchestrator: vi.fn().mockImplementation(() => mockOrchestrator),
-	SessionPool: vi.fn().mockImplementation(() => mockPool),
-}));
+// ─── Plugin shape ───────────────────────────────────────────────────────────
 
-const { default: plugin, _resetBridge } = await import("../src/plugin.js");
-const { CopilotBridge } = await import("../src/client.js");
+describe("plugin shape", () => {
+	it("has expected name and version", () => {
+		expect(plugin.name).toBe("copilot-bridge");
+		expect(plugin.version).toBe("1.0.0");
+	});
 
-// --- Helpers ---
+	it("exposes exactly three tools", () => {
+		expect(plugin.tools).toHaveLength(3);
+		expect(plugin.tools?.[0].name).toBe("copilot");
+		expect(plugin.tools?.[1].name).toBe("copilot_sessions");
+		expect(plugin.tools?.[2].name).toBe("copilot_session_destroy");
+	});
 
-function findTool(name: string) {
-	return plugin.tools?.find((t) => t.name === name);
-}
+	it("has an onLoad hook", () => {
+		expect(typeof plugin.onLoad).toBe("function");
+	});
+});
 
-async function* fakeStream(
-	deltas: Array<import("../src/types.js").StreamingDelta>,
-): AsyncGenerator<import("../src/types.js").StreamingDelta> {
-	for (const d of deltas) {
-		yield d;
-	}
-}
+// ─── Tool parameter schema ──────────────────────────────────────────────────
 
-// --- Tests ---
+describe("tool parameter schema", () => {
+	it("requires prompt and workingDir", () => {
+		const tool = plugin.tools![0];
+		expect(tool.parameters.required).toEqual(["prompt", "workingDir"]);
+	});
 
-describe("OpenClaw Plugin", () => {
-	beforeEach(async () => {
-		vi.clearAllMocks();
-		await _resetBridge();
+	it("defines prompt, persona, workingDir, timeout, and sessionId properties", () => {
+		const props = plugin.tools![0].parameters.properties;
+		expect(Object.keys(props).sort()).toEqual(
+			["persona", "prompt", "sessionId", "timeout", "workingDir"].sort(),
+		);
+		expect(props.prompt.type).toBe("string");
+		expect(props.persona.type).toBe("string");
+		expect(props.workingDir.type).toBe("string");
+		expect(props.timeout.type).toBe("number");
+		expect(props.sessionId.type).toBe("string");
+	});
+});
 
-		mockBridge.ensureReady.mockResolvedValue(undefined);
-		mockBridge.runTask.mockResolvedValue({
-			success: true,
-			content: "Hello world",
-			toolCalls: [],
-			errors: [],
-			sessionId: "sess-123",
-			elapsed: 1500,
+// ─── Bridge singleton ───────────────────────────────────────────────────────
+
+describe("bridge singleton", () => {
+	it("lazily initialises the bridge on first execute", async () => {
+		const tool = plugin.tools![0];
+		expect(vi.mocked(CopilotBridge)).not.toHaveBeenCalled();
+
+		await tool.execute({ prompt: "do stuff", workingDir: "my-app" });
+
+		expect(vi.mocked(CopilotBridge)).toHaveBeenCalledTimes(1);
+		expect(mockBridge.ensureReady).toHaveBeenCalledTimes(1);
+	});
+
+	it("reuses the bridge across calls", async () => {
+		const tool = plugin.tools![0];
+
+		await tool.execute({ prompt: "first", workingDir: "my-app" });
+		await tool.execute({ prompt: "second", workingDir: "my-app" });
+
+		expect(vi.mocked(CopilotBridge)).toHaveBeenCalledTimes(1);
+		expect(mockBridge.ensureReady).toHaveBeenCalledTimes(1);
+	});
+});
+
+// ─── Happy path ─────────────────────────────────────────────────────────────
+
+describe("happy path", () => {
+	it("prompt only — forwards prompt and default timeout", async () => {
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "hello", workingDir: "proj" });
+
+		expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("proj");
+		expect(mockBridge.runTask).toHaveBeenCalledWith({
+			prompt: "hello",
+			workingDir: "/resolved/proj",
+			timeout: 120_000,
 		});
-		mockBridge.resumeTask.mockResolvedValue({
-			success: true,
-			content: "Resumed response",
-			toolCalls: [],
-			errors: [],
-			sessionId: "sess-existing",
-			elapsed: 1000,
-		});
-		mockBridge.listPersistedSessions.mockResolvedValue([]);
-		mockBridge.destroyPersistedSession.mockResolvedValue(undefined);
-		mockBridge.getMostRecentSession.mockResolvedValue(null);
-		mockBridge.getSessionTranscript.mockResolvedValue([]);
-		mockBridge.resolveWorkingDir.mockImplementation(async (dir: string) => `/resolved/${dir}`);
-		mockBridge.runTaskStreaming.mockImplementation(() =>
-			fakeStream([
-				{ type: "text", content: "streamed content" },
-				{ type: "done", content: "" },
-			]),
+		expect(result).toContain("## Result");
+		expect(result).toContain("Hello world");
+	});
+
+	it("prompt with persona — prepends persona with separator", async () => {
+		const tool = plugin.tools![0];
+		const persona = "You are a senior engineer.";
+		const prompt = "refactor module X";
+
+		await tool.execute({ prompt, persona, workingDir: "proj" });
+
+		expect(mockBridge.runTask).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: `${persona}\n\n---\n\n${prompt}`,
+			}),
 		);
 	});
 
-	afterEach(async () => {
-		await _resetBridge();
+	it("custom timeout is forwarded", async () => {
+		const tool = plugin.tools![0];
+		await tool.execute({ prompt: "go", workingDir: "proj", timeout: 60_000 });
+
+		expect(mockBridge.runTask).toHaveBeenCalledWith(
+			expect.objectContaining({ timeout: 60_000 }),
+		);
 	});
 
-	describe("plugin shape", () => {
-		it("exports name, version, and tools array", () => {
-			expect(plugin.name).toBe("copilot-bridge");
-			expect(plugin.version).toBe("1.0.0");
-			expect(Array.isArray(plugin.tools)).toBe(true);
-			expect(plugin.tools?.length).toBe(7);
-		});
+	it("sessionId is passed through to runTask", async () => {
+		const tool = plugin.tools![0];
+		await tool.execute({ prompt: "continue", workingDir: "proj", sessionId: "sess-xyz" });
 
-		it("has an onLoad function", () => {
-			expect(typeof plugin.onLoad).toBe("function");
-		});
-
-		it("onLoad resolves without throwing", async () => {
-			await expect(plugin.onLoad?.({})).resolves.toBeUndefined();
-		});
-
-		it("tool names match expected", () => {
-			const names = plugin.tools?.map((t) => t.name);
-			expect(names).toContain("copilot_code_start");
-			expect(names).toContain("copilot_code_message");
-			expect(names).toContain("copilot_code_verbose");
-			expect(names).toContain("copilot_orchestrate");
-			expect(names).toContain("copilot_code_transcript");
-			expect(names).toContain("copilot_list_sessions");
-			expect(names).toContain("copilot_destroy_session");
-		});
+		expect(mockBridge.runTask).toHaveBeenCalledWith(
+			expect.objectContaining({ sessionId: "sess-xyz" }),
+		);
 	});
 
-	describe("tool parameter schemas", () => {
-		it("copilot_code_message has correct parameters", () => {
-			const tool = findTool("copilot_code_message");
-			expect(tool).toBeDefined();
-			expect(tool?.parameters.type).toBe("object");
-			expect(tool?.parameters.required).toEqual(["task"]);
-			expect(Object.keys(tool?.parameters.properties)).toEqual(
-				expect.arrayContaining(["task", "timeout", "sessionId"]),
-			);
-		});
+	it("sessionId is undefined when omitted", async () => {
+		const tool = plugin.tools![0];
+		await tool.execute({ prompt: "new task", workingDir: "proj" });
 
-		it("copilot_code_verbose has correct parameters", () => {
-			const tool = findTool("copilot_code_verbose");
-			expect(tool).toBeDefined();
-			expect(tool?.parameters.type).toBe("object");
-			expect(tool?.parameters.required).toEqual(["task"]);
-			expect(Object.keys(tool?.parameters.properties)).toEqual(
-				expect.arrayContaining(["task", "timeout", "sessionId"]),
-			);
-		});
-
-		it("copilot_code_start has correct parameters", () => {
-			const tool = findTool("copilot_code_start");
-			expect(tool).toBeDefined();
-			expect(tool?.parameters.type).toBe("object");
-			expect(tool?.parameters.required).toEqual(["task", "workingDir"]);
-			expect(Object.keys(tool?.parameters.properties)).toEqual(
-				expect.arrayContaining(["task", "workingDir", "model", "timeout"]),
-			);
-		});
-
-		it("copilot_code_transcript has correct parameters", () => {
-			const tool = findTool("copilot_code_transcript");
-			expect(tool).toBeDefined();
-			expect(tool?.parameters.type).toBe("object");
-			expect(Object.keys(tool?.parameters.properties)).toEqual(
-				expect.arrayContaining(["sessionId", "count"]),
-			);
-		});
+		expect(mockBridge.runTask).toHaveBeenCalledWith(
+			expect.objectContaining({ sessionId: undefined }),
+		);
 	});
-
-	describe("shared bridge singleton", () => {
-		it("bridge is lazy-initialized on first tool call, not at import time", async () => {
-			// After reset, no tool call has been made yet, so bridge should not exist
-			// Use a fresh execution: reset + verify no construction before first execute
-			await _resetBridge();
-			vi.mocked(CopilotBridge).mockClear();
-
-			// Before any tool call, constructor should not have been called
-			expect(CopilotBridge).not.toHaveBeenCalled();
-
-			// Now trigger a tool call
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-lazy",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			const tool = findTool("copilot_code_message")!;
-			await tool.execute({ task: "lazy init check" });
-
-			// Constructor called exactly once on first use
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-		});
-
-		it("bridge is created once and reused across calls", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-reuse",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			const tool = findTool("copilot_code_message")!;
-			await tool.execute({ task: "first call" });
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-
-			await tool.execute({ task: "second call" });
-			// Still only one construction — reused
-			expect(CopilotBridge).toHaveBeenCalledTimes(1);
-			expect(mockBridge.ensureReady).toHaveBeenCalledTimes(1);
-			expect(mockBridge.resumeTask).toHaveBeenCalledTimes(2);
-		});
-	});
-
-	describe("copilot_code_message tool", () => {
-		it("auto-selects most recent session and formats result as markdown", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Previous",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.resumeTask.mockResolvedValue({
-				success: true,
-				content: "def reverse(s): return s[::-1]",
-				toolCalls: [
-					{
-						tool: "write_file",
-						args: { path: "main.py" },
-						result: "ok",
-						timestamp: 1000,
-					},
-				],
-				errors: [],
-				sessionId: "sess-recent",
-				elapsed: 2350,
-			});
-
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "write a reverse function" });
-
-			expect(result).toContain("## Result");
-			expect(result).toContain("def reverse(s): return s[::-1]");
-			expect(result).toContain("## Tool Calls");
-			expect(result).toContain("`write_file`");
-			expect(result).toContain("## Stats");
-			expect(result).toContain("Elapsed: 2.4s");
-			expect(result).toContain("Session: sess-recent");
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-recent", "write a reverse function", 120_000);
-		});
-
-		it("returns error when no sessions exist and no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue(null);
-
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "do stuff" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("No active sessions");
-			expect(result).toContain("copilot_code_start");
-			expect(mockBridge.resumeTask).not.toHaveBeenCalled();
-		});
-
-		it("uses provided sessionId directly", async () => {
-			const tool = findTool("copilot_code_message")!;
-			await tool.execute({
-				task: "do stuff",
-				sessionId: "sess-specific",
-			});
-
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-specific", "do stuff", 120_000);
-			expect(mockBridge.getMostRecentSession).not.toHaveBeenCalled();
-		});
-
-		it("uses default timeout of 120000 when not specified", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			const tool = findTool("copilot_code_message")!;
-			await tool.execute({ task: "do stuff" });
-
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith(
-				"sess-recent", "do stuff", 120_000,
-			);
-		});
-
-		it("returns error in result string on failure, never throws", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.resumeTask.mockRejectedValue(new Error("connection refused"));
-
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "fail" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("connection refused");
-		});
-
-		it("returns error when getBridge fails", async () => {
-			mockBridge.ensureReady.mockRejectedValue(new Error("not authenticated"));
-
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "fail" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("not authenticated");
-		});
-
-		it("includes errors and success status when resumeTask returns failure", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.resumeTask.mockResolvedValue({
-				success: false,
-				content: "",
-				toolCalls: [],
-				errors: ["internal SDK error", "model overloaded"],
-				sessionId: "sess-err",
-				elapsed: 500,
-			});
-
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "failing task" });
-
-			expect(result).toContain("## Errors");
-			expect(result).toContain("internal SDK error");
-			expect(result).toContain("model overloaded");
-			expect(result).toContain("Success: false");
-		});
-	});
-
-	describe("copilot_code_start tool", () => {
-		it("calls runTask with persistSession: true", async () => {
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "start new project", workingDir: "my-api" });
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("my-api");
-			expect(mockBridge.runTask).toHaveBeenCalledWith({
-				prompt: "start new project",
-				workingDir: "/resolved/my-api",
-				model: undefined,
-				timeout: 120_000,
-				persistSession: true,
-			});
-			expect(result).toContain("## Result");
-			expect(result).toContain("Hello world");
-		});
-
-		it("passes workingDir, model, and timeout", async () => {
-			const tool = findTool("copilot_code_start")!;
-			await tool.execute({
-				task: "start",
-				workingDir: "/tmp/work",
-				model: "gpt-4o",
-				timeout: 60000,
-			});
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("/tmp/work");
-			expect(mockBridge.runTask).toHaveBeenCalledWith({
-				prompt: "start",
-				workingDir: "/resolved//tmp/work",
-				model: "gpt-4o",
-				timeout: 60000,
-				persistSession: true,
-			});
-		});
-
-		it("resolves bare project name via resolveWorkingDir", async () => {
-			const tool = findTool("copilot_code_start")!;
-			await tool.execute({ task: "start", workingDir: "cool-project" });
-
-			expect(mockBridge.resolveWorkingDir).toHaveBeenCalledWith("cool-project");
-			expect(mockBridge.runTask).toHaveBeenCalledWith(
-				expect.objectContaining({ workingDir: "/resolved/cool-project" }),
-			);
-		});
-
-		it("rejects empty workingDir with helpful error", async () => {
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "start" });
-			expect(result).toContain("`workingDir` is required");
-			expect(mockBridge.runTask).not.toHaveBeenCalled();
-		});
-
-		it("rejects empty string workingDir", async () => {
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "start", workingDir: "" });
-			expect(result).toContain("`workingDir` is required");
-			expect(mockBridge.runTask).not.toHaveBeenCalled();
-		});
-
-		it("returns error on failure", async () => {
-			mockBridge.runTask.mockRejectedValue(new Error("connection refused"));
-
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "fail", workingDir: "my-api" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("connection refused");
-		});
-
-		it("rejects empty task", async () => {
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "", workingDir: "my-api" });
-			expect(result).toContain("`task` must be a non-empty string");
-		});
-
-		it("rejects task exceeding max length", async () => {
-			const tool = findTool("copilot_code_start")!;
-			const { result } = await tool.execute({ task: "x".repeat(50_001), workingDir: "my-api" });
-			expect(result).toContain("`task` exceeds maximum length");
-		});
-	});
-
-	describe("copilot_code_transcript tool", () => {
-		it("returns transcript for given sessionId", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "Hello", timestamp: "2026-02-27T10:00:00Z" },
-				{ role: "assistant", content: "Hi there", timestamp: "2026-02-27T10:00:01Z" },
-			]);
-
-			const tool = findTool("copilot_code_transcript")!;
-			const { result } = await tool.execute({ sessionId: "sess-1", count: 2 });
-
-			expect(result).toContain("## Transcript");
-			expect(result).toContain("**user**");
-			expect(result).toContain("Hello");
-			expect(result).toContain("**assistant**");
-			expect(result).toContain("Hi there");
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-1", 2);
-		});
-
-		it("defaults to most recent session when no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Recent",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "Test", timestamp: "2026-02-27T10:00:00Z" },
-			]);
-
-			const tool = findTool("copilot_code_transcript")!;
-			const { result } = await tool.execute({});
-
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-recent", 2);
-			expect(result).toContain("Test");
-		});
-
-		it("returns error when no sessions exist and no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue(null);
-
-			const tool = findTool("copilot_code_transcript")!;
-			const { result } = await tool.execute({});
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("No active sessions");
-		});
-
-		it("returns empty message for session with no messages", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([]);
-
-			const tool = findTool("copilot_code_transcript")!;
-			const { result } = await tool.execute({ sessionId: "sess-empty" });
-
-			expect(result).toContain("No messages in session sess-empty");
-		});
-
-		it("passes custom count parameter", async () => {
-			mockBridge.getSessionTranscript.mockResolvedValue([
-				{ role: "user", content: "msg", timestamp: "2026-02-27T10:00:00Z" },
-			]);
-
-			const tool = findTool("copilot_code_transcript")!;
-			await tool.execute({ sessionId: "sess-1", count: 5 });
-
-			expect(mockBridge.getSessionTranscript).toHaveBeenCalledWith("sess-1", 5);
-		});
-
-		it("returns error on failure", async () => {
-			mockBridge.getSessionTranscript.mockRejectedValue(new Error("Session not found"));
-
-			const tool = findTool("copilot_code_transcript")!;
-			const { result } = await tool.execute({ sessionId: "sess-bad" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("Session not found");
-		});
-	});
-
-	describe("copilot_code_verbose tool", () => {
-		it("auto-selects most recent session and uses non-streaming resumeTask", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "verbose task" });
-
-			expect(result).toContain("Note: Session resume uses non-streaming mode");
-			expect(result).toContain("Resumed response");
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-recent", "verbose task", 120_000);
-		});
-
-		it("uses provided sessionId directly", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "verbose task", sessionId: "sess-specific" });
-
-			expect(result).toContain("Note: Session resume uses non-streaming mode");
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-specific", "verbose task", 120_000);
-			expect(mockBridge.getMostRecentSession).not.toHaveBeenCalled();
-		});
-
-		it("returns error when no sessions exist and no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue(null);
-
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "verbose task" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("No active sessions");
-			expect(mockBridge.resumeTask).not.toHaveBeenCalled();
-		});
-
-		it("returns error in result on failure, never throws", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			mockBridge.resumeTask.mockRejectedValue(new Error("stream broke"));
-
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "fail verbose" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("stream broke");
-		});
-
-		it("returns error when getBridge fails", async () => {
-			mockBridge.ensureReady.mockRejectedValue(new Error("config invalid"));
-
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "fail" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("config invalid");
-		});
-
-		it("rejects non-string sessionId", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "work", sessionId: 42 });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
-		});
-	});
-
-	describe("copilot_orchestrate", () => {
-		const mockPlan = {
-			tasks: [
-				{ id: "t1", description: "Create utils", estimatedComplexity: "S" },
-				{ id: "t2", description: "Add tests", estimatedComplexity: "M" },
+});
+
+// ─── Result formatting ──────────────────────────────────────────────────────
+
+describe("result formatting", () => {
+	it("includes tool calls section when present", async () => {
+		mockBridge.runTask.mockResolvedValue({
+			success: true,
+			content: "Done",
+			toolCalls: [
+				{ tool: "readFile", args: { path: "a.ts" }, result: "ok" },
+				{ tool: "editFile", args: { path: "b.ts" }, result: "ok" },
 			],
-			dependencies: new Map([["t2", ["t1"]]]),
-		};
-
-		const mockOrchestratedResult = {
-			tasks: [
-				{
-					id: "t1",
-					result: {
-						success: true,
-						content: "Utils created",
-						toolCalls: [],
-						errors: [],
-						sessionId: "s1",
-						elapsed: 1000,
-					},
-					status: "success" as const,
-				},
-				{
-					id: "t2",
-					result: {
-						success: true,
-						content: "Tests added",
-						toolCalls: [],
-						errors: [],
-						sessionId: "s2",
-						elapsed: 2000,
-					},
-					status: "success" as const,
-				},
-			],
-			totalElapsed: 3000,
-			summary: "2/2 tasks succeeded, 0 skipped, 0 failed",
-			plan: mockPlan,
-		};
-
-		beforeEach(() => {
-			mockOrchestrator.planTasks.mockResolvedValue(mockPlan);
-			mockOrchestrator.executePlan.mockResolvedValue(mockOrchestratedResult);
+			errors: [],
+			sessionId: "sess-abc",
+			elapsed: 2000,
 		});
 
-		it("has correct tool schema", () => {
-			const tool = findTool("copilot_orchestrate");
-			expect(tool).toBeDefined();
-			expect(tool?.parameters.type).toBe("object");
-			expect(tool?.parameters.required).toEqual(["task"]);
-			expect(Object.keys(tool?.parameters.properties)).toEqual(
-				expect.arrayContaining(["task", "maxConcurrency", "timeout"]),
-			);
-		});
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "go", workingDir: "proj" });
 
-		it("decomposes task, executes plan, and returns formatted result", async () => {
-			const tool = findTool("copilot_orchestrate")!;
-			const { result } = await tool.execute({ task: "build a REST API" });
-
-			expect(mockOrchestrator.planTasks).toHaveBeenCalledWith("build a REST API");
-			expect(mockOrchestrator.executePlan).toHaveBeenCalledWith(mockPlan);
-
-			expect(result).toContain("## Task Plan");
-			expect(result).toContain("**t1**: Create utils [S]");
-			expect(result).toContain("**t2**: Add tests [M]");
-			expect(result).toContain("## Results");
-			expect(result).toContain("✅ t1");
-			expect(result).toContain("Utils created");
-			expect(result).toContain("✅ t2");
-			expect(result).toContain("Tests added");
-			expect(result).toContain("## Summary");
-			expect(result).toContain("2/2 tasks succeeded");
-			expect(result).toContain("Total elapsed: 3.0s");
-		});
-
-		it("uses custom maxConcurrency when provided", async () => {
-			const { SessionPool } = await import("../src/orchestrator.js");
-
-			const tool = findTool("copilot_orchestrate")!;
-			await tool.execute({ task: "parallel work", maxConcurrency: 5 });
-
-			expect(SessionPool).toHaveBeenCalledWith(expect.anything(), 5);
-		});
-
-		it("drains pool after execution", async () => {
-			const tool = findTool("copilot_orchestrate")!;
-			await tool.execute({ task: "drain test" });
-
-			expect(mockPool.drain).toHaveBeenCalledTimes(1);
-		});
-
-		it("returns error message on orchestrator failure", async () => {
-			mockOrchestrator.executePlan.mockRejectedValue(new Error("orchestrator crashed"));
-
-			const tool = findTool("copilot_orchestrate")!;
-			const { result } = await tool.execute({ task: "will fail" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("orchestrator crashed");
-		});
-
-		it("falls back gracefully when plan fails", async () => {
-			mockOrchestrator.planTasks.mockRejectedValue(new Error("planning failed: task too vague"));
-
-			const tool = findTool("copilot_orchestrate")!;
-			const { result } = await tool.execute({ task: "do something" });
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("planning failed: task too vague");
-		});
+		expect(result).toContain("## Tool Calls");
+		expect(result).toContain("`readFile`");
+		expect(result).toContain("`editFile`");
 	});
 
-	describe("input validation", () => {
-		it("copilot_code_message rejects empty task", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` must be a non-empty string");
+	it("includes errors section when present", async () => {
+		mockBridge.runTask.mockResolvedValue({
+			success: false,
+			content: "Partial",
+			toolCalls: [],
+			errors: ["lint failed", "type error"],
+			sessionId: "sess-err",
+			elapsed: 3000,
 		});
 
-		it("copilot_code_message rejects non-string task", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: 123 });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` must be a non-empty string");
-		});
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "go", workingDir: "proj" });
 
-		it("copilot_code_message rejects task exceeding max length", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "x".repeat(50_001) });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
-		});
-
-		it("copilot_code_message rejects negative timeout", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "do stuff", timeout: -1 });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`timeout` must be a non-negative number");
-		});
-
-		it("copilot_code_message rejects non-number timeout", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "do stuff", timeout: "fast" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`timeout` must be a non-negative number");
-		});
-
-		it("copilot_code_verbose rejects empty task", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` must be a non-empty string");
-		});
-
-		it("copilot_code_verbose rejects task exceeding max length", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "x".repeat(50_001) });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
-		});
-
-		it("copilot_orchestrate rejects empty task", async () => {
-			const tool = findTool("copilot_orchestrate")!;
-			const { result } = await tool.execute({ task: "" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` must be a non-empty string");
-		});
-
-		it("copilot_orchestrate rejects task exceeding max length", async () => {
-			const tool = findTool("copilot_orchestrate")!;
-			const { result } = await tool.execute({ task: "x".repeat(50_001) });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`task` exceeds maximum length (50000 chars)");
-		});
-
-		it("copilot_orchestrate treats NaN maxConcurrency as default", async () => {
-			const { SessionPool } = await import("../src/orchestrator.js");
-
-			const tool = findTool("copilot_orchestrate")!;
-			await tool.execute({ task: "nan test", maxConcurrency: Number.NaN });
-
-			expect(SessionPool).toHaveBeenCalledWith(expect.anything(), 3);
-		});
+		expect(result).toContain("## Errors");
+		expect(result).toContain("lint failed");
+		expect(result).toContain("type error");
 	});
 
-	// ── Session persistence — copilot_code_message ─────────────────────────────────
+	it("includes stats section with success, elapsed, and session", async () => {
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "go", workingDir: "proj" });
 
-	describe("copilot_code_message session persistence", () => {
-		it("calls resumeTask with auto-resolved session when no sessionId", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "Previous",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			const tool = findTool("copilot_code_message")!;
-			await tool.execute({ task: "new work" });
+		expect(result).toContain("## Stats");
+		expect(result).toContain("Success: true");
+		expect(result).toContain("Elapsed: 1.5s");
+		expect(result).toContain("Session: sess-123");
+	});
+});
 
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-recent", "new work", 120_000);
-		});
+// ─── Error handling ─────────────────────────────────────────────────────────
 
-		it("calls resumeTask when sessionId is provided", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "continue work", sessionId: "sess-existing" });
+describe("error handling", () => {
+	it("returns ## Error on bridge init failure — never throws", async () => {
+		mockBridge.ensureReady.mockRejectedValue(new Error("auth failed"));
 
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-existing", "continue work", 120_000);
-			expect(mockBridge.getMostRecentSession).not.toHaveBeenCalled();
-			expect(result).toContain("Resumed response");
-			expect(result).toContain("sess-existing");
-		});
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "go", workingDir: "proj" });
 
-		it("rejects non-string sessionId", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "work", sessionId: 123 });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
-		});
-
-		it("returns error when resumeTask throws for unknown session", async () => {
-			mockBridge.resumeTask.mockRejectedValue(new Error("No persisted session found with ID: sess-gone"));
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "continue", sessionId: "sess-gone" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("No persisted session found");
-		});
-
-		it("rejects empty string sessionId", async () => {
-			const tool = findTool("copilot_code_message")!;
-			const { result } = await tool.execute({ task: "test", sessionId: "" });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
-		});
+		expect(result).toContain("## Error");
+		expect(result).toContain("auth failed");
 	});
 
-	// ── Session persistence — copilot_code_verbose ─────────────────────────
+	it("returns ## Error on runTask rejection — never throws", async () => {
+		mockBridge.runTask.mockRejectedValue(new Error("timeout exceeded"));
 
-	describe("copilot_code_verbose session persistence", () => {
-		it("calls resumeTask when sessionId is provided", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "continue verbose", sessionId: "sess-existing" });
+		const tool = plugin.tools![0];
+		const { result } = await tool.execute({ prompt: "go", workingDir: "proj" });
 
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-existing", "continue verbose", 120_000);
-			expect(result).toContain("Note: Session resume uses non-streaming mode");
-			expect(result).toContain("Resumed response");
-		});
-
-		it("auto-selects most recent session when no sessionId provided", async () => {
-			mockBridge.getMostRecentSession.mockResolvedValue({
-				sessionId: "sess-recent",
-				task: "task",
-				startTime: "2026-02-27T10:00:00Z",
-				lastActivity: "2026-02-27T11:00:00Z",
-				messages: [],
-			});
-			const tool = findTool("copilot_code_verbose")!;
-			await tool.execute({ task: "verbose work" });
-
-			expect(mockBridge.getMostRecentSession).toHaveBeenCalled();
-			expect(mockBridge.resumeTask).toHaveBeenCalledWith("sess-recent", "verbose work", 120_000);
-		});
-
-		it("rejects non-string sessionId in persistence", async () => {
-			const tool = findTool("copilot_code_verbose")!;
-			const { result } = await tool.execute({ task: "work", sessionId: 42 });
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
-		});
+		expect(result).toContain("## Error");
+		expect(result).toContain("timeout exceeded");
 	});
 
-	// ── copilot_list_sessions ──────────────────────────────────────────────
+	it("allows retry after bridge init failure", async () => {
+		mockBridge.ensureReady
+			.mockRejectedValueOnce(new Error("transient"))
+			.mockResolvedValueOnce(undefined);
 
-	describe("copilot_list_sessions", () => {
-		it("returns formatted sessions list", async () => {
-			mockBridge.listPersistedSessions.mockResolvedValue([
-				{ sessionId: "sess-1", task: "Fix bugs", lastActivity: "2026-02-27T10:00:00Z" },
-				{ sessionId: "sess-2", task: "Add tests", lastActivity: "2026-02-27T11:00:00Z" },
-			]);
+		const tool = plugin.tools![0];
 
-			const tool = findTool("copilot_list_sessions")!;
-			const { result } = await tool.execute({});
+		const first = await tool.execute({ prompt: "go", workingDir: "proj" });
+		expect(first.result).toContain("## Error");
 
-			expect(result).toContain("## Active Sessions");
-			expect(result).toContain("sess-1");
-			expect(result).toContain("Fix bugs");
-			expect(result).toContain("sess-2");
-			expect(result).toContain("Add tests");
-		});
+		const second = await tool.execute({ prompt: "go", workingDir: "proj" });
+		expect(second.result).toContain("## Result");
+	});
+});
 
-		it("returns empty message when no sessions", async () => {
-			mockBridge.listPersistedSessions.mockResolvedValue([]);
+// ─── Input validation ───────────────────────────────────────────────────────
 
-			const tool = findTool("copilot_list_sessions")!;
-			const { result } = await tool.execute({});
+describe("input validation", () => {
+	const exec = (args: Record<string, any>) => plugin.tools![0].execute(args);
 
-			expect(result).toBe("No active sessions.");
-		});
-
-		it("returns error on failure", async () => {
-			mockBridge.listPersistedSessions.mockRejectedValue(new Error("disk error"));
-
-			const tool = findTool("copilot_list_sessions")!;
-			const { result } = await tool.execute({});
-
-			expect(result).toContain("## Error");
-			expect(result).toContain("disk error");
-		});
+	it("rejects empty prompt", async () => {
+		const { result } = await exec({ prompt: "", workingDir: "proj" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`prompt` must be a non-empty string");
 	});
 
-	// ── copilot_destroy_session ────────────────────────────────────────────
+	it("rejects non-string prompt", async () => {
+		const { result } = await exec({ prompt: 42, workingDir: "proj" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`prompt` must be a non-empty string");
+	});
 
-	describe("copilot_destroy_session", () => {
-		it("destroys session and returns confirmation", async () => {
-			const tool = findTool("copilot_destroy_session")!;
-			const { result } = await tool.execute({ sessionId: "sess-to-destroy" });
+	it("rejects too-long prompt (>500000 chars)", async () => {
+		const { result } = await exec({ prompt: "x".repeat(500_001), workingDir: "proj" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("exceeds maximum length");
+	});
 
-			expect(mockBridge.destroyPersistedSession).toHaveBeenCalledWith("sess-to-destroy");
-			expect(result).toBe("Session sess-to-destroy destroyed.");
+	it("rejects empty workingDir", async () => {
+		const { result } = await exec({ prompt: "go", workingDir: "" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`workingDir` is required");
+	});
+
+	it("rejects missing workingDir", async () => {
+		const { result } = await exec({ prompt: "go" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`workingDir` is required");
+	});
+
+	it("rejects negative timeout", async () => {
+		const { result } = await exec({ prompt: "go", workingDir: "proj", timeout: -1 });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`timeout` must be a non-negative number");
+	});
+
+	it("rejects non-number timeout", async () => {
+		const { result } = await exec({ prompt: "go", workingDir: "proj", timeout: "fast" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`timeout` must be a non-negative number");
+	});
+
+	it("rejects non-string persona", async () => {
+		const { result } = await exec({ prompt: "go", workingDir: "proj", persona: 123 });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`persona` must be a string");
+	});
+
+	it("rejects too-long persona (>50000 chars)", async () => {
+		const { result } = await exec({
+			prompt: "go",
+			workingDir: "proj",
+			persona: "x".repeat(50_001),
 		});
+		expect(result).toContain("## Error");
+		expect(result).toContain("`persona` must be a string");
+	});
 
-		it("rejects empty sessionId", async () => {
-			const tool = findTool("copilot_destroy_session")!;
-			const { result } = await tool.execute({ sessionId: "" });
+	it("rejects non-string sessionId", async () => {
+		const { result } = await exec({ prompt: "go", workingDir: "proj", sessionId: 42 });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`sessionId` must be a string");
+	});
 
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
+	it("rejects too-long sessionId (>200 chars)", async () => {
+		const { result } = await exec({
+			prompt: "go",
+			workingDir: "proj",
+			sessionId: "x".repeat(201),
 		});
+		expect(result).toContain("## Error");
+		expect(result).toContain("`sessionId` must be a string");
+	});
+});
 
-		it("rejects non-string sessionId", async () => {
-			const tool = findTool("copilot_destroy_session")!;
-			const { result } = await tool.execute({ sessionId: 123 });
+// ─── copilot_sessions tool ────────────────────────────────────────────────────────
 
-			expect(result).toContain("## Error");
-			expect(result).toContain("`sessionId` must be a non-empty string");
-		});
+describe("copilot_sessions tool", () => {
+	it("returns 'No active sessions.' when empty", async () => {
+		mockBridge.listSessions.mockReturnValue([]);
+		const tool = plugin.tools![1];
+		const { result } = await tool.execute({});
+		expect(result).toBe("No active sessions.");
+	});
 
-		it("returns error on failure", async () => {
-			mockBridge.destroyPersistedSession.mockRejectedValue(new Error("not found"));
+	it("returns a markdown table when sessions exist", async () => {
+		mockBridge.listSessions.mockReturnValue([
+			{ sessionId: "s1", workingDir: "/home/proj", createdAt: "2026-03-07T00:00:00.000Z", messageCount: 3 },
+			{ sessionId: "s2", workingDir: undefined, createdAt: "2026-03-07T01:00:00.000Z", messageCount: 1 },
+		]);
+		const tool = plugin.tools![1];
+		const { result } = await tool.execute({});
+		expect(result).toContain("| Session ID |");
+		expect(result).toContain("s1");
+		expect(result).toContain("s2");
+		expect(result).toContain("/home/proj");
+		expect(result).toContain("3");
+	});
 
-			const tool = findTool("copilot_destroy_session")!;
-			const { result } = await tool.execute({ sessionId: "sess-missing" });
+	it("returns ## Error on bridge failure", async () => {
+		mockBridge.ensureReady.mockRejectedValueOnce(new Error("init fail"));
+		const tool = plugin.tools![1];
+		const { result } = await tool.execute({});
+		expect(result).toContain("## Error");
+		expect(result).toContain("init fail");
+	});
+});
 
-			expect(result).toContain("## Error");
-			expect(result).toContain("not found");
-		});
+// ─── copilot_session_destroy tool ──────────────────────────────────────────────────
+
+describe("copilot_session_destroy tool", () => {
+	it("destroys a session and returns confirmation", async () => {
+		mockBridge.destroySession.mockResolvedValue(true);
+		const tool = plugin.tools![2];
+		const { result } = await tool.execute({ sessionId: "dead-sess" });
+		expect(result).toContain("dead-sess");
+		expect(result).toContain("destroyed");
+		expect(mockBridge.destroySession).toHaveBeenCalledWith("dead-sess");
+	});
+
+	it("returns 'not found' for unknown session", async () => {
+		mockBridge.destroySession.mockResolvedValue(false);
+		const tool = plugin.tools![2];
+		const { result } = await tool.execute({ sessionId: "unknown" });
+		expect(result).toContain("not found");
+	});
+
+	it("rejects empty sessionId", async () => {
+		const tool = plugin.tools![2];
+		const { result } = await tool.execute({ sessionId: "" });
+		expect(result).toContain("## Error");
+		expect(result).toContain("`sessionId` is required");
+	});
+
+	it("rejects missing sessionId", async () => {
+		const tool = plugin.tools![2];
+		const { result } = await tool.execute({});
+		expect(result).toContain("## Error");
+		expect(result).toContain("`sessionId` is required");
 	});
 });

@@ -115,7 +115,17 @@ class TestInboundOnly:
 
     @pytest.mark.parametrize(
         "frame_type",
-        ["status", "transcription", "assistant", "end", "error", "connected", "ping"],
+        [
+            "status",
+            "transcription",
+            "assistant",
+            "end",
+            "error",
+            "connected",
+            "ping",
+            "history",
+            "session_reset",
+        ],
     )
     def test_outbound_type_rejected_by_parse(self, frame_type: str) -> None:
         with pytest.raises(ProtocolError, match="Unknown frame type"):
@@ -149,3 +159,148 @@ class TestFieldTypeValidation:
     def test_outbound_str_field_rejects_list(self) -> None:
         with pytest.raises(ProtocolError, match="must be str"):
             validate_outbound({"type": "status", "status": ["idle"]})
+
+
+class TestConnectedSessionFields:
+    """Connected frame with optional session fields."""
+
+    def test_outbound_connected_with_session_fields_validates(self) -> None:
+        validate_outbound(
+            {
+                "type": "connected",
+                "version": "1.0",
+                "sessionId": "ses_abc123",
+                "sessionKey": "agent:claw:g2",
+                "sessionStartedAt": "2026-03-07T10:00:00Z",
+            }
+        )
+
+    def test_outbound_connected_without_optional_fields_still_validates(self) -> None:
+        validate_outbound({"type": "connected", "version": "1.0"})
+
+    def test_outbound_connected_rejects_wrong_type_session_id(self) -> None:
+        with pytest.raises(ProtocolError, match="must be str"):
+            validate_outbound(
+                {
+                    "type": "connected",
+                    "version": "1.0",
+                    "sessionId": 123,
+                }
+            )
+
+
+class TestHistoryFrame:
+    """History frame validation."""
+
+    def test_validate_history_frame(self) -> None:
+        validate_outbound(
+            {
+                "type": "history",
+                "entries": [
+                    {"role": "user", "text": "hi", "ts": 1700000000000},
+                    {"role": "assistant", "text": "hello", "ts": 1700000001000},
+                ],
+            }
+        )
+
+    def test_validate_history_frame_empty_entries(self) -> None:
+        validate_outbound(
+            {
+                "type": "history",
+                "entries": [],
+            }
+        )
+
+    def test_history_frame_missing_entries(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'entries'"):
+            validate_outbound({"type": "history"})
+
+
+class TestStatusRequestFrame:
+    """status_request inbound frame validation."""
+
+    def test_status_request_parses(self) -> None:
+        result = parse_text_frame('{"type":"status_request"}')
+        assert result == {"type": "status_request"}
+
+
+class TestEnhancedStatusFrame:
+    """Status frame with optional metadata fields."""
+
+    def test_status_with_metadata_validates(self) -> None:
+        validate_outbound(
+            {
+                "type": "status",
+                "status": "thinking",
+                "question": "hello",
+                "elapsedMs": 1234,
+                "phase": "Waiting for OpenClaw",
+            }
+        )
+
+    def test_status_without_optional_fields_validates(self) -> None:
+        validate_outbound({"type": "status", "status": "idle"})
+
+    def test_status_rejects_wrong_type_question(self) -> None:
+        with pytest.raises(ProtocolError, match="must be str"):
+            validate_outbound(
+                {
+                    "type": "status",
+                    "status": "thinking",
+                    "question": 42,
+                }
+            )
+
+    def test_status_rejects_wrong_type_elapsed(self) -> None:
+        with pytest.raises(ProtocolError, match="must be int"):
+            validate_outbound(
+                {
+                    "type": "status",
+                    "status": "thinking",
+                    "elapsedMs": "slow",
+                }
+            )
+
+    def test_status_rejects_wrong_type_phase(self) -> None:
+        with pytest.raises(ProtocolError, match="must be str"):
+            validate_outbound(
+                {
+                    "type": "status",
+                    "status": "thinking",
+                    "phase": 123,
+                }
+            )
+
+
+class TestResetSessionFrame:
+    """reset_session inbound frame validation."""
+
+    def test_inbound_reset_session_valid(self) -> None:
+        result = parse_text_frame('{"type":"reset_session"}')
+        assert result == {"type": "reset_session"}
+
+
+class TestSessionResetFrame:
+    """session_reset outbound frame validation."""
+
+    def test_outbound_session_reset_valid(self) -> None:
+        validate_outbound({"type": "session_reset", "reason": "daily_reset"})
+
+    def test_outbound_session_reset_user_request(self) -> None:
+        validate_outbound({"type": "session_reset", "reason": "user_request"})
+
+    def test_outbound_session_reset_missing_reason(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'reason'"):
+            validate_outbound({"type": "session_reset"})
+
+    def test_outbound_session_reset_wrong_type_reason(self) -> None:
+        with pytest.raises(ProtocolError, match="must be str"):
+            validate_outbound({"type": "session_reset", "reason": 123})
+
+
+class TestHistoryFrameWrongType:
+    """History frame rejects wrong types for entries."""
+
+    def test_history_entries_wrong_type(self) -> None:
+        with pytest.raises(ProtocolError, match="must be list"):
+            validate_outbound({"type": "history", "entries": "not_a_list"})

@@ -460,6 +460,8 @@ class TestFullWebSocketIntegration:
                     # Handshake
                     connected = await _recv_json(ws)
                     assert connected["type"] == "connected"
+                    history = await _recv_json(ws)
+                    assert history["type"] == "history"
                     idle = await _recv_json(ws)
                     assert idle == {"type": "status", "status": "idle"}
 

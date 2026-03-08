@@ -349,17 +349,19 @@ class TestFullPipeline:
         types = [f["type"] for f in frames]
 
         # Expected sequence:
-        # connected, status:idle, status:recording, status:transcribing,
+        # connected, history, status:idle, status:recording, status:transcribing,
         # transcription, status:idle
         assert types[0] == "connected"
-        assert frames[1] == {"type": "status", "status": "idle"}
-        assert frames[2] == {"type": "status", "status": "recording"}
-        assert frames[3] == {"type": "status", "status": "transcribing"}
-        assert frames[4] == {"type": "transcription", "text": "hello"}
-        assert frames[5] == {"type": "status", "status": "idle"}
+        assert frames[1]["type"] == "history"
+        assert frames[2] == {"type": "status", "status": "idle"}
+        assert frames[3] == {"type": "status", "status": "recording"}
+        assert frames[4] == {"type": "status", "status": "transcribing"}
+        assert frames[5] == {"type": "transcription", "text": "hello"}
+        assert frames[6] == {"type": "status", "status": "idle"}
 
         # Session returns to idle — user must explicitly confirm
-        assert "thinking" not in [f.get("status") for f in frames if f["type"] == "status"]
+        status_frames = [f.get("status") for f in frames if f["type"] == "status"]
+        assert "thinking" not in status_frames
         assert session._state == SessionState.IDLE
 
 

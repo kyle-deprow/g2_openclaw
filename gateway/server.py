@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
 import sys
-from collections.abc import Awaitable, Callable
+import time as _time_module
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass, field
 from enum import StrEnum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -28,6 +32,7 @@ from gateway.protocol import (
     serialize,
     validate_outbound,
 )
+from gateway.session_resolver import resolve_session
 from gateway.transcriber import Transcriber, TranscriptionError
 
 logger = logging.getLogger(__name__)
@@ -39,6 +44,53 @@ _MOCK_DELTAS = [
 ]
 
 _MAX_RECORDING_SECONDS = 90
+
+_BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
+_BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
+
+
+def _generate_session_key() -> str:
+    """Generate a new unique session key."""
+    return f"agent:claw:g2:{int(_time_module.time())}:{uuid.uuid4().hex[:6]}"
+
+
+def _today_utc() -> str:
+    """Return today's date in UTC as YYYY-MM-DD."""
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+@dataclass
+class InflightBuffer:
+    """Holds an in-flight OpenClaw response while the phone is disconnected."""
+
+    user_question: str
+    deltas: list[str] = field(default_factory=list)
+    complete: bool = False
+    error: str | None = None
+    created_at: float = field(default_factory=_time_module.monotonic)
+    _char_count: int = field(default=0, init=False, repr=False)
+
+    @property
+    def full_text(self) -> str:
+        return "".join(self.deltas)
+
+    @property
+    def char_count(self) -> int:
+        return self._char_count
+
+    def append_delta(self, delta: str) -> bool:
+        """Append *delta* if within the char limit. Return False if limit exceeded."""
+        if self._char_count + len(delta) > _BUFFER_MAX_CHARS:
+            return False
+        self.deltas.append(delta)
+        self._char_count += len(delta)
+        return True
+
+    @property
+    def expired(self) -> bool:
+        return (_time_module.monotonic() - self.created_at) > _BUFFER_TTL_SECONDS
 
 
 class SessionState(StrEnum):
@@ -85,15 +137,24 @@ class MockResponseHandler:
 class OpenClawResponseHandler:
     """Response handler that forwards messages to OpenClaw and streams responses."""
 
-    def __init__(self, client: OpenClawClient) -> None:
+    def __init__(
+        self,
+        client: OpenClawClient,
+        get_session_key: Callable[[], str] | None = None,
+    ) -> None:
         self._client = client
+        self._get_session_key = get_session_key or (lambda: "agent:claw:g2")
+
+    async def start_stream(self, message: str) -> AsyncIterator[str]:
+        """Initiate an OpenClaw agent request and return the delta stream."""
+        logger.info("Sending to OpenClaw: %s", message[:100])
+        return await self._client.send_message(message, session_key=self._get_session_key())
 
     async def handle(
         self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
         """Forward message to OpenClaw, relay streamed deltas, send end frame."""
-        logger.info("Sending to OpenClaw: %s", message[:100])
-        stream = await self._client.send_message(message)
+        stream = await self.start_stream(message)
 
         await send_frame({"type": "status", "status": "streaming"})
 
@@ -118,6 +179,10 @@ class GatewaySession:
         transcriber: Transcriber | None = None,
         timeout: int = 120,
         local_audio: bool = False,
+        history_limit: int = 10,
+        session_key: str = "agent:claw:g2",
+        agent_id: str = "claw",
+        server: GatewayServer | None = None,
     ) -> None:
         self.ws = ws
         self._state = SessionState.IDLE
@@ -128,6 +193,13 @@ class GatewaySession:
         self._recording_start: float | None = None
         self._local_audio = local_audio
         self._local_stream: Any = None  # sounddevice.InputStream when active
+        self._history_limit = history_limit
+        self._session_key = session_key
+        self._agent_id = agent_id
+        self._current_question: str | None = None
+        self._task_start: float | None = None
+        self._server: GatewayServer | None = server
+        self._on_ready: Callable[[], Awaitable[None]] | None = None
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
@@ -145,9 +217,81 @@ class GatewaySession:
             finally:
                 self._local_stream = None
 
+    async def _send_history(self) -> None:
+        """Send recent conversation history. Best-effort."""
+        try:
+            from gateway.session_history import read_history
+
+            entries = read_history(
+                session_key=self._session_key,
+                agent_id=self._agent_id,
+                limit=self._history_limit,
+            )
+            await self.send_frame(
+                {
+                    "type": "history",
+                    "entries": [
+                        {"role": e.role, "text": e.text[:2000], "ts": e.ts} for e in entries
+                    ],
+                }
+            )
+            logger.info("Sent %d history entries to client", len(entries))
+        except Exception:
+            logger.warning("Failed to send history — continuing without it", exc_info=True)
+
+    def _phase_description(self) -> str | None:
+        """Return a human-readable description of the current processing phase."""
+        match self._state:
+            case SessionState.IDLE:
+                return None
+            case SessionState.RECORDING:
+                return "Recording audio"
+            case SessionState.TRANSCRIBING:
+                return "Transcribing audio"
+            case SessionState.THINKING:
+                return "Waiting for OpenClaw"
+            case SessionState.STREAMING:
+                return "Streaming response"
+
+    def _build_status_frame(self, *, include_metadata: bool = False) -> dict[str, Any]:
+        """Build a status frame, optionally including task metadata."""
+        frame: dict[str, Any] = {"type": "status", "status": self._state.value}
+        if include_metadata:
+            if self._current_question:
+                frame["question"] = self._current_question[:200]
+            if self._task_start is not None:
+                elapsed = asyncio.get_running_loop().time() - self._task_start
+                frame["elapsedMs"] = int(elapsed * 1000)
+            phase = self._phase_description()
+            if phase:
+                frame["phase"] = phase
+        return frame
+
+    async def _handle_status_request(self) -> None:
+        """Respond with current status and optional task metadata."""
+        frame = self._build_status_frame(include_metadata=True)
+        await self.send_frame(frame)
+
     async def handle(self) -> None:
-        await self.send_frame({"type": "connected", "version": "1.0"})
+        connected_frame: dict[str, Any] = {"type": "connected", "version": "1.0"}
+        meta = resolve_session(
+            session_key=self._session_key,
+            agent_id=self._agent_id,
+        )
+        if meta is not None:
+            connected_frame["sessionId"] = meta.session_id
+            connected_frame["sessionKey"] = meta.session_key
+            if meta.updated_at:
+                connected_frame["sessionStartedAt"] = meta.updated_at
+        await self.send_frame(connected_frame)
+
+        await self._send_history()
+
         await self.send_frame({"type": "status", "status": "idle"})
+
+        # Allow server to replay buffered response
+        if self._on_ready:
+            await self._on_ready()
 
         async for message in self.ws:
             if isinstance(message, bytes):
@@ -206,6 +350,20 @@ class GatewaySession:
                 )
                 return
             await self._handle_stop_audio(frame)
+        elif frame_type == "status_request":
+            await self._handle_status_request()
+        elif frame_type == "reset_session":
+            if self._state != SessionState.IDLE:
+                await self.send_frame(
+                    {
+                        "type": "error",
+                        "detail": "Cannot reset session while busy",
+                        "code": ErrorCode.INVALID_STATE,
+                    }
+                )
+                return
+            if self._server is not None:
+                await self._server.reset_session("user_request")
         else:
             await self.send_frame(
                 {
@@ -229,7 +387,7 @@ class GatewaySession:
             return
         # M-4: recording timeout
         if self._recording_start is not None:
-            elapsed = asyncio.get_event_loop().time() - self._recording_start
+            elapsed = asyncio.get_running_loop().time() - self._recording_start
             if elapsed > _MAX_RECORDING_SECONDS:
                 logger.warning(
                     "Recording exceeded %ss limit — auto-stopping", _MAX_RECORDING_SECONDS
@@ -237,6 +395,8 @@ class GatewaySession:
                 self._audio_buffer.reset()
                 self._recording_start = None
                 self._state = SessionState.IDLE
+                self._current_question = None
+                self._task_start = None
                 await self.send_frame(
                     {
                         "type": "error",
@@ -252,6 +412,8 @@ class GatewaySession:
             logger.error("Audio buffer overflow: %s", exc)
             self._audio_buffer.reset()
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -265,6 +427,8 @@ class GatewaySession:
             if self._audio_buffer is not None:
                 self._audio_buffer.reset()
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -321,7 +485,7 @@ class GatewaySession:
             channels=channels,
             sample_width=sample_width,
         )
-        self._recording_start = asyncio.get_event_loop().time()
+        self._recording_start = asyncio.get_running_loop().time()
         self._state = SessionState.RECORDING
 
         # Start local mic capture when --local-audio is enabled
@@ -360,6 +524,7 @@ class GatewaySession:
         # Stop local mic stream if active
         self._stop_local_stream()
 
+        self._task_start = asyncio.get_running_loop().time()
         self._state = SessionState.TRANSCRIBING
         self._recording_start = None
         await self.send_frame({"type": "status", "status": "transcribing"})
@@ -388,6 +553,8 @@ class GatewaySession:
             except Exception:
                 logger.exception("HIL TTS synthesis failed")
                 self._state = SessionState.IDLE
+                self._current_question = None
+                self._task_start = None
                 await self.send_frame(
                     {
                         "type": "error",
@@ -403,6 +570,8 @@ class GatewaySession:
 
         if buf is None or buf.is_empty:
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -416,6 +585,8 @@ class GatewaySession:
         if self._transcriber is None:
             logger.warning("No transcriber configured — skipping transcription")
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -461,6 +632,8 @@ class GatewaySession:
         except TranscriptionError as exc:
             logger.error("Transcription failed: %s", exc)
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -473,6 +646,8 @@ class GatewaySession:
         except TimeoutError:
             logger.error("Transcription timed out")
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -485,6 +660,8 @@ class GatewaySession:
         except Exception:
             logger.exception("Unexpected transcription error")
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame(
                 {
                     "type": "error",
@@ -499,6 +676,8 @@ class GatewaySession:
         if not text.strip():
             logger.debug("Empty transcription — no speech detected")
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             await self.send_frame({"type": "transcription", "text": ""})
             await self.send_frame(
                 {
@@ -516,8 +695,102 @@ class GatewaySession:
         await self.send_frame({"type": "status", "status": "idle"})
 
     async def _handle_text(self, frame: dict[str, Any]) -> None:
+        self._current_question = frame["message"]
+        self._task_start = asyncio.get_running_loop().time()
+
+        # Clear any stale inflight buffer from a previous request
+        if self._server is not None:
+            await self._server._discard_inflight()
+
         self._state = SessionState.THINKING
         await self.send_frame({"type": "status", "status": "thinking"})
+
+        # If handler supports start_stream, use the buffered background path
+        if self._server is not None and hasattr(self._handler, "start_stream"):
+            try:
+                stream = await asyncio.wait_for(
+                    self._handler.start_stream(frame["message"]),
+                    timeout=self._timeout,
+                )
+            except TimeoutError:
+                logger.error("OpenClaw request timed out")
+                await self._handler.close()
+                try:
+                    await self.send_frame(
+                        {
+                            "type": "error",
+                            "detail": f"Agent cycle exceeded {self._timeout}s timeout",
+                            "code": ErrorCode.TIMEOUT,
+                        }
+                    )
+                except Exception:
+                    logger.debug("Failed to send timeout error frame", exc_info=True)
+                self._state = SessionState.IDLE
+                self._current_question = None
+                self._task_start = None
+                try:
+                    await self.send_frame({"type": "status", "status": "idle"})
+                except Exception:
+                    logger.debug("Failed to send idle status on cleanup", exc_info=True)
+                return
+            except OpenClawError as exc:
+                logger.error("OpenClaw error: %s", exc)
+                await self._handler.close()
+                try:
+                    await self.send_frame(
+                        {
+                            "type": "error",
+                            "detail": "Agent communication error",
+                            "code": ErrorCode.OPENCLAW_ERROR,
+                        }
+                    )
+                except Exception:
+                    logger.debug("Failed to send OpenClaw error frame", exc_info=True)
+                self._state = SessionState.IDLE
+                self._current_question = None
+                self._task_start = None
+                try:
+                    await self.send_frame({"type": "status", "status": "idle"})
+                except Exception:
+                    logger.debug("Failed to send idle status on cleanup", exc_info=True)
+                return
+            except Exception:
+                logger.exception("Response handler error")
+                await self._handler.close()
+                try:
+                    await self.send_frame(
+                        {
+                            "type": "error",
+                            "detail": "Response processing failed",
+                            "code": ErrorCode.OPENCLAW_ERROR,
+                        }
+                    )
+                except Exception:
+                    logger.debug("Failed to send handler error frame", exc_info=True)
+                self._state = SessionState.IDLE
+                self._current_question = None
+                self._task_start = None
+                try:
+                    await self.send_frame({"type": "status", "status": "idle"})
+                except Exception:
+                    logger.debug("Failed to send idle status on cleanup", exc_info=True)
+                return
+
+            # Stream obtained — transition to streaming and start background task
+            self._state = SessionState.STREAMING
+            await self.send_frame({"type": "status", "status": "streaming"})
+
+            buffer = InflightBuffer(user_question=frame["message"])
+            self._server._inflight_buffer = buffer
+            self._server._inflight_task = asyncio.create_task(
+                self._server._run_inflight_stream(stream, buffer),
+                name="inflight-stream",
+            )
+            # Don't await — task runs independently. Session stays in STREAMING.
+            # The background task will transition to IDLE when done.
+            return
+
+        # Fallback: original synchronous path for mock/other handlers
         try:
             await asyncio.wait_for(
                 self._handler.handle(frame["message"], self.send_frame),
@@ -564,6 +837,8 @@ class GatewaySession:
                 logger.debug("Failed to send handler error frame", exc_info=True)
         finally:
             self._state = SessionState.IDLE
+            self._current_question = None
+            self._task_start = None
             try:
                 await self.send_frame({"type": "status", "status": "idle"})
             except Exception:
@@ -582,6 +857,11 @@ class GatewayServer:
         self.config = config
         self._transcriber = transcriber
         self._current_session: GatewaySession | None = None
+        self._inflight_buffer: InflightBuffer | None = None
+        self._inflight_task: asyncio.Task[None] | None = None
+        self._session_key: str = "agent:claw:g2"
+        self._session_date: str = _today_utc()
+        self._pending_reset_reason: str | None = None
 
         if handler is not None:
             self._handler: ResponseHandler = handler
@@ -591,7 +871,9 @@ class GatewayServer:
                 port=config.openclaw_port,
                 token=config.openclaw_gateway_token,
             )
-            self._handler = OpenClawResponseHandler(client)
+            self._handler = OpenClawResponseHandler(
+                client, get_session_key=lambda: self._session_key
+            )
         else:
             self._handler = MockResponseHandler()
 
@@ -629,13 +911,21 @@ class GatewayServer:
                 return
 
         # --- replace existing session (single-connection model) ---
+        # Check for daily session reset before creating session
+        await self._check_daily_reset()
+
         session = GatewaySession(
             ws,
             self._handler,
             self._transcriber,
             timeout=self.config.agent_timeout,
             local_audio=self.config.local_audio,
+            history_limit=self.config.history_limit,
+            session_key=self._session_key,
+            agent_id=self.config.openclaw_agent_id,
+            server=self,
         )
+        session._on_ready = lambda: self._on_session_ready(session)
         old_session = self._current_session
         self._current_session = session  # claim the slot first
         if old_session is not None:
@@ -655,6 +945,197 @@ class GatewayServer:
             session._stop_local_stream()
             if self._current_session is session:
                 self._current_session = None
+            # NOTE: Do NOT cancel _inflight_task — it must finish draining
+
+    async def reset_session(self, reason: str) -> None:
+        """Generate a new session key and notify the connected client."""
+        old_key = self._session_key
+        self._session_key = _generate_session_key()
+        self._session_date = _today_utc()
+        logger.info("Session reset (%s): %s → %s", reason, old_key, self._session_key)
+
+        await self._discard_inflight()
+        await self._handler.close()
+
+        if self._current_session is not None:
+            try:
+                await self._current_session.send_frame(
+                    {
+                        "type": "session_reset",
+                        "reason": reason,
+                    }
+                )
+            except Exception:
+                logger.debug("Failed to send session_reset frame", exc_info=True)
+
+    async def _check_daily_reset(self) -> None:
+        """Check if the date has rolled over since the last interaction."""
+        today = _today_utc()
+        if today != self._session_date:
+            logger.info(
+                "Date rolled over: %s → %s — triggering daily reset",
+                self._session_date,
+                today,
+            )
+            old_key = self._session_key
+            self._session_key = _generate_session_key()
+            self._session_date = today
+            await self._handler.close()
+            self._pending_reset_reason = "daily_reset"
+            logger.info("Daily session reset: %s → %s", old_key, self._session_key)
+
+    async def _on_session_ready(self, session: GatewaySession) -> None:
+        """Called after session sends connected+history+idle."""
+        if session is not self._current_session:
+            return
+
+        # Send pending reset notification
+        if self._pending_reset_reason is not None:
+            try:
+                await session.send_frame(
+                    {
+                        "type": "session_reset",
+                        "reason": self._pending_reset_reason,
+                    }
+                )
+            except Exception:
+                logger.debug("Failed to send pending session_reset", exc_info=True)
+            self._pending_reset_reason = None
+
+        # Replay inflight buffer
+        try:
+            await self._replay_inflight(session)
+        except Exception:
+            logger.exception("Failed to replay inflight buffer")
+            self._inflight_buffer = None
+
+    async def _run_inflight_stream(
+        self,
+        stream: AsyncIterator[str],
+        buffer: InflightBuffer,
+    ) -> None:
+        """Consume the OpenClaw stream into buffer, forwarding to phone if connected.
+
+        Safety: all state mutations here are safe because asyncio.create_task
+        runs on the same event loop — there are no true concurrent accesses,
+        only interleaved execution at await points.
+        """
+        try:
+            async for delta in stream:
+                if not buffer.append_delta(delta):
+                    logger.warning(
+                        "Inflight buffer exceeded %d chars — truncating", _BUFFER_MAX_CHARS
+                    )
+
+                session = self._current_session
+                if session is not None:
+                    try:
+                        await session.send_frame({"type": "assistant", "delta": delta})
+                    except Exception:
+                        logger.info("Phone disconnected mid-stream — continuing to buffer")
+            buffer.complete = True
+        except OpenClawError as exc:
+            buffer.error = str(exc)
+            logger.error("OpenClaw error during inflight stream: %s", exc)
+        except asyncio.CancelledError:
+            raise  # let cancellation propagate
+        except Exception:
+            buffer.error = "internal error"
+            logger.exception("Unexpected error during inflight stream")
+        finally:
+            session = self._current_session
+            if session is not None and buffer.complete and self._inflight_buffer is buffer:
+                try:
+                    await session.send_frame({"type": "end"})
+                    session._state = SessionState.IDLE
+                    session._current_question = None
+                    session._task_start = None
+                    await session.send_frame({"type": "status", "status": "idle"})
+                except Exception:
+                    pass
+            elif session is not None and buffer.error and self._inflight_buffer is buffer:
+                try:
+                    await session.send_frame(
+                        {
+                            "type": "error",
+                            "detail": f"Agent error: {buffer.error}",
+                            "code": ErrorCode.OPENCLAW_ERROR,
+                        }
+                    )
+                    session._state = SessionState.IDLE
+                    session._current_question = None
+                    session._task_start = None
+                    await session.send_frame({"type": "status", "status": "idle"})
+                except Exception:
+                    pass
+
+            if (
+                session is not None
+                and (buffer.complete or buffer.error)
+                and self._inflight_buffer is buffer
+            ):
+                self._inflight_buffer = None
+            self._inflight_task = None
+
+    async def _replay_inflight(self, session: GatewaySession) -> None:
+        """Replay a buffered inflight response to the reconnected phone."""
+        buf = self._inflight_buffer
+        if buf is None or buf.expired:
+            self._inflight_buffer = None
+            return
+
+        if buf.error:
+            await session.send_frame(
+                {
+                    "type": "error",
+                    "detail": f"Previous response failed: {buf.error}",
+                    "code": ErrorCode.OPENCLAW_ERROR,
+                }
+            )
+            session._state = SessionState.IDLE
+            session._current_question = None
+            session._task_start = None
+            self._inflight_buffer = None
+            return
+
+        if buf.complete:
+            await session.send_frame({"type": "status", "status": "streaming"})
+            session._state = SessionState.STREAMING
+            await session.send_frame({"type": "assistant", "delta": buf.full_text})
+            await session.send_frame({"type": "end"})
+            session._state = SessionState.IDLE
+            session._current_question = None
+            session._task_start = None
+            await session.send_frame({"type": "status", "status": "idle"})
+            self._inflight_buffer = None
+            return
+
+        # Still streaming — splice
+        await self._splice_inflight(session, buf)
+
+    async def _splice_inflight(self, session: GatewaySession, buf: InflightBuffer) -> None:
+        """Splice buffered deltas with the live stream for a reconnecting phone."""
+        await session.send_frame({"type": "status", "status": "streaming"})
+        session._state = SessionState.STREAMING
+        session._current_question = buf.user_question
+        session._task_start = asyncio.get_running_loop().time()
+        if buf.full_text:
+            await session.send_frame({"type": "assistant", "delta": buf.full_text})
+        # The background task will forward new deltas to the new _current_session
+
+    async def _discard_inflight(self) -> None:
+        """Cancel any in-flight stream and discard the buffer.
+
+        Clears references BEFORE cancelling to prevent the cancelled task's
+        finally block from clobbering a replacement task.
+        """
+        old_task = self._inflight_task
+        self._inflight_task = None
+        self._inflight_buffer = None
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await old_task
 
     async def _process_request(
         self,

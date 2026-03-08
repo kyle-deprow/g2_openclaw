@@ -122,4 +122,185 @@ describe('parseFrame', () => {
     const frame = parseFrame('{"type":"end","reason":"done"}');
     expect(frame.type).toBe('end');
   });
+
+  // --- Status frame with optional metadata ---
+  it('parses status frame with optional metadata fields', () => {
+    const frame = parseFrame(
+      '{"type":"status","status":"thinking","question":"What is 2+2?","elapsedMs":1234,"phase":"Waiting for OpenClaw"}',
+    );
+    expect(frame).toEqual({
+      type: 'status',
+      status: 'thinking',
+      question: 'What is 2+2?',
+      elapsedMs: 1234,
+      phase: 'Waiting for OpenClaw',
+    });
+  });
+
+  it('parses status frame without metadata (backward compat)', () => {
+    const frame = parseFrame('{"type":"status","status":"idle"}');
+    expect(frame).toEqual({ type: 'status', status: 'idle' });
+    expect((frame as Record<string, unknown>).question).toBeUndefined();
+    expect((frame as Record<string, unknown>).elapsedMs).toBeUndefined();
+    expect((frame as Record<string, unknown>).phase).toBeUndefined();
+  });
+
+  it('ignores wrong-type optional metadata on status frame', () => {
+    const frame = parseFrame(
+      '{"type":"status","status":"idle","question":123,"elapsedMs":"slow","phase":true}',
+    );
+    expect(frame).toEqual({ type: 'status', status: 'idle' });
+  });
+
+  // --- Session reset frame ---
+  it('parses a valid session_reset frame', () => {
+    const frame = parseFrame('{"type":"session_reset","reason":"user_request"}');
+    expect(frame).toEqual({ type: 'session_reset', reason: 'user_request' });
+  });
+
+  it('parses session_reset with daily_reset reason', () => {
+    const frame = parseFrame('{"type":"session_reset","reason":"daily_reset"}');
+    expect(frame).toEqual({ type: 'session_reset', reason: 'daily_reset' });
+  });
+
+  it('throws when session_reset is missing reason', () => {
+    expect(() => parseFrame('{"type":"session_reset"}')).toThrow(
+      'Frame type "session_reset" missing required field "reason"',
+    );
+  });
+
+  it('throws when session_reset reason has wrong type', () => {
+    expect(() => parseFrame('{"type":"session_reset","reason":123}')).toThrow(
+      'Field "reason" must be string',
+    );
+  });
+
+  // --- History frame ---
+  it('parses a valid history frame with entries', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'history',
+      entries: [
+        { role: 'user', text: 'Hello', ts: 1000 },
+        { role: 'assistant', text: 'Hi there', ts: 2000 },
+      ],
+    }));
+    expect(frame).toEqual({
+      type: 'history',
+      entries: [
+        { role: 'user', text: 'Hello', ts: 1000 },
+        { role: 'assistant', text: 'Hi there', ts: 2000 },
+      ],
+    });
+  });
+
+  it('parses a history frame with empty entries array', () => {
+    const frame = parseFrame('{"type":"history","entries":[]}');
+    expect(frame).toEqual({ type: 'history', entries: [] });
+  });
+
+  it('throws when history frame is missing entries field', () => {
+    expect(() => parseFrame('{"type":"history"}')).toThrow(
+      'Frame type "history" missing required field "entries"',
+    );
+  });
+
+  it('throws when history.entries is a string', () => {
+    expect(() => parseFrame('{"type":"history","entries":"not-array"}')).toThrow(
+      'Field "entries" must be object',
+    );
+  });
+
+  it('throws when history.entries is a plain object (not an array)', () => {
+    expect(() => parseFrame('{"type":"history","entries":{"0":"bad"}}')).toThrow(
+      'history.entries must be an array',
+    );
+  });
+
+  // --- Connected frame with optional session fields ---
+  it('parses connected frame with optional sessionId/sessionKey/sessionStartedAt', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'connected',
+      version: '2.1.0',
+      sessionId: 'sess-abc123',
+      sessionKey: 'key-xyz',
+      sessionStartedAt: '2026-03-07T10:00:00Z',
+    }));
+    expect(frame).toEqual({
+      type: 'connected',
+      version: '2.1.0',
+      sessionId: 'sess-abc123',
+      sessionKey: 'key-xyz',
+      sessionStartedAt: '2026-03-07T10:00:00Z',
+    });
+  });
+
+  it('parses connected frame without optional fields (backward compat)', () => {
+    const frame = parseFrame('{"type":"connected","version":"1.0.0"}');
+    expect(frame).toEqual({ type: 'connected', version: '1.0.0' });
+    expect((frame as Record<string, unknown>).sessionId).toBeUndefined();
+    expect((frame as Record<string, unknown>).sessionKey).toBeUndefined();
+    expect((frame as Record<string, unknown>).sessionStartedAt).toBeUndefined();
+  });
+
+  it('silently drops optional connected fields with wrong type', () => {
+    const frame = parseFrame(
+      '{"type":"connected","version":"1.0.0","sessionId":123,"sessionKey":true}',
+    );
+    expect(frame).toEqual({ type: 'connected', version: '1.0.0' });
+    expect((frame as Record<string, unknown>).sessionId).toBeUndefined();
+  });
+
+  // --- Status frame with optional question/elapsedMs/phase ---
+  it('parses status frame with question and elapsedMs', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'status',
+      status: 'thinking',
+      question: 'What time is it?',
+      elapsedMs: 500,
+    }));
+    expect(frame).toEqual({
+      type: 'status',
+      status: 'thinking',
+      question: 'What time is it?',
+      elapsedMs: 500,
+    });
+  });
+
+  it('parses status frame with phase only', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'status',
+      status: 'streaming',
+      phase: 'Generating response',
+    }));
+    expect(frame).toEqual({
+      type: 'status',
+      status: 'streaming',
+      phase: 'Generating response',
+    });
+  });
+
+  // --- Outbound-only type rejection ---
+  it('rejects text as inbound frame type', () => {
+    expect(() => parseFrame('{"type":"text","message":"hi"}')).toThrow(
+      'Unknown frame type: text',
+    );
+  });
+
+  it('rejects pong as inbound frame type', () => {
+    expect(() => parseFrame('{"type":"pong"}')).toThrow(
+      'Unknown frame type: pong',
+    );
+  });
+
+  it('rejects start_audio as inbound frame type', () => {
+    expect(() => parseFrame('{"type":"start_audio","sampleRate":16000,"channels":1,"sampleWidth":2}')).toThrow(
+      'Unknown frame type: start_audio',
+    );
+  });
+
+  it('rejects reset_session as inbound frame type', () => {
+    expect(() => parseFrame('{"type":"reset_session"}')).toThrow(
+      'Unknown frame type: reset_session',
+    );
+  });
 });

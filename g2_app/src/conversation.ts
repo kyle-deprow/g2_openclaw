@@ -72,6 +72,8 @@ export class ConversationHistory {
           return stripMarkdown(entry.text) || '...';
         case 'system':
           return `[${entry.text}]`;
+        default:
+          return `[${entry.text}]`;
       }
     }).join(SEPARATOR);
   }
@@ -90,6 +92,41 @@ export class ConversationHistory {
     // Skip past any separator characters at the boundary
     while (start < tail.length && '─ \n'.includes(tail[start])) start++;
     return '…\n' + tail.slice(start);
+  }
+
+  /**
+   * Format the conversation in reverse chronological order (newest first).
+   * The G2 firmware always starts scroll at the top, so reverse order
+   * ensures the most recent messages are immediately visible.
+   * Trims from the end (oldest messages) when exceeding the character budget.
+   */
+  formatReverse(charLimit: number): string {
+    if (this.entries.length === 0) {
+      return 'Ready.';
+    }
+    const reversed = [...this.entries].reverse();
+    const full = reversed.map((entry) => {
+      switch (entry.role) {
+        case 'user':
+          return `» ${entry.text}`;
+        case 'assistant':
+          return stripMarkdown(entry.text) || '...';
+        case 'system':
+          return `[${entry.text}]`;
+        default:
+          return `[${entry.text}]`;
+      }
+    }).join(SEPARATOR);
+
+    if (full.length <= charLimit) return full;
+    // Over budget — trim oldest (end of reversed string)
+    const trimmed = full.slice(0, charLimit);
+    const lastNewline = trimmed.lastIndexOf('\n');
+    if (lastNewline <= 0) return trimmed + '…';
+    // Find the clean boundary before separator chars
+    let end = lastNewline;
+    while (end > 0 && '─ \n'.includes(trimmed[end - 1])) end--;
+    return trimmed.slice(0, end) + '\n…';
   }
 
   /** Get the formatted text for the last assistant entry only. */
@@ -116,5 +153,18 @@ export class ConversationHistory {
 
   clear(): void {
     this.entries = [];
+  }
+
+  /** Replace all entries with history from the gateway. */
+  replayHistory(entries: Array<{ role: 'user' | 'assistant'; text: string; ts: number }>): void {
+    this.clear();
+    for (const entry of entries) {
+      this.entries.push({
+        role: entry.role,
+        text: entry.text,
+        timestamp: entry.ts,
+      });
+    }
+    this._trim();
   }
 }

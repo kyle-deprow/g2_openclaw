@@ -202,6 +202,11 @@ export class Gateway {
     }
   }
 
+  /** Request current task status from gateway */
+  requestStatus(): void {
+    this.sendJson({ type: 'status_request' });
+  }
+
   onMessage(cb: FrameCallback): void {
     this.frameCallbacks.push(cb);
   }
