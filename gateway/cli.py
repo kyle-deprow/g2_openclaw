@@ -474,7 +474,7 @@ def _wait_for_port(
         if _is_port_open(port, host):
             elapsed = time.monotonic() - start
             console.print(
-                f"  [green]✓[/green] {label} ready on port {port}" f"  [dim]({elapsed:.0f}s)[/dim]"
+                f"  [green]✓[/green] {label} ready on port {port}  [dim]({elapsed:.0f}s)[/dim]"
             )
             return
         now = time.monotonic()
@@ -743,6 +743,11 @@ _local_audio_option = typer.Option(
     "--local-audio",
     help="Capture audio from the local mic instead of receiving it over WebSocket.",
 )
+_restart_option = typer.Option(
+    False,
+    "--restart",
+    help="Stop all running services before launching.",
+)
 
 
 @app.command()
@@ -752,8 +757,15 @@ def launch(
     no_openclaw: bool = _no_openclaw_daemon_option,
     list_audio_devices: bool = _list_audio_devices_option,
     local_audio: bool = _local_audio_option,
+    restart: bool = _restart_option,
 ) -> None:
     """Start the gateway, G2 dev server, and simulator together."""
+
+    # -- Restart: stop everything first ---------------------------------------
+    if restart:
+        console.print("[bold]Stopping existing services…[/bold]\n")
+        stop()
+        console.print()  # blank line before launch output
 
     # -- List audio devices shortcut -------------------------------------------
     if list_audio_devices:
@@ -871,23 +883,10 @@ def launch(
             gw_env = {**os.environ}
             if local_audio:
                 gw_env["G2_LOCAL_AUDIO"] = "true"
-            # Ensure CUDA libraries are discoverable by the gateway subprocess
-            _cuda_lib_dirs = [
-                p
-                for p in (Path.home() / ".cache" / "uv",)
-                if p.exists()
-                for p in p.rglob("nvidia")
-                if p.is_dir()
-                for p in (p / "cublas" / "lib", p / "cudnn" / "lib")
-                if p.is_dir()
-            ]
-            if _cuda_lib_dirs:
-                _existing_ld = gw_env.get("LD_LIBRARY_PATH", "")
-                _cuda_paths = ":".join(str(d) for d in _cuda_lib_dirs)
-                gw_env["LD_LIBRARY_PATH"] = (
-                    f"{_cuda_paths}:{_existing_ld}" if _existing_ld else _cuda_paths
-                )
-                console.print(f"  [dim]LD_LIBRARY_PATH += {len(_cuda_lib_dirs)} CUDA dirs[/dim]")
+            # NOTE: Do NOT modify LD_LIBRARY_PATH here — the gateway server
+            # loads CUDA libs via ctypes.CDLL in _setup_cuda_library_paths().
+            # Setting LD_LIBRARY_PATH with uv-cached .so paths causes SIGBUS
+            # on startup due to library version conflicts.
             gw_proc = subprocess.Popen(
                 [sys.executable, "-m", "gateway"],
                 cwd=str(_PROJECT_ROOT),
@@ -960,7 +959,7 @@ def launch(
 
         # -- Summary ---------------------------------------------------------------
         rows = [
-            f"[bold]OpenClaw:[/bold]    ws://127.0.0.1:{openclaw_port}" "  (systemd)",
+            f"[bold]OpenClaw:[/bold]    ws://127.0.0.1:{openclaw_port}  (systemd)",
             f"[bold]Gateway:[/bold]     {gateway_url}"
             f"  ({'spawned' if gateway_started_by_us else 'pre-existing'})",
             f"[bold]Dev server:[/bold]  http://localhost:{vite_port}"
