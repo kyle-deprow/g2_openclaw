@@ -126,10 +126,26 @@ def load_config() -> GatewayConfig:
             "Set GATEWAY_TOKEN to a strong random value for production use."
         )
     elif cfg.gateway_token in _WEAK_TOKENS:
+        if cfg.gateway_host not in _LOOPBACK_HOSTS:
+            raise ValueError(
+                f"GATEWAY_TOKEN is set to a weak/common value and the gateway is "
+                f"listening on {cfg.gateway_host}. Generate a strong token: "
+                'python -c "import secrets; print(secrets.token_hex(24))"'
+            )
         logger.warning(
             "GATEWAY_TOKEN is set to a weak value. "
             'Generate a strong token, e.g.: python -c "import secrets;'
             ' print(secrets.token_urlsafe(32))"'
+        )
+    elif len(cfg.gateway_token) < 16:
+        if cfg.gateway_host not in _LOOPBACK_HOSTS:
+            raise ValueError(
+                f"GATEWAY_TOKEN is too short ({len(cfg.gateway_token)} chars). "
+                "Use at least 16 characters for a non-loopback host. "
+                'Generate one: python -c "import secrets; print(secrets.token_hex(24))"'
+            )
+        logger.warning(
+            "GATEWAY_TOKEN is shorter than 16 characters — consider using a longer token."
         )
 
     return cfg

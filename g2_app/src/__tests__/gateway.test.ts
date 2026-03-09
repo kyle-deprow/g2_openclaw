@@ -164,6 +164,26 @@ describe('Gateway', () => {
       window.location.hash = '#http://localhost:8765';
       expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
     });
+
+    it('accepts ws:// to Tailscale CGNAT IPs (100.64-127.x.x)', () => {
+      window.location.hash = '#ws://100.100.50.1:8765';
+      expect(gateway.resolveUrl()).toBe('ws://100.100.50.1:8765');
+    });
+
+    it('accepts ws:// to Tailscale lower-bound IP (100.64.0.1)', () => {
+      window.location.hash = '#ws://100.64.0.1:8765';
+      expect(gateway.resolveUrl()).toBe('ws://100.64.0.1:8765');
+    });
+
+    it('rejects ws:// to non-Tailscale 100.x IPs outside CGNAT range', () => {
+      window.location.hash = '#ws://100.63.0.1:8765';
+      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+    });
+
+    it('rejects ws:// to 100.128.x.x (above CGNAT range)', () => {
+      window.location.hash = '#ws://100.128.0.1:8765';
+      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+    });
   });
 
   describe('connect + onopen emits connected', () => {

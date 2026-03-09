@@ -48,6 +48,30 @@ _MAX_RECORDING_SECONDS = 90
 _BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
 _BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
 
+# --- Auth rate limiting ---
+_AUTH_MAX_FAILURES = 5
+_AUTH_WINDOW_SECONDS = 60
+_auth_failures: dict[str, list[float]] = {}
+
+
+def _check_auth_rate_limit(remote_ip: str) -> bool:
+    """Return True if the IP is rate-limited (too many failed attempts)."""
+    now = _time_module.monotonic()
+    attempts = _auth_failures.get(remote_ip, [])
+    # Prune old attempts outside the window
+    attempts = [t for t in attempts if now - t < _AUTH_WINDOW_SECONDS]
+    _auth_failures[remote_ip] = attempts
+    return len(attempts) >= _AUTH_MAX_FAILURES
+
+
+def _record_auth_failure(remote_ip: str) -> None:
+    """Record a failed auth attempt for rate limiting."""
+    now = _time_module.monotonic()
+    attempts = _auth_failures.setdefault(remote_ip, [])
+    attempts.append(now)
+    # Prune to keep only recent attempts
+    _auth_failures[remote_ip] = [t for t in attempts if now - t < _AUTH_WINDOW_SECONDS]
+
 
 def _generate_session_key() -> str:
     """Generate a new unique session key."""
@@ -966,6 +990,13 @@ class GatewayServer:
         """Handle a new WebSocket connection."""
         # --- token auth ---
         if self.config.gateway_token:
+            # Rate limit check
+            remote_ip = ws.remote_address[0] if ws.remote_address else "unknown"
+            if _check_auth_rate_limit(remote_ip):
+                logger.warning("Auth rate limit exceeded for %s", remote_ip)
+                await ws.close(4029, "Too Many Requests")
+                return
+
             # Deprecation warning for query-string token
             if ws.request is not None:
                 query = parse_qs(urlparse(ws.request.path).query)
@@ -992,6 +1023,8 @@ class GatewayServer:
                 pass
 
             if not authenticated:
+                _record_auth_failure(remote_ip)
+                logger.warning("Auth failed for %s", remote_ip)
                 await ws.close(4001, "Unauthorized")
                 return
 

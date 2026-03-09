@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "copilot": {
+      "command": "npx",
+      "args": ["tsx", "copilot_bridge/src/mcp-server.ts"]
+    }
+  }
+}

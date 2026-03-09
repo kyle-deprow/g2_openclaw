@@ -184,6 +184,8 @@ class TestSecurityConfig:
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Weak token warning must not leak the actual token value."""
+        monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.setenv("GATEWAY_TOKEN", "changeme")
 
         import logging
@@ -194,6 +196,40 @@ class TestSecurityConfig:
         assert cfg.gateway_token == "changeme"
         assert "weak value" in caplog.text
         assert "changeme" not in caplog.text
+
+    def test_weak_token_non_loopback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Weak token on non-loopback host raises ValueError."""
+        monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setenv("GATEWAY_HOST", "0.0.0.0")
+        monkeypatch.setenv("GATEWAY_TOKEN", "changeme")
+
+        with pytest.raises(ValueError, match="weak/common value"):
+            load_config()
+
+    def test_short_token_non_loopback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Short token on non-loopback host raises ValueError."""
+        monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setenv("GATEWAY_HOST", "10.0.0.1")
+        monkeypatch.setenv("GATEWAY_TOKEN", "abc123")
+
+        with pytest.raises(ValueError, match="too short"):
+            load_config()
+
+    def test_short_token_loopback_warns(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Short token on loopback host logs a warning but does not raise."""
+        monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
+        monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
+        monkeypatch.setenv("GATEWAY_TOKEN", "short")
+
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            cfg = load_config()
+
+        assert cfg.gateway_token == "short"
+        assert "shorter than 16" in caplog.text
 
     def test_parse_int_env_invalid_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-integer GATEWAY_PORT raises clear ValueError."""

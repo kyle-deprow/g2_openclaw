@@ -17,6 +17,8 @@ function isPrivateHost(hostname: string): boolean {
   if (a === 127 || a === 10) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
+  // Tailscale CGNAT range: 100.64.0.0/10 (a=100, second octet 64-127)
+  if (a === 100 && b >= 64 && b <= 127) return true;
   return false;
 }
 

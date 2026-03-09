@@ -234,6 +234,60 @@ See `infra/parameters/dev.bicepparam` for the deployment parameters.
 
 ---
 
+### 7. Remote Access via Tailscale (optional — use G2 glasses anywhere)
+
+By default the gateway only serves your local WiFi network. Tailscale creates an encrypted mesh VPN so your iPhone can reach the gateway from any network — coffee shop, office, mobile data — without exposing ports to the internet.
+
+#### 7a. Install Tailscale
+
+Install on **both** your PC and iPhone:
+
+- **Linux PC:** `curl -fsSL https://tailscale.com/install.sh | sh && sudo tailscale up`
+- **iPhone:** Install [Tailscale from the App Store](https://apps.apple.com/app/tailscale/id1470499037) and sign in with the same account
+
+Verify connectivity:
+
+```bash
+# On your PC — shows your Tailscale IP (e.g., 100.x.y.z)
+tailscale ip -4
+```
+
+#### 7b. Re-run init-env
+
+The `init-env` command auto-detects Tailscale and writes the remote URL:
+
+```bash
+uv run python -m gateway init-env --force
+```
+
+Check the output — it will show your Tailscale IP and set it as the default `VITE_GATEWAY_URL` in `g2_app/.env.local`.
+
+#### 7c. Verify the generated config
+
+When Tailscale is detected, `init-env` uses the Tailscale IP as the default, with the LAN IP as a commented-out fallback:
+
+```bash
+# Tailscale (default — works from any network):
+VITE_GATEWAY_URL=ws://100.x.y.z:8765?token=abc123...
+
+# LAN fallback (home network only):
+# VITE_GATEWAY_URL=ws://192.168.1.100:8765?token=abc123...
+```
+
+Rebuild and redeploy the G2 app. Traffic is encrypted inside the Tailscale tunnel, so `ws://` (not `wss://`) is safe. To fall back to LAN, swap which line is commented out.
+
+#### 7d. Security notes
+
+- **No port forwarding required** — Tailscale uses NAT traversal (WireGuard under the hood)
+- **No public IP exposure** — the gateway is only reachable via the Tailscale mesh
+- **Strong token required** — `init-env` generates a 48-char hex token by default
+- **OpenClaw stays on localhost** — only port 8765 is reachable via Tailscale; OpenClaw (18789) remains loopback-only
+- The G2 app's `isAllowedUrl()` allows `ws://` for Tailscale IPs (100.x.y.z is in the CGNAT range, treated as private)
+
+> **Tip:** Use `tailscale status` to verify both devices are on the same tailnet before troubleshooting connection issues.
+
+---
+
 ## Verify It Works
 
 ### Quick smoke test (gateway only)

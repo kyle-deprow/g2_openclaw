@@ -108,21 +108,20 @@ if [[ -f "${PRELOAD_SRC}" ]]; then
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
 fi
 
-# ── Merge MCP server config ─────────────────────────────────────────────────
-MCP_CONFIG="${REPO_ROOT}/copilot_bridge/openclaw-mcp-config.json"
-if [[ -f "${MCP_CONFIG}" ]]; then
-  CURRENT=$(cat "${LOCAL_CONFIG}")
-  MERGED_MCP=$(echo "${CURRENT}" | jq --slurpfile mcp "${MCP_CONFIG}" '. * $mcp[0]')
-  echo "${MERGED_MCP}" | jq . > "${LOCAL_CONFIG}"
-  echo "Merged MCP config from ${MCP_CONFIG}"
+# ── Deploy MCP server config ────────────────────────────────────────────────
+MCP_SRC="${REPO_ROOT}/copilot_bridge/openclaw-mcp-config.json"
+MCP_DST="${OPENCLAW_HOME}/mcp.json"
+if [[ -f "${MCP_SRC}" ]]; then
+  cp "${MCP_SRC}" "${MCP_DST}"
+  echo "Deployed MCP config → ${MCP_DST}"
 fi
 
 # ── Validate ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Validating config ──"
 if command -v openclaw &>/dev/null; then
-  echo "Running: openclaw models status"
-  openclaw models status || echo "WARNING: 'openclaw models status' returned non-zero."
+  echo "Running: openclaw config validate"
+  openclaw config validate || echo "WARNING: 'openclaw config validate' returned non-zero."
 else
   echo "openclaw CLI not found on PATH — skipping validation."
   echo "Verify manually: openclaw models status"

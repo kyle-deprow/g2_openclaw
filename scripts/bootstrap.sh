@@ -39,11 +39,13 @@ What it does:
   1. Checks system prerequisites (Python ≥3.13, uv, Node.js ≥22, npm)
   2. Installs Python dependencies via uv
   3. Installs TypeScript dependencies (g2_app, copilot_bridge)
-  4. Generates environment config via gateway init-env
-  5. Installs pre-commit hooks
-  6. Optionally installs EvenHub global tools
-  7. Runs smoke tests to verify the Python stack
-  8. Prints a summary of what was set up
+  4. Installs OpenClaw CLI, onboards, and pushes repo config
+  5. Generates environment config via gateway init-env
+  6. Installs pre-commit hooks
+  7. Optionally installs EvenHub global tools
+  8. Checks Tailscale, file permissions, and security posture
+  9. Runs smoke tests to verify the Python stack
+ 10. Prints a summary of what was set up
 EOF
       exit 0
       ;;
@@ -107,7 +109,7 @@ version_gte() {
 # 1. Check system prerequisites
 # ══════════════════════════════════════════════════════════════════════════════
 check_prerequisites() {
-  section "1/7  Checking prerequisites"
+  section "1/9  Checking prerequisites"
   local fatal=false
 
   # ── Python ≥ 3.13 ──────────────────────────────────────────────────────────
@@ -206,7 +208,7 @@ check_prerequisites() {
 # 2. Install Python dependencies
 # ══════════════════════════════════════════════════════════════════════════════
 install_python_deps() {
-  section "2/7  Installing Python dependencies"
+  section "2/9  Installing Python dependencies"
 
   if $HAS_GPU; then
     info "GPU detected — installing with whisper extra"
@@ -224,7 +226,7 @@ install_python_deps() {
 # 3. Install TypeScript dependencies
 # ══════════════════════════════════════════════════════════════════════════════
 install_ts_deps() {
-  section "3/7  Installing TypeScript dependencies"
+  section "3/9  Installing TypeScript dependencies"
 
   if [[ -d "$REPO_ROOT/g2_app" ]]; then
     info "Installing g2_app dependencies..."
@@ -246,10 +248,83 @@ install_ts_deps() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. Generate environment config
+# 4. OpenClaw setup
+# ══════════════════════════════════════════════════════════════════════════════
+setup_openclaw() {
+  section "4/9  OpenClaw setup"
+
+  # --- Check if OpenClaw CLI is installed ---
+  if command -v openclaw &>/dev/null; then
+    local oc_ver
+    oc_ver="$(openclaw --version 2>&1 | head -1 || echo 'unknown')"
+    ok "OpenClaw CLI: $oc_ver"
+  else
+    info "OpenClaw CLI not found"
+    if prompt_yn "Install OpenClaw globally via npm?"; then
+      sudo npm install -g openclaw
+      if command -v openclaw &>/dev/null; then
+        ok "OpenClaw installed: $(openclaw --version 2>&1 | head -1)"
+        summary_add "Installed OpenClaw globally"
+      else
+        warn "OpenClaw installation failed — skipping setup"
+        summary_add "OpenClaw: install failed"
+        return
+      fi
+    else
+      info "Skipped OpenClaw install — gateway will run in mock mode"
+      summary_add "OpenClaw: not installed (mock mode)"
+      return
+    fi
+  fi
+
+  # --- Check if onboarded ---
+  local oc_config="$HOME/.openclaw/openclaw.json"
+  if [[ ! -f "$oc_config" ]]; then
+    info "OpenClaw not onboarded yet (~/.openclaw/openclaw.json not found)"
+    if prompt_yn "Run 'openclaw onboard --local' now?"; then
+      openclaw onboard --local
+      if [[ -f "$oc_config" ]]; then
+        ok "OpenClaw onboarded"
+        summary_add "OpenClaw: onboarded"
+      else
+        warn "Onboarding didn't create config — check output above"
+        summary_add "OpenClaw: onboarding may have failed"
+        return
+      fi
+    else
+      info "Skipped onboarding — run 'openclaw onboard --local' manually"
+      summary_add "OpenClaw: not onboarded"
+      return
+    fi
+  else
+    ok "OpenClaw config found: $oc_config"
+  fi
+
+  # --- Push repo config ---
+  local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"
+  if [[ -f "$push_script" ]]; then
+    if prompt_yn "Push repo OpenClaw config (models, persona, MCP)?"; then
+      if bash "$push_script"; then
+        ok "OpenClaw config pushed"
+        summary_add "OpenClaw: config pushed"
+      else
+        warn "Config push had issues — check output above"
+        summary_add "OpenClaw: config push had warnings"
+      fi
+    else
+      info "Skipped config push — run 'make push-config' manually"
+      summary_add "OpenClaw: config push skipped"
+    fi
+  else
+    warn "push-openclaw-config.sh not found at $push_script"
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. Generate environment config
 # ══════════════════════════════════════════════════════════════════════════════
 generate_env() {
-  section "4/7  Generating environment config"
+  section "5/9  Generating environment config"
 
   # gateway init-env creates .env and g2_app/.env.local (skips if exists)
   if [[ -f "$REPO_ROOT/.env" ]]; then
@@ -278,10 +353,10 @@ generate_env() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. Install pre-commit hooks
+# 6. Install pre-commit hooks
 # ══════════════════════════════════════════════════════════════════════════════
 install_precommit() {
-  section "5/7  Installing pre-commit hooks"
+  section "6/9  Installing pre-commit hooks"
 
   if [[ -f "$REPO_ROOT/.pre-commit-config.yaml" ]]; then
     uv run pre-commit install
@@ -293,10 +368,10 @@ install_precommit() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. Install optional global tools
+# 7. Install optional global tools
 # ══════════════════════════════════════════════════════════════════════════════
 install_optional_tools() {
-  section "6/7  Optional global tools"
+  section "7/9  Optional global tools"
 
   if $SKIP_OPTIONAL; then
     info "Skipping optional tools (--skip-optional)"
@@ -321,10 +396,86 @@ install_optional_tools() {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. Run smoke tests
+# 8. Tailscale (remote access)
+# ══════════════════════════════════════════════════════════════════════════════
+check_tailscale() {
+  section "8/9  Network & Security"
+
+  # --- Tailscale ---
+  if command -v tailscale &>/dev/null; then
+    local ts_ip
+    ts_ip="$(tailscale ip -4 2>/dev/null || true)"
+    if [[ -n "$ts_ip" ]]; then
+      ok "Tailscale connected: $ts_ip"
+      summary_add "Tailscale: $ts_ip (remote access ready)"
+      info "G2 app can reach the gateway at ws://$ts_ip:8765 from any network"
+    else
+      warn "Tailscale installed but not connected"
+      info "Run: sudo tailscale up"
+      summary_add "Tailscale: installed but not connected"
+    fi
+  else
+    info "Tailscale not installed — gateway will be LAN-only"
+    if ! $SKIP_OPTIONAL; then
+      info "Install for remote access: https://tailscale.com/download"
+    fi
+    summary_add "Tailscale: not installed (LAN-only mode)"
+  fi
+
+  # --- Device identity file permissions ---
+  local id_file="$HOME/.openclaw/state/device-identity.json"
+  if [[ -f "$id_file" ]]; then
+    local perms
+    perms="$(stat -c '%a' "$id_file" 2>/dev/null || stat -f '%Lp' "$id_file" 2>/dev/null || echo "unknown")"
+    if [[ "$perms" == "600" ]]; then
+      ok "Device identity file permissions: $perms"
+    else
+      warn "Device identity file permissions: $perms (should be 600) — fixing"
+      chmod 600 "$id_file"
+      ok "Fixed device identity file permissions to 600"
+      summary_add "Security: fixed device-identity.json permissions"
+    fi
+  fi
+
+  # --- OpenClaw loopback check ---
+  if command -v ss &>/dev/null && ss -tlnp 2>/dev/null | grep -q ":18789"; then
+    local oc_bind
+    oc_bind="$(ss -tlnp 2>/dev/null | grep ':18789' | awk '{print $4}' | head -1)"
+    if echo "$oc_bind" | grep -qE '^(127\.0\.0\.1|::1|\[::1\])'; then
+      ok "OpenClaw listening on loopback only ($oc_bind)"
+    else
+      warn "OpenClaw is NOT on loopback ($oc_bind) — consider restricting to 127.0.0.1"
+      summary_add "Security: OpenClaw exposed on $oc_bind (should be loopback)"
+    fi
+  fi
+
+  # --- Gateway token strength in .env ---
+  if [[ -f "$REPO_ROOT/.env" ]]; then
+    local token_line
+    token_line="$(grep -E '^GATEWAY_TOKEN=' "$REPO_ROOT/.env" 2>/dev/null | head -1)"
+    if [[ -n "$token_line" ]]; then
+      local token_val="${token_line#GATEWAY_TOKEN=}"
+      local token_len="${#token_val}"
+      if [[ "$token_len" -ge 32 ]]; then
+        ok "Gateway token: ${token_len} chars (strong)"
+      elif [[ "$token_len" -ge 16 ]]; then
+        warn "Gateway token: ${token_len} chars (acceptable, 32+ recommended)"
+      elif [[ "$token_len" -gt 0 ]]; then
+        warn "Gateway token: ${token_len} chars (weak — regenerate with init-env --force)"
+        summary_add "Security: gateway token is weak ($token_len chars)"
+      fi
+    else
+      warn "No GATEWAY_TOKEN in .env — auth is disabled"
+      summary_add "Security: no gateway token set"
+    fi
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. Run smoke tests
 # ══════════════════════════════════════════════════════════════════════════════
 run_smoke_tests() {
-  section "7/7  Running smoke tests"
+  section "9/9  Running smoke tests"
 
   info "Running gateway unit tests..."
   if uv run pytest tests/gateway/ -q; then
@@ -353,11 +504,13 @@ print_summary() {
 
   echo ""
   echo -e "${BOLD}  Next steps:${RESET}"
-  echo -e "    ${BLUE}1.${RESET} Edit ${BOLD}.env${RESET} — set GATEWAY_TOKEN and review Whisper settings"
+  echo -e "    ${BLUE}1.${RESET} Edit ${BOLD}.env${RESET} — ensure GATEWAY_TOKEN is 32+ chars and review Whisper settings"
   echo -e "    ${BLUE}2.${RESET} Edit ${BOLD}copilot_bridge/.env${RESET} — configure BYOK or GitHub Copilot token"
-  echo -e "    ${BLUE}3.${RESET} Start OpenClaw:  ${DIM}openclaw${RESET}"
-  echo -e "    ${BLUE}4.${RESET} Launch gateway:  ${DIM}uv run python -m gateway launch${RESET}"
-  echo -e "    ${BLUE}5.${RESET} Start G2 app:    ${DIM}cd g2_app && npm run dev${RESET}"
+  echo -e "    ${BLUE}3.${RESET} Verify security:  ${DIM}re-run this script to check file permissions & token strength${RESET}"
+    echo -e "    ${BLUE}4.${RESET} Start OpenClaw daemon:  ${DIM}openclaw${RESET}"
+  echo -e "    ${BLUE}5.${RESET} Launch gateway:  ${DIM}uv run python -m gateway launch${RESET}"
+  echo -e "    ${BLUE}6.${RESET} Start G2 app:    ${DIM}cd g2_app && npm run dev${RESET}"
+  echo -e "    ${BLUE}7.${RESET} ${DIM}(Optional)${RESET} Install Tailscale for remote access: ${DIM}https://tailscale.com/download${RESET}"
   echo ""
   echo -e "  ${DIM}Docs: docs/guides/getting-started.md${RESET}"
   echo -e "  ${DIM}Re-run this script any time — it's idempotent.${RESET}"
@@ -376,9 +529,11 @@ main() {
   check_prerequisites
   install_python_deps
   install_ts_deps
+  setup_openclaw
   generate_env
   install_precommit
   install_optional_tools
+  check_tailscale
   run_smoke_tests
   print_summary
 }

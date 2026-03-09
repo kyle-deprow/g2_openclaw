@@ -18,18 +18,12 @@ RESET := \033[0m
 # Setup
 # ============================================================================
 
-.PHONY: setup install
+.PHONY: cold-start setup
 
-setup: ## Run scripts/bootstrap.sh
+cold-start: ## Full cold start: deps, env, security checks, smoke tests
 	@bash scripts/bootstrap.sh
 
-install: ## Install all deps (uv sync + npm install in both TS dirs)
-	@echo -e "$(CYAN)$(BOLD)>>> Installing Python dependencies...$(RESET)"
-	@uv sync --extra dev
-	@echo -e "$(CYAN)$(BOLD)>>> Installing G2 App dependencies...$(RESET)"
-	@cd g2_app && npm install
-	@echo -e "$(CYAN)$(BOLD)>>> Installing Copilot Bridge dependencies...$(RESET)"
-	@cd copilot_bridge && npm install
+setup: cold-start ## Alias for cold-start
 
 # ============================================================================
 # Testing
@@ -123,6 +117,32 @@ restart: sim ## Alias for sim
 
 push-config: ## Push OpenClaw config to the gateway
 	@uv run python -m gateway push-config
+
+# ============================================================================
+# G2 App Deploy
+# ============================================================================
+
+.PHONY: deploy deploy-dev
+
+deploy: ## Build, package, and serve G2 app for phone sideloading
+	@echo -e "$(CYAN)$(BOLD)>>> Building G2 app for production...$(RESET)"
+	@cd g2_app && npm run pack
+	@echo -e "$(GREEN)$(BOLD)>>> Package ready: g2_app/g2-openclaw.ehpk$(RESET)"
+	@echo ""
+	@echo -e "$(BOLD)Next steps:$(RESET)"
+	@echo "  1. Serve the package:  cd g2_app && npx serve dist -l 3000"
+	@echo "  2. Generate QR code:   cd g2_app && evenhub qr --url http://$$(hostname -I | awk '{print $$1}'):3000"
+	@echo "  3. Scan QR with EvenHub iOS app"
+	@echo ""
+	@echo -e "$(BOLD)Or use 'make deploy-dev' to deploy via Vite dev server (hot reload).$(RESET)"
+
+deploy-dev: ## Serve G2 app via Vite + generate QR for phone sideloading
+	@echo -e "$(CYAN)$(BOLD)>>> Starting G2 app dev server on 0.0.0.0:5173...$(RESET)"
+	@echo -e "$(BOLD)Scan the QR code below with EvenHub iOS app:$(RESET)"
+	@cd g2_app && npx evenhub qr --http --port 5173 --ip $$(hostname -I | awk '{print $$1}')
+	@echo ""
+	@echo "Starting Vite dev server (Ctrl+C to stop)..."
+	@cd g2_app && npm run dev:network
 
 # ============================================================================
 # Infrastructure
