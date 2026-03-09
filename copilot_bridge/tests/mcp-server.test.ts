@@ -19,19 +19,23 @@ const { mockBridge, mockToolFn } = vi.hoisted(() => {
 });
 
 vi.mock("@github/copilot-sdk", () => ({
-	CopilotClient: vi.fn().mockImplementation(() => ({
-		ping: vi.fn().mockResolvedValue({ message: "ok" }),
-		getAuthStatus: vi.fn().mockResolvedValue({ isAuthenticated: true, authType: "user" }),
-		stop: vi.fn().mockResolvedValue([]),
-		forceStop: vi.fn(),
-	})),
+	CopilotClient: vi.fn().mockImplementation(function () {
+		return {
+			ping: vi.fn().mockResolvedValue({ message: "ok" }),
+			getAuthStatus: vi.fn().mockResolvedValue({ isAuthenticated: true, authType: "user" }),
+			stop: vi.fn().mockResolvedValue([]),
+			forceStop: vi.fn(),
+		};
+	}),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
-	McpServer: vi.fn().mockImplementation(() => ({
-		tool: mockToolFn,
-		connect: vi.fn().mockResolvedValue(undefined),
-	})),
+	McpServer: vi.fn().mockImplementation(function () {
+		return {
+			tool: mockToolFn,
+			connect: vi.fn().mockResolvedValue(undefined),
+		};
+	}),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
@@ -54,7 +58,7 @@ vi.mock("../src/hooks.js", () => ({
 }));
 
 vi.mock("../src/client.js", () => ({
-	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
+	CopilotBridge: vi.fn().mockImplementation(function () { return mockBridge; }),
 }));
 
 // ─── Import module under test ───────────────────────────────────────────────

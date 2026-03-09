@@ -9,6 +9,7 @@ export interface BridgeConfig {
 	byokApiKey?: string;
 	byokBaseUrl?: string;
 	byokModel?: string;
+	model?: string;
 	cliPath?: string;
 	logLevel: "debug" | "info" | "warning" | "error" | "none" | "all";
 	openclawHost: string;
@@ -74,6 +75,7 @@ export function loadConfig(): BridgeConfig {
 		byokApiKey: process.env.COPILOT_BYOK_API_KEY || undefined,
 		byokBaseUrl: process.env.COPILOT_BYOK_BASE_URL || undefined,
 		byokModel: process.env.COPILOT_BYOK_MODEL || undefined,
+		model: process.env.COPILOT_MODEL || undefined,
 		cliPath: process.env.COPILOT_CLI_PATH || undefined,
 		logLevel: logLevel as BridgeConfig["logLevel"],
 		openclawHost: process.env.OPENCLAW_HOST ?? "127.0.0.1",

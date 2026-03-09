@@ -228,7 +228,7 @@ export class CopilotBridge implements ICopilotClient {
 			const hooks = createHooks(this.buildHookConfig());
 
 			const sessionConfig: Record<string, unknown> = {
-				model: request.model,
+				model: request.model ?? this.config.model,
 				provider,
 				streaming: false,
 				hooks,
@@ -420,7 +420,7 @@ export class CopilotBridge implements ICopilotClient {
 		const hooks = createHooks(this.buildHookConfig());
 
 		const sessionConfig: Record<string, unknown> = {
-			model: request.model,
+			model: request.model ?? this.config.model,
 			provider,
 			streaming: true,
 			hooks,

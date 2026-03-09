@@ -167,7 +167,7 @@ OPENCLAW_TOKEN=
 ### Installing Dependencies
 
 ```bash
-# Python (from repo root)
+# Python (from repo root) — includes dev tools (ruff, pytest, mypy)
 uv sync --extra dev
 
 # G2 App

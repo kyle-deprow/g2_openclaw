@@ -29,7 +29,10 @@ uv add pydantic
 # Add a dev-only dependency
 uv add --extra dev pytest-asyncio
 
-# Install all dependencies (including dev)
+# Install all runtime dependencies
+uv sync
+
+# Install with dev tools (ruff, pytest, mypy)
 uv sync --extra dev
 
 # Run a command in the managed environment

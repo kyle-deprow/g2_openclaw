@@ -41,7 +41,10 @@ cd g2_openclaw
 The gateway is the core of the system — a Python WebSocket server that accepts connections, routes messages, and (eventually) handles transcription and AI.
 
 ```bash
-# Install all dependencies (including dev tools)
+# Install all dependencies
+uv sync
+
+# Optional: add dev tools (ruff, pytest, mypy, pre-commit)
 uv sync --extra dev
 ```
 

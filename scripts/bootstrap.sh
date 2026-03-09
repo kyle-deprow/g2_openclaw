@@ -210,14 +210,12 @@ check_prerequisites() {
 install_python_deps() {
   section "2/9  Installing Python dependencies"
 
+  uv sync --extra dev  # runtime + dev tools (ruff, pytest, mypy)
   if $HAS_GPU; then
-    info "GPU detected — installing with whisper extra"
-    uv sync --extra dev --extra whisper
-    summary_add "Python deps installed (dev + whisper)"
+    summary_add "Python deps installed (CUDA GPU)"
   else
-    info "CPU mode — installing dev dependencies"
-    uv sync --extra dev
-    summary_add "Python deps installed (dev)"
+    info "No NVIDIA GPU — Whisper will use CPU (slower but functional)"
+    summary_add "Python deps installed (CPU mode)"
   fi
   ok "Python dependencies ready"
 }

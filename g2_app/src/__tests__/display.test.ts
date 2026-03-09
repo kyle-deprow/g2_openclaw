@@ -6,13 +6,13 @@ import { ConversationHistory } from '../conversation';
 // Mock the SDK
 // ---------------------------------------------------------------------------
 vi.mock('@evenrealities/even_hub_sdk', () => ({
-  CreateStartUpPageContainer: vi.fn().mockImplementation((args: unknown) => args),
-  RebuildPageContainer: vi.fn().mockImplementation((args: unknown) => args),
+  CreateStartUpPageContainer: vi.fn().mockImplementation(function (args: unknown) { return args; }),
+  RebuildPageContainer: vi.fn().mockImplementation(function (args: unknown) { return args; }),
   StartUpPageCreateResult: { success: 0 },
-  TextContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
-  TextContainerUpgrade: vi.fn().mockImplementation((args: unknown) => args),
-  ListContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
-  ListItemContainerProperty: vi.fn().mockImplementation((args: unknown) => args),
+  TextContainerProperty: vi.fn().mockImplementation(function (args: unknown) { return args; }),
+  TextContainerUpgrade: vi.fn().mockImplementation(function (args: unknown) { return args; }),
+  ListContainerProperty: vi.fn().mockImplementation(function (args: unknown) { return args; }),
+  ListItemContainerProperty: vi.fn().mockImplementation(function (args: unknown) { return args; }),
   OsEventTypeList: {
     CLICK_EVENT: 0,
     SCROLL_TOP_EVENT: 1,

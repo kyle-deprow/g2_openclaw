@@ -35,7 +35,7 @@ const { mockClient, mockSession, mockFs, mockExistsSync } = vi.hoisted(() => {
 });
 
 vi.mock("@github/copilot-sdk", () => ({
-	CopilotClient: vi.fn().mockImplementation(() => mockClient),
+	CopilotClient: vi.fn().mockImplementation(function () { return mockClient; }),
 }));
 
 vi.mock("node:fs/promises", () => ({

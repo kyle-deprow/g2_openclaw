@@ -23,7 +23,7 @@ vi.mock("../src/config.js", () => ({
 }));
 
 vi.mock("../src/client.js", () => ({
-	CopilotBridge: vi.fn().mockImplementation(() => mockBridge),
+	CopilotBridge: vi.fn().mockImplementation(function () { return mockBridge; }),
 }));
 
 import { CopilotBridge } from "../src/client.js";

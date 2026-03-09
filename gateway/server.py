@@ -1470,13 +1470,8 @@ async def main() -> None:
             config.whisper_model, config.whisper_device, config.whisper_compute_type
         )
         logger.info("Transcriber loaded (model=%s)", config.whisper_model)
-    except ImportError:
-        logger.warning(
-            "faster-whisper is not installed — audio transcription disabled. "
-            "Install with: uv sync --extra whisper"
-        )
     except Exception:
-        logger.warning("Failed to load transcriber — audio transcription disabled", exc_info=True)
+        logger.exception("Failed to load transcriber — audio transcription disabled")
 
     server = GatewayServer(config, transcriber=transcriber)
     await server.serve()

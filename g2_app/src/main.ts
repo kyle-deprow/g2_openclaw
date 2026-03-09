@@ -287,7 +287,14 @@ async function boot(): Promise<void> {
       openSessionMenu: () => input.openSessionMenu(),
       closeSessionMenu: () => input.closeSessionMenu(),
       getState: () => sm.current,
+      getGatewayConnected: () => gateway.isConnected,
+      getSessionId: () => { try { return localStorage.getItem('g2_last_session_id'); } catch { return null; } },
       getPendingTranscription: () => input.pendingTranscription,
+      getConversation: () => conversation.getEntries(),
+      getDisplayText: () => conversation.formatReverse(2000),
+      tap: () => input.simulateTap(),
+      doubleTap: () => input.simulateDoubleTap(),
+      selectSession: (index: number) => input.simulateMenuSelect(index),
     };
   }
 }

@@ -12,7 +12,7 @@ WebSocket gateway that bridges the G2 glasses (via a phone companion app) to the
 From the repository root:
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 ## Configuration

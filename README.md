@@ -194,7 +194,8 @@ Dependencies are declared in [pyproject.toml](pyproject.toml) (Python) and per-c
 
 ```bash
 # 1. Install Python dependencies
-uv sync --extra dev
+uv sync                    # runtime deps (Whisper, CUDA, gateway)
+uv sync --extra dev        # + dev tools (ruff, pytest, mypy)
 
 # 2. Generate .env with GPU detection + model selection
 uv run python -m gateway init-env

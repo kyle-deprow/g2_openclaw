@@ -68,7 +68,8 @@ LOADING → MENU (boot default) → IDLE → RECORDING → TRANSCRIBING → CONF
 
 ```bash
 # Python
-uv sync --extra dev                    # install all deps
+uv sync                                # install all deps (Whisper, CUDA, gateway)
+uv sync --extra dev                    # + linting, testing, type-checking tools
 uv run pytest tests/gateway/ -v        # gateway unit tests
 uv run pytest tests/integration/ -v    # integration tests
 uv run ruff check .                    # lint

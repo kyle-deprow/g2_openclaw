@@ -37,7 +37,7 @@ const mockConversation = {
   get length() { return 0; },
 };
 vi.mock('../conversation', () => ({
-  ConversationHistory: vi.fn(() => mockConversation),
+  ConversationHistory: vi.fn(function () { return mockConversation; }),
 }));
 
 const mockDisplay = {
@@ -58,7 +58,7 @@ const mockDisplay = {
   finaliseStream: vi.fn(() => Promise.resolve()),
 };
 vi.mock('../display', () => ({
-  DisplayManager: vi.fn(() => mockDisplay),
+  DisplayManager: vi.fn(function () { return mockDisplay; }),
 }));
 
 const mockGateway = {
@@ -72,7 +72,7 @@ const mockGateway = {
   isConnected: true,
 };
 vi.mock('../gateway', () => ({
-  Gateway: vi.fn(() => mockGateway),
+  Gateway: vi.fn(function () { return mockGateway; }),
 }));
 
 const mockSm = {
@@ -88,7 +88,7 @@ const mockSm = {
   reset: vi.fn(),
 };
 vi.mock('../state', () => ({
-  StateMachine: vi.fn(() => mockSm),
+  StateMachine: vi.fn(function () { return mockSm; }),
 }));
 
 const mockInput = {
@@ -104,7 +104,7 @@ const mockInput = {
   get pendingTranscription() { return null; },
 };
 vi.mock('../input', () => ({
-  InputHandler: vi.fn(() => mockInput),
+  InputHandler: vi.fn(function () { return mockInput; }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -137,19 +137,19 @@ describe('main.ts boot()', () => {
       },
     }));
     vi.doMock('../conversation', () => ({
-      ConversationHistory: vi.fn(() => mockConversation),
+      ConversationHistory: vi.fn(function () { return mockConversation; }),
     }));
     vi.doMock('../display', () => ({
-      DisplayManager: vi.fn(() => mockDisplay),
+      DisplayManager: vi.fn(function () { return mockDisplay; }),
     }));
     vi.doMock('../gateway', () => ({
-      Gateway: vi.fn(() => mockGateway),
+      Gateway: vi.fn(function () { return mockGateway; }),
     }));
     vi.doMock('../state', () => ({
-      StateMachine: vi.fn(() => mockSm),
+      StateMachine: vi.fn(function () { return mockSm; }),
     }));
     vi.doMock('../input', () => ({
-      InputHandler: vi.fn(() => mockInput),
+      InputHandler: vi.fn(function () { return mockInput; }),
     }));
 
     await import('../main');

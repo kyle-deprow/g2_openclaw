@@ -258,29 +258,6 @@ class TestMainTranscriber:
             )
             mock_server.serve.assert_awaited_once()
 
-    async def test_main_falls_back_when_faster_whisper_missing(
-        self,
-        main_mocks: tuple[MagicMock, MagicMock, AsyncMock],
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        mock_config, mock_gw_cls, mock_server = main_mocks
-
-        with (
-            patch(
-                "gateway.server.Transcriber",
-                side_effect=ImportError("No module named 'faster_whisper'"),
-            ),
-            caplog.at_level(logging.WARNING, logger="gateway.server"),
-        ):
-            await main()
-
-            mock_gw_cls.assert_called_once_with(
-                mock_config,
-                transcriber=None,
-            )
-            mock_server.serve.assert_awaited_once()
-            assert "faster-whisper is not installed" in caplog.text
-
     async def test_main_falls_back_on_generic_exception(
         self,
         main_mocks: tuple[MagicMock, MagicMock, AsyncMock],

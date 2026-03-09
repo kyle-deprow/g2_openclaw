@@ -80,7 +80,7 @@ export class InputHandler {
     return this._pendingTranscription;
   }
 
-  /** Send a text message to the gateway. Does not touch the DOM. */
+  /** Send a text message to the gateway. */
   sendText(message: string): boolean {
     const trimmed = message.trim();
     if (!trimmed) return false;
@@ -88,6 +88,11 @@ export class InputHandler {
       console.warn('[Input] Cannot send — state is', this.sm.current);
       return false;
     }
+    if (this.sm.current === 'confirming') {
+      this.sm.transition('idle');
+    }
+    this.conversation.addUser(trimmed);
+    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     this.gateway.sendJson({ type: 'text', message: trimmed });
     return true;
   }
@@ -297,6 +302,24 @@ export class InputHandler {
         this.gateway.switchSession(session.sessionKey);
       }
     }
+  }
+
+  /** Programmatic tap — same as ring click. */
+  simulateTap(): boolean {
+    this._handleTap();
+    return true;
+  }
+
+  /** Programmatic double-tap — same as ring double-click. */
+  simulateDoubleTap(): boolean {
+    this._handleDoubleTap();
+    return true;
+  }
+
+  /** Programmatic session selection from menu. */
+  simulateMenuSelect(index: number): boolean {
+    this._handleMenuTap({ listEvent: { currentSelectItemIndex: index } });
+    return true;
   }
 
   /** Cancel an in-progress AI response — return to idle. */

@@ -23,14 +23,16 @@ vi.mock("node:fs/promises", () => ({
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/mcp.js", () => ({
-	McpServer: vi.fn().mockImplementation(() => ({
-		tool: mockToolFn,
-		connect: vi.fn().mockResolvedValue(undefined),
-	})),
+	McpServer: vi.fn().mockImplementation(function () {
+		return {
+			tool: mockToolFn,
+			connect: vi.fn().mockResolvedValue(undefined),
+		};
+	}),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
-	StdioServerTransport: vi.fn().mockImplementation(() => ({})),
+	StdioServerTransport: vi.fn().mockImplementation(function () { return {}; }),
 }));
 
 vi.mock("../src/config.js", () => ({

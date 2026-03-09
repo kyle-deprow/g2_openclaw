@@ -155,6 +155,11 @@ export class ConversationHistory {
     this.entries = [];
   }
 
+  /** Get a copy of all entries (for dev tools). */
+  getEntries(): Array<{ role: 'user' | 'assistant' | 'system'; text: string; timestamp: number }> {
+    return this.entries.map(e => ({ role: e.role, text: e.text, timestamp: e.timestamp }));
+  }
+
   /** Remove the last user entry (e.g. rejected transcription). */
   removeLastUser(): boolean {
     for (let i = this.entries.length - 1; i >= 0; i--) {

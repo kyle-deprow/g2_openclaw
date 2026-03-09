@@ -14,12 +14,12 @@ import numpy as np
 import pytest
 
 # ---------------------------------------------------------------------------
-# Provide a fake ``faster_whisper`` module so that importing
-# ``gateway.transcriber`` never requires the real package.
+# Inject a mock ``faster_whisper`` module so tests avoid loading
+# real Whisper models (heavyweight, requires model downloads + CUDA).
 # ---------------------------------------------------------------------------
 _mock_fw_module = ModuleType("faster_whisper")
 _mock_fw_module.WhisperModel = MagicMock()  # type: ignore[attr-defined]
-sys.modules.setdefault("faster_whisper", _mock_fw_module)
+sys.modules["faster_whisper"] = _mock_fw_module
 
 from gateway.transcriber import Transcriber, TranscriptionError  # noqa: E402
 
