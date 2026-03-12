@@ -32,6 +32,28 @@ console = Console()
 # Root of the repository (parent of the ``gateway/`` package)
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PID_FILE = _PROJECT_ROOT / "logs" / ".sim.pid"
+
+
+def _write_pid_file(pids: dict[str, int]) -> None:
+    """Write spawned process PIDs to the PID file."""
+    _PID_FILE.parent.mkdir(exist_ok=True)
+    _PID_FILE.write_text(json.dumps(pids), encoding="utf-8")
+
+
+def _read_pid_file() -> dict[str, int]:
+    """Read PIDs from the PID file, returning empty dict if missing/invalid."""
+    try:
+        data: dict[str, int] = json.loads(_PID_FILE.read_text(encoding="utf-8"))
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _remove_pid_file() -> None:
+    """Remove the PID file if it exists."""
+    with contextlib.suppress(FileNotFoundError):
+        _PID_FILE.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +679,9 @@ def stop() -> None:
     else:
         console.print("\n[dim]No G2 OpenClaw services were running.[/dim]")
 
+    # Clean up PID file
+    _remove_pid_file()
+
 
 # ---------------------------------------------------------------------------
 # push-config command
@@ -793,6 +818,12 @@ _restart_option = typer.Option(
     "--restart",
     help="Stop all running services before launching.",
 )
+_daemon_option = typer.Option(
+    False,
+    "--daemon",
+    "-d",
+    help="Detach after services start (write PIDs to logs/.sim.pid).",
+)
 
 
 @app.command()
@@ -803,6 +834,7 @@ def launch(
     list_audio_devices: bool = _list_audio_devices_option,
     local_audio: bool = _local_audio_option,
     restart: bool = _restart_option,
+    daemon: bool = _daemon_option,
 ) -> None:
     """Start the gateway, G2 dev server, and simulator together."""
 
@@ -835,6 +867,7 @@ def launch(
         for fh in log_files:
             with contextlib.suppress(Exception):
                 fh.close()
+        _remove_pid_file()
         console.print("[green]All processes stopped.[/green]")
 
     gateway_port = _read_gateway_port()
@@ -950,28 +983,49 @@ def launch(
             console.print(f"  [green]✓[/green] Already running on port {vite_default_port}")
         else:
             console.print("  Starting Vite dev server…")
-            vite_proc = subprocess.Popen(
-                ["npm", "run", "dev"],
-                cwd=str(g2_app_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env={**os.environ},
-            )
-            spawned.append(vite_proc)
-            vite_started_by_us = True
-            vite_port = _capture_vite_port(vite_proc, default=vite_default_port, timeout=15)
-            # Drain remaining Vite stdout into logs/vite.log
-            if vite_proc.stdout:
-                threading.Thread(
-                    target=_drain_pipe,
-                    args=(vite_proc.stdout, _log_dir / "vite.log"),
-                    daemon=True,
-                ).start()
-            if not _is_port_open(vite_port):
-                _wait_for_port(vite_port, label="Vite dev server")
+            _vite_log = open(_log_dir / "vite.log", "a", encoding="utf-8")  # noqa: SIM115
+            log_files.append(_vite_log)
+            vite_proc: subprocess.Popen[str]
+            if daemon:
+                # Daemon mode: send stdout straight to the log file so the
+                # process survives after the launcher exits (no broken pipe).
+                # Redirect stdin from /dev/null to prevent EIO on TTY read.
+                vite_proc = subprocess.Popen(
+                    ["npm", "run", "dev"],
+                    cwd=str(g2_app_dir),
+                    stdin=subprocess.DEVNULL,
+                    stdout=_vite_log,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**os.environ},
+                )
+                spawned.append(vite_proc)
+                vite_started_by_us = True
+                _wait_for_port(vite_default_port, label="Vite dev server")
             else:
-                console.print(f"  [green]✓[/green] Vite dev server ready on port {vite_port}")
+                # Foreground mode: capture stdout to parse the port, then
+                # drain the rest into the log via a daemon thread.
+                vite_proc = subprocess.Popen(
+                    ["npm", "run", "dev"],
+                    cwd=str(g2_app_dir),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**os.environ},
+                )
+                spawned.append(vite_proc)
+                vite_started_by_us = True
+                vite_port = _capture_vite_port(vite_proc, default=vite_default_port, timeout=15)
+                if vite_proc.stdout:
+                    threading.Thread(
+                        target=_drain_pipe,
+                        args=(vite_proc.stdout, _log_dir / "vite.log"),
+                        daemon=True,
+                    ).start()
+                if not _is_port_open(vite_port):
+                    _wait_for_port(vite_port, label="Vite dev server")
+                else:
+                    console.print(f"  [green]✓[/green] Vite dev server ready on port {vite_port}")
 
         # -- 4. Simulator ----------------------------------------------------------
         console.print("[bold]4/4 EvenHub simulator[/bold]")
@@ -1018,6 +1072,24 @@ def launch(
         console.print(Panel("\n".join(rows), title="G2 OpenClaw", border_style="green"))
         console.print(f"[dim]Logs → {_log_dir.relative_to(_PROJECT_ROOT)}/[/dim]")
         console.print("Press [bold]Ctrl+C[/bold] to stop all services.")
+
+        # -- Write PID file --------------------------------------------------------
+        pids: dict[str, int] = {}
+        for p in spawned:
+            args_list = p.args if isinstance(p.args, list | tuple) else []
+            cmd_str = " ".join(str(a) for a in args_list)
+            if "gateway" in cmd_str:
+                pids["gateway"] = p.pid
+            elif "vite" in cmd_str or "npm" in cmd_str:
+                pids["vite"] = p.pid
+            elif "simulator" in cmd_str:
+                pids["simulator"] = p.pid
+        if pids:
+            _write_pid_file(pids)
+
+        if daemon:
+            console.print("[dim]Daemon mode — detaching.[/dim]")
+            return
 
         # -- Wait for interrupt ----------------------------------------------------
         signal.signal(signal.SIGTERM, _cleanup)

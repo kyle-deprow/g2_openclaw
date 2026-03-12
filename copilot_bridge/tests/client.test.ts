@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { approveAll } from "@github/copilot-sdk";
 import type { BridgeConfig } from "../src/config.js";
 import type { CodingTaskRequest } from "../src/types.js";
 
 // --- SDK Mock (vi.hoisted ensures these exist before vi.mock factory runs) ---
 
-const { mockClient, mockSession, mockFs, mockExistsSync } = vi.hoisted(() => {
+const { mockClient, mockSession, mockFs, mockExistsSync, mockHomedir } = vi.hoisted(() => {
+	const mockHomedir = vi.fn().mockReturnValue("/home/testuser");
 	const mockSession = {
 		sendAndWait: vi.fn(),
 		on: vi.fn().mockReturnValue(vi.fn()), // returns unsubscribe fn
@@ -14,6 +16,7 @@ const { mockClient, mockSession, mockFs, mockExistsSync } = vi.hoisted(() => {
 	};
 
 	const mockClient = {
+		start: vi.fn().mockResolvedValue(undefined),
 		ping: vi.fn(),
 		getAuthStatus: vi.fn(),
 		stop: vi.fn(),
@@ -31,11 +34,12 @@ const { mockClient, mockSession, mockFs, mockExistsSync } = vi.hoisted(() => {
 
 	const mockExistsSync = vi.fn().mockReturnValue(false);
 
-	return { mockClient, mockSession, mockFs, mockExistsSync };
+	return { mockClient, mockSession, mockFs, mockExistsSync, mockHomedir };
 });
 
 vi.mock("@github/copilot-sdk", () => ({
 	CopilotClient: vi.fn().mockImplementation(function () { return mockClient; }),
+	approveAll: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -45,6 +49,11 @@ vi.mock("node:fs/promises", () => ({
 
 vi.mock("node:fs", () => ({
 	existsSync: mockExistsSync,
+}));
+
+vi.mock("node:os", () => ({
+	default: { homedir: mockHomedir },
+	homedir: mockHomedir,
 }));
 
 const { CopilotClient: MockedCopilotClient } = await import("@github/copilot-sdk");
@@ -84,6 +93,7 @@ describe("CopilotBridge", () => {
 		mockSession.getMessages.mockResolvedValue([]);
 		mockExistsSync.mockReturnValue(false);
 
+		mockClient.start.mockResolvedValue(undefined);
 		mockClient.ping.mockResolvedValue({
 			message: "health",
 			timestamp: Date.now(),
@@ -134,6 +144,22 @@ describe("CopilotBridge", () => {
 			bridge = new CopilotBridge(config);
 			const resolved = await bridge.resolveWorkingDir("test-project");
 			expect(resolved).toBe("/default/repos/test-project");
+		});
+
+		it("expands tilde to home directory", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("~/repos/weather");
+			expect(resolved).toBe("/home/testuser/repos/weather");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/home/testuser/repos/weather", { recursive: true });
+		});
+
+		it("expands bare tilde to home directory", async () => {
+			const config = makeConfig({ projectsRoot: "/home/user/repos" });
+			bridge = new CopilotBridge(config);
+			const resolved = await bridge.resolveWorkingDir("~");
+			expect(resolved).toBe("/home/testuser");
+			expect(mockFs.mkdir).toHaveBeenCalledWith("/home/testuser", { recursive: true });
 		});
 	});
 
@@ -255,14 +281,14 @@ describe("CopilotBridge", () => {
 	});
 
 	describe("runTask()", () => {
-		it("creates session with hooks instead of onPermissionRequest", async () => {
+		it("creates session with hooks and onPermissionRequest approveAll", async () => {
 			const result = await bridge.runTask(makeRequest());
 
 			expect(mockClient.createSession).toHaveBeenCalledTimes(1);
 			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
 
-			// hooks MUST be present, onPermissionRequest MUST NOT
-			expect(sessionConfig).not.toHaveProperty("onPermissionRequest");
+			// Both hooks and onPermissionRequest must be present
+			expect(sessionConfig.onPermissionRequest).toBe(approveAll);
 			expect(sessionConfig).toHaveProperty("hooks");
 			const hooks = sessionConfig.hooks as Record<string, unknown>;
 			expect(typeof hooks.onPreToolUse).toBe("function");
@@ -357,6 +383,53 @@ describe("CopilotBridge", () => {
 			});
 		});
 
+		it("uses byokModel as session model when BYOK provider is configured", async () => {
+			const byokBridge = new CopilotBridge(
+				makeConfig({
+					byokProvider: "azure",
+					byokApiKey: "sk-test",
+					byokBaseUrl: "https://my.azure.com",
+					byokModel: "model-router",
+					model: "claude-opus-4.6",
+				}),
+			);
+
+			await byokBridge.runTask(makeRequest());
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("model-router");
+		});
+
+		it("falls back to config.model when no BYOK provider is configured", async () => {
+			const plainBridge = new CopilotBridge(
+				makeConfig({
+					model: "claude-opus-4.6",
+				}),
+			);
+
+			await plainBridge.runTask(makeRequest());
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("claude-opus-4.6");
+		});
+
+		it("request-level model overrides byokModel", async () => {
+			const byokBridge = new CopilotBridge(
+				makeConfig({
+					byokProvider: "azure",
+					byokApiKey: "sk-test",
+					byokBaseUrl: "https://my.azure.com",
+					byokModel: "model-router",
+					model: "claude-opus-4.6",
+				}),
+			);
+
+			await byokBridge.runTask(makeRequest({ model: "gpt-4o-mini" }));
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("gpt-4o-mini");
+		});
+
 		it("sends prompt via sendAndWait()", async () => {
 			await bridge.runTask(makeRequest({ prompt: "test prompt" }));
 
@@ -418,6 +491,21 @@ describe("CopilotBridge", () => {
 			await bridge.runTask(makeRequest({ sessionId: "persistent-session" }));
 
 			expect(mockSession.destroy).not.toHaveBeenCalled();
+		});
+
+		it("passes a UUID as sessionId to createSession, not the request sessionId", async () => {
+			const dirPath = "/home/user/repos/weather";
+			const result = await bridge.runTask(makeRequest({ sessionId: dirPath }));
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			const sdkSessionId = sessionConfig.sessionId as string;
+
+			// SDK should receive a UUID, not the dir path
+			expect(sdkSessionId).not.toBe(dirPath);
+			expect(sdkSessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+
+			// But the returned sessionId should be the original sessionKey (dir path)
+			expect(result.sessionId).toBe(dirPath);
 		});
 
 		it("returns errors on failure", async () => {
@@ -593,7 +681,7 @@ describe("CopilotBridge", () => {
 			expect(mockClient.createSession).toHaveBeenCalledTimes(1);
 			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
 			expect(sessionConfig.streaming).toBe(true);
-			expect(sessionConfig).not.toHaveProperty("onPermissionRequest");
+			expect(sessionConfig.onPermissionRequest).toBe(approveAll);
 			expect(sessionConfig).toHaveProperty("hooks");
 			const hooks = sessionConfig.hooks as Record<string, unknown>;
 			expect(typeof hooks.onPreToolUse).toBe("function");
@@ -654,6 +742,78 @@ describe("CopilotBridge", () => {
 				baseUrl: "https://api.openai.com",
 				model: "gpt-4o",
 			});
+		});
+
+		it("uses byokModel as session model in streaming when BYOK is configured", async () => {
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const byokBridge = new CopilotBridge(
+				makeConfig({
+					byokProvider: "azure",
+					byokApiKey: "sk-test",
+					byokBaseUrl: "https://my.azure.com",
+					byokModel: "model-router",
+					model: "claude-opus-4.6",
+				}),
+			);
+
+			const gen = byokBridge.runTaskStreaming(makeRequest());
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("model-router");
+		});
+
+		it("falls back to config.model in streaming when no BYOK configured", async () => {
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const plainBridge = new CopilotBridge(
+				makeConfig({ model: "claude-opus-4.6" }),
+			);
+
+			const gen = plainBridge.runTaskStreaming(makeRequest());
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("claude-opus-4.6");
+		});
+
+		it("request-level model overrides byokModel in streaming", async () => {
+			mockSession.on.mockImplementation((callback: (event: any) => void) => {
+				setTimeout(() => callback({ type: "response.completed" }), 10);
+				return vi.fn();
+			});
+			mockSession.sendAndWait.mockResolvedValue({ data: { content: "" } });
+
+			const byokBridge = new CopilotBridge(
+				makeConfig({
+					byokProvider: "azure",
+					byokApiKey: "sk-test",
+					byokBaseUrl: "https://my.azure.com",
+					byokModel: "model-router",
+					model: "claude-opus-4.6",
+				}),
+			);
+
+			const gen = byokBridge.runTaskStreaming(makeRequest({ model: "gpt-4o-mini" }));
+			for await (const _ of gen) {
+				/* drain */
+			}
+
+			const sessionConfig = mockClient.createSession.mock.calls[0]?.[0] as Record<string, unknown>;
+			expect(sessionConfig.model).toBe("gpt-4o-mini");
 		});
 
 		it("passes systemMessage to streaming session config", async () => {

@@ -18,7 +18,6 @@ export type {
 } from "./types.js";
 
 export { default as plugin } from "./plugin.js";
-export type { OpenClawPlugin } from "./plugin.js";
 
 export {
 	createHooks,

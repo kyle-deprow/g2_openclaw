@@ -16,13 +16,44 @@
             "reasoning": false
           }
         ]
+      },
+      "openrouter": {
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "api": "openai-completions",
+        "apiKey": "env:OPENROUTER_API_KEY",
+        "models": [
+          {
+            "id": "anthropic/claude-sonnet-4-20250514",
+            "name": "Claude Sonnet 4 (via OpenRouter)",
+            "contextWindow": 200000,
+            "maxTokens": 16384,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "openai/gpt-4.1",
+            "name": "GPT-4.1 (via OpenRouter)",
+            "contextWindow": 1047576,
+            "maxTokens": 32768,
+            "input": ["text"],
+            "reasoning": false
+          },
+          {
+            "id": "google/gemini-2.5-flash-preview",
+            "name": "Gemini 2.5 Flash Preview (via OpenRouter)",
+            "contextWindow": 1048576,
+            "maxTokens": 65536,
+            "input": ["text"],
+            "reasoning": false
+          }
+        ]
       }
     }
   },
   "agents": {
     "defaults": {
       "model": {
-        "primary": "azure-oai-g2/model-router"
+        "primary": "github-copilot/claude-sonnet-4.6"
       },
       "compaction": {
         "mode": "safeguard"
@@ -36,10 +67,10 @@
   "tools": {
     "profile": "full",
     "allow": [
-      "Read", "Write", "Glob", "Grep",
-      "memory_search", "memory_write",
+      "Read", "Write", "Glob", "Grep", "exec",
+      "memory_search",
       "web_search", "web_fetch",
-      "copilot_copilot", "copilot_copilot_sessions"
+      "copilot", "copilot_sessions"
     ]
   },
   "session": {

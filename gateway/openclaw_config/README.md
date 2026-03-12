@@ -7,8 +7,8 @@ configuration used by the G2 Gateway.
 
 | File | Purpose |
 |---|---|
-| `openclaw.json` | Model provider, agent defaults, session settings |
-| `.env.example` | Template for the required `AZURE_AI_SERVICES_API_KEY` secret |
+| `openclaw.json` | Model providers (Azure + OpenRouter), agent defaults, session settings |
+| `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `README.md` | This file |
 
@@ -141,6 +141,48 @@ openclaw daemon
 OpenClaw auto-detects `*.openai.azure.com` URLs and rewrites them internally
 to `<baseUrl>/openai/deployments/<modelId>`, so the deployment name must match
 the model ID in the config (`model-router`).
+
+## OpenRouter Provider
+
+OpenRouter is an OpenAI-compatible router that gives access to models from
+Anthropic, OpenAI, Google, and others through a single API key.
+
+### Setup
+
+1. Get an API key at <https://openrouter.ai/keys>
+2. Add it to your `.env` file:
+   ```bash
+   cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
+   # Edit .env and set OPENROUTER_API_KEY=sk-or-...
+   ```
+
+### Switching Providers
+
+The push script selects the active provider via the `OPENCLAW_PROVIDER` env var:
+
+```bash
+# Use OpenRouter with default model (Claude Sonnet 4)
+OPENCLAW_PROVIDER=openrouter uv run python -m gateway push-config
+
+# Use OpenRouter with specific model
+OPENCLAW_PROVIDER=openrouter OPENROUTER_MODEL=openai/gpt-4.1 uv run python -m gateway push-config
+
+# Switch back to Azure
+OPENCLAW_PROVIDER=azure uv run python -m gateway push-config
+```
+
+The default provider is `azure` — if `OPENCLAW_PROVIDER` is unset, nothing changes.
+
+### Available Models
+
+| Model ID | Name | Context | Max Tokens |
+|---|---|---|---|
+| `anthropic/claude-sonnet-4-20250514` | Claude Sonnet 4 | 200 000 | 16 384 |
+| `openai/gpt-4.1` | GPT-4.1 | 1 047 576 | 32 768 |
+| `google/gemini-2.5-flash-preview` | Gemini 2.5 Flash Preview | 1 048 576 | 65 536 |
+
+OpenRouter does **not** need the `azure-api-version-preload.cjs` workaround —
+it uses standard OpenAI-compatible endpoints.
 
 ## Azure API-Version Preload Workaround
 

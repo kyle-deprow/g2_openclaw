@@ -1,27 +1,13 @@
+import { Type } from "@sinclair/typebox";
+// OpenClawPluginApi is provided at runtime by the OpenClaw daemon plugin loader.
+// We declare a minimal interface here to avoid a hard dependency on the SDK package.
+interface OpenClawPluginApi {
+	logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
+	registerTool: (tool: { name: string; label: string; description: string; parameters: unknown; execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown> }) => void;
+}
 import { CopilotBridge } from "./client.js";
 import { loadConfig } from "./config.js";
 import type { CodingTaskResult } from "./types.js";
-
-// --- Local type definitions (since @openclaw/sdk may not be installable) ---
-
-interface OpenClawToolDef {
-	name: string;
-	description: string;
-	parameters: {
-		type: "object";
-		properties: Record<string, { type: string; description: string }>;
-		required?: string[];
-	};
-	execute(args: Record<string, any>): Promise<{ result: string }>;
-}
-
-export interface OpenClawPlugin {
-	name: string;
-	version: string;
-	tools?: OpenClawToolDef[];
-	hooks?: Record<string, (...args: any[]) => Promise<void>>;
-	onLoad?(api: any): Promise<void>;
-}
 
 // --- Shared bridge singleton ---
 
@@ -82,86 +68,92 @@ function formatError(err: unknown): string {
 	return `## Error\n\n${message}`;
 }
 
-// --- Tool definition ---
+function jsonResult(payload: unknown) {
+	return {
+		content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+		details: payload,
+	};
+}
 
-const copilotTool: OpenClawToolDef = {
-	name: "copilot",
-	description:
-		"Execute a coding task via GitHub Copilot. OpenClaw constructs the full prompt including any persona directives, task context, and instructions. Copilot handles planning, implementation, review, and fixes autonomously.",
-	parameters: {
-		type: "object",
-		properties: {
-			prompt: {
-				type: "string",
-				description: "The full task prompt. Include all context, constraints, and instructions.",
-			},
-			persona: {
-				type: "string",
-				description:
-					"System-level instructions appended to Copilot's system prompt. Applied when a new session starts for this workingDir.",
-			},
-			workingDir: {
-				type: "string",
-				description: "Project name or absolute path. Bare names resolve to ~/repos/<name>.",
-			},
-			timeout: {
-				type: "number",
-				description: "Timeout in milliseconds (default 120000)",
-			},
+// --- Parameter schemas ---
+
+const CopilotToolSchema = Type.Object({
+	prompt: Type.String({ description: "The full task prompt. Include all context, constraints, and instructions." }),
+	workingDir: Type.String({ description: "Project name or absolute path. Bare names resolve to ~/repos/<name>." }),
+	persona: Type.Optional(Type.String({ description: "System-level instructions appended to Copilot's system prompt. Applied when a new session starts for this workingDir." })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in milliseconds (default 900000). Set 0 for no timeout." })),
+});
+
+const CopilotSessionsToolSchema = Type.Object({
+	action: Type.Union([Type.Literal("list"), Type.Literal("destroy")], { description: "'list' shows all active sessions. 'destroy' removes a session." }),
+	project: Type.Optional(Type.String({ description: "Project name or path to destroy. Required for action='destroy'." })),
+});
+
+// --- Plugin registration ---
+
+export default function register(api: OpenClawPluginApi) {
+	api.registerTool({
+		name: "copilot",
+		label: "Copilot",
+		description:
+			"Execute a coding task via GitHub Copilot. OpenClaw constructs the full prompt including any persona directives, task context, and instructions. Copilot handles planning, implementation, review, and fixes autonomously.",
+		parameters: CopilotToolSchema,
+		async execute(_toolCallId, params) {
+			const prompt = typeof params?.prompt === "string" ? params.prompt : "";
+			const workingDir = typeof params?.workingDir === "string" ? params.workingDir : "";
+			const persona = typeof params?.persona === "string" ? params.persona : undefined;
+			const timeout = typeof params?.timeout === "number" ? params.timeout : 900_000;
+
+			if (!prompt) return jsonResult({ error: "`prompt` must be a non-empty string" });
+			if (prompt.length > 500_000) return jsonResult({ error: "`prompt` exceeds maximum length (500000 chars)" });
+			if (!workingDir) return jsonResult({ error: "`workingDir` is required. Pass a project name (e.g. 'my-api') or absolute path." });
+			if (timeout < 0) return jsonResult({ error: "`timeout` must be a non-negative number" });
+			if (persona !== undefined && persona.length > 50_000) return jsonResult({ error: "`persona` must be a string (max 50000 chars)" });
+
+			try {
+				const bridge = await getBridge();
+				const resolvedDir = await bridge.resolveWorkingDir(workingDir);
+				const result = await bridge.runTask({
+					prompt,
+					workingDir: resolvedDir,
+					timeout,
+					sessionId: resolvedDir,
+					systemMessage: persona || undefined,
+				});
+				return jsonResult({ text: formatResult(result), success: result.success });
+			} catch (err) {
+				return jsonResult({ error: formatError(err) });
+			}
 		},
-		required: ["prompt", "workingDir"],
-	},
-	async execute(args: Record<string, any>): Promise<{ result: string }> {
-		if (typeof args.prompt !== "string" || args.prompt.length === 0) {
-			return { result: "## Error\n\n`prompt` must be a non-empty string" };
-		}
-		if (args.prompt.length > 500_000) {
-			return { result: "## Error\n\n`prompt` exceeds maximum length (500000 chars)" };
-		}
-		if (typeof args.workingDir !== "string" || args.workingDir.length === 0) {
-			return {
-				result:
-					"## Error\n\n`workingDir` is required. Pass a project name (e.g. 'my-api') or absolute path.",
-			};
-		}
-		if (args.timeout !== undefined && (typeof args.timeout !== "number" || args.timeout < 0)) {
-			return { result: "## Error\n\n`timeout` must be a non-negative number" };
-		}
-		if (
-			args.persona !== undefined &&
-			(typeof args.persona !== "string" || args.persona.length > 50_000)
-		) {
-			return {
-				result: "## Error\n\n`persona` must be a string (max 50000 chars)",
-			};
-		}
-		try {
-			const bridge = await getBridge();
-			const resolvedDir = await bridge.resolveWorkingDir(args.workingDir as string);
+	});
 
-			const result = await bridge.runTask({
-				prompt: args.prompt as string,
-				workingDir: resolvedDir,
-				timeout: (args.timeout as number | undefined) ?? 120_000,
-				sessionId: resolvedDir,
-				systemMessage: (args.persona as string | undefined) || undefined,
-			});
-			return { result: formatResult(result) };
-		} catch (err) {
-			return { result: formatError(err) };
-		}
-	},
-};
+	api.registerTool({
+		name: "copilot_sessions",
+		label: "Copilot Sessions",
+		description:
+			"List or destroy Copilot coding sessions. Sessions are keyed by project directory and retain full conversation context. Destroy a session to start fresh in that project.",
+		parameters: CopilotSessionsToolSchema,
+		async execute(_toolCallId, params) {
+			const action = params?.action as string;
+			if (action !== "list" && action !== "destroy") {
+				return jsonResult({ error: "`action` must be 'list' or 'destroy'" });
+			}
+			try {
+				const bridge = await getBridge();
+				if (action === "list") {
+					const sessions = bridge.listSessions();
+					return jsonResult({ sessions });
+				}
+				const project = typeof params?.project === "string" ? params.project : "";
+				if (!project) return jsonResult({ error: "`project` is required for action='destroy'." });
+				const resolved = await bridge.resolveWorkingDir(project);
+				const destroyed = await bridge.destroySession(resolved);
+				return jsonResult({ destroyed, project });
+			} catch (err) {
+				return jsonResult({ error: formatError(err) });
+			}
+		},
+	});
 
-// --- Plugin default export ---
-
-const plugin: OpenClawPlugin = {
-	name: "copilot-bridge",
-	version: "1.0.0",
-	tools: [copilotTool],
-	async onLoad() {
-		console.log("[copilot-bridge] Plugin loaded");
-	},
-};
-
-export default plugin;
+	api.logger.info("copilot-bridge: registered copilot + copilot_sessions tools");
+}

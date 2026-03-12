@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "charliermarsh.ruff",
+    "biomejs.biome",
+    "ms-python.python",
+    "ms-azuretools.vscode-bicep",
+    "dbaeumer.vscode-eslint",
+    "ms-python.mypy-type-checker"
+  ]
+}

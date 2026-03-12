@@ -97,6 +97,29 @@ export class InputHandler {
     return true;
   }
 
+  /** Simulate a full recording cycle with TTS text.
+   *  Sends start_audio + stop_audio with hilText back-to-back.
+   *  The gateway will TTS the text, run it through Whisper, and return a transcription. */
+  ttsRecord(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed) return false;
+    if (this.sm.current !== 'idle') {
+      console.warn('[Input] Cannot TTS record — state is', this.sm.current);
+      return false;
+    }
+    this.gateway.sendJson({
+      type: 'start_audio',
+      sampleRate: 16000,
+      channels: 1,
+      sampleWidth: 2,
+    });
+    this.gateway.sendJson({
+      type: 'stop_audio',
+      hilText: trimmed,
+    });
+    return true;
+  }
+
   /** Start a recording session — sends start_audio to gateway. */
   startRecording(): boolean {
     if (this.sm.current !== 'idle') {
@@ -152,6 +175,11 @@ export class InputHandler {
     this.sm.transition('idle');
     this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     return true;
+  }
+
+  /** Get the current session list (if loaded). */
+  get sessionList(): SessionListEntry[] | null {
+    return this._sessionList;
   }
 
   /** Store the session list for menu interaction. */
@@ -242,8 +270,8 @@ export class InputHandler {
         this.startRecording();
         break;
       case 'recording':
-        // Tap during recording stops it
-        this.stopRecording(this._getHilText());
+        // Tap during recording stops it (no hilText — glasses user uses real audio)
+        this.stopRecording();
         break;
       case 'confirming':
         // Tap in confirming state confirms the transcription
@@ -345,9 +373,4 @@ export class InputHandler {
     return true;
   }
 
-  /** Read the HIL text input value (if present in DOM). */
-  private _getHilText(): string | undefined {
-    const input = document.getElementById('hil-text') as HTMLInputElement | null;
-    return input?.value?.trim() || undefined;
-  }
 }

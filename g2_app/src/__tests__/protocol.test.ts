@@ -140,9 +140,9 @@ describe('parseFrame', () => {
   it('parses status frame without metadata (backward compat)', () => {
     const frame = parseFrame('{"type":"status","status":"idle"}');
     expect(frame).toEqual({ type: 'status', status: 'idle' });
-    expect((frame as Record<string, unknown>).question).toBeUndefined();
-    expect((frame as Record<string, unknown>).elapsedMs).toBeUndefined();
-    expect((frame as Record<string, unknown>).phase).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).question).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).elapsedMs).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).phase).toBeUndefined();
   });
 
   it('ignores wrong-type optional metadata on status frame', () => {
@@ -237,9 +237,9 @@ describe('parseFrame', () => {
   it('parses connected frame without optional fields (backward compat)', () => {
     const frame = parseFrame('{"type":"connected","version":"1.0.0"}');
     expect(frame).toEqual({ type: 'connected', version: '1.0.0' });
-    expect((frame as Record<string, unknown>).sessionId).toBeUndefined();
-    expect((frame as Record<string, unknown>).sessionKey).toBeUndefined();
-    expect((frame as Record<string, unknown>).sessionStartedAt).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).sessionId).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).sessionKey).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).sessionStartedAt).toBeUndefined();
   });
 
   it('silently drops optional connected fields with wrong type', () => {
@@ -247,7 +247,7 @@ describe('parseFrame', () => {
       '{"type":"connected","version":"1.0.0","sessionId":123,"sessionKey":true}',
     );
     expect(frame).toEqual({ type: 'connected', version: '1.0.0' });
-    expect((frame as Record<string, unknown>).sessionId).toBeUndefined();
+    expect((frame as unknown as Record<string, unknown>).sessionId).toBeUndefined();
   });
 
   // --- Status frame with optional question/elapsedMs/phase ---

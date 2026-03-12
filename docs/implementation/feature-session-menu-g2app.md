@@ -484,10 +484,10 @@ case 'session_switched': {
 }
 ```
 
-### 7.2 Dev Hook Updates
+### 7.2 API Hook Updates
 
-Add `openSessionMenu` and `closeSessionMenu` to the `__g2Dev` object for
-simulator/HIL testing.
+Add `openSessionMenu` and `closeSessionMenu` to the `__g2Api` object for
+simulator testing.
 
 ---
 

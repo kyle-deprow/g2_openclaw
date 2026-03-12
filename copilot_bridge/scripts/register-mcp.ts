@@ -18,7 +18,7 @@ import path from "node:path";
 const __scriptDir = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
 const CONFIG_JSON_PATH = path.resolve(__scriptDir, "..", "openclaw-mcp-config.json");
 const OPENCLAW_CONFIG_DIR = path.join(os.homedir(), ".openclaw");
-const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_CONFIG_DIR, "config");
+const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_CONFIG_DIR, "openclaw.json");
 const SERVER_KEY = "copilot";
 
 // ---------------------------------------------------------------------------

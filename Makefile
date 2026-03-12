@@ -103,7 +103,7 @@ pre-commit: ## Run all pre-commit hooks
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
 
-launch: ## Start the gateway server
+launch: ## Start the gateway server (foreground, Ctrl+C to stop)
 	@uv run python -m gateway launch
 
 stop: ## Stop all G2 OpenClaw processes
@@ -111,7 +111,7 @@ stop: ## Stop all G2 OpenClaw processes
 
 sim: ## Stop all services and re-launch the full sim stack
 	@uv run python -m gateway stop
-	@uv run python -m gateway launch
+	@uv run python -m gateway launch --daemon
 
 restart: sim ## Alias for sim
 

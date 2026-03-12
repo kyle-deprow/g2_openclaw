@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CopilotClient } from "@github/copilot-sdk";
+import { CopilotClient, approveAll } from "@github/copilot-sdk";
 import type { BridgeConfig } from "./config.js";
 import { DEFAULT_POLICY, createHooks } from "./hooks.js";
 import type { HookConfig } from "./hooks.js";
@@ -25,6 +25,7 @@ export interface SessionInfo {
 
 interface StoredSession {
 	session: any;
+	sdkSessionId: string;
 	unsubscribe: () => void;
 	workingDir?: string;
 	createdAt: string;
@@ -82,6 +83,18 @@ export class CopilotBridge implements ICopilotClient {
 
 	async ensureReady(): Promise<void> {
 		log("info", "Ensuring CopilotBridge is ready...");
+
+		try {
+			await this.client.start();
+			log("debug", "Copilot SDK CLI started");
+		} catch (err) {
+			throw new BridgeError(
+				`Failed to start Copilot SDK: ${err instanceof Error ? err.message : String(err)}`,
+				"START_FAILED",
+				undefined,
+				true,
+			);
+		}
 
 		try {
 			const pingResult = await this.client.ping("health");
@@ -182,6 +195,11 @@ export class CopilotBridge implements ICopilotClient {
 	 */
 	async resolveWorkingDir(workingDir: string): Promise<string> {
 		const { mkdir } = await import("node:fs/promises");
+		// Expand ~ to home directory
+		if (workingDir.startsWith("~/") || workingDir === "~") {
+			const { homedir } = await import("node:os");
+			workingDir = workingDir.replace("~", homedir());
+		}
 		const resolved = path.isAbsolute(workingDir)
 			? workingDir
 			: path.join(this.config.projectsRoot, workingDir);
@@ -194,20 +212,22 @@ export class CopilotBridge implements ICopilotClient {
 		const startTime = Date.now();
 		const toolCalls: ToolCallRecord[] = [];
 		const errors: string[] = [];
-		const sessionId = request.sessionId ?? crypto.randomUUID();
+		const sessionKey = request.sessionId ?? crypto.randomUUID();
 
 		const provider = request.provider ?? this.defaultProvider;
 
 		// Check if we can reuse an existing stored session
-		const stored = this.sessions.get(sessionId);
+		const stored = this.sessions.get(sessionKey);
 		let session: any;
+		let sdkSessionId: string;
 		let isNewSession = false;
 
 		if (stored) {
 			// Reuse existing session
 			session = stored.session;
+			sdkSessionId = stored.sdkSessionId;
 			stored.lastAccessedAt = Date.now();
-			log("debug", "Reusing stored session", { sessionId, messageCount: stored.messageCount });
+			log("debug", "Reusing stored session", { sessionKey, messageCount: stored.messageCount });
 		} else {
 			// LRU eviction: if at capacity, destroy the least-recently-accessed session
 			if (this.sessions.size >= this.maxSessions) {
@@ -220,19 +240,21 @@ export class CopilotBridge implements ICopilotClient {
 					}
 				}
 				if (oldestKey) {
-					log("info", "LRU eviction: destroying oldest session", { sessionId: oldestKey });
+					log("info", "LRU eviction: destroying oldest session", { sessionKey: oldestKey });
 					await this.destroySession(oldestKey);
 				}
 			}
 			// Create a new session
+			sdkSessionId = crypto.randomUUID();
 			const hooks = createHooks(this.buildHookConfig());
 
 			const sessionConfig: Record<string, unknown> = {
-				model: request.model ?? this.config.model,
+				model: request.model ?? (provider ? this.config.byokModel : undefined) ?? this.config.model,
 				provider,
 				streaming: false,
 				hooks,
-				sessionId,
+				sessionId: sdkSessionId,
+				onPermissionRequest: approveAll,
 			};
 
 			if (request.workingDir) {
@@ -267,8 +289,9 @@ export class CopilotBridge implements ICopilotClient {
 				},
 			};
 
-			log("debug", "Creating session", { sessionId });
-			session = await this.client.createSession(sessionConfig);
+			log("debug", "Creating session", { sessionKey, sdkSessionId });
+			session = await this.client.createSession(sessionConfig as any);
+			log("debug", "Session created successfully", { sessionKey, sdkSessionId });
 			isNewSession = true;
 		}
 
@@ -319,8 +342,9 @@ export class CopilotBridge implements ICopilotClient {
 
 			// Store the session (create or update)
 			if (isNewSession) {
-				this.sessions.set(sessionId, {
+				this.sessions.set(sessionKey, {
 					session,
+					sdkSessionId,
 					unsubscribe: () => {}, // per-session unsub is a no-op; per-call unsub is in finally
 					workingDir: request.workingDir,
 					createdAt: new Date().toISOString(),
@@ -336,18 +360,20 @@ export class CopilotBridge implements ICopilotClient {
 				content,
 				toolCalls,
 				errors,
-				sessionId,
+				sessionId: sessionKey,
 				elapsed,
 			};
 		} catch (err) {
 			const elapsed = Date.now() - startTime;
 			const message = err instanceof Error ? err.message : String(err);
 			errors.push(message);
+			log("error", "runTask failed", { sessionKey, error: message });
 
 			// Still store the session even on error so it can be retried
 			if (isNewSession) {
-				this.sessions.set(sessionId, {
+				this.sessions.set(sessionKey, {
 					session,
+					sdkSessionId,
 					unsubscribe: () => {},
 					workingDir: request.workingDir,
 					createdAt: new Date().toISOString(),
@@ -363,7 +389,7 @@ export class CopilotBridge implements ICopilotClient {
 				content: "",
 				toolCalls,
 				errors,
-				sessionId,
+				sessionId: sessionKey,
 				elapsed,
 			};
 		} finally {
@@ -415,16 +441,18 @@ export class CopilotBridge implements ICopilotClient {
 
 	async *runTaskStreaming(request: CodingTaskRequest): AsyncGenerator<StreamingDelta> {
 		const provider = request.provider ?? this.defaultProvider;
-		const sessionId = request.sessionId ?? crypto.randomUUID();
+		const sessionKey = request.sessionId ?? crypto.randomUUID();
+		const sdkSessionId = crypto.randomUUID();
 
 		const hooks = createHooks(this.buildHookConfig());
 
 		const sessionConfig: Record<string, unknown> = {
-			model: request.model ?? this.config.model,
+			model: request.model ?? (provider ? this.config.byokModel : undefined) ?? this.config.model,
 			provider,
 			streaming: true,
 			hooks,
-			sessionId,
+			sessionId: sdkSessionId,
+			onPermissionRequest: approveAll,
 		};
 
 		if (request.workingDir) {
@@ -459,8 +487,8 @@ export class CopilotBridge implements ICopilotClient {
 			},
 		};
 
-		log("debug", "Creating streaming session", { sessionId });
-		const session = await this.client.createSession(sessionConfig);
+		log("debug", "Creating streaming session", { sessionKey, sdkSessionId });
+		const session = await this.client.createSession(sessionConfig as any);
 
 		// Collect events into a queue that the generator consumes
 		const queue: StreamingDelta[] = [];
@@ -529,7 +557,7 @@ export class CopilotBridge implements ICopilotClient {
 			unsubscribe();
 			if (!request.sessionId) {
 				await session.destroy();
-				log("debug", "Streaming session destroyed", { sessionId });
+				log("debug", "Streaming session destroyed", { sessionKey });
 			}
 		}
 	}

@@ -7,7 +7,8 @@
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
 #   - openclaw CLI on PATH
-#   - AZURE_AI_SERVICES_API_KEY set in env or in gateway/openclaw_config/.env
+#   - For copilot: run 'openclaw github-copilot login' (or set GH_TOKEN env var)
+#   - For azure: AZURE_AI_SERVICES_API_KEY set in env or in gateway/openclaw_config/.env
 
 set -euo pipefail
 
@@ -44,9 +45,13 @@ if [[ -z "${AZURE_AI_SERVICES_API_KEY:-}" ]] && [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-if [[ -z "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
-  echo "WARNING: AZURE_AI_SERVICES_API_KEY is not set." >&2
-  echo "         The provider config will use the env: reference but auth may fail." >&2
+if [[ "${OPENCLAW_PROVIDER:-copilot}" == "azure" ]] && [[ -z "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
+  echo "WARNING: AZURE_AI_SERVICES_API_KEY is not set but OPENCLAW_PROVIDER=azure." >&2
+  echo "         Set it in ${ENV_FILE} or export it before running this script." >&2
+fi
+
+if [[ "${OPENCLAW_PROVIDER:-copilot}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+  echo "WARNING: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
   echo "         Set it in ${ENV_FILE} or export it before running this script." >&2
 fi
 
@@ -86,19 +91,81 @@ else
   echo "         Auth will fail until the key is resolved." >&2
 fi
 
+if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --arg key "${OPENROUTER_API_KEY}" '
+    (.models.providers // {}) |= with_entries(
+      if .value.apiKey == "env:OPENROUTER_API_KEY" then
+        .value.apiKey = $key
+      else . end
+    )
+  ')
+  echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
+fi
+
+# ── Provider selection ───────────────────────────────────────────────────────
+PROVIDER="${OPENCLAW_PROVIDER:-copilot}"
+case "${PROVIDER}" in
+  copilot)
+    MODEL_PRIMARY="github-copilot/${COPILOT_MODEL:-claude-sonnet-4.6}"
+    ;;
+  azure)
+    MODEL_PRIMARY="azure-oai-g2/model-router"
+    ;;
+  openrouter)
+    MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+    ;;
+  *)
+    echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'copilot', 'azure', or 'openrouter'." >&2
+    exit 1
+    ;;
+esac
+
+MERGED=$(echo "${MERGED}" | jq --arg primary "${MODEL_PRIMARY}" '
+  .agents.defaults.model.primary = $primary
+')
+echo "Active provider: ${PROVIDER} → model: ${MODEL_PRIMARY}"
+
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
 echo "Merged repo config into ${LOCAL_CONFIG}"
 
 # ── Copy bootstrap files ────────────────────────────────────────────────────
+# OpenClaw resolves per-agent workspaces as {workspace_base}-{agent_id}.
+# Default agent is "claw" → workspace-claw/
+AGENT_ID="claw"
+BOOTSTRAP_DST="${OPENCLAW_HOME}/workspace-${AGENT_ID}"
 for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"
-  DST="${OPENCLAW_HOME}/${FILE}"
+  DST="${BOOTSTRAP_DST}/${FILE}"
   if [[ -f "${SRC}" ]]; then
     cp "${SRC}" "${DST}"
     echo "Copied ${FILE} → ${DST}"
   fi
 done
+
+# Clean stale copies from wrong locations
+for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
+  for STALE_DIR in "${OPENCLAW_HOME}" "${OPENCLAW_HOME}/workspace"; do
+    STALE="${STALE_DIR}/${FILE}"
+    if [[ -f "${STALE}" ]] && [[ "${STALE_DIR}" != "${BOOTSTRAP_DST}" ]]; then
+      rm "${STALE}"
+      echo "Removed stale ${STALE}"
+    fi
+  done
+done
+
+# ── Write Copilot Bridge BYOK config ────────────────────────────────────────
+BRIDGE_ENV="${REPO_ROOT}/copilot_bridge/.env"
+if [[ -f "${BRIDGE_ENV}" ]]; then
+  # Remove existing COPILOT_BYOK_API_KEY line and re-add with resolved value
+  sed -i '/^COPILOT_BYOK_API_KEY=/d' "${BRIDGE_ENV}"
+  if [[ -n "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
+    echo "COPILOT_BYOK_API_KEY=${AZURE_AI_SERVICES_API_KEY}" >> "${BRIDGE_ENV}"
+    echo "Wrote COPILOT_BYOK_API_KEY to ${BRIDGE_ENV} (${#AZURE_AI_SERVICES_API_KEY} chars)"
+  else
+    echo "WARNING: AZURE_AI_SERVICES_API_KEY not set — COPILOT_BYOK_API_KEY not written to bridge .env" >&2
+  fi
+fi
 
 # ── Copy Azure API-version preload if present ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
@@ -130,8 +197,16 @@ fi
 echo ""
 echo "Done. Config pushed successfully."
 echo ""
-echo "── Azure API-version preload ──"
-echo "If using Azure OpenAI, ensure NODE_OPTIONS is set before starting the daemon:"
-echo ""
-echo "  export NODE_OPTIONS=\"--require \$HOME/.openclaw/azure-api-version-preload.cjs\""
-echo ""
+if [[ "${PROVIDER}" == "azure" ]]; then
+  echo "── Azure API-version preload ──"
+  echo "Ensure NODE_OPTIONS is set before starting the daemon:"
+  echo ""
+  echo "  export NODE_OPTIONS=\"--require \$HOME/.openclaw/azure-api-version-preload.cjs\""
+  echo ""
+elif [[ "${PROVIDER}" == "copilot" ]]; then
+  echo "── GitHub Copilot ──"
+  echo "Using model: ${MODEL_PRIMARY}"
+  echo "The daemon will auto-exchange your GitHub token for Copilot API tokens."
+  echo "No NODE_OPTIONS preload needed."
+  echo ""
+fi

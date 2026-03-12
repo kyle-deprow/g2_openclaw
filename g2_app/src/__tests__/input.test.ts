@@ -123,22 +123,6 @@ describe('InputHandler', () => {
       expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'stop_audio' });
     });
 
-    it('tap in recording sends stop_audio with hilText from DOM', () => {
-      sm._current = 'recording';
-      const input = document.createElement('input');
-      input.id = 'hil-text';
-      input.value = 'hello world';
-      document.body.appendChild(input);
-
-      handlerAny._handleEvent(CLICK);
-      expect(gateway.sendJson).toHaveBeenCalledWith({
-        type: 'stop_audio',
-        hilText: 'hello world',
-      });
-
-      input.remove();
-    });
-
     it('startRecording returns false when not idle', () => {
       sm._current = 'recording';
       expect(handler.startRecording()).toBe(false);
@@ -229,6 +213,55 @@ describe('InputHandler', () => {
       sm._current = 'idle';
       handler.sendText('  trimmed  ');
       expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'text', message: 'trimmed' });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // ttsRecord
+  // ---------------------------------------------------------------------------
+
+  describe('ttsRecord', () => {
+    it('sends start_audio + stop_audio with hilText when idle', () => {
+      sm._current = 'idle';
+      expect(handler.ttsRecord('hello world')).toBe(true);
+      expect(gateway.sendJson).toHaveBeenCalledTimes(2);
+      expect(gateway.sendJson).toHaveBeenNthCalledWith(1, {
+        type: 'start_audio',
+        sampleRate: 16000,
+        channels: 1,
+        sampleWidth: 2,
+      });
+      expect(gateway.sendJson).toHaveBeenNthCalledWith(2, {
+        type: 'stop_audio',
+        hilText: 'hello world',
+      });
+    });
+
+    it('returns false for empty string', () => {
+      sm._current = 'idle';
+      expect(handler.ttsRecord('')).toBe(false);
+      expect(gateway.sendJson).not.toHaveBeenCalled();
+    });
+
+    it('returns false for whitespace-only string', () => {
+      sm._current = 'idle';
+      expect(handler.ttsRecord('   ')).toBe(false);
+      expect(gateway.sendJson).not.toHaveBeenCalled();
+    });
+
+    it('returns false when not idle', () => {
+      sm._current = 'recording';
+      expect(handler.ttsRecord('hello')).toBe(false);
+      expect(gateway.sendJson).not.toHaveBeenCalled();
+    });
+
+    it('trims whitespace from text', () => {
+      sm._current = 'idle';
+      handler.ttsRecord('  trimmed  ');
+      expect(gateway.sendJson).toHaveBeenNthCalledWith(2, {
+        type: 'stop_audio',
+        hilText: 'trimmed',
+      });
     });
   });
 

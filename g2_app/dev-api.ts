@@ -1,5 +1,5 @@
 /**
- * dev-api.ts — Vite plugin providing HTTP dev API endpoints.
+ * dev-api.ts — Vite plugin providing HTTP automation API endpoints.
  *
  * Lets an external tool (Copilot / curl) control the G2 app running in the
  * simulator's webview via a simple command-queue-and-poll pattern:
@@ -31,7 +31,7 @@ interface StoredResult {
 
 // ── Plugin ─────────────────────────────────────────────────────────────────
 
-export function devApiPlugin(): Plugin {
+export function apiPlugin(): Plugin {
   const pending: PendingCommand[] = [];
   const results = new Map<string, StoredResult>();
 
@@ -93,7 +93,7 @@ export function devApiPlugin(): Plugin {
   }
 
   return {
-    name: 'dev-api',
+    name: 'api',
     apply: 'serve',
 
     configureServer(server) {
@@ -220,7 +220,7 @@ export function devApiPlugin(): Plugin {
     transformIndexHtml(html) {
       const script = `
 <script>
-// DEV-ONLY: Dev API polling (injected by devApiPlugin)
+// Automation API polling (injected by apiPlugin)
 (function() {
   var POLL_INTERVAL = 200;
 
@@ -232,8 +232,8 @@ export function devApiPlugin(): Plugin {
   }
 
   function exec(cmd) {
-    var dev = window.__g2Dev;
-    if (!dev) {
+    var api = window.__g2Api;
+    if (!api) {
       postResult(cmd.id, undefined, 'app not ready');
       return;
     }
@@ -243,58 +243,64 @@ export function devApiPlugin(): Plugin {
       var args = cmd.args || [];
       switch (cmd.cmd) {
         case 'getState':
-          result = dev.getState();
+          result = api.getState();
           break;
         case 'getConversation':
-          result = dev.getConversation();
+          result = api.getConversation();
           break;
         case 'getDisplayText':
-          result = dev.getDisplayText();
+          result = api.getDisplayText();
           break;
         case 'getGatewayConnected':
-          result = dev.getGatewayConnected();
+          result = api.getGatewayConnected();
           break;
         case 'sendText':
-          result = dev.sendText(args[0]);
+          result = api.sendText(args[0]);
+          break;
+        case 'ttsRecord':
+          result = api.ttsRecord(args[0]);
           break;
         case 'startRecording':
-          result = dev.startRecording();
+          result = api.startRecording();
           break;
         case 'stopRecording':
-          result = dev.stopRecording(args[0]);
+          result = api.stopRecording(args[0]);
           break;
         case 'confirmTranscription':
-          result = dev.confirmTranscription();
+          result = api.confirmTranscription();
           break;
         case 'rejectTranscription':
-          result = dev.rejectTranscription();
+          result = api.rejectTranscription();
           break;
         case 'cancelResponse':
-          result = dev.cancelResponse();
+          result = api.cancelResponse();
+          break;
+        case 'getSessionList':
+          result = api.getSessionList();
           break;
         case 'openSessionMenu':
-          result = dev.openSessionMenu();
+          result = api.openSessionMenu();
           break;
         case 'closeSessionMenu':
-          result = dev.closeSessionMenu();
+          result = api.closeSessionMenu();
           break;
         case 'selectSession':
-          result = dev.selectSession(args[0]);
+          result = api.selectSession(args[0]);
           break;
         case 'tap':
-          result = dev.tap();
+          result = api.tap();
           break;
         case 'doubleTap':
-          result = dev.doubleTap();
+          result = api.doubleTap();
           break;
         case 'resetSession':
-          result = dev.resetSession();
+          result = api.resetSession();
           break;
         case 'getSessionId':
-          result = dev.getSessionId();
+          result = api.getSessionId();
           break;
         case 'getPendingTranscription':
-          result = dev.getPendingTranscription();
+          result = api.getPendingTranscription();
           break;
         default:
           error = 'unknown command: ' + cmd.cmd;

@@ -18,6 +18,7 @@ import type { GatewayEvent } from './gateway';
 import { InputHandler } from './input';
 import type { InboundFrame } from './protocol';
 import { StateMachine } from './state';
+import { createAppApi, SESSION_ID_KEY } from './api';
 
 // ---------------------------------------------------------------------------
 // Module-level references (accessible to routing functions)
@@ -27,8 +28,6 @@ let gateway: Gateway;
 let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
-
-const SESSION_ID_KEY = 'g2_last_session_id';
 
 // ---------------------------------------------------------------------------
 // Frame routing
@@ -274,29 +273,8 @@ async function boot(): Promise<void> {
   input.init({ sm, display, gateway, bridge, conversation });
   console.log('[Main] InputHandler initialised');
 
-  // Expose dev hook for the HIL bar (tree-shaken out of production builds)
-  if (import.meta.env.DEV) {
-    (window as any).__g2Dev = {
-      sendText: (msg: string) => input.sendText(msg),
-      startRecording: () => input.startRecording(),
-      stopRecording: (hilText?: string) => input.stopRecording(hilText),
-      confirmTranscription: () => input.confirmTranscription(),
-      rejectTranscription: () => input.rejectTranscription(),
-      cancelResponse: () => input.cancelResponse(),
-      resetSession: () => input.resetSession(),
-      openSessionMenu: () => input.openSessionMenu(),
-      closeSessionMenu: () => input.closeSessionMenu(),
-      getState: () => sm.current,
-      getGatewayConnected: () => gateway.isConnected,
-      getSessionId: () => { try { return localStorage.getItem('g2_last_session_id'); } catch { return null; } },
-      getPendingTranscription: () => input.pendingTranscription,
-      getConversation: () => conversation.getEntries(),
-      getDisplayText: () => conversation.formatReverse(2000),
-      tap: () => input.simulateTap(),
-      doubleTap: () => input.simulateDoubleTap(),
-      selectSession: (index: number) => input.simulateMenuSelect(index),
-    };
-  }
+  // Expose app API for phone UI, automation endpoints, and external tools
+  (window as any).__g2Api = createAppApi({ sm, input, conversation, gateway });
 }
 
 // ---------------------------------------------------------------------------

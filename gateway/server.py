@@ -48,6 +48,8 @@ _MAX_RECORDING_SECONDS = 90
 _BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
 _BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
 
+_STREAM_LOG = Path(__file__).resolve().parent.parent / "logs" / "openclaw-stream.log"
+
 # --- Auth rate limiting ---
 _AUTH_MAX_FAILURES = 5
 _AUTH_WINDOW_SECONDS = 60
@@ -600,7 +602,7 @@ class GatewaySession:
         # Start local mic capture when --local-audio is enabled
         if self._local_audio:
             try:
-                import sounddevice as sd  # type: ignore[import-not-found]  # lazy import
+                import sounddevice as sd  # type: ignore[import-not-found,import-untyped,unused-ignore]  # lazy, optional dep
 
                 def _audio_callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
                     if status:
@@ -1230,11 +1232,20 @@ class GatewayServer:
         only interleaved execution at await points.
         """
         try:
+            _STREAM_LOG.parent.mkdir(exist_ok=True)
+            with _STREAM_LOG.open("w") as f:
+                f.write(
+                    f"--- {buffer.user_question} "
+                    f"[{_time_module.strftime('%Y-%m-%dT%H:%M:%SZ', _time_module.gmtime())}] ---\n"
+                )
             async for delta in stream:
                 if not buffer.append_delta(delta):
                     logger.warning(
                         "Inflight buffer exceeded %d chars — truncating", _BUFFER_MAX_CHARS
                     )
+
+                with _STREAM_LOG.open("a") as f:
+                    f.write(delta)
 
                 session = self._current_session
                 if session is not None:
@@ -1252,6 +1263,8 @@ class GatewayServer:
             buffer.error = "internal error"
             logger.exception("Unexpected error during inflight stream")
         finally:
+            with contextlib.suppress(OSError), _STREAM_LOG.open("a") as f:
+                f.write("\n--- END ---\n")
             session = self._current_session
             if session is not None and buffer.complete and self._inflight_buffer is buffer:
                 try:
@@ -1358,6 +1371,32 @@ class GatewayServer:
         """
         if request.path == "/healthz":
             return connection.respond(200, "OK\n")
+        if request.path == "/stream":
+            buf = self._inflight_buffer
+            body = buf.full_text if buf is not None else "No active stream"
+            return connection.respond(200, body)
+        if request.path == "/abort":
+            had_stream = self._inflight_buffer is not None
+            if had_stream:
+                await self._discard_inflight()
+                session = self._current_session
+                if session is not None:
+                    session._state = SessionState.IDLE
+                    session._current_question = None
+                    session._task_start = None
+                    try:
+                        await session.send_frame(
+                            {
+                                "type": "error",
+                                "detail": "Stream aborted via /abort",
+                                "code": ErrorCode.OPENCLAW_ERROR,
+                            }
+                        )
+                        await session.send_frame({"type": "status", "status": "idle"})
+                    except Exception:
+                        pass
+                return connection.respond(200, "Aborted\n")
+            return connection.respond(200, "No active stream\n")
         return None
 
     async def serve(self) -> None:

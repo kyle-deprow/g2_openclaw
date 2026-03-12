@@ -2,7 +2,10 @@
   "servers": {
     "copilot": {
       "command": "npx",
-      "args": ["tsx", "copilot_bridge/src/mcp-server.ts"]
+      "args": ["tsx", "copilot_bridge/src/mcp-server.ts"],
+      "env": {
+        "COPILOT_MODEL": "claude-opus-4.6"
+      }
     }
   }
 }

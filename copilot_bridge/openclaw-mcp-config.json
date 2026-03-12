@@ -1,8 +1,13 @@
 {
-	"servers": {
-		"copilot": {
-			"command": "npx",
-			"args": ["tsx", "copilot_bridge/src/mcp-server.ts"]
+	"mcp": {
+		"servers": {
+			"copilot": {
+				"command": "npx",
+				"args": ["tsx", "/home/dev/repos/g2_openclaw/copilot_bridge/src/mcp-server.ts"],
+				"env": {
+					"COPILOT_MODEL": "claude-opus-4.6"
+				}
+			}
 		}
 	}
 }

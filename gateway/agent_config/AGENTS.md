@@ -1,39 +1,59 @@
 # Agents — Operational Rules
 
-## Orchestration Loop
+## Orchestration Flow
 
-Every coding task follows this sequence. No exceptions.
+Every coding task follows four steps. No exceptions.
 
-1. **PLAN** — Call `copilot` with a planner persona. Get a phased plan with file paths, complexity, and dependencies.
-2. **PRESENT** — Show the plan to the user. List phases, scope, and risks. Then stop. Wait for explicit approval before proceeding.
-3. **IMPLEMENT** — For each approved phase: destroy the Copilot session, call `copilot` with an implementer persona. One phase per cycle.
-4. **REVIEW** — After implementation: destroy session, call `copilot` with a reviewer persona. Get a structured verdict.
-5. **FIX** — If review finds issues: destroy session, call `copilot` with a fixer persona. Address each finding.
-6. **REPEAT** — Loop review → fix until the verdict is clean, then move to the next phase.
-7. **REPORT** — After all phases complete, summarize what changed and ask if the user wants modifications.
+### 1. SCAFFOLD
 
-## Human-in-the-Loop Gates
+Set up the workspace using `exec` before calling Copilot:
 
-- **Before implementation:** Always present the full plan and wait. "Looks good" or equivalent = approval. Silence ≠ approval.
-- **After all phases:** Summarize changes, ask if anything needs adjustment.
-- **On unexpected errors:** Stop immediately. Report what happened and what you recommend before continuing.
+```bash
+mkdir -p <user-specified-path>
+cd <user-specified-path> && git init
+mkdir -p .github/agents .github/skills
+```
 
-## Session Management
+Examine `~/repos/ai_scaffolding/` — glob agents/ and skills/, read descriptions, pick what fits.
+Always include `orchestrator.agent.md`. Copy selected agents and skills to the target repo.
 
-- Each `workingDir` = one Copilot session with shared file context.
-- Persona is locked at session creation. To switch persona, destroy the session first with `copilot_sessions(action: "destroy", ...)`.
-- Copilot retains file reads, edits, and conversation within a session — don't repeat context unnecessarily.
+**Scaffolding MUST complete before the first `copilot()` call.** Agents and skills are discovered at session creation.
 
-## Handle Directly (no copilot)
+### 2. PLAN
 
-- Conversational questions, clarifications, planning decisions
-- Presenting plans and summaries to the user
-- Memory queries and context recall
-- Choosing which persona fits each step
+Call `copilot()` with `workingDir` = the user's specified path. The prompt MUST:
+- Include the user's requirements VERBATIM — every tech choice, API, directory, and constraint quoted directly from their words. Do not paraphrase or substitute.
+- Include: "The directory already contains .github/agents/ and .github/skills/ with orchestrator config. Preserve these — initialize the project around them (e.g. use --force or init in-place). Do NOT delete or recreate the directory."
+
+Read the result. Distill into a brief summary: phases, key decisions, risks.
+
+**Stop. Wait for explicit approval before building.**
+
+### 3. IMPLEMENT
+
+Same Copilot session (do NOT create a new one). Send a single follow-up that:
+- Includes the approved plan
+- Quotes the user's original requirements again verbatim
+- Reminds: "The directory contains .github/ scaffolding — preserve it. Initialize the project around it."
+- Instructs: "Implement ALL phases end-to-end in one pass. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review across the entire codebase."
+- Do NOT break implementation into separate copilot() calls per phase. One call, all phases.
+- Uses timeout 0 (no timeout) so the full build can complete.
+
+### 4. REPORT
+
+Summarize what was built, list key files, explain how to run it. Ask if the user wants changes.
+
+## Gates
+
+- **Before implementation:** Present plan, wait for "go." Silence ≠ approval.
+- **During implementation:** No gates. Run all phases continuously without asking for approval between phases.
+- **After completion:** Summarize, ask for adjustments.
+- **On errors:** Stop. Report what happened. Don't retry silently.
+
+## Handle Directly
+
+Conversations, clarifications, plan summaries, agent/skill selection, memory queries.
 
 ## Delegate to Copilot
 
-- All code writing, generation, and scaffolding
-- Code review and security analysis
-- Test writing and execution
-- Multi-file refactoring and restructuring
+All code writing, review, testing, refactoring.

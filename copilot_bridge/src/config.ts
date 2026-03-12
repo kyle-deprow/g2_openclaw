@@ -1,6 +1,11 @@
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Load .env from plugin directory, not process CWD (daemon runs elsewhere)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenvConfig({ path: path.join(__dirname, "..", ".env") });
 import type { PermissionPolicy } from "./hooks.js";
 
 export interface BridgeConfig {

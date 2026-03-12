@@ -11,8 +11,8 @@ description:
 # G2 Simulator Automation
 
 Control the G2 app running inside the EvenHub simulator through HTTP endpoints
-served by the Vite dev server on **port 5173**. The Dev API (`g2_app/dev-api.ts`)
-bridges external HTTP calls to `window.__g2Dev` inside the simulator's webview.
+served by the Vite dev server on **port 5173**. The API plugin (`g2_app/dev-api.ts`)
+bridges external HTTP calls to `window.__g2Api` inside the simulator's webview.
 
 ## Starting the Stack
 

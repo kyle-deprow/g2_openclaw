@@ -28,7 +28,6 @@ The Copilot Bridge is a bidirectional integration layer between **OpenClaw** (an
      │  │  mcp-server.ts → MCP tools for OpenClaw to call  ├──┤
      │  │  mcp-openclaw.ts → MCP tools for Copilot to call │  │
      │  │  client.ts     → SDK session management          ├──┤
-     │  │  orchestrator.ts → multi-step task engine         │  │
      │  │  hooks.ts      → permissions, audit, security    │  │
      │  └──────────────────────────────────────────────────┘  │
      │                                                        │
@@ -43,9 +42,9 @@ The Copilot Bridge is a bidirectional integration layer between **OpenClaw** (an
  │                          DATA FLOW                                          │
  │                                                                             │
  │  ┌──────────┐  plugin tools                ┌───────────────┐  SDK sessions  │
- │  │          │  copilot_code ──────────────→│               │──────────────→ │
- │  │          │  copilot_code_verbose ──────→│               │               │
- │  │ OpenClaw │  copilot_orchestrate ──────→│ Copilot Bridge │  ┌──────────┐ │
+ │  │          │  copilot ──────────────────→│               │──────────────→ │
+ │  │          │  copilot_sessions ─────────→│               │               │
+ │  │ OpenClaw │                              │ Copilot Bridge │  ┌──────────┐ │
  │  │  Agent   │                              │   (client.ts)  │→│ GitHub   │ │
  │  │          │  MCP tools (mcp-server.ts)   │                │  │ Copilot  │ │
  │  │          │  copilot_read_file ────────→│                │→│ SDK      │ │
@@ -79,10 +78,9 @@ The Copilot Bridge is a bidirectional integration layer between **OpenClaw** (an
 | `types.ts` | Shared value types: `CodingTaskRequest`, `CodingTaskResult`, `ToolCallRecord`, `StreamingDelta`, `ProviderConfig`, `BridgeError`. |
 | `interfaces.ts` | Contract interfaces: `ICopilotClient`, `ICopilotSession`, `IPermissionHandler`, `IProviderConfig`. Enables testing via dependency injection. |
 | `hooks.ts` | SDK session hooks factory (`createHooks`). Implements permission evaluation, path restriction, secret redaction, audit logging, prompt injection of project context, and error classification (retry/skip/abort). |
-| `plugin.ts` | OpenClaw plugin (`copilot-bridge`). Exports three tools: `copilot_code`, `copilot_code_verbose`, `copilot_orchestrate`. Manages a shared bridge singleton. |
+| `plugin.ts` | OpenClaw plugin (`copilot-bridge`). Exports two tools: `copilot` and `copilot_sessions`. Manages a shared bridge singleton. |
 | `mcp-server.ts` | MCP server exposing Copilot capabilities to OpenClaw. Four tools: `copilot_read_file`, `copilot_create_file`, `copilot_list_files`, `copilot_code_task`. Runs on stdio transport. Includes lazy init, mutex for `copilot_code_task`, and clean shutdown. |
 | `mcp-openclaw.ts` | MCP server exposing OpenClaw memory to Copilot sessions. Three read-only tools: `openclaw_memory_search`, `openclaw_memory_read`, `openclaw_user_prefs`. Includes WebSocket client for OpenClaw gateway, path validation, and keyword-based memory search. |
-| `orchestrator.ts` | Multi-step task engine. `TaskOrchestrator` decomposes a high-level task into a `TaskPlan` via LLM, then executes sub-tasks using a concurrency-limited `SessionPool`. Uses Kahn's algorithm for topological sort and wave-based parallel execution. |
 | `index.ts` | Barrel re-exports for the package public API. |
 
 **Supporting files:**
@@ -99,19 +97,16 @@ The Copilot Bridge is a bidirectional integration layer between **OpenClaw** (an
 
 ### 4.1 OpenClaw → Copilot: Plugin Tools
 
-Registered via `plugin.ts` as an OpenClaw plugin. OpenClaw loads the plugin and gains three tools:
+Registered via `plugin.ts` as an OpenClaw plugin. OpenClaw loads the plugin and gains two tools:
 
 | Tool | Description | Key Parameters |
 |------|-------------|---------------|
-| `copilot_code` | Delegate a coding task; returns final result as markdown | `task` (required), `workingDir`, `model`, `timeout` |
-| `copilot_code_verbose` | Same task delegation but streams step-by-step execution log | Same as above |
-| `copilot_orchestrate` | Decompose a complex task into sub-tasks, execute in parallel | `task` (required), `maxConcurrency` (default 3), `timeout` |
+| `copilot` | Delegate a coding task to a Copilot session. Creates/resumes session by `workingDir`. Returns result as markdown. | `prompt` (required), `workingDir` (required), `persona?`, `timeout?` |
+| `copilot_sessions` | Manage sessions. `action="list"` lists active sessions, `action="destroy"` + `project` kills a specific session. | `action` (required: `"list"` or `"destroy"`), `project?` |
 
-**`copilot_code`** calls `bridge.runTask()` — creates a Copilot SDK session, sends the prompt, waits for the response, and returns formatted markdown with tool calls and stats.
+**`copilot`** calls `bridge.runTask()` — creates or resumes a Copilot SDK session keyed by `workingDir`, sends the prompt, waits for the response, and returns formatted markdown with tool calls and stats.
 
-**`copilot_code_verbose`** calls `bridge.runTaskStreaming()` — same flow but yields `StreamingDelta` events, producing a numbered execution log showing each tool invocation.
-
-**`copilot_orchestrate`** uses the `TaskOrchestrator` to plan and execute multi-step tasks (see §5).
+**`copilot_sessions`** provides session management — list all active sessions or destroy a specific one by project name/path to start fresh.
 
 ### 4.2 OpenClaw → Copilot: MCP Server
 
@@ -136,55 +131,13 @@ Served by `mcp-openclaw.ts` over stdio. Automatically spawned per Copilot SDK se
 | `openclaw_memory_read` | Read a specific memory file (default: `MEMORY.md`) | `file` (optional) |
 | `openclaw_user_prefs` | Read `~/.openclaw/USER.md` user preferences | (none) |
 
-All three tools are **read-only**. They include `_depth` tracking for cycle detection (see §6).
+All three tools are **read-only**. They include `_depth` tracking for cycle detection (see §5).
 
 The `mcp-openclaw.ts` module also contains an `OpenClawClient` WebSocket client for direct RPC to the OpenClaw gateway (host/port from config), with exponential backoff reconnection.
 
 ---
 
-## 5. Task Orchestrator
-
-The orchestrator (`orchestrator.ts`) implements two components specified as C5.1 (Task Decomposition) and C5.2 (Session Pool).
-
-### 5.1 Task Decomposition
-
-`TaskOrchestrator.planTasks(description)`:
-
-1. Sends a structured prompt to the LLM asking it to decompose the task into sub-tasks with dependencies.
-2. Parses the JSON response into a `TaskPlan`:
-   - `tasks`: Array of `SubTask` objects (`id`, `description`, `estimatedComplexity: S|M|L`)
-   - `dependencies`: Map of `taskId → dependsOnTaskIds[]`
-3. Validates the plan with `topologicalSort()` (Kahn's algorithm) — rejects circular dependencies.
-4. Falls back to a single-task plan if parsing or validation fails.
-
-### 5.2 Session Pool
-
-`SessionPool` controls concurrency:
-
-- Default max concurrency: **3** parallel sessions
-- Promise-based acquire/release semaphore
-- Tracks tainted sessions (those that returned `success: false`)
-- `drain()` waits for all active sessions to complete
-
-### 5.3 Execution
-
-`TaskOrchestrator.executePlan(plan)`:
-
-1. Computes topological order and groups tasks into **waves** (tasks whose dependencies are all satisfied).
-2. Runs each wave in parallel via the session pool (`Promise.all`).
-3. On failure: marks transitive dependents as **skipped** (BFS over the dependency graph).
-4. Emits events: `task_start`, `task_complete`, `task_skipped`, `plan_complete`.
-5. Returns an `OrchestratedResult` with per-task results and a summary string.
-
-```
-Wave 1:  [t1, t2]  ──parallel──→  completed
-Wave 2:  [t3]      ── depends on t1 ──→  completed
-Wave 3:  [t4]      ── depends on t2, t3 ──→  completed or skipped
-```
-
----
-
-## 6. Security
+## 5. Security
 
 ### Permission Hooks
 
@@ -234,7 +187,7 @@ Both MCP servers use a `_depth` parameter on every tool to track call depth. `ch
 
 ---
 
-## 7. Configuration
+## 6. Configuration
 
 All configuration is loaded from environment variables via `config.ts`:
 
@@ -258,11 +211,11 @@ A `.env` file is automatically loaded via `dotenv`.
 
 ---
 
-## 8. Setup
+## 7. Setup
 
 ### Register the OpenClaw Plugin
 
-The plugin provides `copilot_code`, `copilot_code_verbose`, and `copilot_orchestrate` tools directly to OpenClaw:
+The plugin provides `copilot` and `copilot_sessions` tools directly to OpenClaw:
 
 ```bash
 cd copilot_bridge
@@ -298,6 +251,18 @@ Alternatively, copy `openclaw-mcp-config.json` into your OpenClaw MCP configurat
 **For Copilot sessions** (so they can call `openclaw_memory_search`, etc.):
 
 No manual registration needed. The `CopilotBridge` automatically configures `mcp-openclaw.js` as a local MCP server in every SDK session it creates.
+
+---
+
+## Integration Status (2026-03-12)
+
+- Plugin registered with OpenClaw: `copilot` and `copilot_sessions` tools active
+- OpenClaw `tools.allow` includes `copilot` and `copilot_sessions`
+- Sessions use LRU eviction (max 8 concurrent sessions)
+- One session per `workingDir` — sessions persist across multiple `copilot()` calls
+- `.github/agents/` and `.github/skills/` in workingDir auto-discovered at session creation
+- BYOK configured for Azure OpenAI via environment variables
+- MCP server (`mcp-openclaw.ts`) provides Copilot sessions read-only access to OpenClaw memory
 
 ### Validate the Connection
 

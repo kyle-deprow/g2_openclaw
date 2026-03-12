@@ -150,9 +150,7 @@ export class Gateway {
 
     this.ws.onmessage = (event: MessageEvent) => {
       if (typeof event.data === 'string') {
-        if (import.meta.env.DEV) {
-          (window as any).__g2Telemetry?.addFrame('in', event.data);
-        }
+        (window as any).__g2Telemetry?.addFrame('in', event.data);
         try {
           const frame = parseFrame(event.data);
           // Respond to ping immediately
@@ -165,10 +163,8 @@ export class Gateway {
           console.error('[Gateway] Frame parse error:', e);
         }
       } else {
-        if (import.meta.env.DEV) {
-          const size = event.data instanceof ArrayBuffer ? event.data.byteLength : '?';
-          (window as any).__g2Telemetry?.addFrame('in', `binary [${size} bytes]`);
-        }
+        const size = event.data instanceof ArrayBuffer ? event.data.byteLength : '?';
+        (window as any).__g2Telemetry?.addFrame('in', `binary [${size} bytes]`);
         console.warn('[Gateway] Binary frame received — ignoring');
       }
     };
@@ -200,9 +196,7 @@ export class Gateway {
   /** Send raw binary data (PCM audio chunks) */
   send(data: ArrayBuffer): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      if (import.meta.env.DEV) {
-        (window as any).__g2Telemetry?.addFrame('out', `binary [${data.byteLength} bytes]`);
-      }
+      (window as any).__g2Telemetry?.addFrame('out', `binary [${data.byteLength} bytes]`);
       this.ws.send(data);
     }
   }
@@ -211,9 +205,7 @@ export class Gateway {
   sendJson(frame: OutboundFrame): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       const json = JSON.stringify(frame);
-      if (import.meta.env.DEV) {
-        (window as any).__g2Telemetry?.addFrame('out', json);
-      }
+      (window as any).__g2Telemetry?.addFrame('out', json);
       this.ws.send(json);
     }
   }
