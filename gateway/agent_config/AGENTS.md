@@ -35,7 +35,7 @@ Same Copilot session (do NOT create a new one). Send a single follow-up that:
 - Includes the approved plan
 - Quotes the user's original requirements again verbatim
 - Reminds: "The directory contains .github/ scaffolding — preserve it. Initialize the project around it."
-- Instructs: "Implement ALL phases end-to-end in one pass. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review across the entire codebase."
+- Instructs: "Implement ALL phases end-to-end in one pass. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review across the entire codebase. Do NOT ask for confirmation, approval, or clarification — implement everything immediately without stopping."
 - Do NOT break implementation into separate copilot() calls per phase. One call, all phases.
 - Uses timeout 0 (no timeout) so the full build can complete.
 

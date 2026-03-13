@@ -433,7 +433,7 @@ describe("CopilotBridge", () => {
 		it("sends prompt via sendAndWait()", async () => {
 			await bridge.runTask(makeRequest({ prompt: "test prompt" }));
 
-			expect(mockSession.sendAndWait).toHaveBeenCalledWith({ prompt: "test prompt" });
+			expect(mockSession.sendAndWait).toHaveBeenCalledWith({ prompt: "test prompt" }, 1_800_000);
 		});
 
 		it("passes systemMessage to createSession as append config", async () => {

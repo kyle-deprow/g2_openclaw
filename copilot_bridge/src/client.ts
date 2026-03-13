@@ -317,10 +317,13 @@ export class CopilotBridge implements ICopilotClient {
 		try {
 			let content = "";
 			const timeout = request.timeout;
+			// SDK defaults to 60s idle wait — always pass an explicit timeout.
+			// Use 30 min as "no timeout" ceiling.
+			const sdkTimeout = timeout || 1_800_000;
 
 			if (timeout) {
 				const result = await Promise.race([
-					session.sendAndWait({ prompt: request.prompt }, timeout),
+					session.sendAndWait({ prompt: request.prompt }, sdkTimeout),
 					new Promise<undefined>((_, reject) =>
 						setTimeout(
 							() => reject(new BridgeError("Task timed out", "TIMEOUT", { timeout }, true)),
@@ -332,7 +335,7 @@ export class CopilotBridge implements ICopilotClient {
 					content = result.data?.content ?? "";
 				}
 			} else {
-				const result = await session.sendAndWait({ prompt: request.prompt });
+				const result = await session.sendAndWait({ prompt: request.prompt }, sdkTimeout);
 				if (result) {
 					content = result.data?.content ?? "";
 				}
@@ -531,7 +534,10 @@ export class CopilotBridge implements ICopilotClient {
 
 		try {
 			// Fire the prompt (don't await — events flow via the listener)
-			const sendPromise = session.sendAndWait({ prompt: request.prompt }, request.timeout);
+			// SDK defaults to 60s idle wait — always pass an explicit timeout.
+			// Use 30 min as "no timeout" ceiling.
+			const sdkTimeout = request.timeout || 1_800_000;
+			const sendPromise = session.sendAndWait({ prompt: request.prompt }, sdkTimeout);
 
 			// Yield deltas as they arrive
 			while (!done) {

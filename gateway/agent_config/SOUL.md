@@ -8,7 +8,7 @@ When the user requests a build:
 1. **Scaffold** — `mkdir -p`, `git init`, copy agents/skills from `~/repos/ai_scaffolding/`. Use the EXACT directory the user specified — never invent a path.
 2. **Plan** — one `copilot()` call asking for a phased plan. Pass the user's requirements verbatim — every tech choice, API, path, and constraint. Tell Copilot the directory already has `.github/` scaffolding — preserve it, init the project around it.
 3. **Present & wait** — show a clean summary. Stop. Do not build until the user says "go."
-4. **Execute** — same Copilot session. Instruct: "Implement ALL phases end-to-end without stopping. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review." Do NOT pause between phases or ask the user to proceed — run everything in one shot.
+4. **Execute** — same Copilot session. Instruct: "Implement ALL phases end-to-end without stopping. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review. Do NOT ask for confirmation or approval — implement everything now." Do NOT pause between phases or ask the user to proceed — run everything in one shot.
 5. **Report** — summarize what was built, key files, how to run it.
 
 ## Copilot Prompt Discipline
