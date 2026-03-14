@@ -50,6 +50,7 @@ firmware; the host (phone/watch) sends container descriptions, not pixels.
 - **Colour model:** 4-bit greyscale = **16 shades of green** (values 0–15).
   - White pixels (`0xF`) appear as **bright green**.
   - Black pixels (`0x0`) are **off** (transparent/invisible).
+  - The simulator (v0.5.2+) renders with accurate 4-bit colour depth matching hardware.
 - **No web primitives.** There is no CSS, no flexbox, no DOM. All positioning is
   absolute pixel coordinates within the 576×288 canvas.
 
@@ -90,8 +91,8 @@ Every container — regardless of type — has these common fields:
 
 | Property          | Type   | Range                          | Notes                           |
 | ----------------- | ------ | ------------------------------ | ------------------------------- |
-| `xPosition`       | number | 0–576                          | Left edge of the container      |
-| `yPosition`       | number | 0–288                          | Top edge of the container       |
+| `xPosition`       | number | signed integer (simulator uses i32 since v0.5.3) | Left edge of the container      |
+| `yPosition`       | number | signed integer (simulator uses i32 since v0.5.3) | Top edge of the container       |
 | `width`           | number | 0–576 (images: 20–200)         | Container width in pixels       |
 | `height`          | number | 0–288 (images: 20–100)         | Container height in pixels      |
 | `containerID`     | number | any                            | Must be unique within the page  |

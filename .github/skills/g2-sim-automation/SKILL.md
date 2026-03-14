@@ -121,7 +121,11 @@ curl -s --max-time 10 http://localhost:5173/_dev/conversation
 #              {"role":"assistant","text":"...","timestamp":...}]}
 ```
 
-### 5. Screenshots (Wayland)
+### 5. Screenshots
+
+**Native simulator screenshot (v0.5.0+):** The simulator supports built-in screenshot export — click the screenshot button in the simulator window. Saves an RGBA PNG to the current working directory with a timestamp filename. Path is logged to simulator stdout (warn level). No OS-level tools needed.
+
+**OS-level alternative (Wayland):**
 
 ```bash
 gnome-screenshot -f /tmp/sim.png && tesseract /tmp/sim.png - 2>/dev/null
@@ -148,3 +152,4 @@ LOADING → MENU → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THIN
 | State stuck in `menu` | Gateway not connected. Check `ss -tlnp \| grep 8765`. |
 | `sendText` returns `false` | Not in `idle` state. Check `/_dev/state` first. |
 | Timeout on convenience endpoints | Browser polling script not running. Restart simulator. |
+| Simulator parse error, no payload detail | Set `RUST_LOG=debug` in the simulator env to log original JSON payloads on parse errors. |
