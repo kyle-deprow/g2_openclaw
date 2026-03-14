@@ -304,6 +304,7 @@ class GatewaySession:
             from gateway.session_history import list_session_summaries
 
             summaries = list_session_summaries(agent_id=self._agent_id)
+            logger.info("Session list: %d sessions found", len(summaries))
             await self.send_frame(
                 {
                     "type": "session_list",
@@ -322,6 +323,7 @@ class GatewaySession:
                     "activeSessionKey": self._session_key,
                 }
             )
+            logger.info("Session list sent successfully")
         except Exception:
             logger.warning("Failed to list sessions", exc_info=True)
             await self.send_frame(
@@ -401,6 +403,7 @@ class GatewaySession:
 
     async def _dispatch(self, frame: dict[str, Any]) -> None:
         frame_type = frame["type"]
+        logger.info("Dispatch: %s", frame_type)
 
         if frame_type == "text":
             if self._state != SessionState.IDLE:
@@ -475,6 +478,9 @@ class GatewaySession:
                 )
                 return
             await self._handle_session_create()
+        elif frame_type == "force_stop":
+            if self._server is not None:
+                await self._server.force_stop()
         else:
             await self.send_frame(
                 {
@@ -1087,6 +1093,30 @@ class GatewayServer:
                 )
             except Exception:
                 logger.debug("Failed to send session_reset frame", exc_info=True)
+
+    async def force_stop(self) -> None:
+        """Hard-kill: abort inflight stream, close OpenClaw connection, reset session."""
+        logger.info("Force stop requested")
+        await self._discard_inflight()
+        await self._handler.close()
+        old_key = self._session_key
+        self._session_key = _generate_session_key()
+        self._session_date = _today_utc()
+        logger.info("Force stop: session reset %s → %s", old_key, self._session_key)
+
+        if self._current_session is not None:
+            self._current_session._state = SessionState.IDLE
+            self._current_session._current_question = None
+            self._current_session._task_start = None
+            try:
+                await self._current_session.send_frame(
+                    {
+                        "type": "session_reset",
+                        "reason": "force_stop",
+                    }
+                )
+            except Exception:
+                logger.debug("Failed to send session_reset after force_stop", exc_info=True)
 
     async def switch_session(self, target_key: str) -> None:
         """Switch the active session to an existing session key.

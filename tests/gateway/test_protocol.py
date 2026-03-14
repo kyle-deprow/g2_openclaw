@@ -342,6 +342,20 @@ class TestSessionCreateFrame:
         assert parsed == frame
 
 
+class TestForceStopFrame:
+    """force_stop inbound frame validation."""
+
+    def test_parse_force_stop(self) -> None:
+        result = parse_text_frame('{"type": "force_stop"}')
+        assert result["type"] == "force_stop"
+
+    def test_force_stop_round_trip(self) -> None:
+        frame: dict[str, Any] = {"type": "force_stop"}
+        serialized = serialize(frame)
+        parsed = parse_text_frame(serialized)
+        assert parsed == frame
+
+
 class TestSessionListFrame:
     """session_list outbound frame validation."""
 

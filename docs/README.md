@@ -23,7 +23,6 @@ docs/
 │   ├── gateway.md                     # PC Gateway design (Python, Whisper, session mgmt)
 │   ├── g2-app.md                      # G2 App thin-client design (TypeScript, BLE relay)
 │   ├── display-layouts.md             # Pixel-level display specs (576×288, 4-bit greyscale)
-│   ├── copilot-bridge.md              # Copilot Bridge design (GitHub Copilot SDK wrapper)
 │   └── azure-infrastructure.md        # Azure infra design (Bicep modules, AI Hub, KeyVault)
 ├── guides/                            # How-to guides
 │   ├── getting-started.md             # Zero-to-working onboarding for new developers

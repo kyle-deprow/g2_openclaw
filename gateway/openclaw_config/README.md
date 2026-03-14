@@ -24,10 +24,10 @@ openclaw onboard --local
 # 3. Set the Azure API key (pick one)
 #    Option A: fetch from Azure
 az cognitiveservices account keys list \
-  --name aisvc-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus \
+  --name oai-ss-aisense-dev-eastus2 \
+  --resource-group rg-ss-aisense-dev-eastus2 \
   --query key1 -o tsv \
-  | xargs -I{} sh -c 'echo "AZURE_AI_SERVICES_API_KEY={}" > gateway/openclaw_config/.env'
+  | xargs -I{} sh -c 'echo "AZURE_OAI_API_KEY={}" > gateway/openclaw_config/.env'
 #    Option B: copy and edit
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
@@ -55,8 +55,8 @@ these settings into the local config with `jq`, preserving everything else.
 
 ### What is managed here
 
-- **Custom provider** `azure-oai-g2` — points at the Azure AI Services model-router
-  deployment (`model-router` on `aisvc-ss-aisense-dev-eastus2.openai.azure.com`).
+- **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
+  deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent defaults** — primary model, compaction mode, concurrency limits,
   denied tools (browser, canvas, etc.).
 - **Session / command settings** — DM scope, reaction scope, command modes.
@@ -84,8 +84,8 @@ Or retrieve it from Azure:
 
 ```bash
 az cognitiveservices account keys list \
-  --name aisvc-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus \
+  --name oai-ss-aisense-dev-eastus2 \
+  --resource-group rg-ss-aisense-dev-eastus2 \
   --query key1 -o tsv
 ```
 
@@ -111,7 +111,7 @@ The script will:
 
 1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
 2. Deep-merge the repo config into the local config (local-only keys preserved)
-3. Resolve `env:AZURE_AI_SERVICES_API_KEY` → actual key value in the provider block
+3. Resolve `env:AZURE_OAI_API_KEY` → actual key value in the provider block
 4. Copy `SOUL.md` and `azure-api-version-preload.cjs` to `~/.openclaw/`
 5. Validate the result with `openclaw models status`
 
@@ -131,16 +131,16 @@ openclaw daemon
 
 | Setting | Value |
 |---|---|
-| Endpoint | `https://aisvc-ss-aisense-dev-eastus2.openai.azure.com/` |
-| Deployment name | `model-router` |
-| Model | Model Router (Azure AI Services, intelligently routes to best model) |
+| Endpoint | `https://oai-ss-aisense-dev-eastus2.openai.azure.com/` |
+| Deployment name | `gpt-5-4` |
+| Model | GPT-5.4 (Azure OpenAI, eastus) |
 | API type | `openai-completions` (OpenClaw's label for OpenAI-compatible APIs) |
 | Context window | 1 047 576 tokens |
 | Max output tokens | 32 768 |
 
 OpenClaw auto-detects `*.openai.azure.com` URLs and rewrites them internally
 to `<baseUrl>/openai/deployments/<modelId>`, so the deployment name must match
-the model ID in the config (`model-router`).
+the model ID in the config (`gpt-5.4`).
 
 ## OpenRouter Provider
 

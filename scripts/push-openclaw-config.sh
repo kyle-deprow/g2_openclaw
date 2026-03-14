@@ -8,7 +8,7 @@
 #   - jq (https://jqlang.github.io/jq/)
 #   - openclaw CLI on PATH
 #   - For copilot: run 'openclaw github-copilot login' (or set GH_TOKEN env var)
-#   - For azure: AZURE_AI_SERVICES_API_KEY set in env or in gateway/openclaw_config/.env
+#   - For azure: AZURE_OAI_API_KEY set in env or in gateway/openclaw_config/.env
 
 set -euo pipefail
 
@@ -38,15 +38,15 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
 fi
 
 # ── Load API key from .env or environment ────────────────────────────────────
-if [[ -z "${AZURE_AI_SERVICES_API_KEY:-}" ]] && [[ -f "${ENV_FILE}" ]]; then
+if [[ -z "${AZURE_OAI_API_KEY:-}" ]] && [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   set -a
   source "${ENV_FILE}"
   set +a
 fi
 
-if [[ "${OPENCLAW_PROVIDER:-copilot}" == "azure" ]] && [[ -z "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
-  echo "WARNING: AZURE_AI_SERVICES_API_KEY is not set but OPENCLAW_PROVIDER=azure." >&2
+if [[ "${OPENCLAW_PROVIDER:-copilot}" == "azure" ]] && [[ -z "${AZURE_OAI_API_KEY:-}" ]]; then
+  echo "WARNING: AZURE_OAI_API_KEY is not set but OPENCLAW_PROVIDER=azure." >&2
   echo "         Set it in ${ENV_FILE} or export it before running this script." >&2
 fi
 
@@ -77,17 +77,17 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
 # The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
 # NOT resolve these natively for custom provider apiKey fields — the literal
 # string is passed to the SDK. We must substitute the actual value here.
-if [[ -n "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --arg key "${AZURE_AI_SERVICES_API_KEY}" '
+if [[ -n "${AZURE_OAI_API_KEY:-}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --arg key "${AZURE_OAI_API_KEY}" '
     (.models.providers // {}) |= with_entries(
-      if .value.apiKey == "env:AZURE_AI_SERVICES_API_KEY" then
+      if .value.apiKey == "env:AZURE_OAI_API_KEY" then
         .value.apiKey = $key
       else . end
     )
   ')
-  echo "Resolved env:AZURE_AI_SERVICES_API_KEY (${#AZURE_AI_SERVICES_API_KEY} chars)."
+  echo "Resolved env:AZURE_OAI_API_KEY (${#AZURE_OAI_API_KEY} chars)."
 else
-  echo "WARNING: AZURE_AI_SERVICES_API_KEY not set — apiKey will contain the literal 'env:' placeholder." >&2
+  echo "WARNING: AZURE_OAI_API_KEY not set — apiKey will contain the literal 'env:' placeholder." >&2
   echo "         Auth will fail until the key is resolved." >&2
 fi
 
@@ -109,7 +109,7 @@ case "${PROVIDER}" in
     MODEL_PRIMARY="github-copilot/${COPILOT_MODEL:-claude-sonnet-4.6}"
     ;;
   azure)
-    MODEL_PRIMARY="azure-oai-g2/model-router"
+    MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
     ;;
   openrouter)
     MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
@@ -154,33 +154,12 @@ for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   done
 done
 
-# ── Write Copilot Bridge BYOK config ────────────────────────────────────────
-BRIDGE_ENV="${REPO_ROOT}/copilot_bridge/.env"
-if [[ -f "${BRIDGE_ENV}" ]]; then
-  # Remove existing COPILOT_BYOK_API_KEY line and re-add with resolved value
-  sed -i '/^COPILOT_BYOK_API_KEY=/d' "${BRIDGE_ENV}"
-  if [[ -n "${AZURE_AI_SERVICES_API_KEY:-}" ]]; then
-    echo "COPILOT_BYOK_API_KEY=${AZURE_AI_SERVICES_API_KEY}" >> "${BRIDGE_ENV}"
-    echo "Wrote COPILOT_BYOK_API_KEY to ${BRIDGE_ENV} (${#AZURE_AI_SERVICES_API_KEY} chars)"
-  else
-    echo "WARNING: AZURE_AI_SERVICES_API_KEY not set — COPILOT_BYOK_API_KEY not written to bridge .env" >&2
-  fi
-fi
-
 # ── Copy Azure API-version preload if present ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
 PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
-fi
-
-# ── Deploy MCP server config ────────────────────────────────────────────────
-MCP_SRC="${REPO_ROOT}/copilot_bridge/openclaw-mcp-config.json"
-MCP_DST="${OPENCLAW_HOME}/mcp.json"
-if [[ -f "${MCP_SRC}" ]]; then
-  cp "${MCP_SRC}" "${MCP_DST}"
-  echo "Deployed MCP config → ${MCP_DST}"
 fi
 
 # ── Validate ─────────────────────────────────────────────────────────────────

@@ -47,6 +47,7 @@ function createMockGateway() {
   return {
     connect: vi.fn(),
     sendJson: vi.fn(),
+    sendForceStop: vi.fn(),
     requestSessionList: vi.fn(),
     switchSession: vi.fn(),
     createNewSession: vi.fn(),
@@ -328,16 +329,18 @@ describe('InputHandler', () => {
   // ---------------------------------------------------------------------------
 
   describe('cancelResponse', () => {
-    it('double-tap in thinking cancels and returns to idle', () => {
+    it('double-tap in thinking sends force_stop and returns to idle', () => {
       sm._current = 'thinking';
       handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(gateway.sendForceStop).toHaveBeenCalled();
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
     });
 
-    it('double-tap in streaming cancels and returns to idle', () => {
+    it('double-tap in streaming sends force_stop and returns to idle', () => {
       sm._current = 'streaming';
       handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(gateway.sendForceStop).toHaveBeenCalled();
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
     });

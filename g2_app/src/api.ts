@@ -29,6 +29,7 @@ export interface AppApi {
   confirmTranscription(): boolean;
   rejectTranscription(): boolean;
   cancelResponse(): boolean;
+  forceStop(): boolean;
   getPendingTranscription(): string | null;
 
   // Sessions
@@ -68,6 +69,7 @@ export function createAppApi(deps: {
     confirmTranscription: () => input.confirmTranscription(),
     rejectTranscription: () => input.rejectTranscription(),
     cancelResponse: () => input.cancelResponse(),
+    forceStop: () => input.forceStop(),
     getPendingTranscription: () => input.pendingTranscription,
     getSessionList: () => input.sessionList,
     openSessionMenu: () => input.openSessionMenu(),

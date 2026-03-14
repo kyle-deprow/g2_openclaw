@@ -11,7 +11,7 @@ G2 OpenClaw is a pipeline that connects Even Realities G2 AR smart glasses to a 
 | Tool | Version | Install | Purpose |
 |------|---------|---------|---------|
 | **Python** | ≥ 3.13 | [python.org](https://www.python.org/) or your OS package manager | PC Gateway, Infra CLI |
-| **Node.js** | ≥ 22 | `nvm install 22` ([nvm](https://github.com/nvm-sh/nvm)) | G2 App, Copilot Bridge |
+| **Node.js** | ≥ 22 | `nvm install 22` ([nvm](https://github.com/nvm-sh/nvm)) | G2 App |
 | **uv** | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | Python package/environment manager |
 | **npm** | latest | Comes with Node.js | Node.js package manager |
 
@@ -128,8 +128,8 @@ Option A — fetch from Azure (requires `az login`):
 
 ```bash
 az cognitiveservices account keys list \
-  --name oai-ss-aisense-dev-eastus \
-  --resource-group rg-ss-aisense-dev-eastus \
+  --name oai-ss-aisense-dev-eastus2 \
+  --resource-group rg-ss-aisense-dev-eastus2 \
   --query key1 -o tsv \
   | xargs -I{} sh -c 'echo "AZURE_OPENAI_API_KEY={}" > gateway/openclaw_config/.env'
 ```
@@ -184,41 +184,7 @@ For full details see `gateway/openclaw_config/README.md` and the [openclaw-azure
 
 ---
 
-### 5. Copilot Bridge (optional — GitHub Copilot integration)
-
-An alternative AI backend that wraps the GitHub Copilot SDK.
-
-```bash
-cd copilot_bridge
-
-# Install dependencies
-npm install
-
-# Build
-npm run build
-```
-
-Set the required environment variable:
-
-```bash
-export COPILOT_GITHUB_TOKEN=ghp_your_token_here
-```
-
-Validate the connection:
-
-```bash
-npm run validate
-```
-
-The bridge also supports BYOK (Bring Your Own Key) providers — OpenAI, Azure OpenAI, Anthropic, and Ollama. See the root [README](../../README.md#copilot-bridge-environment-variables) for the full list of `COPILOT_BYOK_*` variables.
-
-```bash
-cd ../..   # Back to repo root
-```
-
----
-
-### 6. Azure Infrastructure (optional — cloud AI resources)
+### 5. Azure Infrastructure (optional — cloud AI resources)
 
 Deploy Azure AI resources (OpenAI, Key Vault, monitoring, etc.) using the Infra CLI:
 
@@ -237,11 +203,11 @@ See `infra/parameters/dev.bicepparam` for the deployment parameters.
 
 ---
 
-### 7. Remote Access via Tailscale (optional — use G2 glasses anywhere)
+### 6. Remote Access via Tailscale (optional — use G2 glasses anywhere)
 
 By default the gateway only serves your local WiFi network. Tailscale creates an encrypted mesh VPN so your iPhone can reach the gateway from any network — coffee shop, office, mobile data — without exposing ports to the internet.
 
-#### 7a. Install Tailscale
+#### 6a. Install Tailscale
 
 Install on **both** your PC and iPhone:
 
@@ -255,7 +221,7 @@ Verify connectivity:
 tailscale ip -4
 ```
 
-#### 7b. Re-run init-env
+#### 6b. Re-run init-env
 
 The `init-env` command auto-detects Tailscale and writes the remote URL:
 
@@ -265,7 +231,7 @@ uv run python -m gateway init-env --force
 
 Check the output — it will show your Tailscale IP and set it as the default `VITE_GATEWAY_URL` in `g2_app/.env.local`.
 
-#### 7c. Verify the generated config
+#### 6c. Verify the generated config
 
 When Tailscale is detected, `init-env` uses the Tailscale IP as the default, with the LAN IP as a commented-out fallback:
 
@@ -279,7 +245,7 @@ VITE_GATEWAY_URL=ws://100.x.y.z:8765?token=abc123...
 
 Rebuild and redeploy the G2 app. Traffic is encrypted inside the Tailscale tunnel, so `ws://` (not `wss://`) is safe. To fall back to LAN, swap which line is commented out.
 
-#### 7d. Security notes
+#### 6d. Security notes
 
 - **No port forwarding required** — Tailscale uses NAT traversal (WireGuard under the hood)
 - **No public IP exposure** — the gateway is only reachable via the Tailscale mesh
@@ -342,9 +308,6 @@ uv run pytest tests/integration/ -v
 
 # G2 App tests
 cd g2_app && npm test && cd ..
-
-# Copilot Bridge tests
-cd copilot_bridge && npm test && cd ..
 ```
 
 ## Configuration Reference

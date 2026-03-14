@@ -458,8 +458,6 @@ g2_openclaw/
 │   ├── g2_app/                        ← G2 App (TypeScript thin client for iPhone)
 │   │   ├── src/                       ← main.ts, gateway.ts, display.ts, state.ts, etc.
 │   │   └── app.json                   ← EvenHub manifest
-│   ├── copilot_bridge/                ← Copilot Bridge (OpenClaw ↔ GitHub Copilot SDK)
-│   │   └── src/                       ← client.ts, plugin.ts, orchestrator.ts, MCP servers
 ├── infra/                             ← Azure Bicep IaC + Infra CLI (Typer + Rich)
 │   ├── main.bicep
 │   ├── modules/                       ← AI Hub, OpenAI, Key Vault, Storage, Monitoring

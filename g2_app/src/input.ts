@@ -297,7 +297,10 @@ export class InputHandler {
     } else if (state === 'confirming') {
       this.rejectTranscription();
     } else if (state === 'thinking' || state === 'streaming') {
-      this.cancelResponse();
+      console.log('[Input] Force stop — killing OpenClaw session');
+      this.gateway.sendForceStop();
+      this.sm.transition('idle');
+      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     }
   }
 
@@ -350,7 +353,7 @@ export class InputHandler {
     return true;
   }
 
-  /** Cancel an in-progress AI response — return to idle. */
+  /** Cancel an in-progress AI response — return to idle (client-side only). */
   cancelResponse(): boolean {
     if (this.sm.current !== 'thinking' && this.sm.current !== 'streaming') {
       console.warn('[Input] Cannot cancel — state is', this.sm.current);
@@ -359,6 +362,21 @@ export class InputHandler {
     console.log('[Input] Cancelling response');
     this.sm.transition('idle');
     this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    return true;
+  }
+
+  /** Force-stop: kill the OpenClaw session and return to idle. Works from any state. */
+  forceStop(): boolean {
+    console.log('[Input] Force stop requested');
+    this.gateway.sendForceStop();
+    const current = this.sm.current;
+    if (current !== 'idle' && current !== 'loading' && current !== 'disconnected') {
+      if (current === 'menu') {
+        this.display.exitMenuMode().catch(err => console.error('[Input] Display error:', err));
+      }
+      this.sm.transition('idle');
+      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    }
     return true;
   }
 

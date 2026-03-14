@@ -23,6 +23,9 @@ type modelDeploymentConfig = {
 
   @description('Rate limit in requests per minute (RPM).')
   rateLimitPerMinute: int
+
+  @description('SKU tier for the deployment (e.g., Standard, GlobalStandard).')
+  skuName: string
 }
 
 // ---------------------------------------------------------------------------
@@ -39,7 +42,7 @@ param location string
 param tags object
 
 @description('Disable local (API key) authentication. True enforces Entra-only auth.')
-param disableLocalAuth bool = false
+param disableLocalAuth bool = true
 
 @description('Allow or deny public network access. Disable for production.')
 @allowed([
@@ -56,6 +59,9 @@ param skuName string = 'S0'
 
 @description('Array of model deployment configurations.')
 param modelDeployments modelDeploymentConfig[]
+
+@description('Principal ID of the user or service principal to grant Cognitive Services OpenAI User role.')
+param openAiUserPrincipalId string
 
 @description('Resource ID of the Log Analytics workspace for diagnostic settings.')
 param logAnalyticsWorkspaceId string
@@ -100,7 +106,7 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
     parent: openAiAccount
     name: deployment.name
     sku: {
-      name: 'Standard'
+      name: deployment.skuName
       capacity: deployment.capacity
     }
     properties: {
@@ -121,6 +127,17 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
     }
   }
 ]
+
+// Cognitive Services OpenAI User — allows chat completions via Entra auth
+resource openAiUserRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(openAiAccount.id, openAiUserPrincipalId, '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
+  scope: openAiAccount
+  properties: {
+    principalId: openAiUserPrincipalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd')
+    principalType: 'User'
+  }
+}
 
 resource diagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   name: '${openAiAccount.name}-diag'
@@ -158,6 +175,4 @@ output openAiEndpoint string = openAiAccount.properties.endpoint
 @description('Principal ID of the OpenAI account system-assigned managed identity.')
 output openAiPrincipalId string = openAiAccount.identity.principalId
 
-@description('Primary API key — treat as secret.')
-#disable-next-line outputs-should-not-contain-secrets
-output openAiApiKey string = openAiAccount.listKeys().key1
+

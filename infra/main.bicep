@@ -25,6 +25,9 @@ type modelDeploymentConfig = {
 
   @description('Rate limit in requests per minute (RPM).')
   rateLimitPerMinute: int
+
+  @description('SKU tier for the deployment (e.g., Standard, GlobalStandard).')
+  skuName: string
 }
 
 // ---------------------------------------------------------------------------
@@ -76,11 +79,9 @@ param storageSkuName string = 'Standard_LRS'
 @maxValue(730)
 param logRetentionInDays int = 30
 
-@description('Azure region for the AI Services account (model-router). Must differ from primary location when model is region-restricted.')
-param aiServicesLocation string = 'eastus2'
+@description('Principal ID of the user to grant Cognitive Services OpenAI User role on the OpenAI account.')
+param openAiUserPrincipalId string
 
-@description('Deployment capacity for the model-router (tokens per minute, thousands).')
-param modelRouterCapacity int = 100
 
 // ---------------------------------------------------------------------------
 // Variables — Naming convention: {prefix}-{workload}-{env}-{region}-{instance}
@@ -90,15 +91,16 @@ var baseName = '${prefix}-${workload}-${environment}-${location}'
 var resourceGroupName = 'rg-${baseName}'
 
 // Storage accounts have a 24-char alphanumeric limit — derive a compliant name
-var storageAccountName = take(replace('st${prefix}${workload}${environment}', '-', ''), 24)
+var storageAccountName = take(replace('st${prefix}${workload}${environment}${location}', '-', ''), 24)
 
-var keyVaultName = take('kv-${baseName}', 24)
+// Key Vault has a 24-char limit — use shortened location to avoid truncation collisions
+var shortLocation = replace(replace(location, 'eastus2', 'eus2'), 'eastus', 'eus')
+var keyVaultName = take('kv-${prefix}-${workload}-${environment}-${shortLocation}', 24)
 var logAnalyticsName = 'log-${baseName}'
 var appInsightsName = 'appi-${baseName}'
 var openAiAccountName = 'oai-${baseName}'
 var aiHubName = 'aihub-${baseName}'
 var aiProjectName = 'aiproj-${baseName}'
-var aiServicesName = 'aisvc-${prefix}-${workload}-${environment}-${aiServicesLocation}'
 
 // ---------------------------------------------------------------------------
 // Resource Group
@@ -165,29 +167,15 @@ module openAi 'modules/openai.bicep' = {
     openAiAccountName: openAiAccountName
     location: location
     tags: tags
-    disableLocalAuth: false
+    disableLocalAuth: true
+    openAiUserPrincipalId: openAiUserPrincipalId
     publicNetworkAccess: publicNetworkAccess
     modelDeployments: modelDeployments
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
   }
 }
 
-// 5. AI Services (model-router) — depends on monitoring (diagnostic settings)
-module aiServices 'modules/ai-services.bicep' = {
-  name: 'deploy-ai-services'
-  scope: resourceGroup
-  params: {
-    aiServicesAccountName: aiServicesName
-    location: aiServicesLocation
-    tags: tags
-    disableLocalAuth: false
-    publicNetworkAccess: publicNetworkAccess
-    modelRouterCapacity: modelRouterCapacity
-    logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
-  }
-}
-
-// 6. AI Hub — depends on storage, keyVault, monitoring, openAi
+// 5. AI Hub — depends on storage, keyVault, monitoring, openAi
 module aiHub 'modules/ai-hub.bicep' = {
   name: 'deploy-ai-hub'
   scope: resourceGroup
@@ -204,7 +192,7 @@ module aiHub 'modules/ai-hub.bicep' = {
   }
 }
 
-// 7. AI Project — depends on aiHub
+// 6. AI Project — depends on aiHub
 module aiProject 'modules/ai-project.bicep' = {
   name: 'deploy-ai-project'
   scope: resourceGroup
@@ -236,14 +224,5 @@ output openAiEndpoint string = openAi.outputs.openAiEndpoint
 
 @description('Name of the Azure OpenAI account.')
 output openAiAccountName string = openAi.outputs.openAiAccountName
-
-@description('Primary API key for the Azure OpenAI account — treat as secret.')
-output openAiApiKey string = openAi.outputs.openAiApiKey
-
-@description('Endpoint of the Azure AI Services account (model-router).')
-output aiServicesEndpoint string = aiServices.outputs.aiServicesEndpoint
-
-@description('Primary API key for the Azure AI Services account — treat as secret.')
-output aiServicesApiKey string = aiServices.outputs.aiServicesApiKey
 
 

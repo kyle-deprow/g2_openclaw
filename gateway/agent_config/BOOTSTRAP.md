@@ -1,30 +1,44 @@
-# Bootstrap — Environment Context
+# Bootstrap — Quantipy Context
 
-## User Environment
+## Repository
 
-- `~/repos/` is the standard project directory
-- `~/repos/ai_scaffolding/` contains reusable agent and skill templates for new projects
-- The user wears G2 AR smart glasses — responses via this channel should be concise
-- Tools available: `exec` (shell), `copilot` (code delegation), `copilot_sessions` (session management)
-- File tools available: `Read`, `Write`, `Glob`, `Grep`
+`~/repos/quantipy` — Quantitative finance platform for market intelligence.
 
-## ai_scaffolding Contents
+## Tech Stack
 
-Agents (in `~/repos/ai_scaffolding/agents/`):
-- `orchestrator.agent.md` — Required for all projects. Coordinates specialist agents.
-- `react-best-practices.agent.md` — React/Next.js specialist
-- `backend-python.agent.md` — Python backend specialist
-- `composition-patterns.agent.md` — Component architecture specialist
-- `react-native-skills.agent.md` — React Native specialist
+- Python 3.11+ (managed with **uv**, not pip)
+- SQLAlchemy 2.0 + asyncpg (async PostgreSQL)
+- Alembic migrations
+- pytest + ruff
+- Source layout: `src/quantipy/`
 
-Skills (in `~/repos/ai_scaffolding/skills/`):
-- `react-best-practices/` — React patterns, hooks, performance
-- `backend-python/` — Python TDD, typed dataclasses, clean architecture
-- `composition-patterns/` — Component structure, compound patterns
-- Plus 20+ more domain-specific skills (G2, OpenClaw, Azure, etc.)
+## Modules
 
-## Workflow
+| Module | Purpose |
+|--------|---------|
+| `reddit_sentiment/` | Reddit post scraping + LLM sentiment analysis (live + historical) |
+| `news_sentiment/` | News article sentiment via Massive.com and Polygon.io |
+| `price_data/` | OHLCV 1-min bars via Databento |
+| `technical_indicators/` | 13 volume indicators (VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Vol) |
+| `universe/` | Trading universe builder (ticker selection) |
+| `queue/` | PostgreSQL job queue (SKIP LOCKED pattern) |
+| `llm/` | LLM provider abstraction for sentiment analysis |
+| `common/` | Config, database, enums, HTTP, logging, migrations |
+| `cli/` | Typer CLI: reddit, news, ohlc, jobs, reset commands |
 
-1. User sends a request → you scaffold the workspace
-2. You delegate to Copilot → Copilot's orchestrator handles the rest
-3. You present results → user approves or asks for changes
+## Data Available
+
+- **Reddit**: Posts from r/wallstreetbets, r/stocks, r/investing + LLM sentiment scores
+- **News**: Articles with sentiment from Massive.com and Polygon.io
+- **OHLCV**: 1-minute bars from Databento (equities)
+- **Volume indicators**: VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Volatility
+
+## Commands
+
+```bash
+cd ~/repos/quantipy
+uv sync                          # install deps
+uv run pytest -q                 # run tests
+uv run ruff check src/           # lint
+uv run python -m quantipy --help # CLI
+```

@@ -71,6 +71,10 @@ class SessionCreateFrame(TypedDict):
     type: Literal["session_create"]
 
 
+class ForceStopFrame(TypedDict):
+    type: Literal["force_stop"]
+
+
 InboundFrame = (
     StartAudioFrame
     | StopAudioFrame
@@ -81,6 +85,7 @@ InboundFrame = (
     | SessionListRequestFrame
     | SessionSwitchFrame
     | SessionCreateFrame
+    | ForceStopFrame
 )
 
 MAX_TEXT_MESSAGE_LENGTH = 10_000
@@ -184,6 +189,7 @@ _INBOUND_FIELDS: dict[str, list[str]] = {
     "session_list_request": [],
     "session_switch": ["sessionKey"],
     "session_create": [],
+    "force_stop": [],
 }
 
 _OUTBOUND_FIELDS: dict[str, list[str]] = {

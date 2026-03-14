@@ -210,6 +210,11 @@ export class Gateway {
     }
   }
 
+  /** Send force_stop to kill the OpenClaw session */
+  sendForceStop(): void {
+    this.sendJson({ type: 'force_stop' });
+  }
+
   /** Request current task status from gateway */
   requestStatus(): void {
     this.sendJson({ type: 'status_request' });

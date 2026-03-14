@@ -19,15 +19,15 @@ No gateway Python code changes are needed — the gateway talks to OpenClaw over
 
 ```
 G2 Glasses ──BLE──▶ PC Gateway ──WS──▶ OpenClaw daemon ──HTTPS──▶ Azure OpenAI
-                     (Python)           (Node.js)                  (model-router)
+                     (Python)           (Node.js)                  (gpt-5.4)
 ```
 
-1. **Azure Bicep** (`infra/main.bicep`) deploys an Azure AI Services resource with a `model-router` deployment.
-2. **`gateway/openclaw_config/openclaw.json`** defines a custom provider `azure-oai-g2` pointing at the Azure endpoint, using `"apiKey": "env:AZURE_AI_SERVICES_API_KEY"`.
+1. **Azure OpenAI** account `oai-ss-aisense-dev-eastus2` hosts the `gpt-5-4` deployment.
+2. **`gateway/openclaw_config/openclaw.json`** defines a custom provider `azure-oai-g2` pointing at the Azure endpoint, using `"apiKey": "env:AZURE_OAI_API_KEY"`.
 3. **`scripts/push-openclaw-config.sh`** deep-merges the repo config into `~/.openclaw/openclaw.json`, resolving `env:` API key placeholders to real values from `gateway/openclaw_config/.env`.
 4. **`azure-api-version-preload.cjs`** monkey-patches `globalThis.fetch` to inject `?api-version=` on Azure requests (required because OpenClaw uses the standard OpenAI SDK, not AzureOpenAI).
 5. The gateway's `cli.py` launch command sets `NODE_OPTIONS="--require ...preload.cjs"` when spawning the OpenClaw daemon.
-6. Agent defaults set `"primary": "azure-oai-g2/model-router"` — all inference flows through Azure.
+6. Agent defaults set `"primary": "azure-oai-g2/gpt-5.4"` — all inference flows through Azure.
 
 ---
 
@@ -111,7 +111,7 @@ The `agents.defaults.model.primary` field controls which provider+model the agen
 
 ```json
 // Azure (current)
-"primary": "azure-oai-g2/model-router"
+"primary": "azure-oai-g2/gpt-5.4"
 
 // OpenRouter — Claude
 "primary": "openrouter/anthropic/claude-sonnet-4-20250514"
@@ -157,7 +157,7 @@ Add a provider selection mechanism. When `OPENCLAW_PROVIDER=openrouter` is set (
 PROVIDER="${OPENCLAW_PROVIDER:-azure}"
 case "${PROVIDER}" in
   azure)
-    MODEL_PRIMARY="azure-oai-g2/model-router"
+    MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
     ;;
   openrouter)
     MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"

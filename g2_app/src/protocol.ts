@@ -148,7 +148,11 @@ export interface SessionCreateFrame {
   type: 'session_create';
 }
 
-export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame;
+export interface ForceStopFrame {
+  type: 'force_stop';
+}
+
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame;
 
 // === Frame parsing ===
 const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched']);

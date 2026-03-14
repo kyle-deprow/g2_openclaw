@@ -275,6 +275,9 @@ export function apiPlugin(): Plugin {
         case 'cancelResponse':
           result = api.cancelResponse();
           break;
+        case 'forceStop':
+          result = api.forceStop();
+          break;
         case 'getSessionList':
           result = api.getSessionList();
           break;

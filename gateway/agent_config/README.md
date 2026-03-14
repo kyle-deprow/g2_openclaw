@@ -7,7 +7,7 @@ Deploy them with `bash scripts/push-openclaw-config.sh`.
 
 - `SOUL.md` — Core personality: orchestrator identity, boundaries, tone.
 - `AGENTS.md` — Operational rules: orchestration loop, HIL gates, session management.
-- `TOOLS.md` — Tool usage guide for `copilot` and `copilot_sessions`.
+- `TOOLS.md` — Tool usage guide for Copilot CLI and built-in tools.
 - `BOOTSTRAP.md` — Project context: tech stack, repo layout, conventions.
 
 ## Load Order

@@ -7,7 +7,7 @@ G2 OpenClaw bridges Even Realities G2 AR smart glasses to a local OpenClaw AI as
 ## Tech Stack
 
 - **Python 3.13+** — PC Gateway, Infra CLI (managed with **uv**, not pip or poetry)
-- **TypeScript / Node.js 22+** — G2 App, Copilot Bridge (managed with **npm**)
+- **TypeScript / Node.js 22+** — G2 App (managed with **npm**)
 - **Azure Bicep** — Infrastructure-as-code
 
 ## Project Layout
@@ -34,7 +34,6 @@ g2_app/            → G2 App (TypeScript thin client for iPhone / G2 glasses)
   src/input.ts     → Input handler (tap-to-toggle, double-tap menu, menu taps)
   src/gateway.ts   → WebSocket client, session list/switch/create helpers
   src/protocol.ts  → Protocol types including session menu frames
-copilot_bridge/    → Copilot Bridge (TypeScript, GitHub Copilot SDK wrapper)
 infra/             → Infra CLI (Python) + Azure Bicep infrastructure-as-code modules
 tests/             → Python tests (pytest), mirrors gateway structure
 docs/              → Design docs, guides, implementation plans, reference
@@ -79,9 +78,6 @@ uv run pre-commit run --all-files      # run all pre-commit hooks
 
 # G2 App
 cd g2_app && npm install && npm test
-
-# Copilot Bridge
-cd copilot_bridge && npm install && npm test
 ```
 
 ```bash

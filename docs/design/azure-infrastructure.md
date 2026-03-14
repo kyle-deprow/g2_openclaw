@@ -57,12 +57,12 @@ with a resource-type prefix prepended:
 
 | Resource | Prefix | Example (dev) |
 |----------|--------|---------------|
-| Resource Group | `rg-` | `rg-ss-aisense-dev-eastus` |
+| Resource Group | `rg-` | `rg-ss-aisense-dev-eastus2` |
 | Log Analytics | `log-` | `log-ss-aisense-dev-eastus` |
 | App Insights | `appi-` | `appi-ss-aisense-dev-eastus` |
 | Storage Account | `st` | `stssaisensedev` (24-char alphanumeric limit) |
 | Key Vault | `kv-` | `kv-ss-aisense-dev-eastu` (24-char limit) |
-| Azure OpenAI | `oai-` | `oai-ss-aisense-dev-eastus` |
+| Azure OpenAI | `oai-` | `oai-ss-aisense-dev-eastus2` |
 | AI Hub | `aihub-` | `aihub-ss-aisense-dev-eastus` |
 | AI Project | `aiproj-` | `aiproj-ss-aisense-dev-eastus` |
 
@@ -140,7 +140,7 @@ python -m infra lint
 # Tear down
 python -m infra destroy \
   --subscription-id $AZURE_SUBSCRIPTION_ID \
-  --resource-group rg-ss-aisense-dev-eastus
+  --resource-group rg-ss-aisense-dev-eastus2
 ```
 
 The CLI uses Rich for formatted output — colour-coded success/error messages, progress spinners, and panelled deployment results.

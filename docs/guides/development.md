@@ -10,7 +10,6 @@ The repo uses a flat layout — each component at the repo root:
 |-----------|----------|-------------|
 | `gateway/` | Python | PC Gateway — WebSocket server, transcription, AI routing |
 | `g2_app/` | TypeScript | G2 App — thin client for iPhone / G2 glasses (Vite) |
-| `copilot_bridge/` | TypeScript | Copilot Bridge — GitHub Copilot SDK wrapper (Biome) |
 | `infra/` | Python + Bicep | Infra CLI + Azure Bicep IaC modules |
 | `infra/` | Bicep | Azure infrastructure-as-code modules |
 | `tests/` | Python | Gateway unit and integration tests (pytest) |
@@ -35,18 +34,6 @@ uv run pytest tests/integration/ -v
 cd g2_app && npm test
 ```
 
-### Copilot Bridge (TypeScript)
-
-```bash
-cd copilot_bridge
-
-# Unit tests
-npm test
-
-# Integration tests (requires COPILOT_GITHUB_TOKEN and/or OPENCLAW tokens)
-npm run test:integration
-```
-
 ## 3. Linting & Formatting
 
 ### Python — Ruff
@@ -66,16 +53,6 @@ cd g2_app && npx tsc --noEmit
 
 No separate linter; TypeScript strict mode is the enforced check.
 
-### Copilot Bridge — Biome
-
-```bash
-cd copilot_bridge
-npm run lint      # check (biome check .)
-npm run format    # fix  (biome format . --write)
-```
-
-Biome config in `copilot_bridge/biome.json`: tabs, double quotes, semicolons, 100-char line width, recommended rules with `noExplicitAny` and `noNonNullAssertion` as warnings.
-
 ## 4. Type Checking
 
 ```bash
@@ -84,9 +61,6 @@ uv run mypy gateway/ infra/
 
 # G2 App
 cd g2_app && npm run typecheck
-
-# Copilot Bridge
-cd copilot_bridge && npm run typecheck
 ```
 
 mypy is configured in `pyproject.toml` with `strict = true` targeting Python 3.13.
@@ -116,8 +90,8 @@ Configured hooks: **ruff** (lint + format) and **mypy** (type checking).
 ### TypeScript
 
 - **Strict mode** enabled in both TS projects.
-- **Vitest** for testing in both G2 App and Copilot Bridge.
-- **Vite** for building the G2 App; **Biome** for linting/formatting the Copilot Bridge.
+- **Vitest** for testing in G2 App.
+- **Vite** for building the G2 App.
 - G2 App has no runtime linter beyond `tsc --noEmit`.
 
 ### Protocol
@@ -144,26 +118,6 @@ GATEWAY_PORT=8765
 GATEWAY_TOKEN=your-secret-token
 ```
 
-### Copilot Bridge `.env`
-
-Create `copilot_bridge/.env`:
-
-```env
-COPILOT_GITHUB_TOKEN=ghp_...        # Required — GitHub token for Copilot API
-COPILOT_LOG_LEVEL=info               # Optional
-
-# BYOK provider (optional — use instead of GitHub Copilot)
-COPILOT_BYOK_PROVIDER=openai         # openai | azure | anthropic | ollama
-COPILOT_BYOK_API_KEY=sk-...
-COPILOT_BYOK_MODEL=gpt-4.1
-COPILOT_BYOK_BASE_URL=               # Required for azure / ollama
-
-# OpenClaw connection
-OPENCLAW_HOST=localhost
-OPENCLAW_PORT=18789
-OPENCLAW_TOKEN=
-```
-
 ### Installing Dependencies
 
 ```bash
@@ -172,9 +126,6 @@ uv sync --extra dev
 
 # G2 App
 cd g2_app && npm install
-
-# Copilot Bridge
-cd copilot_bridge && npm install
 ```
 
 ---

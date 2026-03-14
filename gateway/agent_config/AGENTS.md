@@ -1,59 +1,62 @@
-# Agents — Operational Rules
+# Agents — Behavioral Rules
 
-## Orchestration Flow
+## Two Modes of Copilot Delegation
 
-Every coding task follows four steps. No exceptions.
+### RESEARCH Mode
+Delegate a question to Copilot CLI with web access. Always structure the prompt:
+- What you're looking for (indicator, strategy, data source, technique)
+- Constraints (must work with our data: 1-min OHLCV, Reddit sentiment, news sentiment, volume indicators)
+- What to return (name, formula, data requirements, complexity, references)
 
-### 1. SCAFFOLD
-
-Set up the workspace using `exec` before calling Copilot:
-
-```bash
-mkdir -p <user-specified-path>
-cd <user-specified-path> && git init
-mkdir -p .github/agents .github/skills
+```
+bash pty:true workdir:~/repos/quantipy command:"copilot -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model gpt-5.4 --no-auto-update"
 ```
 
-Examine `~/repos/ai_scaffolding/` — glob agents/ and skills/, read descriptions, pick what fits.
-Always include `orchestrator.agent.md`. Copy selected agents and skills to the target repo.
+### ENGINEER Mode
+Delegate implementation to Copilot CLI. Always structure the prompt:
+- Exact files to create/modify
+- Existing patterns to follow (reference specific files in the repo)
+- Tech requirements: async Python, SQLAlchemy, pytest TDD, ruff, type hints
+- Instruction: run `uv run pytest` after — all tests must pass
 
-**Scaffolding MUST complete before the first `copilot()` call.** Agents and skills are discovered at session creation.
+```
+bash pty:true workdir:~/repos/quantipy command:"copilot -p 'In ~/repos/quantipy, <task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model gpt-5.4 --no-auto-update"
+```
 
-### 2. PLAN
+## Evaluation Filters
 
-Call `copilot()` with `workingDir` = the user's specified path. The prompt MUST:
-- Include the user's requirements VERBATIM — every tech choice, API, directory, and constraint quoted directly from their words. Do not paraphrase or substitute.
-- Include: "The directory already contains .github/agents/ and .github/skills/ with orchestrator config. Preserve these — initialize the project around them (e.g. use --force or init in-place). Do NOT delete or recreate the directory."
+Every research result passes through these filters before implementation. ALL must pass:
 
-Read the result. Distill into a brief summary: phases, key decisions, risks.
+| Filter | Pass Criteria |
+|--------|--------------|
+| Data available? | Uses data we already collect (OHLCV, Reddit, news, volume) or can collect with minimal new infra |
+| Testable hypothesis? | Can be stated as "if X then Y within Z timeframe" |
+| Single metric? | Measurable by Sharpe, hit rate, drawdown, profit factor, or test pass rate |
+| Not tried before? | Not in experiment log or `memory_search` results |
 
-**Stop. Wait for explicit approval before building.**
+If any filter fails → log the rejection reason and move on. Do not argue with the filter.
 
-### 3. IMPLEMENT
+## Verification Protocol
 
-Same Copilot session (do NOT create a new one). Send a single follow-up that:
-- Includes the approved plan
-- Quotes the user's original requirements again verbatim
-- Reminds: "The directory contains .github/ scaffolding — preserve it. Initialize the project around it."
-- Instructs: "Implement ALL phases end-to-end in one pass. For each phase: implement → review → fix. Do not advance until review passes. After all phases, run a final integration review across the entire codebase. Do NOT ask for confirmation, approval, or clarification — implement everything immediately without stopping."
-- Do NOT break implementation into separate copilot() calls per phase. One call, all phases.
-- Uses timeout 0 (no timeout) so the full build can complete.
+After every implementation:
+1. Run `uv run pytest --tb=short -q` via exec
+2. All tests pass → proceed
+3. Tests fail → delegate fix to Copilot (max 3 attempts)
+4. 3 failures → `git revert HEAD`, log failure, move to next idea
 
-### 4. REPORT
+## Decision Protocol
 
-Summarize what was built, list key files, explain how to run it. Ask if the user wants changes.
+After verification, compare metrics to baseline:
+- Metrics improved or neutral → `git commit`, keep
+- Metrics degraded → `git revert`, log why
+- No subjective judgment. Numbers decide.
+
+## Stuck Detection
+
+5 consecutive discards in the same research area → pivot to a different area. Don't grind.
 
 ## Gates
 
-- **Before implementation:** Present plan, wait for "go." Silence ≠ approval.
-- **During implementation:** No gates. Run all phases continuously without asking for approval between phases.
-- **After completion:** Summarize, ask for adjustments.
-- **On errors:** Stop. Report what happened. Don't retry silently.
-
-## Handle Directly
-
-Conversations, clarifications, plan summaries, agent/skill selection, memory queries.
-
-## Delegate to Copilot
-
-All code writing, review, testing, refactoring.
+- **Before implementation:** Research must pass all 4 evaluation filters
+- **Before keeping changes:** Tests must pass AND metrics must not degrade
+- **Before re-trying:** Check `memory_search` — if the idea was already tried and failed, skip it

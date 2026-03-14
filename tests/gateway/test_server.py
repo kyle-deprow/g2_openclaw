@@ -964,3 +964,88 @@ class TestSessionMenu:
 
             assert resp["sessions"][0]["updatedAt"] is None
             assert resp["sessions"][0]["label"] == "agent:claw:g2:no_ts"
+
+
+class TestForceStop:
+    """force_stop hard-kills inflight work and resets the session."""
+
+    async def test_force_stop_resets_session_key(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """force_stop generates a new session key."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            old_key = gw._session_key
+            await ws.send(json.dumps({"type": "force_stop"}))
+            reset_frame = await _recv_json(ws)
+            assert reset_frame == {"type": "session_reset", "reason": "force_stop"}
+            assert gw._session_key != old_key
+            assert gw._session_key.startswith("agent:claw:g2:")
+
+    async def test_force_stop_while_thinking(self, auth_gateway: tuple[str, GatewayServer]) -> None:
+        """force_stop works from non-idle states (no state guard)."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            # Force session into THINKING state
+            assert gw._current_session is not None
+            gw._current_session._state = SessionState.THINKING
+
+            await ws.send(json.dumps({"type": "force_stop"}))
+            reset_frame = await _recv_json(ws)
+            assert reset_frame == {"type": "session_reset", "reason": "force_stop"}
+            # State should be reset to IDLE
+            assert gw._current_session._state == SessionState.IDLE
+
+    async def test_force_stop_discards_inflight(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """force_stop cancels inflight buffer and task."""
+        from gateway.server import InflightBuffer
+
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            # Set up a fake inflight buffer and task
+            gw._inflight_buffer = InflightBuffer(user_question="pending question")
+
+            async def _fake_stream() -> None:
+                await asyncio.sleep(60)
+
+            task = asyncio.create_task(_fake_stream())
+            gw._inflight_task = task
+
+            await ws.send(json.dumps({"type": "force_stop"}))
+            reset_frame = await _recv_json(ws)
+            assert reset_frame == {"type": "session_reset", "reason": "force_stop"}
+            assert gw._inflight_buffer is None
+            assert gw._inflight_task is None
+
+    async def test_force_stop_closes_openclaw_client(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """force_stop calls close() on the OpenClaw client."""
+        url, gw = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            gw._handler.close = AsyncMock()
+            await ws.send(json.dumps({"type": "force_stop"}))
+            await _recv_json(ws)  # session_reset
+            gw._handler.close.assert_awaited_once()

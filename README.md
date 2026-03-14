@@ -10,12 +10,6 @@ Bridges [Even Realities G2](https://www.evenrealities.com/) AR smart glasses to 
 │ Glasses  │          │ (iPhone)     │  port 8765   │ (Python)     │  port 18789 │ (AI)     │
 │ firmware │          │ TypeScript   │              │ Whisper STT  │             │ Node.js  │
 └──────────┘          └──────────────┘              └──────────────┘             └──────────┘
-                                                           │
-                                                     ┌─────┴──────┐
-                                                     │  Copilot   │
-                                                     │  Bridge    │
-                                                     │ (MCP/Plugin)│
-                                                     └────────────┘
 ```
 
 Glasses display: 576×288 px, 4-bit greyscale micro-LED.
@@ -59,15 +53,6 @@ g2_openclaw/
 │       ├── gateway.ts     # WebSocket client with auto-reconnect + jitter
 │       ├── protocol.ts    # Frame types with runtime validation
 │       └── utils.ts       # stripMarkdown() for display-safe text
-├── copilot_bridge/        # GitHub Copilot ↔ OpenClaw bridge
-│   └── src/
-│       ├── client.ts      # Copilot SDK wrapper, session pool (LRU, max 8)
-│       ├── mcp-server.ts  # MCP: exposes Copilot to OpenClaw
-│       ├── mcp-openclaw.ts # MCP: exposes OpenClaw memory to Copilot
-│       ├── plugin.ts      # Native OpenClaw plugin (alternative to MCP)
-│       ├── hooks.ts       # Permission gates, secret redaction, audit logging
-│       ├── config.ts      # Bridge configuration from env vars
-│       └── types.ts       # Shared type definitions
 ├── infra/                 # Azure IaC — Bicep templates + Python CLI
 │   ├── main.py            # Typer CLI: deploy, what-if, destroy, validate, lint
 │   ├── main.bicep         # Root template
@@ -143,21 +128,9 @@ TypeScript thin client running on iPhone via EvenHub. Bridges G2 glasses (BLE) t
 - Streaming delta display with 100ms debounced batching
 - Display layout: 576×288 canvas — status bar (y=2, 24px), content (y=34, 212px), footer (y=256, 26px)
 
-### Copilot Bridge (`copilot_bridge/`)
+### Coding Tasks
 
-Bidirectional bridge between GitHub Copilot and OpenClaw, available as MCP servers or a native OpenClaw plugin.
-
-| Module | Purpose |
-|--------|---------|
-| `client.ts` | Copilot SDK wrapper, session pool (LRU eviction, max 8 concurrent) |
-| `mcp-server.ts` | MCP server: exposes Copilot capabilities to OpenClaw |
-| `mcp-openclaw.ts` | MCP server: exposes OpenClaw memory/prefs to Copilot |
-| `plugin.ts` | Native OpenClaw plugin (alternative to MCP) |
-| `hooks.ts` | Pre/post tool-use permission gating, secret redaction, JSONL audit logs |
-| `config.ts` | Configuration from env vars |
-| `types.ts` | Shared type definitions |
-
-**Key features:** BYOK support (OpenAI, Azure OpenAI, Anthropic, Ollama), cycle detection (MAX_CALL_DEPTH=3), path restriction policies.
+Coding tasks (code generation, refactoring, etc.) are delegated to the **Copilot CLI** (`copilot`) invoked via OpenClaw's `coding-agent` skill. No separate bridge component is needed.
 
 ### Infrastructure (`infra/`)
 
@@ -174,7 +147,7 @@ uv run azure-infra-cli destroy --env dev   # Tear down
 | Tool | Version | Purpose |
 |------|---------|---------|
 | **Python** | ≥ 3.13 | Gateway, Infra CLI |
-| **Node.js** | ≥ 22 | G2 App, Copilot Bridge |
+| **Node.js** | ≥ 22 | G2 App |
 | **uv** | latest | Python package/env manager (**not** pip/poetry) |
 | **npm** | latest | Node.js package manager |
 
@@ -205,9 +178,6 @@ bash scripts/push-openclaw-config.sh
 
 # 4. Install G2 App dependencies
 cd g2_app && npm install && cd ..
-
-# 5. Install Copilot Bridge dependencies
-cd copilot_bridge && npm install && cd ..
 ```
 
 ### Running
@@ -244,10 +214,9 @@ make test
 # By component
 uv run pytest tests/gateway/ -v          # 334 tests
 cd g2_app && npm test                     # 227 tests
-cd copilot_bridge && npm test             # 216 tests
 ```
 
-**Total: ~777 tests** across the monorepo.
+**Total: ~561 tests** across the monorepo.
 
 ### Linting & Formatting
 
@@ -261,8 +230,6 @@ Or individually:
 ```bash
 uv run ruff check .                       # Python lint
 uv run ruff format .                      # Python format
-cd copilot_bridge && npm run lint         # Biome lint
-cd copilot_bridge && npm run format       # Biome format
 ```
 
 ### Type Checking
@@ -273,7 +240,6 @@ make typecheck
 # Or individually
 uv run mypy gateway/ infra/               # Python (strict mode)
 cd g2_app && npm run typecheck            # TypeScript
-cd copilot_bridge && npm run typecheck    # TypeScript
 ```
 
 ### Pre-commit Hooks
@@ -297,7 +263,7 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 |--------|-------------|
 | `make sim` | Kill all + restart gateway + Vite + simulator |
 | `make stop` | Kill all running services |
-| `make test` | Run all tests (gateway + G2 + bridge) |
+| `make test` | Run all tests (gateway + G2) |
 | `make lint` | Lint all components |
 | `make format` | Format all components |
 | `make typecheck` | Type-check all components |
@@ -327,20 +293,6 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 | `G2_LOCAL_AUDIO` | `false` | Use local mic instead of WebSocket audio |
 | `HISTORY_LIMIT` | `10` | History entries sent on connect |
 | `OPENCLAW_AGENT_ID` | `claw` | Agent ID |
-
-### Copilot Bridge Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COPILOT_GITHUB_TOKEN` | *(required)* | GitHub token for Copilot API access |
-| `COPILOT_BYOK_PROVIDER` | — | BYOK provider: `openai`, `azure`, `anthropic`, `ollama` |
-| `COPILOT_BYOK_API_KEY` | — | API key for BYOK provider |
-| `COPILOT_BYOK_MODEL` | — | Model name for BYOK provider |
-| `COPILOT_BYOK_BASE_URL` | — | Base URL for BYOK provider |
-| `COPILOT_LOG_LEVEL` | `info` | Log level |
-| `OPENCLAW_HOST` | `localhost` | OpenClaw host |
-| `OPENCLAW_PORT` | `18789` | OpenClaw port |
-| `OPENCLAW_TOKEN` | — | OpenClaw auth token |
 
 ### G2 App Gateway URL
 
@@ -398,7 +350,7 @@ Deep-dive docs live in `docs/` — see [docs/README.md](docs/README.md) for the 
 
 | Directory | Contents |
 |-----------|----------|
-| [docs/design/](docs/design/) | Architecture, protocol, gateway, G2 app, display layouts, copilot bridge |
+| [docs/design/](docs/design/) | Architecture, protocol, gateway, G2 app, display layouts |
 | [docs/guides/](docs/guides/) | Getting started, development workflow |
 | [docs/reference/](docs/reference/) | OpenClaw internals, G2 SDK/hardware reference |
 | [docs/decisions/](docs/decisions/) | Architecture Decision Records (ADRs) |

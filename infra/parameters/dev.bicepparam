@@ -6,7 +6,7 @@ using '../main.bicep'
 param prefix = 'ss'
 param workload = 'aisense'
 param environment = 'dev'
-param location = 'eastus'
+param location = 'eastus2'
 
 param tags = {
   environment: 'dev'
@@ -19,15 +19,15 @@ param publicNetworkAccess = 'Enabled'
 param storageSkuName = 'Standard_LRS'
 param logRetentionInDays = 30
 
+param openAiUserPrincipalId = 'ae13c0e4-93db-4d6a-ac32-3f1d529a9d32'
+
 param modelDeployments = [
   {
-    name: 'gpt-41'
-    modelName: 'gpt-4.1'
-    modelVersion: '2025-04-14'
+    name: 'gpt-5-4'
+    modelName: 'gpt-5.4'
+    modelVersion: '2026-03-05'
     capacity: 50
     rateLimitPerMinute: 100
+    skuName: 'GlobalStandard'
   }
 ]
-
-param aiServicesLocation = 'eastus2'
-param modelRouterCapacity = 100

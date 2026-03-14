@@ -38,7 +38,7 @@ Options:
 What it does:
   1. Checks system prerequisites (Python ≥3.13, uv, Node.js ≥22, npm)
   2. Installs Python dependencies via uv
-  3. Installs TypeScript dependencies (g2_app, copilot_bridge)
+  3. Installs TypeScript dependencies (g2_app)
   4. Installs OpenClaw CLI, onboards, and pushes repo config
   5. Generates environment config via gateway init-env
   6. Installs pre-commit hooks
@@ -234,15 +234,6 @@ install_ts_deps() {
   else
     warn "g2_app/ directory not found — skipping"
   fi
-
-  if [[ -d "$REPO_ROOT/copilot_bridge" ]]; then
-    info "Installing copilot_bridge dependencies..."
-    (cd "$REPO_ROOT/copilot_bridge" && npm install)
-    ok "copilot_bridge npm install"
-    summary_add "copilot_bridge: npm packages installed"
-  else
-    warn "copilot_bridge/ directory not found — skipping"
-  fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -333,20 +324,6 @@ generate_env() {
     uv run python -m gateway init-env
     ok "Generated .env and g2_app/.env.local"
     summary_add ".env: generated via init-env"
-  fi
-
-  # copilot_bridge .env
-  if [[ -d "$REPO_ROOT/copilot_bridge" ]]; then
-    if [[ -f "$REPO_ROOT/copilot_bridge/.env" ]]; then
-      warn "copilot_bridge/.env already exists — keeping"
-      summary_add "copilot_bridge/.env: already existed (kept)"
-    elif [[ -f "$REPO_ROOT/copilot_bridge/.env.example" ]]; then
-      cp "$REPO_ROOT/copilot_bridge/.env.example" "$REPO_ROOT/copilot_bridge/.env"
-      ok "Copied copilot_bridge/.env.example → .env"
-      summary_add "copilot_bridge/.env: created from example"
-    else
-      warn "No copilot_bridge/.env.example found — skipping"
-    fi
   fi
 }
 
@@ -503,12 +480,11 @@ print_summary() {
   echo ""
   echo -e "${BOLD}  Next steps:${RESET}"
   echo -e "    ${BLUE}1.${RESET} Edit ${BOLD}.env${RESET} — ensure GATEWAY_TOKEN is 32+ chars and review Whisper settings"
-  echo -e "    ${BLUE}2.${RESET} Edit ${BOLD}copilot_bridge/.env${RESET} — configure BYOK or GitHub Copilot token"
-  echo -e "    ${BLUE}3.${RESET} Verify security:  ${DIM}re-run this script to check file permissions & token strength${RESET}"
-    echo -e "    ${BLUE}4.${RESET} Start OpenClaw daemon:  ${DIM}openclaw${RESET}"
-  echo -e "    ${BLUE}5.${RESET} Launch gateway:  ${DIM}uv run python -m gateway launch${RESET}"
-  echo -e "    ${BLUE}6.${RESET} Start G2 app:    ${DIM}cd g2_app && npm run dev${RESET}"
-  echo -e "    ${BLUE}7.${RESET} ${DIM}(Optional)${RESET} Install Tailscale for remote access: ${DIM}https://tailscale.com/download${RESET}"
+  echo -e "    ${BLUE}2.${RESET} Verify security:  ${DIM}re-run this script to check file permissions & token strength${RESET}"
+    echo -e "    ${BLUE}3.${RESET} Start OpenClaw daemon:  ${DIM}openclaw${RESET}"
+  echo -e "    ${BLUE}4.${RESET} Launch gateway:  ${DIM}uv run python -m gateway launch${RESET}"
+  echo -e "    ${BLUE}5.${RESET} Start G2 app:    ${DIM}cd g2_app && npm run dev${RESET}"
+  echo -e "    ${BLUE}6.${RESET} ${DIM}(Optional)${RESET} Install Tailscale for remote access: ${DIM}https://tailscale.com/download${RESET}"
   echo ""
   echo -e "  ${DIM}Docs: docs/guides/getting-started.md${RESET}"
   echo -e "  ${DIM}Re-run this script any time — it's idempotent.${RESET}"

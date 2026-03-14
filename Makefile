@@ -29,9 +29,9 @@ setup: cold-start ## Alias for cold-start
 # Testing
 # ============================================================================
 
-.PHONY: test test-gateway test-integration test-g2 test-bridge
+.PHONY: test test-gateway test-integration test-g2
 
-test: test-gateway test-integration test-g2 test-bridge ## Run all tests across all components
+test: test-gateway test-integration test-g2 ## Run all tests across all components
 
 test-gateway: ## Run gateway unit tests
 	@echo -e "$(CYAN)$(BOLD)>>> Gateway tests$(RESET)"
@@ -45,17 +45,13 @@ test-g2: ## Run G2 App tests
 	@echo -e "$(CYAN)$(BOLD)>>> G2 App tests$(RESET)"
 	@cd g2_app && npm test
 
-test-bridge: ## Run Copilot Bridge tests
-	@echo -e "$(CYAN)$(BOLD)>>> Copilot Bridge tests$(RESET)"
-	@cd copilot_bridge && npm test
-
 # ============================================================================
 # Linting & Formatting
 # ============================================================================
 
-.PHONY: lint lint-python lint-g2 lint-bridge format format-python format-bridge typecheck typecheck-python
+.PHONY: lint lint-python lint-g2 format format-python typecheck typecheck-python
 
-lint: lint-python lint-g2 lint-bridge ## Lint all components
+lint: lint-python lint-g2 ## Lint all components
 
 lint-python: ## Lint Python with ruff
 	@echo -e "$(CYAN)$(BOLD)>>> Ruff check$(RESET)"
@@ -65,21 +61,13 @@ lint-g2: ## Type-check G2 App
 	@echo -e "$(CYAN)$(BOLD)>>> G2 App typecheck$(RESET)"
 	@cd g2_app && npx tsc --noEmit
 
-lint-bridge: ## Lint & type-check Copilot Bridge
-	@echo -e "$(CYAN)$(BOLD)>>> Copilot Bridge lint + typecheck$(RESET)"
-	@cd copilot_bridge && npm run lint && npm run typecheck
-
-format: format-python format-bridge ## Format all components
+format: format-python ## Format all components
 
 format-python: ## Format Python with ruff
 	@echo -e "$(CYAN)$(BOLD)>>> Ruff format$(RESET)"
 	@uv run ruff format .
 
-format-bridge: ## Format Copilot Bridge with biome
-	@echo -e "$(CYAN)$(BOLD)>>> Copilot Bridge format$(RESET)"
-	@cd copilot_bridge && npm run format
-
-typecheck: typecheck-python lint-g2 lint-bridge ## Run all type checks (mypy + tsc)
+typecheck: typecheck-python lint-g2 ## Run all type checks (mypy + tsc)
 
 typecheck-python: ## Type-check Python with mypy
 	@echo -e "$(CYAN)$(BOLD)>>> mypy$(RESET)"
@@ -176,7 +164,6 @@ clean: ## Remove caches, dist/, logs/, node_modules/
 	@find . -type d -name .ruff_cache -exec rm -rf {} + 2>/dev/null || true
 	@rm -rf dist/ logs/
 	@rm -rf g2_app/node_modules g2_app/dist
-	@rm -rf copilot_bridge/node_modules copilot_bridge/dist
 	@echo -e "$(GREEN)$(BOLD)>>> Clean complete$(RESET)"
 
 # ============================================================================

@@ -67,10 +67,10 @@ openclaw onboard --local
 # 2. Set the Azure API key
 #    Option A: fetch from Azure
 az cognitiveservices account keys list \
-  --name aisvc-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus \
+  --name oai-ss-aisense-dev-eastus2 \
+  --resource-group rg-ss-aisense-dev-eastus2 \
   --query key1 -o tsv \
-  | xargs -I{} sh -c 'echo "AZURE_AI_SERVICES_API_KEY={}" > gateway/openclaw_config/.env'
+  | xargs -I{} sh -c 'echo "AZURE_OAI_API_KEY={}" > gateway/openclaw_config/.env'
 
 #    Option B: copy from .env.example and paste manually
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
@@ -117,7 +117,7 @@ URL must match the model `id` in the config.
 
 **Current value:**
 ```
-https://aisvc-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/model-router
+https://oai-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/gpt-5-4
 ```
 
 ### `provider-api-type`
@@ -127,7 +127,7 @@ The `openai-responses` API type also works but targets the newer responses
 endpoint.
 
 ### `provider-model-id-matches-deployment`
-The model `id` field (e.g., `model-router`) must exactly match the Azure deployment
+The model `id` field (e.g., `gpt-5.4`) must exactly match the Azure deployment
 name. OpenClaw uses this ID when constructing API requests.
 
 ### `provider-config-schema-constraints`
@@ -152,14 +152,14 @@ are accepted on a provider object:
 ## 3. API Key Management (CRITICAL)
 
 ### `auth-env-placeholder`
-The repo config uses `"apiKey": "env:AZURE_AI_SERVICES_API_KEY"` as a placeholder.
+The repo config uses `"apiKey": "env:AZURE_OAI_API_KEY"` as a placeholder.
 **OpenClaw does NOT resolve `env:` prefixes** for custom provider apiKey fields.
 The push script substitutes the actual value at merge time.
 
 ### `auth-push-resolves-key`
 `scripts/push-openclaw-config.sh` loads the key from
 `gateway/openclaw_config/.env` (or the shell environment) and replaces any
-`"env:AZURE_AI_SERVICES_API_KEY"` value in provider configs with the real key.
+`"env:AZURE_OAI_API_KEY"` value in provider configs with the real key.
 The actual key is written to `~/.openclaw/openclaw.json` — never committed.
 
 ### `auth-bearer-works`
@@ -172,12 +172,12 @@ To rotate the API key:
 ```bash
 # 1. Get the new key
 az cognitiveservices account keys list \
-  --name aisvc-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus \
+  --name oai-ss-aisense-dev-eastus2 \
+  --resource-group rg-ss-aisense-dev-eastus2 \
   --query key1 -o tsv
 
 # 2. Update .env
-echo "AZURE_AI_SERVICES_API_KEY=<new-key>" > gateway/openclaw_config/.env
+echo "AZURE_OAI_API_KEY=<new-key>" > gateway/openclaw_config/.env
 
 # 3. Re-push
 uv run python -m gateway push-config
@@ -214,7 +214,7 @@ Set `AZURE_PRELOAD_DEBUG=1` to log every patched URL to stderr:
 
 ```bash
 AZURE_PRELOAD_DEBUG=1 openclaw agent --local --agent main -m "test"
-# [azure-preload] https://...com/openai/deployments/model-router/chat/completions → ...?api-version=2024-12-01-preview
+# [azure-preload] https://...com/openai/deployments/gpt-5-4/chat/completions → ...?api-version=2024-12-01-preview
 ```
 
 ### `preload-version-bump`
@@ -231,7 +231,7 @@ If Azure deprecates `2024-12-01-preview`, update the `AZURE_API_VERSION` constan
 1. Backs up `~/.openclaw/openclaw.json` with a UTC timestamp suffix
 2. Deep-merges the repo config over the local config (jq `*` operator)
 3. Cleans stale model entries that don't match the repo's primary model
-4. Resolves `env:AZURE_AI_SERVICES_API_KEY` → actual key value
+4. Resolves `env:AZURE_OAI_API_KEY` → actual key value
 5. Writes the merged config
 6. Copies `SOUL.md` to `~/.openclaw/`
 7. Copies `azure-api-version-preload.cjs` to `~/.openclaw/`
@@ -244,7 +244,7 @@ Use `--no-restart` to push config only.
 ### `push-prerequisites`
 - `jq` must be installed
 - `openclaw onboard --local` must have been run (creates `~/.openclaw/`)
-- `AZURE_AI_SERVICES_API_KEY` must be set (env or `.env` file)
+- `AZURE_OAI_API_KEY` must be set (env or `.env` file)
 
 ### `push-safe-to-rerun`
 The script is idempotent. It creates a timestamped backup before every merge.
@@ -262,7 +262,7 @@ export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
 ```
 
 ### HTTP 401 from Azure
-**Cause:** API key not resolved — the literal string `env:AZURE_OPENAI_API_KEY`
+**Cause:** API key not resolved — the literal string `env:AZURE_OAI_API_KEY`
 was sent as the Bearer token.
 **Fix:** Re-run the push script with the key available:
 ```bash
@@ -287,7 +287,7 @@ for the full list of accepted keys.
 | File | Purpose |
 | ---- | ------- |
 | `gateway/openclaw_config/openclaw.json` | Repo-managed config overlay (version-controlled) |
-| `gateway/openclaw_config/.env.example` | Template for `AZURE_OPENAI_API_KEY` |
+| `gateway/openclaw_config/.env.example` | Template for `AZURE_OAI_API_KEY` |
 | `gateway/openclaw_config/.env` | Actual API key (gitignored) |
 | `gateway/openclaw_config/azure-api-version-preload.cjs` | Fetch preload for api-version injection |
 | `gateway/openclaw_config/README.md` | Detailed README for this directory |

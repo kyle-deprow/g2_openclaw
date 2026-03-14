@@ -1,50 +1,65 @@
 {
+  "auth": {
+    "profiles": {
+      "github-copilot:github": {
+        "provider": "github-copilot",
+        "mode": "token"
+      }
+    }
+  },
   "models": {
     "providers": {
       "azure-oai-g2": {
-        "baseUrl": "https://aisvc-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/model-router",
+        "baseUrl": "https://oai-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/gpt-5-4",
+        "apiKey": "env:AZURE_OAI_API_KEY",
         "api": "openai-completions",
-        "apiKey": "env:AZURE_AI_SERVICES_API_KEY",
         "models": [
           {
-            "id": "model-router",
-            "name": "Model Router (Azure AI Services, eastus2)",
+            "id": "gpt-5.4",
+            "name": "GPT-5.4 (Azure OpenAI, eastus2)",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
             "contextWindow": 1047576,
-            "maxTokens": 16384,
-            "input": ["text"],
-            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "reasoning": false
+            "maxTokens": 32768
           }
         ]
       },
       "openrouter": {
         "baseUrl": "https://openrouter.ai/api/v1",
-        "api": "openai-completions",
         "apiKey": "env:OPENROUTER_API_KEY",
+        "api": "openai-completions",
         "models": [
           {
             "id": "anthropic/claude-sonnet-4-20250514",
             "name": "Claude Sonnet 4 (via OpenRouter)",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
             "contextWindow": 200000,
-            "maxTokens": 16384,
-            "input": ["text"],
-            "reasoning": false
+            "maxTokens": 16384
           },
           {
             "id": "openai/gpt-4.1",
             "name": "GPT-4.1 (via OpenRouter)",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
             "contextWindow": 1047576,
-            "maxTokens": 32768,
-            "input": ["text"],
-            "reasoning": false
+            "maxTokens": 32768
           },
           {
             "id": "google/gemini-2.5-flash-preview",
             "name": "Gemini 2.5 Flash Preview (via OpenRouter)",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
             "contextWindow": 1048576,
-            "maxTokens": 65536,
-            "input": ["text"],
-            "reasoning": false
+            "maxTokens": 65536
           }
         ]
       }
@@ -53,7 +68,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "github-copilot/claude-sonnet-4.6"
+        "primary": "azure-oai-g2/gpt-5.4"
       },
       "compaction": {
         "mode": "safeguard"
@@ -67,14 +82,15 @@
   "tools": {
     "profile": "full",
     "allow": [
-      "Read", "Write", "Glob", "Grep", "exec",
+      "Read",
+      "Write",
+      "Glob",
+      "Grep",
+      "exec",
       "memory_search",
-      "web_search", "web_fetch",
-      "copilot", "copilot_sessions"
+      "web_search",
+      "web_fetch"
     ]
-  },
-  "session": {
-    "dmScope": "per-channel-peer"
   },
   "messages": {
     "ackReactionScope": "group-mentions"
@@ -84,5 +100,15 @@
     "nativeSkills": "auto",
     "restart": true,
     "ownerDisplay": "raw"
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "gateway": {
+    "mode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.3.2",
+    "lastTouchedAt": "2026-03-14T20:35:31.110Z"
   }
 }

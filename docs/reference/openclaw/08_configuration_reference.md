@@ -523,8 +523,8 @@ When OpenClaw encounters a custom provider, `buildEndpointIdFromUrl()` derives
 an internal endpoint ID from the hostname. For example:
 
 ```
-https://oai-ss-aisense-dev-eastus.openai.azure.com/
-  → custom-oai-ss-aisense-dev-eastus-openai-azure-com
+https://oai-ss-aisense-dev-eastus2.openai.azure.com/
+  → custom-oai-ss-aisense-dev-eastus2-openai-azure-com
 ```
 
 You reference the model in agent config as `<provider-id>/<model-id>`, e.g.:
@@ -561,7 +561,7 @@ Ensure the variable is exported before starting the OpenClaw daemon.
   "models": {
     "providers": {
       "azure-oai-g2": {
-        "baseUrl": "https://oai-ss-aisense-dev-eastus.openai.azure.com/",
+        "baseUrl": "https://oai-ss-aisense-dev-eastus2.openai.azure.com/",
         "api": "openai-completions",
         "apiKey": "env:AZURE_OPENAI_API_KEY",
         "models": [
