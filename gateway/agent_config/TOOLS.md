@@ -6,7 +6,7 @@ Delegate coding tasks to the Copilot CLI agent. Copilot runs autonomously with i
 
 ### Invocation
 ```
-bash pty:true workdir:~/repos/<project> command:"copilot -p '<prompt>' --yolo --model gpt-5.4 --no-auto-update"
+bash pty:true workdir:~/repos/<project> command:"copilot -p '<prompt>' --yolo --model claude-opus-4.6 --no-auto-update"
 ```
 
 ### Key Flags
@@ -21,10 +21,49 @@ bash pty:true workdir:~/repos/<project> command:"copilot -p '<prompt>' --yolo --
 | `--output-format json` | Structured JSONL output |
 | `--resume` | Resume previous session |
 
+### Session Management
+
+Copilot CLI persists sessions at `~/.copilot/session-state/<uuid>/`. Each session has:
+- `workspace.yaml` — cwd, git root, branch, summary, timestamps
+- `events.jsonl` — full conversation history
+- `session.db` — tool state, checkpoints
+
+#### Launch in a specific repo
+```
+bash pty:true workdir:~/repos/quantipy command:"copilot -p '<prompt>' --yolo --model claude-opus-4.6 --no-auto-update"
+```
+The `workdir:` parameter sets Copilot's cwd. Copilot auto-detects the git root and scopes all file operations to that repo.
+
+#### Resume most recent session
+```
+bash pty:true workdir:~/repos/quantipy command:"copilot -p '<follow-up prompt>' --yolo --continue --no-auto-update"
+```
+`--continue` resumes the **globally** most recent session (any repo). Use when you just finished a task and want to follow up.
+
+#### Resume a specific session by ID
+```
+bash pty:true workdir:~/repos/quantipy command:"copilot -p '<follow-up prompt>' --yolo --resume=<session-id> --no-auto-update"
+```
+Use when resuming a specific earlier session. The session retains full conversation history and repo context.
+
+#### Discover sessions for a repo
+```
+bash command:"for d in $(ls -t ~/.copilot/session-state/); do grep -l 'cwd: /home/dev/repos/quantipy' ~/.copilot/session-state/$d/workspace.yaml 2>/dev/null && grep '^summary:' ~/.copilot/session-state/$d/workspace.yaml; done"
+```
+Lists session UUIDs + summaries for a specific repo, most recent first.
+
+#### When to start fresh vs. resume
+| Situation | Action |
+|-----------|--------|
+| New task, clean slate | New session (no `--resume`) |
+| Follow-up to just-completed task | `--continue` |
+| Return to a specific earlier session | `--resume=<uuid>` |
+| Task failed mid-way, need to retry | `--resume=<uuid>` with corrected prompt |
+
 ### Background Tasks
 For long-running work, use background mode:
 ```
-bash pty:true workdir:~/repos/quantipy background:true command:"copilot -p 'Your task' --yolo --model gpt-5.4 --no-auto-update"
+bash pty:true workdir:~/repos/quantipy background:true command:"copilot -p 'Your task' --yolo --model claude-opus-4.6 --no-auto-update"
 ```
 Monitor with `process action:log sessionId:XXX`
 

@@ -8,7 +8,7 @@
 #   - jq (https://jqlang.github.io/jq/)
 #   - openclaw CLI on PATH
 #   - For copilot: run 'openclaw github-copilot login' (or set GH_TOKEN env var)
-#   - For azure: AZURE_OAI_API_KEY set in env or in gateway/openclaw_config/.env
+#   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
 set -euo pipefail
 
@@ -37,17 +37,12 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
   exit 1
 fi
 
-# ── Load API key from .env or environment ────────────────────────────────────
-if [[ -z "${AZURE_OAI_API_KEY:-}" ]] && [[ -f "${ENV_FILE}" ]]; then
+# ── Load env vars from .env ───────────────────────────────────────────────────
+if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   set -a
   source "${ENV_FILE}"
   set +a
-fi
-
-if [[ "${OPENCLAW_PROVIDER:-copilot}" == "azure" ]] && [[ -z "${AZURE_OAI_API_KEY:-}" ]]; then
-  echo "WARNING: AZURE_OAI_API_KEY is not set but OPENCLAW_PROVIDER=azure." >&2
-  echo "         Set it in ${ENV_FILE} or export it before running this script." >&2
 fi
 
 if [[ "${OPENCLAW_PROVIDER:-copilot}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
@@ -77,20 +72,7 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
 # The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
 # NOT resolve these natively for custom provider apiKey fields — the literal
 # string is passed to the SDK. We must substitute the actual value here.
-if [[ -n "${AZURE_OAI_API_KEY:-}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --arg key "${AZURE_OAI_API_KEY}" '
-    (.models.providers // {}) |= with_entries(
-      if .value.apiKey == "env:AZURE_OAI_API_KEY" then
-        .value.apiKey = $key
-      else . end
-    )
-  ')
-  echo "Resolved env:AZURE_OAI_API_KEY (${#AZURE_OAI_API_KEY} chars)."
-else
-  echo "WARNING: AZURE_OAI_API_KEY not set — apiKey will contain the literal 'env:' placeholder." >&2
-  echo "         Auth will fail until the key is resolved." >&2
-fi
-
+# Note: Azure OpenAI uses Entra ID auth (injected by the preload) — no apiKey needed.
 if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   MERGED=$(echo "${MERGED}" | jq --arg key "${OPENROUTER_API_KEY}" '
     (.models.providers // {}) |= with_entries(
@@ -154,6 +136,18 @@ for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   done
 done
 
+# ── Copy skills ──────────────────────────────────────────────────────────────
+SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
+SKILLS_DST="${OPENCLAW_HOME}/skills"
+if [[ -d "${SKILLS_SRC}" ]]; then
+  for SKILL_DIR in "${SKILLS_SRC}"/*/; do
+    SKILL_NAME="$(basename "${SKILL_DIR}")"
+    mkdir -p "${SKILLS_DST}/${SKILL_NAME}"
+    cp "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
+    echo "Copied skill ${SKILL_NAME} → ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
+  done
+fi
+
 # ── Copy Azure API-version preload if present ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
 PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
@@ -177,9 +171,10 @@ echo ""
 echo "Done. Config pushed successfully."
 echo ""
 if [[ "${PROVIDER}" == "azure" ]]; then
-  echo "── Azure API-version preload ──"
-  echo "Ensure NODE_OPTIONS is set before starting the daemon:"
+  echo "── Azure Entra preload ──"
+  echo "Ensure 'az login' has been run and NODE_OPTIONS is set before starting the daemon:"
   echo ""
+  echo "  az login"
   echo "  export NODE_OPTIONS=\"--require \$HOME/.openclaw/azure-api-version-preload.cjs\""
   echo ""
 elif [[ "${PROVIDER}" == "copilot" ]]; then

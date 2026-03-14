@@ -9,7 +9,7 @@ Delegate a question to Copilot CLI with web access. Always structure the prompt:
 - What to return (name, formula, data requirements, complexity, references)
 
 ```
-bash pty:true workdir:~/repos/quantipy command:"copilot -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model gpt-5.4 --no-auto-update"
+bash pty:true workdir:~/repos/quantipy command:"copilot -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model claude-opus-4.6 --no-auto-update"
 ```
 
 ### ENGINEER Mode
@@ -20,7 +20,7 @@ Delegate implementation to Copilot CLI. Always structure the prompt:
 - Instruction: run `uv run pytest` after — all tests must pass
 
 ```
-bash pty:true workdir:~/repos/quantipy command:"copilot -p 'In ~/repos/quantipy, <task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model gpt-5.4 --no-auto-update"
+bash pty:true workdir:~/repos/quantipy command:"copilot -p 'In ~/repos/quantipy, <task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model claude-opus-4.6 --no-auto-update"
 ```
 
 ## Evaluation Filters
