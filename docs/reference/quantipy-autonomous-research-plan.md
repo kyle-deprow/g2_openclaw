@@ -1,7 +1,7 @@
 # Quantipy → Autonomous Research Sandbox — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-15 (Async autonomous migration)
+**Last Updated:** 2026-03-15 (Memory fix, Round 3 autoresearch ML upgrade)
 
 ## Critical Rule
 
@@ -62,6 +62,11 @@ Copilot CLI (--yolo --agent orchestrator --model claude-opus-4.6)
 | Launch | First interaction — tell OpenClaw to start | **DONE** |
 | Async | Background exec, task status on reconnect, cron monitoring | **DONE** |
 | Iterate | Steer, evaluate, tune persona | **IN PROGRESS** |
+| Memory | Durable memory for cross-session context | **DONE** |
+| ML Agents | Upgrade research agents to enforce ML minimum complexity | **DONE** |
+| Autoresearch R1 | First research round — rule-based proposals (disappointing) | **DONE** |
+| Autoresearch R2 | Second research round — ML-grade proposals | **DONE** |
+| Implementation | Build winning strategy (C2: Adversarial Sentiment Crowding) | **NEXT** |
 
 ---
 
@@ -183,45 +188,109 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 
 ## Known Issues
 
-1. **tools.allow warning**: "unknown entries (glob, grep)" — non-blocking, tools still work. May be case sensitivity in newer OpenClaw version.
-2. **Pre-commit hooks**: Pre-existing mypy/detect-secrets issues. Using `--no-verify`.
-3. **LLM costs**: Opus ~$2-5 per iteration, GPT-5.4 with reasoning unknown. Budget carefully.
-4. **exec quoting fragile**: OpenClaw sometimes misformats nested quotes in `-p` prompts. May need further TOOLS.md refinement.
+1. **LLM costs**: GPT-5.4 with reasoning = ~$3-8 per research round. Budget carefully.
+2. **exec quoting fragile**: OpenClaw sometimes misformats nested quotes in `-p` prompts.
+3. **Local embeddings slow on first run**: sqlite-vec + local model downloads may timeout on first memory search.
+4. **Cron cleanup**: OpenClaw doesn't always clean up monitoring crons after task completion — manual cleanup sometimes needed.
 
 ---
 
-## Round 1 — Log
+## Round 1 — Scaffolding + Bloat Strip — DONE
 
 **Scaffolding (commit 467f37f):**
 - OpenClaw autonomously created `.github/copilot-instructions.md`, `orchestrator.agent.md`, `backend-python.agent.md`
 - Quality: accurate tech stack detection, correct project patterns, lean content
 
 **Bloat strip (commit df3bf61):**
-- OpenClaw delegated to Copilot CLI (claude-opus-4.6) via orchestrator agent
 - Removed 17 files (-3793 lines): Airflow, Docker, FastAPI, distributed rate limiter
-- 689 tests pass, 1 pre-existing failure noted
-- Required 3 exec attempts due to tilde/quoting bugs (now fixed in TOOLS.md)
+- 689 tests pass. Required 3 exec attempts due to tilde/quoting bugs (now fixed).
 
 ## Round 2 — Backtesting Integration — DONE
 
-**Completed.** Full backtesting.py integration in 5 phases, all managed by OpenClaw via exec tool calls (not Copilot CLI background mode).
-
-**What was built (6 commits, 721 LOC source + 1891 LOC tests):**
-- Phase 1: schemas, enums, DataBridge adapter, exceptions (49 tests)
-- Phase 2: engine adapter wrapping backtesting.py Backtest class (36 tests)
-- Phase 3: QuantiPyStrategy base class + SMA crossover POC (33 tests)
-- Phase 4: BacktestRunner service tying engine+strategy+DataBridge (11 tests)
-- Phase 5: CLI `quantipy backtest run` command (11 tests)
+**6 commits, 721 LOC source + 1891 LOC tests:**
+- backtesting.py engine adapter, DataBridge, QuantiPyStrategy base, SMA crossover POC, BacktestRunner, CLI command
 - **854 total tests pass, 0 failures**
+- OpenClaw used exec directly (not background:true) — works but slow. Needed nudges between phases.
 
-**Behavioral observations:**
-- ✅ OpenClaw followed mandatory planning gate — presented plan, waited for approval
-- ✅ OpenClaw posted `[TASK:running]` and `[TASK:complete]` markers correctly
-- ✅ OpenClaw self-corrected when Phase 3 first exec failed — retried with explicit instructions
-- ✅ OpenClaw committed Phase 5 itself (didn't wait for us)
-- ⚠️ GPT-5.4 reasoning takes 5-6 min per response — each phase required a separate nudge
-- ⚠️ OpenClaw used exec directly (not Copilot CLI with background:true) — works but bypasses the intended delegate-to-Copilot pattern
-- ⚠️ OpenClaw created research doc bloat (BACKTESTING_RESEARCH.md etc) — had to clean up
-- ⚠️ Did not use `background:true` despite AGENTS.md instructions — may need stronger reinforcement
+## Autoresearch Round 1 — DONE (Disappointing)
 
-**Next: First autoresearch experiment.** Now that backtesting works, send OpenClaw into research mode to find strategies that beat the SMA crossover baseline.
+**First autonomous end-to-end research loop.** OpenClaw spawned orchestrator → researcher (PID 4032410), monitored via cron, extracted results.
+
+**4 proposals, all rule-based (no ML):**
+- Contrarian Sentiment Divergence (hand-crafted threshold)
+- Momentum Regime Detector (hardcoded rules)
+- Trend-Following with Sentiment Filter (moving average + heuristic)
+- Mean Reversion with Volume Confirmation (Bollinger bands + volume rules)
+
+**Root causes of poor quality:**
+1. Contrarian agent had anti-ML bias ("simple is better")
+2. Prompts too generic — no tech stack awareness
+3. No minimum complexity requirement — rule-based proposals accepted
+4. Feasibility-dominated scoring let trivial strategies win
+
+## ML Agent Upgrade — DONE (commits bcebd22, d19c219, 388bf4d)
+
+**Rewrote all 4 Copilot CLI research agents:**
+- `researcher.agent.md`: HARD REJECT for no-ML proposals, weighted scoring (novelty×2 + feasibility + persistence×1.5)
+- `contrarian.agent.md`: "If it has no learned parameters, it's not a strategy" — Minimum Complexity Tier
+- `explorer.agent.md`: ML-first philosophy, experiment templates, academic references
+- `theorist.agent.md`: Theory→features→model→target→validation pipeline mandatory
+- All have Tech Stack Awareness (scikit-learn, pandas, numpy, backtesting.py)
+
+**SKILL.md v4 + AGENTS.md**: ML mandatory filters, weighted scoring, HARD REJECT rule-based.
+
+## Autoresearch Round 2 — DONE (Strong Results)
+
+**9 ML-grade proposals.** All have learned parameters as required.
+
+**Top proposals:**
+| Rank | ID | Name | Composite | Model |
+|------|-----|------|-----------|-------|
+| 1 | C2 | Adversarial Sentiment Crowding Detector | 19.0 | IsolationForest → XGBoost |
+| 2 | T3 | Bayesian Hierarchical Sector Momentum | 19.5 | Bayesian hierarchical model |
+| 3 | T2 | Sentiment-Price Divergence Classifier | 19.0 | RandomForest cross-validated |
+| 4 | E3 | HMM Market Regime Detector | 18.0 | Hidden Markov Model |
+
+**Winner: C2 — Adversarial Sentiment Crowding Detector**
+- Phase 1: IsolationForest anomaly detection on 18-dim feature vector
+- Phase 2: XGBClassifier for mean-reversion prediction after crowding events
+- Features: Reddit sentiment/engagement, price/volume patterns, Reddit-news divergence
+- Validation: walk-forward CV (8-week train → 1-week validate → 7-day embargo, 52 periods)
+- Deps: scikit-learn + xgboost (feasible in current stack)
+
+**Implementation roadmap:** C2 (2-3wk) → E3 (1-2wk) → T2 (2wk) → T3 (3-4wk)
+
+## Memory System Fix — DONE (commit 95a3808)
+
+**Problem:** No memory config at all. Cron ticks hit ENOENT on `memory/YYYY-MM-DD.md`. Skill doc had wrong schema (used `memory.enabled`, `memory.vectorSearch` — invalid in v2026.3.2).
+
+**Root cause:** Top-level `memory` only accepts `backend`/`citations`/`qmd`. Memory search config goes under `agents.defaults.memorySearch` per the Zod schema (`MemorySearchSchema`).
+
+**Fix:**
+- `agents.defaults.memorySearch`: local embeddings, SQLite vector store, hybrid search (BM25 0.7 weight), MMR reranking, temporal decay (30-day half-life)
+- `agents.defaults.compaction.memoryFlush`: enabled, softThresholdTokens=4000
+- `memory.backend`: "builtin"
+- Push script: force-set `memory` section (like `tools`) to prevent deep merge drift
+- Skill doc: corrected Quick Config Template with warning
+- MEMORY.md seeded in workspace-claw with architecture + active experiments
+
+---
+
+## Next Step — Implementation Round
+
+**Goal:** Tell OpenClaw to implement C2 (Adversarial Sentiment Crowding Detector) in quantipy.
+
+**What OpenClaw needs to do:**
+1. Create `src/quantipy/alpha/` module with IsolationForest crowding detector + XGBoost classifier
+2. Build 18-dim feature engineering pipeline using existing data services
+3. Wire to backtesting engine (BacktestRunner) for walk-forward validation
+4. Add scikit-learn + xgboost dependencies
+5. Write tests, backtest against SMA crossover baseline
+6. Report metrics: Sharpe, max drawdown, win rate, profit factor
+
+**Pipeline improvements needed for full autonomy:**
+1. ~~Memory~~ — DONE
+2. **Experiment tracking** — OpenClaw needs to log strategy results to memory (metrics, what worked, what failed)
+3. **Autonomous iteration loop** — After implementing C2, OpenClaw should evaluate results and decide next strategy without human
+4. **Rejection/retry** — If backtest fails minimum Sharpe, auto-iterate on features/params
+5. **Strategy comparison** — Maintain leaderboard of tested strategies in MEMORY.md
