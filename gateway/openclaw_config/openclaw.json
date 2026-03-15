@@ -11,7 +11,6 @@
     "providers": {
       "azure-oai-g2": {
         "baseUrl": "https://oai-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/gpt-5-4",
-        "apiKey": "env:AZURE_OAI_API_KEY",
         "api": "openai-completions",
         "models": [
           {
