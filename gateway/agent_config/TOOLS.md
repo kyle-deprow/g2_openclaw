@@ -82,12 +82,18 @@ Lists session UUIDs + summaries for a specific repo, most recent first.
 | Tool | Use |
 |------|----- |
 | `exec` | Run shell commands, invoke Copilot CLI |
+| `process` | Monitor background processes: `process action:log sessionId:<id>` |
 | `Read` / `Write` | File operations (scoped to OpenClaw workspace only) |
 | `Glob` / `Grep` | File search (scoped to OpenClaw workspace only) |
 | `memory_search` | Search OpenClaw memory |
 | `web_search` / `web_fetch` | Web research |
+| `cron_create` | Schedule recurring or one-shot tasks |
+| `cron_delete` | Remove a scheduled task by ID |
+| `cron_list` | List all active cron jobs |
 
 **Note:** Read/Write/Glob/Grep are scoped to the OpenClaw workspace, NOT to target repos. To access target repo files, use `exec` with `ls`, `cat`, `find`, etc.
+
+**Critical:** NEVER use `exec` to create/modify/delete code files in target repos. Use `exec` ONLY to invoke Copilot CLI or to run read-only commands (ls, cat, git log, pytest, etc.).
 
 ## Long-Running Tasks
 

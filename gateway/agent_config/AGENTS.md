@@ -56,13 +56,13 @@ This is ONE session. Copilot handles all phases autonomously. You wait for it to
 
 ## Background Execution
 
-For Copilot sessions expected to run >2 minutes (any implementation, build, or test suite), use background mode:
+For Copilot sessions expected to run >2 minutes (any implementation, build, or test suite), use background mode. **This is NOT optional — ALL implementation sessions MUST use background:true.**
 
 1. **Launch:** `bash pty:true workdir:/home/dev/repos/quantipy background:true command:"copilot --agent orchestrator --yolo -p \"<full plan>\" --model claude-opus-4.6 --no-auto-update"`
 2. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md)
-3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"` for silent monitoring, `mode: "main"` for shared context.
-4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron.
-5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron.
+3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`, `mode: "main"`.
+4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
+5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 6. **Human may or may not be connected** — doesn't change the workflow.
 
 ### Why background mode?
@@ -70,6 +70,17 @@ Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Bac
 - Respond to the human immediately ("Task launched")
 - Handle other requests while Copilot runs
 - Monitor progress and report completion asynchronously
+
+### Monitoring cron template
+```
+cron_create: schedule "every 5m", delivery "none", mode "main", prompt "Check status of background process <sessionId> via process action:log sessionId:<sessionId>. If output shows completion (exit code 0, tests pass), post [TASK:complete] with results summary and delete this cron via cron_delete. If output shows failure, post [TASK:failed] with error and delete this cron. If still running, do nothing."
+```
+
+## Code Delegation — Absolute Rule
+
+**NEVER create, modify, or delete code files directly.** Not with Write, not with exec cat/echo/tee/sed, not with any tool. ALL code changes in target repos go through Copilot CLI via `exec bash pty:true background:true`.
+
+Violations of this rule produce untested, uncommitted, unreviewed code. Copilot CLI handles multi-file edits, test runs, commits, and error recovery. You cannot replicate that quality with shell one-liners.
 
 ---
 

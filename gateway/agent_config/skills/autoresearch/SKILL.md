@@ -1,12 +1,12 @@
 ---
 name: autoresearch
-description: Autonomous goal-directed iteration. Modify → Verify → Keep/Discard → Repeat. Karpathy-inspired constraint-driven research loop.
-version: 2.0.0
+description: Behavioral mode for autonomous goal-directed iteration. Modify → Verify → Keep/Discard → Repeat via Copilot CLI delegation and cron self-continuation. NOT a separate agent — activates as a mode within the default agent.
+version: 2.1.0
 ---
 
 # Autoresearch — Autonomous Iteration Protocol
 
-Adapted from [Karpathy's autoresearch](https://github.com/karpathy/autoresearch). Applies constraint-driven autonomous iteration to ANY measurable improvement task. Core idea: define a mechanical metric, make one atomic change, verify, keep or revert, repeat. Autonomy scales when you constrain scope, clarify success, and mechanize verification.
+**This is a behavioral mode, not a separate agent.** When the user activates autoresearch, the default agent follows this protocol to run an iterative improvement loop. All code changes are delegated to Copilot CLI. Loop persistence is achieved via cron self-nudging.
 
 ## When to Activate
 
@@ -48,7 +48,8 @@ LOOP (until goal met or user interrupts):
     6. Radical experiments — when incremental changes stall
 
   Phase 3 — MODIFY (one atomic change)
-    - Delegate implementation to Copilot CLI: exec with bash pty:true
+    - Delegate implementation to Copilot CLI: exec bash pty:true background:true
+    - Include in the prompt: the specific change, affected files, test command
     - One focused change, describable in one sentence
     - Write description BEFORE making the change
 
@@ -156,9 +157,27 @@ Recovery protocol:
 
 ## Execution Model
 
-This agent orchestrates. Implementation work is delegated:
-- Use `exec` with `bash pty:true` to delegate coding tasks to Copilot CLI
-- Use `exec` for running tests, benchmarks, git commands
-- Use `memory_search` to check for prior experiments and insights
-- Write findings to MEMORY.md after significant discoveries
-- For scheduling repeated runs, use cron jobs
+**This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol. You do not spawn a subagent.
+
+### Delegation
+All code changes go through Copilot CLI via `exec bash pty:true background:true`:
+- Phase 3 (MODIFY) → delegate coding to Copilot CLI in background
+- Phase 4 (COMMIT) → Copilot handles commits internally
+- Phase 5 (VERIFY) → Copilot runs tests; you check results via `process action:log`
+
+### Self-Continuation via Cron
+The loop persists across agent turns using cron self-nudging:
+
+1. At loop start, create a continuation cron:
+```
+cron_create: schedule "every 3m", delivery "none", mode "main", prompt "Continue the autoresearch loop. Check if the current background Copilot session is done (process action:log). If done, evaluate results (Phase 6-7), then launch the next iteration (Phase 1-3). If still running, do nothing. If goal is met or user interrupted, delete this cron."
+```
+
+2. Each cron trigger resumes the loop at the appropriate phase
+3. When the goal is met or user says stop, delete the cron with `cron_delete`
+
+### Status Reporting
+- Post `[TASK:running] autoresearch iteration N` after each launch
+- Post `[TASK:complete] autoresearch — N iterations, metric: X → Y` when goal met
+- Every 10 iterations, post a progress summary (see Results Logging)
+- Write significant findings to MEMORY.md via `memory_search` context

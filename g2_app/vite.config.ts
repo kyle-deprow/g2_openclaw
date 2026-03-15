@@ -10,16 +10,17 @@ function inputBar(): Plugin {
 <!-- Input bar: Send (direct) + TTS (simulated glasses flow) -->
 <div id="input-bar" style="
   position: fixed; bottom: 0; left: 0; right: 0;
-  display: none; gap: 8px; padding: 12px 16px;
+  display: none; flex-wrap: wrap; gap: 8px; padding: 12px 16px;
   background: #1a1a2e; border-top: 1px solid #333;
   z-index: 9999; font-family: system-ui, sans-serif;
 ">
-  <input id="input-text" type="text" placeholder="Type your message..."
+  <textarea id="input-text" rows="1" placeholder="Type your message..."
     autocomplete="off" style="
-    flex: 1; padding: 10px 14px; font-size: 15px;
-    border: 1px solid #555; border-radius: 6px;
+    width: 100%; min-height: 40px; max-height: 160px; padding: 10px 14px; font-size: 15px;
+    border: 1px solid #555; border-radius: 6px; resize: none; overflow-y: auto;
     background: #0f0f1a; color: #e0e0e0; outline: none;
-  " />
+    font-family: system-ui, sans-serif; line-height: 1.4; box-sizing: border-box;
+  "></textarea>
   <button id="btn-send" title="Send directly to OpenClaw" style="
     padding: 10px 18px; font-size: 14px; font-weight: 600;
     border: none; border-radius: 6px;
@@ -69,7 +70,8 @@ function inputBar(): Plugin {
       bar.style.display = showBar ? 'flex' : 'none';
       var sp = document.getElementById('session-panel');
       var dt = document.getElementById('dev-telemetry');
-      var bottom = showBar ? '54px' : '0';
+      var barHeight = showBar ? bar.offsetHeight : 0;
+      var bottom = barHeight ? (barHeight + 'px') : '0';
       if (sp) sp.style.bottom = bottom;
       if (dt) dt.style.bottom = bottom;
     }
@@ -102,6 +104,7 @@ function inputBar(): Plugin {
     if (!text) return;
     if (api.sendText(text)) {
       input.value = '';
+      input.style.height = 'auto';
     }
   });
 
@@ -113,6 +116,7 @@ function inputBar(): Plugin {
     if (!text) return;
     if (api.ttsRecord(text)) {
       input.value = '';
+      input.style.height = 'auto';
     }
   });
 
@@ -128,10 +132,17 @@ function inputBar(): Plugin {
     if (window.__g2Api) window.__g2Api.cancelResponse();
   });
 
-  document.getElementById('input-text').addEventListener('keydown', function(e) {
+  var inputEl = document.getElementById('input-text');
+  function autoResize() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  }
+  inputEl.addEventListener('input', autoResize);
+  inputEl.addEventListener('keydown', function(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       document.getElementById('btn-send').click();
+      inputEl.style.height = 'auto';
     }
   });
 </script>`;

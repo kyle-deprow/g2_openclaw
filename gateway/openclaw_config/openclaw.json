@@ -86,9 +86,13 @@
       "Glob",
       "Grep",
       "exec",
+      "process",
       "memory_search",
       "web_search",
-      "web_fetch"
+      "web_fetch",
+      "cron_create",
+      "cron_delete",
+      "cron_list"
     ]
   },
   "messages": {
