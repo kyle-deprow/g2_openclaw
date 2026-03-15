@@ -60,7 +60,7 @@ For Copilot sessions expected to run >2 minutes (any implementation, build, or t
 
 1. **Launch:** `bash pty:true workdir:/home/dev/repos/quantipy background:true command:"copilot --agent orchestrator --yolo -p \"<full plan>\" --model claude-opus-4.6 --no-auto-update"`
 2. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md)
-3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`, `execution: "main"`. **Never use isolated** — isolated crons can't see process IDs or conversation context.
+3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`. Do NOT specify `execution` — default (isolated) is correct for named agents. Include the PID and expiry epoch directly in the prompt.
 4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 6. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
@@ -73,13 +73,22 @@ Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Bac
 - Monitor progress and report completion asynchronously
 
 ### Monitoring cron template
+Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
 ```
-cron_create: schedule "every 5m", delivery "none", execution "main", prompt "MONITOR tick N/24. Check process <sessionId> via process action:log. If DONE → post [TASK:complete], delete this cron. If FAILED → post [TASK:failed], delete this cron. If STILL RUNNING and tick < 24 → reply 'still running' only (no tool calls). If tick >= 24 → post [TASK:timeout], delete this cron."
+cron_create: schedule "every 5m", delivery "none", prompt "MONITOR. PID=<PID>. Expiry=<EXPIRY_EPOCH>.
+1. exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo DONE\"
+2. exec bash command:\"date +%s\"
+If no DONE → respond 'still running'. No other tool calls. STOP.
+If epoch > Expiry → post [TASK:timeout], delete this cron.
+If DONE → post [TASK:complete], delete this cron."
 ```
 
-### Cron cost rules
-- **Still-running ticks must be cheap:** If the process isn't done, reply with just "still running" — NO tool calls, NO analysis. This keeps each tick to ~200 tokens instead of ~15K.
-- **Always use execution main:** Isolated crons start fresh each tick with no context — they can't see process IDs, can't continue loops, and waste tokens rebuilding state.
+### Cron rules
+- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents like ours.
+- **Do NOT pass `context`** — not a valid cron_create parameter.
+- **Self-contained prompts** — include PID and expiry epoch. Isolated crons have no conversation history.
+- **Still-running ticks are cheap** — one `ps` exec + text reply. ~2K tokens per tick.
+- **Hard TTL: 2 hours** — embed expiry epoch (creation + 7200s). Cron self-deletes on expiry.
 
 ## Code Delegation — Absolute Rule
 

@@ -193,22 +193,32 @@ All ideation and coding go through Copilot CLI via `exec bash pty:true backgroun
 - Phase 4 (VERIFY) → you run tests directly or check Copilot results via `process action:log`
 
 ### Self-Continuation via Cron
-The loop persists across agent turns using cron self-nudging:
+The loop persists across turns using cron self-monitoring. Because we run as a named agent (not default), crons use **isolated execution** (the default). Each prompt must be self-contained.
 
-1. At loop start, create a continuation cron:
+1. Before creating the cron, capture the expiry epoch:
+   `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
+   This gives a Unix timestamp 2 hours from now.
+
+2. Create the monitoring cron (fill in PID and EXPIRY from step 1):
 ```
-cron_create: schedule "every 3m", delivery "none", execution "main", prompt "AUTORESEARCH MONITOR (tick N of max 40). Check background Copilot via process action:log. If DONE → evaluate results, launch next iteration, reset tick to 0. If STILL RUNNING → reply with only 'still running' (no tool calls, no analysis). If tick >= 40 (2 hours) → delete this cron, post [TASK:timeout]. If goal met or user said stop → delete this cron."
+cron_create: schedule "every 3m", delivery "none", prompt "AUTORESEARCH MONITOR. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
+Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo PROCESS_DONE\"
+Step 2: exec bash command:\"date +%s\"
+If output does NOT contain PROCESS_DONE → respond 'still running'. Make NO other tool calls. STOP.
+If current epoch > Expiry → post [TASK:timeout], delete this cron with cron_delete. STOP.
+If PROCESS_DONE → check results: exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3 && uv run pytest -q --tb=line 2>&1 | tail -5\". Post [TASK:complete] with 1-line summary. Delete this cron with cron_delete."
 ```
 
 **CRITICAL cron rules:**
-- `execution: "main"` — the cron MUST share the main session context to see process IDs and conversation history. Never use isolated.
-- **Hard TTL: 40 ticks (2 hours).** If the cron fires 40 times without completing, it self-deletes. This prevents runaway token burn.
-- **Still-running ticks are FREE.** If the background process isn't done, respond with just "still running" — no tool calls, no reasoning, no analysis. This costs ~200 tokens instead of ~15K.
-- Track the tick count in memory or the cron prompt itself. Increment on each fire.
+- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents. This is an OpenClaw constraint.
+- **Do NOT pass a `context` parameter** — not a valid cron_create field. Valid fields: schedule, delivery, prompt, model, agent, thinking.
+- **Prompt must be self-contained** — include PID, repo path, and expiry epoch. Isolated crons have NO conversation history.
+- **Still-running ticks are cheap** — one `ps` check + "still running" text. ~2K tokens per tick.
+- **Hard TTL: 2 hours** — calculated as creation epoch + 7200. Cron self-deletes on expiry.
 
-2. Each cron trigger resumes the loop at the appropriate phase
-3. When the goal is met or user says stop, delete the cron with `cron_delete`
-4. After 40 ticks with no goal completion, the cron self-deletes as a safety valve
+3. Each cron tick runs independently with all context in the prompt
+4. When process completes, the cron evaluates and self-deletes
+5. To continue the loop: after cron reports completion, launch NEXT iteration from main conversation, create new cron for new PID
 
 ### Status Reporting
 - Post `[TASK:running] autoresearch iteration N` after each launch
