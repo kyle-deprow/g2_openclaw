@@ -211,6 +211,31 @@ After verification, compare metrics to baseline:
 - Metrics degraded → `git revert`, log why
 - No subjective judgment. Numbers decide.
 
+## Memory Practices
+
+Write to memory proactively — don't wait for compaction to flush context:
+
+- **After every experiment result:** Write outcome to `memory/YYYY-MM-DD.md` (status, metric, what worked/failed)
+- **After every decision:** Record it in daily memory
+- **After every research round:** Summarize proposals, winner, and rejection reasons
+- **Before starting work:** `memory_search` for related past experiments, decisions, failures
+- **Update MEMORY.md** only for critical durable facts that should persist in every session bootstrap
+- **Never duplicate:** Search memory before writing similar notes
+
+### Daily Memory Format
+```markdown
+# YYYY-MM-DD
+
+## Experiments
+- <name>: <status> (metric: <value>)
+
+## Decisions
+- <what was decided and why>
+
+## Research
+- Round N: <winner> selected, <N> proposals evaluated
+```
+
 ## Stuck Detection
 
 5 consecutive discards in the same research area → pivot to a different area. Don't grind.

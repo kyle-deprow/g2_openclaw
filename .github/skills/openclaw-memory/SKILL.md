@@ -411,38 +411,47 @@ If similar information exists, update rather than duplicate.
 
 ---
 
-## Quick Config Template
+## Quick Config Template (v2026.3.2)
+
+> **IMPORTANT**: Memory search config goes under `agents.defaults.memorySearch`,
+> NOT under a top-level `memory` key. The top-level `memory` key only accepts
+> `backend` ("builtin"|"qmd"), `citations`, and `qmd`.
 
 ```json
 {
   "memory": {
-    "enabled": true,
-    "vectorSearch": {
-      "enabled": true,
-      "backend": "sqlite",
-      "sqliteVec": false,
-      "embeddingProvider": "local",
-      "chunkSize": 512,
-      "chunkOverlap": 50,
-      "hybridWeight": 0.7,
-      "topK": 20,
-      "mmr": {
-        "enabled": true,
-        "lambda": 0.7,
-        "fetchMultiplier": 3
-      },
-      "temporalDecay": {
-        "enabled": true,
-        "halfLifeDays": 30,
-        "weight": 0.2
-      }
-    },
-    "sessionMemory": {
-      "enabled": false
-    }
+    "backend": "builtin"
   },
   "agents": {
     "defaults": {
+      "memorySearch": {
+        "enabled": true,
+        "sources": ["memory", "sessions"],
+        "provider": "local",
+        "store": {
+          "driver": "sqlite",
+          "vector": { "enabled": true }
+        },
+        "chunking": {
+          "tokens": 512,
+          "overlap": 50
+        },
+        "sync": {
+          "onSessionStart": true,
+          "onSearch": true,
+          "watch": true
+        },
+        "query": {
+          "maxResults": 20,
+          "minScore": 0.3,
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "mmr": { "enabled": true, "lambda": 0.7 },
+            "temporalDecay": { "enabled": true, "halfLifeDays": 30 }
+          }
+        }
+      },
       "compaction": {
         "memoryFlush": {
           "enabled": true,

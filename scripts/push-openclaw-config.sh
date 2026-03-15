@@ -76,6 +76,14 @@ if [[ -n "${REPO_TOOLS}" ]]; then
   MERGED=$(echo "${MERGED}" | jq --argjson tools "${REPO_TOOLS}" '.tools = $tools')
 fi
 
+# ── Force-set memory section from repo config ────────────────────────────────
+# Deep merge preserves stale keys from old memory schemas.
+# Overwrite the entire memory section with the repo's version.
+REPO_MEMORY=$(jq '.memory // empty' "${REPO_CONFIG}")
+if [[ -n "${REPO_MEMORY}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --argjson memory "${REPO_MEMORY}" '.memory = $memory')
+fi
+
 # ── Resolve env: references in provider apiKey fields ────────────────────────
 # The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
 # NOT resolve these natively for custom provider apiKey fields — the literal
