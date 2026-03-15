@@ -6,8 +6,9 @@ Delegate coding tasks to the Copilot CLI agent. Copilot runs autonomously with i
 
 ### Invocation
 ```
-bash pty:true workdir:~/repos/<project> command:"copilot -p '<prompt>' --yolo --model claude-opus-4.6 --no-auto-update"
+bash pty:true workdir:~/repos/<project> command:"copilot --agent orchestrator -p '<prompt>' --yolo --model claude-opus-4.6 --no-auto-update"
 ```
+Use `--agent orchestrator` by default. It delegates internally to specialist agents defined in the repo's `.github/agents/`. Only use `--agent <name>` for a direct specialist when the task is narrow and single-purpose.
 
 ### Key Flags
 | Flag | Purpose |
@@ -15,6 +16,7 @@ bash pty:true workdir:~/repos/<project> command:"copilot -p '<prompt>' --yolo --
 | `-p "prompt"` | Non-interactive mode (exits after completion) |
 | `--yolo` | Full auto — all permissions, no confirmation |
 | `--model <model>` | Model selection (gpt-5.4, claude-opus-4.6, gpt-5.2-codex, etc.) |
+| `--agent <name>` | Route to specialist agent defined in `.github/agents/<name>.agent.md` |
 | `--add-dir <dir>` | Allow access to additional directories |
 | `--no-ask-user` | Autonomous mode, no questions |
 | `--no-auto-update` | Skip update checks |
