@@ -202,32 +202,26 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 - 689 tests pass, 1 pre-existing failure noted
 - Required 3 exec attempts due to tilde/quoting bugs (now fixed in TOOLS.md)
 
-## Round 2 — Backtesting Integration
+## Round 2 — Backtesting Integration — DONE
 
-**Plan approved:** Integrate backtesting.py as backtesting engine (OSS-first evaluation done by Copilot — scored 6 libraries, backtesting.py won at 29/35). Phases: foundation → strategies → service layer → advanced.
+**Completed.** Full backtesting.py integration in 5 phases, all managed by OpenClaw via exec tool calls (not Copilot CLI background mode).
 
-**Execution model correction:** Changed from "one Copilot session per phase" to "one Copilot session executes full plan autonomously." OpenClaw delegates once after approval; Copilot handles all phases, commits, tests internally.
+**What was built (6 commits, 721 LOC source + 1891 LOC tests):**
+- Phase 1: schemas, enums, DataBridge adapter, exceptions (49 tests)
+- Phase 2: engine adapter wrapping backtesting.py Backtest class (36 tests)
+- Phase 3: QuantiPyStrategy base class + SMA crossover POC (33 tests)
+- Phase 4: BacktestRunner service tying engine+strategy+DataBridge (11 tests)
+- Phase 5: CLI `quantipy backtest run` command (11 tests)
+- **854 total tests pass, 0 failures**
 
-**Phase 1 partial (uncommitted):** Copilot created `src/quantipy/backtesting/` (schemas.py, adapters.py, exceptions.py, __init__.py) + 4 test files. 772 tests pass, 1 trivial failure. Was killed mid-stream by model crash before commit. Needs clean restart.
+**Behavioral observations:**
+- ✅ OpenClaw followed mandatory planning gate — presented plan, waited for approval
+- ✅ OpenClaw posted `[TASK:running]` and `[TASK:complete]` markers correctly
+- ✅ OpenClaw self-corrected when Phase 3 first exec failed — retried with explicit instructions
+- ✅ OpenClaw committed Phase 5 itself (didn't wait for us)
+- ⚠️ GPT-5.4 reasoning takes 5-6 min per response — each phase required a separate nudge
+- ⚠️ OpenClaw used exec directly (not Copilot CLI with background:true) — works but bypasses the intended delegate-to-Copilot pattern
+- ⚠️ OpenClaw created research doc bloat (BACKTESTING_RESEARCH.md etc) — had to clean up
+- ⚠️ Did not use `background:true` despite AGENTS.md instructions — may need stronger reinforcement
 
-**Persona tuning applied:**
-- AGENTS.md: Added OSS-First Rule to planning gate, added implementation delegation example
-- SOUL.md: Added "OSS before custom" principle (#6), fixed execution model to single Copilot session
-- BOOTSTRAP.md: Added Data APIs table with all service methods for Copilot/OpenClaw reference
-- Fixed OpenClaw sometimes not delegating to Copilot (needed explicit exec command in message)
-
-**Known issues encountered:**
-- OpenClaw sometimes doesn't use exec → invents plans from training data. Solved by explicit rejection + re-instruction
-- Model crashed mid-session (gateway log: "agent error: model crashed"). Need to monitor for this.
-- OpenClaw loses context when bouncing sessions after crash recovery
-
-**Next steps (async model):**
-- Push updated config (SOUL.md, AGENTS.md, TOOLS.md with async rules) + restart OpenClaw
-- Send backtesting task — OpenClaw should now use `background:true` and post `[TASK:running]`
-- Disconnect, let OpenClaw work autonomously
-- Reconnect — verify `taskSummary` appears in connected frame and G2 shows task indicator
-- After backtesting committed: send first autonomous research experiment
-
-**Principles established:**
-- **OSS-first** — Always search for and use existing OSS before building custom. In AGENTS.md planning gate and SOUL.md.
-- **Async-first** — All Copilot sessions use `background:true`. Status via `[TASK:*]` markers. Cron for monitoring. Human connects/disconnects freely.
+**Next: First autoresearch experiment.** Now that backtesting works, send OpenClaw into research mode to find strategies that beat the SMA crossover baseline.
