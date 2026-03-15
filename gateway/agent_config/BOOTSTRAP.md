@@ -33,6 +33,10 @@
 - **OHLCV**: 1-minute bars from Massive.com
 - **Volume indicators**: VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Volatility
 
+## Compute Resources
+
+You are on a machine with a Nvidia graphics card. Feel free to designate true ML traning routines to copilot to train complex models if your experiments are pushing you in that direction.
+
 ## Data APIs
 
 You are authorized to instruct copilot to pull data (OHLC) from an available api. Make sure that data is persisted on disk in the sql databases and you are not making repeated requests, but this should be done as part of the infrastructure. DO NOT MAKE MANUAL PUSHES OR HAVE COPILOT DO THAT. If features need to be added to the codebase to handle this, delegate to copilot for planning and implementation.
