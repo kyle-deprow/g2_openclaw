@@ -26,8 +26,8 @@ param modelDeployments = [
     name: 'gpt-5-4'
     modelName: 'gpt-5.4'
     modelVersion: '2026-03-05'
-    capacity: 50
-    rateLimitPerMinute: 100
+    capacity: 500
+    rateLimitPerMinute: 500
     skuName: 'GlobalStandard'
   }
 ]

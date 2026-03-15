@@ -9,7 +9,7 @@ import type { ConversationHistory } from './conversation';
 import type { Gateway } from './gateway';
 import type { InputHandler } from './input';
 import type { StateMachine } from './state';
-import type { AppStatus } from './protocol';
+import type { AppStatus, CopilotSessionEntry, CopilotHistoryEntry } from './protocol';
 
 export interface AppApi {
   // State
@@ -30,6 +30,7 @@ export interface AppApi {
   rejectTranscription(): boolean;
   cancelResponse(): boolean;
   forceStop(): boolean;
+  killOpenClawSession(): void;
   getPendingTranscription(): string | null;
 
   // Sessions
@@ -39,10 +40,22 @@ export interface AppApi {
   selectSession(index: number): boolean;
   resetSession(): boolean;
 
+  // Copilot
+  getCopilotSessions(): CopilotSessionEntry[] | null;
+  requestCopilotSessions(): void;
+  watchCopilotSession(sessionId: string): void;
+  unwatchCopilotSession(): void;
+  killCopilotSession(sessionId: string): void;
+  getCopilotConversation(): Array<{ role: string; text: string; ts: number }>;
+  getActiveTab(): ActiveTab;
+  setActiveTab(tab: ActiveTab): void;
+
   // Simulation
   tap(): boolean;
   doubleTap(): boolean;
 }
+
+export type ActiveTab = 'openclaw' | 'copilot' | 'telemetry';
 
 export const SESSION_ID_KEY = 'g2_last_session_id';
 
@@ -51,8 +64,12 @@ export function createAppApi(deps: {
   input: InputHandler;
   conversation: ConversationHistory;
   gateway: Gateway;
+  getCopilotSessions: () => CopilotSessionEntry[] | null;
+  getCopilotConversation: () => CopilotHistoryEntry[];
+  getActiveTab: () => ActiveTab;
+  setActiveTab: (tab: ActiveTab) => void;
 }): AppApi {
-  const { sm, input, conversation, gateway } = deps;
+  const { sm, input, conversation, gateway, getCopilotSessions, getCopilotConversation, getActiveTab, setActiveTab: setTab } = deps;
 
   return {
     getState: () => sm.current,
@@ -70,12 +87,26 @@ export function createAppApi(deps: {
     rejectTranscription: () => input.rejectTranscription(),
     cancelResponse: () => input.cancelResponse(),
     forceStop: () => input.forceStop(),
+    killOpenClawSession: () => {
+      gateway.sendJson({ type: 'force_stop' });
+      gateway.requestSessionList();
+    },
     getPendingTranscription: () => input.pendingTranscription,
     getSessionList: () => input.sessionList,
     openSessionMenu: () => input.openSessionMenu(),
     closeSessionMenu: () => input.closeSessionMenu(),
     selectSession: (index) => input.simulateMenuSelect(index),
     resetSession: () => input.resetSession(),
+
+    getCopilotSessions: () => getCopilotSessions(),
+    requestCopilotSessions: () => gateway.sendJson({ type: 'copilot_session_list_request' }),
+    watchCopilotSession: (sessionId) => gateway.sendJson({ type: 'copilot_watch', sessionId }),
+    unwatchCopilotSession: () => gateway.sendJson({ type: 'copilot_unwatch' }),
+    killCopilotSession: (sessionId) => gateway.sendJson({ type: 'copilot_kill', sessionId }),
+    getCopilotConversation: () => getCopilotConversation(),
+    getActiveTab: () => getActiveTab(),
+    setActiveTab: (tab) => setTab(tab),
+
     tap: () => input.simulateTap(),
     doubleTap: () => input.simulateDoubleTap(),
   };

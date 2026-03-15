@@ -100,6 +100,29 @@ resource lock 'Microsoft.Authorization/locks@2020-05-01' = {
   }
 }
 
+resource contentFilter 'Microsoft.CognitiveServices/accounts/raiPolicies@2024-10-01' = {
+  parent: openAiAccount
+  name: 'permissive-filter'
+  properties: {
+    basePolicyName: 'Microsoft.DefaultV2'
+    mode: 'Blocking'
+    contentFilters: [
+      { name: 'hate', source: 'Prompt', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'sexual', source: 'Prompt', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'selfharm', source: 'Prompt', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'violence', source: 'Prompt', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'hate', source: 'Completion', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'sexual', source: 'Completion', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'selfharm', source: 'Completion', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'violence', source: 'Completion', blocking: true, enabled: true, severityThreshold: 'High' }
+      { name: 'jailbreak', source: 'Prompt', blocking: true, enabled: true }
+      { name: 'indirect_attack', source: 'Prompt', blocking: true, enabled: true }
+      { name: 'protected_material_text', source: 'Completion', blocking: true, enabled: true }
+      { name: 'protected_material_code', source: 'Completion', blocking: true, enabled: true }
+    ]
+  }
+}
+
 @batchSize(1)
 resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = [
   for (deployment, index) in modelDeployments: {
@@ -115,7 +138,7 @@ resource modelDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-
         name: deployment.modelName
         version: deployment.modelVersion
       }
-      raiPolicyName: 'Microsoft.DefaultV2'
+      raiPolicyName: contentFilter.name
       #disable-next-line BCP073
       rateLimits: [
         {

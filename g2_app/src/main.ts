@@ -19,6 +19,8 @@ import { InputHandler } from './input';
 import type { InboundFrame } from './protocol';
 import { StateMachine } from './state';
 import { createAppApi, SESSION_ID_KEY } from './api';
+import type { ActiveTab } from './api';
+import type { CopilotSessionEntry, CopilotHistoryEntry } from './protocol';
 
 // ---------------------------------------------------------------------------
 // Module-level references (accessible to routing functions)
@@ -28,6 +30,12 @@ let gateway: Gateway;
 let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
+
+// Copilot tab state
+const MAX_COPILOT_ENTRIES = 500;
+let copilotSessions: CopilotSessionEntry[] | null = null;
+let copilotConversation: CopilotHistoryEntry[] = [];
+let activeTab: ActiveTab = 'openclaw';
 
 // ---------------------------------------------------------------------------
 // Frame routing
@@ -55,6 +63,16 @@ function routeFrame(frame: InboundFrame): void {
         try {
           localStorage.setItem(SESSION_ID_KEY, frame.sessionId);
         } catch { /* localStorage full or unavailable — non-fatal */ }
+      }
+
+      // Inject task status on reconnect (deduplicated, brackets stripped)
+      if (frame.taskSummary) {
+        console.log('[Main] Task status on reconnect: %s', frame.taskSummary);
+        const cleaned = frame.taskSummary.replace(/^\[(RUNNING|COMPLETE|FAILED)\]\s*/, '$1: ');
+        const last = conversation.lastEntry;
+        if (!last || last.role !== 'system' || last.text !== cleaned) {
+          conversation.addSystem(cleaned);
+        }
       }
 
       sm.transition('menu');
@@ -173,8 +191,11 @@ function routeFrame(frame: InboundFrame): void {
       conversation.clear();
       const label = reason === 'daily_reset' ? 'New day, new session' : 'Session reset';
       conversation.addSystem(label);
-      if (sm.current !== 'idle') sm.transition('idle');
-      display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
+      // Don't transition or show display if user is in the session menu (e.g. killed from panel)
+      if (sm.current !== 'menu') {
+        if (sm.current !== 'idle') sm.transition('idle');
+        display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
+      }
       break;
     }
 
@@ -207,6 +228,47 @@ function routeFrame(frame: InboundFrame): void {
       // Skip showIdle when exitMenuMode already rebuilt the transcript layout
       if (!wasMenu) {
         display.showIdle().catch(err => console.error('[Main] Display error:', err));
+      }
+      break;
+    }
+
+    // -- Copilot session list response ----------------------------------
+    case 'copilot_session_list': {
+      console.log(`[Main] Copilot sessions: ${frame.sessions.length}`);
+      copilotSessions = frame.sessions;
+      break;
+    }
+
+    // -- Copilot history on watch start ---------------------------------
+    case 'copilot_history': {
+      console.log(`[Main] Copilot history: ${frame.entries.length} entries for ${frame.sessionId}`);
+      copilotConversation = frame.entries.length > MAX_COPILOT_ENTRIES
+        ? frame.entries.slice(-MAX_COPILOT_ENTRIES)
+        : frame.entries;
+      break;
+    }
+
+    // -- Copilot transcript delta (live) --------------------------------
+    case 'copilot_transcript': {
+      copilotConversation.push({ role: frame.role, text: frame.delta, ts: Date.now() });
+      if (copilotConversation.length > MAX_COPILOT_ENTRIES) {
+        copilotConversation.splice(0, copilotConversation.length - MAX_COPILOT_ENTRIES);
+      }
+      break;
+    }
+
+    // -- Copilot transcript end -----------------------------------------
+    case 'copilot_transcript_end': {
+      console.log(`[Main] Copilot session ended: ${frame.sessionId}`);
+      break;
+    }
+
+    // -- Copilot session killed -----------------------------------------
+    case 'copilot_killed': {
+      console.log(`[Main] Copilot kill result: ${frame.sessionId} success=${frame.success}`);
+      // Refresh the session list after a kill
+      if (activeTab === 'copilot') {
+        gateway.sendJson({ type: 'copilot_session_list_request' });
       }
       break;
     }
@@ -274,7 +336,16 @@ async function boot(): Promise<void> {
   console.log('[Main] InputHandler initialised');
 
   // Expose app API for phone UI, automation endpoints, and external tools
-  (window as any).__g2Api = createAppApi({ sm, input, conversation, gateway });
+  (window as any).__g2Api = createAppApi({
+    sm,
+    input,
+    conversation,
+    gateway,
+    getCopilotSessions: () => copilotSessions,
+    getCopilotConversation: () => copilotConversation,
+    getActiveTab: () => activeTab,
+    setActiveTab: (tab) => { activeTab = tab; },
+  });
 }
 
 // ---------------------------------------------------------------------------

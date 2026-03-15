@@ -1045,7 +1045,7 @@ class TestForceStop:
             await ws.recv()  # history
             await ws.recv()  # status:idle
 
-            gw._handler.close = AsyncMock()
+            gw._handler.close = AsyncMock()  # type: ignore[method-assign]
             await ws.send(json.dumps({"type": "force_stop"}))
             await _recv_json(ws)  # session_reset
             gw._handler.close.assert_awaited_once()

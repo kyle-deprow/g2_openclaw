@@ -47,6 +47,7 @@ export interface ConnectedFrame {
   sessionId?: string;
   sessionKey?: string;
   sessionStartedAt?: string;
+  taskSummary?: string;
 }
 
 export interface PingFrame {
@@ -66,7 +67,7 @@ export interface HistoryFrame {
 
 export interface SessionResetFrame {
   type: 'session_reset';
-  reason: 'user_request' | 'daily_reset';
+  reason: 'user_request' | 'daily_reset' | 'force_stop';
 }
 
 export interface SessionListEntry {
@@ -92,6 +93,52 @@ export interface SessionSwitchedFrame {
   sessionStartedAt?: string;
 }
 
+export interface CopilotSessionEntry {
+  sessionId: string;
+  cwd: string;
+  dirName: string;
+  repository: string;
+  branch: string;
+  summary: string;
+  updatedAt: string;
+  isRunning: boolean;
+}
+
+export interface CopilotSessionListFrame {
+  type: 'copilot_session_list';
+  sessions: CopilotSessionEntry[];
+}
+
+export interface CopilotHistoryEntry {
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+  ts: number;
+}
+
+export interface CopilotHistoryFrame {
+  type: 'copilot_history';
+  sessionId: string;
+  entries: CopilotHistoryEntry[];
+}
+
+export interface CopilotTranscriptFrame {
+  type: 'copilot_transcript';
+  sessionId: string;
+  delta: string;
+  role: 'user' | 'assistant' | 'system';
+}
+
+export interface CopilotTranscriptEndFrame {
+  type: 'copilot_transcript_end';
+  sessionId: string;
+}
+
+export interface CopilotKilledFrame {
+  type: 'copilot_killed';
+  sessionId: string;
+  success: boolean;
+}
+
 export type InboundFrame =
   | StatusFrame
   | TranscriptionFrame
@@ -103,7 +150,12 @@ export type InboundFrame =
   | HistoryFrame
   | SessionResetFrame
   | SessionListFrame
-  | SessionSwitchedFrame;
+  | SessionSwitchedFrame
+  | CopilotSessionListFrame
+  | CopilotHistoryFrame
+  | CopilotTranscriptFrame
+  | CopilotTranscriptEndFrame
+  | CopilotKilledFrame;
 
 // === Outbound frames (App → Gateway) ===
 export interface TextFrame {
@@ -152,10 +204,28 @@ export interface ForceStopFrame {
   type: 'force_stop';
 }
 
-export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame;
+export interface CopilotSessionListRequestFrame {
+  type: 'copilot_session_list_request';
+}
+
+export interface CopilotWatchFrame {
+  type: 'copilot_watch';
+  sessionId: string;
+}
+
+export interface CopilotUnwatchFrame {
+  type: 'copilot_unwatch';
+}
+
+export interface CopilotKillRequestFrame {
+  type: 'copilot_kill';
+  sessionId: string;
+}
+
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame | CopilotSessionListRequestFrame | CopilotWatchFrame | CopilotUnwatchFrame | CopilotKillRequestFrame;
 
 // === Frame parsing ===
-const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched']);
+const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched', 'copilot_session_list', 'copilot_history', 'copilot_transcript', 'copilot_transcript_end', 'copilot_killed']);
 
 /** Required fields per inbound frame type (mirrors Python gateway validation). */
 const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -170,6 +240,11 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   session_reset: ['reason'],
   session_list: ['sessions', 'activeSessionKey'],
   session_switched: ['sessionKey'],
+  copilot_session_list: ['sessions'],
+  copilot_history: ['sessionId', 'entries'],
+  copilot_transcript: ['sessionId', 'delta', 'role'],
+  copilot_transcript_end: ['sessionId'],
+  copilot_killed: ['sessionId', 'success'],
 };
 
 /** Valid status values (matches GatewayStatus union). */
@@ -182,7 +257,7 @@ const VALID_ERROR_CODES = new Set([
 ]);
 
 /** Valid session_reset reason values. */
-const VALID_REASONS = new Set(['user_request', 'daily_reset']);
+const VALID_REASONS = new Set(['user_request', 'daily_reset', 'force_stop']);
 
 /** Expected types for required fields (runtime validation). */
 /** Expected types for required and optional fields (runtime validation).
@@ -197,6 +272,11 @@ const FIELD_TYPES: Record<string, Record<string, string>> = {
   session_reset: { reason: 'string' },
   session_list: { sessions: 'object', activeSessionKey: 'string' },
   session_switched: { sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
+  copilot_session_list: { sessions: 'object' },
+  copilot_history: { sessionId: 'string', entries: 'object' },
+  copilot_transcript: { sessionId: 'string', delta: 'string', role: 'string' },
+  copilot_transcript_end: { sessionId: 'string' },
+  copilot_killed: { sessionId: 'string', success: 'boolean' },
 };
 
 export function parseFrame(data: string): InboundFrame {
@@ -322,6 +402,45 @@ export function parseFrame(data: string): InboundFrame {
   // Validate session_reset reason against known union
   if (clean.type === 'session_reset' && !VALID_REASONS.has(clean.reason as string)) {
     throw new Error(`Invalid session_reset reason: "${clean.reason}"`);
+  }
+
+  // Copy copilot_session_list sessions array (filter out malformed entries)
+  if (clean.type === 'copilot_session_list') {
+    if (!Array.isArray(frame.sessions)) {
+      throw new Error('copilot_session_list.sessions must be an array');
+    }
+    clean.sessions = (frame.sessions as unknown[]).filter((entry): entry is Record<string, unknown> => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const e = entry as Record<string, unknown>;
+      return typeof e.sessionId === 'string' && typeof e.cwd === 'string';
+    }).map(e => {
+      const r = e as Record<string, unknown>;
+      return {
+        sessionId: r.sessionId as string,
+        cwd: r.cwd as string,
+        dirName: typeof r.dirName === 'string' ? r.dirName : '',
+        repository: typeof r.repository === 'string' ? r.repository : '',
+        branch: typeof r.branch === 'string' ? r.branch : '',
+        summary: typeof r.summary === 'string' ? r.summary : '',
+        updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
+        isRunning: typeof r.isRunning === 'boolean' ? r.isRunning : false,
+      };
+    });
+  }
+
+  // Copy copilot_history entries array
+  if (clean.type === 'copilot_history') {
+    if (!Array.isArray(frame.entries)) {
+      throw new Error('copilot_history.entries must be an array');
+    }
+    clean.entries = (frame.entries as unknown[]).filter((entry): entry is Record<string, unknown> => {
+      if (typeof entry !== 'object' || entry === null) return false;
+      const e = entry as Record<string, unknown>;
+      return typeof e.role === 'string' && typeof e.text === 'string' && typeof e.ts === 'number';
+    }).map(e => {
+      const r = e as Record<string, unknown>;
+      return { role: r.role as string, text: r.text as string, ts: r.ts as number };
+    });
   }
 
   return clean as unknown as InboundFrame;

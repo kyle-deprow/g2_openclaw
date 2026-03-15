@@ -24,7 +24,7 @@
 
 const { execSync } = require("child_process");
 
-const AZURE_API_VERSION = "2024-12-01-preview";
+const AZURE_API_VERSION = "2025-04-01-preview";
 const AZURE_HOST_PATTERN = /\.openai\.azure\.com$/i;
 const TOKEN_RESOURCE = "https://cognitiveservices.azure.com";
 const TOKEN_REFRESH_MARGIN_S = 300; // refresh 5 min before expiry
@@ -114,6 +114,76 @@ function maybeInjectApiVersion(input) {
   }
 }
 
+// ── Body patching ────────────────────────────────────────────────────
+
+/**
+ * For Azure POST requests, intercept the JSON body to:
+ *   1. Rename deprecated `max_tokens` → `max_completion_tokens`
+ *   2. Inject `reasoning_effort: "high"` if not already present
+ *
+ * GPT-5.4 rejects `max_tokens` and requires `max_completion_tokens`.
+ * Returns the (possibly modified) body string, or the original body.
+ */
+function patchBody(body) {
+  if (!body || typeof body !== "string") return body;
+  try {
+    const parsed = JSON.parse(body);
+    let modified = false;
+
+    // Rename max_tokens → max_completion_tokens
+    if ("max_tokens" in parsed && !("max_completion_tokens" in parsed)) {
+      parsed.max_completion_tokens = parsed.max_tokens;
+      delete parsed.max_tokens;
+      modified = true;
+    }
+
+    // Inject reasoning_effort: "high"
+    if (!("reasoning_effort" in parsed)) {
+      parsed.reasoning_effort = "high";
+      modified = true;
+    }
+
+    if (modified && debug) {
+      process.stderr.write(
+        `[azure-preload] patched body: max_completion_tokens=${parsed.max_completion_tokens}, reasoning_effort=${parsed.reasoning_effort}\n`
+      );
+    }
+
+    return modified ? JSON.stringify(parsed) : body;
+  } catch {
+    return body;
+  }
+}
+
+/**
+ * Extract body text from either init.body or a Request object.
+ * Returns { bodyText, consumed } where consumed indicates whether
+ * the Request body stream was read (needs reconstruction).
+ */
+async function extractBody(input, init) {
+  // init.body takes precedence (standard fetch pattern)
+  if (init?.body != null) {
+    if (typeof init.body === "string") return { bodyText: init.body, consumed: false };
+    // ReadableStream or Buffer — read it
+    try {
+      const text = await new Response(init.body).text();
+      return { bodyText: text, consumed: false };
+    } catch {
+      return { bodyText: null, consumed: false };
+    }
+  }
+  // Body baked into a Request object
+  if (input instanceof Request && input.body) {
+    try {
+      const text = await input.text();
+      return { bodyText: text, consumed: true };
+    } catch {
+      return { bodyText: null, consumed: true };
+    }
+  }
+  return { bodyText: null, consumed: false };
+}
+
 // ── Fetch patch ──────────────────────────────────────────────────────
 
 globalThis.fetch = function patchedFetch(input, init) {
@@ -130,45 +200,59 @@ globalThis.fetch = function patchedFetch(input, init) {
   if (urlStr && isAzureUrl(urlStr)) {
     const token = getEntraToken();
     if (token) {
-      // Merge all headers: from Request object + from init
-      const merged = new Headers();
+      // Use async path so we can read and patch the body
+      return (async () => {
+        // Merge all headers: from Request object + from init
+        const merged = new Headers();
 
-      // 1. Headers baked into a Request object
-      if (patched instanceof Request) {
-        for (const [k, v] of patched.headers.entries()) {
-          merged.set(k, v);
+        // 1. Headers baked into a Request object
+        if (patched instanceof Request) {
+          for (const [k, v] of patched.headers.entries()) {
+            merged.set(k, v);
+          }
         }
-      }
 
-      // 2. Headers from init (override Request headers)
-      if (init?.headers) {
-        const initH =
-          init.headers instanceof Headers
-            ? init.headers
-            : new Headers(init.headers);
-        for (const [k, v] of initH.entries()) {
-          merged.set(k, v);
+        // 2. Headers from init (override Request headers)
+        if (init?.headers) {
+          const initH =
+            init.headers instanceof Headers
+              ? init.headers
+              : new Headers(init.headers);
+          for (const [k, v] of initH.entries()) {
+            merged.set(k, v);
+          }
         }
-      }
 
-      // 3. Remove any existing authorization (case-insensitive via Headers API)
-      merged.delete("authorization");
+        // 3. Remove any existing authorization and api-key headers
+        merged.delete("authorization");
+        merged.delete("api-key");
 
-      // 4. Set Entra bearer token
-      merged.set("Authorization", `Bearer ${token}`);
+        // 4. Set Entra bearer token
+        merged.set("Authorization", `Bearer ${token}`);
 
-      // Rebuild: strip headers from the Request so merged takes precedence
-      const newInit = { ...init, headers: merged };
-      if (patched instanceof Request) {
-        // Reconstruct Request without its baked-in headers
-        const freshRequest = new Request(patched.url, {
-          method: patched.method,
-          body: patched.body,
-          signal: patched.signal,
-        });
-        return originalFetch.call(this, freshRequest, newInit);
-      }
-      return originalFetch.call(this, patched, newInit);
+        // 5. Patch body for POST requests (rename max_tokens, inject reasoning)
+        const method = (init?.method || (patched instanceof Request ? patched.method : "GET")).toUpperCase();
+        let finalBody = init?.body ?? undefined;
+
+        if (method === "POST") {
+          const { bodyText } = await extractBody(patched, init);
+          if (bodyText) {
+            finalBody = patchBody(bodyText);
+          }
+        }
+
+        // Rebuild init with patched headers and body
+        const newInit = { ...init, headers: merged, body: finalBody, method };
+
+        if (patched instanceof Request) {
+          const freshRequest = new Request(patched.url, {
+            method,
+            signal: patched.signal,
+          });
+          return originalFetch.call(this, freshRequest, newInit);
+        }
+        return originalFetch.call(this, patched, newInit);
+      })();
     }
   }
 

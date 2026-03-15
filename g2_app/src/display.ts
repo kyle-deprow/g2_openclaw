@@ -382,13 +382,32 @@ export class DisplayManager {
       ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
       : 'Ready.';
 
+    // Detect task status from latest system message
+    const statusLabel = this._resolveIdleStatus();
+
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this.rebuildTranscript('Idle', 'Tap to interact');
+      await this.rebuildTranscript(statusLabel, 'Tap to interact');
     } else {
       await this.replaceTranscript(transcript);
-      await this.updateStatus('Idle');
+      await this.updateStatus(statusLabel);
       await this.updateFooter('Tap to interact');
     }
+  }
+
+  /** Check the latest system message for a [TASK:*] marker and return an appropriate status label. */
+  private _resolveIdleStatus(): string {
+    if (!this.conversation) return 'Idle';
+    const entries = this.conversation.getEntries();
+    // Walk backwards to find the most recent system entry
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.role !== 'system') continue;
+      if (e.text.startsWith('RUNNING:')) return '● Task Running';
+      if (e.text.startsWith('COMPLETE:')) return '✓ Task Done';
+      if (e.text.startsWith('FAILED:')) return '✗ Task Failed';
+      break; // Only check the most recent system message
+    }
+    return 'Idle';
   }
 
   async showRecording(): Promise<void> {
@@ -447,7 +466,7 @@ export class DisplayManager {
     await this.flushRemainingDeltas();
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     await this.replaceTranscript(transcript);
-    await this.updateStatus('Idle');
+    await this.updateStatus(this._resolveIdleStatus());
     await this.updateFooter('Tap to interact');
   }
 

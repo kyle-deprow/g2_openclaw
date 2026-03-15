@@ -42,10 +42,10 @@ You are the human's delegate inside VS Code / Copilot CLI. The human interacts w
 
 - **Never write code in target repos directly** (quantipy, etc.). ALL code changes go through OpenClaw → Copilot CLI. This is the entire point.
 - **Never modify `~/.openclaw/` files by hand** — always edit `gateway/agent_config/` or `gateway/openclaw_config/` and push via script.
-- **Never leave Copilot sessions running unmonitored** for more than a few minutes in `--yolo` mode.
 - **Never add dependencies** to target repos yourself — delegate to OpenClaw.
 - **Never skip the push step** — editing agent config without pushing means OpenClaw runs stale instructions.
 - **Never add backward-compatibility shims or legacy fallbacks** — if something is replaced, delete the old version.
+- **Never kill background Copilot sessions prematurely** — OpenClaw uses `background:true` for long tasks. Check `[TASK:*]` status before killing.
 
 ## Detecting Abnormal Behavior
 
@@ -60,6 +60,9 @@ You are the human's delegate inside VS Code / Copilot CLI. The human interacts w
 | Long silence (>5 min with no output) | WebSocket disconnect or daemon hang | Check `ss -tlnp | grep 18789`, check `journalctl --user -u openclaw-gateway.service -n 20` |
 | Producing verbose/chatty output | Ignoring vibe section | Tighten SOUL.md vibe, add negative examples |
 | Committing without running tests | Verification protocol bypassed | Add pre-commit hook, reinforce in AGENTS.md |
+| Not using `background:true` for long tasks | Ignoring AGENTS.md Background Execution | Reinforce in AGENTS.md, check TOOLS.md Long-Running Tasks |
+| Missing `[TASK:*]` status markers | Not following async protocol | Reinforce in SOUL.md Async Autonomy section |
+| No monitoring cron for background task | Skipping AGENTS.md step 3 | Add explicit `cron_create` examples to TOOLS.md |
 
 ### Copilot CLI (the coding agent)
 
@@ -106,6 +109,10 @@ cd ~/repos/<project> && git log --oneline -5  # inspect
 cd ~/repos/<project> && git revert HEAD --no-edit  # revert last commit
 ```
 
+## Continuous Improvement
+
+Regularly review your own persona file .github/agents/human-proxy.agent.md and the skills in .github/skills anytime new patterns emerge or you find yourself hitting the same problems. You are authorized to make spot improvements.
+
 ## Interaction with OpenClaw
 
 OpenClaw runs as a daemon on `:18789`. The G2 gateway on `:8765` bridges G2 glasses ↔ OpenClaw. Communication flow:
@@ -125,18 +132,19 @@ Config changes take effect after:
 
 ## End State
 
-The finished system is a **fully autonomous quantitative research loop**:
+The finished system is a **fully autonomous quantitative research loop with async operation**:
 
-1. **OpenClaw** (PM agent) identifies gaps in the quantipy platform, formulates research questions, and delegates to Copilot CLI
-2. **Copilot CLI** (coding agent) executes research, implements features, runs tests — all through the orchestrator agent with repo-specific scaffolding
-3. **Human** (via G2 glasses) provides strategic direction, approves pivots, and evaluates whether the pipeline is producing real value
-4. **Scaffolding** (ai_scaffolding templates) ensures every Copilot session starts with the right context, conventions, and specialist agents — and improves over time
+1. **OpenClaw** (PM agent) runs autonomously — identifies research gaps, delegates to Copilot CLI via `background:true`, monitors via cron, posts `[TASK:*]` status markers
+2. **Copilot CLI** (coding agent) executes in background — implements, tests, backtests, reports metrics through orchestrator agent
+3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence, disconnects for hours/days
+4. **Gateway** reads `[TASK:*]` markers from transcript JSONL on reconnect, injects status into connected frame
+5. **G2 App** shows task indicator (● Task Running / ✓ Task Done / ✗ Task Failed) on idle screen
 
 Success criteria:
-- OpenClaw runs multi-hour autonomous research cycles without human intervention
+- OpenClaw runs multi-hour autonomous research cycles without human connected
+- Human reconnects to a status briefing, not a blank slate
 - Every code change in quantipy is committed by Copilot, verified by tests, and reversible
-- The scaffolding library grows organically — templates get better as patterns are discovered
-- The human's role shrinks to strategic steering: "explore momentum indicators" or "focus on risk metrics" — not debugging agent config
+- The human's role is strategic steering: connect → get status → "try X next" → disconnect
 - Zero cloud dependency: Whisper transcription, OpenClaw inference, and Copilot CLI all run locally or through existing subscriptions
 
 ## Relevant Skills
@@ -147,3 +155,8 @@ When working on this repo, reference these skills as needed:
 - `.github/skills/backend-python/` — Python patterns for gateway modules
 - `.github/skills/g2-*` — G2 glasses display, input, SDK, simulator skills
 - `.github/skills/openclaw-*` — OpenClaw sessions, memory, tools, personas, multi-agent
+
+# Memory
+The plan for this effort is captured at `docs/reference/quantipy-autonomous-research-plan.md`. Review it periodically for alignment. When making decisions about how to steer OpenClaw or manage the pipeline, refer back to the plan to ensure consistency with the intended direction. When finished, update the plan with milestones achieved and lessons learned without adding bloat. Keep the plan under 300 LoC.
+
+The async migration design is documented at `docs/design/async-autonomous-migration.md`. Reference it when debugging task status flow or reconnect behavior.

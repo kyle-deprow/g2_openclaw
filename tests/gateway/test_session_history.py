@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from datetime import UTC
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from gateway.session_history import (
     HistoryEntry,
     _strip_bracket_prefixes,
+    _summary_cache,
+    clear_summary_cache,
     list_session_summaries,
     read_history,
     resolve_session_file,
@@ -551,3 +556,237 @@ class TestListSessionSummaries:
 
         assert len(result) == 1
         assert result[0].session_key == "agent:claw:g2"
+
+
+# ---------------------------------------------------------------------------
+# Summary cache (Task 1)
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryCacheMtime:
+    """session_summary() caches by file mtime and clear_summary_cache() resets it."""
+
+    def setup_method(self) -> None:
+        clear_summary_cache()
+
+    def teardown_method(self) -> None:
+        clear_summary_cache()
+
+    def test_session_summary_uses_cache_on_same_mtime(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_c1")
+        _write_jsonl(sd, "ses_c1", [_msg("user", "Hello")])
+
+        r1 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r1 is not None
+        assert r1.preview == "Hello"
+
+        # Overwrite the file content but keep the same mtime
+        jsonl_path = sd / "ses_c1.jsonl"
+        original_stat = jsonl_path.stat()
+        jsonl_path.write_text(json.dumps(_msg("user", "Changed")) + "\n")
+        # Restore original mtime so the cache still hits
+        os.utime(jsonl_path, (original_stat.st_atime, original_stat.st_mtime))
+
+        r2 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r2 is not None
+        # Should return the cached value (old preview) because mtime unchanged
+        assert r2.preview == "Hello"
+        assert r2 is r1  # same object identity
+
+    def test_session_summary_invalidates_on_mtime_change(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_c2")
+        _write_jsonl(sd, "ses_c2", [_msg("user", "First")])
+
+        r1 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r1 is not None
+        assert r1.preview == "First"
+
+        # Modify the file (new content AND new mtime)
+        jsonl_path = sd / "ses_c2.jsonl"
+        time.sleep(0.05)  # ensure mtime changes
+        jsonl_path.write_text(
+            json.dumps(_msg("user", "Second"))
+            + "\n"
+            + json.dumps(_msg("assistant", "Reply"))
+            + "\n"
+        )
+
+        r2 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r2 is not None
+        assert r2.preview == "Second"
+        assert r2.message_count == 2
+
+    def test_clear_summary_cache(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_c3")
+        _write_jsonl(sd, "ses_c3", [_msg("user", "Original")])
+
+        r1 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r1 is not None
+        assert r1.preview == "Original"
+
+        # Overwrite but keep mtime identical
+        jsonl_path = sd / "ses_c3.jsonl"
+        original_stat = jsonl_path.stat()
+        jsonl_path.write_text(json.dumps(_msg("user", "Replaced")) + "\n")
+        os.utime(jsonl_path, (original_stat.st_atime, original_stat.st_mtime))
+
+        # Without clearing, cache still returns old data
+        r2 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r2 is not None
+        assert r2.preview == "Original"
+
+        # After clearing, it re-reads
+        clear_summary_cache()
+        r3 = session_summary(session_key="agent:claw:g2", agent_id="claw", base_path=tmp_path)
+        assert r3 is not None
+        assert r3.preview == "Replaced"
+
+
+# ---------------------------------------------------------------------------
+# Reverse-seek read_history (Task 2)
+# ---------------------------------------------------------------------------
+
+
+class TestReadHistoryReverseSeek:
+    """read_history() uses reverse-seek for large files."""
+
+    def test_read_history_reverse_seek_large_file(self, tmp_path: Path) -> None:
+        """Create a JSONL with 1000+ entries, verify read_history returns last N."""
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_big")
+
+        # Generate 1500 messages (well over 512KB threshold)
+        lines: list[dict[str, Any]] = []
+        for i in range(1500):
+            lines.append(_msg("user", f"message-{i:04d}-" + "x" * 200))
+
+        _write_jsonl(sd, "ses_big", lines)
+
+        entries = read_history(
+            session_key="agent:claw:g2", agent_id="claw", limit=10, base_path=tmp_path
+        )
+        assert len(entries) == 10
+        # Should be the last 10
+        assert entries[0].text.startswith("message-1490-")
+        assert entries[9].text.startswith("message-1499-")
+
+    def test_read_history_small_file_unchanged(self, tmp_path: Path) -> None:
+        """Small files (< 512KB) should work identically to before."""
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_sm")
+        _write_jsonl(
+            sd,
+            "ses_sm",
+            [
+                _msg("user", "hello"),
+                _msg("assistant", "world"),
+                _msg("user", "foo"),
+            ],
+        )
+
+        entries = read_history(
+            session_key="agent:claw:g2", agent_id="claw", limit=2, base_path=tmp_path
+        )
+        assert len(entries) == 2
+        assert entries[0].text == "world"
+        assert entries[1].text == "foo"
+
+    def test_read_history_large_limit_scales_seekback(self, tmp_path: Path) -> None:
+        """A large limit scales the seek window so no messages are silently dropped."""
+        sd = _make_sessions_dir(tmp_path)
+        _write_sessions_json(sd, "agent:claw:g2", "ses_scale")
+
+        # Generate 1500+ entries (each ~300 bytes → total ~450KB+)
+        lines: list[dict[str, Any]] = []
+        for i in range(1500):
+            lines.append(_msg("user", f"line-{i:04d}-" + "x" * 200))
+        _write_jsonl(sd, "ses_scale", lines)
+
+        entries = read_history(
+            session_key="agent:claw:g2", agent_id="claw", limit=500, base_path=tmp_path
+        )
+        assert len(entries) == 500
+        # Should be the last 500 entries
+        assert entries[0].text.startswith("line-1000-")
+        assert entries[499].text.startswith("line-1499-")
+
+
+# ---------------------------------------------------------------------------
+# Summary cache pruning (Must-Fix #1)
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryCachePruning:
+    """list_session_summaries() prunes stale entries from _summary_cache."""
+
+    def setup_method(self) -> None:
+        clear_summary_cache()
+
+    def teardown_method(self) -> None:
+        clear_summary_cache()
+
+    def test_summary_cache_prunes_stale_entries(self, tmp_path: Path) -> None:
+        sd = _make_sessions_dir(tmp_path)
+
+        # Create two sessions
+        store = {
+            "agent:claw:keep": {
+                "sessionId": "ses_keep",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+            "agent:claw:remove": {
+                "sessionId": "ses_remove",
+                "updatedAt": "2026-03-07T09:00:00Z",
+            },
+        }
+        (sd / "sessions.json").write_text(json.dumps(store))
+        _write_jsonl(sd, "ses_keep", [_msg("user", "Hello")])
+        _write_jsonl(sd, "ses_remove", [_msg("user", "Goodbye")])
+
+        from gateway.session_resolver import SessionMeta
+
+        metas_both = [
+            SessionMeta(
+                session_id="ses_keep",
+                session_key="agent:claw:keep",
+                updated_at="2026-03-07T10:00:00Z",
+            ),
+            SessionMeta(
+                session_id="ses_remove",
+                session_key="agent:claw:remove",
+                updated_at="2026-03-07T09:00:00Z",
+            ),
+        ]
+        with patch("gateway.session_resolver.list_sessions", return_value=metas_both):
+            result = list_session_summaries(agent_id="claw", base_path=tmp_path)
+
+        assert len(result) == 2
+        assert "agent:claw:keep" in _summary_cache
+        assert "agent:claw:remove" in _summary_cache
+
+        # Now remove one session from sessions.json
+        store2 = {
+            "agent:claw:keep": {
+                "sessionId": "ses_keep",
+                "updatedAt": "2026-03-07T10:00:00Z",
+            },
+        }
+        (sd / "sessions.json").write_text(json.dumps(store2))
+
+        metas_one = [
+            SessionMeta(
+                session_id="ses_keep",
+                session_key="agent:claw:keep",
+                updated_at="2026-03-07T10:00:00Z",
+            ),
+        ]
+        with patch("gateway.session_resolver.list_sessions", return_value=metas_one):
+            result2 = list_session_summaries(agent_id="claw", base_path=tmp_path)
+
+        assert len(result2) == 1
+        # The deleted session's key should be pruned from the cache
+        assert "agent:claw:keep" in _summary_cache
+        assert "agent:claw:remove" not in _summary_cache

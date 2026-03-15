@@ -55,7 +55,7 @@ Base URL: `http://localhost:5173`
 | `sendText`             | `["message"]`     | Send text to OpenClaw (bypasses Whisper) |
 | `tap`                  | `[]`              | Simulate ring tap                  |
 | `doubleTap`            | `[]`              | Open session menu                  |
-| `selectSession`        | `[index]`         | Pick session from menu (0-based)   |
+| `selectSession`        | `[index]`         | Pick session from menu (0-based). **Index 0 = "New Session"; existing sessions start at index 1.** |
 | `getState`             | `[]`              | Returns state string               |
 | `getDisplayText`       | `[]`              | Returns glasses display text       |
 | `getConversation`      | `[]`              | Returns conversation entries       |
@@ -84,15 +84,16 @@ curl -s --max-time 5 http://localhost:5173/_dev/health
 
 ### 2. Boot → select a session
 
-App boots into **menu** state. Select the first session to reach **idle**:
+App boots into **menu** state. Index 0 is always "✦ New Session"; existing sessions start at index 1.
 
 ```bash
 curl -s --max-time 10 http://localhost:5173/_dev/state
 # → {"id":"...","result":"menu","ts":...}
 
+# Select first EXISTING session (index 1). Use index 0 to create a new session.
 curl -s -X POST http://localhost:5173/_dev/cmd \
   -H 'Content-Type: application/json' \
-  -d '{"cmd":"selectSession","args":[0]}'
+  -d '{"cmd":"selectSession","args":[1]}'
 sleep 3
 
 curl -s --max-time 10 http://localhost:5173/_dev/state
@@ -143,6 +144,7 @@ LOADING → MENU → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THIN
 - **idle**: Ready. `tap` starts recording, `doubleTap` opens menu.
 - **After sendText**: State cycles idle → thinking → streaming → idle automatically.
 - **After HMR/restart**: Simulator webview reloads. Wait 5 s, state returns to menu.
+- **After error/disconnected** (e.g. daemon restart): Run `make sim` to kill and restart the full stack, then re-select a session.
 
 ## Troubleshooting
 

@@ -16,6 +16,17 @@ _OPENCLAW_BASE = Path.home() / ".openclaw" / "agents"
 DEFAULT_HISTORY_LIMIT = 10
 _DEFAULT_PREVIEW_MAX_LEN = 80
 
+# Reverse-seek: only read the tail of large JSONL files (~500KB)
+_HISTORY_TAIL_BYTES: int = 512_000
+
+# Summary cache: session_key → (mtime, SessionSummary)
+_summary_cache: dict[str, tuple[float, SessionSummary]] = {}
+
+
+def clear_summary_cache() -> None:
+    """Clear the in-memory session summary cache."""
+    _summary_cache.clear()
+
 
 @dataclass(frozen=True)
 class HistoryEntry:
@@ -26,7 +37,7 @@ class HistoryEntry:
     ts: int  # Unix milliseconds
 
 
-def _extract_text(content: object) -> str:
+def extract_text(content: object) -> str:
     """Extract plain text from an OpenClaw message content field."""
     if isinstance(content, str):
         return content
@@ -111,7 +122,15 @@ def read_history(
 
     entries: list[HistoryEntry] = []
     try:
+        file_size = jsonl_path.stat().st_size
         with jsonl_path.open(encoding="utf-8") as f:
+            # Estimate bytes needed: each JSONL line is typically ~300-500 bytes
+            estimated_tail = max(_HISTORY_TAIL_BYTES, limit * 500)
+            if file_size > estimated_tail:
+                # Reverse-seek: jump near the end of the file
+                f.seek(file_size - estimated_tail)
+                f.readline()  # skip partial first line
+
             for line in f:
                 line = line.strip()
                 if not line:
@@ -133,7 +152,7 @@ def read_history(
                     continue
 
                 content = msg.get("content", "")
-                text = _extract_text(content).strip()
+                text = extract_text(content).strip()
 
                 if role == "assistant" and not text:
                     continue
@@ -188,6 +207,7 @@ def session_summary(
     """Build a lightweight summary for one session.
 
     Reads the JSONL transcript to count messages and extract a preview.
+    Uses an mtime-based cache to avoid re-parsing unchanged files.
     Returns None if the transcript file is missing.
     """
     jsonl_path = resolve_session_file(
@@ -197,6 +217,20 @@ def session_summary(
     )
     if jsonl_path is None:
         return None
+
+    # Check mtime cache
+    try:
+        current_mtime = jsonl_path.stat().st_mtime
+    except OSError:
+        return None
+
+    cached = _summary_cache.get(session_key)
+    if cached is not None:
+        cached_mtime, cached_summary = cached
+        # Float comparison: safe for local filesystems; on NFS/FUSE mtime
+        # granularity may mask sub-second changes (acceptable for local-only use).
+        if cached_mtime == current_mtime:
+            return cached_summary
 
     first_user_text: str | None = None
     message_count = 0
@@ -224,7 +258,7 @@ def session_summary(
                     continue
 
                 content = msg.get("content", "")
-                text = _extract_text(content).strip()
+                text = extract_text(content).strip()
 
                 if role == "assistant" and not text:
                     continue
@@ -252,13 +286,18 @@ def session_summary(
         # Fallback: extract from the jsonl filename
         resolved_session_id = jsonl_path.stem
 
-    return SessionSummary(
+    result = SessionSummary(
         session_key=session_key,
         session_id=resolved_session_id,
         updated_at=updated_at,
         preview=preview,
         message_count=message_count,
     )
+
+    # Store in cache
+    _summary_cache[session_key] = (current_mtime, result)
+
+    return result
 
 
 def list_session_summaries(
@@ -282,5 +321,11 @@ def list_session_summaries(
         )
         if summary is not None:
             summaries.append(summary)
+
+    # Prune stale cache entries for sessions that no longer exist
+    current_keys = {m.session_key for m in metas}
+    stale = set(_summary_cache.keys()) - current_keys
+    for k in stale:
+        del _summary_cache[k]
 
     return summaries
