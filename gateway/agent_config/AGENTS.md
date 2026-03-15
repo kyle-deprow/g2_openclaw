@@ -135,9 +135,50 @@ Every research result passes through these filters before implementation. ALL mu
 | Data available? | Uses data we already collect (OHLCV, Reddit, news, volume) or can collect with minimal new infra |
 | Testable hypothesis? | Can be stated as "if X then Y within Z timeframe" |
 | Single metric? | Measurable by Sharpe, hit rate, drawdown, profit factor, or test pass rate |
-| Not tried before? | Not in experiment log or `memory_search` results |
+| Not tried before? | Not in experiment log, `memory_search` results, or shared RESEARCH_LOG.md |
+| Novel enough? | Not a textbook indicator (SMA, RSI, MACD, Bollinger, OBV are BANNED as primary signals) — must have a novel angle |
 
 If any filter fails → log the rejection reason and move on. Do not argue with the filter.
+
+## Research via Copilot Agents
+
+Experiment ideas come from the Copilot CLI `researcher` agent, which orchestrates a structured debate among `contrarian`, `explorer`, and `theorist` agents. All 4 are `.agent.md` files deployed in the target repo's `.github/agents/`.
+
+### How to run an ideation round
+1. Build context: current metrics, last 10 experiments, data available, what's been tried
+2. Read `RESEARCH_LOG.md` from the workspace for the full experiment history
+3. Delegate to Copilot: `copilot --agent researcher -p "<context>"` with `background:true`
+4. The researcher orchestrates contrarian/explorer/theorist, collects 6-9 proposals, applies filters, picks a winner
+5. Read the research report from the Copilot session output
+6. Delegate the winning idea to Copilot: `copilot --agent orchestrator -p "<implement winner>"` with `background:true`
+
+### Scaffolding Requirement
+Before running research, ensure the target repo has the research agents deployed:
+- `.github/agents/researcher.agent.md`
+- `.github/agents/contrarian.agent.md`
+- `.github/agents/explorer.agent.md`
+- `.github/agents/theorist.agent.md`
+
+These come from `~/repos/ai_scaffolding/agents/`. If missing, copy them as part of the scaffolding step.
+
+### Shared Experiment Memory
+Maintain `RESEARCH_LOG.md` in the OpenClaw workspace (via `Write`). Format:
+```markdown
+## Tried
+| # | Idea | Source | Metric | Status | Why |
+|---|------|--------|--------|--------|-----|
+| 1 | SMA crossover | baseline | -0.44 | keep | baseline reference |
+| 2 | RSI mean reversion | contrarian | -0.19 | keep | +0.25 improvement |
+| 3 | Funding rate arb | explorer | - | rejected | no crypto data source yet |
+
+## Rejected Ideas
+- <idea>: <reason it was filtered out>
+
+## Insights
+- <pattern observed across experiments>
+```
+
+Update this file after every ideation round and every experiment result. All 3 subagents receive this context in their prompts so they build on collective knowledge.
 
 ## Verification Protocol
 

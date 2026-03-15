@@ -91,6 +91,7 @@ Lists session UUIDs + summaries for a specific repo, most recent first.
 | `cron_delete` | Remove a scheduled task by ID |
 | `cron_list` | List all active cron jobs |
 
+
 **Note:** Read/Write/Glob/Grep are scoped to the OpenClaw workspace, NOT to target repos. To access target repo files, use `exec` with `ls`, `cat`, `find`, etc.
 
 **Critical:** NEVER use `exec` to create/modify/delete code files in target repos. Use `exec` ONLY to invoke Copilot CLI or to run read-only commands (ls, cat, git log, pytest, etc.).

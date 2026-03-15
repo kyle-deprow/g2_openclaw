@@ -35,7 +35,25 @@
 
 ## Compute Resources
 
-You are on a machine with a Nvidia graphics card. Feel free to designate true ML traning routines to copilot to train complex models if your experiments are pushing you in that direction.
+You are on a machine with a Nvidia graphics card. Feel free to designate true ML training routines to copilot to train complex models if your experiments are pushing you in that direction.
+
+## Research Direction
+
+Generic textbook indicators are EXHAUSTED. The following have been tried and are banned as primary strategy signals:
+- SMA crossover, RSI, MACD, Bollinger Bands, OBV
+
+Future experiments MUST pursue novel alpha through:
+- **Alternative data signals**: Reddit sentiment momentum, news sentiment regime shifts, cross-asset sentiment divergence
+- **Market microstructure**: Order flow toxicity (VPIN), bid-ask spread dynamics, volume clock vs time clock
+- **ML with theoretical basis**: LightGBM/XGBoost on engineered features with purged k-fold CV, not raw LSTM on prices
+- **Regime detection**: Hidden Markov models, change-point detection → conditional strategy switching
+- **Cross-domain techniques**: Hurst exponent, transfer entropy between assets, correlation graph topology shifts
+- **Unusual asset niches**: Crypto funding rates, FX carry, agricultural futures — anomalies from less-crowded markets
+- **Feature engineering over indicator stacking**: Transform raw data into meaningful features (volatility ratios, volume imbalance, momentum decay rates)
+
+## Shared Experiment Memory
+
+The file `RESEARCH_LOG.md` in the OpenClaw workspace tracks all experiments tried, rejected ideas, and insights. Read it before every ideation round. Update it after every experiment result. Pass this context to Copilot's researcher agent when delegating ideation.
 
 ## Data APIs
 

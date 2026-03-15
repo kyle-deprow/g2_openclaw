@@ -1,12 +1,14 @@
 ---
 name: autoresearch
-description: Behavioral mode for autonomous goal-directed iteration. Modify → Verify → Keep/Discard → Repeat via Copilot CLI delegation and cron self-continuation. NOT a separate agent — activates as a mode within the default agent.
-version: 2.1.0
+description: Autonomous research loop with Copilot-based multi-agent ideation. PM delegates research debate to Copilot researcher agent, selects winner, delegates implementation to Copilot orchestrator, measures, keeps/reverts. Cron-driven self-continuation.
+version: 4.0.0
 ---
 
-# Autoresearch — Autonomous Iteration Protocol
+# Autoresearch — Autonomous Iteration Protocol v4
 
-**This is a behavioral mode, not a separate agent.** When the user activates autoresearch, the default agent follows this protocol to run an iterative improvement loop. All code changes are delegated to Copilot CLI. Loop persistence is achieved via cron self-nudging.
+**Behavioral mode with Copilot-based research agents.** The PM agent orchestrates an iterative research loop. Novel experiment ideas come from delegating to the Copilot `researcher` agent, which orchestrates a structured debate among `contrarian`, `explorer`, and `theorist` agents. The PM evaluates the winning idea and delegates implementation to the Copilot `orchestrator` agent.
+
+**EXECUTION MODEL:** You (the PM agent) run this loop in YOUR turn using your own tools. Phases 1, 6, 7 use `read`, `write`, `exec`, `memory_search` directly. Phase 2 (ideation) delegates to Copilot `--agent researcher`. Phase 3 (implementation) delegates to Copilot `--agent orchestrator`. Both run in background via `exec bash pty:true background:true`. Do NOT wrap the entire loop in a single `exec copilot` call.
 
 ## When to Activate
 
@@ -26,6 +28,7 @@ version: 2.1.0
 4. **Define direction** — higher is better (coverage, Sharpe) or lower is better (latency, loss)
 5. **Establish baseline** — run verification, record as iteration #0 in experiment log
 6. **Check prior work** — use `memory_search` to find previous attempts on this goal. Don't repeat failed ideas.
+7. **Check scaffolding** — verify the target repo has `.github/agents/researcher.agent.md` + contrarian + explorer + theorist. If missing, copy from `~/repos/ai_scaffolding/agents/`.
 
 ## The Loop
 
@@ -39,42 +42,66 @@ LOOP (until goal met or user interrupts):
     - Run: memory_search for related past experiments
     - Identify: what worked, what failed, what's untried
 
-  Phase 2 — IDEATE (pick next change, priority order)
-    1. Fix crashes/failures from previous iteration
-    2. Exploit successes — variants of what improved the metric
-    3. Explore untried approaches from experiment log gaps
-    4. Combine near-misses — two changes that individually didn't help
-    5. Simplify — remove code while maintaining metric
-    6. Radical experiments — when incremental changes stall
+  Phase 2 — IDEATE (Copilot research agents)
+    Delegate the entire research debate to Copilot's researcher agent:
+
+    a) Build context block:
+       - Current best metric and baseline
+       - Last 10 experiment log entries (what worked, what didn't)
+       - List of all strategies/approaches already tried
+       - Available data sources in the codebase
+
+    b) Delegate to Copilot researcher agent:
+
+       exec bash pty:true workdir:<repo> background:true command:"copilot --agent researcher -p \"
+         Context:
+         - Current best Sharpe: <N>, baseline: <N>
+         - Experiments tried: <list>
+         - Data available: <list>
+         - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED.
+
+         Run the research debate. Delegate to contrarian, explorer, and theorist
+         agents. Each should propose 2-3 graded ideas. Evaluate all proposals
+         against filters (data available, testable, novel, not tried). Pick the
+         single best idea. Output a structured research report with the winner
+         and all proposals.
+       \" --yolo --model claude-opus-4.6 --no-auto-update"
+
+    c) Wait for completion via process action:log
+    d) Read the research report from the session output
+    e) Extract the winning idea
+    f) Write the winning idea to the shared experiment log before proceeding
 
   Phase 3 — MODIFY (one atomic change)
-    - Delegate implementation to Copilot CLI: exec bash pty:true background:true
-    - Include in the prompt: the specific change, affected files, test command
-    - One focused change, describable in one sentence
-    - Write description BEFORE making the change
+    Delegate implementation to Copilot orchestrator:
 
-  Phase 4 — COMMIT (before verification)
-    - exec: git add <files> && git commit -m "experiment: <description>"
-    - Commit BEFORE verify so rollback is clean: git reset --hard HEAD~1
+    exec bash pty:true workdir:<repo> background:true command:"copilot --agent orchestrator -p \"
+      Implement this experiment: <winning idea from Phase 2>
+      Affected files: <list>
+      Test command: <command>
+      One focused change. Run tests after. Commit with message 'experiment: <description>'.
+    \" --yolo --model claude-opus-4.6 --no-auto-update"
 
-  Phase 5 — VERIFY (mechanical only)
+    Wait for completion via process action:log
+
+  Phase 4 — VERIFY (mechanical only)
     - exec: run the verification command (tests, benchmark, backtest)
     - Extract the metric number from output
-    - Timeout: if verification exceeds 2x normal time, kill and treat as crash
+    - Timeout: if verification exceeds 2x normal time, stop and treat as crash
 
-  Phase 6 — DECIDE (no ambiguity)
+  Phase 5 — DECIDE (no ambiguity)
     - IMPROVED → keep commit, status = "keep"
     - SAME/WORSE → exec: git reset --hard HEAD~1, status = "discard"
     - CRASHED → attempt fix (max 3 tries), else revert, status = "crash"
     - Simplicity override: barely improved + complex → discard.
       Unchanged metric + simpler code → keep.
 
-  Phase 7 — LOG
+  Phase 6 — LOG
     - Append to experiments.jsonl (see Results Logging below)
     - If meaningful finding → write insight to MEMORY.md
     - Print one-line status every ~5 iterations
 
-  Phase 8 — REPEAT
+  Phase 7 — REPEAT
     - Go to Phase 1. Do NOT stop. Do NOT ask "should I continue?"
     - If goal achieved → print final summary and stop
 ```
@@ -99,7 +126,7 @@ Seven universal principles from Karpathy's autoresearch, applicable to any auton
 
 2. **Separate Strategy from Tactics** — The user sets direction ("improve page load speed"). The agent executes iterations ("lazy-load images, code-split routes"). Don't mix roles.
 
-3. **Metrics Must Be Mechanical** — If you can't verify with a shell command that outputs a number, you can't iterate autonomously. Tests pass/fail, benchmark ms, coverage %, file size bytes. "Looks better" kills autonomous loops.
+3. **Metrics Must Be Mechanical** — If you can't verify with a shell command that outputs a number, you can't iterate autonomously. Tests pass/fail, benchmark ms, coverage %, file size bytes. "Looks better" breaks autonomous loops.
 
 4. **Verification Must Be Fast** — If verification takes longer than the work itself, incentives misalign. Use the fastest verification that catches real problems. Unit tests (seconds) > E2E suite (minutes) > manual QA (hours).
 
@@ -153,17 +180,17 @@ Recovery protocol:
 - Syntax error → fix immediately, don't count as separate iteration
 - Runtime error → attempt fix (max 3 tries), then move on
 - Resource exhaustion (OOM) → revert, try smaller variant
-- Infinite loop/hang → kill after timeout, revert, avoid that approach
+- Infinite loop/hang → stop after timeout, revert, avoid that approach
 
 ## Execution Model
 
 **This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol. You do not spawn a subagent.
 
 ### Delegation
-All code changes go through Copilot CLI via `exec bash pty:true background:true`:
-- Phase 3 (MODIFY) → delegate coding to Copilot CLI in background
-- Phase 4 (COMMIT) → Copilot handles commits internally
-- Phase 5 (VERIFY) → Copilot runs tests; you check results via `process action:log`
+All ideation and coding go through Copilot CLI via `exec bash pty:true background:true`:
+- Phase 2 (IDEATE) → delegate to Copilot `--agent researcher` in background
+- Phase 3 (MODIFY) → delegate to Copilot `--agent orchestrator` in background
+- Phase 4 (VERIFY) → you run tests directly or check Copilot results via `process action:log`
 
 ### Self-Continuation via Cron
 The loop persists across agent turns using cron self-nudging:
