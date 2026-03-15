@@ -124,5 +124,7 @@ These markers allow the gateway to detect task status on reconnect and display i
 ### Monitoring Cron
 After launching a background task, create a monitoring cron:
 ```
-cron_create: schedule "every 5m", delivery "none", mode "main", prompt "Check status of background process <sessionId>. If complete, post [TASK:complete] with results. If failed, post [TASK:failed] with error. If still running, do nothing. Delete this cron when task finishes."
+cron_create: schedule "every 5m", delivery "none", execution "main", prompt "MONITOR tick N/24. Check process <sessionId> via process action:log. If DONE → post [TASK:complete], delete this cron. If FAILED → post [TASK:failed], delete this cron. If STILL RUNNING → reply 'still running' only (no tool calls). If tick >= 24 (2h) → post [TASK:timeout], delete this cron."
 ```
+
+**Cron rules:** Always use `execution: "main"` (never isolated). Still-running ticks = reply with just text, no tool calls (~200 tokens). Hard cap: 24 ticks (2h at 5m interval).

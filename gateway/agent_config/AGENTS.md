@@ -60,10 +60,11 @@ For Copilot sessions expected to run >2 minutes (any implementation, build, or t
 
 1. **Launch:** `bash pty:true workdir:/home/dev/repos/quantipy background:true command:"copilot --agent orchestrator --yolo -p \"<full plan>\" --model claude-opus-4.6 --no-auto-update"`
 2. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md)
-3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`, `mode: "main"`.
+3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`, `execution: "main"`. **Never use isolated** — isolated crons can't see process IDs or conversation context.
 4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
-6. **Human may or may not be connected** — doesn't change the workflow.
+6. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
+7. **Human may or may not be connected** — doesn't change the workflow.
 
 ### Why background mode?
 Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Background mode lets the agent:
@@ -73,8 +74,12 @@ Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Bac
 
 ### Monitoring cron template
 ```
-cron_create: schedule "every 5m", delivery "none", mode "main", prompt "Check status of background process <sessionId> via process action:log sessionId:<sessionId>. If output shows completion (exit code 0, tests pass), post [TASK:complete] with results summary and delete this cron via cron_delete. If output shows failure, post [TASK:failed] with error and delete this cron. If still running, do nothing."
+cron_create: schedule "every 5m", delivery "none", execution "main", prompt "MONITOR tick N/24. Check process <sessionId> via process action:log. If DONE → post [TASK:complete], delete this cron. If FAILED → post [TASK:failed], delete this cron. If STILL RUNNING and tick < 24 → reply 'still running' only (no tool calls). If tick >= 24 → post [TASK:timeout], delete this cron."
 ```
+
+### Cron cost rules
+- **Still-running ticks must be cheap:** If the process isn't done, reply with just "still running" — NO tool calls, NO analysis. This keeps each tick to ~200 tokens instead of ~15K.
+- **Always use execution main:** Isolated crons start fresh each tick with no context — they can't see process IDs, can't continue loops, and waste tokens rebuilding state.
 
 ## Code Delegation — Absolute Rule
 

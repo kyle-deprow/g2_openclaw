@@ -197,11 +197,18 @@ The loop persists across agent turns using cron self-nudging:
 
 1. At loop start, create a continuation cron:
 ```
-cron_create: schedule "every 3m", delivery "none", mode "main", prompt "Continue the autoresearch loop. Check if the current background Copilot session is done (process action:log). If done, evaluate results (Phase 6-7), then launch the next iteration (Phase 1-3). If still running, do nothing. If goal is met or user interrupted, delete this cron."
+cron_create: schedule "every 3m", delivery "none", execution "main", prompt "AUTORESEARCH MONITOR (tick N of max 40). Check background Copilot via process action:log. If DONE → evaluate results, launch next iteration, reset tick to 0. If STILL RUNNING → reply with only 'still running' (no tool calls, no analysis). If tick >= 40 (2 hours) → delete this cron, post [TASK:timeout]. If goal met or user said stop → delete this cron."
 ```
+
+**CRITICAL cron rules:**
+- `execution: "main"` — the cron MUST share the main session context to see process IDs and conversation history. Never use isolated.
+- **Hard TTL: 40 ticks (2 hours).** If the cron fires 40 times without completing, it self-deletes. This prevents runaway token burn.
+- **Still-running ticks are FREE.** If the background process isn't done, respond with just "still running" — no tool calls, no reasoning, no analysis. This costs ~200 tokens instead of ~15K.
+- Track the tick count in memory or the cron prompt itself. Increment on each fire.
 
 2. Each cron trigger resumes the loop at the appropriate phase
 3. When the goal is met or user says stop, delete the cron with `cron_delete`
+4. After 40 ticks with no goal completion, the cron self-deletes as a safety valve
 
 ### Status Reporting
 - Post `[TASK:running] autoresearch iteration N` after each launch
