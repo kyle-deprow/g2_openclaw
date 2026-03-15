@@ -58,13 +58,18 @@ LOOP (until goal met or user interrupts):
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
          - Data available: <list>
-         - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED.
+         - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED as primary signals.
+         - MANDATORY: Every proposal MUST include a machine learning / learning component.
+           Reject any idea that relies solely on hand-tuned thresholds or fixed rules.
+           Minimum: supervised learning, unsupervised clustering, online learning, or learned features.
+         - Tech stack: Python 3.13, scikit-learn, pandas, numpy, backtesting.py, SQLAlchemy.
+         - Scoring weight: (novelty × 2) + feasibility + (persistence × 1.5). Favor ambitious ML ideas.
 
          Run the research debate. Delegate to contrarian, explorer, and theorist
-         agents. Each should propose 2-3 graded ideas. Evaluate all proposals
-         against filters (data available, testable, novel, not tried). Pick the
-         single best idea. Output a structured research report with the winner
-         and all proposals.
+         agents. Each should propose 2-3 ML-grade ideas with learned parameters.
+         HARD REJECT any proposal without a learning component.
+         Evaluate remaining proposals against filters. Pick the single best ML idea.
+         Output a structured research report with the winner and all proposals.
        \" --yolo --model claude-opus-4.6 --no-auto-update"
 
     c) Wait for completion via process action:log

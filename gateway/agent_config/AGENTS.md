@@ -146,11 +146,13 @@ Every research result passes through these filters before implementation. ALL mu
 
 | Filter | Pass Criteria |
 |--------|--------------|
+| Has learned parameters? | MUST include ML/learning component — reject pure rule-based proposals with fixed thresholds |
 | Data available? | Uses data we already collect (OHLCV, Reddit, news, volume) or can collect with minimal new infra |
 | Testable hypothesis? | Can be stated as "if X then Y within Z timeframe" |
 | Single metric? | Measurable by Sharpe, hit rate, drawdown, profit factor, or test pass rate |
 | Not tried before? | Not in experiment log, `memory_search` results, or shared RESEARCH_LOG.md |
 | Novel enough? | Not a textbook indicator (SMA, RSI, MACD, Bollinger, OBV are BANNED as primary signals) — must have a novel angle |
+| Feature engineering defined? | Clear pipeline: raw data → derived features → model input |
 
 If any filter fails → log the rejection reason and move on. Do not argue with the filter.
 
