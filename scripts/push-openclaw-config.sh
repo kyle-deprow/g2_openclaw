@@ -68,6 +68,14 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
     else . end
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
+# ── Force-set tools section from repo config ─────────────────────────────────
+# Deep merge preserves stale keys (e.g. tools.allow from a previous push).
+# Overwrite the entire tools section with the repo's version to avoid drift.
+REPO_TOOLS=$(jq '.tools // empty' "${REPO_CONFIG}")
+if [[ -n "${REPO_TOOLS}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --argjson tools "${REPO_TOOLS}" '.tools = $tools')
+fi
+
 # ── Resolve env: references in provider apiKey fields ────────────────────────
 # The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
 # NOT resolve these natively for custom provider apiKey fields — the literal
