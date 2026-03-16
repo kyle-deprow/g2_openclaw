@@ -164,6 +164,28 @@ Every research result passes through these filters before implementation. ALL mu
 | Novel enough? | Not a textbook indicator (SMA, RSI, MACD, Bollinger, OBV are BANNED as primary signals) — must have a novel angle |
 | Feature engineering defined? | Clear pipeline: raw data → derived features → model input |
 
+## Experiment Output Convention
+
+Every experiment MUST produce a **Jupyter notebook** as its primary deliverable.
+
+**Location:** `notebooks/experiments/<strategy_name>.ipynb`
+
+**Required sections in every experiment notebook:**
+1. **Hypothesis** — what we expect and why
+2. **Data** — load from existing services, show shape and sample
+3. **Features** — compute and visualize distributions/correlations
+4. **Training** — walk-forward CV with clear train/validate/embargo splits
+5. **Backtest** — run via BacktestRunner, compare vs SMA baseline
+6. **Results** — Sharpe, max drawdown, win rate, profit factor (printed)
+7. **Visualizations** — equity curve, drawdown chart, feature importance
+8. **Conclusion** — keep/discard with reasoning
+
+**Verification:** The notebook must execute cleanly via `uv run jupyter execute <path> --timeout=300`. A notebook that doesn't run is a CRASH, same as failing tests.
+
+**Module code** lives in `src/quantipy/alpha/<strategy_name>/` — the notebook imports and orchestrates it. The notebook is NOT a dump of all the code; it's the experiment narrative that calls the module.
+
+**Why notebooks:** Reproducibility, visual results on reconnect, self-documenting experiments. When you review past experiments, you read the notebook — not the module code.
+
 If any filter fails → log the rejection reason and move on. Do not argue with the filter.
 
 ## Research via Copilot Agents

@@ -51,6 +51,16 @@ Future experiments MUST pursue novel alpha through:
 - **Unusual asset niches**: Crypto funding rates, FX carry, agricultural futures — anomalies from less-crowded markets
 - **Feature engineering over indicator stacking**: Transform raw data into meaningful features (volatility ratios, volume imbalance, momentum decay rates)
 
+## Experiment Notebooks
+
+All experiments produce Jupyter notebooks as primary output.
+
+- **Location:** `notebooks/experiments/<strategy_name>.ipynb`
+- **Existing:** `notebooks/llm_comparison_experiment.ipynb` (pre-existing)
+- **Deps:** `jupyter` and `nbformat` are NOT yet in pyproject.toml — Copilot must add them when creating the first experiment notebook. Also add `matplotlib` for visualizations if not present.
+- **Execution:** `uv run jupyter execute <notebook.ipynb> --timeout=300`
+- **Convention:** Notebook imports module code from `src/quantipy/alpha/<strategy_name>/` — it orchestrates the experiment, not duplicates the code.
+
 ## Shared Experiment Memory
 
 The file `RESEARCH_LOG.md` in the OpenClaw workspace tracks all experiments tried, rejected ideas, and insights. Read it before every ideation round. Update it after every experiment result. Pass this context to Copilot's researcher agent when delegating ideation.

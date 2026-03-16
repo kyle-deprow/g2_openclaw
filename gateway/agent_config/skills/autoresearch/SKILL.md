@@ -96,6 +96,10 @@ LOOP (until goal met or user interrupts):
     - Test requirements: pytest, all existing tests must still pass
     - Dependencies: only add deps already in the stack (scikit-learn, xgboost, etc.) or lightweight
 
+    **NOTEBOOK OUTPUT (mandatory):**
+    Every experiment MUST produce a Jupyter notebook as its primary output.
+    The notebook is the deliverable — module code supports it, not the other way around.
+
     Delegate to Copilot orchestrator:
 
     exec bash pty:true workdir:<repo> background:true command:"copilot --agent orchestrator -p \"
@@ -107,14 +111,27 @@ LOOP (until goal met or user interrupts):
       Feature Engineering:
       <feature list from proposal — map each to existing data services>
 
-      Implementation:
-      - Create src/quantipy/alpha/<strategy_name>/ with:
+      Implementation has TWO parts:
+
+      PART 1 — Module code in src/quantipy/alpha/<strategy_name>/:
         - features.py — feature extraction pipeline using existing data services
         - model.py — ML model training and prediction (scikit-learn/xgboost)
         - strategy.py — QuantiPyStrategy subclass that wraps the model for backtesting
-      - Wire to BacktestRunner for walk-forward validation
-      - Walk-forward: 8-week train, 1-week validate, 7-day embargo, roll 52x
-      - Compare Sharpe ratio to SMA crossover baseline
+
+      PART 2 — Experiment notebook at notebooks/experiments/<strategy_name>.ipynb:
+        This is the PRIMARY deliverable. The notebook MUST contain:
+        1. Hypothesis — what we expect and why (2-3 sentences)
+        2. Data loading — pull from existing data services, show shape and sample
+        3. Feature engineering — compute features, show distributions/correlations
+        4. Model training — walk-forward CV (8-week train, 1-week validate, 7-day embargo, 52 rolls)
+        5. Backtest execution — run via BacktestRunner, compare vs SMA baseline
+        6. Results — Sharpe ratio, max drawdown, win rate, profit factor (as printed output)
+        7. Visualizations — equity curve, drawdown chart, feature importance
+        8. Conclusion — 2-3 sentences: keep/discard decision with reasoning
+
+        The notebook must be EXECUTABLE: `uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb`
+        Use papermill-compatible parameterization where possible.
+        Create notebooks/ and notebooks/experiments/ dirs if they don't exist.
 
       Tests: write unit tests in tests/unit/alpha/test_<strategy_name>.py
       After: run uv run pytest -q --tb=short --ignore=tests/integration
@@ -125,11 +142,17 @@ LOOP (until goal met or user interrupts):
     Wait for completion via process action:log
 
   Phase 4 — VERIFY (mechanical backtest)
-    After Copilot commits, run the backtest yourself:
+    After Copilot commits, verify THREE things:
 
+    a) Tests pass:
     exec bash pty:true workdir:<repo> command:"uv run pytest -q --tb=short --ignore=tests/integration 2>&1 | tail -10"
 
-    Then run the actual backtest to get metrics:
+    b) Notebook exists and executes:
+    exec bash pty:true workdir:<repo> command:"ls notebooks/experiments/<strategy_name>.ipynb && uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb --timeout=300 2>&1 | tail -20"
+    If the notebook doesn't exist → CRASH.
+    If the notebook fails to execute → CRASH (attempt fix, max 3 tries).
+
+    c) Extract metrics from notebook output (or run backtest directly):
     exec bash pty:true workdir:<repo> command:"uv run python -c \"
       from quantipy.backtesting.runner import BacktestRunner
       # Run the new strategy and the baseline, print Sharpe, drawdown, win rate
