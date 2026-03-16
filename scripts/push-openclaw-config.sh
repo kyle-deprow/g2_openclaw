@@ -64,7 +64,12 @@ REPO_PRIMARY=$(jq -r '.agents.defaults.model.primary // empty' "${REPO_CONFIG}")
 MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
   .[0] * .[1]
   | if $primary != "" then
-      .agents.defaults.models = { ($primary): (.agents.defaults.models[$primary] // {}) }
+      # Build models allowlist from ALL configured providers (not just primary).
+      # Each provider/modelId pair becomes an allowed model for agent use + cron.
+      .agents.defaults.models = (
+        [.models.providers | to_entries[] | .key as $p | .value.models[]? | {("\($p)/\(.id)"): {}}]
+        | add // { ($primary): {} }
+      )
     else . end
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
