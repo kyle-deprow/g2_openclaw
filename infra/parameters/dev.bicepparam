@@ -30,4 +30,12 @@ param modelDeployments = [
     rateLimitPerMinute: 500
     skuName: 'GlobalStandard'
   }
+  {
+    name: 'gpt-5-mini'
+    modelName: 'gpt-5-mini'
+    modelVersion: '2025-08-07'
+    capacity: 200
+    rateLimitPerMinute: 200
+    skuName: 'GlobalStandard'
+  }
 ]

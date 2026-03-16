@@ -121,15 +121,16 @@ After launching, completing, or failing a background task, ALWAYS post a structu
 
 These markers allow the gateway to detect task status on reconnect and display it to the user.
 
-### Monitoring Cron
-After launching a background task, create a monitoring cron. First get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
+### Copilot Process Sentinel
+After launching a background task, create a cheap monitoring sentinel. Uses `azure-oai-g2-mini/gpt-5-mini` (~$0.001/tick) instead of the main model. First get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
 ```
-cron_create: schedule "every 5m", delivery "none", prompt "MONITOR. PID=<PID>. Expiry=<EXPIRY_EPOCH>.
-1. exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo DONE\"
-2. exec bash command:\"date +%s\"
-If no DONE → respond 'still running'. STOP.
-If epoch > Expiry → post [TASK:timeout], delete this cron.
-If DONE → post [TASK:complete], delete this cron."
+cron_create: schedule "every 5m", delivery "none", model "azure-oai-g2-mini/gpt-5-mini", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>.
+Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
+Step 2: exec bash command:\"date +%s\"
+If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP.
+If current epoch > Expiry → respond '[TASK:timeout]'. Delete this cron.
+If EXITED → exec bash command:\"cd <REPO_PATH> && git log --oneline -3 && echo '---' && uv run pytest -q --tb=line 2>&1 | tail -5\"
+Respond '[TASK:complete] Copilot PID <PID> exited. Results: <summary>'. Delete this cron."
 ```
 
-**Cron rules:** Do NOT specify `execution` (default isolated is correct for named agents). Do NOT pass `context`. Still-running ticks = 1 exec + text (~2K tokens). Hard TTL: embed expiry epoch (creation + 7200s).
+**Sentinel rules:** Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`. Do NOT specify `execution` (default isolated is correct). Do NOT pass `context`. Alive ticks = ~$0.001. Exit tick = ~$0.01 (git log + pytest). Hard TTL: embed expiry epoch (creation + 7200s). Reusable for any Copilot background process.

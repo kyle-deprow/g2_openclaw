@@ -73,23 +73,34 @@ Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Bac
 - Handle other requests while Copilot runs
 - Monitor progress and report completion asynchronously
 
-### Monitoring cron template
+### Copilot Process Sentinel (two-stage cron)
+
+Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only checks `ps -p PID` — it does NOT reason about results. When Copilot exits, the sentinel does a lightweight result check (git log + pytest summary), posts `[TASK:complete]`, and deletes itself. Full evaluation happens when the main agent (GPT-5.4) processes the completion.
+
 Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
+
 ```
-cron_create: schedule "every 5m", delivery "none", prompt "MONITOR. PID=<PID>. Expiry=<EXPIRY_EPOCH>.
-1. exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo DONE\"
-2. exec bash command:\"date +%s\"
-If no DONE → respond 'still running'. No other tool calls. STOP.
-If epoch > Expiry → post [TASK:timeout], delete this cron.
-If DONE → post [TASK:complete], delete this cron."
+cron_create: schedule "every 5m", delivery "none", model "azure-oai-g2-mini/gpt-5-mini", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>.
+Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
+Step 2: exec bash command:\"date +%s\"
+If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
+If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
+If EXITED → run: exec bash command:\"cd <REPO_PATH> && git log --oneline -3 && echo '---' && uv run pytest -q --tb=line 2>&1 | tail -5\"
+Respond: '[TASK:complete] Copilot PID <PID> exited. Results: <git log summary>, <test summary>'. Delete this cron with cron_delete. STOP."
 ```
 
-### Cron rules
-- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents like ours.
+**Why this works:**
+- **Alive ticks (~90% of calls):** Mini model, ~$0.001 per tick. One `ps` command + "alive" response.
+- **Exit tick (1 call):** Mini model, ~$0.01. Runs git log + pytest, formats summary. No reasoning needed.
+- **Full evaluation:** Happens in the **main agent's next turn** (GPT-5.4) when it reads the [TASK:complete] status.
+
+### Sentinel rules
+- **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes the sentinel cheap.
+- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create parameter.
-- **Self-contained prompts** — include PID and expiry epoch. Isolated crons have no conversation history.
-- **Still-running ticks are cheap** — one `ps` exec + text reply. ~2K tokens per tick.
-- **Hard TTL: 2 hours** — embed expiry epoch (creation + 7200s). Cron self-deletes on expiry.
+- **Self-contained prompts** — include PID, repo path, and expiry epoch. Isolated crons have no conversation history.
+- **Hard TTL: 2 hours** — embed expiry epoch (creation + 7200s). Sentinel self-deletes on expiry.
+- **Reusable** — this sentinel works for ANY Copilot CLI background process (researcher, orchestrator, specialist).
 
 ## Code Delegation — Absolute Rule
 

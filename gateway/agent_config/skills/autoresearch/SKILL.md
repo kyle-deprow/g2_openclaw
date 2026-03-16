@@ -347,33 +347,39 @@ All ideation and coding go through Copilot CLI via `exec bash pty:true backgroun
 - Phase 3 (MODIFY) → delegate to Copilot `--agent orchestrator` in background
 - Phase 4 (VERIFY) → you run tests directly or check Copilot results via `process action:log`
 
-### Self-Continuation via Cron
-The loop persists across turns using cron self-monitoring. Because we run as a named agent (not default), crons use **isolated execution** (the default). Each prompt must be self-contained.
+### Self-Continuation via Copilot Process Sentinel
+The loop persists across turns using a cheap monitoring sentinel. Uses `azure-oai-g2-mini/gpt-5-mini` for ~$0.001/tick instead of burning GPT-5.4 on `ps -p PID` checks.
 
-1. Before creating the cron, capture the expiry epoch:
+1. Before creating the sentinel, capture the expiry epoch:
    `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
-   This gives a Unix timestamp 2 hours from now.
 
-2. Create the monitoring cron (fill in PID and EXPIRY from step 1):
+2. Create the Copilot Process Sentinel (fill in PID, REPO, and EXPIRY):
 ```
-cron_create: schedule "every 3m", delivery "none", prompt "AUTORESEARCH MONITOR. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
-Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo PROCESS_DONE\"
+cron_create: schedule "every 5m", delivery "none", model "azure-oai-g2-mini/gpt-5-mini", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
+Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
-If output does NOT contain PROCESS_DONE → respond 'still running'. Make NO other tool calls. STOP.
-If current epoch > Expiry → post [TASK:timeout], delete this cron with cron_delete. STOP.
-If PROCESS_DONE → check results: exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3 && uv run pytest -q --tb=line 2>&1 | tail -5\". Post [TASK:complete] with 1-line summary. Delete this cron with cron_delete."
+If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
+If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
+If EXITED → run: exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3 && echo '---' && uv run pytest -q --tb=line 2>&1 | tail -5\"
+Respond: '[TASK:complete] Copilot PID <PID> exited. Results: <git log summary>, <test summary>'. Delete this cron with cron_delete. STOP."
 ```
 
-**CRITICAL cron rules:**
-- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents. This is an OpenClaw constraint.
-- **Do NOT pass a `context` parameter** — not a valid cron_create field. Valid fields: schedule, delivery, prompt, model, agent, thinking.
-- **Prompt must be self-contained** — include PID, repo path, and expiry epoch. Isolated crons have NO conversation history.
-- **Still-running ticks are cheap** — one `ps` check + "still running" text. ~2K tokens per tick.
-- **Hard TTL: 2 hours** — calculated as creation epoch + 7200. Cron self-deletes on expiry.
+**Sentinel design (two-stage cost optimization):**
+- **Alive ticks (~90%):** Mini model, ~$0.001. One `ps` command + "alive". No reasoning.
+- **Exit tick (once):** Mini model, ~$0.01. Runs git log + pytest, formats summary. Still cheap.
+- **Full evaluation:** Happens in your NEXT turn (GPT-5.4) when you process the [TASK:complete] status and continue the autoresearch loop.
 
-3. Each cron tick runs independently with all context in the prompt
-4. When process completes, the cron evaluates and self-deletes
-5. To continue the loop: after cron reports completion, launch NEXT iteration from main conversation, create new cron for new PID
+**Sentinel rules:**
+- **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes monitoring cheap.
+- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
+- **Do NOT pass `context`** — not a valid cron_create field. Valid: schedule, delivery, prompt, model, agent, thinking.
+- **Prompt must be self-contained** — include PID, repo path, and expiry. Isolated crons have NO conversation history.
+- **Hard TTL: 2 hours** — creation epoch + 7200. Sentinel self-deletes on expiry.
+- **Reusable** — this same sentinel pattern works for researcher, orchestrator, or any Copilot background process.
+
+3. Each tick runs independently with all context in the prompt
+4. When Copilot exits, the sentinel does a lightweight summary and self-deletes
+5. To continue the loop: after sentinel reports completion, launch NEXT iteration from main conversation, create new sentinel for new PID
 
 ### Status Reporting
 - Post `[TASK:running] autoresearch iteration N` after each launch

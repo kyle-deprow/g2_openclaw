@@ -1,7 +1,7 @@
 # Quantipy → Autonomous Research Sandbox — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-16 (Repo revert, Round 3 intraday focus)
+**Last Updated:** 2026-03-16 (Two-stage cron sentinel, GPT-5-mini, Round 3 intraday focus)
 
 ## Critical Rule
 
@@ -190,10 +190,35 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 
 ## Known Issues
 
-1. **LLM costs**: GPT-5.4 with reasoning = ~$3-8 per research round. Budget carefully.
+1. **LLM costs**: GPT-5.4 with reasoning = ~$3-8 per research round. Mitigated by mini sentinel for cron.
 2. **exec quoting fragile**: OpenClaw sometimes misformats nested quotes in `-p` prompts.
 3. **Local embeddings slow on first run**: sqlite-vec + local model downloads may timeout on first memory search.
-4. **Cron cleanup**: OpenClaw doesn't always clean up monitoring crons after task completion — manual cleanup sometimes needed.
+
+---
+
+## Two-Stage Cron: Copilot Process Sentinel
+
+**Problem:** Cron monitoring ticks used the full GPT-5.4 model (~$0.10-0.30/tick) to run `ps -p PID`. At 5-min intervals over a 30-min Copilot run = 6× full model invocations for trivial health checks. Prior run also specified `model: "claude-opus-4.6"` (a Copilot CLI model name, not valid in OpenClaw) causing error + exponential backoff.
+
+**Solution:** Two-stage cost optimization using GPT-5-mini for sentinel ticks.
+
+| Stage | Model | Cost/tick | What happens |
+|-------|-------|-----------|-------------|
+| Alive check (~90% of ticks) | azure-oai-g2-mini/gpt-5-mini | ~$0.001 | `ps -p PID` → "alive" |
+| Exit detection (1 tick) | azure-oai-g2-mini/gpt-5-mini | ~$0.01 | git log + pytest summary → [TASK:complete] |
+| Full evaluation (next turn) | azure-oai-g2/gpt-5.4 | ~$0.10-0.30 | Main agent continues autoresearch loop |
+
+**Config:**
+- Added `azure-oai-g2-mini` provider to `openclaw.json` (deployment: `gpt-5-mini`, model: `gpt-5-mini`, version: `2025-08-07`, capacity: 200, GlobalStandard)
+- Sentinel template in AGENTS.md, TOOLS.md, and SKILL.md all specify `model: "azure-oai-g2-mini/gpt-5-mini"`
+- Sentinel is GENERIC — reusable for any Copilot CLI background process (researcher, orchestrator, specialist)
+
+**Cost comparison (typical 30-min research run, 5-min intervals):**
+| Approach | Ticks | Cost |
+|----------|-------|------|
+| Old (GPT-5.4 every 5m) | 6 × $0.20 | ~$1.20 |
+| Old (GPT-5.4 every 15m) | 2 × $0.20 | ~$0.40 |
+| New sentinel (mini every 5m) | 5 × $0.001 + 1 × $0.01 + 1 × $0.20 | ~$0.22 |
 
 ---
 
@@ -306,3 +331,6 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 - Notebook enforcement (mandatory Jupyter output for every experiment)
 - Planning gate exemption (no human approval during autoresearch loop)
 - Intraday constraints injected at every delegation point
+- **Two-stage Copilot Process Sentinel** — mini model for cheap 5-min monitoring, GPT-5.4 only for evaluation
+- **GPT-5-mini added to openclaw.json** — `azure-oai-g2-mini/gpt-5-mini` (capacity 200, GlobalStandard)
+- **Generalized sentinel template** — reusable for any Copilot background process
