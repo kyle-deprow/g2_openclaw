@@ -1,7 +1,7 @@
 # Quantipy → Autonomous Research Sandbox — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-16 (Round 3 T1 implemented, exec syntax fix, mandatory cron reinforcement)
+**Last Updated:** 2026-03-16 (Round 3 T2 ideation complete — Isolation Forest Anomaly-Gated RF winner)
 
 ## Critical Rule
 
@@ -236,45 +236,37 @@ Connect → get status → steer → disconnect → OpenClaw continues. Tune per
 - **70 total tests pass** (45 regime detection + 25 alpha strategy) in 12.76s
 - Notebook executed successfully — all 16 code cells produce output
 
-**Backtest Results (synthetic data, look-ahead biased):**
+**T1 Evaluation: DISCARD** — 1 trade/1399 days, 51.3% accuracy, underperforms B&H by 9.47pp. GMM+features infra reusable, signal mapping failed.
 
-| Metric | Value |
-|--------|-------|
-| Return | 14.85% |
-| Buy & Hold | 24.32% |
-| Sharpe | 1.01 |
-| Sortino | 1.70 |
-| Max Drawdown | -3.70% |
-| Win Rate | 100% (1 trade) |
-| Total Trades | 1 |
-| Exposure | 48.1% |
+**T2 Ideation (completed — commit `db64324` in quantipy):**
+- Copilot researcher (PID 429216, `--yolo`, stdout → `/tmp/researcher-output-2.txt`) ran ~9 min
+- 3-agent debate: contrarian, explorer, theorist → 9 proposals
+- Winner: **T2-ISOGATE — Isolation Forest Anomaly-Gated Random Forest** (score 37.0/50)
+- Runner-up: E2 Passive-Aggressive Online + Sentiment Gate (score 34.5)
+- Full report: `notebooks/experiments/RESEARCH_DEBATE_T2.md`
 
-**Walk-Forward CV (out-of-sample, honest):**
-
-| Metric | Value |
-|--------|-------|
-| Folds | 177 |
-| Mean Accuracy | 0.513 |
-| Mean F1 | 0.407 |
-| Mean Log Loss | 4.68 |
-
-**Evaluation: DISCARD**
-- Only 1 trade over 1399 days — strategy is too conservative
-- Underperforms buy-and-hold by 9.47pp
-- Walk-forward accuracy (51.3%) barely above random chance
-- The regime detection infrastructure (GMM + features) is sound and reusable, but the signal-to-trade mapping needs fundamental redesign
+**T2-ISOGATE Design:**
+- Two-stage: (1) Isolation Forest anomaly detection on joint microstructure+sentiment features, (2) Random Forest direction prediction ONLY on anomalous bars
+- 19 features: 7 existing micro + 3 new micro + 3 sentiment timing + 4 temporal + 2 cross-modal
+- Ternary target: UP >+10bps, DOWN <-10bps, FLAT within 6-bar horizon
+- Walk-forward: 60-bar train / 20-bar test / 10-bar slide / 2-bar purge
+- Key insight: T1 predicted ALL bars → noise. T2 filters for ~10-15% high-info bars first
+- Expected: 56-62% accuracy (anomalous bars only), 5-10 trades/week, Sharpe 1.2-1.8
 
 **TODO:**
-- [ ] Update RESEARCH_LOG.md with T1 results + DISCARD verdict
-- [ ] Continue to next proposal from Round 3 ideation (T2 or new ideation round)
-- [ ] New session needed for AGENTS.md fixes to take effect (exec syntax, mandatory sentinel)
+- [ ] T2 implementation via OpenClaw → Copilot orchestrator
+- [ ] Update RESEARCH_LOG.md with T1 DISCARD + T2 ideation results
+- [ ] Push quantipy commits to origin (4 unpushed: d521ac5, 38d4128, 519afa1, db64324)
 
 **Pipeline improvements since Round 2:**
-- Memory config fixed (correct Zod schema for v2026.3.2)
-- Reflection hooks (Phase 7 REFLECT with pattern analysis + scaffolding updates)
-- Notebook enforcement (mandatory Jupyter output for every experiment)
-- Planning gate exemption (no human approval during autoresearch loop)
-- Intraday constraints injected at every delegation point
-- **Two-stage Copilot Process Sentinel** — mini model for cheap 5-min monitoring, GPT-5.4 only for evaluation
-- **GPT-5-mini added to openclaw.json** — `azure-oai-g2-mini/gpt-5-mini` (capacity 200, GlobalStandard)
-- **Generalized sentinel template** — reusable for any Copilot background process
+- Two-stage Copilot Process Sentinel (mini model for 5-min monitoring)
+- GPT-5-mini provider added (`azure-oai-g2-mini/gpt-5-mini`)
+- Generalized sentinel template (reusable for any Copilot background process)
+- `--yolo` MANDATORY for all Copilot CLI invocations (file ops fail without it)
+- Stdout capture via `2>&1 | tee /tmp/<output>.txt` for background processes
+- AGENTS.md sentinel steps reordered: sentinel BEFORE response, 4-step atomic
+- exec syntax guide added to AGENTS.md (named params, not inline flags)
+
+**Known bugs:**
+- OpenClaw ignores per-model `maxTokens` from config, sends internal default ~32000. Causes 400 errors on 16384-capped models (gpt-5-mini, gpt-5-4). No config fix — OpenClaw core issue.
+- Sentinel cron consistently errors due to maxTokens bug. Still functions but with error backoff delays.
