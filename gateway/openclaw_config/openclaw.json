@@ -21,7 +21,7 @@
               "text"
             ],
             "contextWindow": 1047576,
-            "maxTokens": 128000
+            "maxTokens": 16384
           }
         ]
       },
@@ -87,7 +87,10 @@
       },
       "memorySearch": {
         "enabled": true,
-        "sources": ["memory", "sessions"],
+        "sources": [
+          "memory",
+          "sessions"
+        ],
         "provider": "local",
         "store": {
           "driver": "sqlite",
