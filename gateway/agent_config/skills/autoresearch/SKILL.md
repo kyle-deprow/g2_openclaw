@@ -155,10 +155,11 @@ LOOP (until goal met or user interrupts):
 
     Wait for completion via process action:log
 
-  Phase 4 — VERIFY (mechanical backtest — run IMMEDIATELY after sentinel reports completion)
-    **DO NOT WAIT FOR HUMAN.** The sentinel's [TASK:complete] includes metrics. Parse them first.
-    If metrics are present → use them directly for Phase 5.
-    If metrics are missing or insufficient → run these checks yourself:
+  Phase 4 — VERIFY (run in YOUR turn with exec commands — do NOT delegate to Copilot)
+    **DO NOT WAIT FOR HUMAN. DO NOT DELEGATE TO COPILOT.** Evaluation is lightweight — you do it directly.
+    The sentinel's [TASK:complete] includes metrics. Parse them first.
+    If metrics are present and sufficient → use them directly for Phase 5.
+    If metrics are missing or insufficient → run these checks yourself with exec:
 
     a) Tests pass:
     exec bash pty:true workdir:<repo> command:"uv run pytest -q --tb=short --ignore=tests/integration 2>&1 | tail -10"
@@ -342,10 +343,14 @@ Recovery protocol:
 **This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol. You do not spawn a subagent.
 
 ### Delegation
-All ideation and coding go through Copilot CLI via `exec bash pty:true background:true`:
+**Only Phase 2 and Phase 3 delegate to Copilot CLI.** Everything else is YOUR work:
 - Phase 2 (IDEATE) → delegate to Copilot `--agent researcher` in background
-- Phase 3 (MODIFY) → delegate to Copilot `--agent orchestrator` in background
-- Phase 4 (VERIFY) → you run tests directly or check Copilot results via `process action:log`
+- Phase 3 (IMPLEMENT) → delegate to Copilot `--agent orchestrator` in background
+- Phase 4-5 (VERIFY + DECIDE) → YOU run exec commands directly (notebook execution, metric extraction, threshold comparison)
+- Phase 6-7 (LOG + REFLECT) → YOU write to files and memory directly
+- Phase 8 (CONTINUE) → YOU decide next action and launch the appropriate Copilot agent
+
+**The entire Phase 4 → Phase 8 sequence runs in ONE turn** after sentinel reports completion. You do not stop between phases. You do not ask the human what to do next.
 
 ### Self-Continuation via Copilot Process Sentinel
 The loop persists across turns using a cheap monitoring sentinel. Uses `azure-oai-g2-mini/gpt-5-mini` for ~$0.001/tick instead of burning GPT-5.4 on `ps -p PID` checks.

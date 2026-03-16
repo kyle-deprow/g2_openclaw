@@ -116,20 +116,24 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 
 ### Autonomous Post-Completion Evaluation
 
-**When you receive a [TASK:complete] from the sentinel — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop:
+**When you receive a [TASK:complete] from the sentinel — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop **IN YOUR OWN TURN using exec commands. Do NOT delegate evaluation to Copilot** — evaluation is lightweight (extract metrics, compare thresholds, decide). Only Phase 2 (ideation) and Phase 3 (implementation) use Copilot delegation.
 
 1. **Parse the metrics** from the sentinel's [TASK:complete] message (Sharpe, accuracy, drawdown, return, trade count)
-2. **Run Phase 4 VERIFY** — if the notebook wasn't executed, execute it now. Extract all metrics.
+2. **Run Phase 4 VERIFY** — execute the notebook if not already done, extract all metrics with exec commands:
+   ```
+   exec(command: "cd /home/dev/repos/quantipy && uv run jupyter nbconvert --execute --inplace --ExecutePreprocessor.timeout=300 notebooks/experiments/<name>.ipynb 2>&1 | tail -5")
+   exec(command: "cd /home/dev/repos/quantipy && python3 -c \"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])); [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\" 2>&1 | tail -30")
+   ```
 3. **Run Phase 5 DECIDE** — apply the hard thresholds from the autoresearch skill (Sharpe > -0.5? > 0.5? > 1.0? Max DD < 30%?)
 4. **Run Phase 6 LOG** — record results in RESEARCH_LOG.md and memory
 5. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
-6. **Run Phase 8 CONTINUE** — pick next action autonomously:
-   - KEEP with low Sharpe → try feature iteration
-   - DISCARD → move to next proposal from RESEARCH_LOG.md
-   - All proposals exhausted → new ideation round with updated context
+6. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
+   - KEEP with low Sharpe → launch Copilot orchestrator for feature iteration
+   - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
+   - All proposals exhausted → launch Copilot researcher for new ideation with updated context
    - Goal met → post [TASK:complete] final summary
 
-**This is non-negotiable.** The human connected to steer, not to babysit each evaluation. If strategies are failing, YOU decide to iterate, scrap, or pivot. The human will see results on reconnect.
+**Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases.
 
 ### Sentinel rules
 - **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes the sentinel cheap.
