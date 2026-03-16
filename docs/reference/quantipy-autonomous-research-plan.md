@@ -114,77 +114,19 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 
 ## Launch — DONE
 
-**Completed:**
-- Scaffolding deployed by OpenClaw → commit `467f37f`
-- Bloat stripped by OpenClaw → Copilot CLI → commit `df3bf61` (55 files, -3793 lines)
-  - Removed: airflow/, docker/, docker-compose.yaml, .dockerignore, src/quantipy/api/, src/quantipy/client.py, distributed_rate_limiter.py
-  - Updated imports in 4 files, 689 tests pass
-- Azure GPT-5.4 working with 128k completion tokens, reasoning_effort=high
-
-**Bugs fixed during launch:**
-- Azure auth: preload needed to strip `api-key` header (not just `authorization`)
-- exec workdir: tilde `~` not expanded → must use absolute paths
-- Copilot CLI quoting: single quotes in `-p` break when prompt has apostrophes
-- API version: needed `2025-04-01-preview` for `max_completion_tokens` + `reasoning_effort`
-- Parameter rename: model rejects deprecated `max_tokens`, requires `max_completion_tokens`
-
-**Config improvements deployed:**
-- TOOLS.md: absolute paths, double-quote quoting, workdir warnings
-- AGENTS.md: all examples use absolute `/home/dev/repos/quantipy` paths
-- Preload: body interception, parameter rename, reasoning inject, API version bump
-- openclaw.json: maxTokens=128000, reasoning=true
+Scaffolding deployed → bloat stripped (-3793 lines, 689 tests). Azure GPT-5.4 128k tokens working. Key bug fixes: Azure auth preload (strip api-key header), exec workdir (no tilde), Copilot quoting, API version `2025-04-01-preview`.
 
 ---
 
 ## Async Autonomous — DONE
 
-**Problem:** Blocking `exec` tied up OpenClaw for entire Copilot sessions (5-30 min). 5-min inflight buffer TTL meant reconnects after short disconnects lost responses. No concept of background work — user saw "Idle" even when Copilot was actively building.
-
-**Solution implemented (3 phases):**
-
-| Phase | What | Files |
-|-------|------|-------|
-| Config | Taught OpenClaw `background:true`, `[TASK:status]` markers, cron monitoring | SOUL.md, AGENTS.md, TOOLS.md |
-| Gateway | Task-aware reconnect — reads JSONL transcript for `[TASK:*]` markers, injects `taskSummary` in `connected` frame | task_status.py (new), server.py, protocol.py |
-| G2 App | Shows task indicator on reconnect, deduplicates on flaky connections | protocol.ts, main.ts, display.ts |
-
-**Key design decisions:**
-- No separate task database — uses structured `[TASK:status]` markers in OpenClaw session transcript (JSONL)
-- Gateway reuses `resolve_session_file()` and `extract_text()` from session_history (no duplication)
-- TOOLS.md is single source of truth for task status format; SOUL.md and AGENTS.md reference it
-- G2 display transforms `[RUNNING] desc` → `RUNNING: desc` to avoid double-bracket rendering
-
-**What OpenClaw now does differently:**
-- Long tasks use `bash background:true` — agent responds immediately, Copilot runs in background
-- Posts `[TASK:running]`, `[TASK:complete]`, `[TASK:failed]` markers
-- Creates monitoring crons for background tasks
-- First message on human reconnect = status briefing
-
-**Tests:** 419 Python (13 new for task_status), 231 TypeScript — all pass. Lint clean.
+Background exec with `background:true`, `[TASK:status]` markers in JSONL transcript, cron monitoring, task-aware reconnect (gateway reads markers, injects `taskSummary` in `connected` frame). G2 shows task indicator on reconnect. Tests: 419 Python (13 new), 231 TypeScript.
 
 ---
 
 ## Iterate — IN PROGRESS
 
-**After launch, our job is to:**
-1. Connect to OpenClaw via G2, get status briefing, steer with high-level directions
-2. Disconnect — OpenClaw continues autonomously with background tasks and cron monitoring
-3. Reconnect later — gateway injects `taskSummary`, G2 shows task status indicator
-4. Evaluate quality, approve/reject, tune persona if behavior is suboptimal
-5. Redeploy updated persona via `bash scripts/push-openclaw-config.sh` + `openclaw daemon restart`
-
-**Persona tuning triggers:**
-| Observed Problem | Fix |
-|-----------------|-----|
-| OpenClaw writes code directly instead of delegating | Strengthen AGENTS.md delegation rules |
-| Copilot makes poor choices | Improve copilot-instructions.md via SCAFFOLD |
-| Research is shallow/generic | Improve RESEARCH mode prompts in AGENTS.md |
-| Experiments not tracked | Strengthen experiment logging requirements |
-| Agent gets stuck in loops | Tune stuck detection thresholds |
-| Too much money spent on Opus | Switch default model to sonnet for routine, opus for deep dives |
-| Not using background:true for long tasks | Reinforce in AGENTS.md Background Execution section |
-| Missing [TASK:*] markers | Reinforce in SOUL.md Async Autonomy section |
-| No cron for monitoring | Check AGENTS.md step 3, add explicit cron_create examples |
+Connect → get status → steer → disconnect → OpenClaw continues. Tune persona when behavior is suboptimal. Push via `bash scripts/push-openclaw-config.sh` + `openclaw daemon restart`.
 
 ---
 
@@ -222,82 +164,16 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 
 ---
 
-## Round 1 — Scaffolding + Bloat Strip — DONE
+## Prior Rounds Summary
 
-**Scaffolding (commit 467f37f):**
-- OpenClaw autonomously created `.github/copilot-instructions.md`, `orchestrator.agent.md`, `backend-python.agent.md`
-- Quality: accurate tech stack detection, correct project patterns, lean content
-
-**Bloat strip (commit df3bf61):**
-- Removed 17 files (-3793 lines): Airflow, Docker, FastAPI, distributed rate limiter
-- 689 tests pass. Required 3 exec attempts due to tilde/quoting bugs (now fixed).
-
-## Round 2 — Backtesting Integration — DONE
-
-**6 commits, 721 LOC source + 1891 LOC tests:**
-- backtesting.py engine adapter, DataBridge, QuantiPyStrategy base, SMA crossover POC, BacktestRunner, CLI command
-- **854 total tests pass, 0 failures**
-- OpenClaw used exec directly (not background:true) — works but slow. Needed nudges between phases.
-
-## Autoresearch Round 1 — DONE (Disappointing)
-
-**First autonomous end-to-end research loop.** OpenClaw spawned orchestrator → researcher (PID 4032410), monitored via cron, extracted results.
-
-**4 proposals, all rule-based (no ML):**
-- Contrarian Sentiment Divergence (hand-crafted threshold)
-- Momentum Regime Detector (hardcoded rules)
-- Trend-Following with Sentiment Filter (moving average + heuristic)
-- Mean Reversion with Volume Confirmation (Bollinger bands + volume rules)
-
-**Root causes of poor quality:**
-1. Contrarian agent had anti-ML bias ("simple is better")
-2. Prompts too generic — no tech stack awareness
-3. No minimum complexity requirement — rule-based proposals accepted
-4. Feasibility-dominated scoring let trivial strategies win
-
-## ML Agent Upgrade — DONE (commits bcebd22, d19c219, 388bf4d)
-
-**Rewrote all 4 Copilot CLI research agents:**
-- `researcher.agent.md`: HARD REJECT for no-ML proposals, weighted scoring (novelty×2 + feasibility + persistence×1.5)
-- `contrarian.agent.md`: "If it has no learned parameters, it's not a strategy" — Minimum Complexity Tier
-- `explorer.agent.md`: ML-first philosophy, experiment templates, academic references
-- `theorist.agent.md`: Theory→features→model→target→validation pipeline mandatory
-- All have Tech Stack Awareness (scikit-learn, pandas, numpy, backtesting.py)
-
-**SKILL.md v4 + AGENTS.md**: ML mandatory filters, weighted scoring, HARD REJECT rule-based.
-
-## Autoresearch Round 2 — DONE (Strong Results)
-
-**9 ML-grade proposals.** All have learned parameters as required.
-
-**Top proposals:**
-| Rank | ID | Name | Composite | Model |
-|------|-----|------|-----------|-------|
-| 1 | C2 | Adversarial Sentiment Crowding Detector | 19.0 | IsolationForest → XGBoost |
-| 2 | T3 | Bayesian Hierarchical Sector Momentum | 19.5 | Bayesian hierarchical model |
-| 3 | T2 | Sentiment-Price Divergence Classifier | 19.0 | RandomForest cross-validated |
-| 4 | E3 | HMM Market Regime Detector | 18.0 | Hidden Markov Model |
-
-**Winner: C2 — Adversarial Sentiment Crowding Detector**
-- Phase 1: IsolationForest anomaly detection on 18-dim feature vector
-- Phase 2: XGBClassifier for mean-reversion prediction after crowding events
-- Features: Reddit sentiment/engagement, price/volume patterns, Reddit-news divergence
-- Validation: walk-forward CV (8-week train → 1-week validate → 7-day embargo, 52 periods)
-- Deps: scikit-learn + xgboost (feasible in current stack)
-
-**Implementation roadmap:** C2 (2-3wk) → E3 (1-2wk) → T2 (2wk) → T3 (3-4wk)
-
-## Memory System Fix — DONE (commit 95a3808)
-
-**Problem:** No memory config at all. Cron ticks hit ENOENT on `memory/YYYY-MM-DD.md`. Skill doc had wrong schema (used `memory.enabled`, `memory.vectorSearch` — invalid in v2026.3.2).
-
-**Root cause:** Top-level `memory` only accepts `backend`/`citations`/`qmd`. Memory search config goes under `agents.defaults.memorySearch` per the Zod schema (`MemorySearchSchema`).
-
-**Fix:**
-- `agents.defaults.memorySearch`: local embeddings, SQLite vector store, hybrid search (BM25 0.7 weight), MMR reranking, temporal decay (30-day half-life)
-- `agents.defaults.compaction.memoryFlush`: enabled, softThresholdTokens=4000
-- `memory.backend`: "builtin"
-- Push script: force-set `memory` section (like `tools`) to prevent deep merge drift
+| Round | Outcome | Key Commits |
+|-------|---------|-------------|
+| R1 Scaffold + Bloat Strip | Scaffolding deployed (467f37f), bloat stripped -3793 lines (df3bf61), 689 tests pass | DONE |
+| R2 Backtesting | backtesting.py adapter + BacktestRunner + SMA POC (721 LOC src + 1891 LOC tests), 854 tests pass | DONE |
+| Autoresearch R1 | 4 proposals, all rule-based (no ML) — disappointing. Root cause: anti-ML bias in prompts | DONE |
+| ML Agent Upgrade | All 4 agents rewritten with HARD REJECT for no-ML, weighted scoring, min complexity tier (bcebd22, d19c219, 388bf4d) | DONE |
+| Autoresearch R2 | 9 ML-grade proposals. Winner: C2 Adversarial Sentiment Crowding Detector. Archived — not intraday-focused | DONE |
+| Memory Fix | Local embeddings, SQLite vec, hybrid search. Push script force-sets memory config (95a3808) | DONE |
 - Skill doc: corrected Quick Config Template with warning
 - MEMORY.md seeded in workspace-claw with architecture + active experiments
 
@@ -350,12 +226,48 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 4. **Dev API sendText was 404** — no convenience POST endpoint existed. Added `_dev/sendText` and `_dev/ttsRecord` convenience routes (commit `56e5cef`).
 5. **Gateway stale WS after daemon restart** — gateway connected to old daemon; messages silently dropped. Requires gateway restart after daemon restart.
 
+**Notebook + Backtest (completed — commits `38d4128`, `519afa1` in quantipy):**
+- Copilot orchestrator (PID 364524) ran ~17 min, clean exit
+- **2,893 LOC** across 10 files:
+  - `src/quantipy/alpha/microstructure_regime_detection/`: schemas.py, data_generator.py, signal_generator.py, strategy.py, __init__.py (346 LOC)
+  - `notebooks/experiments/microstructure_regime_detection.ipynb` (703 LOC, 25 cells, 16 code)
+  - `tests/unit/test_microstructure_regime_strategy.py` (314 LOC, 25 tests)
+  - jupyter, matplotlib, nbclient, ipykernel dev deps
+- **70 total tests pass** (45 regime detection + 25 alpha strategy) in 12.76s
+- Notebook executed successfully — all 16 code cells produce output
+
+**Backtest Results (synthetic data, look-ahead biased):**
+
+| Metric | Value |
+|--------|-------|
+| Return | 14.85% |
+| Buy & Hold | 24.32% |
+| Sharpe | 1.01 |
+| Sortino | 1.70 |
+| Max Drawdown | -3.70% |
+| Win Rate | 100% (1 trade) |
+| Total Trades | 1 |
+| Exposure | 48.1% |
+
+**Walk-Forward CV (out-of-sample, honest):**
+
+| Metric | Value |
+|--------|-------|
+| Folds | 177 |
+| Mean Accuracy | 0.513 |
+| Mean F1 | 0.407 |
+| Mean Log Loss | 4.68 |
+
+**Evaluation: DISCARD**
+- Only 1 trade over 1399 days — strategy is too conservative
+- Underperforms buy-and-hold by 9.47pp
+- Walk-forward accuracy (51.3%) barely above random chance
+- The regime detection infrastructure (GMM + features) is sound and reusable, but the signal-to-trade mapping needs fundamental redesign
+
 **TODO:**
-- [ ] Notebook experiment (notebooks/experiments/microstructure_regime_detection.ipynb)
-- [ ] Backtest via BacktestRunner + compare to SMA baseline
-- [ ] Update RESEARCH_LOG.md with results
-- [ ] Evaluate: keep/discard based on metrics
-- [ ] Continue to next proposal or new ideation round
+- [ ] Update RESEARCH_LOG.md with T1 results + DISCARD verdict
+- [ ] Continue to next proposal from Round 3 ideation (T2 or new ideation round)
+- [ ] New session needed for AGENTS.md fixes to take effect (exec syntax, mandatory sentinel)
 
 **Pipeline improvements since Round 2:**
 - Memory config fixed (correct Zod schema for v2026.3.2)
