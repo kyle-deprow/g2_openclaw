@@ -163,7 +163,49 @@ LOOP (until goal met or user interrupts):
     - Write to memory/YYYY-MM-DD.md: strategy name, outcome, Sharpe, what worked/failed
     - If SIGNIFICANT KEEP or STRONG KEEP → update MEMORY.md with the strategy as a milestone
 
-  Phase 7 — CONTINUE (autonomous progression)
+  Phase 7 — REFLECT (after every 3 implementations or end of research round)
+    This phase runs after implementing 3 strategies from a round OR when all proposals are done.
+
+    a) Pattern analysis — read RESEARCH_LOG.md and extract:
+       - Success rate: how many KEEPs vs DISCARDs vs CRASHes?
+       - Did high-ranked proposals actually perform better than low-ranked ones?
+       - Which agent source (contrarian/explorer/theorist) produced the best ideas?
+       - Which model types worked (tree-based, Bayesian, HMM, etc.)?
+       - Which feature categories drove success (sentiment, volume, price patterns)?
+
+    b) Copilot session forensics — for each CRASH or bad DISCARD:
+       - Read the Copilot session log: `exec bash command:"ls -t /home/dev/.copilot/session-state/ | head -10"`
+       - Check: did Copilot misunderstand the prompt? Use wrong data services? Skip tests?
+       - Identify repeating failure patterns (e.g., "always imports wrong module", "forgets walk-forward")
+
+    c) Scaffolding update — if patterns found in (b):
+       Delegate to Copilot to update the scaffolding:
+       ```
+       exec bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"
+         Read .github/copilot-instructions.md and .github/agents/.
+         Based on these observed failure patterns: <patterns from b>
+         Update the instructions to prevent these. Add specific warnings, examples, or rules.
+         Also check if any agent file is stale or never triggered — remove it if so.
+         Keep it lean. Run git diff to show what changed.
+       \" --yolo --model claude-opus-4.6 --no-auto-update"
+       ```
+
+    d) Research quality adjustment — write to memory:
+       - If high-ranked proposals consistently underperform: note that scoring weights may need adjustment
+       - If one agent source dominates successes: note to weight that source higher next round
+       - If a model type consistently fails: add it to the avoid list for next ideation prompt
+
+    e) Write a reflection note to memory/YYYY-MM-DD.md:
+       ```
+       ## Reflection (after N implementations)
+       - Success rate: X/N kept, Y discarded, Z crashed
+       - Best source: <agent> (N/M kept)
+       - Best model type: <type>
+       - Scaffolding updated: yes/no (what changed)
+       - Next round adjustments: <what to emphasize/avoid>
+       ```
+
+  Phase 8 — CONTINUE (autonomous progression)
     Do NOT stop. Do NOT ask "should I continue?" Just continue.
 
     Decision tree:
@@ -174,7 +216,8 @@ LOOP (until goal met or user interrupts):
     c) Current strategy was DISCARD?
        → Move to next ranked proposal from RESEARCH_LOG.md
     d) All proposals from current research round implemented?
-       → Run Phase 2 again for a new ideation round with updated context
+       → Run Phase 7 REFLECT first, then Phase 2 for new ideation with updated context
+       → Include reflection insights in the next researcher prompt
     e) Goal met (Sharpe > 1.5 sustained across walk-forward)?
        → Post [TASK:complete], print final summary, stop
 

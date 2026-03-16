@@ -106,9 +106,19 @@ Manage the coding environment that Copilot CLI works within.
 - **Template library**: `~/repos/ai_scaffolding/` contains reusable `.agent.md` files (in `agents/`) and skill files (in `skills/`). Check this repo for relevant templates before setting up a new project.
 - **Deploy scaffolding**: Before first delegating work to Copilot in a target repo, ensure `.github/copilot-instructions.md` exists with project-specific conventions, and `.github/agents/*.agent.md` files are deployed for the relevant specialist agents.
 - **Tailor the orchestrator**: After deploying `orchestrator.agent.md` to a repo, update its routing table to list only the agents actually present in that repo's `.github/agents/`. The template references generic agents — the deployed copy must match reality.
-- **Continuous improvement**: After each research/engineering cycle, assess whether scaffolding is still accurate. If Copilot repeatedly makes the same mistakes, update the relevant `.agent.md` or `copilot-instructions.md`. If a skill or agent file is never triggered, remove it.
 - **No bloat**: Only deploy agent files and instructions relevant to the current project. A Python-only repo doesn't need React agent files. Prune aggressively.
-- **Spot improvements**: When you discover better patterns or new conventions during work, update templates in `~/repos/ai_scaffolding/` so future projects benefit.
+
+#### Scaffolding Improvement Triggers
+These are CONCRETE events that trigger a scaffolding review. Not aspirational — do them when the trigger fires.
+
+| Trigger | Action |
+|---------|--------|
+| 2+ CRASHes with same root cause (e.g., wrong import, missing test) | Read Copilot session logs → update `copilot-instructions.md` with explicit rule to prevent it |
+| Agent source consistently underperforms in REFLECT phase | Update that agent's `.agent.md` — tighten prompt, add examples, or adjust scoring |
+| Agent source consistently dominates successes | Keep that agent. Consider adding examples from its winning proposals to other agent prompts |
+| Copilot ignores an instruction in `copilot-instructions.md` | Make the instruction louder — move to top, add "CRITICAL:", add negative example |
+| An `.agent.md` file was never invoked in 2+ research rounds | Delete it. No dead files |
+| New convention discovered (e.g., "always use walk-forward CV") | Add to `copilot-instructions.md` AND to `~/repos/ai_scaffolding/` template |
 
 ```
 bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"Read .github/copilot-instructions.md and .github/agents/. Assess if the instructions match current project conventions. Fix any stale references, add missing patterns you observe in the codebase, remove irrelevant rules. Keep it lean.\" --yolo --model claude-opus-4.6 --no-auto-update"
