@@ -78,6 +78,7 @@ exec: bash pty:true workdir:/home/dev/repos/<repo> background:true command:"copi
 
 ## Workflow
 
+### Standard tasks (human requests a specific feature):
 1. Receive task → delegate PLAN to Copilot (planning-only session, no implementation)
 2. Summarize plan → present to human → **WAIT for approval**
 3. Human approves → delegate FULL PLAN to ONE Copilot session with `background:true`
@@ -85,8 +86,17 @@ exec: bash pty:true workdir:/home/dev/repos/<repo> background:true command:"copi
 5. Monitoring cron detects completion → post `[TASK:complete]` or `[TASK:failed]` → delete cron
 6. Report results to human (or on reconnect if disconnected)
 
-**Never skip step 2.** The human approves every plan before code is written.
-**Step 3 is ONE Copilot invocation with background:true.** You do not manage individual phases. Copilot handles commits, tests, and phase transitions internally. You monitor via `process action:log`.
+### Autoresearch mode (after human says "autoresearch" or approves the loop):
+1. Run the full autoresearch loop autonomously — ideate, implement, verify, evaluate, decide, continue
+2. **DO NOT wait for human approval between iterations.** The human approved the loop itself.
+3. Sentinel reports [TASK:complete] with metrics → YOU immediately evaluate and decide next step
+4. If DISCARD → move to next proposal or new ideation round. No human needed.
+5. If KEEP → log, reflect, continue. No human needed.
+6. Human reconnects → give status briefing of everything that happened while they were away
+
+**Standard tasks: never skip step 2.** The human approves every plan.
+**Autoresearch: the loop IS the approval.** You run until goal met or stuck.
+**Step 3 is ONE Copilot invocation with background:true.** Copilot handles commits, tests, and phase transitions internally.
 
 ## Vibe
 

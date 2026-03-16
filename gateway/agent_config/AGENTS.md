@@ -92,7 +92,7 @@ exec(command: "pty:true workdir:/foo copilot ...")
 
 ### Copilot Process Sentinel (two-stage cron)
 
-Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only checks `ps -p PID` — it does NOT reason about results. When Copilot exits, the sentinel does a lightweight result check (git log + pytest summary), posts `[TASK:complete]`, and deletes itself. Full evaluation happens when the main agent (GPT-5.4) processes the completion.
+Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only checks `ps -p PID` — it does NOT reason about results. When Copilot exits, the sentinel captures: git log, test summary, AND notebook backtest metrics. This is critical — without metrics, you cannot evaluate the strategy.
 
 Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
 
@@ -102,14 +102,34 @@ Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
 If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run: exec bash command:\"cd <REPO_PATH> && git log --oneline -3 && echo '---' && uv run pytest -q --tb=line 2>&1 | tail -5\"
-Respond: '[TASK:complete] Copilot PID <PID> exited. Results: <git log summary>, <test summary>'. Delete this cron with cron_delete. STOP."
+If EXITED → run THREE commands:
+  exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
+  exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
+  exec bash command:\"cd <REPO_PATH> && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
+Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete this cron with cron_delete. STOP."
 ```
 
 **Why this works:**
 - **Alive ticks (~90% of calls):** Mini model, ~$0.001 per tick. One `ps` command + "alive" response.
-- **Exit tick (1 call):** Mini model, ~$0.01. Runs git log + pytest, formats summary. No reasoning needed.
-- **Full evaluation:** Happens in the **main agent's next turn** (GPT-5.4) when it reads the [TASK:complete] status.
+- **Exit tick (1 call):** Mini model, ~$0.01. Runs git log + pytest + notebook metric extraction. No reasoning needed.
+- **Full evaluation:** Happens in the **main agent's next turn** (GPT-5.4) when it reads the [TASK:complete] status with metrics included.
+
+### Autonomous Post-Completion Evaluation
+
+**When you receive a [TASK:complete] from the sentinel — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop:
+
+1. **Parse the metrics** from the sentinel's [TASK:complete] message (Sharpe, accuracy, drawdown, return, trade count)
+2. **Run Phase 4 VERIFY** — if the notebook wasn't executed, execute it now. Extract all metrics.
+3. **Run Phase 5 DECIDE** — apply the hard thresholds from the autoresearch skill (Sharpe > -0.5? > 0.5? > 1.0? Max DD < 30%?)
+4. **Run Phase 6 LOG** — record results in RESEARCH_LOG.md and memory
+5. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
+6. **Run Phase 8 CONTINUE** — pick next action autonomously:
+   - KEEP with low Sharpe → try feature iteration
+   - DISCARD → move to next proposal from RESEARCH_LOG.md
+   - All proposals exhausted → new ideation round with updated context
+   - Goal met → post [TASK:complete] final summary
+
+**This is non-negotiable.** The human connected to steer, not to babysit each evaluation. If strategies are failing, YOU decide to iterate, scrap, or pivot. The human will see results on reconnect.
 
 ### Sentinel rules
 - **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes the sentinel cheap.

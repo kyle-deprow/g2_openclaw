@@ -155,27 +155,27 @@ LOOP (until goal met or user interrupts):
 
     Wait for completion via process action:log
 
-  Phase 4 — VERIFY (mechanical backtest)
-    After Copilot commits, verify THREE things:
+  Phase 4 — VERIFY (mechanical backtest — run IMMEDIATELY after sentinel reports completion)
+    **DO NOT WAIT FOR HUMAN.** The sentinel's [TASK:complete] includes metrics. Parse them first.
+    If metrics are present → use them directly for Phase 5.
+    If metrics are missing or insufficient → run these checks yourself:
 
     a) Tests pass:
     exec bash pty:true workdir:<repo> command:"uv run pytest -q --tb=short --ignore=tests/integration 2>&1 | tail -10"
 
     b) Notebook exists and executes:
-    exec bash pty:true workdir:<repo> command:"ls notebooks/experiments/<strategy_name>.ipynb && uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb --timeout=300 2>&1 | tail -20"
+    exec bash pty:true workdir:<repo> command:"ls notebooks/experiments/<strategy_name>.ipynb && uv run jupyter nbconvert --execute --inplace --ExecutePreprocessor.timeout=300 notebooks/experiments/<strategy_name>.ipynb 2>&1 | tail -20"
     If the notebook doesn't exist → CRASH.
     If the notebook fails to execute → CRASH (attempt fix, max 3 tries).
 
-    c) Extract metrics from notebook output (or run backtest directly):
-    exec bash pty:true workdir:<repo> command:"uv run python -c \"
-      from quantipy.backtesting.runner import BacktestRunner
-      # Run the new strategy and the baseline, print Sharpe, drawdown, win rate
-    \" 2>&1"
+    c) Extract metrics from notebook output:
+    exec bash workdir:<repo> command:"python3 -c \"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\" 2>&1 | tail -30"
 
-    Extract metrics: Sharpe ratio, max drawdown, win rate, profit factor.
+    Extract: Sharpe ratio, max drawdown, win rate, total return, trade count, OOS accuracy.
     If the strategy can't be backtested yet (missing data, import errors), treat as CRASH.
 
-  Phase 5 — DECIDE (against thresholds)
+  Phase 5 — DECIDE (against thresholds — autonomous, no human input)
+    **You make this decision. Not the human.**
     Hard thresholds for quant strategies:
     - Tests pass? If no → CRASH (attempt fix, max 3 tries, then revert)
     - Sharpe > -0.5? If no → DISCARD (too bad to keep)
@@ -242,10 +242,10 @@ LOOP (until goal met or user interrupts):
        - Next round adjustments: <what to emphasize/avoid>
        ```
 
-  Phase 8 — CONTINUE (autonomous progression)
-    Do NOT stop. Do NOT ask "should I continue?" Just continue.
+  Phase 8 — CONTINUE (autonomous progression — NO HUMAN INPUT NEEDED)
+    Do NOT stop. Do NOT ask "should I continue?" Do NOT wait for the human. Just continue.
 
-    Decision tree:
+    Decision tree (you decide, not the human):
     a) Current strategy was KEEP and Sharpe < 1.0?
        → Try optimizing: feature iteration, hyperparameter tuning, ensemble with prior keeps
     b) Current strategy was STRONG KEEP (Sharpe > 1.0)?
@@ -360,8 +360,11 @@ Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
 If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run: exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3 && echo '---' && uv run pytest -q --tb=line 2>&1 | tail -5\"
-Respond: '[TASK:complete] Copilot PID <PID> exited. Results: <git log summary>, <test summary>'. Delete this cron with cron_delete. STOP."
+If EXITED → run THREE commands:
+  exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3\"
+  exec bash command:\"cd /home/dev/repos/quantipy && uv run pytest -q --tb=line 2>&1 | tail -5\"
+  exec bash command:\"cd /home/dev/repos/quantipy && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
+Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete this cron with cron_delete. STOP."
 ```
 
 **Sentinel design (two-stage cost optimization):**
