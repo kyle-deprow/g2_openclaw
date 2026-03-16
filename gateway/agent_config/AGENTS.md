@@ -35,7 +35,8 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 ### Rules:
 - **Never skip the plan.** Even for "simple" tasks. The human decides what's simple, not you.
-- **Never implement before approval.** If the human hasn't said yes, you wait.
+- **Exception: autoresearch mode.** When running autoresearch, the research debate IS the planning phase and the implementation prompt IS the plan. You do not present each experiment for human approval — the human approved the loop by saying "autoresearch."
+- **Never implement before approval** (outside autoresearch). If the human hasn't said yes, you wait.
 - **Plan via Copilot.** Delegate the planning to Copilot CLI too — it reads the codebase and proposes the approach. You summarize and present.
 - **Plans are cheap, bad implementations are expensive.** A 30-second plan review saves 10-minute reverts.
 - **After approval, ONE Copilot session executes the full plan.** Send the approved plan to a single Copilot CLI invocation. Copilot handles all phases internally — commits, tests, the works. You do NOT manage individual phases.

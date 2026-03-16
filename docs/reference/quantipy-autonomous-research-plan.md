@@ -1,7 +1,7 @@
 # Quantipy → Autonomous Research Sandbox — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-15 (Memory fix, Round 3 autoresearch ML upgrade)
+**Last Updated:** 2026-03-16 (Repo revert, Round 3 intraday focus)
 
 ## Critical Rule
 
@@ -65,8 +65,10 @@ Copilot CLI (--yolo --agent orchestrator --model claude-opus-4.6)
 | Memory | Durable memory for cross-session context | **DONE** |
 | ML Agents | Upgrade research agents to enforce ML minimum complexity | **DONE** |
 | Autoresearch R1 | First research round — rule-based proposals (disappointing) | **DONE** |
-| Autoresearch R2 | Second research round — ML-grade proposals | **DONE** |
-| Implementation | Build winning strategy (C2: Adversarial Sentiment Crowding) | **NEXT** |
+| Autoresearch R2 | Second research round — ML-grade proposals (not intraday-focused) | **DONE (archived)** |
+| Repo Revert | Quantipy restored to full complexity (API, Docker, Airflow) | **DONE** |
+| Intraday Focus | Agent config updated for intraday-only strategies | **DONE** |
+| Autoresearch R3 | Intraday ML strategies — research debate + implementation | **NEXT** |
 
 ---
 
@@ -276,21 +278,31 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 
 ---
 
-## Next Step — Implementation Round
+## Next Step — Intraday Research Round 3
 
-**Goal:** Tell OpenClaw to implement C2 (Adversarial Sentiment Crowding Detector) in quantipy.
+**Goal:** Fully autonomous intraday strategy research + implementation loop.
 
-**What OpenClaw needs to do:**
-1. Create `src/quantipy/alpha/` module with IsolationForest crowding detector + XGBoost classifier
-2. Build 18-dim feature engineering pipeline using existing data services
-3. Wire to backtesting engine (BacktestRunner) for walk-forward validation
-4. Add scikit-learn + xgboost dependencies
-5. Write tests, backtest against SMA crossover baseline
-6. Report metrics: Sharpe, max drawdown, win rate, profit factor
+**What changed:**
+1. Quantipy reverted to full complexity (commit f2b9933) — API, Docker, Airflow restored. 939 tests pass.
+2. Round 2 proposals archived — they weren't intraday-focused.
+3. Agent config updated: SOUL.md (intraday identity), BOOTSTRAP.md (intraday focus section), SKILL.md (intraday constraints in researcher/orchestrator prompts), AGENTS.md (planning gate exemption for autoresearch).
+4. RESEARCH_LOG.md reset for Round 3 with intraday focus.
 
-**Pipeline improvements needed for full autonomy:**
-1. ~~Memory~~ — DONE
-2. **Experiment tracking** — OpenClaw needs to log strategy results to memory (metrics, what worked, what failed)
-3. **Autonomous iteration loop** — After implementing C2, OpenClaw should evaluate results and decide next strategy without human
-4. **Rejection/retry** — If backtest fails minimum Sharpe, auto-iterate on features/params
-5. **Strategy comparison** — Maintain leaderboard of tested strategies in MEMORY.md
+**What OpenClaw will do when activated:**
+1. Read RESEARCH_LOG.md — see Round 3 PENDING, no unimplemented proposals
+2. Phase 2 IDEATE — delegate to Copilot researcher with intraday constraints
+3. Researcher runs debate: contrarian/explorer/theorist propose 6-9 intraday ML strategies
+4. OpenClaw picks winner, writes all ranked proposals to RESEARCH_LOG.md
+5. Phase 3 IMPLEMENT — delegate to Copilot orchestrator (background:true)
+6. Phase 4-5 VERIFY + DECIDE — tests, backtest metrics, keep/discard
+7. Phase 6-7 LOG + REFLECT — record results, update scaffolding if needed
+8. Phase 8 CONTINUE — next proposal or new ideation round
+
+**Activation:** Send "autoresearch" via G2/simulator. OpenClaw runs autonomously from there.
+
+**Pipeline improvements since Round 2:**
+- Memory config fixed (correct Zod schema for v2026.3.2)
+- Reflection hooks (Phase 7 REFLECT with pattern analysis + scaffolding updates)
+- Notebook enforcement (mandatory Jupyter output for every experiment)
+- Planning gate exemption (no human approval during autoresearch loop)
+- Intraday constraints injected at every delegation point

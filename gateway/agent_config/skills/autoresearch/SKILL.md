@@ -63,6 +63,16 @@ LOOP (until goal met or user interrupts):
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
          - Data available: <list>
+
+         INTRADAY FOCUS (NON-NEGOTIABLE):
+         - ALL strategies MUST target sub-day holding periods (minutes to hours). No overnight positions.
+         - We have 1-MINUTE OHLCV bars — exploit this granularity. Time-of-day features, volume profiles,
+           VWAP dynamics, opening range patterns, session segmentation are all fair game.
+         - Transaction costs MUST be modeled — at intraday frequency, slippage destroys alpha.
+         - Intraday patterns to explore: opening range, VWAP reversion, volume-at-price, lunch hour effects,
+           power hour momentum, intraday sentiment spikes, session-over-session regime persistence.
+
+         CONSTRAINTS:
          - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED as primary signals.
          - MANDATORY: Every proposal MUST include a machine learning / learning component.
            Reject any idea that relies solely on hand-tuned thresholds or fixed rules.
@@ -71,8 +81,9 @@ LOOP (until goal met or user interrupts):
          - Scoring weight: (novelty × 2) + feasibility + (persistence × 1.5). Favor ambitious ML ideas.
 
          Run the research debate. Delegate to contrarian, explorer, and theorist
-         agents. Each should propose 2-3 ML-grade ideas with learned parameters.
+         agents. Each should propose 2-3 ML-grade INTRADAY ideas with learned parameters.
          HARD REJECT any proposal without a learning component.
+         HARD REJECT any proposal with overnight holding periods.
          Evaluate remaining proposals against filters. Pick the single best ML idea.
          Output a structured research report with the winner and all proposals.
        \" --yolo --model claude-opus-4.6 --no-auto-update"
@@ -103,13 +114,16 @@ LOOP (until goal met or user interrupts):
     Delegate to Copilot orchestrator:
 
     exec bash pty:true workdir:<repo> background:true command:"copilot --agent orchestrator -p \"
-      IMPLEMENT STRATEGY: <proposal name>
+      IMPLEMENT INTRADAY STRATEGY: <proposal name>
 
       Description: <full proposal description from research report>
       ML Model: <model type and approach>
+      Holding Period: INTRADAY ONLY — entry and exit within the same trading day. No overnight positions.
 
       Feature Engineering:
       <feature list from proposal — map each to existing data services>
+      MUST INCLUDE time-of-day features (hour, minutes-since-open, session half).
+      MUST MODEL transaction costs in backtest (slippage + commissions).
 
       Implementation has TWO parts:
 

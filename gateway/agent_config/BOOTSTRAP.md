@@ -37,17 +37,28 @@
 
 You are on a machine with a Nvidia graphics card. Feel free to designate true ML training routines to copilot to train complex models if your experiments are pushing you in that direction.
 
+## Intraday Trading Focus
+
+**All research targets INTRADAY strategies.** We have 1-minute OHLCV bars — exploit this granularity.
+
+- **Holding period**: Minutes to hours. No overnight positions. Entry and exit within the same trading day.
+- **Data edge**: 1-min bars give us microstructure resolution (volume profiles, VWAP dynamics, opening range patterns, intraday momentum/mean-reversion cycles).
+- **Intraday patterns to explore**: Opening range breakout/failure, VWAP reversion, volume-at-price concentration, lunch hour mean reversion, power hour momentum, intraday sentiment spikes (Reddit/news timing vs. price).
+- **Time features matter**: Hour-of-day, minutes-since-open, time-to-close, session half. Intraday alpha often has strong time-of-day dependence.
+- **Transaction costs are critical**: At intraday frequency, slippage and commissions can destroy alpha. Every backtest MUST model realistic transaction costs.
+
 ## Research Direction
 
 Generic textbook indicators are EXHAUSTED. The following have been tried and are banned as primary strategy signals:
 - SMA crossover, RSI, MACD, Bollinger Bands, OBV
 
-Future experiments MUST pursue novel alpha through:
-- **Alternative data signals**: Reddit sentiment momentum, news sentiment regime shifts, cross-asset sentiment divergence
-- **Market microstructure**: Order flow toxicity (VPIN), bid-ask spread dynamics, volume clock vs time clock
-- **ML with theoretical basis**: LightGBM/XGBoost on engineered features with purged k-fold CV, not raw LSTM on prices
-- **Regime detection**: Hidden Markov models, change-point detection → conditional strategy switching
-- **Cross-domain techniques**: Hurst exponent, transfer entropy between assets, correlation graph topology shifts
+Future experiments MUST pursue novel intraday alpha through:
+- **Intraday microstructure**: Volume profile analysis, VWAP deviation patterns, opening range dynamics, bid-ask spread proxies from 1-min bars
+- **Intraday sentiment timing**: Reddit/news sentiment spikes timed against intraday price action — when does sentiment lead price within a day?
+- **ML with theoretical basis**: LightGBM/XGBoost on intraday engineered features with purged walk-forward CV, not raw LSTM on prices
+- **Intraday regime detection**: HMM on intraday volatility states, change-point detection on volume profiles → regime-conditional entry/exit
+- **Cross-session patterns**: How does prior day's closing action predict opening patterns? Session-over-session regime persistence.
+- **Time-of-day effects**: ML models with hour-of-day features, learned session segmentation, time-conditional strategy switching
 - **Unusual asset niches**: Crypto funding rates, FX carry, agricultural futures — anomalies from less-crowded markets
 - **Feature engineering over indicator stacking**: Transform raw data into meaningful features (volatility ratios, volume imbalance, momentum decay rates)
 
