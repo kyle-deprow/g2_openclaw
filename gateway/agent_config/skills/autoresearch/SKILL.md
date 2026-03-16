@@ -1,14 +1,16 @@
 ---
 name: autoresearch
 description: Autonomous research loop with Copilot-based multi-agent ideation. PM delegates research debate to Copilot researcher agent, selects winner, delegates implementation to Copilot orchestrator, measures, keeps/reverts. Cron-driven self-continuation.
-version: 4.0.0
+version: 5.0.0
 ---
 
-# Autoresearch — Autonomous Iteration Protocol v4
+# Autoresearch — Autonomous Iteration Protocol v5
 
 **Behavioral mode with Copilot-based research agents.** The PM agent orchestrates an iterative research loop. Novel experiment ideas come from delegating to the Copilot `researcher` agent, which orchestrates a structured debate among `contrarian`, `explorer`, and `theorist` agents. The PM evaluates the winning idea and delegates implementation to the Copilot `orchestrator` agent.
 
 **EXECUTION MODEL:** You (the PM agent) run this loop in YOUR turn using your own tools. Phases 1, 6, 7 use `read`, `write`, `exec`, `memory_search` directly. Phase 2 (ideation) delegates to Copilot `--agent researcher`. Phase 3 (implementation) delegates to Copilot `--agent orchestrator`. Both run in background via `exec bash pty:true background:true`. Do NOT wrap the entire loop in a single `exec copilot` call.
+
+**AUTONOMOUS BY DEFAULT:** Once activated, you run the full loop without waiting for human approval at each step. The human steers with high-level direction ("autoresearch", "focus on sentiment", "try HMM approaches") and disconnects. You continue working.
 
 ## When to Activate
 
@@ -37,10 +39,13 @@ LOOP (until goal met or user interrupts):
 
   Phase 1 — REVIEW (build situational awareness)
     - Read current state of in-scope files
-    - Read last 10-20 entries from experiment log
+    - Read last 10-20 entries from experiment log (RESEARCH_LOG.md)
     - Run: git log --oneline -20
-    - Run: memory_search for related past experiments
+    - Run: memory_search for related past experiments AND prior research rounds
     - Identify: what worked, what failed, what's untried
+    - Check: do we have UNIMPLEMENTED proposals from a prior research round?
+      If yes → skip Phase 2, go straight to Phase 3 with the top-ranked unimplemented proposal.
+      If no → proceed to Phase 2 for new ideation.
 
   Phase 2 — IDEATE (Copilot research agents)
     Delegate the entire research debate to Copilot's researcher agent:
@@ -74,41 +79,106 @@ LOOP (until goal met or user interrupts):
 
     c) Wait for completion via process action:log
     d) Read the research report from the session output
-    e) Extract the winning idea
-    f) Write the winning idea to the shared experiment log before proceeding
+    e) Extract the winning idea AND the full ranked list (all proposals with scores)
+    f) Write ALL proposals (ranked, with scores) to RESEARCH_LOG.md and memory
+       This is your implementation queue — you'll work through them in order.
 
-  Phase 3 — MODIFY (one atomic change)
-    Delegate implementation to Copilot orchestrator:
+  Phase 3 — IMPLEMENT (Copilot orchestrator — quantitative strategy)
+    Pick the top-ranked UNIMPLEMENTED proposal from RESEARCH_LOG.md.
+
+    Build a detailed implementation prompt that includes:
+    - The proposal name, description, and ML model type
+    - Feature engineering pipeline: raw data → features → model input
+    - Which existing data services to use (PriceDataService, NewsSentimentService, etc.)
+    - Model training approach (walk-forward, cross-validation, etc.)
+    - Where to put the code: src/quantipy/alpha/<strategy_name>/
+    - Backtest requirements: use BacktestRunner, compare vs SMA crossover baseline
+    - Test requirements: pytest, all existing tests must still pass
+    - Dependencies: only add deps already in the stack (scikit-learn, xgboost, etc.) or lightweight
+
+    Delegate to Copilot orchestrator:
 
     exec bash pty:true workdir:<repo> background:true command:"copilot --agent orchestrator -p \"
-      Implement this experiment: <winning idea from Phase 2>
-      Affected files: <list>
-      Test command: <command>
-      One focused change. Run tests after. Commit with message 'experiment: <description>'.
+      IMPLEMENT STRATEGY: <proposal name>
+
+      Description: <full proposal description from research report>
+      ML Model: <model type and approach>
+
+      Feature Engineering:
+      <feature list from proposal — map each to existing data services>
+
+      Implementation:
+      - Create src/quantipy/alpha/<strategy_name>/ with:
+        - features.py — feature extraction pipeline using existing data services
+        - model.py — ML model training and prediction (scikit-learn/xgboost)
+        - strategy.py — QuantiPyStrategy subclass that wraps the model for backtesting
+      - Wire to BacktestRunner for walk-forward validation
+      - Walk-forward: 8-week train, 1-week validate, 7-day embargo, roll 52x
+      - Compare Sharpe ratio to SMA crossover baseline
+
+      Tests: write unit tests in tests/unit/alpha/test_<strategy_name>.py
+      After: run uv run pytest -q --tb=short --ignore=tests/integration
+      All existing tests MUST still pass.
+      Commit with message: 'experiment: <strategy_name> — <one-line description>'
     \" --yolo --model claude-opus-4.6 --no-auto-update"
 
     Wait for completion via process action:log
 
-  Phase 4 — VERIFY (mechanical only)
-    - exec: run the verification command (tests, benchmark, backtest)
-    - Extract the metric number from output
-    - Timeout: if verification exceeds 2x normal time, stop and treat as crash
+  Phase 4 — VERIFY (mechanical backtest)
+    After Copilot commits, run the backtest yourself:
 
-  Phase 5 — DECIDE (no ambiguity)
-    - IMPROVED → keep commit, status = "keep"
-    - SAME/WORSE → exec: git reset --hard HEAD~1, status = "discard"
-    - CRASHED → attempt fix (max 3 tries), else revert, status = "crash"
-    - Simplicity override: barely improved + complex → discard.
-      Unchanged metric + simpler code → keep.
+    exec bash pty:true workdir:<repo> command:"uv run pytest -q --tb=short --ignore=tests/integration 2>&1 | tail -10"
+
+    Then run the actual backtest to get metrics:
+    exec bash pty:true workdir:<repo> command:"uv run python -c \"
+      from quantipy.backtesting.runner import BacktestRunner
+      # Run the new strategy and the baseline, print Sharpe, drawdown, win rate
+    \" 2>&1"
+
+    Extract metrics: Sharpe ratio, max drawdown, win rate, profit factor.
+    If the strategy can't be backtested yet (missing data, import errors), treat as CRASH.
+
+  Phase 5 — DECIDE (against thresholds)
+    Hard thresholds for quant strategies:
+    - Tests pass? If no → CRASH (attempt fix, max 3 tries, then revert)
+    - Sharpe > -0.5? If no → DISCARD (too bad to keep)
+    - Sharpe > SMA baseline? If yes → KEEP (improvement)
+    - Sharpe > 0.5? → SIGNIFICANT KEEP (flag as promising)
+    - Sharpe > 1.0? → STRONG KEEP (prioritize for further optimization)
+    - Max drawdown < 30%? If no → DISCARD regardless of Sharpe
+
+    Decision:
+    - KEEP / SIGNIFICANT KEEP → keep commit, record metrics, mark strategy as "implemented" in RESEARCH_LOG.md
+    - DISCARD → git revert HEAD, record why, consider: can features be improved?
+      If the model architecture is sound but features are weak, try ONE feature iteration before moving on.
+    - CRASH → attempt fix (max 3 tries), else revert. Mark as "crashed" in RESEARCH_LOG.md.
+
+    After DISCARD with decent architecture (Sharpe > -1.0):
+    - Try one feature engineering iteration: add/remove features, retrain, retest
+    - If still DISCARD after feature iteration → move to next proposal
 
   Phase 6 — LOG
     - Append to experiments.jsonl (see Results Logging below)
-    - If meaningful finding → write insight to MEMORY.md
-    - Print one-line status every ~5 iterations
+    - Update RESEARCH_LOG.md: mark strategy status (implemented/discarded/crashed) with metrics
+    - Write to memory/YYYY-MM-DD.md: strategy name, outcome, Sharpe, what worked/failed
+    - If SIGNIFICANT KEEP or STRONG KEEP → update MEMORY.md with the strategy as a milestone
 
-  Phase 7 — REPEAT
-    - Go to Phase 1. Do NOT stop. Do NOT ask "should I continue?"
-    - If goal achieved → print final summary and stop
+  Phase 7 — CONTINUE (autonomous progression)
+    Do NOT stop. Do NOT ask "should I continue?" Just continue.
+
+    Decision tree:
+    a) Current strategy was KEEP and Sharpe < 1.0?
+       → Try optimizing: feature iteration, hyperparameter tuning, ensemble with prior keeps
+    b) Current strategy was STRONG KEEP (Sharpe > 1.0)?
+       → Move to next proposal. Log this as a "significant alpha candidate."
+    c) Current strategy was DISCARD?
+       → Move to next ranked proposal from RESEARCH_LOG.md
+    d) All proposals from current research round implemented?
+       → Run Phase 2 again for a new ideation round with updated context
+    e) Goal met (Sharpe > 1.5 sustained across walk-forward)?
+       → Post [TASK:complete], print final summary, stop
+
+    Go to Phase 1.
 ```
 
 ## Critical Rules

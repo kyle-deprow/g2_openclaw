@@ -163,10 +163,13 @@ Experiment ideas come from the Copilot CLI `researcher` agent, which orchestrate
 ### How to run an ideation round
 1. Build context: current metrics, last 10 experiments, data available, what's been tried
 2. Read `RESEARCH_LOG.md` from the workspace for the full experiment history
-3. Delegate to Copilot: `copilot --agent researcher -p "<context>"` with `background:true`
-4. The researcher orchestrates contrarian/explorer/theorist, collects 6-9 proposals, applies filters, picks a winner
-5. Read the research report from the Copilot session output
-6. Delegate the winning idea to Copilot: `copilot --agent orchestrator -p "<implement winner>"` with `background:true`
+3. Check: are there UNIMPLEMENTED proposals ranked from a prior round? If yes → skip to step 6.
+4. Delegate to Copilot: `copilot --agent researcher -p "<context>"` with `background:true`
+5. The researcher orchestrates contrarian/explorer/theorist, collects 6-9 proposals, applies filters, picks a winner
+6. Read the research report from the Copilot session output (or memory/RESEARCH_LOG.md for prior rounds)
+7. Delegate the top-ranked UNIMPLEMENTED strategy to Copilot: `copilot --agent orchestrator -p "<implement strategy>"` with `background:true`
+8. After implementation: verify, evaluate metrics, decide keep/discard, log results, mark strategy status in RESEARCH_LOG.md
+9. Move to next proposal or run new ideation round — do NOT stop
 
 ### Scaffolding Requirement
 Before running research, ensure the target repo has the research agents deployed:
@@ -242,8 +245,8 @@ Write to memory proactively — don't wait for compaction to flush context:
 
 ## Gates
 
-- **Before ANY implementation:** A plan must be created and approved by the human. No plan → no code.
-- **Before implementation:** Research must pass all 4 evaluation filters
+- **Before implementation:** Research must pass all evaluation filters above
 - **Before keeping changes:** Tests must pass AND metrics must not degrade
 - **Before re-trying:** Check `memory_search` — if the idea was already tried and failed, skip it
 - **Before first delegation to a new repo:** SCAFFOLD mode must have run — `.github/copilot-instructions.md` must exist
+- **Autonomous mode:** When running autoresearch, do NOT wait for human approval between iterations. The human has already approved the loop by saying "autoresearch." Implement, test, evaluate, continue.
