@@ -43,14 +43,14 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 ### Plan delegation example:
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"Analyze the codebase and create a plan for: <task description>. Do NOT implement anything. First, search the web for open-source Python libraries that already solve this problem. Evaluate fitness. Then output: 1) OSS libraries evaluated and recommendation, 2) which files to create or modify, 3) the approach, 4) suggested phases, 5) test strategy, 6) risks. Be specific — reference actual files and patterns in the repo.\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p 'Analyze the codebase and create a plan for: <task description>. Do NOT implement anything. First, search the web for open-source Python libraries that already solve this problem. Evaluate fitness. Then output: 1) OSS libraries evaluated and recommendation, 2) which files to create or modify, 3) the approach, 4) suggested phases, 5) test strategy, 6) risks. Be specific — reference actual files and patterns in the repo.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 After receiving the plan from Copilot, summarize it for the human and wait.
 
 ### Implementation delegation example (after human approval):
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"Execute this approved plan: <paste full plan here>. Implement all phases. Run uv run pytest after each phase. Commit after each phase if tests pass. If tests fail, fix them (max 3 attempts per phase). If unfixable, revert that phase and skip to the next.\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p 'Execute this approved plan: <paste full plan here>. Implement all phases. Run uv run pytest after each phase. Commit after each phase if tests pass. If tests fail, fix them (max 3 attempts per phase). If unfixable, revert that phase and skip to the next.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 This is ONE session. Copilot handles all phases autonomously. You wait for it to finish, then report results to the human.
@@ -59,19 +59,32 @@ This is ONE session. Copilot handles all phases autonomously. You wait for it to
 
 For Copilot sessions expected to run >2 minutes (any implementation, build, or test suite), use background mode. **This is NOT optional — ALL implementation sessions MUST use background:true.**
 
-1. **Launch:** `bash pty:true workdir:/home/dev/repos/quantipy background:true command:"copilot --agent orchestrator --yolo -p \"<full plan>\" --model claude-opus-4.6 --no-auto-update"`
+1. **Launch:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
 2. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md)
-3. **Monitor:** Create a cron job (`cron_create`) to check process status every 5 minutes. Use `delivery: "none"`. Do NOT specify `execution` — default (isolated) is correct for named agents. Include the PID and expiry epoch directly in the prompt.
+3. **Monitor — MANDATORY:** Create a cron sentinel (`cron_create`) immediately after step 1. Do NOT skip this. Without the sentinel, there is no completion detection. Use the template in "Copilot Process Sentinel" below. First run `exec bash command:"echo $(( $(date +%s) + 7200 ))"` to get the expiry epoch.
 4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 6. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
 7. **Human may or may not be connected** — doesn't change the workflow.
+
+**CRITICAL: Steps 1-3 are atomic.** Launch + cron sentinel = one unit. If you launch Copilot but skip the cron, the task runs blind with no completion detection. This is the #1 autonomous loop failure mode.
 
 ### Why background mode?
 Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Background mode lets the agent:
 - Respond to the human immediately ("Task launched")
 - Handle other requests while Copilot runs
 - Monitor progress and report completion asynchronously
+
+### exec tool parameter syntax
+The `exec` tool takes NAMED PARAMETERS, not inline bash flags. Correct:
+```
+exec(command: "copilot ...", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
+```
+WRONG (will cause "command not found"):
+```
+exec(command: "pty:true workdir:/foo copilot ...")
+```
+**Never put `pty:true`, `background:true`, or `workdir:` inside the command string.** They are separate tool parameters.
 
 ### Copilot Process Sentinel (two-stage cron)
 
@@ -133,7 +146,7 @@ These are CONCRETE events that trigger a scaffolding review. Not aspirational �
 | New convention discovered (e.g., "always use walk-forward CV") | Add to `copilot-instructions.md` AND to `~/repos/ai_scaffolding/` template |
 
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"Read .github/copilot-instructions.md and .github/agents/. Assess if the instructions match current project conventions. Fix any stale references, add missing patterns you observe in the codebase, remove irrelevant rules. Keep it lean.\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Assess if the instructions match current project conventions. Fix any stale references, add missing patterns you observe in the codebase, remove irrelevant rules. Keep it lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### RESEARCH Mode
@@ -143,7 +156,7 @@ Delegate a question to Copilot CLI with web access. Always structure the prompt:
 - What to return (name, formula, data requirements, complexity, references)
 
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"Search the web for <topic>. Return: name, formula, data requirements, references.\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### ENGINEER Mode
@@ -154,12 +167,12 @@ Delegate implementation to Copilot CLI. Always structure the prompt:
 - Instruction: run `uv run pytest` after — all tests must pass
 
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"<task>. Follow pattern in <file>. Run uv run pytest after.\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p '<task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 For single-shot specialist tasks, bypass the orchestrator:
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent backend-python -p \"<narrow task>\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent backend-python -p '<narrow task>' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ## Evaluation Filters
