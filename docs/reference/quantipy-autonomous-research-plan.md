@@ -1,7 +1,7 @@
 # Quantipy → Autonomous Research Sandbox — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-16 (Two-stage cron sentinel, GPT-5-mini, Round 3 intraday focus)
+**Last Updated:** 2026-03-16 (Round 3 T1 implemented, exec syntax fix, mandatory cron reinforcement)
 
 ## Critical Rule
 
@@ -68,7 +68,7 @@ Copilot CLI (--yolo --agent orchestrator --model claude-opus-4.6)
 | Autoresearch R2 | Second research round — ML-grade proposals (not intraday-focused) | **DONE (archived)** |
 | Repo Revert | Quantipy restored to full complexity (API, Docker, Airflow) | **DONE** |
 | Intraday Focus | Agent config updated for intraday-only strategies | **DONE** |
-| Autoresearch R3 | Intraday ML strategies — research debate + implementation | **NEXT** |
+| Autoresearch R3 | Intraday ML strategies — research debate + implementation | **IN PROGRESS** |
 
 ---
 
@@ -324,6 +324,38 @@ OpenClaw's agent config (`gateway/agent_config/`) is configured for quantipy res
 8. Phase 8 CONTINUE — next proposal or new ideation round
 
 **Activation:** Send "autoresearch" via G2/simulator. OpenClaw runs autonomously from there.
+
+## Autoresearch Round 3 — IN PROGRESS
+
+**Ideation phase (completed):**
+- Copilot researcher (session `236e33a3`, PID 289036) ran structured debate
+- 21,365-char research report, 535 events
+- Winner: **T1 Microstructure Regime Detection via GMM on Volume-Price Impact Features**
+
+**T1 Implementation (completed — commit `d521ac5` in quantipy):**
+- Copilot orchestrator (PID 339530) ran ~15 minutes, clean exit
+- **1,615 LOC** across 9 files:
+  - `src/quantipy/technical_indicators/regime_detection/`: schemas.py (92), features.py (247), gmm.py (74), classifier.py (261), service.py (129), __init__.py (59)
+  - `tests/unit/test_regime_detection.py` (608 lines, 45 tests)
+  - `pyproject.toml` + `uv.lock` (scikit-learn, scipy deps)
+- **45 tests pass** in 8.76s
+- Two-stage pipeline: GMM(K=2-4, BIC selected) on 7 microstructure features → Per-regime Logistic Regression with L2 reg
+- Walk-forward CV: 20-day train, 5-day test, 5-day slide, 30-bar purged gap
+- Target: binary sign(return next 30 min), 0.02% threshold
+
+**Issues observed:**
+1. **OpenClaw skipped cron sentinel** — launched Copilot but didn't create the monitoring cron. Fixed in AGENTS.md (mandatory reinforcement).
+2. **exec pty:true syntax error** — OpenClaw put `pty:true` inside the bash command string instead of as a named parameter. Self-recovered after 2 failures. Fixed in AGENTS.md (explicit syntax guide).
+3. **LLM timeout after daemon restart** — accumulated context caused 408 timeout from Azure. Resolved by daemon restart + fresh session.
+4. **Dev API sendText was 404** — no convenience POST endpoint existed. Added `_dev/sendText` and `_dev/ttsRecord` convenience routes (commit `56e5cef`).
+5. **Gateway stale WS after daemon restart** — gateway connected to old daemon; messages silently dropped. Requires gateway restart after daemon restart.
+
+**TODO:**
+- [ ] Notebook experiment (notebooks/experiments/microstructure_regime_detection.ipynb)
+- [ ] Backtest via BacktestRunner + compare to SMA baseline
+- [ ] Update RESEARCH_LOG.md with results
+- [ ] Evaluate: keep/discard based on metrics
+- [ ] Continue to next proposal or new ideation round
 
 **Pipeline improvements since Round 2:**
 - Memory config fixed (correct Zod schema for v2026.3.2)
