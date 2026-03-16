@@ -105,6 +105,24 @@ if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
 fi
 
+# ── Propagate Azure API key to all azure-oai-* providers ─────────────────────
+# The primary azure-oai-g2 provider gets an apiKey during onboarding or from
+# the local config. Secondary Azure providers (e.g., azure-oai-g2-mini) share
+# the same Azure resource and need the same key. The Entra preload overrides
+# the key at HTTP time with a bearer token — the stored key just passes
+# OpenClaw's internal provider auth validation.
+MERGED=$(echo "${MERGED}" | jq '
+  (.models.providers // {}) as $provs |
+  ($provs | to_entries | map(select(.key | startswith("azure-oai-"))) | map(select(.value.apiKey != null and .value.apiKey != "")) | .[0].value.apiKey // null) as $azureKey |
+  if $azureKey != null then
+    .models.providers |= with_entries(
+      if (.key | startswith("azure-oai-")) and (.value.apiKey == null or .value.apiKey == "") then
+        .value.apiKey = $azureKey
+      else . end
+    )
+  else . end
+')
+
 # ── Provider selection ───────────────────────────────────────────────────────
 PROVIDER="${OPENCLAW_PROVIDER:-copilot}"
 case "${PROVIDER}" in
