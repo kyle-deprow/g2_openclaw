@@ -59,15 +59,19 @@ This is ONE session. Copilot handles all phases autonomously. You wait for it to
 
 For Copilot sessions expected to run >2 minutes (any implementation, build, or test suite), use background mode. **This is NOT optional — ALL implementation sessions MUST use background:true.**
 
-1. **Launch:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
-2. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md)
-3. **Monitor — MANDATORY:** Create a cron sentinel (`cron_create`) immediately after step 1. Do NOT skip this. Without the sentinel, there is no completion detection. Use the template in "Copilot Process Sentinel" below. First run `exec bash command:"echo $(( $(date +%s) + 7200 ))"` to get the expiry epoch.
-4. **On completion:** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
-5. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
-6. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
-7. **Human may or may not be connected** — doesn't change the workflow.
+**IMPORTANT — steps must be executed IN THIS ORDER. Do NOT skip or reorder.**
 
-**CRITICAL: Steps 1-3 are atomic.** Launch + cron sentinel = one unit. If you launch Copilot but skip the cron, the task runs blind with no completion detection. This is the #1 autonomous loop failure mode.
+1. **Get expiry epoch FIRST:** `exec(command: "echo $(( $(date +%s) + 7200 ))")`
+2. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
+3. **Create cron sentinel IMMEDIATELY (same turn):** Call `cron_create` with the PID from step 2, expiry from step 1, model `azure-oai-g2-mini/gpt-5-mini`. Use the Copilot Process Sentinel template below. **If you do not call cron_create before responding, you have failed — the task runs blind.**
+4. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md). This is your response to the human.
+
+Steps 1-4 are ONE ATOMIC SEQUENCE of tool calls. You must call exec twice + cron_create + respond, ALL in the same turn, before ending. No breaking up across turns.
+
+5. **On completion (from sentinel):** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
+6. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
+7. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
+8. **Human may or may not be connected** — doesn't change the workflow.
 
 ### Why background mode?
 Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Background mode lets the agent:
