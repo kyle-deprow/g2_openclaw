@@ -214,6 +214,44 @@ export function apiPlugin(): Plugin {
         if (req.method !== 'GET') { next(); return; }
         enqueueAndWait('getDisplayText', [], res);
       }) as any);
+
+      // ── POST /_dev/sendText (convenience) ──────────────────────────
+      server.middlewares.use('/_dev/sendText', (async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') { next(); return; }
+        const body = await readBody(req);
+        let text: string;
+        try {
+          const parsed = JSON.parse(body);
+          text = parsed.text ?? parsed.message ?? '';
+        } catch {
+          json(res, 400, { error: 'invalid json' });
+          return;
+        }
+        if (!text) {
+          json(res, 400, { error: 'missing text' });
+          return;
+        }
+        enqueueAndWait('sendText', [text], res);
+      }) as any);
+
+      // ── POST /_dev/ttsRecord (convenience) ─────────────────────────
+      server.middlewares.use('/_dev/ttsRecord', (async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.method !== 'POST') { next(); return; }
+        const body = await readBody(req);
+        let text: string;
+        try {
+          const parsed = JSON.parse(body);
+          text = parsed.text ?? '';
+        } catch {
+          json(res, 400, { error: 'invalid json' });
+          return;
+        }
+        if (!text) {
+          json(res, 400, { error: 'missing text' });
+          return;
+        }
+        enqueueAndWait('ttsRecord', [text], res);
+      }) as any);
     },
 
     // ── Browser-side polling script ──────────────────────────────────────
