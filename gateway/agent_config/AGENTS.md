@@ -44,7 +44,7 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 ### Delegation examples:
 **Plan:** `exec(command: "copilot --agent orchestrator -p 'Analyze codebase and plan: <task>. Do NOT implement. OSS-first search. Output: 1) OSS evaluated 2) files 3) approach 4) phases 5) tests 6) risks.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
 
-**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
+**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
 
 ## Background Execution
 
@@ -53,11 +53,12 @@ For Copilot sessions expected to run >2 minutes (any implementation, build, or t
 **IMPORTANT — steps must be executed IN THIS ORDER. Do NOT skip or reorder.**
 
 1. **Get expiry epoch FIRST:** `exec(command: "echo $(( $(date +%s) + 7200 ))")`
-2. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
-3. **MANDATORY — Create cron sentinel (same turn, no exceptions):** Call `cron_create` with the PID from step 2, expiry from step 1, delivery `announce`. Use the Copilot Process Sentinel template below.
+2. **Record repo HEAD:** `exec(command: "cd /home/dev/repos/quantipy && git rev-parse HEAD")` — save this as HEAD_AT_LAUNCH for the sentinel.
+3. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
+4. **MANDATORY — Create cron sentinel (same turn, no exceptions):** Call `cron_create` with the PID from step 3, expiry from step 1, HEAD from step 2, delivery `announce`. Use the Copilot Process Sentinel template below.
 4. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md). This is your response to the human.
 
-**CRITICAL: You MUST execute ALL 4 steps in ONE turn.** exec(epoch) → exec(copilot) → cron_create → text response. If you respond with text before calling cron_create, the task runs blind with NO monitoring — there is NO way to learn when Copilot finishes. This is the #1 most common failure mode. NEVER skip cron_create, even if sentinels failed in prior sessions. Prior sentinel errors were caused by specifying a model (now fixed). The default model works.
+**CRITICAL: You MUST execute ALL 5 steps in ONE turn.** exec(epoch) → exec(HEAD) → exec(copilot) → cron_create → text response. If you respond with text before calling cron_create, the task runs blind with NO monitoring — there is NO way to learn when Copilot finishes. This is the #1 most common failure mode. NEVER skip cron_create, even if sentinels failed in prior sessions. Prior sentinel errors were caused by specifying a model (now fixed). The default model works.
 
 5. **On completion (from sentinel):** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 6. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
@@ -88,16 +89,19 @@ Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only 
 Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
 
 ```
-cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>.
+cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>. HEAD_AT_LAUNCH=<HEAD_HASH>.
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
 If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run THREE commands:
+If EXITED → run FIVE commands:
+  exec bash command:\"cd <REPO_PATH> && git rev-parse HEAD\"
   exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
   exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
   exec bash command:\"cd <REPO_PATH> && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
-Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete this cron with cron_delete. STOP."
+  exec bash command:\"ls -t /home/dev/.copilot/session-state/ | head -1\"
+If HEAD == HEAD_AT_LAUNCH (no new commits) → respond: '[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>'. Delete cron. STOP.
+Else → respond: '[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete cron. STOP."
 ```
 
 **Why this works:**
@@ -125,6 +129,19 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
    - Goal met → post [TASK:complete] final summary
 
 **Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases. **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
+
+### Incomplete Task Resume
+
+When sentinel reports `[TASK:incomplete]` (Copilot exited but HEAD unchanged — no commits):
+
+1. **Resume the session** — use the session ID from the sentinel:
+   ```
+   exec(command: "copilot --resume=<session-id> -p \"Your previous session explored and planned but did not implement any code. Skip exploration. Execute the implementation plan now — create modules, tests, notebook, run pytest, commit on success.\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "<REPO_PATH>")
+   ```
+2. **Create a new sentinel** for the resumed session (same template, new PID, same HEAD_AT_LAUNCH).
+3. **Max 2 resumes.** If the 2nd resume also produces `[TASK:incomplete]`, report `[TASK:failed] Copilot unable to produce output after 2 resumes. Session: <session-id>` and move to the next action (discard proposal, try next).
+
+This handles the common failure where the orchestrator spends all turns on exploration/planning without reaching implementation.
 
 ### Sentinel rules
 - **Always specify delivery as:** `delivery "announce", channel "g2"` — isolated cron sessions have no default channel. Without `channel "g2"`, announce fails with "Channel is required."
