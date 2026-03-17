@@ -127,9 +127,8 @@ function maybeInjectApiVersion(input) {
  */
 
 // Model-specific max_completion_tokens caps.
-// OpenClaw sends an internal default (~32000) that exceeds some models' limits.
-// Only cap models that genuinely reject values above their limit.
-// GPT-5.4 accepts 32000+ via direct curl — do NOT cap it.
+// OpenClaw sends an internal default (~32000) that exceeds gpt-5-mini's 16384 limit.
+// GPT-5.4 direct deployment accepts 32000+ — do NOT cap it.
 const MODEL_MAX_TOKENS = {
   "gpt-5-mini": 16384,
 };
@@ -147,7 +146,7 @@ function patchBody(body) {
       modified = true;
     }
 
-    // Cap max_completion_tokens to model-specific limits
+    // Cap max_completion_tokens per model
     if ("max_completion_tokens" in parsed && "model" in parsed) {
       const modelName = String(parsed.model);
       for (const [pattern, cap] of Object.entries(MODEL_MAX_TOKENS)) {

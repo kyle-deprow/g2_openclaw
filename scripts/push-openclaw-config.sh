@@ -195,6 +195,39 @@ if [[ -f "${PRELOAD_SRC}" ]]; then
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
 fi
 
+# ── Fix per-agent model overrides ────────────────────────────────────────────
+# OpenClaw may generate per-agent models.json with stale URLs (e.g. model-router).
+# Force the azure-oai-g2 provider to use the direct deployment URL from our config.
+AGENT_MODELS="${OPENCLAW_HOME}/agents/claw/agent/models.json"
+if [[ -f "${AGENT_MODELS}" ]] && command -v python3 &>/dev/null; then
+  CORRECT_BASE_URL=$(jq -r '.models.providers["azure-oai-g2"].baseUrl // empty' "${LOCAL_CONFIG}")
+  if [[ -n "${CORRECT_BASE_URL}" ]]; then
+    python3 -c "
+import json, sys
+with open('${AGENT_MODELS}') as f:
+    c = json.load(f)
+changed = False
+for name in ['azure-oai-g2', 'azure-oai-g2-mini']:
+    p = c.get('providers', {}).get(name)
+    if not p: continue
+    if 'apiKey' in p:
+        del p['apiKey']  # Entra tokens via preload, not API keys
+        changed = True
+if 'azure-oai-g2' in c.get('providers', {}):
+    p = c['providers']['azure-oai-g2']
+    if p.get('baseUrl') != '${CORRECT_BASE_URL}':
+        p['baseUrl'] = '${CORRECT_BASE_URL}'
+        changed = True
+if changed:
+    with open('${AGENT_MODELS}', 'w') as f:
+        json.dump(c, f, indent=2)
+    print('Fixed per-agent models.json: baseUrl + removed apiKeys')
+else:
+    print('Per-agent models.json already correct')
+"
+  fi
+fi
+
 # ── Validate ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Validating config ──"
