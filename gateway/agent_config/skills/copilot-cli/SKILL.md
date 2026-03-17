@@ -235,12 +235,45 @@ exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claud
 
 ## Delegation Modes
 
+### Pre-Handoff Scaffolding Review
+
+**Before EVERY delegation to a target repo, evaluate whether the repo's agent files need improvement.** This is NOT a mandatory update — it's a conditional check. Only update if there's evidence of a problem.
+
+**When to review scaffolding:**
+- First delegation to a new repo (agents may not exist yet)
+- 2+ CRASHes or `[TASK:incomplete]` with the same root cause pattern
+- Agent produced wrong output type (e.g., explored when told to implement)
+- Copilot ignored instructions clearly stated in `.github/copilot-instructions.md`
+- New convention or pattern discovered that existing agents don't know about
+
+**When NOT to review scaffolding:**
+- Task completed successfully — don't fix what isn't broken
+- First attempt at a new experiment type — let it run first, evaluate after
+- Minor quality issues (formatting, naming) — not worth the overhead
+
+**Review procedure (lightweight — read-only commands in YOUR turn):**
+```
+exec bash command:"cat <REPO_PATH>/.github/copilot-instructions.md | head -30"
+exec bash command:"ls <REPO_PATH>/.github/agents/"
+exec bash command:"head -20 <REPO_PATH>/.github/agents/orchestrator.agent.md"
+```
+
+Assess: Are instructions still accurate? Do agents reference correct paths/patterns? Are there stale agents nobody uses?
+
+**If update needed — delegate to Copilot (non-blocking, before the main task):**
+```
+exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Based on these recent failures: <describe patterns>. Update instructions to prevent these. Remove stale agent files not used in 2+ rounds. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "<REPO_PATH>")
+```
+
+This is a blocking foreground call (not background) — it's fast (~1 min) and must complete before the main task launches. The main task needs correct agents to succeed.
+
+**Key rule: scaffolding updates are a means, not an end.** Don't get stuck in a meta-loop of endlessly improving agent files. Review → fix if broken → move on to the actual work.
+
 ### SCAFFOLD — Setup Coding Environment
 Before first delegation to a repo, ensure it has `.github/copilot-instructions.md` + `.github/agents/*.agent.md`.
 ```
 exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Fix stale refs, add missing patterns, remove irrelevant rules. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
-Triggers for review: 2+ CRASHes with same root cause → update instructions. Agent never invoked in 2+ rounds → delete it.
 
 ### RESEARCH — Delegate a Question
 Structure the prompt with: what you're looking for, constraints (our data: 1-min OHLCV, sentiment, volume), what to return.

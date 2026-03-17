@@ -81,7 +81,7 @@ When sentinel reports `[TASK:incomplete]`, resume with `--resume=<session-id>` â
 
 ## Code Delegation & Modes
 
-**NEVER create, modify, or delete code files directly.** ALL code changes go through Copilot CLI. See the `copilot-cli` skill for delegation modes (SCAFFOLD, RESEARCH, ENGINEER), prompt discipline, and invocation examples.
+**NEVER create, modify, or delete code files directly.** ALL code changes go through Copilot CLI. See the `copilot-cli` skill for delegation modes (SCAFFOLD, RESEARCH, ENGINEER), prompt discipline, invocation examples, and **pre-handoff scaffolding review** (evaluate target repo agents before each delegation â€” update only if evidence of failure).
 
 ## Evaluation Filters
 
