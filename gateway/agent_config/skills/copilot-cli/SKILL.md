@@ -95,31 +95,31 @@ Execute ALL steps in ONE turn. Do NOT respond with text before step 4.
 
 ## Process Sentinel Template
 
-The sentinel monitors a background Copilot process. It checks every 5 minutes whether the process is alive, and when it exits, captures git state, test results, notebook metrics, and session ID.
+The sentinel monitors a background Copilot process. It checks every 5 minutes whether the process is alive, and when it exits, captures git state, test results, notebook metrics, and session ID. It uses `sessions_send` to inject results into the G2 session.
 
 **Before creating, get:** expiry epoch + repo HEAD (steps 1-2 above).
 
 ```
-cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>. HEAD_AT_LAUNCH=<HEAD_HASH>.
+cron_create: schedule "every 5m", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>. HEAD_AT_LAUNCH=<HEAD_HASH>.
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
-If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run FIVE commands:
+If current epoch > Expiry → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:timeout] Copilot PID <PID> exceeded 2h TTL\"). Then cron_delete this cron. STOP.
+If EXITED → run FOUR commands:
   exec bash command:\"cd <REPO_PATH> && git rev-parse HEAD\"
   exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
   exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
-  exec bash command:\"cd <REPO_PATH> && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
   exec bash command:\"ls -t /home/dev/.copilot/session-state/ | head -1\"
-If HEAD == HEAD_AT_LAUNCH (no new commits) → respond: '[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>'. Delete cron. STOP.
-Else → respond: '[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete cron. STOP."
+If HEAD == HEAD_AT_LAUNCH (no new commits) → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>\"). Then cron_delete. STOP.
+Else → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>.\"). Then cron_delete. STOP."
 ```
 
 ### Sentinel Configuration Rules
 
 | Rule | Why |
 |------|-----|
-| `delivery "announce", channel "g2"` | Isolated crons have no default channel. Without this, announce fails. |
+| Do NOT use `delivery "announce", channel "g2"` | The G2 gateway is NOT a registered OpenClaw channel. Channel-based delivery ALWAYS fails. |
+| Use `sessions_send` for exit notifications | The sentinel uses `sessions_send(sessionKey:"agent:claw:g2", ...)` to inject results into the G2 session. This requires `tools.sessions.visibility=all` in openclaw.json. |
 | Do NOT specify `model` | Default works. Specifying a model causes auth errors in isolated crons. |
 | Do NOT specify `execution` | Default (isolated) is correct. `execution: "main"` FAILS for named agents. |
 | Do NOT pass `context` | Not a valid `cron_create` parameter. |
@@ -127,9 +127,9 @@ Else → respond: '[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: 
 | Hard TTL: 2 hours | Embed expiry epoch (creation + 7200s). Sentinel self-deletes on expiry. |
 
 ### How It Works
-- **Alive ticks (~90% of calls):** One `ps` command → "alive" response. Cheap, announced to channel but your main agent ignores.
-- **Exit tick (once):** Runs git log + pytest + notebook metrics. Compares HEAD to HEAD_AT_LAUNCH. Announces `[TASK:complete]` or `[TASK:incomplete]`.
-- **Full evaluation:** Happens in YOUR next turn when you read the announced status.
+- **Alive ticks (~90% of calls):** One `ps` command → "alive" response. Cheap, no delivery needed.
+- **Exit tick (once):** Runs git log + pytest. Compares HEAD to HEAD_AT_LAUNCH. Uses `sessions_send` to inject `[TASK:complete]` or `[TASK:incomplete]` into the G2 session.
+- **Full evaluation:** Happens in YOUR next turn when you see the sessions_send message in the G2 session.
 
 ## Incomplete Task Resume
 

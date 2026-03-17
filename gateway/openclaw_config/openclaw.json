@@ -141,7 +141,10 @@
     "backend": "builtin"
   },
   "tools": {
-    "profile": "full"
+    "profile": "full",
+    "sessions": {
+      "visibility": "all"
+    }
   },
   "messages": {
     "ackReactionScope": "group-mentions"
