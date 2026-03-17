@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-17 (E2 implemented, autonomous loop debugging)
+**Last Updated:** 2026-03-17 (post-crash recovery, Round 4 ideation done, E3 DISCARD)
 
 ## Goal
 
@@ -18,7 +18,7 @@ Human (G2 glasses, connects/disconnects freely)
   ↓ "autoresearch" / "focus on X" / reconnect → status briefing
 OpenClaw PM (daemon :18789, autonomous 24/7)
   ↓ exec bash background:true → Copilot CLI
-  ↓ cron sentinel (gpt-5-mini) monitors PID every 5 min
+  ↓ cron sentinel monitors PID every 5 min (delivery: announce, channel: g2)
   ↓ sentinel reports [TASK:complete] with metrics
   ↓ OpenClaw evaluates metrics in own turn (no Copilot needed)
   ↓ OpenClaw autonomously decides: keep/discard → next iteration
@@ -31,88 +31,71 @@ Copilot CLI (--yolo --agent orchestrator/researcher --model claude-opus-4.6)
 
 ## Autonomous Loop Status
 
-### What works e2e:
-- [x] Human sends "autoresearch" → OpenClaw launches Copilot researcher
-- [x] Researcher runs 3-agent debate → 9 proposals → winner selected
-- [x] OpenClaw launches Copilot orchestrator for implementation (background:true)
+### What works:
+- [x] "autoresearch" trigger → OpenClaw launches Copilot researcher
+- [x] Researcher 3-agent debate → 9 proposals → winner selected
+- [x] OpenClaw launches Copilot orchestrator (background:true)
 - [x] Orchestrator implements module + tests + notebook → commits
-- [x] OpenClaw can evaluate results and decide DISCARD autonomously (seen once)
-- [x] OpenClaw can launch next implementation without human (E2 after T2 DISCARD)
-- [x] Preload caps gpt-5-mini max_tokens at 16384 (sentinel fix)
+- [x] OpenClaw evaluates DISCARD autonomously (observed for T2→E2, T2→E3)
+- [x] OpenClaw launches next implementation without human approval
+- [x] Preload caps gpt-5-mini max_tokens at 16384
+- [x] AGENTS.md compressed to ~17k (under 20k bootstrap truncation limit)
+- [x] Sentinel delivery: `announce` + `channel "g2"` (isolated sessions need explicit channel)
+- [x] No model in sentinel (avoids auth errors in isolated cron sessions)
 
-### What's broken (blocking full autonomy):
-- [ ] **Sentinel reliability**: OpenClaw frequently skips sentinel creation despite config emphasis. Without sentinel, it can't detect when background Copilot exits.
-- [ ] **Sentinel max_tokens**: Fixed in preload but UNTESTED since daemon restart. Need to verify sentinel fires successfully with the cap.
-- [ ] **Post-sentinel continuation**: Even when sentinel reports [TASK:complete], OpenClaw doesn't always continue to Phase 4-8 autonomously. Config says to — behavior doesn't match.
-- [ ] **Orchestrator incomplete exits**: E2 orchestrator created files but didn't commit (ran out of context). Need to handle partial completions.
-- [ ] **No tee/stdout capture**: OpenClaw doesn't consistently pipe Copilot output for debugging.
-- [ ] **Gateway stale after daemon restart**: Must restart full stack, not just daemon.
-
-### What's been tried to fix autonomy:
-- AGENTS.md: "Steps 1-4 are ONE ATOMIC SEQUENCE" (sentinel before response) — partially working
-- AGENTS.md: "Autonomous Post-Completion Evaluation" section — OpenClaw followed it once (T2→E2)
-- SOUL.md: Autoresearch section says "DO NOT wait for human approval between iterations"
-- SKILL.md: Phase 4-8 are exec commands, not Copilot delegation
-- Preload: MODEL_MAX_TOKENS cap for gpt-5-mini (16384)
+### What's still broken:
+- [ ] **Sentinel creation reliability** — OpenClaw skips sentinel ~50% of launches. Without sentinel, it can't detect Copilot exit.
+- [ ] **Sentinel max_tokens cap untested post-restart** — preload.cjs caps gpt-5-mini but hasn't been verified e2e.
+- [ ] **Content filter on financial context** — Azure GPT-5.4 content filter triggers after several turns. Requires session reset.
+- [ ] **Orchestrator incomplete exits** — sometimes runs out of context before committing.
 
 ---
 
-## Strategy Results (Round 3)
+## Strategy Results
 
-| # | Strategy | Source | Sharpe | Accuracy | Trades | Status | Commit |
-|---|----------|--------|--------|----------|--------|--------|--------|
-| T1 | GMM Regime Detection | R3 ideation | 1.01 | 51.3% | 1 | DISCARD | d521ac5 |
-| T2 | Isolation Forest Anomaly-Gated RF | T2 ideation | -27.86 | 44.8% | 131 | DISCARD | ab25745, e318dab |
-| E2 | PA Sentiment Gate | T2 runner-up | ? | ? | ? | IMPLEMENTED (not backtested) | f10dd37 |
+| # | Strategy | Sharpe | Accuracy | Trades | Verdict | Commit |
+|---|----------|--------|----------|--------|---------|--------|
+| T1 | GMM Regime Detection | 1.01 | 51.3% | 1 | DISCARD | d521ac5 |
+| T2 | IF Anomaly-Gated RF | -27.86 | 44.8% | 131 | DISCARD | ab25745 |
+| E2 | PA Sentiment Gate | — | — | — | IMPL ONLY | f10dd37 |
+| E3 | CPG-Ridge Ensemble | -143.16 | — | — | DISCARD | 3bad5ca |
 
-8 unpushed commits in quantipy (d521ac5 through f10dd37).
+**Root cause (T4 researcher):** All experiments ran on synthetic data with zero alpha. T4 winner (C1: Kyle DGP + Cross-Sectional GBM) fixes this with a realistic data generator.
 
----
+**Round 4 ideation:** Complete (commit `1f76b41`). Winner: **C1 Kyle DGP + Cross-Sectional GBM**. Not yet implemented.
 
-## Infra Done
-
-- Copilot CLI v1.0.5, copilot_bridge removed (-15,900 lines)
-- Azure GPT-5.4 (128k maxTokens) + GPT-5-mini (16384) via Entra auth preload
-- Autoresearch skill v5.0.0, 4 Copilot research agents deployed
-- Dev API: `_dev/sendText`, `_dev/cmd`, `_dev/state` endpoints
-- Push script: auto-generates models allowlist, propagates API keys
-- Async: background exec, [TASK:status] markers, task-aware reconnect
-
-## Config Files
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| SOUL.md | 108 | PM identity, autonomous after approval, autoresearch triggers |
-| AGENTS.md | 337 | Delegation modes, sentinel template, evaluation filters, post-completion eval |
-| SKILL.md | 396 | 8-phase autoresearch loop, Copilot prompt templates |
-| openclaw.json | 166 | GPT-5.4 + GPT-5-mini providers, memory, compaction |
-| preload.cjs | 287 | Entra auth, max_tokens→max_completion_tokens, model caps |
-
-## Known Issues
-
-1. **Sentinel skipped by OpenClaw** — despite "Steps 1-4 ATOMIC" in AGENTS.md, OpenClaw frequently launches Copilot without creating sentinel. Root cause unclear — may be context window limitation or instruction buried too deep.
-2. **exec quoting fragile** — OpenClaw misformats nested quotes in `-p` prompts 2/3 times before self-recovering.
-3. **Gateway stale WS** — after daemon restart, gateway holds connection to old daemon. Must restart full stack.
+**Quantipy:** 28 unpushed commits. Uncommitted: executed conformal_ridge.ipynb + 4 PNGs.
 
 ---
 
-## Next Steps (in order)
+## Config State
 
-1. **Restart full stack** (gateway is stale from last daemon restart)
-2. **Test sentinel max_tokens fix** — launch a dummy Copilot process, create sentinel, verify it fires without 400 error
-3. **Send "continue autoresearch"** — let OpenClaw evaluate E2 state and continue autonomously
-4. **Monitor**: Does OpenClaw create a sentinel? Does sentinel fire? Does OpenClaw evaluate + continue?
-5. **Fix failures as they arise** — tune AGENTS.md/SOUL.md/SKILL.md for each observed behavior gap
-6. **Push quantipy commits** when tests are stable
+| File | Chars | Deployed |
+|------|-------|----------|
+| AGENTS.md | 17,426 | Yes (07cb2fd) |
+| SKILL.md | 25,216 | Yes (07cb2fd) |
+| SOUL.md | ~7,000 | Yes |
+| openclaw.json | GPT-5.4 128k + mini 16384 | Yes |
+| preload.cjs | gpt-5-mini cap 16384 | Yes |
+
+---
+
+## Next Steps
+
+1. **Restart full stack** — gateway + vite + simulator (daemon auto-started at boot)
+2. **Fresh session** — reset to avoid content filter from prior financial context
+3. **Relay state** — tell OpenClaw: E3 DISCARD, Round 4 ideation done, winner C1, implement it
+4. **Monitor sentinel** — verify creation + `channel "g2"` + no max_tokens error
+5. **Monitor autonomous continuation** — eval → decide → next launch without human
+6. **Fix failures** — tune config per observed behavior gap
+7. **Push quantipy commits** once loop stable
 
 ## Success Criteria
 
-The loop is working when OpenClaw can:
-1. Launch implementation (with sentinel and tee)
-2. Sentinel detects exit and reports metrics
-3. OpenClaw evaluates metrics without human input
-4. OpenClaw decides keep/discard
-5. OpenClaw launches next iteration (or new ideation)
-6. Repeat steps 1-5 without human connected
-
-All 6 steps happening autonomously = loop complete.
+OpenClaw completes without human interaction:
+1. Launch implementation with sentinel
+2. Sentinel detects exit + reports metrics
+3. Evaluate in own turn
+4. Decide keep/discard
+5. Launch next iteration
+6. Repeat
