@@ -360,7 +360,7 @@ The loop persists across turns using a cheap monitoring sentinel. Uses `azure-oa
 
 2. Create the Copilot Process Sentinel (fill in PID, REPO, and EXPIRY):
 ```
-cron_create: schedule "every 5m", delivery "announce", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
+cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
@@ -378,7 +378,7 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 - **Full evaluation:** Happens in your NEXT turn (GPT-5.4) when you process the announced [TASK:complete] and continue the autoresearch loop.
 
 **Sentinel rules:**
-- **Always specify `delivery: "announce"`** — so the main agent sees [TASK:complete] when Copilot exits.
+- **Always specify delivery as:** `delivery "announce", channel "g2"` — isolated cron sessions have no default channel. Without `channel "g2"`, announce fails with "Channel is required."
 - **Do NOT specify `model`** — the default model works. Specifying a model causes auth errors in isolated cron sessions.
 - **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create field. Valid: schedule, delivery, prompt, model, agent, thinking.
