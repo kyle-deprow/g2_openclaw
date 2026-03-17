@@ -54,10 +54,10 @@ For Copilot sessions expected to run >2 minutes (any implementation, build, or t
 
 1. **Get expiry epoch FIRST:** `exec(command: "echo $(( $(date +%s) + 7200 ))")`
 2. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
-3. **Create cron sentinel IMMEDIATELY (same turn):** Call `cron_create` with the PID from step 2, expiry from step 1, delivery `announce`. Use the Copilot Process Sentinel template below. **If you do not call cron_create before responding, you have failed — the task runs blind.**
+3. **MANDATORY — Create cron sentinel (same turn, no exceptions):** Call `cron_create` with the PID from step 2, expiry from step 1, delivery `announce`. Use the Copilot Process Sentinel template below.
 4. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md). This is your response to the human.
 
-Steps 1-4 are ONE ATOMIC SEQUENCE of tool calls. You must call exec twice + cron_create + respond, ALL in the same turn, before ending. No breaking up across turns.
+**CRITICAL: You MUST execute ALL 4 steps in ONE turn.** exec(epoch) → exec(copilot) → cron_create → text response. If you respond with text before calling cron_create, the task runs blind with NO monitoring — there is NO way to learn when Copilot finishes. This is the #1 most common failure mode. NEVER skip cron_create, even if sentinels failed in prior sessions. Prior sentinel errors were caused by specifying a model (now fixed). The default model works.
 
 5. **On completion (from sentinel):** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
 6. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
@@ -124,10 +124,11 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
    - Goal met → post [TASK:complete] final summary
 
-**Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases.
+**Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases. **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
 
 ### Sentinel rules
 - **Always specify `delivery: "announce"`** — so the main agent sees [TASK:complete] when Copilot exits.
+- **Do NOT specify `model`** — the default model works. Specifying a model causes auth errors in isolated cron sessions.
 - **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create parameter.
 - **Self-contained prompts** — include PID, repo path, and expiry epoch. Isolated crons have no conversation history.
@@ -236,4 +237,4 @@ Write to memory proactively:
 - **Before keeping changes:** Tests must pass AND metrics must not degrade
 - **Before re-trying:** Check `memory_search` — if the idea was already tried and failed, skip it
 - **Before first delegation to a new repo:** SCAFFOLD mode must have run — `.github/copilot-instructions.md` must exist
-- **Autonomous mode:** When running autoresearch, do NOT wait for human approval between iterations. The human has already approved the loop by saying "autoresearch." Implement, test, evaluate, continue.
+- **Autonomous mode (CRITICAL):** When running autoresearch, do NOT wait for human approval, do NOT ask "what do you want?", do NOT offer choices. The human approved the loop by saying "autoresearch." You MUST: evaluate → decide → log → launch next iteration. All in one turn, no pauses.

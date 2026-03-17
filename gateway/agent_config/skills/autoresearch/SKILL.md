@@ -379,6 +379,7 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 
 **Sentinel rules:**
 - **Always specify `delivery: "announce"`** — so the main agent sees [TASK:complete] when Copilot exits.
+- **Do NOT specify `model`** — the default model works. Specifying a model causes auth errors in isolated cron sessions.
 - **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create field. Valid: schedule, delivery, prompt, model, agent, thinking.
 - **Prompt must be self-contained** — include PID, repo path, and expiry. Isolated crons have NO conversation history.
