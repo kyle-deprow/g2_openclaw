@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-17 (post-crash recovery, Round 4 ideation done, E3 DISCARD)
+**Last Updated:** 2026-03-17 (model-router fix, C1 implementation launched autonomously)
 
 ## Goal
 
@@ -32,22 +32,26 @@ Copilot CLI (--yolo --agent orchestrator/researcher --model claude-opus-4.6)
 ## Autonomous Loop Status
 
 ### What works:
-- [x] "autoresearch" trigger → OpenClaw launches Copilot researcher
+- [x] "autoresearch" trigger → OpenClaw reads memory, picks up where it left off
 - [x] Researcher 3-agent debate → 9 proposals → winner selected
-- [x] OpenClaw launches Copilot orchestrator (background:true)
+- [x] OpenClaw launches Copilot orchestrator (background:true) with detailed prompt
 - [x] Orchestrator implements module + tests + notebook → commits
-- [x] OpenClaw evaluates DISCARD autonomously (observed for T2→E2, T2→E3)
-- [x] OpenClaw launches next implementation without human approval
+- [x] Sentinel delivery: `announce` + `channel "g2"` (isolated sessions need explicit channel)
+- [x] No model in sentinel template (avoids auth errors in isolated cron sessions)
 - [x] Preload caps gpt-5-mini max_tokens at 16384
 - [x] AGENTS.md compressed to ~17k (under 20k bootstrap truncation limit)
-- [x] Sentinel delivery: `announce` + `channel "g2"` (isolated sessions need explicit channel)
-- [x] No model in sentinel (avoids auth errors in isolated cron sessions)
+- [x] Per-agent models.json fixed: direct deployment URL (not model-router), no apiKeys
+- [x] Push script auto-corrects per-agent models.json on every push
+- [x] GPT-5.4 hitting correct endpoint: oai-ss.../gpt-5-4 (verified via preload debug)
 
-### What's still broken:
-- [ ] **Sentinel creation reliability** — OpenClaw skips sentinel ~50% of launches. Without sentinel, it can't detect Copilot exit.
-- [ ] **Sentinel max_tokens cap untested post-restart** — preload.cjs caps gpt-5-mini but hasn't been verified e2e.
-- [ ] **Content filter on financial context** — Azure GPT-5.4 content filter triggers after several turns. Requires session reset.
-- [ ] **Orchestrator incomplete exits** — sometimes runs out of context before committing.
+### Working but not yet verified e2e:
+- [ ] **Sentinel announces [TASK:complete] to main agent** — correct config deployed but not yet tested through a full cycle
+- [ ] **OpenClaw evaluates metrics autonomously after sentinel announcement** — should work per AGENTS.md but needs cycle to confirm
+- [ ] **OpenClaw continues to next iteration without human** — observed partially (T2→E2) but never full sentinel→eval→launch cycle
+
+### Known issues:
+- **Content filter** — Azure GPT-5.4 flags financial context after several turns. Mitigated by session reset.
+- **Orchestrator context limits** — sometimes exits before committing. Fix: smaller prompts or `--continue`.
 
 ---
 
@@ -62,33 +66,35 @@ Copilot CLI (--yolo --agent orchestrator/researcher --model claude-opus-4.6)
 
 **Root cause (T4 researcher):** All experiments ran on synthetic data with zero alpha. T4 winner (C1: Kyle DGP + Cross-Sectional GBM) fixes this with a realistic data generator.
 
-**Round 4 ideation:** Complete (commit `1f76b41`). Winner: **C1 Kyle DGP + Cross-Sectional GBM**. Not yet implemented.
+**Round 4 ideation:** Complete (commit `1f76b41`). Winner: **C1 Kyle DGP + Cross-Sectional HistGBT**.
 
-**Quantipy:** 28 unpushed commits. Uncommitted: executed conformal_ridge.ipynb + 4 PNGs.
+**C1 implementation:** ACTIVE — Copilot orchestrator PID 42628, sentinel `0746cd52` (0 errors, announce/g2). Launched autonomously after "autoresearch" trigger with correct model (oai-ss.../gpt-5-4).
+
+**Quantipy:** 28 unpushed commits.
 
 ---
 
 ## Config State
 
-| File | Chars | Deployed |
-|------|-------|----------|
-| AGENTS.md | 17,426 | Yes (07cb2fd) |
-| SKILL.md | 25,216 | Yes (07cb2fd) |
-| SOUL.md | ~7,000 | Yes |
-| openclaw.json | GPT-5.4 128k + mini 16384 | Yes |
-| preload.cjs | gpt-5-mini cap 16384 | Yes |
+| File | Chars | Deployed | Notes |
+|------|-------|----------|-------|
+| AGENTS.md | 17,426 | Yes | Under 20k bootstrap limit |
+| SKILL.md | 25,216 | Yes | Loaded on-demand per skill |
+| preload.cjs | — | Yes | gpt-5-mini cap 16384 only |
+| openclaw.json | — | Yes | GPT-5.4 128k |
+| per-agent models.json | — | Yes | Fixed: oai-ss URL, no apiKeys |
+| push-openclaw-config.sh | — | Yes | Auto-corrects per-agent models.json |
 
 ---
 
 ## Next Steps
 
-1. **Restart full stack** — gateway + vite + simulator (daemon auto-started at boot)
-2. **Fresh session** — reset to avoid content filter from prior financial context
-3. **Relay state** — tell OpenClaw: E3 DISCARD, Round 4 ideation done, winner C1, implement it
-4. **Monitor sentinel** — verify creation + `channel "g2"` + no max_tokens error
-5. **Monitor autonomous continuation** — eval → decide → next launch without human
-6. **Fix failures** — tune config per observed behavior gap
-7. **Push quantipy commits** once loop stable
+1. **Monitor C1 implementation** — Copilot PID 42628 active, sentinel watching
+2. **Verify sentinel fires correctly** — sentinel announces [TASK:complete] with metrics
+3. **Verify OpenClaw evaluates autonomously** — reads metrics, decides keep/discard
+4. **Verify OpenClaw continues to next iteration** — launches C2 or new ideation
+5. **Push quantipy commits** once loop stable
+6. **Disable preload debug** — `AZURE_PRELOAD_DEBUG=1` is noisy, disable after confirmed
 
 ## Success Criteria
 
