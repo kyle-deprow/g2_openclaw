@@ -53,6 +53,8 @@ You are the human's delegate inside VS Code / Copilot CLI. The human interacts w
 - **Never skip the push step** — editing agent config without pushing means OpenClaw runs stale instructions.
 - **Never add backward-compatibility shims or legacy fallbacks** — if something is replaced, delete the old version.
 - **Never kill background Copilot sessions prematurely** — check `[TASK:*]` status before killing.
+- **Never write to /tmp** — requires manual user approval in VS Code. Use `.archive/` in the repo root for any temp/log files. Add `.archive/` to `.gitignore` if not already there.
+- **Never use /dev/null in commands** — redirects to `/dev/null` (e.g. `2>/dev/null`) also require manual approval. Let errors print to stderr, or redirect to `.archive/` if you must suppress output.
 
 ## Detecting Abnormal Behavior
 
