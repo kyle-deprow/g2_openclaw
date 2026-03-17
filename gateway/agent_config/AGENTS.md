@@ -48,66 +48,11 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 ## Background Execution
 
-For Copilot sessions expected to run >2 minutes (any implementation, build, or test suite), use background mode. **This is NOT optional — ALL implementation sessions MUST use background:true.**
+**Read the `copilot-cli` skill for the full protocol** — launch sequence, sentinel template, exec syntax, and configuration rules.
 
-**IMPORTANT — steps must be executed IN THIS ORDER. Do NOT skip or reorder.**
+**ALL implementation sessions MUST use `background:true`.** The 5-step launch sequence (epoch → HEAD → copilot → sentinel → confirm) must execute in ONE turn. Never respond before the sentinel is created.
 
-1. **Get expiry epoch FIRST:** `exec(command: "echo $(( $(date +%s) + 7200 ))")`
-2. **Record repo HEAD:** `exec(command: "cd /home/dev/repos/quantipy && git rev-parse HEAD")` — save this as HEAD_AT_LAUNCH for the sentinel.
-3. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
-4. **MANDATORY — Create cron sentinel (same turn, no exceptions):** Call `cron_create` with the PID from step 3, expiry from step 1, HEAD from step 2, delivery `announce`. Use the Copilot Process Sentinel template below.
-4. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md). This is your response to the human.
-
-**CRITICAL: You MUST execute ALL 5 steps in ONE turn.** exec(epoch) → exec(HEAD) → exec(copilot) → cron_create → text response. If you respond with text before calling cron_create, the task runs blind with NO monitoring — there is NO way to learn when Copilot finishes. This is the #1 most common failure mode. NEVER skip cron_create, even if sentinels failed in prior sessions. Prior sentinel errors were caused by specifying a model (now fixed). The default model works.
-
-5. **On completion (from sentinel):** Post `[TASK:complete]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
-6. **On failure:** Post `[TASK:failed]` status (see TOOLS.md). Delete the monitoring cron with `cron_delete`.
-7. **Timeout (max 24 ticks / 2 hours):** Post `[TASK:timeout]`. Delete the monitoring cron. This is a hard safety limit.
-8. **Human may or may not be connected** — doesn't change the workflow.
-
-### Why background mode?
-Blocking `exec` ties up the agent for the entire Copilot run (5-30 minutes). Background mode lets the agent:
-- Respond to the human immediately ("Task launched")
-- Handle other requests while Copilot runs
-- Monitor progress and report completion asynchronously
-
-### exec tool parameter syntax
-The `exec` tool takes NAMED PARAMETERS, not inline bash flags. Correct:
-```
-exec(command: "copilot ...", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
-```
-WRONG (will cause "command not found"):
-```
-exec(command: "pty:true workdir:/foo copilot ...")
-```
-**Never put `pty:true`, `background:true`, or `workdir:` inside the command string.** They are separate tool parameters.
-
-### Copilot Process Sentinel (two-stage cron)
-
-Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only checks `ps -p PID` — it does NOT reason about results. When Copilot exits, the sentinel captures: git log, test summary, AND notebook backtest metrics. This is critical — without metrics, you cannot evaluate the strategy.
-
-Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
-
-```
-cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>. HEAD_AT_LAUNCH=<HEAD_HASH>.
-Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
-Step 2: exec bash command:\"date +%s\"
-If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
-If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run FIVE commands:
-  exec bash command:\"cd <REPO_PATH> && git rev-parse HEAD\"
-  exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
-  exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
-  exec bash command:\"cd <REPO_PATH> && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
-  exec bash command:\"ls -t /home/dev/.copilot/session-state/ | head -1\"
-If HEAD == HEAD_AT_LAUNCH (no new commits) → respond: '[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>'. Delete cron. STOP.
-Else → respond: '[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete cron. STOP."
-```
-
-**Why this works:**
-- **Alive ticks (~90% of calls):** One `ps` command + "alive" response. Announced to channel but main agent ignores.
-- **Exit tick (1 call):** Runs git log + pytest + notebook metric extraction. Announces [TASK:complete] to channel.
-- **Full evaluation:** Happens in the **main agent's next turn** (GPT-5.4) when it reads the [TASK:complete] status with metrics included.
+**CRITICAL:** Never skip `cron_create`. Never specify `model` in sentinels. Always use `delivery "announce", channel "g2"`. These are the top failure modes — the skill documents them all.
 
 ### Autonomous Post-Completion Evaluation
 
@@ -132,70 +77,11 @@ Else → respond: '[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: 
 
 ### Incomplete Task Resume
 
-When sentinel reports `[TASK:incomplete]` (Copilot exited but HEAD unchanged — no commits):
+When sentinel reports `[TASK:incomplete]`, resume with `--resume=<session-id>` — max 2 retries before declaring `[TASK:failed]`. **Read the `copilot-cli` skill** for the full resume protocol, common failure patterns, and log inspection commands.
 
-1. **Resume the session** — use the session ID from the sentinel:
-   ```
-   exec(command: "copilot --resume=<session-id> -p \"Your previous session explored and planned but did not implement any code. Skip exploration. Execute the implementation plan now — create modules, tests, notebook, run pytest, commit on success.\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "<REPO_PATH>")
-   ```
-2. **Create a new sentinel** for the resumed session (same template, new PID, same HEAD_AT_LAUNCH).
-3. **Max 2 resumes.** If the 2nd resume also produces `[TASK:incomplete]`, report `[TASK:failed] Copilot unable to produce output after 2 resumes. Session: <session-id>` and move to the next action (discard proposal, try next).
+## Code Delegation & Modes
 
-This handles the common failure where the orchestrator spends all turns on exploration/planning without reaching implementation.
-
-### Sentinel rules
-- **Always specify delivery as:** `delivery "announce", channel "g2"` — isolated cron sessions have no default channel. Without `channel "g2"`, announce fails with "Channel is required."
-- **Do NOT specify `model`** — the default model works. Specifying a model causes auth errors in isolated cron sessions.
-- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
-- **Do NOT pass `context`** — not a valid cron_create parameter.
-- **Self-contained prompts** — include PID, repo path, and expiry epoch. Isolated crons have no conversation history.
-- **Hard TTL: 2 hours** — embed expiry epoch (creation + 7200s). Sentinel self-deletes on expiry.
-- **Reusable** — this sentinel works for ANY Copilot CLI background process (researcher, orchestrator, specialist).
-
-## Code Delegation — Absolute Rule
-
-**NEVER create, modify, or delete code files directly.** Not with Write, not with exec cat/echo/tee/sed, not with any tool. ALL code changes in target repos go through Copilot CLI via `exec bash pty:true background:true`.
-
-Violations of this rule produce untested, uncommitted, unreviewed code. Copilot CLI handles multi-file edits, test runs, commits, and error recovery. You cannot replicate that quality with shell one-liners.
-
----
-
-## Copilot Delegation Modes
-
-### SCAFFOLD Mode
-Setup coding environment for Copilot CLI. Templates in `~/repos/ai_scaffolding/`. Before first delegation, ensure `.github/copilot-instructions.md` + `.github/agents/*.agent.md` exist in target repo.
-
-**Triggers for scaffolding review:** 2+ CRASHes with same root cause → update instructions. Agent underperforms → update its `.agent.md`. Agent never invoked in 2+ rounds → delete it. New convention found → add to instructions + template.
-
-```
-exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Fix stale refs, add missing patterns, remove irrelevant rules. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
-```
-
-### RESEARCH Mode
-Delegate a question to Copilot CLI with web access. Always structure the prompt:
-- What you're looking for (indicator, strategy, data source, technique)
-- Constraints (must work with our data: 1-min OHLCV, Reddit sentiment, news sentiment, volume indicators)
-- What to return (name, formula, data requirements, complexity, references)
-
-```
-exec(command: "copilot --agent orchestrator -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
-```
-
-### ENGINEER Mode
-Delegate implementation to Copilot CLI. Always structure the prompt:
-- Exact files to create/modify
-- Existing patterns to follow (reference specific files in the repo)
-- Tech requirements: async Python, SQLAlchemy, pytest TDD, ruff, type hints
-- Instruction: run `uv run pytest` after — all tests must pass
-
-```
-exec(command: "copilot --agent orchestrator -p '<task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
-```
-
-For single-shot specialist tasks, bypass the orchestrator:
-```
-exec(command: "copilot --agent backend-python -p '<narrow task>' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
-```
+**NEVER create, modify, or delete code files directly.** ALL code changes go through Copilot CLI. See the `copilot-cli` skill for delegation modes (SCAFFOLD, RESEARCH, ENGINEER), prompt discipline, and invocation examples.
 
 ## Evaluation Filters
 

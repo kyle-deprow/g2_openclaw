@@ -340,55 +340,25 @@ Recovery protocol:
 
 ## Execution Model
 
-**This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol. You do not spawn a subagent.
+**This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol.
 
 ### Delegation
 **Only Phase 2 and Phase 3 delegate to Copilot CLI.** Everything else is YOUR work:
 - Phase 2 (IDEATE) → delegate to Copilot `--agent researcher` in background
 - Phase 3 (IMPLEMENT) → delegate to Copilot `--agent orchestrator` in background
-- Phase 4-5 (VERIFY + DECIDE) → YOU run exec commands directly (notebook execution, metric extraction, threshold comparison)
+- Phase 4-5 (VERIFY + DECIDE) → YOU run exec commands directly
 - Phase 6-7 (LOG + REFLECT) → YOU write to files and memory directly
 - Phase 8 (CONTINUE) → YOU decide next action and launch the appropriate Copilot agent
 
-**The entire Phase 4 → Phase 8 sequence runs in ONE turn** after sentinel reports completion. You do not stop between phases. You do not ask the human what to do next.
+**The entire Phase 4 → Phase 8 sequence runs in ONE turn** after sentinel reports completion.
 
 ### Self-Continuation via Copilot Process Sentinel
-The loop persists across turns using a cheap monitoring sentinel. Uses `azure-oai-g2-mini/gpt-5-mini` for ~$0.001/tick instead of burning GPT-5.4 on `ps -p PID` checks.
 
-1. Before creating the sentinel, capture the expiry epoch:
-   `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
-
-2. Create the Copilot Process Sentinel (fill in PID, REPO, and EXPIRY):
-```
-cron_create: schedule "every 5m", delivery "announce", channel "g2", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
-Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
-Step 2: exec bash command:\"date +%s\"
-If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
-If current epoch > Expiry → respond '[TASK:timeout] Copilot PID <PID> exceeded 2h TTL'. Delete this cron with cron_delete. STOP.
-If EXITED → run THREE commands:
-  exec bash command:\"cd /home/dev/repos/quantipy && git log --oneline -3\"
-  exec bash command:\"cd /home/dev/repos/quantipy && uv run pytest -q --tb=line 2>&1 | tail -5\"
-  exec bash command:\"cd /home/dev/repos/quantipy && python3 -c \\\"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\\\" 2>&1 | tail -20\"
-Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <test summary>. Notebook metrics: <extracted metrics>'. Delete this cron with cron_delete. STOP."
-```
-
-**Sentinel design (two-stage cost optimization):**
-- **Alive ticks (~90%):** One `ps` command + "alive". Announced to channel — main agent ignores.
-- **Exit tick (once):** Runs git log + pytest + notebook metrics, formats [TASK:complete] summary. Announced to channel.
-- **Full evaluation:** Happens in your NEXT turn (GPT-5.4) when you process the announced [TASK:complete] and continue the autoresearch loop.
-
-**Sentinel rules:**
-- **Always specify delivery as:** `delivery "announce", channel "g2"` — isolated cron sessions have no default channel. Without `channel "g2"`, announce fails with "Channel is required."
-- **Do NOT specify `model`** — the default model works. Specifying a model causes auth errors in isolated cron sessions.
-- **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
-- **Do NOT pass `context`** — not a valid cron_create field. Valid: schedule, delivery, prompt, model, agent, thinking.
-- **Prompt must be self-contained** — include PID, repo path, and expiry. Isolated crons have NO conversation history.
-- **Hard TTL: 2 hours** — creation epoch + 7200. Sentinel self-deletes on expiry.
-- **Reusable** — this same sentinel pattern works for researcher, orchestrator, or any Copilot background process.
-
-3. Each tick runs independently with all context in the prompt
-4. When Copilot exits, the sentinel does a lightweight summary and self-deletes
-5. To continue the loop: after sentinel reports completion, launch NEXT iteration from main conversation, create new sentinel for new PID
+**Read the `copilot-cli` skill** for the full sentinel template, configuration rules, and resume logic. Key points:
+- Create sentinel immediately after launching background Copilot (same turn)
+- Sentinel compares HEAD_AT_LAUNCH vs HEAD on exit to detect `[TASK:incomplete]`
+- On `[TASK:incomplete]`, resume with `--resume=<session-id>` (max 2 retries)
+- On `[TASK:complete]`, continue the autoresearch loop (Phase 4+) in YOUR turn
 
 ### Status Reporting
 - Post `[TASK:running] autoresearch iteration N` after each launch

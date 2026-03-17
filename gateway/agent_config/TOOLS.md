@@ -2,80 +2,19 @@
 
 ## Primary: Copilot CLI (via exec)
 
-Delegate coding tasks to the Copilot CLI agent. Copilot runs autonomously with its own file search, multi-file edit, terminal, and planning capabilities.
+Delegate coding tasks to the Copilot CLI agent. **Read the `copilot-cli` skill** for the full reference: invocation syntax, flags, agent routing, background execution, sentinel template, session management, resume logic, and debugging.
 
-### Critical: exec workdir
-
-**Always use absolute paths for `workdir:`** — tilde (`~`) is NOT expanded.
-- Correct: `workdir:/home/dev/repos/quantipy`
-- Wrong: `workdir:~/repos/quantipy`
-
-### Critical: Prompt quoting
-
-**Never nest single quotes inside single quotes.** Use double quotes for the `-p` prompt:
-- Correct: `-p "Your prompt here"`
-- Wrong: `-p 'Your prompt here'` (breaks if prompt contains apostrophes)
-
-### Invocation
+Quick reference:
 ```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-opus-4.6 --no-auto-update"
+exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
-Use `--agent orchestrator` by default. It delegates internally to specialist agents defined in the repo's `.github/agents/`. Only use `--agent <name>` for a direct specialist when the task is narrow and single-purpose.
 
-### Key Flags
-| Flag | Purpose |
-|------|---------|
-| `-p "prompt"` | Non-interactive mode (exits after completion) |
-| `--yolo` | Full auto — all permissions, no confirmation |
-| `--model <model>` | Model selection (gpt-5.4, claude-opus-4.6, gpt-5.2-codex, etc.) |
-| `--agent <name>` | Route to specialist agent defined in `.github/agents/<name>.agent.md` |
-| `--add-dir <dir>` | Allow access to additional directories |
-| `--no-ask-user` | Autonomous mode, no questions |
-| `--no-auto-update` | Skip update checks |
-| `--output-format json` | Structured JSONL output |
-| `--resume` | Resume previous session |
-
-### Session Management
-
-Copilot CLI persists sessions at `/home/dev/.copilot/session-state/<uuid>/`. Each session has:
-- `workspace.yaml` — cwd, git root, branch, summary, timestamps
-- `events.jsonl` — full conversation history
-- `session.db` — tool state, checkpoints
-
-#### Launch in a specific repo
-```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-opus-4.6 --no-auto-update"
-```
-The `workdir:` parameter sets Copilot's cwd. Copilot auto-detects the git root and scopes all file operations to that repo.
-
-#### Resume most recent session
-```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot -p \"<follow-up prompt>\" --yolo --continue --no-auto-update"
-```
-`--continue` resumes the **globally** most recent session (any repo). Use when you just finished a task and want to follow up.
-
-#### Resume a specific session by ID
-```
-bash pty:true workdir:/home/dev/repos/quantipy command:"copilot -p \"<follow-up prompt>\" --yolo --resume=<session-id> --no-auto-update"
-```
-Use when resuming a specific earlier session. The session retains full conversation history and repo context.
-
-#### Discover sessions for a repo
-```
-bash command:"for d in $(ls -t /home/dev/.copilot/session-state/); do grep -l 'cwd: /home/dev/repos/quantipy' /home/dev/.copilot/session-state/$d/workspace.yaml 2>/dev/null && grep '^summary:' /home/dev/.copilot/session-state/$d/workspace.yaml; done"
-```
-Lists session UUIDs + summaries for a specific repo, most recent first.
-
-#### When to start fresh vs. resume
-| Situation | Action |
-|-----------|--------|
-| New task, clean slate | New session (no `--resume`) |
-| Follow-up to just-completed task | `--continue` |
-| Return to a specific earlier session | `--resume=<uuid>` |
-| Task failed mid-way, need to retry | `--resume=<uuid>` with corrected prompt |
-
-### Model Selection
-- **claude-opus-4.6** — Complex analysis, long context
+Key rules (see skill for details):
+- Always absolute paths for `workdir:` — tilde `~` is NOT expanded
+- Never nest single quotes — use double quotes for `-p`
+- `--agent orchestrator` by default, specialist only for narrow single-shot tasks
+- `background: true` for ALL implementation sessions (>2 min)
+- Never put `pty:true` or `workdir:` inside the command string — they are separate exec params
 
 ## Built-in Tools
 
@@ -98,35 +37,16 @@ Lists session UUIDs + summaries for a specific repo, most recent first.
 
 ## Long-Running Tasks
 
-For Copilot sessions expected to take >2 minutes, use background mode:
-
-### Launch
-```
-bash pty:true workdir:/home/dev/repos/quantipy background:true command:"copilot --agent orchestrator --yolo -p \"<task>\" --model claude-opus-4.6 --no-auto-update"
-```
-
-### Monitor Progress
-```
-process action:log sessionId:<id-from-launch>
-```
+See the `copilot-cli` skill for the full background execution protocol, sentinel template, and task status conventions.
 
 ### Task Status Convention
-After launching, completing, or failing a background task, ALWAYS post a structured status message:
 
 | Event | Format |
 |-------|--------|
 | Launch | `[TASK:running] <description> \| started: <HH:MM UTC>` |
 | Complete | `[TASK:complete] <description> \| duration: <Xm> \| result: <1-line>` |
+| Incomplete | `[TASK:incomplete] <description> \| session: <uuid>` |
 | Failure | `[TASK:failed] <description> \| error: <1-line reason>` |
+| Timeout | `[TASK:timeout] <description> \| exceeded 2h TTL` |
 
-These markers allow the gateway to detect task status on reconnect and display it to the user.
-
-### Copilot Process Sentinel
-After launching a background task, create a monitoring sentinel. First get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"` and repo HEAD: `exec bash command:"cd <REPO_PATH> && git rev-parse HEAD"`
-
-See AGENTS.md "Copilot Process Sentinel" section for the full template. Key rules:
-- **delivery "announce", channel "g2"** — required for isolated cron sessions
-- **Do NOT specify `model`** — default works; specifying causes auth errors
-- **Include HEAD_AT_LAUNCH** — sentinel compares to detect if Copilot produced commits
-- **Reports `[TASK:incomplete]`** if HEAD unchanged (triggers resume logic)
-- **Reports `[TASK:complete]`** if HEAD advanced (triggers evaluation)
+These markers allow the gateway to detect task status on reconnect and display it on G2 glasses.
