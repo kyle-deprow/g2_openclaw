@@ -144,6 +144,9 @@
     "profile": "full",
     "sessions": {
       "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true
     }
   },
   "messages": {
