@@ -360,7 +360,7 @@ The loop persists across turns using a cheap monitoring sentinel. Uses `azure-oa
 
 2. Create the Copilot Process Sentinel (fill in PID, REPO, and EXPIRY):
 ```
-cron_create: schedule "every 5m", delivery "none", model "azure-oai-g2-mini/gpt-5-mini", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
+cron_create: schedule "every 5m", delivery "announce", prompt "COPILOT SENTINEL. PID=<PID>. Repo=/home/dev/repos/quantipy. Expiry=<EXPIRY_EPOCH>.
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
@@ -373,12 +373,12 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 ```
 
 **Sentinel design (two-stage cost optimization):**
-- **Alive ticks (~90%):** Mini model, ~$0.001. One `ps` command + "alive". No reasoning.
-- **Exit tick (once):** Mini model, ~$0.01. Runs git log + pytest, formats summary. Still cheap.
-- **Full evaluation:** Happens in your NEXT turn (GPT-5.4) when you process the [TASK:complete] status and continue the autoresearch loop.
+- **Alive ticks (~90%):** One `ps` command + "alive". Announced to channel — main agent ignores.
+- **Exit tick (once):** Runs git log + pytest + notebook metrics, formats [TASK:complete] summary. Announced to channel.
+- **Full evaluation:** Happens in your NEXT turn (GPT-5.4) when you process the announced [TASK:complete] and continue the autoresearch loop.
 
 **Sentinel rules:**
-- **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes monitoring cheap.
+- **Always specify `delivery: "announce"`** — so the main agent sees [TASK:complete] when Copilot exits.
 - **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create field. Valid: schedule, delivery, prompt, model, agent, thinking.
 - **Prompt must be self-contained** — include PID, repo path, and expiry. Isolated crons have NO conversation history.

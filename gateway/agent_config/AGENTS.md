@@ -41,19 +41,10 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 - **Plans are cheap, bad implementations are expensive.** A 30-second plan review saves 10-minute reverts.
 - **After approval, ONE Copilot session executes the full plan.** Send the approved plan to a single Copilot CLI invocation. Copilot handles all phases internally — commits, tests, the works. You do NOT manage individual phases.
 
-### Plan delegation example:
-```
-exec(command: "copilot --agent orchestrator -p 'Analyze the codebase and create a plan for: <task description>. Do NOT implement anything. First, search the web for open-source Python libraries that already solve this problem. Evaluate fitness. Then output: 1) OSS libraries evaluated and recommendation, 2) which files to create or modify, 3) the approach, 4) suggested phases, 5) test strategy, 6) risks. Be specific — reference actual files and patterns in the repo.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
-```
+### Delegation examples:
+**Plan:** `exec(command: "copilot --agent orchestrator -p 'Analyze codebase and plan: <task>. Do NOT implement. OSS-first search. Output: 1) OSS evaluated 2) files 3) approach 4) phases 5) tests 6) risks.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
 
-After receiving the plan from Copilot, summarize it for the human and wait.
-
-### Implementation delegation example (after human approval):
-```
-exec(command: "copilot --agent orchestrator -p 'Execute this approved plan: <paste full plan here>. Implement all phases. Run uv run pytest after each phase. Commit after each phase if tests pass. If tests fail, fix them (max 3 attempts per phase). If unfixable, revert that phase and skip to the next.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
-```
-
-This is ONE session. Copilot handles all phases autonomously. You wait for it to finish, then report results to the human.
+**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
 
 ## Background Execution
 
@@ -63,7 +54,7 @@ For Copilot sessions expected to run >2 minutes (any implementation, build, or t
 
 1. **Get expiry epoch FIRST:** `exec(command: "echo $(( $(date +%s) + 7200 ))")`
 2. **Launch Copilot:** `exec(command: "copilot --agent orchestrator --yolo -p '<full plan>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")` — note the PID from the output.
-3. **Create cron sentinel IMMEDIATELY (same turn):** Call `cron_create` with the PID from step 2, expiry from step 1, model `azure-oai-g2-mini/gpt-5-mini`. Use the Copilot Process Sentinel template below. **If you do not call cron_create before responding, you have failed — the task runs blind.**
+3. **Create cron sentinel IMMEDIATELY (same turn):** Call `cron_create` with the PID from step 2, expiry from step 1, delivery `announce`. Use the Copilot Process Sentinel template below. **If you do not call cron_create before responding, you have failed — the task runs blind.**
 4. **Confirm to human:** Post task status using `[TASK:running]` format (see TOOLS.md). This is your response to the human.
 
 Steps 1-4 are ONE ATOMIC SEQUENCE of tool calls. You must call exec twice + cron_create + respond, ALL in the same turn, before ending. No breaking up across turns.
@@ -97,7 +88,7 @@ Use a **cheap mini model** for the 5-minute monitoring ticks. The sentinel only 
 Before creating, get expiry: `exec bash command:"echo $(( $(date +%s) + 7200 ))"`
 
 ```
-cron_create: schedule "every 5m", delivery "none", model "azure-oai-g2-mini/gpt-5-mini", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>.
+cron_create: schedule "every 5m", delivery "announce", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>.
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
@@ -110,8 +101,8 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 ```
 
 **Why this works:**
-- **Alive ticks (~90% of calls):** Mini model, ~$0.001 per tick. One `ps` command + "alive" response.
-- **Exit tick (1 call):** Mini model, ~$0.01. Runs git log + pytest + notebook metric extraction. No reasoning needed.
+- **Alive ticks (~90% of calls):** One `ps` command + "alive" response. Announced to channel but main agent ignores.
+- **Exit tick (1 call):** Runs git log + pytest + notebook metric extraction. Announces [TASK:complete] to channel.
 - **Full evaluation:** Happens in the **main agent's next turn** (GPT-5.4) when it reads the [TASK:complete] status with metrics included.
 
 ### Autonomous Post-Completion Evaluation
@@ -136,7 +127,7 @@ Respond: '[TASK:complete] Copilot PID <PID> exited. Commits: <git log>. Tests: <
 **Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases.
 
 ### Sentinel rules
-- **Always specify `model: "azure-oai-g2-mini/gpt-5-mini"`** — this is what makes the sentinel cheap.
+- **Always specify `delivery: "announce"`** — so the main agent sees [TASK:complete] when Copilot exits.
 - **Do NOT specify `execution`** — default (isolated) is correct. `execution: "main"` FAILS for named agents.
 - **Do NOT pass `context`** — not a valid cron_create parameter.
 - **Self-contained prompts** — include PID, repo path, and expiry epoch. Isolated crons have no conversation history.
@@ -154,27 +145,12 @@ Violations of this rule produce untested, uncommitted, unreviewed code. Copilot 
 ## Copilot Delegation Modes
 
 ### SCAFFOLD Mode
-Manage the coding environment that Copilot CLI works within.
+Setup coding environment for Copilot CLI. Templates in `~/repos/ai_scaffolding/`. Before first delegation, ensure `.github/copilot-instructions.md` + `.github/agents/*.agent.md` exist in target repo.
 
-- **Template library**: `~/repos/ai_scaffolding/` contains reusable `.agent.md` files (in `agents/`) and skill files (in `skills/`). Check this repo for relevant templates before setting up a new project.
-- **Deploy scaffolding**: Before first delegating work to Copilot in a target repo, ensure `.github/copilot-instructions.md` exists with project-specific conventions, and `.github/agents/*.agent.md` files are deployed for the relevant specialist agents.
-- **Tailor the orchestrator**: After deploying `orchestrator.agent.md` to a repo, update its routing table to list only the agents actually present in that repo's `.github/agents/`. The template references generic agents — the deployed copy must match reality.
-- **No bloat**: Only deploy agent files and instructions relevant to the current project. A Python-only repo doesn't need React agent files. Prune aggressively.
-
-#### Scaffolding Improvement Triggers
-These are CONCRETE events that trigger a scaffolding review. Not aspirational — do them when the trigger fires.
-
-| Trigger | Action |
-|---------|--------|
-| 2+ CRASHes with same root cause (e.g., wrong import, missing test) | Read Copilot session logs → update `copilot-instructions.md` with explicit rule to prevent it |
-| Agent source consistently underperforms in REFLECT phase | Update that agent's `.agent.md` — tighten prompt, add examples, or adjust scoring |
-| Agent source consistently dominates successes | Keep that agent. Consider adding examples from its winning proposals to other agent prompts |
-| Copilot ignores an instruction in `copilot-instructions.md` | Make the instruction louder — move to top, add "CRITICAL:", add negative example |
-| An `.agent.md` file was never invoked in 2+ research rounds | Delete it. No dead files |
-| New convention discovered (e.g., "always use walk-forward CV") | Add to `copilot-instructions.md` AND to `~/repos/ai_scaffolding/` template |
+**Triggers for scaffolding review:** 2+ CRASHes with same root cause → update instructions. Agent underperforms → update its `.agent.md`. Agent never invoked in 2+ rounds → delete it. New convention found → add to instructions + template.
 
 ```
-exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Assess if the instructions match current project conventions. Fix any stale references, add missing patterns you observe in the codebase, remove irrelevant rules. Keep it lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
+exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Fix stale refs, add missing patterns, remove irrelevant rules. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### RESEARCH Mode
@@ -205,84 +181,26 @@ exec(command: "copilot --agent backend-python -p '<narrow task>' --yolo --model 
 
 ## Evaluation Filters
 
-Every research result passes through these filters before implementation. ALL must pass:
-
-| Filter | Pass Criteria |
-|--------|--------------|
-| Has learned parameters? | MUST include ML/learning component — reject pure rule-based proposals with fixed thresholds |
-| Data available? | Uses data we already collect (OHLCV, Reddit, news, volume) or can collect with minimal new infra |
-| Testable hypothesis? | Can be stated as "if X then Y within Z timeframe" |
-| Single metric? | Measurable by Sharpe, hit rate, drawdown, profit factor, or test pass rate |
-| Not tried before? | Not in experiment log, `memory_search` results, or shared RESEARCH_LOG.md |
-| Novel enough? | Not a textbook indicator (SMA, RSI, MACD, Bollinger, OBV are BANNED as primary signals) — must have a novel angle |
-| Feature engineering defined? | Clear pipeline: raw data → derived features → model input |
+Every research result must pass ALL before implementation:
+- Has learned parameters (ML/learning component — reject pure rule-based)
+- Data available (OHLCV, Reddit, news, volume — or minimal new infra)
+- Testable hypothesis ("if X then Y within Z timeframe")
+- Single metric (Sharpe, hit rate, drawdown, profit factor)
+- Not tried before (check experiment log + `memory_search`)
+- Novel enough (SMA, RSI, MACD, Bollinger, OBV BANNED as primary signals)
+- Feature engineering defined (raw data → features → model input)
 
 ## Experiment Output Convention
 
-Every experiment MUST produce a **Jupyter notebook** as its primary deliverable.
-
-**Location:** `notebooks/experiments/<strategy_name>.ipynb`
-
-**Required sections in every experiment notebook:**
-1. **Hypothesis** — what we expect and why
-2. **Data** — load from existing services, show shape and sample
-3. **Features** — compute and visualize distributions/correlations
-4. **Training** — walk-forward CV with clear train/validate/embargo splits
-5. **Backtest** — run via BacktestRunner, compare vs SMA baseline
-6. **Results** — Sharpe, max drawdown, win rate, profit factor (printed)
-7. **Visualizations** — equity curve, drawdown chart, feature importance
-8. **Conclusion** — keep/discard with reasoning
-
-**Verification:** The notebook must execute cleanly via `uv run jupyter execute <path> --timeout=300`. A notebook that doesn't run is a CRASH, same as failing tests.
-
-**Module code** lives in `src/quantipy/alpha/<strategy_name>/` — the notebook imports and orchestrates it. The notebook is NOT a dump of all the code; it's the experiment narrative that calls the module.
-
-**Why notebooks:** Reproducibility, visual results on reconnect, self-documenting experiments. When you review past experiments, you read the notebook — not the module code.
-
-If any filter fails → log the rejection reason and move on. Do not argue with the filter.
+Every experiment MUST produce a Jupyter notebook at `notebooks/experiments/<strategy_name>.ipynb`. Required sections: Hypothesis, Data, Features, Training (walk-forward CV), Backtest (vs SMA baseline), Results (Sharpe/DD/win rate printed), Visualizations, Conclusion. Must execute via `uv run jupyter execute <path> --timeout=300`. Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
 
 ## Research via Copilot Agents
 
-Experiment ideas come from the Copilot CLI `researcher` agent, which orchestrates a structured debate among `contrarian`, `explorer`, and `theorist` agents. All 4 are `.agent.md` files deployed in the target repo's `.github/agents/`.
-
-### How to run an ideation round
-1. Build context: current metrics, last 10 experiments, data available, what's been tried
-2. Read `RESEARCH_LOG.md` from the workspace for the full experiment history
-3. Check: are there UNIMPLEMENTED proposals ranked from a prior round? If yes → skip to step 6.
-4. Delegate to Copilot: `copilot --agent researcher -p "<context>"` with `background:true`
-5. The researcher orchestrates contrarian/explorer/theorist, collects 6-9 proposals, applies filters, picks a winner
-6. Read the research report from the Copilot session output (or memory/RESEARCH_LOG.md for prior rounds)
-7. Delegate the top-ranked UNIMPLEMENTED strategy to Copilot: `copilot --agent orchestrator -p "<implement strategy>"` with `background:true`
-8. After implementation: verify, evaluate metrics, decide keep/discard, log results, mark strategy status in RESEARCH_LOG.md
-9. Move to next proposal or run new ideation round — do NOT stop
-
-### Scaffolding Requirement
-Before running research, ensure the target repo has the research agents deployed:
-- `.github/agents/researcher.agent.md`
-- `.github/agents/contrarian.agent.md`
-- `.github/agents/explorer.agent.md`
-- `.github/agents/theorist.agent.md`
-
-These come from `~/repos/ai_scaffolding/agents/`. If missing, copy them as part of the scaffolding step.
-
-### Shared Experiment Memory
-Maintain `RESEARCH_LOG.md` in the OpenClaw workspace (via `Write`). Format:
-```markdown
-## Tried
-| # | Idea | Source | Metric | Status | Why |
-|---|------|--------|--------|--------|-----|
-| 1 | SMA crossover | baseline | -0.44 | keep | baseline reference |
-| 2 | RSI mean reversion | contrarian | -0.19 | keep | +0.25 improvement |
-| 3 | Funding rate arb | explorer | - | rejected | no crypto data source yet |
-
-## Rejected Ideas
-- <idea>: <reason it was filtered out>
-
-## Insights
-- <pattern observed across experiments>
-```
-
-Update this file after every ideation round and every experiment result. All 3 subagents receive this context in their prompts so they build on collective knowledge.
+See the `autoresearch` skill for the full multi-agent research protocol. Key points:
+- Ideation uses `--agent researcher` which orchestrates contrarian/explorer/theorist
+- Implementation uses `--agent orchestrator`
+- Scaffolding: ensure target repo has `.github/agents/researcher.agent.md` + contrarian + explorer + theorist (from `~/repos/ai_scaffolding/agents/`)
+- Maintain `RESEARCH_LOG.md` — all proposals ranked with scores, all results logged
 
 ## Verification Protocol
 
@@ -301,28 +219,12 @@ After verification, compare metrics to baseline:
 
 ## Memory Practices
 
-Write to memory proactively — don't wait for compaction to flush context:
-
-- **After every experiment result:** Write outcome to `memory/YYYY-MM-DD.md` (status, metric, what worked/failed)
-- **After every decision:** Record it in daily memory
-- **After every research round:** Summarize proposals, winner, and rejection reasons
-- **Before starting work:** `memory_search` for related past experiments, decisions, failures
-- **Update MEMORY.md** only for critical durable facts that should persist in every session bootstrap
-- **Never duplicate:** Search memory before writing similar notes
-
-### Daily Memory Format
-```markdown
-# YYYY-MM-DD
-
-## Experiments
-- <name>: <status> (metric: <value>)
-
-## Decisions
-- <what was decided and why>
-
-## Research
-- Round N: <winner> selected, <N> proposals evaluated
-```
+Write to memory proactively:
+- After every experiment: outcome, metric, what worked/failed → `memory/YYYY-MM-DD.md`
+- After every decision/research round: record it
+- Before starting work: `memory_search` for related past experiments
+- MEMORY.md: only durable facts. Daily notes: `memory/YYYY-MM-DD.md`
+- Never duplicate — search before writing
 
 ## Stuck Detection
 
