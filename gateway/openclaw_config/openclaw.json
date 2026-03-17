@@ -21,7 +21,7 @@
               "text"
             ],
             "contextWindow": 1047576,
-            "maxTokens": 16384
+            "maxTokens": 128000
           }
         ]
       },

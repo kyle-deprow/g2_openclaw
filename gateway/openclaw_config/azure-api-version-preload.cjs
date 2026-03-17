@@ -119,11 +119,21 @@ function maybeInjectApiVersion(input) {
 /**
  * For Azure POST requests, intercept the JSON body to:
  *   1. Rename deprecated `max_tokens` → `max_completion_tokens`
- *   2. Inject `reasoning_effort: "high"` if not already present
+ *   2. Cap `max_completion_tokens` to model-specific limits
+ *   3. Inject `reasoning_effort: "high"` if not already present
  *
  * GPT-5.4 rejects `max_tokens` and requires `max_completion_tokens`.
  * Returns the (possibly modified) body string, or the original body.
  */
+
+// Model-specific max_completion_tokens caps.
+// OpenClaw sends an internal default (~32000) that exceeds some models' limits.
+// Only cap models that genuinely reject values above their limit.
+// GPT-5.4 accepts 32000+ via direct curl — do NOT cap it.
+const MODEL_MAX_TOKENS = {
+  "gpt-5-mini": 16384,
+};
+
 function patchBody(body) {
   if (!body || typeof body !== "string") return body;
   try {
@@ -135,6 +145,23 @@ function patchBody(body) {
       parsed.max_completion_tokens = parsed.max_tokens;
       delete parsed.max_tokens;
       modified = true;
+    }
+
+    // Cap max_completion_tokens to model-specific limits
+    if ("max_completion_tokens" in parsed && "model" in parsed) {
+      const modelName = String(parsed.model);
+      for (const [pattern, cap] of Object.entries(MODEL_MAX_TOKENS)) {
+        if (modelName.includes(pattern) && parsed.max_completion_tokens > cap) {
+          if (debug) {
+            process.stderr.write(
+              `[azure-preload] capping max_completion_tokens from ${parsed.max_completion_tokens} to ${cap} for model ${modelName}\n`
+            );
+          }
+          parsed.max_completion_tokens = cap;
+          modified = true;
+          break;
+        }
+      }
     }
 
     // Inject reasoning_effort: "high"
