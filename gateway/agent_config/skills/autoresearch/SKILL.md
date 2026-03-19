@@ -182,6 +182,16 @@ LOOP (until goal met or user interrupts):
         The notebook must be EXECUTABLE: `uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb`
         Create notebooks/ and notebooks/experiments/ dirs if they don't exist.
 
+      CRITICAL BACKTEST RULE — holding period MUST match prediction horizon:
+      If the model predicts a 15-bar forward return, the backtest MUST hold the position for 15 bars — NOT 1 bar.
+      Holding for 1 bar and recalculating every bar inflates Sharpe by diversifying across many tiny bets.
+      Implement a cooldown: after taking a position, DO NOT trade again for `horizon` bars.
+      This is the most common backtesting bug — it produces impossible Sharpe values (>10).
+
+      METRIC SANITY CHECK before reporting results:
+      Sharpe > 10 = BUG. Win rate = 1.0 = BUG. Max drawdown = 0.00% = BUG. Profit factor = inf = BUG.
+      If any of these trigger, find and fix the bug before reporting.
+
       Tests: write unit tests in tests/unit/alpha/test_<strategy_name>.py
       After: run uv run pytest -q --tb=short --ignore=tests/integration
       All existing tests MUST still pass.
@@ -195,6 +205,16 @@ LOOP (until goal met or user interrupts):
     The sentinel's [TASK:complete] includes metrics. Parse them first.
     If metrics are present and sufficient → use them directly for Phase 5.
     If metrics are missing or insufficient → run these checks yourself with exec:
+
+    a0) SANITY CHECK FIRST — before interpreting any metrics, check for impossible values:
+    - Sharpe > 10 → BUG (horizon mismatch, look-ahead bias, or PnL calculation error)
+    - Win rate = 1.0 → BUG (no losing days means signal leaks future data)
+    - Max drawdown = 0.00% → BUG (impossible in real trading)
+    - Profit factor = inf → BUG (no losing trades)
+    - Accuracy < 50% but Sharpe > 5 → BUG (return calculation inflates gains)
+    If ANY sanity check triggers: verdict is BUG, not KEEP/DISCARD.
+    Delegate a fix to Copilot: "Fix the backtesting bug: <specific issue>. The holding period must match the prediction horizon."
+    Re-run evaluation after the fix. Do NOT report bugged metrics as results.
 
     a) Tests pass:
     exec bash pty:true workdir:<repo> command:"uv run pytest -q --tb=short --ignore=tests/integration 2>&1 | tail -10"
@@ -279,21 +299,28 @@ LOOP (until goal met or user interrupts):
        ```
 
   Phase 8 — CONTINUE (autonomous progression — NO HUMAN INPUT NEEDED)
-    Do NOT stop. Do NOT ask "should I continue?" Do NOT wait for the human. Just continue.
+    **THIS IS THE MOST IMPORTANT PHASE. YOU MUST EXECUTE IT. NEVER SKIP IT.**
+    Do NOT stop. Do NOT ask "should I continue?" Do NOT wait for the human.
+    Do NOT post [TASK:complete] unless the GOAL IS MET (Sharpe > 1.5 sustained).
+    Posting [TASK:complete] after evaluation of a single experiment is WRONG — that means the individual task finished, not the autonomous loop.
 
     Decision tree (you decide, not the human):
-    a) Current strategy was KEEP and Sharpe < 1.0?
+    a) Current strategy had a BACKTESTING BUG (sanity check triggered)?
+       → Delegate bug fix to Copilot orchestrator → re-evaluate. This does NOT count as an iteration.
+    b) Current strategy was KEEP and Sharpe < 1.0?
        → Try optimizing: feature iteration, hyperparameter tuning, ensemble with prior keeps
-    b) Current strategy was STRONG KEEP (Sharpe > 1.0)?
+    c) Current strategy was STRONG KEEP (Sharpe > 1.0)?
        → Move to next proposal. Log this as a "significant alpha candidate."
-    c) Current strategy was DISCARD?
+    d) Current strategy was DISCARD?
        → Move to next ranked proposal from RESEARCH_LOG.md
-    d) All proposals from current research round implemented?
+    e) All proposals from current research round implemented?
        → Run Phase 7 REFLECT first, then Phase 2 for new ideation with updated context
        → Include reflection insights in the next researcher prompt
-    e) Goal met (Sharpe > 1.5 sustained across walk-forward)?
+    f) Goal met (Sharpe > 1.5 sustained across walk-forward)?
        → Post [TASK:complete], print final summary, stop
 
+    **After deciding, IMMEDIATELY launch the next Copilot process (5-step launch sequence).**
+    The loop continues until the goal is met or the human explicitly says "stop."
     Go to Phase 1.
 ```
 

@@ -64,16 +64,22 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
    exec(command: "cd /home/dev/repos/quantipy && uv run jupyter nbconvert --execute --inplace --ExecutePreprocessor.timeout=300 notebooks/experiments/<name>.ipynb 2>&1 | tail -5")
    exec(command: "cd /home/dev/repos/quantipy && python3 -c \"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])); [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\" 2>&1 | tail -30")
    ```
-3. **Run Phase 5 DECIDE** — apply the hard thresholds from the autoresearch skill (Sharpe > -0.5? > 0.5? > 1.0? Max DD < 30%?)
-4. **Run Phase 6 LOG** — record results in RESEARCH_LOG.md and memory
-5. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
-6. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
+3. **SANITY CHECK FIRST** — before interpreting metrics, check for impossible values:
+   - Sharpe > 10 → BUG (not alpha). Win rate = 1.0 → BUG. Max drawdown = 0% → BUG. Profit factor = inf → BUG.
+   - If any sanity check triggers: verdict is BUG. Delegate fix to Copilot. Re-evaluate after fix.
+4. **Run Phase 5 DECIDE** — apply the hard thresholds from the autoresearch skill (Sharpe > -0.5? > 0.5? > 1.0? Max DD < 30%?)
+5. **Run Phase 6 LOG** — record results in RESEARCH_LOG.md and memory
+6. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
+7. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
+   - BUG detected → launch Copilot orchestrator to fix the backtest, re-evaluate
    - KEEP with low Sharpe → launch Copilot orchestrator for feature iteration
    - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
-   - Goal met → post [TASK:complete] final summary
+   - Goal met (Sharpe > 1.5 sustained) → post [TASK:complete] final summary
 
 **Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases. **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
+
+**CRITICAL: [TASK:complete] is for the individual task, NOT the autoresearch loop.** After posting [TASK:complete] for one experiment's evaluation, you MUST immediately run Phase 8 to decide on and launch the next action. The autoresearch loop is only done when the GOAL is met (Sharpe > 1.5 sustained across walk-forward). Do NOT stop after evaluating one experiment — that's a loop stall.
 
 ### Incomplete Task Resume
 
