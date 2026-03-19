@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 from urllib.parse import parse_qs, urlparse
 
 import websockets
@@ -295,6 +295,118 @@ class GatewaySession:
             if phase:
                 frame["phase"] = phase
         return frame
+
+    # ── Quick commands ──────────────────────────────────────────────
+    # Short voice commands handled locally without an OpenClaw round-trip.
+    # Keeps the G2 UX responsive for common steering actions.
+
+    _QUICK_COMMANDS: ClassVar[dict[str, str]] = {
+        "status": "status",
+        "what's happening": "status",
+        "what is happening": "status",
+        "update": "status",
+        "progress": "status",
+    }
+
+    async def _try_quick_command(self, message: str) -> bool:
+        """Intercept short steering commands and handle locally.
+
+        Returns True if the command was handled, False to pass through to OpenClaw.
+        """
+        normalised = message.strip().lower().rstrip("?.!")
+        cmd = self._QUICK_COMMANDS.get(normalised)
+        if cmd is None:
+            return False
+
+        logger.info("Quick command: %r → %s", message, cmd)
+
+        if cmd == "status":
+            await self._quick_status()
+            return True
+
+        return False
+
+    async def _quick_status(self) -> None:
+        """Build and send a quick local status summary without querying OpenClaw."""
+        import shutil
+        import subprocess
+
+        parts: list[str] = []
+
+        # 1. Task status from transcript
+        task_info = read_task_status(
+            session_key=self._session_key,
+            agent_id=self._agent_id,
+        )
+        if task_info:
+            parts.append(f"[{task_info.status.upper()}] {task_info.description[:80]}")
+
+        # 2. Copilot processes
+        try:
+            result = subprocess.run(
+                ["pgrep", "-fa", "copilot.*-p"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            copilot_lines = [
+                line
+                for line in result.stdout.strip().splitlines()
+                if "tsserver" not in line and "vscode" not in line
+            ]
+            if copilot_lines:
+                parts.append(f"Copilot: {len(copilot_lines)} running")
+            else:
+                parts.append("Copilot: idle")
+        except Exception:
+            parts.append("Copilot: unknown")
+
+        # 3. Cron sentinels
+        if shutil.which("openclaw"):
+            try:
+                result = subprocess.run(
+                    ["openclaw", "cron", "list", "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                import json as _json
+
+                try:
+                    cron_data = _json.loads(result.stdout)
+                    jobs = cron_data if isinstance(cron_data, list) else cron_data.get("jobs", [])
+                    active = [j for j in jobs if j.get("status") in ("idle", "running")]
+                    if active:
+                        parts.append(f"Sentinels: {len(active)} active")
+                    else:
+                        parts.append("Sentinels: none")
+                except _json.JSONDecodeError:
+                    sentinel_count = result.stdout.count("sentinel")
+                    if sentinel_count > 0:
+                        parts.append(f"Sentinels: {sentinel_count}")
+                    else:
+                        parts.append("Sentinels: none")
+            except Exception:
+                pass
+
+        # 4. Git status of quantipy
+        quantipy_dir = "/home/dev/repos/quantipy"
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-1"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                cwd=quantipy_dir,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts.append(f"Last commit: {result.stdout.strip()[:60]}")
+        except Exception:
+            pass
+
+        summary = " | ".join(parts) if parts else "No active tasks"
+        await self.send_frame({"type": "assistant", "delta": summary})
+        await self.send_frame({"type": "status", "status": "idle"})
 
     async def _handle_status_request(self) -> None:
         """Respond with current status and optional task metadata."""
@@ -893,6 +1005,11 @@ class GatewaySession:
         await self.send_frame({"type": "status", "status": "idle"})
 
     async def _handle_text(self, frame: dict[str, Any]) -> None:
+        # Quick command intercept — handle short steering commands locally
+        quick = await self._try_quick_command(frame["message"])
+        if quick:
+            return
+
         self._current_question = frame["message"]
         self._task_start = asyncio.get_running_loop().time()
 

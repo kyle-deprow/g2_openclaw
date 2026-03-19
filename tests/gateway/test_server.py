@@ -480,6 +480,50 @@ class TestStatusRequest:
             assert len(resp["question"]) == 200
 
 
+class TestQuickCommand:
+    """Quick command intercept handles short steering commands locally."""
+
+    async def test_status_command_returns_assistant_and_idle(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Saying 'status' returns a local summary without querying OpenClaw."""
+        url, _ = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            await ws.send(json.dumps({"type": "text", "message": "status"}))
+
+            # Should get an assistant frame with summary (not thinking/streaming)
+            resp = await _recv_json(ws)
+            assert resp["type"] == "assistant"
+            assert isinstance(resp["delta"], str)
+            assert len(resp["delta"]) > 0
+
+            # Followed by idle status
+            idle = await _recv_json(ws)
+            assert idle == {"type": "status", "status": "idle"}
+
+    async def test_non_quick_command_passes_through(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        """Normal text messages are NOT intercepted by quick commands."""
+        url, _ = auth_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await ws.recv()  # connected
+            await ws.recv()  # history
+            await ws.recv()  # status:idle
+
+            await ws.send(json.dumps({"type": "text", "message": "hello world"}))
+
+            # Should go through normal mock handler path → thinking
+            thinking = await _recv_json(ws)
+            assert thinking == {"type": "status", "status": "thinking"}
+
+
 class TestSessionReset:
     """Session reset notification and control tests."""
 
