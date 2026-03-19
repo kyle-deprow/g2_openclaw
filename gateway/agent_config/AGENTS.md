@@ -87,16 +87,38 @@ When sentinel reports `[TASK:incomplete]`, resume with `--resume=<session-id>` �
 
 Every research result must pass ALL before implementation:
 - Has learned parameters (ML/learning component — reject pure rule-based)
-- Data available (OHLCV, Reddit, news, volume — or minimal new infra)
+- Data available (real OHLCV in PostgreSQL — NEVER synthetic data)
+- Uses real data from the database (NVDA: 112k bars, AMD: 106k bars, Jan-Jul 2022)
 - Testable hypothesis ("if X then Y within Z timeframe")
 - Single metric (Sharpe, hit rate, drawdown, profit factor)
 - Not tried before (check experiment log + `memory_search`)
 - Novel enough (SMA, RSI, MACD, Bollinger, OBV BANNED as primary signals)
 - Feature engineering defined (raw data → features → model input)
+- **Asset class / universe specified** (which tickers, why, how to evaluate)
+- **Hyperparameter tuning plan** (RandomizedSearchCV + TimeSeriesSplit, never hardcoded)
+- **Transaction cost model** (spread + slippage per ticker, report gross AND net Sharpe)
+- **Data split defined** (Jan-Apr train/CV, May validation, Jun-Jul sacred OOS)
 
 ## Experiment Output Convention
 
-Every experiment MUST produce a Jupyter notebook at `notebooks/experiments/<strategy_name>.ipynb`. Required sections: Hypothesis, Data, Features, Training (walk-forward CV), Backtest (vs SMA baseline), Results (Sharpe/DD/win rate printed), Visualizations, Conclusion. Must execute via `uv run jupyter execute <path> --timeout=300`. Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
+Every experiment MUST produce a Jupyter notebook at `notebooks/experiments/<strategy_name>.ipynb`.
+The notebook must read the `experiment-data` skill (`.github/skills/experiment-data/SKILL.md`) and follow its methodology.
+
+Required sections:
+1. Data inventory (actual DB rows/dates loaded)
+2. Hypothesis + universe choice (which tickers, why)
+3. Data loading (real OHLCV via `qp.prices()` or direct SQL — NEVER synthetic)
+4. Feature engineering (on real data, show distributions)
+5. Hyperparameter tuning (RandomizedSearchCV + TimeSeriesSplit, report best params)
+6. Walk-forward backtest (20-day train, 5-day test, 1-day embargo, min 10 folds, Jan-Apr only)
+7. Transaction costs (report gross AND net Sharpe)
+8. OOS evaluation (Jun-Jul 2022, never touched during training)
+9. Null tests (shuffled labels, random features, bootstrap Sharpe CI)
+10. Conclusion (keep/iterate/discard)
+
+Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
+Must execute via `uv run jupyter execute <path> --timeout=300`.
+API server must be running: `uv run uvicorn 'quantipy.api.main:create_app' --factory --host 127.0.0.1 --port 8000 &`
 
 ## Research via Copilot Agents
 

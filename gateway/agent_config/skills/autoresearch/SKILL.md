@@ -55,6 +55,7 @@ LOOP (until goal met or user interrupts):
        - Last 10 experiment log entries (what worked, what didn't)
        - List of all strategies/approaches already tried
        - Available data sources in the codebase
+       - Available REAL data: check with exec bash command:"cd /home/dev/repos/quantipy && uv run python -c \"import quantipy as qp; print(qp.prices('NVDA','2022-01-01','2022-12-31').shape)\""
 
     b) Delegate to Copilot researcher agent:
 
@@ -62,15 +63,31 @@ LOOP (until goal met or user interrupts):
          Context:
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
-         - Data available: <list>
+         - Data available: REAL 1-min OHLCV for NVDA (112k bars) and AMD (106k bars), Jan-Jul 2022.
+           Also: 132k Reddit sentiment posts, 5,935 news articles, 118k daily ticker summaries.
+           Load via: import quantipy as qp; df = qp.prices('NVDA', '2022-01-01', '2022-07-31')
+           Or direct SQL to localhost:5433 (see experiment-data skill for connection details)
+
+         REAL DATA ONLY (NON-NEGOTIABLE):
+         - ALL experiments MUST use real OHLCV data from the database. ZERO synthetic data.
+         - Every prior experiment used synthetic data and was DISCARDED as meaningless. Do not repeat this.
+         - Read the experiment-data skill (.github/skills/experiment-data/SKILL.md) for data loading patterns.
 
          INTRADAY FOCUS (NON-NEGOTIABLE):
          - ALL strategies MUST target sub-day holding periods (minutes to hours). No overnight positions.
          - We have 1-MINUTE OHLCV bars — exploit this granularity. Time-of-day features, volume profiles,
            VWAP dynamics, opening range patterns, session segmentation are all fair game.
          - Transaction costs MUST be modeled — at intraday frequency, slippage destroys alpha.
-         - Intraday patterns to explore: opening range, VWAP reversion, volume-at-price, lunch hour effects,
-           power hour momentum, intraday sentiment spikes, session-over-session regime persistence.
+
+         ASSET CLASS & UNIVERSE DESIGN (MANDATORY in every proposal):
+         Every proposal MUST explicitly address:
+         1. WHAT to trade: single ticker (NVDA/AMD), pair (NVDA vs AMD relative value),
+            equal-weight basket, or cross-sectional (rank and trade both).
+         2. WHY that universe: is the alpha thesis ticker-specific or generalizable?
+         3. HOW to evaluate: walk-forward CV config, OOS holdout period, transaction cost model.
+         4. DATA SPLIT: Jan-Apr 2022 for train/CV, May 2022 for validation, Jun-Jul 2022 as sacred OOS.
+         5. HYPERPARAMETER TUNING: how params will be tuned (RandomizedSearchCV + TimeSeriesSplit).
+         Proposals without explicit universe/evaluation design are REJECTED.
 
          CONSTRAINTS:
          - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED as primary signals.
@@ -78,13 +95,16 @@ LOOP (until goal met or user interrupts):
            Reject any idea that relies solely on hand-tuned thresholds or fixed rules.
            Minimum: supervised learning, unsupervised clustering, online learning, or learned features.
          - Tech stack: Python 3.13, scikit-learn, pandas, numpy, backtesting.py, SQLAlchemy.
-         - Scoring weight: (novelty × 2) + feasibility + (persistence × 1.5). Favor ambitious ML ideas.
+         - Scoring weight: (novelty × 2) + feasibility + (persistence × 1.5) + (evaluation rigor × 1.5).
 
-         Run the research debate. Delegate to contrarian, explorer, and theorist
-         agents. Each should propose 2-3 ML-grade INTRADAY ideas with learned parameters.
+         Run the research debate. Delegate to contrarian, explorer, and theorist.
+         Each proposal MUST include: strategy description, universe choice with justification,
+         ML model, feature engineering, data split, hyperparameter tuning plan, transaction cost model,
+         evaluation criteria, and expected trade frequency.
          HARD REJECT any proposal without a learning component.
          HARD REJECT any proposal with overnight holding periods.
-         Evaluate remaining proposals against filters. Pick the single best ML idea.
+         HARD REJECT any proposal using synthetic data.
+         HARD REJECT any proposal without explicit universe/evaluation design.
          Output a structured research report with the winner and all proposals.
        \" --yolo --model claude-opus-4.6 --no-auto-update"
 
@@ -100,10 +120,12 @@ LOOP (until goal met or user interrupts):
     Build a detailed implementation prompt that includes:
     - The proposal name, description, and ML model type
     - Feature engineering pipeline: raw data → features → model input
-    - Which existing data services to use (PriceDataService, NewsSentimentService, etc.)
-    - Model training approach (walk-forward, cross-validation, etc.)
+    - Universe: which tickers and why (from the proposal's asset class design)
+    - Data loading: MUST use real data via qp.prices() or direct SQL. Read the experiment-data skill.
+    - Model training approach (walk-forward CV with hyperparameter tuning)
+    - Transaction cost model (spread + slippage per ticker)
     - Where to put the code: src/quantipy/alpha/<strategy_name>/
-    - Backtest requirements: use BacktestRunner, compare vs SMA crossover baseline
+    - Backtest requirements: use BacktestRunner, compare vs buy-and-hold baseline
     - Test requirements: pytest, all existing tests must still pass
     - Dependencies: only add deps already in the stack (scikit-learn, xgboost, etc.) or lightweight
 
@@ -116,35 +138,48 @@ LOOP (until goal met or user interrupts):
     exec bash pty:true workdir:<repo> background:true command:"copilot --agent orchestrator -p \"
       IMPLEMENT INTRADAY STRATEGY: <proposal name>
 
+      READ THE experiment-data SKILL FIRST: .github/skills/experiment-data/SKILL.md
+      It defines data loading, methodology, evaluation, and decision thresholds.
+
       Description: <full proposal description from research report>
       ML Model: <model type and approach>
+      Universe: <tickers and justification from proposal>
       Holding Period: INTRADAY ONLY — entry and exit within the same trading day. No overnight positions.
+
+      REAL DATA ONLY — load via qp.prices() or direct SQL from PostgreSQL (localhost:5433).
+      Before starting, ensure API server is running:
+        uv run uvicorn 'quantipy.api.main:create_app' --factory --host 127.0.0.1 --port 8000 &
+      NEVER generate synthetic OHLCV data. All prior synthetic experiments were DISCARDED.
 
       Feature Engineering:
       <feature list from proposal — map each to existing data services>
       MUST INCLUDE time-of-day features (hour, minutes-since-open, session half).
-      MUST MODEL transaction costs in backtest (slippage + commissions).
 
       Implementation has TWO parts:
 
       PART 1 — Module code in src/quantipy/alpha/<strategy_name>/:
-        - features.py — feature extraction pipeline using existing data services
-        - model.py — ML model training and prediction (scikit-learn/xgboost)
+        - features.py — feature extraction pipeline using real OHLCV data
+        - model.py — ML model training and prediction with hyperparameter tuning
         - strategy.py — QuantiPyStrategy subclass that wraps the model for backtesting
 
       PART 2 — Experiment notebook at notebooks/experiments/<strategy_name>.ipynb:
         This is the PRIMARY deliverable. The notebook MUST contain:
-        1. Hypothesis — what we expect and why (2-3 sentences)
-        2. Data loading — pull from existing data services, show shape and sample
-        3. Feature engineering — compute features, show distributions/correlations
-        4. Model training — walk-forward CV (8-week train, 1-week validate, 7-day embargo, 52 rolls)
-        5. Backtest execution — run via BacktestRunner, compare vs SMA baseline
-        6. Results — Sharpe ratio, max drawdown, win rate, profit factor (as printed output)
-        7. Visualizations — equity curve, drawdown chart, feature importance
-        8. Conclusion — 2-3 sentences: keep/discard decision with reasoning
+        1. Data inventory — run the inventory cell from experiment-data skill, print actual date ranges
+        2. Hypothesis — what we expect, which tickers, why this universe
+        3. Data loading — qp.prices() for real OHLCV, show shape and sample
+        4. Feature engineering — compute features on real data, show distributions/correlations
+        5. Hyperparameter tuning — RandomizedSearchCV with TimeSeriesSplit (min 5 splits)
+           Report best params and CV scores. NEVER hardcode model hyperparameters.
+        6. Walk-forward backtest — 20-day train, 5-day test, 1-day embargo, minimum 10 folds
+           on Jan-Apr 2022 data only. Report per-fold metrics.
+        7. Transaction costs — apply spread (NVDA 0.5bps, AMD 0.8bps) + 0.3bps slippage
+           Report BOTH gross and net Sharpe. If net < 0 but gross > 0, strategy trades too much.
+        8. OOS evaluation — run final model on Jun-Jul 2022 (NEVER touched during training)
+           Report OOS Sharpe (gross + net), accuracy, trades/day, max drawdown.
+        9. Null tests — at least 3: shuffled labels, random features, bootstrap Sharpe CI
+        10. Conclusion — keep/iterate/discard decision with reasoning
 
         The notebook must be EXECUTABLE: `uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb`
-        Use papermill-compatible parameterization where possible.
         Create notebooks/ and notebooks/experiments/ dirs if they don't exist.
 
       Tests: write unit tests in tests/unit/alpha/test_<strategy_name>.py
