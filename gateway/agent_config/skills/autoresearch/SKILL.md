@@ -227,26 +227,73 @@ LOOP (until goal met or user interrupts):
     c) Extract metrics from notebook output:
     exec bash workdir:<repo> command:"python3 -c \"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])) if nbs else {}; [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\" 2>&1 | tail -30"
 
-    Extract: Sharpe ratio, max drawdown, win rate, total return, trade count, OOS accuracy.
+    Extract: IS walk-forward Sharpe (the primary metric), OOS Sharpe, max drawdown, win rate, trade count, OOS accuracy, OOS trading days, feature importances.
     If the strategy can't be backtested yet (missing data, import errors), treat as CRASH.
+
+  Phase 4.5 — ADVERSARIAL REVIEW (Copilot reviewer — isolated, skeptical)
+    **Every experiment gets reviewed by a dedicated adversarial agent before any keep/discard decision.**
+    This catches statistical issues that threshold checks miss: inflated OOS on short periods,
+    feature importance anomalies, OOS >> IS inversions, leakage patterns, holding period mismatches.
+
+    Delegate to Copilot reviewer agent:
+
+    exec bash pty:true workdir:<repo> background:true command:"copilot --agent reviewer -p \"
+      REVIEW EXPERIMENT: <strategy_name>
+
+      Read the experiment-data skill: .github/skills/experiment-data/SKILL.md
+      Read the reviewer agent instructions: .github/agents/reviewer.agent.md
+
+      Notebook: notebooks/experiments/<strategy_name>.ipynb
+      Module code: src/quantipy/alpha/<strategy_dir>/
+      Tests: tests/unit/test_<strategy_name>*.py
+
+      Metrics from Phase 4 extraction:
+      - IS walk-forward Sharpe (net): <value>
+      - IS bootstrap CI: [<low>, <high>]
+      - OOS Sharpe (net): <value>
+      - OOS trading days: <value>
+      - Trades/day IS: <value>
+      - Trades/day OOS: <value>
+      - Feature importances: <list top 5 with values>
+      - Null test results: <pass/fail summary>
+
+      Run ALL 8 checks from your review protocol.
+      Read the actual source code, not just notebook output.
+      Output the structured review with verdict and recommended action.
+    \" --yolo --model claude-opus-4.6 --no-auto-update"
+
+    Wait for completion via process monitor notification.
+    Parse the reviewer's output. Extract:
+    - Verdict: PASS / CONDITIONAL PASS / FAIL
+    - Recommended decision metric (usually IS walk-forward Sharpe)
+    - Issues found (with severity)
+    - Recommended action
+
+    **The reviewer's recommended metric overrides raw OOS claims.**
+    If reviewer says "use IS Sharpe 2.13, not OOS 5.90" → Phase 5 uses 2.13.
 
   Phase 5 — DECIDE (against thresholds — autonomous, no human input)
     **You make this decision. Not the human.**
-    Hard thresholds for quant strategies:
+    **Use the reviewer's recommended decision metric, NOT raw OOS.**
+    If the reviewer was not available or crashed, use IS walk-forward Sharpe (net).
+
+    Hard thresholds for quant strategies (applied to the decision metric):
     - Tests pass? If no → CRASH (attempt fix, max 3 tries, then revert)
-    - Sharpe > -0.5? If no → DISCARD (too bad to keep)
-    - Sharpe > SMA baseline? If yes → KEEP (improvement)
-    - Sharpe > 0.5? → SIGNIFICANT KEEP (flag as promising)
-    - Sharpe > 1.0? → STRONG KEEP (prioritize for further optimization)
-    - Max drawdown < 30%? If no → DISCARD regardless of Sharpe
+    - Decision Sharpe > -0.5? If no → DISCARD (too bad to keep)
+    - Decision Sharpe > SMA baseline? If yes → KEEP (improvement)
+    - Decision Sharpe > 0.5? → SIGNIFICANT KEEP (flag as promising)
+    - Decision Sharpe > 1.0? → STRONG KEEP (prioritize for further optimization)
+    - Max drawdown (IS) < 30%? If no → DISCARD regardless of Sharpe
+    - Reviewer verdict FAIL with CRITICAL issues? → BUG FIX first (delegate to Copilot, re-review)
 
     Decision:
-    - KEEP / SIGNIFICANT KEEP → keep commit, record metrics, mark strategy as "implemented" in RESEARCH_LOG.md
-    - DISCARD → git revert HEAD, record why, consider: can features be improved?
+    - KEEP / SIGNIFICANT KEEP → keep commit, record metrics + reviewer verdict, mark as "implemented" in RESEARCH_LOG.md
+    - DISCARD → git revert HEAD, record why + reviewer issues, consider: can features be improved?
       If the model architecture is sound but features are weak, try ONE feature iteration before moving on.
     - CRASH → attempt fix (max 3 tries), else revert. Mark as "crashed" in RESEARCH_LOG.md.
+    - BUG FIX → delegate fix to Copilot orchestrator, then re-run Phase 4 + 4.5.
 
-    After DISCARD with decent architecture (Sharpe > -1.0):
+    After DISCARD with decent architecture (Decision Sharpe > -1.0):
     - Try one feature engineering iteration: add/remove features, retrain, retest
     - If still DISCARD after feature iteration → move to next proposal
 
@@ -301,8 +348,9 @@ LOOP (until goal met or user interrupts):
   Phase 8 — CONTINUE (autonomous progression — NO HUMAN INPUT NEEDED)
     **THIS IS THE MOST IMPORTANT PHASE. YOU MUST EXECUTE IT. NEVER SKIP IT.**
     Do NOT stop. Do NOT ask "should I continue?" Do NOT wait for the human.
-    Do NOT post [TASK:complete] unless the GOAL IS MET (Sharpe > 1.5 sustained).
+    Do NOT post [TASK:complete] unless the GOAL IS MET (IS walk-forward Sharpe (net) > 1.5, reviewer PASS/CONDITIONAL PASS).
     Posting [TASK:complete] after evaluation of a single experiment is WRONG — that means the individual task finished, not the autonomous loop.
+    Posting GOAL MET based on raw OOS Sharpe without reviewer validation is WRONG — OOS on short periods is unreliable.
 
     Decision tree (you decide, not the human):
     a) Current strategy had a BACKTESTING BUG (sanity check triggered)?
@@ -316,8 +364,9 @@ LOOP (until goal met or user interrupts):
     e) All proposals from current research round implemented?
        → Run Phase 7 REFLECT first, then Phase 2 for new ideation with updated context
        → Include reflection insights in the next researcher prompt
-    f) Goal met (Sharpe > 1.5 sustained across walk-forward)?
-       → Post [TASK:complete], print final summary, stop
+    f) Goal met (IS walk-forward Sharpe (net) > 1.5 AND reviewer verdict PASS or CONDITIONAL PASS)?
+       → Post [TASK:complete], print final summary, stop.
+       Note: GOAL MET requires the reviewer to validate the result. An unreviewed Sharpe > 1.5 does NOT trigger GOAL MET.
 
     **After deciding, IMMEDIATELY launch the next Copilot process (5-step launch sequence).**
     The loop continues until the goal is met or the human explicitly says "stop."

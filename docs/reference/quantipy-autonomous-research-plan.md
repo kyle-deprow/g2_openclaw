@@ -57,51 +57,61 @@ Copilot CLI (--yolo --agent orchestrator/researcher --model claude-opus-4.6)
 
 ## Strategy Results
 
-| # | Strategy | Sharpe | Accuracy | Trades | Verdict | Commit |
-|---|----------|--------|----------|--------|---------|--------|
-| T1 | GMM Regime Detection | 1.01 | 51.3% | 1 | DISCARD | d521ac5 |
-| T2 | IF Anomaly-Gated RF | -27.86 | 44.8% | 131 | DISCARD | ab25745 |
-| E2 | PA Sentiment Gate | — | — | — | IMPL ONLY | f10dd37 |
-| E3 | CPG-Ridge Ensemble | -143.16 | — | — | DISCARD | 3bad5ca |
+| # | Strategy | IS Sharpe (net) | OOS Sharpe (net) | Verdict | Commit | Reviewer |
+|---|----------|-----------------|------------------|---------|--------|----------|
+| T1 | GMM Regime Detection | 1.01 | — | DISCARD | d521ac5 | N/A (pre-reviewer) |
+| T2 | IF Anomaly-Gated RF | -27.86 | — | DISCARD | ab25745 | N/A |
+| E2 | PA Sentiment Gate | — | — | IMPL ONLY | f10dd37 | N/A |
+| E3 | CPG-Ridge Ensemble | -143.16 | — | DISCARD | 3bad5ca | N/A |
+| E2-HMR | HMM Regime | — | — | DISCARD | 86c48ab | N/A |
+| T4-HRE | Hurst Regime | — | — | DISCARD | 614a607 | N/A |
+| T7-TFD | Trade Fragmentation | — | — | DISCARD | 37266e4 | N/A |
+| T8-LMS | LMSW Vol-Ret Elasticity | — | — | KEPT | add9862 | N/A |
+| T8-MSG | Multi-Scale OHLC Geometry | 2.13 | 5.90 | KEPT* | 02192b2 | Needs review |
 
-**Root cause (T4 researcher):** All experiments ran on synthetic data with zero alpha. T4 winner (C1: Kyle DGP + Cross-Sectional GBM) fixes this with a realistic data generator.
+*T8-MSG: OOS 5.90 on 45 days is unreliable. IS walk-forward 2.13 [1.65, 2.73] is the real result.
 
-**Round 4 ideation:** Complete (commit `1f76b41`). Winner: **C1 Kyle DGP + Cross-Sectional HistGBT**.
+---
 
-**C1 implementation:** ACTIVE — Copilot orchestrator PID 42628, sentinel `0746cd52` (0 errors, announce/g2). Launched autonomously after "autoresearch" trigger with correct model (oai-ss.../gpt-5-4).
+## Architecture (Current)
 
-**Quantipy:** 28 unpushed commits.
+```
+Human (G2 glasses)
+  ↓ "autoresearch" / reconnect → status
+OpenClaw PM (:18789)
+  ↓ Phase 2: Copilot --agent researcher (ideation)
+  ↓ Phase 3: Copilot --agent orchestrator (implementation)
+  ↓ Phase 4: OpenClaw verifies (tests, notebook, metrics)
+  ↓ Phase 4.5: Copilot --agent reviewer (adversarial review)  ← NEW
+  ↓ Phase 5-8: decide → log → reflect → continue
+  ↓ Gateway process monitor (polls 30s, notifies on exit)
+Copilot CLI (--yolo --model claude-opus-4.6)
+~/repos/quantipy (all changes via Copilot)
+```
 
 ---
 
 ## Config State
 
-| File | Chars | Deployed | Notes |
-|------|-------|----------|-------|
-| AGENTS.md | 17,426 | Yes | Under 20k bootstrap limit |
-| SKILL.md | 25,216 | Yes | Loaded on-demand per skill |
-| preload.cjs | — | Yes | gpt-5-mini cap 16384 only |
-| openclaw.json | — | Yes | GPT-5.4 128k |
-| per-agent models.json | — | Yes | Fixed: oai-ss URL, no apiKeys |
-| push-openclaw-config.sh | — | Yes | Auto-corrects per-agent models.json |
+| File | Location | Status |
+|------|----------|--------|
+| autoresearch SKILL.md | g2_openclaw agent_config | Phase 4.5 added, needs push |
+| reviewer.agent.md | quantipy .github/agents | NEW, needs commit |
+| experiment-data SKILL.md | quantipy .github/skills | Updated, needs commit |
+| orchestrator.agent.md | quantipy .github/agents | Updated, needs commit |
 
 ---
 
 ## Next Steps
 
-1. **Monitor C1 implementation** — Copilot PID 42628 active, sentinel watching
-2. **Verify sentinel fires correctly** — sentinel announces [TASK:complete] with metrics
-3. **Verify OpenClaw evaluates autonomously** — reads metrics, decides keep/discard
-4. **Verify OpenClaw continues to next iteration** — launches C2 or new ideation
-5. **Push quantipy commits** once loop stable
-6. **Disable preload debug** — `AZURE_PRELOAD_DEBUG=1` is noisy, disable after confirmed
+1. Push OpenClaw config (autoresearch with Phase 4.5)
+2. Commit quantipy scaffolding (reviewer agent + updated skills)
+3. Run T8-MSG through the reviewer to validate current HEAD
+4. Resume autonomous loop from T8-MSG review
+5. Monitor reviewer quality
 
 ## Success Criteria
 
-OpenClaw completes without human interaction:
-1. Launch implementation with sentinel
-2. Sentinel detects exit + reports metrics
-3. Evaluate in own turn
-4. Decide keep/discard
-5. Launch next iteration
-6. Repeat
+1. Every experiment goes through adversarial review before keep/discard
+2. GOAL MET requires IS walk-forward Sharpe > 1.5 AND reviewer PASS
+3. Loop: implement → review → decide → next (zero human)
