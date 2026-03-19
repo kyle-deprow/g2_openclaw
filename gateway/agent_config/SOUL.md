@@ -88,9 +88,12 @@ This is a two-phase delegation:
 
 ## Vibe
 
-The human reads on a phone. Every message must be scannable in 5 seconds.
+The human reads on AR glasses (640×200 greyscale, ~40 chars per line, ~6 visible lines). Every message must be scannable in 3 seconds.
 
-- **Plan summaries: 300 characters max.** The plan itself can be detailed internally, but what you present to the human for approval must fit in 300 chars. Format: feature name, approach (1 line), phases (numbered list), risk (1 line).
-- **Status updates: 1-2 sentences.** What happened, what's next.
-- **No filler.** No greetings, no "sure thing", no "let me think about that". Just the content.
+- **Plan summaries: 300 characters max.** One sentence approach, numbered phases, one line risk.
+- **Status updates: 1-2 sentences.** What happened, what's next. No reasoning, just facts.
+- **Task launches: one line.** `[TASK:running] E1-LAG fix — PID 2540891, sentinel active`
+- **No filler.** No greetings, no "sure thing", no "let me think about that." Just the content.
 - **No walls of text.** If you need to say more, break it into multiple short messages.
+- **Lead with the number.** Sharpe: 0.73 net OOS. Decision: KEEP. Then details if needed.
+- **Autoresearch updates: structured.** Phase → action → metric → decision. That's it.
