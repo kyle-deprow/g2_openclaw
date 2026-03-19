@@ -402,35 +402,21 @@ Recovery protocol:
 
 ## Loop Recovery (Preventing Stalls)
 
-The most dangerous failure mode is NOT a crash — it's a silent stall where no Copilot is running and no sentinel is active. The loop just stops and nobody notices.
+The most dangerous failure mode is NOT a crash — it's a silent stall where no Copilot is running. The loop just stops and nobody notices.
 
-### Stale Sentinel Recovery
-When you receive a `[TASK:timeout]` or `[TASK:complete]` for a PID you didn't launch or already evaluated:
-1. **cron_delete that cron immediately** (check `cron_list` first)
-2. **Check running Copilots:** `exec bash command:"pgrep -fa 'copilot.*-p' || echo NO_COPILOT"`
-3. **If NO_COPILOT → re-enter autoresearch at Phase 1.** The loop stalled. Resume it.
-4. **If Copilot is running → verify it has a sentinel.** `cron_list` — if no sentinel exists for that PID, create one.
+**The gateway's process monitor handles this automatically.** It polls Copilot sessions every 30 seconds and sends `[TASK:complete]` or `[TASK:failed]` to your session when a process exits. No cron sentinels needed.
 
 ### On Reconnect / Session Resume
 When the human connects (or you receive a `connected` frame), run a health check:
-1. `cron_list` — any sentinels? Check their PIDs are alive.
-2. `pgrep -fa 'copilot.*-p'` — any Copilots running without sentinels?
-3. Dead PIDs with live crons → clean up (cron_delete + evaluate last commit)
-4. Live PIDs without crons → create sentinel
-5. No PIDs, no crons, autoresearch was active → **loop stalled. Re-enter at Phase 1.**
-
-### Mandatory Sentinel Check After Launch
-After EVERY `exec bash background:true` that launches Copilot:
-1. Verify `cron_list` shows the new sentinel within 30 seconds
-2. If sentinel creation failed → retry once. If still failed → kill the Copilot process and log the error.
-3. Never proceed to "confirm to human" without a verified sentinel.
+1. `pgrep -fa 'copilot.*-p' || echo NO_COPILOT` — any Copilots running?
+2. If NO_COPILOT and autoresearch was active → **loop stalled. Re-enter at Phase 1.**
+3. If Copilot IS running → the gateway monitor will notify you when it exits. Wait.
 
 ### Never Silently Acknowledge Staleness
-When you see a stale `[TASK:*]` message, you MUST act:
-- Delete the stale cron
-- Check system state (any running Copilots? any active sentinels?)
-- Re-enter the loop if nothing is running
-- **Never respond "stale, ignoring" and stop.** That's how loops die.
+When you see a `[TASK:*]` message, you MUST act:
+- Evaluate the results (Phase 4)
+- Continue the loop (Phase 8)
+- **Never respond "noted" and stop.** That's how loops die.
 
 ## Execution Model
 
@@ -444,15 +430,16 @@ When you see a stale `[TASK:*]` message, you MUST act:
 - Phase 6-7 (LOG + REFLECT) → YOU write to files and memory directly
 - Phase 8 (CONTINUE) → YOU decide next action and launch the appropriate Copilot agent
 
-**The entire Phase 4 → Phase 8 sequence runs in ONE turn** after sentinel reports completion.
+**The entire Phase 4 → Phase 8 sequence runs in ONE turn** after the gateway's process monitor reports completion.
 
-### Self-Continuation via Copilot Process Sentinel
+### Self-Continuation via Gateway Process Monitor
 
-**Read the `copilot-cli` skill** for the full sentinel template, configuration rules, and resume logic. Key points:
-- Create sentinel immediately after launching background Copilot (same turn)
-- Sentinel compares HEAD_AT_LAUNCH vs HEAD on exit to detect `[TASK:incomplete]`
-- On `[TASK:incomplete]`, resume with `--resume=<session-id>` (max 2 retries)
+**Read the `copilot-cli` skill** for the full launch sequence. Key points:
+- The gateway automatically detects Copilot processes working on target repos
+- When a process exits, the gateway sends `[TASK:complete]` or `[TASK:failed]` to your session
+- Includes git log, notebook sanity check output, and dirty-tree detection
 - On `[TASK:complete]`, continue the autoresearch loop (Phase 4+) in YOUR turn
+- On `[TASK:failed]` (dirty tree), check uncommitted changes then evaluate
 
 ### Status Reporting
 - Post `[TASK:running] autoresearch iteration N` after each launch

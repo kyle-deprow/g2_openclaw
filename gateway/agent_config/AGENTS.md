@@ -48,17 +48,17 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 ## Background Execution
 
-**Read the `copilot-cli` skill for the full protocol** — launch sequence, sentinel template, exec syntax, and configuration rules.
+**Read the `copilot-cli` skill for the full protocol** — launch sequence, exec syntax, and configuration rules.
 
-**ALL implementation sessions MUST use `background:true`.** The 5-step launch sequence (epoch → HEAD → copilot → sentinel → confirm) must execute in ONE turn. Never respond before the sentinel is created.
+**ALL implementation sessions MUST use `background:true`.** The 3-step launch sequence (HEAD → copilot → confirm) must execute in ONE turn.
 
-**CRITICAL:** Never skip `cron_create`. Never specify `model` in sentinels. Never use `delivery "announce", channel "g2"` — it ALWAYS fails (G2 is not a registered OpenClaw channel). Use `sessions_send` instead. Always call `cron_delete` BEFORE `sessions_send` — if send fails, the cron must still be gone. **Read the `copilot-cli` skill** for the full sentinel template.
+**No cron sentinels needed.** The gateway's built-in process monitor automatically tracks Copilot processes and sends `[TASK:complete]` or `[TASK:failed]` to your session when they exit. It includes git log, notebook sanity check output, and dirty-tree detection.
 
 ### Autonomous Post-Completion Evaluation
 
-**When you receive a [TASK:complete] from the sentinel — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop **IN YOUR OWN TURN using exec commands. Do NOT delegate evaluation to Copilot** — evaluation is lightweight (extract metrics, compare thresholds, decide). Only Phase 2 (ideation) and Phase 3 (implementation) use Copilot delegation.
+**When you receive a [TASK:complete] or [TASK:failed] from the gateway — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop **IN YOUR OWN TURN using exec commands. Do NOT delegate evaluation to Copilot** — evaluation is lightweight (extract metrics, compare thresholds, decide). Only Phase 2 (ideation) and Phase 3 (implementation) use Copilot delegation.
 
-1. **Parse the metrics** from the sentinel's [TASK:complete] message (Sharpe, accuracy, drawdown, return, trade count)
+1. **Parse the metrics** from the gateway's notification (includes git log and notebook sanity output)
 2. **Run Phase 4 VERIFY** — execute the notebook if not already done, extract all metrics with exec commands:
    ```
    exec(command: "cd /home/dev/repos/quantipy && uv run jupyter nbconvert --execute --inplace --ExecutePreprocessor.timeout=300 notebooks/experiments/<name>.ipynb 2>&1 | tail -5")
@@ -77,13 +77,13 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
    - Goal met (Sharpe > 1.5 sustained) → post [TASK:complete] final summary
 
-**Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true + sentinel.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases. **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
+**Phase 4-5 are exec commands in YOUR turn. Phase 6-7 are write/memory operations in YOUR turn. Phase 8 launches a new Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens in ONE turn. You do not stop between phases. **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
 
 **CRITICAL: [TASK:complete] is for the individual task, NOT the autoresearch loop.** After posting [TASK:complete] for one experiment's evaluation, you MUST immediately run Phase 8 to decide on and launch the next action. The autoresearch loop is only done when the GOAL is met (Sharpe > 1.5 sustained across walk-forward). Do NOT stop after evaluating one experiment — that's a loop stall.
 
 ### Incomplete Task Resume
 
-When sentinel reports `[TASK:incomplete]`, resume with `--resume=<session-id>` — max 2 retries before declaring `[TASK:failed]`. **Read the `copilot-cli` skill** for the full resume protocol, common failure patterns, and log inspection commands.
+When a `[TASK:failed]` indicates dirty tree (uncommitted changes), the Copilot may have died mid-work. Check `git status`, review the changes, and decide whether to commit or discard. If the work is salvageable, commit it and evaluate. Otherwise, `git checkout .` and re-launch.
 
 ## Code Delegation & Modes
 

@@ -27,6 +27,7 @@ from gateway.config import GatewayConfig, load_config
 from gateway.copilot_sessions import kill_copilot_session, list_copilot_sessions
 from gateway.copilot_watcher import CopilotSessionWatcher
 from gateway.openclaw_client import OpenClawClient, OpenClawError
+from gateway.process_monitor import CopilotProcessMonitor
 from gateway.protocol import (
     ErrorCode,
     ProtocolError,
@@ -1179,6 +1180,8 @@ class GatewayServer:
         self._pending_reset_reason: str | None = None
         self._copilot_watcher: CopilotSessionWatcher | None = None
         self._copilot_watch_task: asyncio.Task[None] | None = None
+        self._process_monitor: CopilotProcessMonitor | None = None
+        self._process_monitor_task: asyncio.Task[None] | None = None
 
         if handler is not None:
             self._handler: ResponseHandler = handler
@@ -1745,7 +1748,44 @@ class GatewayServer:
             self.config.gateway_port,
             **serve_kwargs,  # type: ignore[arg-type]
         ):
-            await asyncio.Future()  # block forever
+            await self._start_process_monitor()
+            try:
+                await asyncio.Future()  # block forever
+            finally:
+                await self._stop_process_monitor()
+
+    async def _start_process_monitor(self) -> None:
+        """Start the background Copilot process monitor if OpenClaw is configured."""
+        if not self.config.openclaw_gateway_token:
+            return
+
+        monitor_client = OpenClawClient(
+            host=self.config.openclaw_host,
+            port=self.config.openclaw_port,
+            token=self.config.openclaw_gateway_token,
+        )
+
+        async def notify(message: str) -> None:
+            """Send a notification to OpenClaw and drain the response."""
+            try:
+                stream = await monitor_client.send_message(message, session_key=self._session_key)
+                async for _delta in stream:
+                    pass  # drain — we don't display the response
+            except OpenClawError:
+                logger.warning("Process monitor: failed to notify OpenClaw", exc_info=True)
+
+        self._process_monitor = CopilotProcessMonitor(notify_callback=notify)
+        self._process_monitor_task = asyncio.create_task(self._process_monitor.run())
+        logger.info("Copilot process monitor started")
+
+    async def _stop_process_monitor(self) -> None:
+        """Stop the background process monitor."""
+        if self._process_monitor is not None:
+            self._process_monitor.stop()
+        if self._process_monitor_task is not None:
+            self._process_monitor_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._process_monitor_task
 
 
 def _setup_cuda_library_paths() -> None:

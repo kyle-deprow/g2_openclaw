@@ -62,101 +62,33 @@ Only bypass with `--agent <name>` for narrow single-shot tasks:
 
 **ALL implementation sessions MUST use `background:true`.** Any Copilot run expected to take >2 minutes.
 
-### The 5-Step Launch Sequence
+### The 3-Step Launch Sequence
 
-Execute ALL steps in ONE turn. Do NOT respond with text before step 4.
+Execute ALL steps in ONE turn.
 
-1. **Get expiry epoch:**
-   `exec(command: "echo $(( $(date +%s) + 7200 ))")`
-
-2. **Record repo HEAD:**
+1. **Record repo HEAD:**
    `exec(command: "cd /home/dev/repos/quantipy && git rev-parse HEAD")`
-   Save this as HEAD_AT_LAUNCH — the sentinel needs it.
+   Save as HEAD_AT_LAUNCH for later evaluation.
 
-3. **Launch Copilot:**
+2. **Launch Copilot:**
    `exec(command: "copilot --agent orchestrator --yolo -p '<prompt>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
    Note the PID from the output.
 
-4. **Create sentinel (MANDATORY — same turn):**
-   Call `cron_create` with PID, expiry, HEAD_AT_LAUNCH. See Sentinel Template below.
-
-5. **Confirm to human:**
+3. **Confirm to human:**
    Post `[TASK:running] <description> | started: <HH:MM UTC>`
 
-**Why this order matters:** If you respond before creating the sentinel, the task runs blind — there is NO way to learn when Copilot finishes. This is the #1 most common failure mode.
+**No sentinel needed.** The gateway's built-in process monitor automatically tracks Copilot processes working on target repos. When the process exits, the gateway sends a `[TASK:complete]` or `[TASK:failed]` message directly to your session with git log, notebook sanity check results, and dirty-tree detection. This replaces the old cron-based sentinel mechanism, which was unreliable due to `sessions_send` failures in isolated cron context.
 
 ### After Launch
 | Event | Action |
 |-------|--------|
-| Sentinel: `[TASK:complete]` | Evaluate results → continue loop → delete cron |
-| Sentinel: `[TASK:incomplete]` | Resume session (see Resume Logic) → delete cron |
-| Sentinel: `[TASK:timeout]` | Post `[TASK:timeout]`, investigate → delete cron |
-| Sentinel: `[TASK:failed]` | Log failure → move to next action → delete cron |
-
-## Process Sentinel Template
-
-The sentinel monitors a background Copilot process. It checks every 5 minutes whether the process is alive, and when it exits, captures git state, test results, notebook metrics, and session ID. It uses `sessions_send` to inject results into the G2 session.
-
-**Before creating, get:** expiry epoch + repo HEAD (steps 1-2 above).
-
-```
-cron_create: schedule "every 5m", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REPO_PATH>. Expiry=<EXPIRY_EPOCH>. HEAD_AT_LAUNCH=<HEAD_HASH>.
-Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
-Step 2: exec bash command:\"date +%s\"
-If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
-If current epoch > Expiry → cron_delete this cron FIRST. Then sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:timeout] Copilot PID <PID> exceeded 2h TTL\"). STOP.
-If EXITED → run FOUR commands:
-  exec bash command:\"cd <REPO_PATH> && git rev-parse HEAD\"
-  exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
-  exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
-  exec bash command:\"ls -t /home/dev/.copilot/session-state/ | head -1\"
-THEN cron_delete this cron IMMEDIATELY (before any notification — guarantees no re-fire).
-If HEAD == HEAD_AT_LAUNCH (no new commits) → sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>\"). STOP.
-Else → sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>.\"). STOP."
-```
-
-### Sentinel Configuration Rules
-
-| Rule | Why |
-|------|-----|
-| Do NOT use `delivery "announce", channel "g2"` | The G2 gateway is NOT a registered OpenClaw channel. Channel-based delivery ALWAYS fails. |
-| Use `sessions_send` for exit notifications | The sentinel uses `sessions_send(sessionKey:"agent:claw:g2", ...)` to inject results into the G2 session. This requires `tools.sessions.visibility=all` in openclaw.json. |
-| Do NOT specify `model` | Default works. Specifying a model causes auth errors in isolated crons. |
-| Do NOT specify `execution` | Default (isolated) is correct. `execution: "main"` FAILS for named agents. |
-| Do NOT pass `context` | Not a valid `cron_create` parameter. |
-| Prompt must be self-contained | Include PID, repo path, HEAD, and expiry. Isolated crons have NO conversation history. |
-| Hard TTL: 2 hours | Embed expiry epoch (creation + 7200s). Sentinel self-deletes on expiry. |
-
-### How It Works
-- **Alive ticks (~90% of calls):** One `ps` command → "alive" response. Cheap, no delivery needed.
-- **Exit tick (once):** Runs git log + pytest. Compares HEAD to HEAD_AT_LAUNCH. **Deletes the cron first**, then uses `sessions_send` to inject `[TASK:complete]` or `[TASK:incomplete]` into the G2 session.
-- **Full evaluation:** Happens in YOUR next turn when you see the sessions_send message in the G2 session.
-
-### Sentinel Self-Healing Rules
-
-These rules prevent the stale-sentinel failure mode where a cron fires indefinitely for a dead process.
-
-**Rule 1: cron_delete ALWAYS comes before sessions_send.**
-The sentinel template above enforces this. If sessions_send fails (network, permissions, session gone), the cron is already deleted. No re-fire. The notification is best-effort; cleanup is mandatory.
-
-**Rule 2: Every Copilot launch MUST create a sentinel in the SAME turn.**
-This is non-negotiable. If you launch `background:true` without `cron_create` in the same turn, there is NO mechanism to detect completion. The 5-step launch sequence exists for this reason.
-
-**Rule 3: When you receive a stale [TASK:*] for a PID you didn't launch or already evaluated:**
-1. Immediately `cron_delete` that cron (if it still exists — check `cron_list` first)
-2. Check if any Copilot is currently running: `exec bash command:"pgrep -fa 'copilot.*-p' || echo NO_COPILOT"`
-3. If NO_COPILOT and autoresearch is active → re-enter the autoresearch loop (Phase 1)
-4. If a Copilot IS running → verify it has a sentinel. If not, create one.
-
-**Rule 4: On daemon restart or reconnect, audit crons.**
-Run `cron_list`. For each sentinel cron, check if its PID is alive (`ps -p <PID>`). Delete any cron whose PID is dead. This prevents zombie sentinels surviving daemon restarts.
-
-**Rule 5: Never acknowledge a stale sentinel without acting.**
-Saying "that's stale, ignoring" is NOT acceptable. Either delete the cron or verify the current state. Every stale sentinel is a recovery opportunity — use it to re-enter the loop.
+| Gateway: `[TASK:complete]` | Evaluate results → continue loop |
+| Gateway: `[TASK:failed]` (dirty tree) | Check git status → commit or discard → evaluate |
+| No notification after 2h | Process likely died silently — check `pgrep -fa copilot` |
 
 ## Incomplete Task Resume
 
-When sentinel reports `[TASK:incomplete]` (Copilot exited but HEAD unchanged — no new commits), Copilot spent its session on exploration/planning without producing code. This is the most common failure with the orchestrator agent.
+When Copilot exits but HEAD is unchanged (no new commits), it spent its session on exploration/planning without producing code. This is the most common failure with the orchestrator agent.
 
 ### Resume Protocol
 
