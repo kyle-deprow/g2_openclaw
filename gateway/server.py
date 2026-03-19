@@ -329,7 +329,6 @@ class GatewaySession:
 
     async def _quick_status(self) -> None:
         """Build and send a quick local status summary without querying OpenClaw."""
-        import shutil
         import subprocess
 
         parts: list[str] = []
@@ -362,33 +361,11 @@ class GatewaySession:
         except Exception:
             parts.append("Copilot: unknown")
 
-        # 3. Cron sentinels
-        if shutil.which("openclaw"):
-            try:
-                result = subprocess.run(
-                    ["openclaw", "cron", "list", "--json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                import json as _json
-
-                try:
-                    cron_data = _json.loads(result.stdout)
-                    jobs = cron_data if isinstance(cron_data, list) else cron_data.get("jobs", [])
-                    active = [j for j in jobs if j.get("status") in ("idle", "running")]
-                    if active:
-                        parts.append(f"Sentinels: {len(active)} active")
-                    else:
-                        parts.append("Sentinels: none")
-                except _json.JSONDecodeError:
-                    sentinel_count = result.stdout.count("sentinel")
-                    if sentinel_count > 0:
-                        parts.append(f"Sentinels: {sentinel_count}")
-                    else:
-                        parts.append("Sentinels: none")
-            except Exception:
-                pass
+        # 3. Process monitor tracked PIDs
+        if self._server and self._server._process_monitor:
+            tracked = self._server._process_monitor.tracked_pids
+            if tracked:
+                parts.append(f"Monitored: {len(tracked)} PIDs")
 
         # 4. Git status of quantipy
         quantipy_dir = "/home/dev/repos/quantipy"
