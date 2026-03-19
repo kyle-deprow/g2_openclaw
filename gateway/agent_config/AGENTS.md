@@ -79,11 +79,12 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
    - KEEP with low Sharpe → launch Copilot orchestrator for feature iteration
    - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
-   - Goal met (IS walk-forward Sharpe net > 1.5, reviewer PASS) → post [TASK:complete] final summary
+   - STRONG KEEP (IS Sharpe > 1.0, reviewer PASS) → log as portfolio candidate, post [PORTFOLIO] status, then KEEP EXPLORING for orthogonal strategies
+   - The loop NEVER self-terminates. Only the human saying "stop" halts it.
 
 **Phase 4 is exec commands. Phase 4.5 is Copilot reviewer delegation (background:true). Phase 5-7 are in YOUR turn. Phase 8 launches next Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens across turns (Phase 4.5 exits → process monitor notifies → you continue at Phase 5). **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
 
-**CRITICAL: GOAL MET requires IS walk-forward Sharpe (net) > 1.5 AND reviewer verdict PASS or CONDITIONAL PASS.** Raw OOS Sharpe on short periods is NOT sufficient for GOAL MET. An unreviewed experiment is NOT eligible for GOAL MET.
+**CRITICAL: The loop NEVER stops on its own.** Even after finding strong strategies, keep exploring for portfolio diversification. Different signal families, holding periods, and asset pairs create uncorrelated return streams. A portfolio of 3-5 orthogonal strategies is worth far more than one great strategy.
 
 ### Incomplete Task Resume
 

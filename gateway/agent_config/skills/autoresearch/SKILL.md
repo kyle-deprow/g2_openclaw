@@ -345,31 +345,41 @@ LOOP (until goal met or user interrupts):
        - Next round adjustments: <what to emphasize/avoid>
        ```
 
-  Phase 8 — CONTINUE (autonomous progression — NO HUMAN INPUT NEEDED)
+  Phase 8 — CONTINUE (autonomous progression — NEVER STOP)
     **THIS IS THE MOST IMPORTANT PHASE. YOU MUST EXECUTE IT. NEVER SKIP IT.**
     Do NOT stop. Do NOT ask "should I continue?" Do NOT wait for the human.
-    Do NOT post [TASK:complete] unless the GOAL IS MET (IS walk-forward Sharpe (net) > 1.5, reviewer PASS/CONDITIONAL PASS).
-    Posting [TASK:complete] after evaluation of a single experiment is WRONG — that means the individual task finished, not the autonomous loop.
-    Posting GOAL MET based on raw OOS Sharpe without reviewer validation is WRONG — OOS on short periods is unreliable.
+    **The loop NEVER terminates on its own.** Even after finding a STRONG KEEP strategy,
+    continue exploring for orthogonal strategies to build a robust portfolio.
+    Only the human saying "stop" halts the loop.
+
+    Posting [TASK:complete] after evaluation of a single experiment is WRONG — that means
+    the individual task finished, not the autonomous loop.
+    Posting GOAL MET based on raw OOS Sharpe without reviewer validation is WRONG.
 
     Decision tree (you decide, not the human):
     a) Current strategy had a BACKTESTING BUG (sanity check triggered)?
        → Delegate bug fix to Copilot orchestrator → re-evaluate. This does NOT count as an iteration.
     b) Current strategy was KEEP and Sharpe < 1.0?
        → Try optimizing: feature iteration, hyperparameter tuning, ensemble with prior keeps
-    c) Current strategy was STRONG KEEP (Sharpe > 1.0)?
-       → Move to next proposal. Log this as a "significant alpha candidate."
+    c) Current strategy was STRONG KEEP (IS walk-forward Sharpe > 1.0, reviewer PASS)?
+       → Log as "significant alpha candidate" in RESEARCH_LOG.md and memory.
+       → Post a brief status update: "[PORTFOLIO] <strategy> added — IS Sharpe X.XX (reviewer PASS)"
+       → Then CONTINUE to next proposal. Explore orthogonal strategies (different signal families,
+         different holding periods, different asset pairs) to diversify the portfolio.
     d) Current strategy was DISCARD?
        → Move to next ranked proposal from RESEARCH_LOG.md
     e) All proposals from current research round implemented?
        → Run Phase 7 REFLECT first, then Phase 2 for new ideation with updated context
-       → Include reflection insights in the next researcher prompt
-    f) Goal met (IS walk-forward Sharpe (net) > 1.5 AND reviewer verdict PASS or CONDITIONAL PASS)?
-       → Post [TASK:complete], print final summary, stop.
-       Note: GOAL MET requires the reviewer to validate the result. An unreviewed Sharpe > 1.5 does NOT trigger GOAL MET.
+       → Include reflection insights + current portfolio composition in the next researcher prompt
+       → Explicitly ask the researcher to propose strategies ORTHOGONAL to existing keeps
+         (different signal families, uncorrelated return streams)
 
-    **After deciding, IMMEDIATELY launch the next Copilot process (5-step launch sequence).**
-    The loop continues until the goal is met or the human explicitly says "stop."
+    **Portfolio-aware ideation:** When launching Phase 2, include the list of all KEPT strategies
+    with their signal type, holding period, and correlation profile. Ask for strategies that
+    would ADD diversification, not duplicate existing alpha sources.
+
+    **After deciding, IMMEDIATELY launch the next Copilot process.**
+    The loop continues until the human explicitly says "stop."
     Go to Phase 1.
 ```
 
