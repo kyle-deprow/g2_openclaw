@@ -338,6 +338,38 @@ Recovery protocol:
 - Resource exhaustion (OOM) → revert, try smaller variant
 - Infinite loop/hang → stop after timeout, revert, avoid that approach
 
+## Loop Recovery (Preventing Stalls)
+
+The most dangerous failure mode is NOT a crash — it's a silent stall where no Copilot is running and no sentinel is active. The loop just stops and nobody notices.
+
+### Stale Sentinel Recovery
+When you receive a `[TASK:timeout]` or `[TASK:complete]` for a PID you didn't launch or already evaluated:
+1. **cron_delete that cron immediately** (check `cron_list` first)
+2. **Check running Copilots:** `exec bash command:"pgrep -fa 'copilot.*-p' || echo NO_COPILOT"`
+3. **If NO_COPILOT → re-enter autoresearch at Phase 1.** The loop stalled. Resume it.
+4. **If Copilot is running → verify it has a sentinel.** `cron_list` — if no sentinel exists for that PID, create one.
+
+### On Reconnect / Session Resume
+When the human connects (or you receive a `connected` frame), run a health check:
+1. `cron_list` — any sentinels? Check their PIDs are alive.
+2. `pgrep -fa 'copilot.*-p'` — any Copilots running without sentinels?
+3. Dead PIDs with live crons → clean up (cron_delete + evaluate last commit)
+4. Live PIDs without crons → create sentinel
+5. No PIDs, no crons, autoresearch was active → **loop stalled. Re-enter at Phase 1.**
+
+### Mandatory Sentinel Check After Launch
+After EVERY `exec bash background:true` that launches Copilot:
+1. Verify `cron_list` shows the new sentinel within 30 seconds
+2. If sentinel creation failed → retry once. If still failed → kill the Copilot process and log the error.
+3. Never proceed to "confirm to human" without a verified sentinel.
+
+### Never Silently Acknowledge Staleness
+When you see a stale `[TASK:*]` message, you MUST act:
+- Delete the stale cron
+- Check system state (any running Copilots? any active sentinels?)
+- Re-enter the loop if nothing is running
+- **Never respond "stale, ignoring" and stop.** That's how loops die.
+
 ## Execution Model
 
 **This is a behavioral mode, NOT a separate agent.** When activated, you (the default agent) follow this protocol.

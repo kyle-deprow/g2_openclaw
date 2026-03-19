@@ -104,14 +104,15 @@ cron_create: schedule "every 5m", prompt "COPILOT SENTINEL. PID=<PID>. Repo=<REP
 Step 1: exec bash command:\"ps -p <PID> -o pid= 2>/dev/null || echo EXITED\"
 Step 2: exec bash command:\"date +%s\"
 If output does NOT contain EXITED → respond 'PID <PID> alive'. STOP. No other tool calls.
-If current epoch > Expiry → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:timeout] Copilot PID <PID> exceeded 2h TTL\"). Then cron_delete this cron. STOP.
+If current epoch > Expiry → cron_delete this cron FIRST. Then sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:timeout] Copilot PID <PID> exceeded 2h TTL\"). STOP.
 If EXITED → run FOUR commands:
   exec bash command:\"cd <REPO_PATH> && git rev-parse HEAD\"
   exec bash command:\"cd <REPO_PATH> && git log --oneline -3\"
   exec bash command:\"cd <REPO_PATH> && uv run pytest -q --tb=line 2>&1 | tail -5\"
   exec bash command:\"ls -t /home/dev/.copilot/session-state/ | head -1\"
-If HEAD == HEAD_AT_LAUNCH (no new commits) → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>\"). Then cron_delete. STOP.
-Else → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>.\"). Then cron_delete. STOP."
+THEN cron_delete this cron IMMEDIATELY (before any notification — guarantees no re-fire).
+If HEAD == HEAD_AT_LAUNCH (no new commits) → sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:incomplete] PID <PID> exited with no new commits. Session: <session-id>. Git: <git log>. Tests: <test summary>\"). STOP.
+Else → sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:complete] PID <PID> exited. Commits: <git log>. Tests: <test summary>.\"). STOP."
 ```
 
 ### Sentinel Configuration Rules
@@ -128,8 +129,30 @@ Else → use sessions_send(sessionKey:\"agent:claw:g2\", message:\"[TASK:complet
 
 ### How It Works
 - **Alive ticks (~90% of calls):** One `ps` command → "alive" response. Cheap, no delivery needed.
-- **Exit tick (once):** Runs git log + pytest. Compares HEAD to HEAD_AT_LAUNCH. Uses `sessions_send` to inject `[TASK:complete]` or `[TASK:incomplete]` into the G2 session.
+- **Exit tick (once):** Runs git log + pytest. Compares HEAD to HEAD_AT_LAUNCH. **Deletes the cron first**, then uses `sessions_send` to inject `[TASK:complete]` or `[TASK:incomplete]` into the G2 session.
 - **Full evaluation:** Happens in YOUR next turn when you see the sessions_send message in the G2 session.
+
+### Sentinel Self-Healing Rules
+
+These rules prevent the stale-sentinel failure mode where a cron fires indefinitely for a dead process.
+
+**Rule 1: cron_delete ALWAYS comes before sessions_send.**
+The sentinel template above enforces this. If sessions_send fails (network, permissions, session gone), the cron is already deleted. No re-fire. The notification is best-effort; cleanup is mandatory.
+
+**Rule 2: Every Copilot launch MUST create a sentinel in the SAME turn.**
+This is non-negotiable. If you launch `background:true` without `cron_create` in the same turn, there is NO mechanism to detect completion. The 5-step launch sequence exists for this reason.
+
+**Rule 3: When you receive a stale [TASK:*] for a PID you didn't launch or already evaluated:**
+1. Immediately `cron_delete` that cron (if it still exists — check `cron_list` first)
+2. Check if any Copilot is currently running: `exec bash command:"pgrep -fa 'copilot.*-p' || echo NO_COPILOT"`
+3. If NO_COPILOT and autoresearch is active → re-enter the autoresearch loop (Phase 1)
+4. If a Copilot IS running → verify it has a sentinel. If not, create one.
+
+**Rule 4: On daemon restart or reconnect, audit crons.**
+Run `cron_list`. For each sentinel cron, check if its PID is alive (`ps -p <PID>`). Delete any cron whose PID is dead. This prevents zombie sentinels surviving daemon restarts.
+
+**Rule 5: Never acknowledge a stale sentinel without acting.**
+Saying "that's stale, ignoring" is NOT acceptable. Either delete the cron or verify the current state. Every stale sentinel is a recovery opportunity — use it to re-enter the loop.
 
 ## Incomplete Task Resume
 

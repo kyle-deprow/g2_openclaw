@@ -52,7 +52,7 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 **ALL implementation sessions MUST use `background:true`.** The 5-step launch sequence (epoch → HEAD → copilot → sentinel → confirm) must execute in ONE turn. Never respond before the sentinel is created.
 
-**CRITICAL:** Never skip `cron_create`. Never specify `model` in sentinels. Always use `delivery "announce", channel "g2"`. These are the top failure modes — the skill documents them all.
+**CRITICAL:** Never skip `cron_create`. Never specify `model` in sentinels. Never use `delivery "announce", channel "g2"` — it ALWAYS fails (G2 is not a registered OpenClaw channel). Use `sessions_send` instead. Always call `cron_delete` BEFORE `sessions_send` — if send fails, the cron must still be gone. **Read the `copilot-cli` skill** for the full sentinel template.
 
 ### Autonomous Post-Completion Evaluation
 
