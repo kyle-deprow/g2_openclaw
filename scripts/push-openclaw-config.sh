@@ -73,6 +73,47 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
     else . end
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
+# ── Copy Graphiti MCP config (before path resolution check) ──────────────────
+GRAPHITI_CONFIG_SRC="${REPO_ROOT}/gateway/openclaw_config/graphiti-config.yaml"
+GRAPHITI_CONFIG_DST="${OPENCLAW_HOME}/graphiti-config.yaml"
+if [[ -f "${GRAPHITI_CONFIG_SRC}" ]]; then
+  cp "${GRAPHITI_CONFIG_SRC}" "${GRAPHITI_CONFIG_DST}"
+  echo "Copied graphiti-config.yaml → ${GRAPHITI_CONFIG_DST}"
+fi
+
+# ── Resolve Graphiti MCP server paths ─────────────────────────────────────────
+GRAPHITI_MCP_REPO="${HOME}/.local/share/graphiti-mcp/repo/mcp_server"
+GRAPHITI_MCP_PYTHON="${HOME}/.local/share/graphiti-mcp/venv/bin/python"
+GRAPHITI_CONFIG_RESOLVED="${OPENCLAW_HOME}/graphiti-config.yaml"
+if [[ -x "${GRAPHITI_MCP_PYTHON}" ]] && [[ -f "${GRAPHITI_MCP_REPO}/main.py" ]] && [[ -f "${GRAPHITI_CONFIG_RESOLVED}" ]]; then
+  # pragma: allowlist nextline secret
+  GRAPH_API_KEY_REF="env:AZURE_OPENAI_API_KEY"
+  MERGED=$(echo "${MERGED}" | jq \
+    --arg cmd "${GRAPHITI_MCP_PYTHON}" \
+    --arg main "${GRAPHITI_MCP_REPO}/main.py" \
+    --arg cfg "${GRAPHITI_CONFIG_RESOLVED}" \
+    --arg apikey "${GRAPH_API_KEY_REF}" '
+    .mcp.servers.graph = {
+      "command": $cmd,
+      "args": [$main, "--transport", "stdio", "--config", $cfg],
+      "env": {
+        "AZURE_OPENAI_API_KEY": $apikey,
+        "AZURE_OPENAI_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
+        "AZURE_OPENAI_DEPLOYMENT": "gpt-5-mini",
+        "AZURE_OPENAI_EMBEDDINGS_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
+        "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT": "text-embedding-3-small",
+        "AZURE_OPENAI_API_VERSION": "2024-10-21",
+        "FALKORDB_URI": "redis://localhost:6379"
+      }
+    }
+  ')
+  echo "Resolved Graphiti MCP: ${GRAPHITI_MCP_PYTHON} ${GRAPHITI_MCP_REPO}/main.py"
+else
+  # Remove the disabled placeholder from repo config
+  MERGED=$(echo "${MERGED}" | jq 'del(.mcp.servers.graph)')
+  echo "Graphiti MCP not installed — graph server entry removed"
+fi
+
 # ── Force-set tools section from repo config ─────────────────────────────────
 # Deep merge preserves stale keys (e.g. tools.allow from a previous push).
 # Overwrite the entire tools section with the repo's version to avoid drift.

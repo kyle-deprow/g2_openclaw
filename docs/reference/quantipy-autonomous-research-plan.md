@@ -17,13 +17,14 @@ Run a fully autonomous quantitative research pipeline: OpenClaw (PM agent) ideat
 Human (G2 glasses — connect/steer/disconnect)
   ↓
 OpenClaw PM (:18789 — autonomous daemon)
-  ├─ Phase 1: Resume — read RESEARCH_LOG.md + memory
+  ├─ Graphiti MCP (stdio) → FalkorDB (:6379, Docker, persistent volume)
+  ├─ Phase 1: Resume — read RESEARCH_LOG.md + memory + knowledge graph
   ├─ Phase 2: Ideate — Copilot --agent researcher (3-agent debate)
   ├─ Phase 3: Implement — Copilot --agent orchestrator (code + test + notebook)
   ├─ Phase 4: Verify — sanity checks (Sharpe >10 = BUG, OOS >2× IS = unreliable)
   ├─ Phase 4.5: Review — Copilot --agent reviewer (adversarial 8-point audit)
   ├─ Phase 5: Decide — IS walk-forward Sharpe is the primary metric
-  ├─ Phase 6-7: Log + reflect
+  ├─ Phase 6-7: Log + reflect + graph_add_memory
   └─ Phase 8: Continue — loop NEVER self-terminates, seek orthogonal strategies
   ↓
 Gateway (:8765) — process monitor polls 30s, notifies OpenClaw on Copilot exit
@@ -77,6 +78,8 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | autoresearch/ | `gateway/agent_config/skills/` | Full 8-phase autonomous loop protocol |
 | copilot-cli/ | `gateway/agent_config/skills/` | Copilot delegation, sentinels, resume |
 | experiment-data/ | `quantipy .github/skills/` | Data loading, walk-forward, sanity checks |
+| graphiti-config.yaml | `gateway/openclaw_config/` | Graphiti MCP server config (graph backend, LLM, embedder, entity types) |
+| knowledge-graph/ | `gateway/agent_config/skills/` | Teaches agent when/how to use graph tools in autoresearch |
 
 ## Success Criteria
 

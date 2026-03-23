@@ -140,6 +140,15 @@
   "memory": {
     "backend": "builtin"
   },
+  "mcp": {
+    "servers": {
+      "graph": {
+        "disabled": true,
+        "command": "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
+        "args": []
+      }
+    }
+  },
   "tools": {
     "profile": "full",
     "sessions": {

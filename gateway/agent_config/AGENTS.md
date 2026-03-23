@@ -72,7 +72,9 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 4. **Run Phase 4.5 ADVERSARIAL REVIEW** — delegate to Copilot `--agent reviewer` (background:true). The reviewer validates methodology, checks for leakage, and provides a corrected decision metric. See autoresearch skill Phase 4.5 for the full prompt template.
 5. **Run Phase 5 DECIDE** — apply thresholds from autoresearch skill using the **reviewer's recommended metric** (IS walk-forward Sharpe net), NOT raw OOS Sharpe.
 6. **Run Phase 6 LOG** — record results + reviewer verdict in RESEARCH_LOG.md and memory
+6b. **Log to knowledge graph** — call `graph_add_memory` with the full experiment result. Include: experiment name, features, model, tickers, metrics (IS Sharpe, OOS Sharpe), reviewer verdict, decision, failure modes. Read the `knowledge-graph` skill for the episode body template. One episode per experiment. If graph tools error (FalkorDB down), continue — graph is additive, not blocking.
 7. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
+   - Query knowledge graph: `graph_search_memory_facts` to find which feature/model combinations have consistently succeeded or failed. Include in reflect summary.
 8. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
    - BUG detected → launch Copilot orchestrator to fix the backtest, re-evaluate
    - Reviewer FAIL → launch Copilot orchestrator to fix issues, re-review
@@ -80,6 +82,7 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
    - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
    - STRONG KEEP (IS Sharpe > 1.0, reviewer PASS) → log as portfolio candidate, post [PORTFOLIO] status, then KEEP EXPLORING for orthogonal strategies
+   - Before ideation: `graph_search_nodes` + `graph_search_memory_facts` for cross-experiment patterns. Include findings in the researcher prompt. Skip if graph unavailable.
    - The loop NEVER self-terminates. Only the human saying "stop" halts it.
 
 **Phase 4 is exec commands. Phase 4.5 is Copilot reviewer delegation (background:true). Phase 5-7 are in YOUR turn. Phase 8 launches next Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens across turns (Phase 4.5 exits → process monitor notifies → you continue at Phase 5). **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**

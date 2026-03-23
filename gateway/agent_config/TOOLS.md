@@ -35,6 +35,22 @@ Key rules (see skill for details):
 
 **Critical:** NEVER use `exec` to create/modify/delete code files in target repos. Use `exec` ONLY to invoke Copilot CLI or to run read-only commands (ls, cat, git log, pytest, etc.).
 
+## Knowledge Graph (via Graphiti MCP)
+
+| Tool | Use |
+|------|-----|
+| `graph_add_memory` | Record experiment results, observations, relationships |
+| `graph_search_nodes` | Find entities (experiments, features, models, tickers) |
+| `graph_search_memory_facts` | Find relationships and facts between entities |
+| `graph_get_episodes` | Retrieve recent episodes chronologically |
+| `graph_get_entity_edge` | Get a specific relationship edge by UUID |
+| `graph_get_status` | Check graph server health |
+| `graph_delete_episode` | Remove a specific episode (data correction only) |
+| `graph_delete_entity_edge` | Remove a relationship edge (data correction only) |
+| `graph_clear_graph` | **DESTRUCTIVE** — wipe entire graph. Dev resets only. |
+
+Read the `knowledge-graph` skill for when/how to use each tool in the autoresearch loop. If graph tools error, continue without — it's additive, not blocking.
+
 ## Long-Running Tasks
 
 See the `copilot-cli` skill for the full background execution protocol, sentinel template, and task status conventions.

@@ -86,7 +86,7 @@ pre-commit: ## Run all pre-commit hooks
 # Gateway Operations
 # ============================================================================
 
-.PHONY: init-env launch stop sim restart push-config
+.PHONY: init-env launch stop sim restart push-config graphiti-start graphiti-stop
 
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
@@ -96,8 +96,9 @@ launch: ## Start the gateway server (foreground, Ctrl+C to stop)
 
 stop: ## Stop all G2 OpenClaw processes
 	@uv run python -m gateway stop
+	@$(MAKE) --no-print-directory graphiti-stop
 
-sim: ## Stop all services and re-launch the full sim stack
+sim: graphiti-start ## Stop all services and re-launch the full sim stack
 	@uv run python -m gateway stop
 	@uv run python -m gateway launch --daemon
 
@@ -105,6 +106,18 @@ restart: sim ## Alias for sim
 
 push-config: ## Push OpenClaw config to the gateway
 	@uv run python -m gateway push-config
+
+graphiti-start: ## Start FalkorDB container (idempotent)
+	@echo -e "$(CYAN)$(BOLD)>>> Starting FalkorDB...$(RESET)"
+	@docker start graphiti-falkordb 2>/dev/null || \
+		docker run -d --name graphiti-falkordb \
+			-p 6379:6379 \
+			-v graphiti-data:/data \
+			falkordb/falkordb:latest
+	@echo -e "$(GREEN)$(BOLD)>>> FalkorDB ready on :6379$(RESET)"
+
+graphiti-stop: ## Stop FalkorDB container
+	@docker stop graphiti-falkordb 2>/dev/null || true
 
 # ============================================================================
 # G2 App Deploy

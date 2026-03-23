@@ -1,0 +1,49 @@
+server:
+  transport: "stdio"
+
+llm:
+  provider: "azure_openai"
+  model: "gpt-5-mini"
+  providers:
+    azure_openai:
+      api_key: ${AZURE_OPENAI_API_KEY}
+      api_url: ${AZURE_OPENAI_ENDPOINT}
+      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
+      deployment_name: ${AZURE_OPENAI_DEPLOYMENT}
+
+embedder:
+  provider: "azure_openai"
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  providers:
+    azure_openai:
+      api_key: ${AZURE_OPENAI_API_KEY}
+      api_url: ${AZURE_OPENAI_EMBEDDINGS_ENDPOINT}
+      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
+      deployment_name: ${AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT}
+
+database:
+  provider: "falkordb"
+  providers:
+    falkordb:
+      uri: redis://localhost:6379
+      password: ""
+      database: default_db
+
+graphiti:
+  group_id: "quantipy-research"
+  entity_types:
+    - name: "Experiment"
+      description: "A named research experiment or backtest run"
+    - name: "Feature"
+      description: "An engineered feature used in model training or analysis"
+    - name: "Model"
+      description: "A machine learning model or statistical model"
+    - name: "DataSource"
+      description: "A data feed, API, or dataset used as input"
+    - name: "Ticker"
+      description: "A financial instrument identified by ticker symbol"
+    - name: "FailureMode"
+      description: "A known failure pattern or degradation scenario"
+    - name: "Metric"
+      description: "A quantitative measure used to evaluate performance"
