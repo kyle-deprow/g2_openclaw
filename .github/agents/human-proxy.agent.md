@@ -22,6 +22,7 @@ You are the human's delegate inside VS Code / Copilot CLI. The human interacts w
 | OpenClaw agent config | `gateway/agent_config/` | SOUL.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md |
 | OpenClaw skills | `gateway/agent_config/skills/` | copilot-cli, autoresearch, + future skills |
 | OpenClaw daemon config | `gateway/openclaw_config/` | openclaw.json, provider settings, preload |
+| Graphiti config | `gateway/openclaw_config/graphiti-config.yaml` | Knowledge graph: entity types, Azure OpenAI, FalkorDB |
 | Push script | `scripts/push-openclaw-config.sh` | Deploys agent config + skills to ~/.openclaw/ |
 | Sim stack | `make sim` / `make stop` | Gateway + Vite + Simulator lifecycle |
 | This agent + repo skills | `.github/agents/`, `.github/skills/` | Copilot agent personas, repo-level skills |
@@ -67,6 +68,7 @@ You are the human's delegate inside VS Code / Copilot CLI. The human interacts w
 | Subjective quality judgments ("looks good") | Violating SOUL.md principle 2 | Reinforce "Mechanical verification only", tighten evaluation filters |
 | Ignoring test failures | Bypassing verification protocol | Check AGENTS.md verification section, add explicit gate |
 | Long silence (>5 min with no output) | WebSocket disconnect or daemon hang | Check `ss -tlnp | grep 18789`, check `journalctl --user -u openclaw-gateway.service -n 20` |
+| Graph tools returning errors consistently | FalkorDB down or MCP server crashed | Check `docker ps | grep falkordb`, `make graphiti-start`, check graphiti-config.yaml |
 | Producing verbose/chatty output | Ignoring vibe section | Tighten SOUL.md vibe, add negative examples |
 | Committing without running tests | Verification protocol bypassed | Add pre-commit hook, reinforce in AGENTS.md |
 | Not using `background:true` for long tasks | Ignoring AGENTS.md Background Execution | Reinforce in AGENTS.md, check TOOLS.md Long-Running Tasks |
@@ -166,6 +168,7 @@ When working on this repo, reference these skills as needed:
 **OpenClaw agent skills** (deployed to `~/.openclaw/skills/` via push script):
 - `gateway/agent_config/skills/copilot-cli/` — Copilot CLI delegation, sentinels, resume, debugging
 - `gateway/agent_config/skills/autoresearch/` — Autonomous research loop protocol
+- `gateway/agent_config/skills/knowledge-graph/` — Graphiti MCP tools, entity types, autoresearch graph integration
 
 **Repo skills** (for Copilot in this repo):
 - `.github/skills/openclaw-improvement/` — Meta: how to improve OpenClaw through skills

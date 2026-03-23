@@ -14,6 +14,12 @@ GREEN := \033[32m
 BOLD  := \033[1m
 RESET := \033[0m
 
+# Graphiti MCP paths
+GRAPHITI_HOME   := $(HOME)/.local/share/graphiti-mcp
+GRAPHITI_REPO   := $(GRAPHITI_HOME)/repo
+GRAPHITI_VENV   := $(GRAPHITI_HOME)/venv
+GRAPHITI_PYTHON := $(GRAPHITI_VENV)/bin/python
+
 # ============================================================================
 # Setup
 # ============================================================================
@@ -86,7 +92,7 @@ pre-commit: ## Run all pre-commit hooks
 # Gateway Operations
 # ============================================================================
 
-.PHONY: init-env launch stop sim restart push-config graphiti-start graphiti-stop
+.PHONY: init-env launch stop sim restart push-config graphiti-start graphiti-stop graphiti-install
 
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
@@ -118,6 +124,18 @@ graphiti-start: ## Start FalkorDB container (idempotent)
 
 graphiti-stop: ## Stop FalkorDB container
 	@docker stop graphiti-falkordb 2>/dev/null || true
+
+graphiti-install: ## Install Graphiti MCP server (idempotent, pulls latest if exists)
+	@echo -e "$(CYAN)$(BOLD)>>> Installing Graphiti MCP server...$(RESET)"
+	@if [ -d "$(GRAPHITI_REPO)" ]; then \
+		git -C "$(GRAPHITI_REPO)" pull --ff-only 2>/dev/null || echo "Pull skipped"; \
+	else \
+		mkdir -p "$(GRAPHITI_HOME)" && \
+		git clone --depth 1 https://github.com/getzep/graphiti.git "$(GRAPHITI_REPO)"; \
+	fi
+	@[ -x "$(GRAPHITI_PYTHON)" ] || uv venv "$(GRAPHITI_VENV)" --python 3.13
+	@cd "$(GRAPHITI_REPO)/mcp_server" && uv sync --python "$(GRAPHITI_PYTHON)"
+	@echo -e "$(GREEN)$(BOLD)>>> Graphiti MCP installed$(RESET)"
 
 # ============================================================================
 # G2 App Deploy

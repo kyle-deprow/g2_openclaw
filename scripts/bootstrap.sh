@@ -39,7 +39,7 @@ What it does:
   1. Checks system prerequisites (Python ≥3.13, uv, Node.js ≥22, npm)
   2. Installs Python dependencies via uv
   3. Installs TypeScript dependencies (g2_app)
-  4. Installs OpenClaw CLI, onboards, and pushes repo config
+  4. Installs OpenClaw CLI, onboards, pushes repo config, optionally installs Graphiti MCP
   5. Generates environment config via gateway init-env
   6. Installs pre-commit hooks
   7. Optionally installs EvenHub global tools
@@ -306,6 +306,25 @@ setup_openclaw() {
     fi
   else
     warn "push-openclaw-config.sh not found at $push_script"
+  fi
+
+  # --- Install Graphiti MCP server ---
+  if command -v docker &>/dev/null; then
+    if prompt_yn "Install Graphiti MCP server (knowledge graph)?"; then
+      if make -C "$REPO_ROOT" graphiti-install; then
+        ok "Graphiti MCP installed"
+        summary_add "Graphiti MCP: installed"
+      else
+        warn "Graphiti MCP install had issues — check output above"
+        summary_add "Graphiti MCP: install had warnings"
+      fi
+    else
+      info "Skipped Graphiti — run 'make graphiti-install' manually"
+      summary_add "Graphiti MCP: skipped"
+    fi
+  else
+    info "Docker not available — skipping Graphiti MCP (requires FalkorDB container)"
+    summary_add "Graphiti MCP: skipped (no Docker)"
   fi
 }
 
