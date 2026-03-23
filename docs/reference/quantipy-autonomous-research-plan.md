@@ -1,92 +1,86 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-22 (FULL RESET — clean slate with sentiment data backfill)
+**Last Updated:** 2026-03-22
 
 ## Goal
 
-Get OpenClaw running a fully autonomous research loop: ideate → implement → backtest → evaluate → decide (keep/discard) → continue — **with zero human interaction between iterations**. The human connects briefly via G2 glasses, gets a status briefing, optionally steers, disconnects. OpenClaw runs 24/7.
+Run a fully autonomous quantitative research pipeline: OpenClaw (PM agent) ideates → delegates to Copilot CLI → evaluates results → decides keep/discard → continues. The human connects via G2 AR glasses for brief strategic steering; the loop runs 24/7 without interaction.
 
 ## Critical Rule
 
-**WE DO NOT TOUCH QUANTIPY DIRECTLY.** All code in `~/repos/quantipy` is written by OpenClaw → Copilot CLI. We tune OpenClaw's persona/config and fix infrastructure.
+**We do not touch quantipy directly.** All code in `~/repos/quantipy` is written by OpenClaw → Copilot CLI. We tune OpenClaw's persona/config and fix infrastructure in this repo.
 
 ## Architecture
 
 ```
-Human (G2 glasses)
-  ↓ "autoresearch" / reconnect → status
-OpenClaw PM (:18789)
-  ↓ Phase 1: Resume check (read RESEARCH_LOG.md + memory)
-  ↓ Phase 2: Copilot --agent researcher (3-agent debate → proposals)
-  ↓ Phase 3: Copilot --agent orchestrator (implement + test + notebook)
-  ↓ Phase 4: OpenClaw verifies (tests, notebook, metrics, sanity checks)
-  ↓ Phase 4.5: Copilot --agent reviewer (adversarial review)
-  ↓ Phase 5-8: decide → log → reflect → continue (NEVER stops)
-  ↓ Gateway process monitor (polls 30s, notifies on exit)
-Copilot CLI (--yolo --model claude-opus-4.6)
-~/repos/quantipy (all changes via Copilot)
+Human (G2 glasses — connect/steer/disconnect)
+  ↓
+OpenClaw PM (:18789 — autonomous daemon)
+  ├─ Phase 1: Resume — read RESEARCH_LOG.md + memory
+  ├─ Phase 2: Ideate — Copilot --agent researcher (3-agent debate)
+  ├─ Phase 3: Implement — Copilot --agent orchestrator (code + test + notebook)
+  ├─ Phase 4: Verify — sanity checks (Sharpe >10 = BUG, OOS >2× IS = unreliable)
+  ├─ Phase 4.5: Review — Copilot --agent reviewer (adversarial 8-point audit)
+  ├─ Phase 5: Decide — IS walk-forward Sharpe is the primary metric
+  ├─ Phase 6-7: Log + reflect
+  └─ Phase 8: Continue — loop NEVER self-terminates, seek orthogonal strategies
+  ↓
+Gateway (:8765) — process monitor polls 30s, notifies OpenClaw on Copilot exit
+  ↓
+Copilot CLI (--yolo --agent <role> --model claude-opus-4.6)
+  ↓
+~/repos/quantipy — all changes committed by Copilot, reversible via git
 ```
 
----
+## Data Available
 
-## Current State: CLEAN SLATE
+- **OHLCV**: 1-minute bars for NVDA and AMD (Jan–Jul 2022)
+- **Reddit sentiment**: Historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
+- **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
+- All loaded via `quantipy.prices()` or direct SQL to localhost:5433
 
-**All experiment artifacts deleted.** Starting fresh with:
-- Sentiment data being backfilled for Jan-Jul 2022 (Reddit + news)
-- All methodology improvements retained (adversarial reviewer, continuous portfolio mode, sanity checks)
-- OpenClaw memory wiped — no stale experiment records
+## Methodology Guardrails
 
-### What works (proven in prior rounds):
-- [x] "autoresearch" trigger → full autonomous loop
-- [x] Researcher 3-agent debate → ranked proposals → winner selected
-- [x] Orchestrator implements module + tests + notebook → commits
-- [x] Adversarial reviewer catches methodology bugs (proven on T8-MSG)
-- [x] Continuous portfolio exploration — loop never self-terminates
-- [x] Process monitor detects Copilot exit, notifies OpenClaw within 30s
-- [x] IS walk-forward Sharpe as primary decision metric (not OOS)
-- [x] Sanity checks: Sharpe >10 = BUG, OOS >2× IS = unreliable
+These were hard-won from 18 prior experiments (all discarded) and are now baked into the agent config:
 
-### Key lessons from prior rounds (18 experiments, all discarded):
-- Pure OHLCV features exhausted after 18 attempts — need sentiment data channel
-- Per-bar returns without cooldown inflate Sharpe massively (T8-MSG bug)
-- OOS on <60 days is statistically meaningless
-- All 3 research agents converged on sentiment as the untapped channel
+| Guardrail | Why |
+|-----------|-----|
+| IS walk-forward Sharpe is the decision metric | OOS on <60 days is meaningless; OOS >2× IS indicates luck |
+| Adversarial reviewer runs after every experiment | Caught T8-MSG methodology bugs that inflated Sharpe from -2.76 to +5.9 |
+| Sanity checks: Sharpe >10 = BUG | Caught annualization bugs (T8-MSG fix #1 showed IS Sharpe 13.2) |
+| Cooldown must match holding period | Per-bar returns without cooldown inflate results massively |
+| Loop never stops | "GOAL MET" was premature at OOS 5.9; continuous exploration builds a portfolio |
+| Real data only, no synthetic | Early experiments used synthetic data — all were meaningless |
+| 3-agent research debate | Researcher, contrarian, explorer/theorist — prevents tunnel vision |
 
----
+## Copilot Agent Roster (in quantipy)
 
-## Strategy Results
+| Agent | Role |
+|-------|------|
+| researcher | Orchestrates 3-specialist debate, produces ranked proposals |
+| orchestrator | Implements experiments end-to-end (module + tests + notebook) |
+| reviewer | Adversarial 8-point audit (OOS reliability, leakage, feature importance, costs) |
+| contrarian | Challenges consensus, proposes unconventional directions |
+| explorer | Broad creative search, novel feature families |
+| theorist | Academically grounded proposals with citations |
+| backend-python | Platform infrastructure work |
 
-(empty — fresh start)
+## Config Files
 
----
-
-## Config State
-
-| File | Location | Status |
-|------|----------|--------|
-| BOOTSTRAP.md | g2_openclaw agent_config | Updated — fresh start, no banned list |
-| autoresearch SKILL.md | g2_openclaw agent_config | Updated — dynamic data counts |
-| AGENTS.md | g2_openclaw agent_config | Current — reviewer flow, continuous mode |
-| SOUL.md | g2_openclaw agent_config | Current |
-| TOOLS.md | g2_openclaw agent_config | Current |
-| reviewer.agent.md | quantipy .github/agents | Current |
-| experiment-data SKILL.md | quantipy .github/skills | Current |
-| All 7 Copilot agents | quantipy .github/agents | Current |
-| All 5 Copilot skills | quantipy .github/skills | Current |
-
----
-
-## Next Steps
-
-1. Sentiment data backfill completes (in progress)
-2. Push OpenClaw config + restart daemon
-3. Trigger "autoresearch" → fresh Round 1 with sentiment data available
-4. Monitor first experiment through full adversarial review cycle
+| File | Location | Purpose |
+|------|----------|---------|
+| SOUL.md | `gateway/agent_config/` | OpenClaw identity, principles, vibe |
+| AGENTS.md | `gateway/agent_config/` | Behavioral rules, verification protocol, phase flow |
+| BOOTSTRAP.md | `gateway/agent_config/` | Quantipy context (modules, data, commands) |
+| TOOLS.md | `gateway/agent_config/` | Tool reference, exec syntax |
+| autoresearch/ | `gateway/agent_config/skills/` | Full 8-phase autonomous loop protocol |
+| copilot-cli/ | `gateway/agent_config/skills/` | Copilot delegation, sentinels, resume |
+| experiment-data/ | `quantipy .github/skills/` | Data loading, walk-forward, sanity checks |
 
 ## Success Criteria
 
 1. Every experiment goes through adversarial review before keep/discard
-2. Sentiment data is used in at least one experiment (the whole point of reset)
-3. Loop runs continuously — implement → review → decide → next (zero human)
-4. Build a portfolio of orthogonal strategies, not just one
+2. Loop runs continuously — implement → review → decide → next (zero human needed)
+3. Build a portfolio of orthogonal strategies, not just one
+4. Human's role is strategic steering: connect → get status → "try X next" → disconnect

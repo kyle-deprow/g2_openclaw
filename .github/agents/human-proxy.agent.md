@@ -150,20 +150,14 @@ Config changes take effect after:
 
 ## End State
 
-The finished system is a **fully autonomous quantitative research loop with async operation**:
+The system is a **fully autonomous quantitative research loop**:
 
-1. **OpenClaw** (PM agent) runs autonomously — identifies research gaps, delegates to Copilot CLI via `background:true`, monitors via cron, posts `[TASK:*]` status markers
-2. **Copilot CLI** (coding agent) executes in background — implements, tests, backtests, reports metrics through orchestrator agent
-3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence, disconnects for hours/days
-4. **Gateway** reads `[TASK:*]` markers from transcript JSONL on reconnect, injects status into connected frame
-5. **G2 App** shows task indicator (● Task Running / ✓ Task Done / ✗ Task Failed) on idle screen
+1. **OpenClaw** (PM agent) runs autonomously — ideates via 3-agent researcher debate, delegates to Copilot CLI, monitors via gateway process monitor, evaluates via adversarial reviewer, decides keep/discard, continues to next experiment. Never stops.
+2. **Copilot CLI** (coding agent) executes in background — implements strategy modules + tests + notebooks, commits on success, reverts on failure. Uses orchestrator, researcher, and reviewer agent personas.
+3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence ("focus on sentiment" / "try regime detection"), disconnects for hours/days.
+4. **Gateway** process monitor polls every 30s, notifies OpenClaw when Copilot exits. Reads `[TASK:*]` markers from transcript on reconnect.
 
-Success criteria:
-- OpenClaw runs multi-hour autonomous research cycles without human connected
-- Human reconnects to a status briefing, not a blank slate
-- Every code change in quantipy is committed by Copilot, verified by tests, and reversible
-- The human's role is strategic steering: connect → get status → "try X next" → disconnect
-- Zero cloud dependency: Whisper transcription, OpenClaw inference, and Copilot CLI all run locally or through existing subscriptions
+Success = OpenClaw runs multi-hour autonomous research cycles, human reconnects to a status briefing not a blank slate, every code change is committed by Copilot and reversible.
 
 ## Relevant Skills
 

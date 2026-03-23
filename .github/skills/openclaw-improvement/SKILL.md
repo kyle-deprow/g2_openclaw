@@ -62,16 +62,15 @@ wc -c gateway/agent_config/TOOLS.md
 
 **Fix:** Move detailed content to a skill. Replace with a 1-2 line reference: "Read the `X` skill for details."
 
-## Sentinel Failures — Root Causes
+## Process Monitor (replaced cron sentinels)
 
-| Failure | Root cause | Fix |
-|---------|-----------|-----|
-| Sentinel never fires | Missing `cron_create` (agent responded before creating it) | Enforce 5-step launch in AGENTS.md |
-| Sentinel fires but no announcement | `delivery "none"` or missing `channel` | Must be `delivery "announce", channel "g2"` |
-| Sentinel auth error | `model` specified in cron_create | Remove `model` parameter — default works |
-| Sentinel `execution: "main"` fails | Named agents can't use main execution | Remove `execution` — default (isolated) works |
-| Sentinel misreads exit status | Process exited but sentinel checks wrong PID | Verify PID from exec output matches sentinel |
-| `[TASK:complete]` but no commits | Copilot explored/planned but never implemented | HEAD comparison detects this → `[TASK:incomplete]` |
+The gateway's built-in process monitor polls every 30s for Copilot PID exit, then notifies OpenClaw via WebSocket. This replaced the earlier cron-based sentinel approach.
+
+| Issue | Root cause | Fix |
+|-------|-----------|-----|
+| OpenClaw not notified of Copilot exit | Process monitor not running (gateway down) | Ensure gateway is running: `ss -tlnp \| grep 8765` |
+| Late notification (>2 min) | Death report builder timeout on long sessions | Check gateway logs for slow transcript parsing |
+| Double notification | Multiple gateway restarts while Copilot running | Only one gateway instance should run |
 
 ## Copilot CLI Output Failures
 
