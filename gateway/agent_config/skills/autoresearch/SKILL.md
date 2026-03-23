@@ -64,7 +64,7 @@ LOOP (until goal met or user interrupts):
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
          - Data available: REAL 1-min OHLCV for NVDA (112k bars) and AMD (106k bars), Jan-Jul 2022.
-           Also: 132k Reddit sentiment posts, 5,935 news articles, 118k daily ticker summaries.
+           Also: Reddit sentiment posts + news articles with sentiment scores (check DB for current counts).
            Load via: import quantipy as qp; df = qp.prices('NVDA', '2022-01-01', '2022-07-31')
            Or direct SQL to localhost:5433 (see experiment-data skill for connection details)
 

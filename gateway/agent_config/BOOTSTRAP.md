@@ -49,18 +49,19 @@ You are on a machine with a Nvidia graphics card. Feel free to designate true ML
 
 ## Research Direction
 
-Generic textbook indicators are EXHAUSTED. The following have been tried and are banned as primary strategy signals:
-- SMA crossover, RSI, MACD, Bollinger Bands, OBV
+**Fresh start.** No experiments have been run yet. All data channels are available:
 
-Future experiments MUST pursue novel intraday alpha through:
-- **Intraday microstructure**: Volume profile analysis, VWAP deviation patterns, opening range dynamics, bid-ask spread proxies from 1-min bars
-- **Intraday sentiment timing**: Reddit/news sentiment spikes timed against intraday price action — when does sentiment lead price within a day?
-- **ML with theoretical basis**: LightGBM/XGBoost on intraday engineered features with purged walk-forward CV, not raw LSTM on prices
-- **Intraday regime detection**: HMM on intraday volatility states, change-point detection on volume profiles → regime-conditional entry/exit
-- **Cross-session patterns**: How does prior day's closing action predict opening patterns? Session-over-session regime persistence.
-- **Time-of-day effects**: ML models with hour-of-day features, learned session segmentation, time-conditional strategy switching
-- **Unusual asset niches**: Crypto funding rates, FX carry, agricultural futures — anomalies from less-crowded markets
-- **Feature engineering over indicator stacking**: Transform raw data into meaningful features (volatility ratios, volume imbalance, momentum decay rates)
+- **OHLCV**: 1-min bars for NVDA and AMD (Jan–Jul 2022)
+- **Reddit sentiment**: Historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores (being backfilled for 2022 period)
+- **News sentiment**: Articles with sentiment from Massive.com and Polygon.io (being backfilled for 2022 period)
+
+Pursue novel intraday alpha through any combination of:
+- **Intraday microstructure**: Volume profiles, VWAP deviation, opening range dynamics, bid-ask spread proxies
+- **Sentiment-gated signals**: Use Reddit/news sentiment as conditioning variables for intraday volume/price features — when does sentiment modulate microstructure behavior?
+- **ML with theoretical basis**: LightGBM/XGBoost/HistGradientBoosting on engineered features with purged walk-forward CV
+- **Regime detection**: HMM on intraday volatility states, change-point detection → regime-conditional entry/exit
+- **Cross-session patterns**: Prior day closing action predicting opening patterns
+- **Feature engineering over indicator stacking**: Volatility ratios, volume imbalance, momentum decay, sentiment×volume interactions
 
 ## Experiment Notebooks
 
@@ -74,7 +75,7 @@ All experiments produce Jupyter notebooks as primary output.
 
 ## Shared Experiment Memory
 
-The file `RESEARCH_LOG.md` in the OpenClaw workspace tracks all experiments tried, rejected ideas, and insights. Read it before every ideation round. Update it after every experiment result. Pass this context to Copilot's researcher agent when delegating ideation.
+The file `RESEARCH_LOG.md` in the quantipy repo tracks all experiments tried, rejected ideas, and insights. Read it before every ideation round. Update it after every experiment result. Pass this context to Copilot's researcher agent when delegating ideation. Currently empty — this is a fresh start.
 
 ## Data APIs
 
