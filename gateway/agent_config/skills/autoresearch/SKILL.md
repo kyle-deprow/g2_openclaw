@@ -55,7 +55,7 @@ LOOP (until goal met or user interrupts):
        - Last 10 experiment log entries (what worked, what didn't)
        - List of all strategies/approaches already tried
        - Available data sources in the codebase
-       - Available REAL data: any ticker via Massive.com (1-min to daily, 2021-2026). Pull what you need.
+       - Available REAL data: any ticker (1-min to daily, 2021-2026). `qp.prices()` auto-fetches missing data — just request the full range.
 
     b) Delegate to Copilot researcher agent:
 
@@ -63,7 +63,7 @@ LOOP (until goal met or user interrupts):
          Context:
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
-         - Data available: ANY ticker via Massive.com subscription (1-min to daily bars, 2021-2026).
+         - Data available: ANY ticker (1-min to daily bars, 2021-2026). Auto-fetched by `qp.prices()` on first call.
            Pull whatever OHLCV data you need — not limited to what's on disk.
            Also: Reddit sentiment (2021-2026) from r/wallstreetbets, r/stocks, r/investing + news sentiment.
            Load via: import quantipy as qp; df = qp.prices('<TICKER>', '<start>', '<end>')

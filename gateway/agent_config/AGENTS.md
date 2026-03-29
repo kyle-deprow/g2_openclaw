@@ -102,7 +102,7 @@ When a `[TASK:failed]` indicates dirty tree (uncommitted changes), the Copilot m
 Every research result must pass ALL before implementation:
 - Has learned parameters (ML/learning component — reject pure rule-based)
 - Data available (real OHLCV in PostgreSQL — NEVER synthetic data)
-- Uses real data from the database — pull any ticker via Massive.com if not on disk
+- Uses real data from the database — `qp.prices()` auto-fetches missing tickers on first call
 - **Data range coverage: experiments MUST use at least 95% of available trading days.** If we have 2021–2026 data, the experiment spans 2021–2026. No cherry-picking 6-month windows.
 - Testable hypothesis ("if X then Y within Z timeframe")
 - Single metric (Sharpe, hit rate, drawdown, profit factor)
@@ -122,7 +122,7 @@ The notebook must read the `experiment-data` skill (`.github/skills/experiment-d
 Required sections:
 1. Data inventory (actual DB rows/dates loaded — must show full date range)
 2. Hypothesis + universe choice (which tickers, why)
-3. Data loading (real OHLCV via `qp.prices()` or direct SQL — NEVER synthetic. Pull from Massive.com if not on disk.)
+3. Data loading (real OHLCV via `qp.prices()` — NEVER synthetic. Auto-fetches missing data on first call.)
 4. Feature engineering (on real data, show distributions)
 5. Hyperparameter tuning (RandomizedSearchCV + TimeSeriesSplit, report best params)
 6. Walk-forward backtest (20-day train, 5-day test, 1-day embargo, min 20 folds across multi-year data)
@@ -131,7 +131,7 @@ Required sections:
 9. Null tests (shuffled labels, random features, bootstrap Sharpe CI)
 10. Conclusion (keep/iterate/discard)
 
-**DATA RANGE RULE: The experiment-data skill in .github/skills/ may reference narrow date ranges (Jan-Jul 2022). IGNORE those constraints. Use 2021–2026 data. Pull additional tickers via `uv run quantipy ohlc fetch <TICKER> -s 2021-01-01 -e 2026-03-01` if needed.**
+**DATA RANGE RULE: Use 2021–2026 data. `qp.prices()` auto-fetches missing tickers/dates — no manual fetch needed. Just request the full date range.**
 
 Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
 Must execute via `uv run jupyter execute <path> --timeout=300`.

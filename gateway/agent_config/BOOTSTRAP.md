@@ -28,7 +28,7 @@
 
 ## Data Available
 
-- **OHLCV**: Any ticker, any timeframe (down to 1-min bars) via Massive.com subscription. Pull what you need — don't limit to what's on disk. Period: 2021–2026.
+- **OHLCV**: Any ticker, any timeframe (down to 1-min bars). `qp.prices()` auto-fetches missing data from Massive.com on first call — no manual fetch step needed. Period: 2021–2026.
 - **Reddit sentiment**: 2021–2026 historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
 - **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
 - **Volume indicators**: VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Volatility
@@ -49,19 +49,18 @@ You are on a machine with a Nvidia graphics card. Feel free to designate true ML
 
 ## Data Range Coverage Rule (NON-NEGOTIABLE)
 
-**Every experiment MUST use at least 95% of available trading days for the chosen ticker(s).** We have 2021–2026 data via Massive.com — use it all.
+**Every experiment MUST use at least 95% of available trading days for the chosen ticker(s).** We have 2021–2026 data — use it all.
 
-- **Pull data first**: Before starting an experiment, fetch OHLCV: `uv run quantipy ohlc fetch <TICKER> -s 2021-01-01 -e 2026-03-01`
+- **Data is auto-fetched**: `qp.prices()` gap-fills missing dates from Massive.com automatically. Just request the full range.
 - **Train/CV period**: At least 3 years of data (e.g., 2021–2024)
 - **OOS holdout**: At least 6 months / 120 trading days (e.g., 2025-H1). NEVER touched during training.
-- **Do NOT limit to Jan-Jul 2022.** That was the old constraint. The `experiment-data` skill in quantipy may still reference narrow dates — OVERRIDE those with the full range.
 - **Walk-forward folds**: With 3+ years of data, use 20+ folds minimum.
 
 ## Research Direction
 
 **Fresh start.** No experiments have been run yet. All data channels are available:
 
-- **OHLCV**: Any ticker via Massive.com (1-min to daily bars, 2021–2026). Start with low-to-mid cap equities but expand in any direction.
+- **OHLCV**: Any ticker (1-min to daily bars, 2021–2026). Auto-fetched on first `qp.prices()` call. Start with low-to-mid cap equities but expand in any direction.
 - **Reddit sentiment**: 2021–2026 posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
 - **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
 
