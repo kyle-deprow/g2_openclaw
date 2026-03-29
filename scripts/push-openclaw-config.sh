@@ -63,6 +63,7 @@ echo "Backed up local config → ${BACKUP}"
 REPO_PRIMARY=$(jq -r '.agents.defaults.model.primary // empty' "${REPO_CONFIG}")
 MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
   .[0] * .[1]
+  | del(.mcp)
   | if $primary != "" then
       # Build models allowlist from ALL configured providers (not just primary).
       # Each provider/modelId pair becomes an allowed model for agent use + cron.
@@ -86,28 +87,35 @@ GRAPHITI_MCP_REPO="${HOME}/.local/share/graphiti-mcp/repo/mcp_server"
 GRAPHITI_MCP_PYTHON="${HOME}/.local/share/graphiti-mcp/venv/bin/python"
 GRAPHITI_CONFIG_RESOLVED="${OPENCLAW_HOME}/graphiti-config.yaml"
 if [[ -x "${GRAPHITI_MCP_PYTHON}" ]] && [[ -f "${GRAPHITI_MCP_REPO}/main.py" ]] && [[ -f "${GRAPHITI_CONFIG_RESOLVED}" ]]; then
-  # pragma: allowlist nextline secret
-  GRAPH_API_KEY_REF="env:AZURE_OPENAI_API_KEY"
-  MERGED=$(echo "${MERGED}" | jq \
-    --arg cmd "${GRAPHITI_MCP_PYTHON}" \
-    --arg main "${GRAPHITI_MCP_REPO}/main.py" \
-    --arg cfg "${GRAPHITI_CONFIG_RESOLVED}" \
-    --arg apikey "${GRAPH_API_KEY_REF}" '
-    .mcp.servers.graph = {
-      "command": $cmd,
-      "args": [$main, "--transport", "stdio", "--config", $cfg],
-      "env": {
-        "AZURE_OPENAI_API_KEY": $apikey,
-        "AZURE_OPENAI_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
-        "AZURE_OPENAI_DEPLOYMENT": "gpt-5-mini",
-        "AZURE_OPENAI_EMBEDDINGS_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
-        "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT": "text-embedding-3-small",
-        "AZURE_OPENAI_API_VERSION": "2024-10-21",
-        "FALKORDB_URI": "redis://localhost:6379"
+  # Check if graph is disabled in the repo config
+  GRAPH_DISABLED=$(jq -r '.mcp.servers.graph.disabled // false' "${REPO_CONFIG}")
+  if [[ "${GRAPH_DISABLED}" == "true" ]]; then
+    MERGED=$(echo "${MERGED}" | jq 'del(.mcp)')
+    echo "Graphiti MCP installed but disabled in repo config — mcp section removed"
+  else
+    # pragma: allowlist nextline secret
+    GRAPH_API_KEY_REF="env:AZURE_OPENAI_API_KEY"
+    MERGED=$(echo "${MERGED}" | jq \
+      --arg cmd "${GRAPHITI_MCP_PYTHON}" \
+      --arg main "${GRAPHITI_MCP_REPO}/main.py" \
+      --arg cfg "${GRAPHITI_CONFIG_RESOLVED}" \
+      --arg apikey "${GRAPH_API_KEY_REF}" '
+      .mcp.servers.graph = {
+        "command": $cmd,
+        "args": [$main, "--transport", "stdio", "--config", $cfg],
+        "env": {
+          "AZURE_OPENAI_API_KEY": $apikey,
+          "AZURE_OPENAI_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
+          "AZURE_OPENAI_DEPLOYMENT": "gpt-5-mini",
+          "AZURE_OPENAI_EMBEDDINGS_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
+          "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT": "text-embedding-3-small",
+          "AZURE_OPENAI_API_VERSION": "2024-10-21",
+          "FALKORDB_URI": "redis://localhost:6379"
+        }
       }
-    }
-  ')
-  echo "Resolved Graphiti MCP: ${GRAPHITI_MCP_PYTHON} ${GRAPHITI_MCP_REPO}/main.py"
+    ')
+    echo "Resolved Graphiti MCP: ${GRAPHITI_MCP_PYTHON} ${GRAPHITI_MCP_REPO}/main.py"
+  fi
 else
   # Remove the disabled placeholder from repo config
   MERGED=$(echo "${MERGED}" | jq 'del(.mcp.servers.graph)')

@@ -102,7 +102,8 @@ When a `[TASK:failed]` indicates dirty tree (uncommitted changes), the Copilot m
 Every research result must pass ALL before implementation:
 - Has learned parameters (ML/learning component — reject pure rule-based)
 - Data available (real OHLCV in PostgreSQL — NEVER synthetic data)
-- Uses real data from the database (NVDA: 112k bars, AMD: 106k bars, Jan-Jul 2022)
+- Uses real data from the database — pull any ticker via Massive.com if not on disk
+- **Data range coverage: experiments MUST use at least 95% of available trading days.** If we have 2021–2026 data, the experiment spans 2021–2026. No cherry-picking 6-month windows.
 - Testable hypothesis ("if X then Y within Z timeframe")
 - Single metric (Sharpe, hit rate, drawdown, profit factor)
 - Not tried before (check experiment log + `memory_search`)
@@ -111,7 +112,7 @@ Every research result must pass ALL before implementation:
 - **Asset class / universe specified** (which tickers, why, how to evaluate)
 - **Hyperparameter tuning plan** (RandomizedSearchCV + TimeSeriesSplit, never hardcoded)
 - **Transaction cost model** (spread + slippage per ticker, report gross AND net Sharpe)
-- **Data split defined** (Jan-Apr train/CV, May validation, Jun-Jul sacred OOS)
+- **Data split defined** — use multi-year data. OOS must be at least 120 trading days (~6 months). Train/CV should cover 3+ years.
 
 ## Experiment Output Convention
 
@@ -119,16 +120,18 @@ Every experiment MUST produce a Jupyter notebook at `notebooks/experiments/<stra
 The notebook must read the `experiment-data` skill (`.github/skills/experiment-data/SKILL.md`) and follow its methodology.
 
 Required sections:
-1. Data inventory (actual DB rows/dates loaded)
+1. Data inventory (actual DB rows/dates loaded — must show full date range)
 2. Hypothesis + universe choice (which tickers, why)
-3. Data loading (real OHLCV via `qp.prices()` or direct SQL — NEVER synthetic)
+3. Data loading (real OHLCV via `qp.prices()` or direct SQL — NEVER synthetic. Pull from Massive.com if not on disk.)
 4. Feature engineering (on real data, show distributions)
 5. Hyperparameter tuning (RandomizedSearchCV + TimeSeriesSplit, report best params)
-6. Walk-forward backtest (20-day train, 5-day test, 1-day embargo, min 10 folds, Jan-Apr only)
+6. Walk-forward backtest (20-day train, 5-day test, 1-day embargo, min 20 folds across multi-year data)
 7. Transaction costs (report gross AND net Sharpe)
-8. OOS evaluation (Jun-Jul 2022, never touched during training)
+8. OOS evaluation (min 120 trading days / ~6 months, NEVER touched during training)
 9. Null tests (shuffled labels, random features, bootstrap Sharpe CI)
 10. Conclusion (keep/iterate/discard)
+
+**DATA RANGE RULE: The experiment-data skill in .github/skills/ may reference narrow date ranges (Jan-Jul 2022). IGNORE those constraints. Use 2021–2026 data. Pull additional tickers via `uv run quantipy ohlc fetch <TICKER> -s 2021-01-01 -e 2026-03-01` if needed.**
 
 Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
 Must execute via `uv run jupyter execute <path> --timeout=300`.

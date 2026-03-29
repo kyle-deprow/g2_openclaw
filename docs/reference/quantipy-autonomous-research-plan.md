@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-22
+**Last Updated:** 2026-03-28
 
 ## Goal
 
@@ -16,7 +16,7 @@ Run a fully autonomous quantitative research pipeline: OpenClaw (PM agent) ideat
 ```
 Human (G2 glasses — connect/steer/disconnect)
   ↓
-OpenClaw PM (:18789 — autonomous daemon)
+OpenClaw PM (:18789 — autonomous daemon, GPT-5.4 reasoning:high)
   ├─ Graphiti MCP (stdio) → FalkorDB (:6379, Docker, persistent volume)
   ├─ Phase 1: Resume — read RESEARCH_LOG.md + memory + knowledge graph
   ├─ Phase 2: Ideate — Copilot --agent researcher (3-agent debate)
@@ -34,10 +34,20 @@ Copilot CLI (--yolo --agent <role> --model claude-opus-4.6)
 ~/repos/quantipy — all changes committed by Copilot, reversible via git
 ```
 
+## Current Phase (2026-03-28)
+
+**Status: Data range fix applied, relaunching loop.** First cycle revealed all experiments used only 6 months of NVDA/AMD 2022 data — root cause was hardcoded constraints in quantipy's experiment-data skill. Fixed across all config layers (AGENTS.md, BOOTSTRAP.md, experiment-data skill). Worktrees cleaned. Ready for second cycle with full 2021-2026 data mandate.
+
+**Objective:** Identify, backtest, and validate multiple profitable intraday strategies across diverse asset classes. Start with low-to-mid cap equities, expand freely.
+
+**Monitoring strategy:** Human proxy (Copilot agent in g2_openclaw) monitors via Dev API (`/_dev/display`, `/_dev/conversation`, `/_dev/state`). Intervenes only on: stuck loops, dead processes, protocol violations. Improves OpenClaw via skills/agent config when deviations detected.
+
+**Validation target:** At least 2+ strategies with IS walk-forward Sharpe > 0.5 (net of costs), passing adversarial review.
+
 ## Data Available
 
-- **OHLCV**: 1-minute bars for NVDA and AMD (Jan–Jul 2022)
-- **Reddit sentiment**: Historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
+- **OHLCV**: Any ticker, any timeframe (down to 1-min bars) via Massive.com subscription. Not limited to what's on disk — the agent can pull any data it needs. Period: 2021–2026.
+- **Reddit sentiment**: 2021–2026 historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
 - **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
 - All loaded via `quantipy.prices()` or direct SQL to localhost:5433
 
@@ -53,6 +63,9 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | Cooldown must match holding period | Per-bar returns without cooldown inflate results massively |
 | Loop never stops | "GOAL MET" was premature at OOS 5.9; continuous exploration builds a portfolio |
 | Real data only, no synthetic | Early experiments used synthetic data — all were meaningless |
+| 95% data range coverage | Experiments limited to 6mo caused useless OOS; use full 2021-2026 range |
+| Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
+| Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
 | 3-agent research debate | Researcher, contrarian, explorer/theorist — prevents tunnel vision |
 
 ## Copilot Agent Roster (in quantipy)
@@ -87,3 +100,16 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 2. Loop runs continuously — implement → review → decide → next (zero human needed)
 3. Build a portfolio of orthogonal strategies, not just one
 4. Human's role is strategic steering: connect → get status → "try X next" → disconnect
+5. At least 2+ validated profitable strategies (IS Sharpe > 0.5 net, reviewer PASS)
+
+## Monitoring Log
+
+| Timestamp | Event | Action | Outcome |
+|-----------|-------|--------|---------|
+| 2026-03-28 03:00 | Launch | Fresh start, graph enabled, autoresearch sent | Loop started |
+| 2026-03-28 03:15 | T9-HRA | Copilot implemented Hurst Regime Adaptive | Tests failed → reverted |
+| 2026-03-28 03:30 | T9-IFA | Copilot implemented Isolation Forest Adaptive | Notebook not executed, incomplete |
+| 2026-03-28 03:45 | Resume | OpenClaw self-healed with --continue | T9-IFA resumed |
+| 2026-03-28 04:00 | DATA RANGE VIOLATION | All experiments used only 6mo NVDA/AMD 2022 | Stopped loop for fix |
+| 2026-03-28 04:30 | Config fix | Updated AGENTS.md, BOOTSTRAP.md, experiment-data skill | 95% coverage rule, 3yr train, 120d OOS, 20+ folds |
+| 2026-03-28 04:45 | Restart | Pushed config, restarted OpenClaw, cleaned worktrees | Ready for new cycle |

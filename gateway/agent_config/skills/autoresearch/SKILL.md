@@ -55,7 +55,7 @@ LOOP (until goal met or user interrupts):
        - Last 10 experiment log entries (what worked, what didn't)
        - List of all strategies/approaches already tried
        - Available data sources in the codebase
-       - Available REAL data: check with exec bash command:"cd /home/dev/repos/quantipy && uv run python -c \"import quantipy as qp; print(qp.prices('NVDA','2022-01-01','2022-12-31').shape)\""
+       - Available REAL data: any ticker via Massive.com (1-min to daily, 2021-2026). Pull what you need.
 
     b) Delegate to Copilot researcher agent:
 
@@ -63,9 +63,10 @@ LOOP (until goal met or user interrupts):
          Context:
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
-         - Data available: REAL 1-min OHLCV for NVDA (112k bars) and AMD (106k bars), Jan-Jul 2022.
-           Also: Reddit sentiment posts + news articles with sentiment scores (check DB for current counts).
-           Load via: import quantipy as qp; df = qp.prices('NVDA', '2022-01-01', '2022-07-31')
+         - Data available: ANY ticker via Massive.com subscription (1-min to daily bars, 2021-2026).
+           Pull whatever OHLCV data you need — not limited to what's on disk.
+           Also: Reddit sentiment (2021-2026) from r/wallstreetbets, r/stocks, r/investing + news sentiment.
+           Load via: import quantipy as qp; df = qp.prices('<TICKER>', '<start>', '<end>')
            Or direct SQL to localhost:5433 (see experiment-data skill for connection details)
 
          REAL DATA ONLY (NON-NEGOTIABLE):
@@ -81,11 +82,12 @@ LOOP (until goal met or user interrupts):
 
          ASSET CLASS & UNIVERSE DESIGN (MANDATORY in every proposal):
          Every proposal MUST explicitly address:
-         1. WHAT to trade: single ticker (NVDA/AMD), pair (NVDA vs AMD relative value),
-            equal-weight basket, or cross-sectional (rank and trade both).
+         1. WHAT to trade: any ticker(s) — start with low/mid-cap equities but expand freely.
+            Pairs, baskets, sector ETFs, volatility products are all fair game.
          2. WHY that universe: is the alpha thesis ticker-specific or generalizable?
          3. HOW to evaluate: walk-forward CV config, OOS holdout period, transaction cost model.
-         4. DATA SPLIT: Jan-Apr 2022 for train/CV, May 2022 for validation, Jun-Jul 2022 as sacred OOS.
+         4. DATA SPLIT: Use multi-year data (2021-2026). Define train/CV/OOS split per experiment.
+            OOS must be at least 60 trading days and NEVER touched during training.
          5. HYPERPARAMETER TUNING: how params will be tuned (RandomizedSearchCV + TimeSeriesSplit).
          Proposals without explicit universe/evaluation design are REJECTED.
 
@@ -171,10 +173,10 @@ LOOP (until goal met or user interrupts):
         5. Hyperparameter tuning — RandomizedSearchCV with TimeSeriesSplit (min 5 splits)
            Report best params and CV scores. NEVER hardcode model hyperparameters.
         6. Walk-forward backtest — 20-day train, 5-day test, 1-day embargo, minimum 10 folds
-           on Jan-Apr 2022 data only. Report per-fold metrics.
-        7. Transaction costs — apply spread (NVDA 0.5bps, AMD 0.8bps) + 0.3bps slippage
+           on the training period. Report per-fold metrics.
+        7. Transaction costs — apply realistic spread + slippage per ticker
            Report BOTH gross and net Sharpe. If net < 0 but gross > 0, strategy trades too much.
-        8. OOS evaluation — run final model on Jun-Jul 2022 (NEVER touched during training)
+        8. OOS evaluation — run final model on held-out period (NEVER touched during training, min 60 days)
            Report OOS Sharpe (gross + net), accuracy, trades/day, max drawdown.
         9. Null tests — at least 3: shuffled labels, random features, bootstrap Sharpe CI
         10. Conclusion — keep/iterate/discard decision with reasoning

@@ -18,6 +18,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import IO, Any
 
@@ -582,6 +584,32 @@ def _drain_pipe(pipe: IO[Any], log_path: Path | None = None) -> None:
         pass
 
 
+def _vite_health_check(port: int, *, timeout: float = 2.0) -> bool:
+    """Return *True* if the Vite dev server on *port* responds to a health check."""
+    try:
+        req = urllib.request.Request(f"http://localhost:{port}/_dev/health")
+        with urllib.request.urlopen(req, timeout=timeout):
+            return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _read_vite_port_from_log(log_path: Path, timeout: float, default: int) -> int:
+    """Parse the Vite ``Local:`` URL from a log file, polling until *timeout*."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            text = log_path.read_text(encoding="utf-8")
+        except OSError:
+            time.sleep(0.3)
+            continue
+        match = re.search(r"Local:\s+https?://[^:]+:(\d+)", text)
+        if match:
+            return int(match.group(1))
+        time.sleep(0.3)
+    return default
+
+
 def _capture_vite_port(proc: subprocess.Popen[str], default: int, timeout: float) -> int:
     """Read Vite stdout lines looking for the ``Local:`` URL.
 
@@ -979,9 +1007,18 @@ def launch(
         # -- 3. Vite dev server ----------------------------------------------------
         console.print("[bold]3/4 Vite dev server[/bold]")
         g2_app_dir = _PROJECT_ROOT / "g2_app"
+        _vite_already_running = False
         if _is_port_open(vite_default_port):
-            console.print(f"  [green]✓[/green] Already running on port {vite_default_port}")
-        else:
+            if _vite_health_check(vite_default_port):
+                console.print(f"  [green]✓[/green] Already running on port {vite_default_port}")
+                _vite_already_running = True
+            else:
+                console.print("  [yellow]⚠[/yellow] Stale process on port 5173 — killing…")
+                stale_pid = _find_pid_on_port(vite_default_port)
+                if stale_pid:
+                    os.kill(stale_pid, signal.SIGKILL)
+                    time.sleep(0.5)
+        if not _vite_already_running:
             console.print("  Starting Vite dev server…")
             _vite_log = open(_log_dir / "vite.log", "a", encoding="utf-8")  # noqa: SIM115
             log_files.append(_vite_log)
@@ -1001,7 +1038,13 @@ def launch(
                 )
                 spawned.append(vite_proc)
                 vite_started_by_us = True
-                _wait_for_port(vite_default_port, label="Vite dev server")
+                vite_port = _read_vite_port_from_log(
+                    _log_dir / "vite.log", timeout=15, default=vite_default_port
+                )
+                if not _is_port_open(vite_port):
+                    _wait_for_port(vite_port, label="Vite dev server")
+                else:
+                    console.print(f"  [green]✓[/green] Vite dev server ready on port {vite_port}")
             else:
                 # Foreground mode: capture stdout to parse the port, then
                 # drain the rest into the log via a daemon thread.
