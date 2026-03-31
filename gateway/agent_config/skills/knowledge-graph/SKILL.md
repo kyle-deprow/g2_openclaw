@@ -1,23 +1,37 @@
 ---
 name: knowledge-graph
-description: Temporal knowledge graph for structured experiment tracking via Graphiti MCP. Use graph tools to record experiments, features, models, failure modes, and cross-experiment relationships.
-version: 1.0.0
+description: Temporal knowledge graph for structured experiment tracking via Graphiti MCP. Automatically activated — use graph tools to record experiments, features, models, failure modes, and cross-experiment relationships.
+version: 2.0.0
 ---
 
 # Knowledge Graph — Experiment Memory
 
-## When to Use
+## Activation
 
-Use the knowledge graph (`graph_*` tools) to:
-- Record experiment results with structured relationships (experiment → used feature → produced metric)
-- Track failure modes across experiments (which features/models keep failing, and why)
-- Query cross-experiment patterns ("which features appeared in experiments with IS Sharpe > 0.5?")
-- Build temporal context ("what changed between experiment T8 v1 and T8 v2?")
+This skill is **always active**. You MUST use the graph tools automatically at the appropriate phases — no user prompt is needed. The graph is your persistent structured memory for cross-experiment learning.
 
-Do NOT use for:
+## Automatic Usage Rules
+
+**On every research iteration:**
+1. **Before ideation** — `graph_search` for prior experiments, failure modes, and successful patterns
+2. **After logging results** — `graph_add_memory` with the full experiment outcome
+3. **During reflection** — `graph_search` for cross-experiment meta-patterns
+
+**On session start:**
+- `graph_get_episodes` to load recent temporal context
+- `graph_search` for any entities related to the current task
+
+## What Goes in the Graph
+
+- Experiment results with structured relationships (experiment → used feature → produced metric)
+- Failure modes across experiments (which features/models keep failing, and why)
+- Cross-experiment patterns ("which features appeared in experiments with IS Sharpe > 0.5?")
+- Temporal context ("what changed between experiment T8 v1 and T8 v2?")
+
+Do NOT store:
 - General conversation memory (use built-in `memory_search`)
 - Ephemeral status updates (use `[TASK:status]` conventions)
-- Raw data storage (experiments write notebooks + RESEARCH_LOG.md)
+- Raw data (experiments write notebooks + RESEARCH_LOG.md)
 
 ## Entity Types
 
@@ -50,26 +64,22 @@ graph_add_memory(
 
 Graphiti extracts entities and relationships from natural language automatically.
 
-### graph_search_nodes
-Find entities by semantic query.
+### graph_search
+Find entities and relationships by semantic query.
 
-**When:** Phase 1 (RESUME) and Phase 2 (IDEATE).
+**When:** Phase 1 (RESUME), Phase 2 (IDEATE), Phase 7 (REFLECT).
 
-**Example:** `graph_search_nodes(query: "VWAP deviation feature")`
-
-### graph_search_memory_facts
-Find relationships between entities.
-
-**When:** Phase 2 (IDEATE) — cross-experiment patterns. Phase 7 (REFLECT) — meta-analysis.
-
-**Example:** `graph_search_memory_facts(query: "experiments using LightGBM on NVDA")`
+**Examples:**
+- `graph_search(query: "VWAP deviation feature")`
+- `graph_search(query: "experiments using LightGBM on NVDA")`
+- `graph_search(query: "failure modes in mean-reversion strategies")`
 
 ### graph_get_episodes
 Retrieve recent episodes chronologically.
 
 **When:** Session start — get temporal context.
 
-### graph_get_status
+### graph_status
 Check graph server + FalkorDB connectivity.
 
 ### graph_delete_episode / graph_delete_entity_edge
@@ -82,10 +92,10 @@ Data correction only. Rare.
 
 | Phase | Graph Action |
 |-------|-------------|
-| Phase 1 (RESUME) | `graph_search_nodes` + `graph_search_memory_facts` for cross-experiment patterns |
+| Phase 1 (RESUME) | `graph_search` for prior experiments and cross-experiment patterns |
 | Phase 2 (IDEATE) | Include graph context in researcher prompt |
 | Phase 6 (LOG) | `graph_add_memory` with full experiment result |
-| Phase 7 (REFLECT) | `graph_search_memory_facts` for meta-patterns |
+| Phase 7 (REFLECT) | `graph_search` for meta-patterns and recurring failure modes |
 
 ## Episode Body Template
 

@@ -94,7 +94,7 @@ if [[ -x "${GRAPHITI_MCP_PYTHON}" ]] && [[ -f "${GRAPHITI_MCP_REPO}/main.py" ]] 
     echo "Graphiti MCP installed but disabled in repo config — mcp section removed"
   else
     # pragma: allowlist nextline secret
-    GRAPH_API_KEY_REF="env:AZURE_OPENAI_API_KEY"
+    GRAPH_API_KEY_REF="env:COPILOT_API_TOKEN"
     MERGED=$(echo "${MERGED}" | jq \
       --arg cmd "${GRAPHITI_MCP_PYTHON}" \
       --arg main "${GRAPHITI_MCP_REPO}/main.py" \
@@ -104,12 +104,9 @@ if [[ -x "${GRAPHITI_MCP_PYTHON}" ]] && [[ -f "${GRAPHITI_MCP_REPO}/main.py" ]] 
         "command": $cmd,
         "args": [$main, "--transport", "stdio", "--config", $cfg],
         "env": {
-          "AZURE_OPENAI_API_KEY": $apikey,
-          "AZURE_OPENAI_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
-          "AZURE_OPENAI_DEPLOYMENT": "gpt-5-mini",
-          "AZURE_OPENAI_EMBEDDINGS_ENDPOINT": "https://oai-ss-aisense-dev-eastus2.openai.azure.com",
-          "AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT": "text-embedding-3-small",
-          "AZURE_OPENAI_API_VERSION": "2024-10-21",
+          "COPILOT_API_TOKEN": $apikey,
+          "COPILOT_API_BASE_URL": "https://api.enterprise.githubcopilot.com/v1",
+          "COPILOT_PROXY_URL": "https://proxy.enterprise.githubcopilot.com/v1",
           "FALKORDB_URI": "redis://localhost:6379"
         }
       }
@@ -242,6 +239,35 @@ PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
+fi
+
+# ── Copy Copilot headers preload for Graphiti ────────────────────────────────
+COPILOT_PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/copilot-headers-preload.py"
+COPILOT_PRELOAD_DST="${OPENCLAW_HOME}/copilot_headers_preload.py"
+if [[ -f "${COPILOT_PRELOAD_SRC}" ]]; then
+  cp "${COPILOT_PRELOAD_SRC}" "${COPILOT_PRELOAD_DST}"
+  # Create graphiti-site/ with sitecustomize.py that auto-loads the preload
+  mkdir -p "${OPENCLAW_HOME}/graphiti-site"
+  cat > "${OPENCLAW_HOME}/graphiti-site/sitecustomize.py" << 'SITEOF'
+import sys, os
+preload = os.path.join(os.path.dirname(__file__), '..', 'copilot_headers_preload.py')
+if os.path.exists(preload):
+    exec(open(preload).read())
+SITEOF
+  echo "Copied copilot-headers-preload.py + graphiti-site/sitecustomize.py"
+fi
+
+# ── Patch Graphiti MCP factories.py to pass base_url for OpenAI LLM ──────────
+# The upstream factory omits base_url when creating the OpenAI LLM client,
+# so it defaults to api.openai.com instead of using the configured api_url.
+FACTORIES_PY="${HOME}/.local/share/graphiti-mcp/repo/mcp_server/src/services/factories.py"
+if [[ -f "${FACTORIES_PY}" ]]; then
+  if ! grep -q 'base_url=config.providers.openai.api_url' "${FACTORIES_PY}"; then
+    sed -i '/llm_config = CoreLLMConfig(/,/^[[:space:]]*)/{ s/api_key=api_key,/api_key=api_key,\n                    base_url=config.providers.openai.api_url,/ }' "${FACTORIES_PY}"
+    echo "Patched factories.py: added base_url to OpenAI LLM config"
+  else
+    echo "factories.py already patched"
+  fi
 fi
 
 # ── Fix per-agent model overrides ────────────────────────────────────────────

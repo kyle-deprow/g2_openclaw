@@ -135,7 +135,23 @@
       "subagents": {
         "maxConcurrent": 8
       }
-    }
+    },
+    "list": [
+      {
+        "id": "main",
+        "skills": [
+          "knowledge-graph",
+          "autoresearch"
+        ],
+        "subagents": {
+          "allowAgents": [
+            "contrarian",
+            "explorer",
+            "theorist"
+          ]
+        }
+      }
+    ]
   },
   "memory": {
     "backend": "builtin"
@@ -143,7 +159,6 @@
   "mcp": {
     "servers": {
       "graph": {
-        "disabled": true,
         "command": "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
         "args": []
       }

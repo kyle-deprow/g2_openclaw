@@ -2,25 +2,21 @@ server:
   transport: "stdio"
 
 llm:
-  provider: "azure_openai"
+  provider: "openai"
   model: "gpt-5-mini"
   providers:
-    azure_openai:
-      api_key: ${AZURE_OPENAI_API_KEY}
-      api_url: ${AZURE_OPENAI_ENDPOINT}
-      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
-      deployment_name: ${AZURE_OPENAI_DEPLOYMENT}
+    openai:
+      api_key: ${COPILOT_API_TOKEN}
+      api_url: ${COPILOT_API_BASE_URL:https://api.enterprise.githubcopilot.com}
 
 embedder:
-  provider: "azure_openai"
+  provider: "openai"
   model: "text-embedding-3-small"
   dimensions: 1536
   providers:
-    azure_openai:
-      api_key: ${AZURE_OPENAI_API_KEY}
-      api_url: ${AZURE_OPENAI_EMBEDDINGS_ENDPOINT}
-      api_version: ${AZURE_OPENAI_API_VERSION:2024-10-21}
-      deployment_name: ${AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT}
+    openai:
+      api_key: ${COPILOT_API_TOKEN}
+      api_url: ${COPILOT_PROXY_URL:https://proxy.enterprise.githubcopilot.com/v1}
 
 database:
   provider: "falkordb"
@@ -31,7 +27,7 @@ database:
       database: default_db
 
 graphiti:
-  group_id: "quantipy-research"
+  group_id: "quantipy_research"
   entity_types:
     - name: "Experiment"
       description: "A named research experiment or backtest run"
