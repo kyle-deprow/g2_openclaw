@@ -641,10 +641,12 @@ def _capture_vite_port(proc: subprocess.Popen[str], default: int, timeout: float
 
 @app.command()
 def stop() -> None:
-    """Stop all G2 OpenClaw processes (gateway, Vite, simulator)."""
+    """Stop all G2 OpenClaw processes (agents, MCP servers, gateway, Vite, simulator)."""
 
     targets = [
         ("OpenClaw daemon", ["openclaw.*daemon"]),
+        ("OpenClaw agent", ["openclaw-agent"]),
+        ("Graphiti MCP server", ["python.*graphiti.*mcp_server"]),
         ("Gateway", ["python.*-m.*gateway"]),
         ("Vite dev server", ["node.*vite"]),
         ("EvenHub simulator", ["evenhub-simulator"]),

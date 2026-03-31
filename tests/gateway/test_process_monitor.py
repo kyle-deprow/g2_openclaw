@@ -184,3 +184,90 @@ class TestFormatMessage:
         )
         msg = monitor._format_message(report)
         assert "BUG: Sharpe > 10" in msg
+
+
+class _EmptyAsyncIter:
+    """Async iterator that yields nothing — simulates an empty stream."""
+
+    def __aiter__(self) -> _EmptyAsyncIter:
+        return self
+
+    async def __anext__(self) -> str:
+        raise StopAsyncIteration
+
+
+class TestNotifyRetry:
+    """Tests for _notify_openclaw_with_retry in gateway.server."""
+
+    @pytest.mark.asyncio()
+    async def test_succeeds_on_first_attempt(self) -> None:
+        """Should send message and drain stream without retrying."""
+        from gateway.server import _notify_openclaw_with_retry
+
+        client = AsyncMock()
+        client.send_message = AsyncMock(return_value=_EmptyAsyncIter())
+
+        await _notify_openclaw_with_retry(client, "hello", "session:key")
+
+        client.send_message.assert_called_once_with("hello", session_key="session:key")
+        client.disconnect.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_retries_on_transient_failure(self) -> None:
+        """Should retry after OpenClawError and succeed on second attempt."""
+        from gateway.openclaw_client import OpenClawError
+        from gateway.server import _notify_openclaw_with_retry
+
+        client = AsyncMock()
+        client.send_message = AsyncMock(
+            side_effect=[OpenClawError("connection refused"), _EmptyAsyncIter()]
+        )
+
+        with patch("gateway.server.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await _notify_openclaw_with_retry(client, "msg", "s:k")
+
+        assert client.send_message.call_count == 2
+        client.disconnect.assert_called_once()
+        mock_sleep.assert_called_once_with(5)
+
+    @pytest.mark.asyncio()
+    async def test_retries_exhaust_all_attempts(self) -> None:
+        """Should try all attempts then give up without raising."""
+        from gateway.openclaw_client import OpenClawError
+        from gateway.server import _notify_openclaw_with_retry
+
+        client = AsyncMock()
+        client.send_message = AsyncMock(side_effect=OpenClawError("always fails"))
+
+        with patch("gateway.server.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await _notify_openclaw_with_retry(client, "msg", "s:k")
+
+        # 1 initial + 3 retries = 4 total attempts
+        assert client.send_message.call_count == 4
+        assert client.disconnect.call_count == 3
+        assert mock_sleep.call_args_list == [
+            ((5,),),
+            ((15,),),
+            ((30,),),
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_succeeds_on_third_attempt(self) -> None:
+        """Should succeed after two failures."""
+        from gateway.openclaw_client import OpenClawError
+        from gateway.server import _notify_openclaw_with_retry
+
+        client = AsyncMock()
+        client.send_message = AsyncMock(
+            side_effect=[
+                OpenClawError("refused"),
+                OpenClawError("restart"),
+                _EmptyAsyncIter(),
+            ]
+        )
+
+        with patch("gateway.server.asyncio.sleep", new_callable=AsyncMock):
+            await _notify_openclaw_with_retry(client, "msg", "s:k")
+
+        assert client.send_message.call_count == 3
+        assert client.disconnect.call_count == 2

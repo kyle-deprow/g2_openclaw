@@ -1,6 +1,6 @@
 ---
 name: autoresearch
-description: Autonomous research loop with Copilot-based multi-agent ideation. PM delegates research debate to Copilot researcher agent, selects winner, delegates implementation to Copilot orchestrator, measures, keeps/reverts. Cron-driven self-continuation.
+description: Autonomous research loop with Copilot-based multi-agent ideation. PM delegates research debate to Copilot researcher agent, selects winner, delegates implementation to Copilot orchestrator, measures, keeps/reverts. Gateway-monitored self-continuation.
 version: 5.0.0
 ---
 
@@ -42,7 +42,9 @@ LOOP (until goal met or user interrupts):
     - Read last 10-20 entries from experiment log (RESEARCH_LOG.md)
     - Run: git log --oneline -20
     - Run: memory_search for related past experiments AND prior research rounds
-    - Identify: what worked, what failed, what's untried
+    - Query knowledge graph: graph_search for prior experiments, failure modes, successful features
+    - Query knowledge graph: graph_get_episodes for recent temporal context
+    - Identify: what worked, what failed, what's untried (combining RESEARCH_LOG + graph results)
     - Check: do we have UNIMPLEMENTED proposals from a prior research round?
       If yes → skip Phase 2, go straight to Phase 3 with the top-ranked unimplemented proposal.
       If no → proceed to Phase 2 for new ideation.
@@ -119,12 +121,19 @@ LOOP (until goal met or user interrupts):
   Phase 3 — IMPLEMENT (Copilot orchestrator — quantitative strategy)
     Pick the top-ranked UNIMPLEMENTED proposal from RESEARCH_LOG.md.
 
+    **CRITICAL: Extract walk-forward parameters from the proposal.** Each proposal in RESEARCH_LOG.md
+    specifies its own walk-forward design (min train window, test block size, slide step, purge gap,
+    expected fold count). You MUST read these values and inject them into the implementation prompt.
+    If the proposal doesn't specify, use the defaults from experiment-data skill (train_min=630 days,
+    test=21 days, step=21 days, purge=390 bars).
+
     Build a detailed implementation prompt that includes:
     - The proposal name, description, and ML model type
     - Feature engineering pipeline: raw data → features → model input
     - Universe: which tickers and why (from the proposal's asset class design)
     - Data loading: MUST use real data via qp.prices() or direct SQL. Read the experiment-data skill.
     - Model training approach (walk-forward CV with hyperparameter tuning)
+    - **Walk-forward parameters extracted from the proposal** (min train days, test days, step, purge bars)
     - Transaction cost model (spread + slippage per ticker)
     - Where to put the code: src/quantipy/alpha/<strategy_name>/
     - Backtest requirements: use BacktestRunner, compare vs buy-and-hold baseline
@@ -172,16 +181,17 @@ LOOP (until goal met or user interrupts):
         4. Feature engineering — compute features on real data, show distributions/correlations
         5. Hyperparameter tuning — RandomizedSearchCV with TimeSeriesSplit (min 5 splits)
            Report best params and CV scores. NEVER hardcode model hyperparameters.
-        6. Walk-forward backtest — 20-day train, 5-day test, 1-day embargo, minimum 10 folds
-           on the training period. Report per-fold metrics.
+        6. Walk-forward backtest — expanding window, min 630-day train, 21-day test blocks,
+           390-bar purge gap, 21-day slide, minimum 20 folds on the training period.
+           If RESEARCH_LOG specifies different walk-forward params, use those exact values.
+           Report per-fold metrics.
         7. Transaction costs — apply realistic spread + slippage per ticker
            Report BOTH gross and net Sharpe. If net < 0 but gross > 0, strategy trades too much.
-        8. OOS evaluation — run final model on held-out period (NEVER touched during training, min 60 days)
+        8. OOS evaluation — run final model on held-out period (NEVER touched during training, min 120 days)
            Report OOS Sharpe (gross + net), accuracy, trades/day, max drawdown.
         9. Null tests — at least 3: shuffled labels, random features, bootstrap Sharpe CI
         10. Conclusion — keep/iterate/discard decision with reasoning
 
-        The notebook must be EXECUTABLE: `uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb`
         Create notebooks/ and notebooks/experiments/ dirs if they don't exist.
 
       CRITICAL BACKTEST RULE — holding period MUST match prediction horizon:
@@ -197,14 +207,23 @@ LOOP (until goal met or user interrupts):
       Tests: write unit tests in tests/unit/alpha/test_<strategy_name>.py
       After: run uv run pytest -q --tb=short --ignore=tests/integration
       All existing tests MUST still pass.
-      Commit with message: 'experiment: <strategy_name> — <one-line description>'
+
+      MANDATORY FINAL STEPS (do ALL of these before exiting):
+      1. Execute the notebook end-to-end:
+         uv run jupyter execute notebooks/experiments/<strategy_name>.ipynb --ExecutePreprocessor.timeout=600
+         If execution fails, fix the error and re-run. Do NOT exit with a broken notebook.
+      2. Verify the notebook has outputs — open it and confirm cells produced printed results.
+      3. Run the sanity checks above on the actual output. If any trigger, fix the bug and re-execute.
+      4. Only after the notebook executes cleanly with valid metrics:
+         Commit with message: 'experiment: <strategy_name> — <one-line description>'
+      DO NOT commit a notebook without outputs. DO NOT exit without executing the notebook.
     \" --yolo --model claude-opus-4.6 --no-auto-update"
 
     Wait for completion via process action:log
 
   Phase 4 — VERIFY (run in YOUR turn with exec commands — do NOT delegate to Copilot)
     **DO NOT WAIT FOR HUMAN. DO NOT DELEGATE TO COPILOT.** Evaluation is lightweight — you do it directly.
-    The sentinel's [TASK:complete] includes metrics. Parse them first.
+    The gateway's [TASK:complete] includes metrics. Parse them first.
     If metrics are present and sufficient → use them directly for Phase 5.
     If metrics are missing or insufficient → run these checks yourself with exec:
 
@@ -304,11 +323,25 @@ LOOP (until goal met or user interrupts):
     - Update RESEARCH_LOG.md: mark strategy status (implemented/discarded/crashed) with metrics
     - Write to memory/YYYY-MM-DD.md: strategy name, outcome, Sharpe, what worked/failed
     - If SIGNIFICANT KEEP or STRONG KEEP → update MEMORY.md with the strategy as a milestone
+    - Write to knowledge graph (MANDATORY):
+      graph_add_memory(
+        name: "<experiment_name> result",
+        episode_body: "<experiment name> used <features> with <model> on <tickers> <timeframe>.
+          IS Sharpe: <value>. OOS Sharpe: <value>. Reviewer: <PASS/FAIL>. Decision: <KEEP/DISCARD>.
+          Failure modes: <any encountered>. Key insight: <what was learned>.",
+        source_description: "autoresearch phase 6 log"
+      )
 
   Phase 7 — REFLECT (after every 3 implementations or end of research round)
     This phase runs after implementing 3 strategies from a round OR when all proposals are done.
 
-    a) Pattern analysis — read RESEARCH_LOG.md and extract:
+    a0) Knowledge graph meta-analysis — before reading logs:
+       - graph_search for all Experiment entities → build success/failure panorama
+       - graph_search for FailureMode entities → identify recurring anti-patterns
+       - graph_search for Feature entities used in successful experiments → identify winning features
+       - graph_search for cross-experiment relationships (which features + models co-occur in KEEPs?)
+
+    a) Pattern analysis — read RESEARCH_LOG.md and extract (augmented with graph results):
        - Success rate: how many KEEPs vs DISCARDs vs CRASHes?
        - Did high-ranked proposals actually perform better than low-ranked ones?
        - Which agent source (contrarian/explorer/theorist) produced the best ideas?
@@ -465,7 +498,7 @@ Recovery protocol:
 
 The most dangerous failure mode is NOT a crash — it's a silent stall where no Copilot is running. The loop just stops and nobody notices.
 
-**The gateway's process monitor handles this automatically.** It polls Copilot sessions every 30 seconds and sends `[TASK:complete]` or `[TASK:failed]` to your session when a process exits. No cron sentinels needed.
+**The gateway's process monitor handles this automatically.** It polls Copilot sessions every 30 seconds and sends `[TASK:complete]` or `[TASK:failed]` to your session when a process exits.
 
 ### On Reconnect / Session Resume
 When the human connects (or you receive a `connected` frame), run a health check:

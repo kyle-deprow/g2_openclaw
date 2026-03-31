@@ -52,7 +52,7 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 
 **ALL implementation sessions MUST use `background:true`.** The 3-step launch sequence (HEAD → copilot → confirm) must execute in ONE turn.
 
-**No cron sentinels needed.** The gateway's built-in process monitor automatically tracks Copilot processes and sends `[TASK:complete]` or `[TASK:failed]` to your session when they exit. It includes git log, notebook sanity check output, and dirty-tree detection.
+The gateway's built-in process monitor automatically tracks Copilot processes and sends `[TASK:complete]` or `[TASK:failed]` to your session when they exit. It includes git log, notebook sanity check output, and dirty-tree detection.
 
 ### Autonomous Post-Completion Evaluation
 

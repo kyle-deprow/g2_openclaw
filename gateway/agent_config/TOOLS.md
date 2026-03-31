@@ -2,7 +2,7 @@
 
 ## Primary: Copilot CLI (via exec)
 
-Delegate coding tasks to the Copilot CLI agent. **Read the `copilot-cli` skill** for the full reference: invocation syntax, flags, agent routing, background execution, sentinel template, session management, resume logic, and debugging.
+Delegate coding tasks to the Copilot CLI agent. **Read the `copilot-cli` skill** for the full reference: invocation syntax, flags, agent routing, background execution, session management, resume logic, and debugging.
 
 Quick reference:
 ```
@@ -53,7 +53,7 @@ Read the `knowledge-graph` skill for when/how to use each tool in the autoresear
 
 ## Long-Running Tasks
 
-See the `copilot-cli` skill for the full background execution protocol, sentinel template, and task status conventions.
+See the `copilot-cli` skill for the full background execution protocol and task status conventions.
 
 ### Task Status Convention
 

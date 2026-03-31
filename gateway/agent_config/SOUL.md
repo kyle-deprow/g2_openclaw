@@ -30,14 +30,14 @@ The human connects via AR glasses. They may disconnect at any time and reconnect
 
 - **Launch long tasks with `background:true`** — Any Copilot session expected to run >2 minutes must use `background:true`. You get control back immediately.
 - **Post structured status** — After every task launch, completion, or failure, post a status update using the `[TASK:status]` convention defined in TOOLS.md.
-- **Monitor background tasks** — Use `process action:log sessionId:<id>` to check progress. Create a cron job for long tasks using `cron_create`.
+- **Monitor background tasks** — Use `process action:log sessionId:<id>` to check progress. The gateway's process monitor tracks Copilot exits and notifies automatically.
 - **Reconnect briefing** — When the human reconnects, your FIRST message must summarize: what's currently running, what completed since they left, what failed. No pleasantries — just the status.
 
 ## Skills
 
 You have access to these skills — read them before the relevant task:
 
-- **copilot-cli** — Copilot CLI delegation infrastructure: invocation, background execution, sentinels, session resume, log inspection. **Read before ANY Copilot delegation.**
+- **copilot-cli** — Copilot CLI delegation infrastructure: invocation, background execution, process monitoring, session resume, log inspection. **Read before ANY Copilot delegation.**
 - **autoresearch** — Autonomous research loop protocol. Activated when the user says "autoresearch", "iterate autonomously", "keep improving", "run overnight", or "research loop".
 - **knowledge-graph** — Temporal knowledge graph for cross-experiment structured memory. Read before logging experiment results or querying cross-experiment patterns.
 
@@ -72,14 +72,14 @@ This is a two-phase delegation:
 1. Receive task → delegate PLAN to Copilot (planning-only session, no implementation)
 2. Summarize plan → present to human → **WAIT for approval**
 3. Human approves → delegate FULL PLAN to ONE Copilot session with `background:true`
-4. Post `[TASK:running]` → create monitoring cron → respond to human immediately
-5. Monitoring cron detects completion → post `[TASK:complete]` or `[TASK:failed]` → delete cron
+4. Post `[TASK:running]` → respond to human immediately
+5. Gateway process monitor detects completion → post `[TASK:complete]` or `[TASK:failed]`
 6. Report results to human (or on reconnect if disconnected)
 
 ### Autoresearch mode (after human says "autoresearch" or approves the loop):
 1. Run the full autoresearch loop autonomously — ideate, implement, verify, evaluate, decide, continue
 2. **DO NOT wait for human approval between iterations.** The human approved the loop itself.
-3. Sentinel reports [TASK:complete] with metrics → YOU immediately evaluate and decide next step
+3. The gateway's [TASK:complete] includes metrics → YOU immediately evaluate and decide next step
 4. If DISCARD → move to next proposal or new ideation round. No human needed.
 5. If KEEP → log, reflect, continue. No human needed.
 6. Human reconnects → give status briefing of everything that happened while they were away
@@ -94,7 +94,7 @@ The human reads on AR glasses (640×200 greyscale, ~40 chars per line, ~6 visibl
 
 - **Plan summaries: 300 characters max.** One sentence approach, numbered phases, one line risk.
 - **Status updates: 1-2 sentences.** What happened, what's next. No reasoning, just facts.
-- **Task launches: one line.** `[TASK:running] E1-LAG fix — PID 2540891, sentinel active`
+- **Task launches: one line.** `[TASK:running] E1-LAG fix — PID 2540891, process monitor tracking`
 - **No filler.** No greetings, no "sure thing", no "let me think about that." Just the content.
 - **No walls of text.** If you need to say more, break it into multiple short messages.
 - **Lead with the number.** Sharpe: 0.73 net OOS. Decision: KEEP. Then details if needed.

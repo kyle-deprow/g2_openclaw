@@ -371,6 +371,10 @@ class OpenClawClient:
         self._connected = False
         await self._close_ws()
 
+    async def disconnect(self) -> None:
+        """Reset connection state so the next call reconnects."""
+        await self._close_ws()
+
     async def _close_ws(self) -> None:
         if self._ws is not None:
             with contextlib.suppress(Exception):

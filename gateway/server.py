@@ -54,6 +54,42 @@ _BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
 
 _STREAM_LOG = Path(__file__).resolve().parent.parent / "logs" / "openclaw-stream.log"
 
+_NOTIFY_RETRY_DELAYS = (5, 15, 30)
+
+
+async def _notify_openclaw_with_retry(
+    client: OpenClawClient,
+    message: str,
+    session_key: str,
+) -> None:
+    """Send notification to OpenClaw with increasing-delay retries."""
+    max_attempts = len(_NOTIFY_RETRY_DELAYS) + 1
+    for attempt in range(max_attempts):
+        try:
+            stream = await client.send_message(message, session_key=session_key)
+            async for _delta in stream:
+                pass  # drain — we don't display the response
+            return
+        except OpenClawError:
+            if attempt >= len(_NOTIFY_RETRY_DELAYS):
+                logger.error(
+                    "Process monitor: failed to notify OpenClaw after %d attempts",
+                    max_attempts,
+                    exc_info=True,
+                )
+                return
+            delay = _NOTIFY_RETRY_DELAYS[attempt]
+            logger.warning(
+                "Process monitor: notify attempt %d/%d failed, retrying in %ds",
+                attempt + 1,
+                max_attempts,
+                delay,
+                exc_info=True,
+            )
+            await client.disconnect()
+            await asyncio.sleep(delay)
+
+
 # --- Auth rate limiting ---
 _AUTH_MAX_FAILURES = 5
 _AUTH_WINDOW_SECONDS = 60
@@ -1743,13 +1779,9 @@ class GatewayServer:
         )
 
         async def notify(message: str) -> None:
-            """Send a notification to OpenClaw and drain the response."""
-            try:
-                stream = await monitor_client.send_message(message, session_key=self._session_key)
-                async for _delta in stream:
-                    pass  # drain — we don't display the response
-            except OpenClawError:
-                logger.warning("Process monitor: failed to notify OpenClaw", exc_info=True)
+            """Send a notification to OpenClaw with retry on failure."""
+            key = self._session_key  # snapshot before retries
+            await _notify_openclaw_with_retry(monitor_client, message, key)
 
         self._process_monitor = CopilotProcessMonitor(notify_callback=notify)
         self._process_monitor_task = asyncio.create_task(self._process_monitor.run())

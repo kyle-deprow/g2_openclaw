@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -544,3 +546,107 @@ class TestPushConfig:
         restart_calls = [c for c in calls if "restart" in c]
         assert len(restart_calls) == 1
         assert restart_calls[0] == ["openclaw", "daemon", "restart"]
+
+
+# ---------------------------------------------------------------------------
+# stop command
+# ---------------------------------------------------------------------------
+
+
+class TestStop:
+    """Tests for the stop command process cleanup."""
+
+    @staticmethod
+    def _pgrep_side_effect(
+        matches: dict[str, str],
+    ) -> Callable[..., MagicMock]:
+        """Return a side_effect for subprocess.run that simulates pgrep.
+
+        *matches* maps a pgrep pattern substring to the stdout to return.
+        """
+
+        def _side_effect(cmd: list[str], **kwargs: object) -> MagicMock:
+            if cmd[0] == "pgrep":
+                pattern = cmd[-1]
+                for key, stdout in matches.items():
+                    if key in pattern:
+                        return MagicMock(returncode=0, stdout=stdout)
+            return MagicMock(returncode=1, stdout="")
+
+        return _side_effect
+
+    def test_stop_kills_openclaw_agent_processes(self) -> None:
+        """When pgrep matches openclaw-agent, SIGTERM is sent to returned PIDs."""
+        killed_signals: dict[int, list[int]] = {}
+
+        def _fake_kill(pid: int, sig: int) -> None:
+            killed_signals.setdefault(pid, []).append(sig)
+            if sig == 0:
+                raise ProcessLookupError
+
+        side_effect = self._pgrep_side_effect({"openclaw-agent": "1001\n1002\n"})
+
+        with (
+            patch("gateway.cli.subprocess.run", side_effect=side_effect),
+            patch("gateway.cli.os.kill", side_effect=_fake_kill),
+            patch("gateway.cli.os.getpid", return_value=99999),
+            patch("gateway.cli.os.getppid", return_value=99998),
+            patch("gateway.cli.time.sleep"),
+            patch("gateway.cli.time.monotonic", side_effect=[0, 0, 10, 10, 10, 10, 10, 10] * 10),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert signal.SIGTERM in killed_signals.get(1001, [])
+        assert signal.SIGTERM in killed_signals.get(1002, [])
+
+    def test_stop_kills_graphiti_mcp_processes(self) -> None:
+        """When pgrep matches graphiti MCP server, SIGTERM is sent to returned PIDs."""
+        killed_signals: dict[int, list[int]] = {}
+
+        def _fake_kill(pid: int, sig: int) -> None:
+            killed_signals.setdefault(pid, []).append(sig)
+            if sig == 0:
+                raise ProcessLookupError
+
+        side_effect = self._pgrep_side_effect({"graphiti.*mcp_server": "2001\n"})
+
+        with (
+            patch("gateway.cli.subprocess.run", side_effect=side_effect),
+            patch("gateway.cli.os.kill", side_effect=_fake_kill),
+            patch("gateway.cli.os.getpid", return_value=99999),
+            patch("gateway.cli.os.getppid", return_value=99998),
+            patch("gateway.cli.time.sleep"),
+            patch("gateway.cli.time.monotonic", side_effect=[0, 0, 10, 10, 10, 10, 10, 10] * 10),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert signal.SIGTERM in killed_signals.get(2001, [])
+
+    def test_stop_excludes_own_pid(self) -> None:
+        """When pgrep returns the current process PID, it is excluded from kill targets."""
+        own_pid = 5000
+        killed_pids: set[int] = set()
+
+        def _fake_kill(pid: int, sig: int) -> None:
+            if sig == signal.SIGTERM:
+                killed_pids.add(pid)
+            if sig == 0:
+                raise ProcessLookupError
+
+        side_effect = self._pgrep_side_effect({"openclaw-agent": f"{own_pid}\n3001\n"})
+
+        with (
+            patch("gateway.cli.subprocess.run", side_effect=side_effect),
+            patch("gateway.cli.os.kill", side_effect=_fake_kill),
+            patch("gateway.cli.os.getpid", return_value=own_pid),
+            patch("gateway.cli.os.getppid", return_value=99998),
+            patch("gateway.cli.time.sleep"),
+            patch("gateway.cli.time.monotonic", side_effect=[0, 0, 10, 10, 10, 10, 10, 10] * 10),
+        ):
+            result = runner.invoke(app, ["stop"])
+
+        assert result.exit_code == 0
+        assert own_pid not in killed_pids
+        assert 3001 in killed_pids

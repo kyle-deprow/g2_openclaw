@@ -1,11 +1,10 @@
 """Gateway-side Copilot process monitor.
 
-Replaces the broken cron-based sentinel mechanism. Polls for Copilot CLI
-sessions working on target repos and auto-notifies OpenClaw when they exit.
+Polls for Copilot CLI sessions working on target repos and auto-notifies
+OpenClaw when they exit.
 
-This runs as a background asyncio task inside the gateway server. Because
-notifications go through the gateway's existing OpenClaw WebSocket client,
-there are no ``sessions_send`` permission issues that plague cron sentinels.
+Runs as a background asyncio task inside the gateway server. Notifications
+go through the gateway's existing OpenClaw WebSocket client.
 """
 
 from __future__ import annotations

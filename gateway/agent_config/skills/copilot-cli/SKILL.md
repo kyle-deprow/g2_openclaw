@@ -1,6 +1,6 @@
 ---
 name: copilot-cli
-description: Copilot CLI delegation infrastructure — invocation, background execution, session management, process sentinels, resume logic, log inspection, and debugging. Read this skill before any Copilot delegation.
+description: Copilot CLI delegation infrastructure — invocation, background execution, session management, process monitoring, resume logic, log inspection, and debugging. Read this skill before any Copilot delegation.
 version: 1.0.0
 ---
 
@@ -77,7 +77,7 @@ Execute ALL steps in ONE turn.
 3. **Confirm to human:**
    Post `[TASK:running] <description> | started: <HH:MM UTC>`
 
-**No sentinel needed.** The gateway's built-in process monitor automatically tracks Copilot processes working on target repos. When the process exits, the gateway sends a `[TASK:complete]` or `[TASK:failed]` message directly to your session with git log, notebook sanity check results, and dirty-tree detection. This replaces the old cron-based sentinel mechanism, which was unreliable due to `sessions_send` failures in isolated cron context.
+The gateway's built-in process monitor automatically tracks Copilot processes working on target repos. When the process exits, the gateway sends a `[TASK:complete]` or `[TASK:failed]` message directly to your session with git log, notebook sanity check results, and dirty-tree detection.
 
 ### After Launch
 | Event | Action |
@@ -92,14 +92,12 @@ When Copilot exits but HEAD is unchanged (no new commits), it spent its session 
 
 ### Resume Protocol
 
-1. **Resume the session** using the session ID from the sentinel:
+1. **Resume the session** using the session ID from the process monitor notification:
    ```
    exec(command: "copilot --resume=<session-id> -p \"Your previous session explored and planned but did not implement any code. Skip exploration. Execute the implementation plan now — create modules, tests, notebook, run pytest, commit on success.\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "<REPO_PATH>")
    ```
 
-2. **Create a new sentinel** for the resumed session (same template, new PID, same HEAD_AT_LAUNCH).
-
-3. **Max 2 resumes.** If the 2nd resume also produces `[TASK:incomplete]`:
+2. **Max 2 resumes.** If the 2nd resume also produces `[TASK:incomplete]`:
    - Report `[TASK:failed] Copilot unable to produce output after 2 resumes. Session: <session-id>`
    - Move to next action (discard proposal, try next experiment, etc.)
 
@@ -173,7 +171,7 @@ Shows which subagents were spawned (explore, plan, implement).
 | Import errors in notebook | Copilot used wrong module path | Fix prompt to specify exact import paths |
 | Tests pass but notebook fails to execute | Missing dependency or data | Check notebook cell errors, fix deps |
 | PID exits immediately (< 30s) | Auth failure or model error | Check `~/.copilot/logs/` for error, verify model config |
-| Session hangs (sentinel shows alive for >1h) | Complex task or stuck in retry loop | Check process CPU: `ps -p <PID> -o %cpu` — if 0%, kill it |
+| Session hangs (process monitor shows alive for >1h) | Complex task or stuck in retry loop | Check process CPU: `ps -p <PID> -o %cpu` — if 0%, kill it |
 
 ## Code Delegation — Absolute Rule
 
