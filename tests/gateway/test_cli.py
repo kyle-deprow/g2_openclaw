@@ -600,8 +600,8 @@ class TestStop:
         assert signal.SIGTERM in killed_signals.get(1001, [])
         assert signal.SIGTERM in killed_signals.get(1002, [])
 
-    def test_stop_kills_graphiti_mcp_processes(self) -> None:
-        """When pgrep matches graphiti MCP server, SIGTERM is sent to returned PIDs."""
+    def test_stop_kills_mempalace_mcp_processes(self) -> None:
+        """When pgrep matches MemPalace MCP server, SIGTERM is sent to returned PIDs."""
         killed_signals: dict[int, list[int]] = {}
 
         def _fake_kill(pid: int, sig: int) -> None:
@@ -609,7 +609,7 @@ class TestStop:
             if sig == 0:
                 raise ProcessLookupError
 
-        side_effect = self._pgrep_side_effect({"graphiti.*mcp_server": "2001\n"})
+        side_effect = self._pgrep_side_effect({"mempalace": "2001\n"})
 
         with (
             patch("gateway.cli.subprocess.run", side_effect=side_effect),

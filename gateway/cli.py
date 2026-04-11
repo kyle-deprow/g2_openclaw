@@ -646,7 +646,7 @@ def stop() -> None:
     targets = [
         ("OpenClaw daemon", ["openclaw.*daemon"]),
         ("OpenClaw agent", ["openclaw-agent"]),
-        ("Graphiti MCP server", ["python.*graphiti.*mcp_server"]),
+        ("MemPalace MCP server", ["python.*mempalace"]),
         ("Gateway", ["python.*-m.*gateway"]),
         ("Vite dev server", ["node.*vite"]),
         ("EvenHub simulator", ["evenhub-simulator"]),
@@ -1030,7 +1030,7 @@ def launch(
                 # process survives after the launcher exits (no broken pipe).
                 # Redirect stdin from /dev/null to prevent EIO on TTY read.
                 vite_proc = subprocess.Popen(
-                    ["npm", "run", "dev"],
+                    ["npm", "run", "dev:network"],
                     cwd=str(g2_app_dir),
                     stdin=subprocess.DEVNULL,
                     stdout=_vite_log,
@@ -1051,7 +1051,7 @@ def launch(
                 # Foreground mode: capture stdout to parse the port, then
                 # drain the rest into the log via a daemon thread.
                 vite_proc = subprocess.Popen(
-                    ["npm", "run", "dev"],
+                    ["npm", "run", "dev:network"],
                     cwd=str(g2_app_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

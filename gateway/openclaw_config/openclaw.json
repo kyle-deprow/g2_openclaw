@@ -140,7 +140,7 @@
       {
         "id": "main",
         "skills": [
-          "knowledge-graph",
+          "mempalace",
           "autoresearch"
         ],
         "subagents": {
@@ -158,9 +158,9 @@
   },
   "mcp": {
     "servers": {
-      "graph": {
+      "mempalace": {
         "command": "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
-        "args": []
+        "args": ["-m", "mempalace.mcp_server", "--palace", "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"]
       }
     }
   },

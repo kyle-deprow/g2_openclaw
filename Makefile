@@ -14,11 +14,9 @@ GREEN := \033[32m
 BOLD  := \033[1m
 RESET := \033[0m
 
-# Graphiti MCP paths
-GRAPHITI_HOME   := $(HOME)/.local/share/graphiti-mcp
-GRAPHITI_REPO   := $(GRAPHITI_HOME)/repo
-GRAPHITI_VENV   := $(GRAPHITI_HOME)/venv
-GRAPHITI_PYTHON := $(GRAPHITI_VENV)/bin/python
+# MemPalace paths
+MEMPALACE_VENV    := $(HOME)/.local/share/mempalace/venv
+MEMPALACE_PYTHON  := $(MEMPALACE_VENV)/bin/python
 
 # ============================================================================
 # Setup
@@ -92,7 +90,7 @@ pre-commit: ## Run all pre-commit hooks
 # Gateway Operations
 # ============================================================================
 
-.PHONY: init-env launch stop sim restart push-config graphiti-start graphiti-stop graphiti-install
+.PHONY: init-env launch stop sim restart push-config mempalace-install
 
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
@@ -102,9 +100,8 @@ launch: ## Start the gateway server (foreground, Ctrl+C to stop)
 
 stop: ## Stop all G2 OpenClaw processes
 	@uv run python -m gateway stop
-	@$(MAKE) --no-print-directory graphiti-stop
 
-sim: graphiti-start ## Stop all services and re-launch the full sim stack
+sim: ## Stop all services and re-launch the full sim stack
 	@uv run python -m gateway stop
 	@uv run python -m gateway launch --daemon
 
@@ -113,29 +110,17 @@ restart: sim ## Alias for sim
 push-config: ## Push OpenClaw config to the gateway
 	@uv run python -m gateway push-config
 
-graphiti-start: ## Start FalkorDB container (idempotent)
-	@echo -e "$(CYAN)$(BOLD)>>> Starting FalkorDB...$(RESET)"
-	@docker start graphiti-falkordb 2>/dev/null || \
-		docker run -d --name graphiti-falkordb \
-			-p 6379:6379 \
-			-v graphiti-data:/data \
-			falkordb/falkordb:latest
-	@echo -e "$(GREEN)$(BOLD)>>> FalkorDB ready on :6379$(RESET)"
-
-graphiti-stop: ## Stop FalkorDB container
-	@docker stop graphiti-falkordb 2>/dev/null || true
-
-graphiti-install: ## Install Graphiti MCP server (idempotent, pulls latest if exists)
-	@echo -e "$(CYAN)$(BOLD)>>> Installing Graphiti MCP server...$(RESET)"
-	@if [ -d "$(GRAPHITI_REPO)" ]; then \
-		git -C "$(GRAPHITI_REPO)" pull --ff-only 2>/dev/null || echo "Pull skipped"; \
+mempalace-install: ## Install MemPalace MCP server (idempotent)
+	@echo -e "$(CYAN)$(BOLD)>>> Installing MemPalace...$(RESET)"
+	@if [ -d "$(MEMPALACE_VENV)" ]; then \
+		echo "MemPalace venv exists, upgrading..."; \
+		uv pip install --python $(MEMPALACE_PYTHON) --upgrade mempalace 2>&1 | tail -1; \
 	else \
-		mkdir -p "$(GRAPHITI_HOME)" && \
-		git clone --depth 1 https://github.com/getzep/graphiti.git "$(GRAPHITI_REPO)"; \
+		uv venv $(MEMPALACE_VENV); \
+		uv pip install --python $(MEMPALACE_PYTHON) mempalace 2>&1 | tail -1; \
 	fi
-	@[ -x "$(GRAPHITI_PYTHON)" ] || uv venv "$(GRAPHITI_VENV)" --python 3.13
-	@cd "$(GRAPHITI_REPO)/mcp_server" && uv sync --python "$(GRAPHITI_PYTHON)"
-	@echo -e "$(GREEN)$(BOLD)>>> Graphiti MCP installed$(RESET)"
+	@echo -e "$(GREEN)$(BOLD)>>> MemPalace ready$(RESET)"
+
 
 # ============================================================================
 # G2 App Deploy

@@ -26,8 +26,8 @@ gateway/           → PC Gateway (Python WebSocket server, Whisper, OpenClaw re
   tts.py           → Text-to-speech (Piper)
   cli.py           → CLI commands (launch, stop, init-env, push-config)
   config.py        → Gateway configuration
-  openclaw_config/graphiti-config.yaml → Graphiti MCP server config (Azure OpenAI, FalkorDB, entity types)
-  agent_config/skills/knowledge-graph/ → Graphiti MCP tools, entity types, autoresearch graph integration
+  openclaw_config/  → OpenClaw config (openclaw.json, Azure preload)
+  agent_config/skills/mempalace/ → MemPalace MCP tools, autoresearch integration
 g2_app/            → G2 App (TypeScript thin client for iPhone / G2 glasses)
   src/main.ts      → App bootstrap, boot-to-menu flow, frame routing
   src/state.ts     → State machine (loading → menu → idle → recording → ...)
@@ -94,10 +94,8 @@ make stop                              # kill all running services
 ```
 
 ```bash
-# Graphiti Knowledge Graph
-make graphiti-install                  # install Graphiti MCP server (idempotent)
-make graphiti-start                    # start FalkorDB container
-make graphiti-stop                     # stop FalkorDB container
+# MemPalace Memory
+make mempalace-install                 # install MemPalace (idempotent)
 ```
 
 ## Things to Avoid

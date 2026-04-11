@@ -35,21 +35,26 @@ Key rules (see skill for details):
 
 **Critical:** NEVER use `exec` to create/modify/delete code files in target repos. Use `exec` ONLY to invoke Copilot CLI or to run read-only commands (ls, cat, git log, pytest, etc.).
 
-## Knowledge Graph (via Graphiti MCP)
+## Memory (via MemPalace MCP)
 
 | Tool | Use |
 |------|-----|
-| `graph_add_memory` | Record experiment results, observations, relationships |
-| `graph_search_nodes` | Find entities (experiments, features, models, tickers) |
-| `graph_search_memory_facts` | Find relationships and facts between entities |
-| `graph_get_episodes` | Retrieve recent episodes chronologically |
-| `graph_get_entity_edge` | Get a specific relationship edge by UUID |
-| `graph_get_status` | Check graph server health |
-| `graph_delete_episode` | Remove a specific episode (data correction only) |
-| `graph_delete_entity_edge` | Remove a relationship edge (data correction only) |
-| `graph_clear_graph` | **DESTRUCTIVE** — wipe entire graph. Dev resets only. |
+| `mempalace_status` | Palace health + drawer overview |
+| `mempalace_search` | Semantic search across stored experiment content |
+| `mempalace_add_drawer` | Store verbatim experiment results (wing/room/content) |
+| `mempalace_delete_drawer` | Remove a drawer by ID (data correction only) |
+| `mempalace_kg_query` | Query entity relationships from knowledge graph |
+| `mempalace_kg_add` | Add temporal fact (subject→predicate→object) |
+| `mempalace_kg_invalidate` | Mark a fact as no longer true |
+| `mempalace_kg_timeline` | Chronological story of an entity |
+| `mempalace_kg_stats` | Knowledge graph overview |
+| `mempalace_diary_write` | Record session summary for continuity |
+| `mempalace_diary_read` | Browse past session notes |
+| `mempalace_list_wings` | List all wings with drawer counts |
+| `mempalace_list_rooms` | List rooms within a wing |
+| `mempalace_check_duplicate` | Pre-write duplicate detection |
 
-Read the `knowledge-graph` skill for when/how to use each tool in the autoresearch loop. If graph tools error, continue without — it's additive, not blocking.
+Read the `mempalace` skill for when/how to use each tool in the autoresearch loop. If mempalace tools error, continue without — it's additive, not blocking.
 
 ## Long-Running Tasks
 

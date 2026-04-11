@@ -74,49 +74,25 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
     else . end
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
-# ── Copy Graphiti MCP config (before path resolution check) ──────────────────
-GRAPHITI_CONFIG_SRC="${REPO_ROOT}/gateway/openclaw_config/graphiti-config.yaml"
-GRAPHITI_CONFIG_DST="${OPENCLAW_HOME}/graphiti-config.yaml"
-if [[ -f "${GRAPHITI_CONFIG_SRC}" ]]; then
-  cp "${GRAPHITI_CONFIG_SRC}" "${GRAPHITI_CONFIG_DST}"
-  echo "Copied graphiti-config.yaml → ${GRAPHITI_CONFIG_DST}"
-fi
+# ── Resolve MemPalace MCP server path ─────────────────────────────────────────
+MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
+MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
+MEMPALACE_PALACE="${HOME}/.mempalace/palace"
 
-# ── Resolve Graphiti MCP server paths ─────────────────────────────────────────
-GRAPHITI_MCP_REPO="${HOME}/.local/share/graphiti-mcp/repo/mcp_server"
-GRAPHITI_MCP_PYTHON="${HOME}/.local/share/graphiti-mcp/venv/bin/python"
-GRAPHITI_CONFIG_RESOLVED="${OPENCLAW_HOME}/graphiti-config.yaml"
-if [[ -x "${GRAPHITI_MCP_PYTHON}" ]] && [[ -f "${GRAPHITI_MCP_REPO}/main.py" ]] && [[ -f "${GRAPHITI_CONFIG_RESOLVED}" ]]; then
-  # Check if graph is disabled in the repo config
-  GRAPH_DISABLED=$(jq -r '.mcp.servers.graph.disabled // false' "${REPO_CONFIG}")
-  if [[ "${GRAPH_DISABLED}" == "true" ]]; then
-    MERGED=$(echo "${MERGED}" | jq 'del(.mcp)')
-    echo "Graphiti MCP installed but disabled in repo config — mcp section removed"
-  else
-    # pragma: allowlist nextline secret
-    GRAPH_API_KEY_REF="env:COPILOT_API_TOKEN"
-    MERGED=$(echo "${MERGED}" | jq \
-      --arg cmd "${GRAPHITI_MCP_PYTHON}" \
-      --arg main "${GRAPHITI_MCP_REPO}/main.py" \
-      --arg cfg "${GRAPHITI_CONFIG_RESOLVED}" \
-      --arg apikey "${GRAPH_API_KEY_REF}" '
-      .mcp.servers.graph = {
-        "command": $cmd,
-        "args": [$main, "--transport", "stdio", "--config", $cfg],
-        "env": {
-          "COPILOT_API_TOKEN": $apikey,
-          "COPILOT_API_BASE_URL": "https://api.enterprise.githubcopilot.com/v1",
-          "COPILOT_PROXY_URL": "https://proxy.enterprise.githubcopilot.com/v1",
-          "FALKORDB_URI": "redis://localhost:6379"
-        }
-      }
-    ')
-    echo "Resolved Graphiti MCP: ${GRAPHITI_MCP_PYTHON} ${GRAPHITI_MCP_REPO}/main.py"
-  fi
+if [[ -x "${MEMPALACE_PYTHON}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq \
+    --arg cmd "${MEMPALACE_PYTHON}" \
+    --arg palace "${MEMPALACE_PALACE}" '
+    .mcp.servers.mempalace = {
+      "command": $cmd,
+      "args": ["-m", "mempalace.mcp_server", "--palace", $palace]
+    }
+  ')
+  echo "Resolved MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
 else
-  # Remove the disabled placeholder from repo config
-  MERGED=$(echo "${MERGED}" | jq 'del(.mcp.servers.graph)')
-  echo "Graphiti MCP not installed — graph server entry removed"
+  echo "WARNING: MemPalace not installed at ${MEMPALACE_VENV}. Run 'make mempalace-install' first." >&2
+  # Remove placeholder
+  MERGED=$(echo "${MERGED}" | jq 'del(.mcp.servers.mempalace)')
 fi
 
 # ── Force-set tools section from repo config ─────────────────────────────────
@@ -239,35 +215,6 @@ PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
-fi
-
-# ── Copy Copilot headers preload for Graphiti ────────────────────────────────
-COPILOT_PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/copilot-headers-preload.py"
-COPILOT_PRELOAD_DST="${OPENCLAW_HOME}/copilot_headers_preload.py"
-if [[ -f "${COPILOT_PRELOAD_SRC}" ]]; then
-  cp "${COPILOT_PRELOAD_SRC}" "${COPILOT_PRELOAD_DST}"
-  # Create graphiti-site/ with sitecustomize.py that auto-loads the preload
-  mkdir -p "${OPENCLAW_HOME}/graphiti-site"
-  cat > "${OPENCLAW_HOME}/graphiti-site/sitecustomize.py" << 'SITEOF'
-import sys, os
-preload = os.path.join(os.path.dirname(__file__), '..', 'copilot_headers_preload.py')
-if os.path.exists(preload):
-    exec(open(preload).read())
-SITEOF
-  echo "Copied copilot-headers-preload.py + graphiti-site/sitecustomize.py"
-fi
-
-# ── Patch Graphiti MCP factories.py to pass base_url for OpenAI LLM ──────────
-# The upstream factory omits base_url when creating the OpenAI LLM client,
-# so it defaults to api.openai.com instead of using the configured api_url.
-FACTORIES_PY="${HOME}/.local/share/graphiti-mcp/repo/mcp_server/src/services/factories.py"
-if [[ -f "${FACTORIES_PY}" ]]; then
-  if ! grep -q 'base_url=config.providers.openai.api_url' "${FACTORIES_PY}"; then
-    sed -i '/llm_config = CoreLLMConfig(/,/^[[:space:]]*)/{ s/api_key=api_key,/api_key=api_key,\n                    base_url=config.providers.openai.api_url,/ }' "${FACTORIES_PY}"
-    echo "Patched factories.py: added base_url to OpenAI LLM config"
-  else
-    echo "factories.py already patched"
-  fi
 fi
 
 # ── Fix per-agent model overrides ────────────────────────────────────────────

@@ -71,7 +71,7 @@ openclaw update --channel stable       # update (stable | beta | dev)
 - **MCP servers are first-class.** Configure in `config.json` under `mcp.servers`. Three transports: `stdio` (npm packages, local scripts), `SSE` (`url` ending `/sse`), `Streamable HTTP` (`url` + `transport: "streamable-http"`).
 - **MCP tools auto-prefix with server name.** `github_create_issue`, `db_query`. Choose **short** server names — long prefixes waste tokens.
 - **Never hardcode secrets in MCP config.** Use `"env:VAR_NAME"` syntax. Resolves at runtime from Gateway's environment.
-- **Example: Graphiti knowledge graph MCP.** Configured as `mcp.servers.graph` with `stdio` transport. The `push-openclaw-config.sh` script resolves paths at deploy time — repo config stores a disabled placeholder that the script replaces with real paths or removes if not installed.
+- **Example: MemPalace MCP.** Configured as `mcp.servers.mempalace` with `stdio` transport. Provides 20 tools (prefix `mempalace_*`) for structured experiment storage, semantic search, temporal knowledge graph, and session diaries.
 - **MCP tools follow the same allow/deny policies** as built-in tools. Deny destructive MCP tools explicitly (e.g. `gh_delete_repo`).
 - **Skills bundle prompts + tools + MCP configs** into reusable modules. Install from ClawHub: `openclaw skills install web-research`. Skills support gating (platform, required tools, feature flags).
 - **TypeScript plugins (via jiti)** can register: custom tools, background services, channels, lifecycle hooks, providers, RPC methods, and **CLI subcommands**. Discovery order: workspace → managed → bundled.

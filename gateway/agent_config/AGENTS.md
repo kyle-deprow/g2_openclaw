@@ -72,9 +72,9 @@ The gateway's built-in process monitor automatically tracks Copilot processes an
 4. **Run Phase 4.5 ADVERSARIAL REVIEW** — delegate to Copilot `--agent reviewer` (background:true). The reviewer validates methodology, checks for leakage, and provides a corrected decision metric. See autoresearch skill Phase 4.5 for the full prompt template.
 5. **Run Phase 5 DECIDE** — apply thresholds from autoresearch skill using the **reviewer's recommended metric** (IS walk-forward Sharpe net), NOT raw OOS Sharpe.
 6. **Run Phase 6 LOG** — record results + reviewer verdict in RESEARCH_LOG.md and memory
-6b. **Log to knowledge graph** — call `graph_add_memory` with the full experiment result. Include: experiment name, features, model, tickers, metrics (IS Sharpe, OOS Sharpe), reviewer verdict, decision, failure modes. Read the `knowledge-graph` skill for the episode body template. One episode per experiment. If graph tools error (FalkorDB down), continue — graph is additive, not blocking.
+6b. **Log to MemPalace** — call `mempalace_add_drawer` with the full experiment result (wing: `wing_quantipy`, room: `room_<experiment_id>`). Then call `mempalace_kg_add` for each structured fact (experiment→feature, experiment→metric, experiment→model, experiment→decision). Read the `mempalace` skill for the drawer content template and KG triple examples. One drawer per experiment. If mempalace tools error, continue — it's additive, not blocking.
 7. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
-   - Query knowledge graph: `graph_search_memory_facts` to find which feature/model combinations have consistently succeeded or failed. Include in reflect summary.
+   - Query MemPalace: `mempalace_search` + `mempalace_kg_query` to find which feature/model combinations have consistently succeeded or failed. Include in reflect summary.
 8. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
    - BUG detected → launch Copilot orchestrator to fix the backtest, re-evaluate
    - Reviewer FAIL → launch Copilot orchestrator to fix issues, re-review
@@ -82,7 +82,7 @@ The gateway's built-in process monitor automatically tracks Copilot processes an
    - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
    - All proposals exhausted → launch Copilot researcher for new ideation with updated context
    - STRONG KEEP (IS Sharpe > 1.0, reviewer PASS) → log as portfolio candidate, post [PORTFOLIO] status, then KEEP EXPLORING for orthogonal strategies
-   - Before ideation: `graph_search_nodes` + `graph_search_memory_facts` for cross-experiment patterns. Include findings in the researcher prompt. Skip if graph unavailable.
+   - Before ideation: `mempalace_search` + `mempalace_kg_query` for cross-experiment patterns. Include findings in the researcher prompt. Skip if mempalace unavailable.
    - The loop NEVER self-terminates. Only the human saying "stop" halts it.
 
 **Phase 4 is exec commands. Phase 4.5 is Copilot reviewer delegation (background:true). Phase 5-7 are in YOUR turn. Phase 8 launches next Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens across turns (Phase 4.5 exits → process monitor notifies → you continue at Phase 5). **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
@@ -97,18 +97,27 @@ When a `[TASK:failed]` indicates dirty tree (uncommitted changes), the Copilot m
 
 **NEVER create, modify, or delete code files directly.** ALL code changes go through Copilot CLI. See the `copilot-cli` skill for delegation modes (SCAFFOLD, RESEARCH, ENGINEER), prompt discipline, invocation examples, and **pre-handoff scaffolding review** (evaluate target repo agents before each delegation — update only if evidence of failure).
 
+## Current Research Direction (from the human)
+
+**Simple indicator intraday trading on small/mid cap equities + Reddit sentiment.**
+- Features: Moving Averages, Bollinger Bands, OBV + Reddit sentiment correlation
+- Universe: 4-10 small/mid cap equities ($1B-$20B market cap). NO mega-caps.
+- Holding: Intraday only. Flat by 15:50 ET. No entries before 9:45.
+- ML model: freely choose, iterate. No restrictions.
+- Do NOT propose exotic features (wavelets, entropy, topology, etc). Simple indicators only.
+
 ## Evaluation Filters
 
 Every research result must pass ALL before implementation:
-- Has learned parameters (ML/learning component — reject pure rule-based)
 - Data available (real OHLCV in PostgreSQL — NEVER synthetic data)
 - Uses real data from the database — `qp.prices()` auto-fetches missing tickers on first call
 - **Data range coverage: experiments MUST use at least 95% of available trading days.** If we have 2021–2026 data, the experiment spans 2021–2026. No cherry-picking 6-month windows.
 - Testable hypothesis ("if X then Y within Z timeframe")
 - Single metric (Sharpe, hit rate, drawdown, profit factor)
 - Not tried before (check experiment log + `memory_search`)
-- Novel enough (SMA, RSI, MACD, Bollinger, OBV BANNED as primary signals)
 - Feature engineering defined (raw data → features → model input)
+- **Uses simple indicators (MA, Bollinger, OBV) + sentiment — no exotic features**
+- **Universe: small/mid cap equities ($1B-$20B market cap) — NO mega-caps**
 - **Asset class / universe specified** (which tickers, why, how to evaluate)
 - **Hyperparameter tuning plan** (RandomizedSearchCV + TimeSeriesSplit, never hardcoded)
 - **Transaction cost model** (spread + slippage per ticker, report gross AND net Sharpe)

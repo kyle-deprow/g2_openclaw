@@ -30,7 +30,8 @@ version: 5.0.0
 4. **Define direction** — higher is better (coverage, Sharpe) or lower is better (latency, loss)
 5. **Establish baseline** — run verification, record as iteration #0 in experiment log
 6. **Check prior work** — use `memory_search` to find previous attempts on this goal. Don't repeat failed ideas.
-7. **Check scaffolding** — verify the target repo has `.github/agents/researcher.agent.md` + contrarian + explorer + theorist. If missing, copy from `~/repos/ai_scaffolding/agents/`.
+7. **Check MemPalace** — `mempalace_status` to verify connectivity, then `mempalace_diary_read(agent_name: "autoresearch", last_n: 5)` for session continuity.
+8. **Check scaffolding** — verify the target repo has `.github/agents/researcher.agent.md` + contrarian + explorer + theorist. If missing, copy from `~/repos/ai_scaffolding/agents/`.
 
 ## The Loop
 
@@ -42,9 +43,9 @@ LOOP (until goal met or user interrupts):
     - Read last 10-20 entries from experiment log (RESEARCH_LOG.md)
     - Run: git log --oneline -20
     - Run: memory_search for related past experiments AND prior research rounds
-    - Query knowledge graph: graph_search for prior experiments, failure modes, successful features
-    - Query knowledge graph: graph_get_episodes for recent temporal context
-    - Identify: what worked, what failed, what's untried (combining RESEARCH_LOG + graph results)
+    - Query MemPalace: mempalace_search for prior experiments, failure modes, successful features
+    - Query MemPalace: mempalace_kg_query for entity relationships and temporal context
+    - Identify: what worked, what failed, what's untried (combining RESEARCH_LOG + MemPalace results)
     - Check: do we have UNIMPLEMENTED proposals from a prior research round?
       If yes → skip Phase 2, go straight to Phase 3 with the top-ranked unimplemented proposal.
       If no → proceed to Phase 2 for new ideation.
@@ -62,53 +63,50 @@ LOOP (until goal met or user interrupts):
     b) Delegate to Copilot researcher agent:
 
        exec bash pty:true workdir:<repo> background:true command:"copilot --agent researcher -p \"
+         CURRENT RESEARCH DIRECTION (from the human — NON-NEGOTIABLE):
+         Simple indicator intraday trading on small/mid cap equities + Reddit sentiment correlation.
+         ALL proposals MUST use these building blocks:
+         - Indicators: Moving Averages, Bollinger Bands, OBV. Iterate on parameters/combinations.
+         - Sentiment: Reddit post sentiment from DB (analyzed_posts, ticker_sentiments tables).
+         - Universe: 4-10 small/mid cap equities (\$1B-\$20B market cap). You choose which tickers.
+         - Holding: Intraday ONLY. Flat by 15:50 ET. No entries before 9:45.
+         - ML model: freely choose, compare, iterate. No restrictions on model type or complexity.
+         HARD REJECT any proposal using exotic/novel features (wavelets, entropy, topology, etc).
+         HARD REJECT any proposal on mega-caps (AAPL, NVDA, TSLA, MSFT, GOOG, etc).
+         The thesis: simple indicators work better on less-efficient small/mid caps.
+
          Context:
          - Current best Sharpe: <N>, baseline: <N>
          - Experiments tried: <list>
          - Data available: ANY ticker (1-min to daily bars, 2021-2026). Auto-fetched by `qp.prices()` on first call.
-           Pull whatever OHLCV data you need — not limited to what's on disk.
            Also: Reddit sentiment (2021-2026) from r/wallstreetbets, r/stocks, r/investing + news sentiment.
+           Sentiment SQL: SELECT * FROM analyzed_posts / ticker_sentiments (localhost:5433)
            Load via: import quantipy as qp; df = qp.prices('<TICKER>', '<start>', '<end>')
-           Or direct SQL to localhost:5433 (see experiment-data skill for connection details)
 
          REAL DATA ONLY (NON-NEGOTIABLE):
          - ALL experiments MUST use real OHLCV data from the database. ZERO synthetic data.
-         - Every prior experiment used synthetic data and was DISCARDED as meaningless. Do not repeat this.
          - Read the experiment-data skill (.github/skills/experiment-data/SKILL.md) for data loading patterns.
 
          INTRADAY FOCUS (NON-NEGOTIABLE):
          - ALL strategies MUST target sub-day holding periods (minutes to hours). No overnight positions.
-         - We have 1-MINUTE OHLCV bars — exploit this granularity. Time-of-day features, volume profiles,
-           VWAP dynamics, opening range patterns, session segmentation are all fair game.
-         - Transaction costs MUST be modeled — at intraday frequency, slippage destroys alpha.
+         - We have 1-MINUTE OHLCV bars. Transaction costs MUST be modeled.
 
          ASSET CLASS & UNIVERSE DESIGN (MANDATORY in every proposal):
          Every proposal MUST explicitly address:
-         1. WHAT to trade: any ticker(s) — start with low/mid-cap equities but expand freely.
-            Pairs, baskets, sector ETFs, volatility products are all fair game.
-         2. WHY that universe: is the alpha thesis ticker-specific or generalizable?
+         1. WHAT to trade: small/mid cap equities (\$1B-\$20B market cap, >5M avg daily volume).
+         2. WHY that universe: justify by volatility, spread, liquidity, Reddit coverage.
          3. HOW to evaluate: walk-forward CV config, OOS holdout period, transaction cost model.
-         4. DATA SPLIT: Use multi-year data (2021-2026). Define train/CV/OOS split per experiment.
-            OOS must be at least 60 trading days and NEVER touched during training.
-         5. HYPERPARAMETER TUNING: how params will be tuned (RandomizedSearchCV + TimeSeriesSplit).
+         4. DATA SPLIT: Use multi-year data (2021-2026). OOS at least 60 trading days.
+         5. HYPERPARAMETER TUNING: RandomizedSearchCV + TimeSeriesSplit.
          Proposals without explicit universe/evaluation design are REJECTED.
 
-         CONSTRAINTS:
-         - Generic indicators (SMA, RSI, MACD, Bollinger, OBV) are BANNED as primary signals.
-         - MANDATORY: Every proposal MUST include a machine learning / learning component.
-           Reject any idea that relies solely on hand-tuned thresholds or fixed rules.
-           Minimum: supervised learning, unsupervised clustering, online learning, or learned features.
-         - Tech stack: Python 3.13, scikit-learn, pandas, numpy, backtesting.py, SQLAlchemy.
-         - Scoring weight: (novelty × 2) + feasibility + (persistence × 1.5) + (evaluation rigor × 1.5).
-
          Run the research debate. Delegate to contrarian, explorer, and theorist.
-         Each proposal MUST include: strategy description, universe choice with justification,
-         ML model, feature engineering, data split, hyperparameter tuning plan, transaction cost model,
-         evaluation criteria, and expected trade frequency.
-         HARD REJECT any proposal without a learning component.
+         Each proposal MUST use MA + Bollinger + OBV as the core feature set, with Reddit sentiment.
+         Iterate on: which MAs, which BB params, how to combine with sentiment, ML model choice.
          HARD REJECT any proposal with overnight holding periods.
          HARD REJECT any proposal using synthetic data.
-         HARD REJECT any proposal without explicit universe/evaluation design.
+         HARD REJECT any proposal on mega-cap tickers.
+         HARD REJECT any proposal using exotic features instead of simple indicators.
          Output a structured research report with the winner and all proposals.
        \" --yolo --model claude-opus-4.6 --no-auto-update"
 
@@ -324,22 +322,27 @@ LOOP (until goal met or user interrupts):
     - Write to memory/YYYY-MM-DD.md: strategy name, outcome, Sharpe, what worked/failed
     - If SIGNIFICANT KEEP or STRONG KEEP → update MEMORY.md with the strategy as a milestone
     - Write to knowledge graph (MANDATORY):
-      graph_add_memory(
-        name: "<experiment_name> result",
-        episode_body: "<experiment name> used <features> with <model> on <tickers> <timeframe>.
+      mempalace_add_drawer(
+        wing: "wing_quantipy",
+        room: "room_<experiment_id>",
+        content: "<experiment name> used <features> with <model> on <tickers> <timeframe>.
           IS Sharpe: <value>. OOS Sharpe: <value>. Reviewer: <PASS/FAIL>. Decision: <KEEP/DISCARD>.
-          Failure modes: <any encountered>. Key insight: <what was learned>.",
-        source_description: "autoresearch phase 6 log"
+          Failure modes: <any encountered>. Key insight: <what was learned>."
       )
+      Then add structured KG triples:
+      mempalace_kg_add(subject: "<experiment_name>", predicate: "achieved_is_sharpe", object: "<value>", valid_from: "<date>")
+      mempalace_kg_add(subject: "<experiment_name>", predicate: "used_feature", object: "<feature>", valid_from: "<date>")
+      mempalace_kg_add(subject: "<experiment_name>", predicate: "used_model", object: "<model>", valid_from: "<date>")
+      mempalace_kg_add(subject: "<experiment_name>", predicate: "decision", object: "<KEEP/DISCARD>", valid_from: "<date>")
 
   Phase 7 — REFLECT (after every 3 implementations or end of research round)
     This phase runs after implementing 3 strategies from a round OR when all proposals are done.
 
-    a0) Knowledge graph meta-analysis — before reading logs:
-       - graph_search for all Experiment entities → build success/failure panorama
-       - graph_search for FailureMode entities → identify recurring anti-patterns
-       - graph_search for Feature entities used in successful experiments → identify winning features
-       - graph_search for cross-experiment relationships (which features + models co-occur in KEEPs?)
+    a0) MemPalace meta-analysis — before reading logs:
+       - mempalace_search for all experiment results → build success/failure panorama
+       - mempalace_kg_query for FailureMode entities → identify recurring anti-patterns
+       - mempalace_kg_query for Feature entities used in successful experiments → identify winning features
+       - mempalace_search for cross-experiment relationships (which features + models co-occur in KEEPs?)
 
     a) Pattern analysis — read RESEARCH_LOG.md and extract (augmented with graph results):
        - Success rate: how many KEEPs vs DISCARDs vs CRASHes?
@@ -379,6 +382,13 @@ LOOP (until goal met or user interrupts):
        - Scaffolding updated: yes/no (what changed)
        - Next round adjustments: <what to emphasize/avoid>
        ```
+
+    f) Write MemPalace session diary:
+       mempalace_diary_write(
+         agent_name: "autoresearch",
+         entry: "Reflection after N implementations. Success rate: X/N kept. Best features: <list>. Best model: <type>. Key insights: <what was learned>. Next direction: <what to try>.",
+         topic: "autoresearch-session"
+       )
 
   Phase 8 — CONTINUE (autonomous progression — NEVER STOP)
     **THIS IS THE MOST IMPORTANT PHASE. YOU MUST EXECUTE IT. NEVER SKIP IT.**
