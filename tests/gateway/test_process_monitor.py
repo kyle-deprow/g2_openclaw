@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import signal
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from gateway.process_monitor import CopilotProcessMonitor, DeathReport
+from gateway.process_monitor import (
+    CopilotProcessMonitor,
+    DeathReport,
+    OrphanReaper,
+    ReapResult,
+    _OrphanCandidate,
+)
 
 
 @pytest.fixture()
@@ -271,3 +278,274 @@ class TestNotifyRetry:
 
         assert client.send_message.call_count == 3
         assert client.disconnect.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# OrphanReaper tests
+# ---------------------------------------------------------------------------
+
+
+def _ps_line(pid: int, ppid: int, etimes: int, rss: int, args: str) -> str:
+    return f"  {pid}   {ppid}      {etimes}  {rss} {args}"
+
+
+class TestFindOrphans:
+    """Tests for OrphanReaper._find_orphans."""
+
+    def test_finds_loky_orphan_with_ppid_1(self) -> None:
+        """Loky worker with ppid=1 and age > 120s should be detected."""
+        ps_output = _ps_line(9001, 1, 600, 512000, "/usr/bin/python -m loky.backend.popen")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9001
+        assert orphans[0].rss_kb == 512000
+
+    def test_finds_joblib_orphan_with_systemd_parent(self) -> None:
+        """Joblib worker under systemd --user parent should be detected."""
+        ps_output = _ps_line(9002, 2129, 300, 256000, "python -c from joblib import ...")
+        result = MagicMock(returncode=0, stdout=ps_output)
+        parent_result = MagicMock(returncode=0, stdout="/usr/lib/systemd/systemd --user\n")
+
+        with patch(
+            "gateway.process_monitor.subprocess.run",
+            side_effect=[result, parent_result],
+        ):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9002
+
+    def test_finds_ipykernel_orphan(self) -> None:
+        """ipykernel worker with ppid=1 should be detected."""
+        ps_output = _ps_line(9003, 1, 200, 100000, "python -m ipykernel_launcher -f conn.json")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9003
+
+    def test_ignores_young_process(self) -> None:
+        """Processes running < 120s should not be reaped."""
+        ps_output = _ps_line(9004, 1, 60, 512000, "python -m loky.backend.popen")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 0
+
+    def test_ignores_non_orphan(self) -> None:
+        """Loky worker with a normal parent should not be reaped."""
+        ps_output = _ps_line(9005, 5000, 600, 512000, "python -m loky.backend.popen")
+        ps_result = MagicMock(returncode=0, stdout=ps_output)
+        parent_result = MagicMock(returncode=0, stdout="python run_pipeline.py\n")
+
+        with patch(
+            "gateway.process_monitor.subprocess.run",
+            side_effect=[ps_result, parent_result],
+        ):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 0
+
+    def test_ignores_unrelated_process(self) -> None:
+        """Process without loky/joblib/ipykernel in args should be ignored."""
+        ps_output = _ps_line(9006, 1, 600, 512000, "/usr/bin/vim some_file.py")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 0
+
+    def test_caches_systemd_parent_lookup(self) -> None:
+        """Multiple orphans with the same ppid should only look up parent once."""
+        lines = "\n".join(
+            [
+                _ps_line(9010, 2129, 300, 100000, "python loky worker 1"),
+                _ps_line(9011, 2129, 400, 200000, "python loky worker 2"),
+            ]
+        )
+        ps_result = MagicMock(returncode=0, stdout=lines)
+        parent_result = MagicMock(returncode=0, stdout="/usr/lib/systemd/systemd --user\n")
+
+        with patch(
+            "gateway.process_monitor.subprocess.run",
+            side_effect=[ps_result, parent_result],
+        ) as mock_run:
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 2
+        # ps called twice: once for listing, once for parent lookup (cached for second orphan)
+        assert mock_run.call_count == 2
+
+    def test_handles_ps_failure(self) -> None:
+        """Should return empty list when ps fails."""
+        result = MagicMock(returncode=1, stdout="")
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert orphans == []
+
+    def test_skips_malformed_ps_lines(self) -> None:
+        """Lines with fewer than 5 fields or non-numeric PID should be silently skipped."""
+        ps_output = "\n".join(
+            [
+                "bad line",
+                "abc 1 600 512000 python loky worker",
+                _ps_line(9001, 1, 600, 512000, "python -m loky.backend.popen"),
+            ]
+        )
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9001
+
+
+class TestKillProcess:
+    """Tests for OrphanReaper._kill_process."""
+
+    @pytest.mark.asyncio()
+    async def test_sigterm_then_sigkill(self) -> None:
+        """Should send SIGTERM, wait, then SIGKILL."""
+        with (
+            patch("gateway.process_monitor.os.kill") as mock_kill,
+            patch("gateway.process_monitor.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            result = await OrphanReaper._kill_process(9001)
+
+        assert result is True
+        assert mock_kill.call_args_list == [
+            call(9001, signal.SIGTERM),
+            call(9001, signal.SIGKILL),
+        ]
+        mock_sleep.assert_called_once_with(5)
+
+    @pytest.mark.asyncio()
+    async def test_process_already_gone(self) -> None:
+        """Should return False if process doesn't exist at SIGTERM time."""
+        with patch(
+            "gateway.process_monitor.os.kill",
+            side_effect=ProcessLookupError,
+        ):
+            result = await OrphanReaper._kill_process(9999)
+
+        assert result is False
+
+    @pytest.mark.asyncio()
+    async def test_no_permission(self) -> None:
+        """Should return False if we can't kill the process."""
+        with patch(
+            "gateway.process_monitor.os.kill",
+            side_effect=PermissionError,
+        ):
+            result = await OrphanReaper._kill_process(9001)
+
+        assert result is False
+
+    @pytest.mark.asyncio()
+    async def test_sigterm_sufficient(self) -> None:
+        """Should succeed if SIGTERM kills it and SIGKILL gets ProcessLookupError."""
+        effects = [None, ProcessLookupError]
+
+        with (
+            patch("gateway.process_monitor.os.kill", side_effect=effects) as mock_kill,
+            patch("gateway.process_monitor.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await OrphanReaper._kill_process(9001)
+
+        assert result is True
+        assert mock_kill.call_args_list == [
+            call(9001, signal.SIGTERM),
+            call(9001, signal.SIGKILL),
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_sigterm_ok_sigkill_permission_error(self) -> None:
+        """Should return True when SIGTERM succeeds but SIGKILL raises PermissionError."""
+        effects = [None, PermissionError]
+
+        with (
+            patch("gateway.process_monitor.os.kill", side_effect=effects) as mock_kill,
+            patch("gateway.process_monitor.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            result = await OrphanReaper._kill_process(9001)
+
+        assert result is True
+        assert mock_kill.call_args_list == [
+            call(9001, signal.SIGTERM),
+            call(9001, signal.SIGKILL),
+        ]
+
+
+class TestReapCycle:
+    """Tests for OrphanReaper._reap end-to-end."""
+
+    @pytest.mark.asyncio()
+    async def test_reap_returns_summary(self) -> None:
+        """Should return killed count and freed MB."""
+        candidates = [
+            _OrphanCandidate(pid=9001, ppid=1, etimes=600, rss_kb=512000, args="loky worker"),
+            _OrphanCandidate(pid=9002, ppid=1, etimes=300, rss_kb=256000, args="joblib worker"),
+        ]
+        reaper = OrphanReaper()
+
+        with (
+            patch.object(reaper, "_find_orphans", return_value=candidates),
+            patch.object(reaper, "_kill_process", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await reaper._reap()
+
+        assert result == ReapResult(killed=2, freed_mb=(512000 + 256000) // 1024)
+
+    @pytest.mark.asyncio()
+    async def test_reap_partial_failure(self) -> None:
+        """Should count only successfully killed processes."""
+        candidates = [
+            _OrphanCandidate(pid=9001, ppid=1, etimes=600, rss_kb=512000, args="loky worker"),
+            _OrphanCandidate(pid=9002, ppid=1, etimes=300, rss_kb=256000, args="joblib worker"),
+        ]
+        reaper = OrphanReaper()
+
+        with (
+            patch.object(reaper, "_find_orphans", return_value=candidates),
+            patch.object(
+                reaper, "_kill_process", new_callable=AsyncMock, side_effect=[True, False]
+            ),
+        ):
+            result = await reaper._reap()
+
+        assert result == ReapResult(killed=1, freed_mb=512000 // 1024)
+
+    @pytest.mark.asyncio()
+    async def test_reap_no_orphans(self) -> None:
+        """Should return zeros when nothing found."""
+        reaper = OrphanReaper()
+
+        with patch.object(reaper, "_find_orphans", return_value=[]):
+            result = await reaper._reap()
+
+        assert result == ReapResult(killed=0, freed_mb=0)
+
+
+class TestCopilotMonitorReaperIntegration:
+    """Tests that CopilotProcessMonitor creates and manages OrphanReaper."""
+
+    def test_monitor_has_reaper(self, monitor: CopilotProcessMonitor) -> None:
+        """Monitor should create an OrphanReaper in __init__."""
+        assert isinstance(monitor._reaper, OrphanReaper)
+
+    def test_stop_stops_reaper(self, monitor: CopilotProcessMonitor) -> None:
+        """stop() should propagate to the reaper."""
+        monitor.stop()
+        assert monitor._reaper._running is False
