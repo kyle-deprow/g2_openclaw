@@ -197,16 +197,27 @@ for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   done
 done
 
-# ── Copy skills ──────────────────────────────────────────────────────────────
+# ── Copy skills (and prune stale ones) ───────────────────────────────────────
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 SKILLS_DST="${OPENCLAW_HOME}/skills"
 if [[ -d "${SKILLS_SRC}" ]]; then
+  # Copy repo skills to local
   for SKILL_DIR in "${SKILLS_SRC}"/*/; do
     SKILL_NAME="$(basename "${SKILL_DIR}")"
     mkdir -p "${SKILLS_DST}/${SKILL_NAME}"
     cp "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
     echo "Copied skill ${SKILL_NAME} → ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
   done
+  # Remove skills that no longer exist in repo
+  if [[ -d "${SKILLS_DST}" ]]; then
+    for LOCAL_SKILL in "${SKILLS_DST}"/*/; do
+      LOCAL_NAME="$(basename "${LOCAL_SKILL}")"
+      if [[ ! -d "${SKILLS_SRC}/${LOCAL_NAME}" ]]; then
+        rm -rf "${LOCAL_SKILL}"
+        echo "Removed stale skill ${LOCAL_NAME}"
+      fi
+    done
+  fi
 fi
 
 # ── Copy Azure API-version preload if present ────────────────────────────────
