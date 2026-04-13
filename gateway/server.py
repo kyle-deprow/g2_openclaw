@@ -39,7 +39,32 @@ from gateway.session_resolver import resolve_session
 from gateway.task_status import read_task_status
 from gateway.transcriber import Transcriber, TranscriptionError
 
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace import StatusCode
+
+    _HAS_OTEL = True
+except ImportError:
+    _HAS_OTEL = False
+
 logger = logging.getLogger(__name__)
+
+
+def _span(name: str, **attributes: str | int | float | bool):  # type: ignore[no-untyped-def]
+    """Create an OTel span context manager, or a no-op if OTel is unavailable."""
+    if not _HAS_OTEL:
+        return contextlib.nullcontext()
+    return trace.get_tracer(__name__).start_as_current_span(name, attributes=attributes)
+
+
+def _record_span_error(exc: BaseException) -> None:
+    """Record an exception on the current active span, if any."""
+    if not _HAS_OTEL:
+        return
+    span = trace.get_current_span()
+    span.set_status(StatusCode.ERROR, str(exc))
+    span.record_exception(exc)
+
 
 _MOCK_DELTAS = [
     "This is a ",
@@ -845,6 +870,11 @@ class GatewaySession:
 
     async def _handle_stop_audio(self, frame: dict[str, Any] | None = None) -> None:
         """Stop recording and run transcription pipeline."""
+        with _span("gateway.transcribe_audio"):
+            await self._handle_stop_audio_inner(frame)
+
+    async def _handle_stop_audio_inner(self, frame: dict[str, Any] | None = None) -> None:
+        """Inner implementation of stop audio handling."""
         # Stop local mic stream if active
         self._stop_local_stream()
 
@@ -954,6 +984,7 @@ class GatewaySession:
                 pass  # diagnostic only — never block transcription
             text = await self._transcriber.transcribe(audio_array)
         except TranscriptionError as exc:
+            _record_span_error(exc)
             logger.error("Transcription failed: %s", exc)
             self._state = SessionState.IDLE
             self._current_question = None
@@ -967,7 +998,8 @@ class GatewaySession:
             )
             await self.send_frame({"type": "status", "status": "idle"})
             return
-        except TimeoutError:
+        except TimeoutError as exc:
+            _record_span_error(exc)
             logger.error("Transcription timed out")
             self._state = SessionState.IDLE
             self._current_question = None
@@ -1019,6 +1051,10 @@ class GatewaySession:
         await self.send_frame({"type": "status", "status": "idle"})
 
     async def _handle_text(self, frame: dict[str, Any]) -> None:
+        with _span("gateway.handle_text", message_length=len(frame["message"])):
+            await self._handle_text_inner(frame)
+
+    async def _handle_text_inner(self, frame: dict[str, Any]) -> None:
         # Quick command intercept — handle short steering commands locally
         quick = await self._try_quick_command(frame["message"])
         if quick:
@@ -1041,7 +1077,8 @@ class GatewaySession:
                     self._handler.start_stream(frame["message"]),
                     timeout=self._timeout,
                 )
-            except TimeoutError:
+            except TimeoutError as exc:
+                _record_span_error(exc)
                 logger.error("OpenClaw request timed out")
                 await self._handler.close()
                 try:
@@ -1063,6 +1100,7 @@ class GatewaySession:
                     logger.debug("Failed to send idle status on cleanup", exc_info=True)
                 return
             except OpenClawError as exc:
+                _record_span_error(exc)
                 logger.error("OpenClaw error: %s", exc)
                 await self._handler.close()
                 try:
@@ -1083,7 +1121,8 @@ class GatewaySession:
                 except Exception:
                     logger.debug("Failed to send idle status on cleanup", exc_info=True)
                 return
-            except Exception:
+            except Exception as exc:
+                _record_span_error(exc)
                 logger.exception("Response handler error")
                 await self._handler.close()
                 try:
@@ -1212,6 +1251,11 @@ class GatewayServer:
 
     async def handler(self, ws: ServerConnection) -> None:
         """Handle a new WebSocket connection."""
+        with _span("gateway.ws_connection"):
+            await self._handler_inner(ws)
+
+    async def _handler_inner(self, ws: ServerConnection) -> None:
+        """Inner implementation of WebSocket connection handler."""
         # --- token auth ---
         if self.config.gateway_token:
             # Rate limit check
@@ -1574,6 +1618,14 @@ class GatewayServer:
         runs on the same event loop — there are no true concurrent accesses,
         only interleaved execution at await points.
         """
+        with _span("gateway.inflight_stream"):
+            await self._run_inflight_stream_inner(stream, buffer)
+
+    async def _run_inflight_stream_inner(
+        self,
+        stream: AsyncIterator[str],
+        buffer: InflightBuffer,
+    ) -> None:
         try:
             _STREAM_LOG.parent.mkdir(exist_ok=True)
             with _STREAM_LOG.open("w") as f:

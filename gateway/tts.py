@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import wave
 
 import numpy as np
 
+try:
+    from opentelemetry import trace
+
+    _HAS_OTEL = True
+except ImportError:
+    _HAS_OTEL = False
+
 logger = logging.getLogger(__name__)
+
+
+def _span(name: str, **attributes: str | int | float | bool):  # type: ignore[no-untyped-def]
+    """Create an OTel span context manager, or a no-op if OTel is unavailable."""
+    if not _HAS_OTEL:
+        return contextlib.nullcontext()
+    return trace.get_tracer(__name__).start_as_current_span(name, attributes=attributes)
+
 
 # espeak-ng native output rate (may vary by platform, 22050 is typical)
 _ESPEAK_SAMPLE_RATE = 22050
@@ -26,9 +42,14 @@ async def synthesize_pcm(
 
     Raises ``RuntimeError`` on espeak-ng failure.
     """
-    wav_bytes = await _espeak_to_wav_bytes(text)
-    pcm = _wav_bytes_to_pcm(wav_bytes, target_sample_rate)
-    return pcm, target_sample_rate
+    with _span(
+        "tts.synthesize",
+        text_length=len(text),
+        target_sample_rate=target_sample_rate,
+    ):
+        wav_bytes = await _espeak_to_wav_bytes(text)
+        pcm = _wav_bytes_to_pcm(wav_bytes, target_sample_rate)
+        return pcm, target_sample_rate
 
 
 async def _espeak_to_wav_bytes(text: str) -> bytes:

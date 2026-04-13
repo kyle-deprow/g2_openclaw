@@ -3,10 +3,35 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
+
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace import StatusCode
+
+    _HAS_OTEL = True
+except ImportError:
+    _HAS_OTEL = False
+
+
+def _span(name: str, **attributes: str | int | float | bool):  # type: ignore[no-untyped-def]
+    """Create an OTel span context manager, or a no-op if OTel is unavailable."""
+    if not _HAS_OTEL:
+        return contextlib.nullcontext()
+    return trace.get_tracer(__name__).start_as_current_span(name, attributes=attributes)
+
+
+def _record_span_error(exc: BaseException) -> None:
+    """Record an exception on the current active span, if any."""
+    if not _HAS_OTEL:
+        return
+    span = trace.get_current_span()
+    span.set_status(StatusCode.ERROR, str(exc))
+    span.record_exception(exc)
 
 
 class TranscriptionError(Exception):
@@ -42,27 +67,32 @@ class Transcriber:
             TranscriptionError: If transcription is empty.
             asyncio.TimeoutError: If inference exceeds timeout.
         """
-        loop = asyncio.get_running_loop()
+        with _span("whisper.transcribe", language=language, audio_samples=len(audio)):
+            try:
+                loop = asyncio.get_running_loop()
 
-        def _run_inference() -> str:
-            segments, _info = self._model.transcribe(
-                audio,
-                language=language,
-                beam_size=1,
-                best_of=1,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                vad_filter=True,
-                vad_parameters={"threshold": 0.3},
-            )
-            return " ".join(seg.text.strip() for seg in segments).strip()
+                def _run_inference() -> str:
+                    segments, _info = self._model.transcribe(
+                        audio,
+                        language=language,
+                        beam_size=1,
+                        best_of=1,
+                        temperature=0.0,
+                        condition_on_previous_text=False,
+                        vad_filter=True,
+                        vad_parameters={"threshold": 0.3},
+                    )
+                    return " ".join(seg.text.strip() for seg in segments).strip()
 
-        result = await asyncio.wait_for(
-            loop.run_in_executor(None, _run_inference),
-            timeout=timeout,
-        )
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, _run_inference),
+                    timeout=timeout,
+                )
 
-        if not result:
-            raise TranscriptionError("Transcription produced empty result")
+                if not result:
+                    raise TranscriptionError("Transcription produced empty result")
 
-        return result
+                return result
+            except (TranscriptionError, TimeoutError) as exc:
+                _record_span_error(exc)
+                raise

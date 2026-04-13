@@ -20,7 +20,32 @@ from gateway.device_identity import (
     load_or_create_device_identity,
 )
 
+try:
+    from opentelemetry import trace
+    from opentelemetry.trace import StatusCode
+
+    _HAS_OTEL = True
+except ImportError:
+    _HAS_OTEL = False
+
 logger = logging.getLogger(__name__)
+
+
+def _span(name: str, **attributes: str | int | float | bool):  # type: ignore[no-untyped-def]
+    """Create an OTel span context manager, or a no-op if OTel is unavailable."""
+    if not _HAS_OTEL:
+        return contextlib.nullcontext()
+    return trace.get_tracer(__name__).start_as_current_span(name, attributes=attributes)
+
+
+def _record_span_error(exc: BaseException) -> None:
+    """Record an exception on the current active span, if any."""
+    if not _HAS_OTEL:
+        return
+    span = trace.get_current_span()
+    span.set_status(StatusCode.ERROR, str(exc))
+    span.record_exception(exc)
+
 
 # Defaults matching the JS GatewayClient SDK
 _DEFAULT_CLIENT_ID = "gateway-client"
@@ -162,6 +187,14 @@ class OpenClawClient:
            (incorporating the nonce).  This binds the scopes to a verified
            device identity so the server preserves them.
         """
+        with _span("openclaw.connect"):
+            try:
+                await self._ensure_connected_inner()
+            except OpenClawError as exc:
+                _record_span_error(exc)
+                raise
+
+    async def _ensure_connected_inner(self) -> None:
         if self._connected and self._ws is not None:
             return
 
@@ -258,6 +291,14 @@ class OpenClawClient:
 
         Raises OpenClawError on agent errors or communication failures.
         """
+        with _span("openclaw.send_message_init", session_key=session_key):
+            return await self._send_message_inner(text, session_key)
+
+    async def _send_message_inner(
+        self,
+        text: str,
+        session_key: str = "agent:claw:g2",
+    ) -> AsyncIterator[str]:
         await self.ensure_connected()
         if self._ws is None:
             raise OpenClawError("not connected")
