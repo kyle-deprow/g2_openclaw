@@ -1,0 +1,101 @@
+# G2 OpenClaw — OpenTelemetry Observability Stack
+# Usage: docker compose -f docker-compose.otel.yml up -d
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.127.0
+    container_name: g2-otel-collector
+    volumes:
+      - ./otel/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus exporter
+    networks:
+      - g2-otel
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: g2-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+    networks:
+      - g2-otel
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16687/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: g2-prometheus
+    volumes:
+      - ./otel/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - g2-otel
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  loki:
+    image: grafana/loki:latest
+    container_name: g2-loki
+    ports:
+      - "3100:3100"
+    networks:
+      - g2-otel
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: g2-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./otel/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - g2-otel
+    depends_on:
+      jaeger:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+networks:
+  g2-otel:
+    driver: bridge
+
+volumes:
+  grafana-data:

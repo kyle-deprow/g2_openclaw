@@ -101,7 +101,11 @@ launch: ## Start the gateway server (foreground, Ctrl+C to stop)
 stop: ## Stop all G2 OpenClaw processes
 	@uv run python -m gateway stop
 
-sim: ## Stop all services and re-launch the full sim stack
+sim: otel-up ## Full stack: G2 + OpenClaw + OTel observability
+	@uv run python -m gateway stop
+	@uv run python -m gateway launch --daemon
+
+sim-lite: ## G2 + OpenClaw only (no OTel Docker stack)
 	@uv run python -m gateway stop
 	@uv run python -m gateway launch --daemon
 
@@ -121,6 +125,26 @@ mempalace-install: ## Install MemPalace MCP server (idempotent)
 	fi
 	@echo -e "$(GREEN)$(BOLD)>>> MemPalace ready$(RESET)"
 
+
+# ============================================================================
+# OTel Observability Stack
+# ============================================================================
+
+.PHONY: otel-up otel-down otel-status
+
+otel-up: ## Start OTel observability stack (Docker)
+	@echo -e "$(CYAN)$(BOLD)>>> Starting OTel stack...$(RESET)"
+	@docker compose -f docker-compose.otel.yml up -d
+	@echo -e "$(GREEN)$(BOLD)>>> OTel stack ready$(RESET)"
+	@echo "  Grafana:    http://localhost:3000  (admin/admin)"
+	@echo "  Jaeger:     http://localhost:16686"
+	@echo "  Prometheus: http://localhost:9090"
+
+otel-down: ## Stop OTel observability stack
+	@docker compose -f docker-compose.otel.yml down
+
+otel-status: ## Show OTel stack status
+	@docker compose -f docker-compose.otel.yml ps
 
 # ============================================================================
 # G2 App Deploy

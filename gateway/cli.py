@@ -882,6 +882,11 @@ def launch(
         )
         raise typer.Exit()
 
+    # -- OTel init (before any server import) ---------------------------------
+    from gateway.otel_setup import init_otel
+
+    otel_shutdown = init_otel()
+
     spawned: list[subprocess.Popen[Any]] = []
     log_files: list[Any] = []  # Track opened log file handles for cleanup
     _log_dir = _PROJECT_ROOT / "logs"
@@ -898,6 +903,7 @@ def launch(
             with contextlib.suppress(Exception):
                 fh.close()
         _remove_pid_file()
+        otel_shutdown()
         console.print("[green]All processes stopped.[/green]")
 
     gateway_port = _read_gateway_port()
