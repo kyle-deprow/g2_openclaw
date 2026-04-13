@@ -26,6 +26,8 @@ gateway/           → PC Gateway (Python WebSocket server, Whisper, OpenClaw re
   tts.py           → Text-to-speech (Piper)
   cli.py           → CLI commands (launch, stop, init-env, push-config)
   config.py        → Gateway configuration
+  otel_setup.py    → OTel initialization, logging configuration, graceful degradation
+  metrics.py       → Custom application metrics (connections, durations, errors)
   openclaw_config/  → OpenClaw config (openclaw.json, Azure preload)
   agent_config/skills/mempalace/ → MemPalace MCP tools, autoresearch integration
 g2_app/            → G2 App (TypeScript thin client for iPhone / G2 glasses)
@@ -91,6 +93,10 @@ uv run python -m gateway launch --restart  # same as make sim, from CLI
 # Individual controls
 make launch                            # start gateway + vite + simulator
 make stop                              # kill all running services
+make sim-lite                          # gateway only (no OTel stack)
+make otel-up                           # start OTel Docker services
+make otel-down                         # stop OTel Docker services
+make otel-status                       # check OTel service health
 ```
 
 ```bash

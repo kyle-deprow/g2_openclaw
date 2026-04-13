@@ -39,8 +39,8 @@ g2_openclaw/
 │   ├── device_identity.py # Ed25519 keypair management for OpenClaw handshake
 │   ├── session_resolver.py # Session metadata from OpenClaw store
 │   ├── session_history.py # Conversation history from JSONL transcripts
-│   ├── tts.py             # Text-to-speech via espeak-ng
-│   ├── cli.py             # CLI: init-env, launch, stop, push-config
+│   ├── tts.py             # Text-to-speech via espeak-ng│   ├── otel_setup.py      # OpenTelemetry initialization + logging configuration
+│   ├── metrics.py         # Custom application metrics (connections, durations, errors)│   ├── cli.py             # CLI: init-env, launch, stop, push-config
 │   ├── agent_config/      # OpenClaw agent persona (SOUL.md, AGENTS.md, etc.)
 │   └── openclaw_config/   # OpenClaw daemon config (provider, model, etc.)
 ├── g2_app/                # G2 App — TypeScript thin client for iPhone / G2 glasses
@@ -66,6 +66,8 @@ g2_openclaw/
 │   ├── bootstrap.sh       # One-shot repo setup (prereqs, deps, config, tests)
 │   └── push-openclaw-config.sh  # Merge agent/provider config into ~/.openclaw/
 ├── docs/                  # Design docs, guides, ADRs, reference material
+├── docker-compose.otel.yml  # OTel observability stack (collector, Jaeger, Prometheus, Loki, Grafana)
+├── otel/                    # OTel collector, Grafana, Prometheus configuration
 ├── Makefile               # 25+ targets for build, test, lint, sim, infra
 └── pyproject.toml         # Root config (Python 3.13+, uv-managed)
 ```
@@ -88,6 +90,8 @@ Python WebSocket server that accepts G2 App connections, runs Whisper transcript
 | `session_resolver.py` | Session metadata resolution from OpenClaw local store |
 | `session_history.py` | Conversation history from JSONL transcript files |
 | `tts.py` | Text-to-speech via espeak-ng |
+| `otel_setup.py` | OpenTelemetry initialization, logging configuration, graceful degradation |
+| `metrics.py` | Custom application metrics (connections, durations, errors) |
 | `cli.py` | CLI commands: `init-env`, `launch`, `stop`, `push-config` |
 
 **Server-side state machine:** `IDLE → RECORDING → TRANSCRIBING → IDLE (confirmation) → THINKING → STREAMING → IDLE`
@@ -270,7 +274,63 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 | `make cold-start` | Full setup: deps, env, security, smoke tests |
 | `make push-config` | Push OpenClaw config to `~/.openclaw/` |
 | `make clean` | Remove caches, dist/, logs/, node_modules/ |
+| `make sim-lite` | Start gateway only (no OTel Docker stack) |
+| `make otel-up` | Start OTel observability Docker services |
+| `make otel-down` | Stop OTel observability Docker services |
+| `make otel-status` | Check OTel service health |
 | `make help` | Show all targets |
+
+## Observability
+
+The gateway integrates OpenTelemetry for traces, metrics, and log export. By default, `make sim` starts the full observability stack.
+
+### OTel Stack
+
+```bash
+make sim          # Start OTel stack + gateway + Vite + simulator
+make sim-lite     # Start gateway only (no OTel stack)
+make otel-up      # Start just the OTel Docker services
+make otel-down    # Stop the OTel Docker services
+make otel-status  # Check OTel service health
+```
+
+Five Docker services run via `docker-compose.otel.yml`:
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| OTel Collector | 4317 (gRPC), 4318 (HTTP) | Receives OTLP telemetry, routes to backends |
+| Jaeger | 16686 | Distributed trace viewer |
+| Prometheus | 9090 | Metrics storage and querying |
+| Loki | 3100 | Log aggregation |
+| Grafana | 3000 | Dashboards (auto-provisions all datasources) |
+
+Default Grafana credentials: `admin` / `admin`.
+
+### What's Instrumented
+
+**Traces** (visible in Jaeger at `http://localhost:16686`):
+- `gateway.ws_connection` — Full WebSocket session lifecycle
+- `gateway.handle_text` — Text message processing
+- `gateway.transcribe_audio` — Audio transcription pipeline
+- `gateway.inflight_stream` — Background OpenClaw streaming
+- `openclaw.connect` — OpenClaw auth handshake
+- `openclaw.send_message_init` — OpenClaw agent request initiation
+- `whisper.transcribe` — Whisper model inference
+- `tts.synthesize` — Text-to-speech synthesis
+
+**Metrics** (visible in Prometheus at `http://localhost:9090`):
+- `gateway.ws.connections_active` — Active WebSocket connections (UpDownCounter)
+- `gateway.transcription.duration_seconds` — Whisper transcription time (Histogram)
+- `gateway.openclaw.request_duration_seconds` — OpenClaw request time (Histogram)
+- `gateway.openclaw.errors_total` — OpenClaw error count (Counter)
+- `gateway.process_monitor.orphans_reaped_total` — Orphan processes killed (Counter)
+
+**Logs** (visible in Loki via Grafana):
+All stdlib `logging` calls are bridged to OTel via `LoggingInstrumentor`. Log records include trace context (trace_id, span_id) for correlation.
+
+### Disabling OTel
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT=none` in `.env` or environment to disable all telemetry export. The gateway falls back to console + `RotatingFileHandler` (logs/gateway.log).
 
 ## Configuration
 
@@ -293,6 +353,7 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 | `G2_LOCAL_AUDIO` | `false` | Use local mic instead of WebSocket audio |
 | `HISTORY_LIMIT` | `10` | History entries sent on connect |
 | `OPENCLAW_AGENT_ID` | `claw` | Agent ID |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint. Set to `none` or empty to disable OTel |
 
 ### G2 App Gateway URL
 

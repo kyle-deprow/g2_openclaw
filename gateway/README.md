@@ -24,6 +24,7 @@ The gateway reads three environment variables (all optional):
 | `GATEWAY_HOST`   | `0.0.0.0`  | Bind address                             |
 | `GATEWAY_PORT`   | `8765`      | Listen port                              |
 | `GATEWAY_TOKEN`  | *(none)*    | Shared secret for `?token=` auth. If unset, auth is disabled. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP endpoint. `none` or empty disables telemetry |
 
 You can place these in a `.env` file at the repo root; `python-dotenv` will load it automatically.
 
@@ -89,6 +90,16 @@ The gateway uses a JSON-over-WebSocket protocol. Each message is a single JSON o
 | `ping`          | —                 | Keepalive probe                      |
 
 For the full protocol spec, see [docs/02-pc-gateway-design.md](../../docs/02-pc-gateway-design.md).
+
+## Observability (OpenTelemetry)
+
+The gateway exports traces, metrics, and logs via OTLP. See the [root README](../README.md#observability) for the full observability stack setup.
+
+Key modules:
+- `otel_setup.py` — Initialization, logging configuration, graceful degradation
+- `metrics.py` — Custom application metrics (5 instruments)
+
+When OTel is disabled, the gateway uses console + file logging (`logs/gateway.log`).
 
 ## Phase 1 Limitations
 
