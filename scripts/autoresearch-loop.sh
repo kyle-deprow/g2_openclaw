@@ -129,7 +129,7 @@ collect_death_report() {
   echo ""
   
   # Find newest notebook: check git diff first, then mtime fallback
-  local newest_nb
+  local newest_nb=""
   if [[ "$head_before" != "$head_after" ]]; then
     newest_nb=$(git diff --name-only "${head_before}..HEAD" 2>/dev/null | grep '\.ipynb' | head -1)
   fi
