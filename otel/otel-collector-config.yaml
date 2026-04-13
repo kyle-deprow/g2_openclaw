@@ -16,6 +16,8 @@ exporters:
     endpoint: "jaeger:4317"
     tls:
       insecure: true
+  debug:
+    verbosity: basic
   prometheus:
     endpoint: "0.0.0.0:8889"
   loki:
@@ -26,12 +28,15 @@ extensions:
     endpoint: "0.0.0.0:13133"
 
 service:
+  telemetry:
+    logs:
+      level: info
   extensions: [health_check]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [otlp/jaeger]
+      exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
       processors: [batch]

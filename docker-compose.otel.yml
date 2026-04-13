@@ -17,12 +17,7 @@ services:
       jaeger:
         condition: service_healthy
       loki:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+        condition: service_started
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -34,7 +29,7 @@ services:
     networks:
       - g2-otel
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16687/"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:14269/"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -61,11 +56,6 @@ services:
       - "3100:3100"
     networks:
       - g2-otel
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
 
   grafana:
     image: grafana/grafana:latest
@@ -77,7 +67,7 @@ services:
       - grafana-data:/var/lib/grafana
       - ./otel/grafana/provisioning:/etc/grafana/provisioning:ro
     ports:
-      - "3000:3000"
+      - "3002:3000"
     networks:
       - g2-otel
     depends_on:
@@ -86,7 +76,7 @@ services:
       prometheus:
         condition: service_healthy
       loki:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
       interval: 10s

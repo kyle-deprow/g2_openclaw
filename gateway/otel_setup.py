@@ -83,6 +83,10 @@ def init_otel() -> Callable[[], None]:
         logger.warning("OpenTelemetry packages not installed — telemetry disabled")
         return _noop_shutdown
 
+    # Set the env var so individual exporters auto-append signal paths
+    # (e.g., /v1/traces, /v1/logs, /v1/metrics)
+    os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
+
     resource = Resource.create(
         {
             "service.name": "g2-gateway",
@@ -92,19 +96,17 @@ def init_otel() -> Callable[[], None]:
 
     # Traces
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint)))
+    tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(tracer_provider)
 
     # Metrics
-    metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=endpoint))
+    metric_reader = PeriodicExportingMetricReader(OTLPMetricExporter())
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
 
     # Logs
     logger_provider = LoggerProvider(resource=resource)
-    logger_provider.add_log_record_processor(
-        BatchLogRecordProcessor(OTLPLogExporter(endpoint=endpoint))
-    )
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(OTLPLogExporter()))
 
     configure_logging(otel_active=True)
 
