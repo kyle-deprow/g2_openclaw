@@ -13,7 +13,6 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 from urllib.parse import parse_qs, urlparse
@@ -1932,24 +1931,13 @@ def _setup_cuda_library_paths() -> None:
 
 async def main() -> None:
     """Entry point: load config, initialise transcriber, and start serving."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-
-    # File handler — captures DEBUG-level output to logs/gateway.log
-    _project_root = Path(__file__).resolve().parent.parent
-    _log_dir = _project_root / "logs"
-    _log_dir.mkdir(exist_ok=True)
-    _file_handler = RotatingFileHandler(
-        _log_dir / "gateway.log",
-        maxBytes=5_000_000,
-        backupCount=3,
-        encoding="utf-8",
-    )
-    _file_handler.setLevel(logging.DEBUG)
-    _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    logging.getLogger().addHandler(_file_handler)
+    # Logging is configured by init_otel() (called from cli.py).
+    # If running directly (not via CLI), set up basic logging.
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
 
     config = load_config()
 

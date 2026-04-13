@@ -1,4 +1,4 @@
-"""OpenTelemetry initialization for G2 Gateway."""
+"""OpenTelemetry initialization and logging configuration for G2 Gateway."""
 
 from __future__ import annotations
 
@@ -7,6 +7,44 @@ import os
 from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def configure_logging(*, otel_active: bool = False) -> None:
+    """Set up stdlib logging handlers.
+
+    When OTel is active, only a console StreamHandler is added (INFO level).
+    OTel's LoggingHandler (attached by init_otel) handles export to Loki.
+
+    When OTel is NOT active, adds both console and a RotatingFileHandler
+    for local file logging as a fallback.
+    """
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(_LOG_FORMAT)
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+
+    if not otel_active:
+        from logging.handlers import RotatingFileHandler
+        from pathlib import Path
+
+        log_dir = Path(__file__).resolve().parent.parent / "logs"
+        log_dir.mkdir(exist_ok=True)
+        file_handler = RotatingFileHandler(
+            log_dir / "gateway.log",
+            maxBytes=5_000_000,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(fmt)
+        root.addHandler(file_handler)
 
 
 def _noop_shutdown() -> None:
@@ -22,6 +60,7 @@ def init_otel() -> Callable[[], None]:
     """
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
     if endpoint.lower() in ("", "none"):
+        configure_logging(otel_active=False)
         logger.info("OTel disabled (OTEL_EXPORTER_OTLP_ENDPOINT=%r) — skipping init", endpoint)
         return _noop_shutdown
 
@@ -40,6 +79,7 @@ def init_otel() -> Callable[[], None]:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError:
+        configure_logging(otel_active=False)
         logger.warning("OpenTelemetry packages not installed — telemetry disabled")
         return _noop_shutdown
 
@@ -65,6 +105,8 @@ def init_otel() -> Callable[[], None]:
     logger_provider.add_log_record_processor(
         BatchLogRecordProcessor(OTLPLogExporter(endpoint=endpoint))
     )
+
+    configure_logging(otel_active=True)
 
     # Attach OTel log handler to root logger so existing logging.getLogger() calls emit to OTel
     otel_handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)

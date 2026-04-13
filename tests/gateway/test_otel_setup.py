@@ -5,10 +5,11 @@ from __future__ import annotations
 import contextlib
 import logging
 from collections.abc import Iterator
+from logging.handlers import RotatingFileHandler
 from unittest.mock import patch
 
 import pytest
-from gateway.otel_setup import init_otel
+from gateway.otel_setup import configure_logging, init_otel
 from opentelemetry import metrics, trace
 from opentelemetry.metrics import _internal as metrics_internal
 from opentelemetry.sdk._logs import LoggerProvider
@@ -20,8 +21,13 @@ from opentelemetry.util._once import Once
 
 @pytest.fixture(autouse=True)
 def _reset_otel_globals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Reset OTel global providers between tests so each test is isolated."""
+    """Reset OTel global providers and root logger handlers between tests."""
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+
+    # Snapshot root logger handlers before the test
+    root = logging.getLogger()
+    original_handlers = list(root.handlers)
+    original_level = root.level
 
     yield
 
@@ -39,12 +45,10 @@ def _reset_otel_globals(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     metrics_internal._METER_PROVIDER = None
     metrics_internal._METER_PROVIDER_SET_ONCE = Once()
 
-    # Clean up any OTel handlers leaked onto the root logger
-    with contextlib.suppress(Exception):
-        from opentelemetry.instrumentation.logging.handler import LoggingHandler
-
-        root = logging.getLogger()
-        root.handlers = [h for h in root.handlers if not isinstance(h, LoggingHandler)]
+    # Restore root logger to pre-test state
+    # (removes handlers added by configure_logging / init_otel)
+    root.handlers = original_handlers
+    root.level = original_level
 
 
 class TestInitOtelReturnsShutdownCallable:
@@ -137,3 +141,61 @@ class TestLoggingInstrumentorActive:
 
         test_logger.removeHandler(handler)
         logger_provider.shutdown()
+
+
+class TestConfigureLoggingOtelInactive:
+    def test_adds_console_and_file_handler(self) -> None:
+        configure_logging(otel_active=False)
+
+        root = logging.getLogger()
+        handler_types = [type(h) for h in root.handlers]
+        assert logging.StreamHandler in handler_types
+        assert RotatingFileHandler in handler_types
+
+    def test_console_handler_level_is_info(self) -> None:
+        configure_logging(otel_active=False)
+
+        root = logging.getLogger()
+        stream_handlers = [h for h in root.handlers if type(h) is logging.StreamHandler]
+        assert stream_handlers[0].level == logging.INFO
+
+    def test_file_handler_level_is_debug(self) -> None:
+        configure_logging(otel_active=False)
+
+        root = logging.getLogger()
+        file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+        assert file_handlers[0].level == logging.DEBUG
+
+
+class TestConfigureLoggingOtelActive:
+    def test_adds_only_console_handler(self) -> None:
+        configure_logging(otel_active=True)
+
+        root = logging.getLogger()
+        handler_types = [type(h) for h in root.handlers]
+        assert logging.StreamHandler in handler_types
+        assert RotatingFileHandler not in handler_types
+
+    def test_root_level_is_debug(self) -> None:
+        configure_logging(otel_active=True)
+
+        root = logging.getLogger()
+        assert root.level == logging.DEBUG
+
+
+class TestInitOtelConfiguresLogging:
+    def test_otel_active_no_file_handler(self) -> None:
+        init_otel()
+
+        root = logging.getLogger()
+        file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+        assert file_handlers == []
+
+    def test_otel_disabled_adds_file_handler(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "none")
+
+        init_otel()
+
+        root = logging.getLogger()
+        file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+        assert len(file_handlers) == 1
