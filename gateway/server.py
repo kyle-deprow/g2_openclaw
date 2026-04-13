@@ -26,6 +26,7 @@ from gateway.audio_buffer import AudioBuffer, BufferOverflow
 from gateway.config import GatewayConfig, load_config
 from gateway.copilot_sessions import kill_copilot_session, list_copilot_sessions
 from gateway.copilot_watcher import CopilotSessionWatcher
+from gateway.metrics import gateway_metrics
 from gateway.openclaw_client import OpenClawClient, OpenClawError
 from gateway.process_monitor import CopilotProcessMonitor
 from gateway.protocol import (
@@ -951,6 +952,7 @@ class GatewaySession:
             await self.send_frame({"type": "status", "status": "idle"})
             return
 
+        _transcription_start = _time_module.monotonic()
         try:
             audio_array = buf.to_numpy()
             try:
@@ -1045,6 +1047,10 @@ class GatewaySession:
             await self.send_frame({"type": "status", "status": "idle"})
             return
 
+        gateway_metrics.record_transcription_duration(
+            _time_module.monotonic() - _transcription_start
+        )
+
         # Send transcription to client and return to idle for user confirmation
         await self.send_frame({"type": "transcription", "text": text})
         self._state = SessionState.IDLE
@@ -1062,6 +1068,7 @@ class GatewaySession:
 
         self._current_question = frame["message"]
         self._task_start = asyncio.get_running_loop().time()
+        _openclaw_start = _time_module.monotonic()
 
         # Clear any stale inflight buffer from a previous request
         if self._server is not None:
@@ -1079,6 +1086,7 @@ class GatewaySession:
                 )
             except TimeoutError as exc:
                 _record_span_error(exc)
+                gateway_metrics.record_openclaw_error()
                 logger.error("OpenClaw request timed out")
                 await self._handler.close()
                 try:
@@ -1101,6 +1109,7 @@ class GatewaySession:
                 return
             except OpenClawError as exc:
                 _record_span_error(exc)
+                gateway_metrics.record_openclaw_error()
                 logger.error("OpenClaw error: %s", exc)
                 await self._handler.close()
                 try:
@@ -1123,6 +1132,7 @@ class GatewaySession:
                 return
             except Exception as exc:
                 _record_span_error(exc)
+                gateway_metrics.record_openclaw_error()
                 logger.exception("Response handler error")
                 await self._handler.close()
                 try:
@@ -1151,7 +1161,7 @@ class GatewaySession:
             buffer = InflightBuffer(user_question=frame["message"])
             self._server._inflight_buffer = buffer
             self._server._inflight_task = asyncio.create_task(
-                self._server._run_inflight_stream(stream, buffer),
+                self._server._run_inflight_stream(stream, buffer, _openclaw_start),
                 name="inflight-stream",
             )
             # Don't await — task runs independently. Session stays in STREAMING.
@@ -1165,6 +1175,7 @@ class GatewaySession:
                 timeout=self._timeout,
             )
         except TimeoutError:
+            gateway_metrics.record_openclaw_error()
             logger.error("Agent cycle timed out after %ss", self._timeout)
             await self._handler.close()
             try:
@@ -1178,6 +1189,7 @@ class GatewaySession:
             except Exception:
                 logger.debug("Failed to send timeout error frame", exc_info=True)
         except OpenClawError as exc:
+            gateway_metrics.record_openclaw_error()
             logger.error("OpenClaw error: %s", exc)
             await self._handler.close()
             try:
@@ -1191,6 +1203,7 @@ class GatewaySession:
             except Exception:
                 logger.debug("Failed to send OpenClaw error frame", exc_info=True)
         except Exception:
+            gateway_metrics.record_openclaw_error()
             logger.exception("Response handler error")
             await self._handler.close()
             try:
@@ -1204,6 +1217,9 @@ class GatewaySession:
             except Exception:
                 logger.debug("Failed to send handler error frame", exc_info=True)
         finally:
+            gateway_metrics.record_openclaw_request_duration(
+                _time_module.monotonic() - _openclaw_start
+            )
             self._state = SessionState.IDLE
             self._current_question = None
             self._task_start = None
@@ -1251,8 +1267,12 @@ class GatewayServer:
 
     async def handler(self, ws: ServerConnection) -> None:
         """Handle a new WebSocket connection."""
-        with _span("gateway.ws_connection"):
-            await self._handler_inner(ws)
+        gateway_metrics.connection_opened()
+        try:
+            with _span("gateway.ws_connection"):
+                await self._handler_inner(ws)
+        finally:
+            gateway_metrics.connection_closed()
 
     async def _handler_inner(self, ws: ServerConnection) -> None:
         """Inner implementation of WebSocket connection handler."""
@@ -1611,6 +1631,7 @@ class GatewayServer:
         self,
         stream: AsyncIterator[str],
         buffer: InflightBuffer,
+        openclaw_start: float,
     ) -> None:
         """Consume the OpenClaw stream into buffer, forwarding to phone if connected.
 
@@ -1619,12 +1640,13 @@ class GatewayServer:
         only interleaved execution at await points.
         """
         with _span("gateway.inflight_stream"):
-            await self._run_inflight_stream_inner(stream, buffer)
+            await self._run_inflight_stream_inner(stream, buffer, openclaw_start)
 
     async def _run_inflight_stream_inner(
         self,
         stream: AsyncIterator[str],
         buffer: InflightBuffer,
+        openclaw_start: float,
     ) -> None:
         try:
             _STREAM_LOG.parent.mkdir(exist_ok=True)
@@ -1650,14 +1672,19 @@ class GatewayServer:
                         logger.info("Phone disconnected mid-stream — continuing to buffer")
             buffer.complete = True
         except OpenClawError as exc:
+            gateway_metrics.record_openclaw_error()
             buffer.error = str(exc)
             logger.error("OpenClaw error during inflight stream: %s", exc)
         except asyncio.CancelledError:
             raise  # let cancellation propagate
         except Exception:
+            gateway_metrics.record_openclaw_error()
             buffer.error = "internal error"
             logger.exception("Unexpected error during inflight stream")
         finally:
+            gateway_metrics.record_openclaw_request_duration(
+                _time_module.monotonic() - openclaw_start
+            )
             with contextlib.suppress(OSError), _STREAM_LOG.open("a") as f:
                 f.write("\n--- END ---\n")
             session = self._current_session

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gateway.copilot_sessions import CopilotSessionInfo, list_copilot_sessions
+from gateway.metrics import gateway_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class OrphanReaper:
             try:
                 result = await self._reap()
                 if result.killed > 0:
+                    gateway_metrics.record_orphans_reaped(result.killed)
                     logger.warning(
                         "Reaped %d orphan(s), freed ~%d MB",
                         result.killed,
