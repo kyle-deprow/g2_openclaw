@@ -58,20 +58,55 @@ You are on a machine with a Nvidia graphics card. Feel free to designate true ML
 
 ## Research Direction
 
-**Fresh start.** No experiments have been run yet. All data channels are available:
+### Trading Universe: Small/Mid-Cap Only (NON-NEGOTIABLE)
 
-- **OHLCV**: Any ticker (1-min to daily bars, 2021–2026). Auto-fetched on first `qp.prices()` call. Start with low-to-mid cap equities but expand in any direction.
-- **Reddit sentiment**: 2021–2026 posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
+**You may ONLY trade small-cap and mid-cap stocks ($500M–$20B market cap).** This is the core thesis: simple indicators work better on less-efficient, higher-volatility names where institutional coverage is thinner and retail flow creates exploitable patterns.
+
+**Universe discovery IS part of the research.** You choose which small/mid-cap tickers to trade. Consider:
+- Liquidity (>2M avg daily volume — must be tradeable at intraday frequency)
+- Volatility (higher intraday range = more alpha opportunity)
+- Sector diversity (don't cluster everything in one sector)
+- Data availability (need 2021–2026 coverage for robust walk-forward)
+
+**Examples of valid small/mid-cap tickers** (not exhaustive — discover your own):
+- Meme/retail-heavy: PLTR, SOFI, HOOD, RIVN, LCID, MARA, BB, CLOV, WISH, SKLZ, BBBY
+- Biotech/pharma: MRNA (was mid-cap pre-2021), DNA, CRSP, BEAM
+- Tech mid-cap: RBLX, U, DKNG, OPEN, UPST, AFRM, BILL
+- EV/clean energy: CHPT, QS, PLUG, FCEL, BLNK
+- Fintech: SQ (was mid-cap), COIN, NU, LMND
+
+**Large-caps (SPY, AAPL, NVDA, TSLA, MSFT, GOOG, META, AMZN, etc.) may be used as SIGNAL SOURCES but NEVER traded.** Cross-asset lead-lag, beta hedging, sector rotation signals — all fine as features. But the positions you take must be in small/mid-caps.
+
+### Data Sources
+
+- **OHLCV**: Any ticker (1-min to daily bars, 2021–2026). Auto-fetched on first `qp.prices()` call.
+- **Reddit sentiment**: 2021–2026 posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores. Use for **feature generation and signal conditioning** — NOT to restrict the trading universe. Many tradeable small/mid-caps have zero Reddit coverage, and that's fine.
 - **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
+
+### Data Download: Pre-fetch Before Backtesting
+
+When you select tickers for an experiment, **download the full 2021–2026 OHLCV data upfront** before running the backtest. `qp.prices()` auto-fetches missing data, but fetching inside a walk-forward loop is slow. Pre-fetch pattern:
+
+```python
+# Pre-fetch all tickers at experiment start (before any backtest logic)
+import quantipy as qp
+TICKERS = ["PLTR", "SOFI", "DKNG", "SPY"]  # SPY for signals only, not traded
+for t in TICKERS:
+    df = qp.prices(t, "2021-01-01", "2026-04-01")
+    print(f"{t}: {len(df)} bars, {df['timestamp'].dt.date.nunique()} trading days")
+```
+
+### Alpha Directions
 
 Pursue novel intraday alpha through any combination of:
 - **Intraday microstructure**: Volume profiles, VWAP deviation, opening range dynamics, bid-ask spread proxies
-- **Sentiment-gated signals**: Use Reddit/news sentiment as conditioning variables for intraday volume/price features
+- **Sentiment-gated signals**: Use Reddit/news sentiment as conditioning variables — but don't require tickers to have Reddit coverage
+- **Cross-asset signals**: Use SPY/QQQ/sector ETFs as leading indicators for small/mid-cap positions. The signal is from large-caps, the trade is in small/mid-caps.
 - **ML with theoretical basis**: LightGBM/XGBoost/HistGradientBoosting on engineered features with purged walk-forward CV
 - **Regime detection**: HMM on intraday volatility states, change-point detection → regime-conditional entry/exit
 - **Cross-session patterns**: Prior day closing action predicting opening patterns
-- **Multi-asset exploration**: Low/mid-cap equities, sector ETFs, volatility products — diverse universe for orthogonal strategies
 - **Feature engineering over indicator stacking**: Volatility ratios, volume imbalance, momentum decay, sentiment×volume interactions
+- **Universe selection as alpha**: Which small/mid-caps to trade on which days is itself a signal. Rotation, momentum, liquidity screening.
 
 ## Experiment Notebooks
 

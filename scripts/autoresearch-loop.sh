@@ -23,6 +23,7 @@ LOOP_LOG="$LOG_DIR/autoresearch-loop.log"
 PIDFILE="$LOG_DIR/autoresearch-loop.pid"
 POLL_INTERVAL=30  # seconds between checks
 SCOPE_ENABLED="${SCOPE_ENABLED:-true}"  # wrap openclaw calls in systemd scope for process isolation
+COPILOT_MODEL="${COPILOT_MODEL:-claude-sonnet-4.6}"  # model for Copilot CLI sessions
 
 mkdir -p "$LOG_DIR"
 
@@ -43,6 +44,8 @@ log() {
   echo "[$ts] $*" >> "$LOOP_LOG"
 }
 
+MEM_PRESSURE_THRESHOLD=85  # percent used RAM before triggering cleanup
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 copilot_is_running() {
@@ -56,6 +59,52 @@ get_copilot_pid() {
 openclaw_is_running() {
   # ss -tlnp can fail in headless/nohup context; use nc as fallback
   nc -z 127.0.0.1 18789 2>/dev/null || ss -tlnp 2>/dev/null | grep -q ':18789'
+}
+
+mem_used_percent() {
+  # Read from /proc/meminfo — no external deps
+  awk '/^MemTotal:/{total=$2} /^MemAvailable:/{avail=$2} END{if(total>0) printf "%d", ((total-avail)/total)*100; else print 0}' /proc/meminfo
+}
+
+check_memory_pressure() {
+  # Returns 0 (true) if RAM usage exceeds threshold
+  local used
+  used=$(mem_used_percent)
+  [[ "$used" -ge "$MEM_PRESSURE_THRESHOLD" ]]
+}
+
+kill_zombie_kernels() {
+  # Kill orphaned python processes (ppid=1) matching jupyter/ipykernel patterns
+  # that are using >200 MB RSS.  These are zombie kernels leftover from crashed
+  # Copilot sessions that ran `jupyter nbconvert --execute`.
+  local killed=0
+  local freed_mb=0
+  while IFS= read -r line; do
+    local pid ppid rss args
+    pid=$(echo "$line" | awk '{print $1}')
+    ppid=$(echo "$line" | awk '{print $2}')
+    rss=$(echo "$line" | awk '{print $3}')
+    args=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf "%s ", $i}')
+
+    [[ "$ppid" -ne 1 ]] && continue
+    [[ "$rss" -lt 204800 ]] && continue  # <200 MB
+
+    # Only kill python/node processes, never openclaw/vscode/gateway
+    if echo "$args" | grep -qiE "python|ipykernel|jupyter|nbconvert|loky|joblib"; then
+      if ! echo "$args" | grep -qiE "openclaw|gateway|vscode"; then
+        kill "$pid" 2>/dev/null
+        local mb=$((rss / 1024))
+        log "Killed zombie PID $pid (${mb} MB): ${args:0:120}"
+        freed_mb=$((freed_mb + mb))
+        killed=$((killed + 1))
+      fi
+    fi
+  done < <(ps -eo pid,ppid,rss,args --no-headers 2>/dev/null)
+
+  if [[ "$killed" -gt 0 ]]; then
+    log "Memory cleanup: killed $killed zombie(s), freed ~${freed_mb} MB"
+  fi
+  echo "$killed"
 }
 
 get_quantipy_state() {
@@ -154,6 +203,11 @@ send_to_openclaw() {
   local message="$1"
   local session_id="autoresearch-loop-$(date +%Y%m%d-%H%M%S)"
   
+  # Inject model override into every message
+  message="[MODEL: Use --model $COPILOT_MODEL for ALL Copilot sessions. Do NOT use any other model.]
+
+$message"
+
   log "Sending to OpenClaw (session: $session_id)..."
   
   if [[ "$SCOPE_ENABLED" == "true" ]] && command -v systemd-run &>/dev/null; then
@@ -232,6 +286,15 @@ The human wants profitable strategies found. Keep going until Sharpe > 0.5 net O
         log "Tracking Copilot PID $pid (HEAD before: $captured_head)"
       fi
       log "Copilot running (PID: $pid). Polling in ${POLL_INTERVAL}s..."
+
+      # Memory pressure check on every poll
+      if check_memory_pressure; then
+        local mem_pct
+        mem_pct=$(mem_used_percent)
+        log "WARNING: Memory pressure detected (${mem_pct}% used, threshold ${MEM_PRESSURE_THRESHOLD}%)"
+        kill_zombie_kernels
+      fi
+
       sleep "$POLL_INTERVAL"
       continue
     fi

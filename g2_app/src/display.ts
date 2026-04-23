@@ -29,20 +29,12 @@ import type { ConversationHistory } from './conversation';
 import type { SessionListEntry } from './protocol';
 
 // ---------------------------------------------------------------------------
-// Greyscale constants
-// ---------------------------------------------------------------------------
-const MUTED   = 0x6;
-const SECOND  = 0xA;
-const PRIMARY = 0xF;
-
-// ---------------------------------------------------------------------------
 // Container IDs (stable across all rebuilds)
 // ---------------------------------------------------------------------------
 const ID_STATUS         = 1;
-const ID_TRANSCRIPT     = 3;
-const ID_FOOTER         = 4;
-const ID_EVENT_CAPTURE  = 5;
-const ID_MENU_LIST      = 6;
+const ID_TRANSCRIPT     = 2;
+const ID_FOOTER         = 3;
+const ID_MENU_LIST      = 4; // reuses slot 4 (menu mode replaces transcript mode)
 
 // ---------------------------------------------------------------------------
 // Character limits
@@ -62,12 +54,10 @@ function text(
   y: number,
   w: number,
   h: number,
-  fontSize: number,
-  fontColor: number,
   content: string,
   eventCapture: 0 | 1 = 0,
 ): TextContainerProperty {
-  const c = new TextContainerProperty({
+  return new TextContainerProperty({
     containerID: id,
     containerName: name,
     content,
@@ -80,37 +70,6 @@ function text(
     borderRdaius: 0, // SDK typo — intentional
     paddingLength: 0,
     isEventCapture: eventCapture,
-  });
-  // fontSize / fontColor exist in the protobuf but are absent from the .d.ts
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const obj = c as any;
-  obj.fontSize = fontSize;
-  obj.fontColor = fontColor;
-  return c;
-}
-
-// ---------------------------------------------------------------------------
-// Helper: invisible list container for event capture (simulator compat)
-// ---------------------------------------------------------------------------
-function eventCaptureList(): ListContainerProperty {
-  return new ListContainerProperty({
-    xPosition: 0,
-    yPosition: 0,
-    width: 1,
-    height: 1,
-    borderWidth: 0,
-    borderColor: 0,
-    borderRdaius: 0, // SDK typo — intentional
-    paddingLength: 0,
-    containerID: ID_EVENT_CAPTURE,
-    containerName: 'capture',
-    isEventCapture: 1,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 1,
-      itemWidth: 1,
-      isItemSelectBorderEn: 0,
-      itemName: ['tap'],
-    }),
   });
 }
 
@@ -154,23 +113,36 @@ export class DisplayManager {
   private async _createStartup(): Promise<void> {
     const b = this.bridge;
     if (!b) throw new Error('[Display] Bridge not set');
+    console.log('[Display] _createStartup: bridge OK');
 
     const statusText = 'OpenClaw  ● Loading';
     const transcriptText = 'Starting up...';
     const footerText = 'Initialising';
 
-    const result = await b.createStartUpPageContainer(
-      new CreateStartUpPageContainer({
-        containerTotalNum: 4,
-        textObject: [
-          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerText),
-        ],
-        listObject: [eventCaptureList()],
-      }),
-    );
+    console.log('[Display] Building container objects...');
+    const textObjects = [
+      text(ID_STATUS,     'status',     8,   2, 560,  24, statusText),
+      text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, transcriptText, 1),
+      text(ID_FOOTER,     'footer',     8, 256, 560,  26, footerText),
+    ];
+    console.log('[Display] textObjects: %d', textObjects.length);
 
+    const payload = new CreateStartUpPageContainer({
+      containerTotalNum: 3,
+      textObject: textObjects,
+    });
+    console.log('[Display] Payload built, calling createStartUpPageContainer...');
+
+    let result: StartUpPageCreateResult;
+    try {
+      result = await b.createStartUpPageContainer(payload);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('[Display] createStartUpPageContainer threw:', msg, typeof e, e);
+      throw e;
+    }
+
+    console.log('[Display] createStartUpPageContainer result:', result, typeof result);
     if (result !== StartUpPageCreateResult.success) {
       throw new Error(`[Display] createStartUpPageContainer failed (code ${result})`);
     }
@@ -179,6 +151,7 @@ export class DisplayManager {
     this._statusLen = statusText.length;
     this._transcriptLen = transcriptText.length;
     this._footerLen = footerText.length;
+    console.log('[Display] _createStartup complete');
   }
 
   private requireBridge(): EvenAppBridge {
@@ -213,13 +186,12 @@ export class DisplayManager {
 
     await b.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: 4,
+        containerTotalNum: 3,
         textObject: [
-          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerHint),
+          text(ID_STATUS,     'status',     8,   2, 560,  24, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 256, 560,  26, footerHint),
         ],
-        listObject: [eventCaptureList()],
       }),
     );
 
@@ -567,8 +539,8 @@ export class DisplayManager {
       new RebuildPageContainer({
         containerTotalNum: 3,
         textObject: [
-          text(ID_STATUS, 'status', 8, 2, 560, 24, 16, SECOND, statusText),
-          text(ID_FOOTER, 'footer', 8, 256, 560, 26, 14, MUTED, footerText),
+          text(ID_STATUS, 'status', 8, 2, 560, 24, statusText),
+          text(ID_FOOTER, 'footer', 8, 256, 560, 26, footerText),
         ],
         listObject: [
           new ListContainerProperty({
@@ -615,13 +587,12 @@ export class DisplayManager {
 
     await b.rebuildPageContainer(
       new RebuildPageContainer({
-        containerTotalNum: 4,
+        containerTotalNum: 3,
         textObject: [
-          text(ID_STATUS,     'status',     8,   2, 560,  24, 16, SECOND, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, 18, PRIMARY, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 256, 560,  26, 14, MUTED,  footerText),
+          text(ID_STATUS,     'status',     8,   2, 560,  24, statusText),
+          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, transcriptText, 1),
+          text(ID_FOOTER,     'footer',     8, 256, 560,  26, footerText),
         ],
-        listObject: [eventCaptureList()],
       }),
     );
 

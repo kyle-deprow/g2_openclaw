@@ -64,15 +64,26 @@ LOOP (until goal met or user interrupts):
 
        exec bash pty:true workdir:<repo> background:true command:"copilot --agent researcher -p \"
          CURRENT RESEARCH DIRECTION (from the human — NON-NEGOTIABLE):
-         Simple indicator intraday trading on small/mid cap equities + Reddit sentiment correlation.
-         ALL proposals MUST use these building blocks:
-         - Indicators: Moving Averages, Bollinger Bands, OBV. Iterate on parameters/combinations.
-         - Sentiment: Reddit post sentiment from DB (analyzed_posts, ticker_sentiments tables).
-         - Universe: 4-10 small/mid cap equities (\$1B-\$20B market cap). You choose which tickers.
-         - Holding: Intraday ONLY. Flat by 15:50 ET. No entries before 9:45.
+         Intraday trading on small/mid-cap equities ($500M-$20B market cap).
+         Large-caps (SPY, QQQ, AAPL, NVDA, TSLA, etc.) may be used as SIGNAL SOURCES but NEVER traded.
+         Reddit sentiment is available for FEATURE GENERATION — it does NOT restrict the ticker universe.
+
+         UNIVERSE SELECTION IS PART OF THE RESEARCH:
+         - You choose which small/mid-cap tickers to trade. Finding the right universe IS alpha.
+         - Consider: liquidity (>2M avg daily vol), volatility, sector diversity, data coverage (2021-2026).
+         - Tickers with zero Reddit coverage are perfectly valid — sentiment is one optional feature, not a filter.
+         - Pre-fetch all chosen tickers' full 2021-2026 data at experiment start.
+
+         BUILDING BLOCKS (iterate freely on parameters, combinations, and ML models):
+         - Indicators: Moving Averages, Bollinger Bands, OBV, VWAP, volume profiles. Iterate on parameters.
+         - Sentiment: Reddit/news sentiment from DB as OPTIONAL features/conditioning. Not required.
+         - Cross-asset signals: SPY/QQQ/sector ETFs as leading indicators for small/mid-cap positions.
          - ML model: freely choose, compare, iterate. No restrictions on model type or complexity.
-         HARD REJECT any proposal using exotic/novel features (wavelets, entropy, topology, etc).
-         HARD REJECT any proposal on mega-caps (AAPL, NVDA, TSLA, MSFT, GOOG, etc).
+
+         HARD REJECT any proposal that TRADES mega-caps (AAPL, NVDA, TSLA, MSFT, GOOG, META, AMZN, etc.).
+         Using mega-caps as SIGNAL SOURCES (features, beta hedging, lead-lag) is fine and encouraged.
+         HARD REJECT any proposal with overnight holding periods.
+         HARD REJECT any proposal using synthetic data.
          The thesis: simple indicators work better on less-efficient small/mid caps.
 
          Context:
@@ -93,22 +104,24 @@ LOOP (until goal met or user interrupts):
 
          ASSET CLASS & UNIVERSE DESIGN (MANDATORY in every proposal):
          Every proposal MUST explicitly address:
-         1. WHAT to trade: small/mid cap equities (\$1B-\$20B market cap, >5M avg daily volume).
-         2. WHY that universe: justify by volatility, spread, liquidity, Reddit coverage.
-         3. HOW to evaluate: walk-forward CV config, OOS holdout period, transaction cost model.
-         4. DATA SPLIT: Use multi-year data (2021-2026). OOS at least 60 trading days.
-         5. HYPERPARAMETER TUNING: RandomizedSearchCV + TimeSeriesSplit.
+         1. WHAT to trade: small/mid cap equities ($500M-$20B market cap, >2M avg daily volume).
+            Finding the right tickers IS part of the alpha. Justify your choices.
+         2. SIGNAL SOURCES: may include large-cap ETFs (SPY, QQQ) or mega-caps as features. NOT traded.
+         3. WHY that universe: justify by volatility, spread, liquidity, sector exposure, data quality.
+         4. HOW to evaluate: walk-forward CV config, OOS holdout period, transaction cost model.
+         5. DATA SPLIT: Use full available data (2021-2026). OOS at least 60 trading days.
+         6. DATA PRE-FETCH: All tickers (traded + signal sources) must be pre-fetched for 2021-2026 before backtesting.
+         7. HYPERPARAMETER TUNING: RandomizedSearchCV + TimeSeriesSplit.
          Proposals without explicit universe/evaluation design are REJECTED.
 
          Run the research debate. Delegate to contrarian, explorer, and theorist.
-         Each proposal MUST use MA + Bollinger + OBV as the core feature set, with Reddit sentiment.
-         Iterate on: which MAs, which BB params, how to combine with sentiment, ML model choice.
+         Each proposal should use simple indicators as core features, with optional sentiment conditioning.
+         Iterate on: which indicators, which params, universe selection, cross-asset signals, ML model choice.
          HARD REJECT any proposal with overnight holding periods.
          HARD REJECT any proposal using synthetic data.
-         HARD REJECT any proposal on mega-cap tickers.
-         HARD REJECT any proposal using exotic features instead of simple indicators.
+         HARD REJECT any proposal that TRADES mega-cap tickers (using them as signal sources is fine).
          Output a structured research report with the winner and all proposals.
-       \" --yolo --model claude-opus-4.6 --no-auto-update"
+       \" --yolo --model claude-sonnet-4.6 --no-auto-update"
 
     c) Wait for completion via process action:log
     d) Read the research report from the session output
@@ -215,7 +228,7 @@ LOOP (until goal met or user interrupts):
       4. Only after the notebook executes cleanly with valid metrics:
          Commit with message: 'experiment: <strategy_name> — <one-line description>'
       DO NOT commit a notebook without outputs. DO NOT exit without executing the notebook.
-    \" --yolo --model claude-opus-4.6 --no-auto-update"
+    \" --yolo --model claude-sonnet-4.6 --no-auto-update"
 
     Wait for completion via process action:log
 
@@ -279,7 +292,7 @@ LOOP (until goal met or user interrupts):
       Run ALL 8 checks from your review protocol.
       Read the actual source code, not just notebook output.
       Output the structured review with verdict and recommended action.
-    \" --yolo --model claude-opus-4.6 --no-auto-update"
+    \" --yolo --model claude-sonnet-4.6 --no-auto-update"
 
     Wait for completion via process monitor notification.
     Parse the reviewer's output. Extract:
@@ -365,7 +378,7 @@ LOOP (until goal met or user interrupts):
          Update the instructions to prevent these. Add specific warnings, examples, or rules.
          Also check if any agent file is stale or never triggered — remove it if so.
          Keep it lean. Run git diff to show what changed.
-       \" --yolo --model claude-opus-4.6 --no-auto-update"
+       \" --yolo --model claude-sonnet-4.6 --no-auto-update"
        ```
 
     d) Research quality adjustment — write to memory:

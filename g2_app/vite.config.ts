@@ -769,6 +769,11 @@ export default defineConfig({
   server: {
     host: 'localhost',
     port: 5173,
+    watch: {
+      usePolling: false,
+      // Disable file watching entirely — the dev API doesn't need HMR
+      ignored: ['**'],
+    },
   },
   plugins: [apiPlugin(), inputBar(), telemetryPanel(), sessionPanel()],
   build: {

@@ -29,7 +29,8 @@ _POLL_INTERVAL = 30  # seconds
 _REAP_INTERVAL = 300  # seconds between orphan reap cycles
 _MIN_ORPHAN_AGE = 120  # seconds before considering a worker orphaned
 _SIGTERM_GRACE = 5  # seconds to wait after SIGTERM before SIGKILL
-_ORPHAN_MARKERS = ("loky", "joblib", "ipykernel")
+_ORPHAN_MARKERS = ("loky", "joblib", "ipykernel", "nbconvert", "jupyter")
+_MEM_PRESSURE_PERCENT = 85  # trigger aggressive reap when RAM usage exceeds this
 _QUANTIPY_DIR = str(Path.home() / "repos" / "quantipy")
 
 
@@ -107,7 +108,28 @@ class OrphanReaper:
         self._running = False
 
     async def _reap(self) -> ReapResult:
-        """Run one reap cycle: find orphans, kill them, return summary."""
+        """Run one reap cycle: find orphans, kill them, return summary.
+
+        Under memory pressure (>85% RAM used), also kills large stale
+        python/node processes that have been reparented to init, even if
+        they don't match the standard orphan markers.
+        """
+        under_pressure = self._check_memory_pressure()
+        candidates = await asyncio.to_thread(self._find_orphans)
+        if under_pressure:
+            pressure_candidates = await asyncio.to_thread(self._find_pressure_targets)
+            # Deduplicate by PID
+            seen = {c.pid for c in candidates}
+            for pc in pressure_candidates:
+                if pc.pid not in seen:
+                    candidates.append(pc)
+                    seen.add(pc.pid)
+            if pressure_candidates:
+                logger.warning(
+                    "Memory pressure detected (>%d%%) — found %d additional targets",
+                    _MEM_PRESSURE_PERCENT,
+                    len(pressure_candidates),
+                )
         candidates = await asyncio.to_thread(self._find_orphans)
         killed = 0
         freed_kb = 0
@@ -176,6 +198,89 @@ class OrphanReaper:
         return candidates
 
     @staticmethod
+    def _check_memory_pressure() -> bool:
+        """Return True if system RAM usage exceeds the pressure threshold."""
+        try:
+            with open("/proc/meminfo") as f:
+                info: dict[str, int] = {}
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].rstrip(":") in (
+                        "MemTotal",
+                        "MemAvailable",
+                    ):
+                        info[parts[0].rstrip(":")] = int(parts[1])
+                total = info.get("MemTotal", 0)
+                available = info.get("MemAvailable", 0)
+                if total == 0:
+                    return False
+                used_pct = ((total - available) / total) * 100
+                return used_pct > _MEM_PRESSURE_PERCENT
+        except Exception:
+            return False
+
+    @staticmethod
+    def _find_pressure_targets() -> list[_OrphanCandidate]:
+        """Find large reparented python/node processes during memory pressure.
+
+        More aggressive than ``_find_orphans`` — catches any python or node
+        process whose parent is PID 1 and that's using >200 MB RSS. These
+        are typically zombie Jupyter kernels or dead Copilot child processes.
+        """
+        _PRESSURE_MIN_RSS_KB = 200 * 1024  # 200 MB
+        _PRESSURE_MARKERS = ("python", "node")
+        # Never kill these, even under pressure
+        _PRESSURE_EXCLUDE = (
+            "openclaw",
+            "gateway",
+            "vscode",
+            "copilot-chat",
+            "copilot-typescript",
+            "tsserver",
+            "next-server",
+        )
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid,ppid,etimes,rss,args", "--no-headers"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return []
+        except Exception:
+            return []
+
+        targets: list[_OrphanCandidate] = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split(None, 4)
+            if len(parts) < 5:
+                continue
+            try:
+                pid = int(parts[0])
+                ppid = int(parts[1])
+                etimes = int(parts[2])
+                rss_kb = int(parts[3])
+            except ValueError:
+                continue
+            args = parts[4]
+
+            if ppid != 1:
+                continue
+            if rss_kb < _PRESSURE_MIN_RSS_KB:
+                continue
+            if etimes < _MIN_ORPHAN_AGE:
+                continue
+            if not any(m in args for m in _PRESSURE_MARKERS):
+                continue
+            if any(ex in args for ex in _PRESSURE_EXCLUDE):
+                continue
+            targets.append(
+                _OrphanCandidate(pid=pid, ppid=ppid, etimes=etimes, rss_kb=rss_kb, args=args)
+            )
+        return targets
+
+    @staticmethod
     def _is_systemd_user(pid: int) -> bool:
         """Return True if *pid* is a ``systemd --user`` process."""
         try:
@@ -212,6 +317,15 @@ class OrphanReaper:
         return True
 
 
+_NUDGE_DELAY = 300  # seconds to wait before sending a follow-up nudge
+_NUDGE_MESSAGE = (
+    "AUTORESEARCH STALL DETECTED — no new Copilot process started after the last death report. "
+    "You MUST continue the loop NOW. Execute Phase 8 CONTINUE from the autoresearch protocol: "
+    "decide next action (fix bug / next proposal / new ideation) and launch Copilot with "
+    "background:true IMMEDIATELY. Do NOT summarize status. Do NOT ask the human. LAUNCH NOW."
+)
+
+
 class CopilotProcessMonitor:
     """Watches Copilot processes and notifies when they die.
 
@@ -234,6 +348,7 @@ class CopilotProcessMonitor:
         self._tracked: dict[int, TrackedProcess] = {}
         self._running = False
         self._reaper = OrphanReaper()
+        self._pending_nudge: asyncio.Task[None] | None = None
 
     async def run(self) -> None:
         """Main polling loop. Runs until stop() is called."""
@@ -257,6 +372,8 @@ class CopilotProcessMonitor:
         """Signal the monitor to stop."""
         self._running = False
         self._reaper.stop()
+        if self._pending_nudge and not self._pending_nudge.done():
+            self._pending_nudge.cancel()
 
     @property
     def tracked_pids(self) -> list[int]:
@@ -296,11 +413,38 @@ class CopilotProcessMonitor:
                 logger.info("Notified OpenClaw about PID %d exit", pid)
             except Exception:
                 logger.exception("Failed to notify OpenClaw about PID %d", pid)
+            # Schedule a follow-up nudge in case OpenClaw doesn't continue
+            self._schedule_nudge()
+
+        # Cancel pending nudge if a new Copilot process appeared
+        if self._pending_nudge and not self._pending_nudge.done() and self._tracked:
+            self._pending_nudge.cancel()
+            self._pending_nudge = None
+            logger.info("Cancelled pending nudge — new Copilot process detected")
 
     def _is_target(self, session: CopilotSessionInfo) -> bool:
         """Check if a session is working on one of our target repos."""
         cwd = session.cwd or ""
         return any(cwd == target or cwd.startswith(target + "/") for target in self._target_dirs)
+
+    def _schedule_nudge(self) -> None:
+        """Schedule a follow-up nudge if no new Copilot starts within the delay."""
+        if self._pending_nudge and not self._pending_nudge.done():
+            self._pending_nudge.cancel()
+        self._pending_nudge = asyncio.create_task(self._send_nudge_after_delay())
+
+    async def _send_nudge_after_delay(self) -> None:
+        """Wait, then nudge OpenClaw if still no tracked Copilot processes."""
+        await asyncio.sleep(_NUDGE_DELAY)
+        if self._tracked:
+            logger.info("Nudge cancelled — Copilot process is running")
+            return
+        logger.warning("No Copilot process started after %ds — sending nudge", _NUDGE_DELAY)
+        try:
+            await self._notify(_NUDGE_MESSAGE)
+            logger.info("Sent stall nudge to OpenClaw")
+        except Exception:
+            logger.exception("Failed to send stall nudge")
 
     def _build_report(self, tp: TrackedProcess) -> DeathReport:
         """Build a death report for a dead Copilot process (runs in thread)."""
@@ -341,7 +485,17 @@ class CopilotProcessMonitor:
                 "Check git status and decide whether to commit or discard."
             )
 
-        parts.append("Continue autoresearch — evaluate results and proceed to the next phase.")
+        parts.append(
+            "ACTION REQUIRED — Execute the autoresearch evaluation loop NOW:\n"
+            "1. Parse metrics from the info above (Phase 4 VERIFY)\n"
+            "2. Sanity-check for impossible values (Sharpe>10, win rate=1.0)\n"
+            "3. Run Phase 5 DECIDE — apply thresholds\n"
+            "4. Run Phase 6 LOG — record in RESEARCH_LOG.md + memory\n"
+            "5. Run Phase 8 CONTINUE — pick next action and launch Copilot with background:true\n"
+            "\n"
+            "Do NOT summarize status and wait. Do NOT ask the human what to do. "
+            "Do NOT say 'if you want'. DECIDE and LAUNCH the next step NOW."
+        )
 
         return "\n\n".join(parts)
 

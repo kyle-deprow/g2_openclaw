@@ -12,7 +12,7 @@ This skill covers everything about invoking, monitoring, resuming, and debugging
 
 ### Command Structure
 ```
-exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
+exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### Key Flags
@@ -20,7 +20,7 @@ exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claud
 |------|---------|
 | `-p "prompt"` | Non-interactive mode (exits after completion) |
 | `--yolo` | Full auto — all permissions, no confirmation |
-| `--model <model>` | Model selection (claude-opus-4.6 is default) |
+| `--model <model>` | Model selection (claude-sonnet-4.6 is default) |
 | `--agent <name>` | Route to `.github/agents/<name>.agent.md` in the repo |
 | `--add-dir <dir>` | Allow access to additional directories |
 | `--no-ask-user` | Autonomous mode, no questions |
@@ -71,7 +71,7 @@ Execute ALL steps in ONE turn.
    Save as HEAD_AT_LAUNCH for later evaluation.
 
 2. **Launch Copilot:**
-   `exec(command: "copilot --agent orchestrator --yolo -p '<prompt>' --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
+   `exec(command: "copilot --agent orchestrator --yolo -p '<prompt>' --model claude-sonnet-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")`
    Note the PID from the output.
 
 3. **Confirm to human:**
@@ -94,7 +94,7 @@ When Copilot exits but HEAD is unchanged (no new commits), it spent its session 
 
 1. **Resume the session** using the session ID from the process monitor notification:
    ```
-   exec(command: "copilot --resume=<session-id> -p \"Your previous session explored and planned but did not implement any code. Skip exploration. Execute the implementation plan now — create modules, tests, notebook, run pytest, commit on success.\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "<REPO_PATH>")
+   exec(command: "copilot --resume=<session-id> -p \"Your previous session explored and planned but did not implement any code. Skip exploration. Execute the implementation plan now — create modules, tests, notebook, run pytest, commit on success.\" --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, background: true, workdir: "<REPO_PATH>")
    ```
 
 2. **Max 2 resumes.** If the 2nd resume also produces `[TASK:incomplete]`:
@@ -183,7 +183,7 @@ Violations produce untested, uncommitted, unreviewed code. Copilot CLI handles m
 
 **Only acceptable way to change code:**
 ```
-exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/<repo>")
+exec(command: "copilot --agent orchestrator -p \"<prompt>\" --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/<repo>")
 ```
 
 ## Delegation Modes
@@ -215,7 +215,7 @@ Assess: Are instructions still accurate? Do agents reference correct paths/patte
 
 **If update needed — delegate to Copilot (non-blocking, before the main task):**
 ```
-exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Based on these recent failures: <describe patterns>. Update instructions to prevent these. Remove stale agent files not used in 2+ rounds. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "<REPO_PATH>")
+exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Based on these recent failures: <describe patterns>. Update instructions to prevent these. Remove stale agent files not used in 2+ rounds. Keep lean.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "<REPO_PATH>")
 ```
 
 This is a blocking foreground call (not background) — it's fast (~1 min) and must complete before the main task launches. The main task needs correct agents to succeed.
@@ -225,19 +225,19 @@ This is a blocking foreground call (not background) — it's fast (~1 min) and m
 ### SCAFFOLD — Setup Coding Environment
 Before first delegation to a repo, ensure it has `.github/copilot-instructions.md` + `.github/agents/*.agent.md`.
 ```
-exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Fix stale refs, add missing patterns, remove irrelevant rules. Keep lean.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
+exec(command: "copilot --agent orchestrator -p 'Read .github/copilot-instructions.md and .github/agents/. Fix stale refs, add missing patterns, remove irrelevant rules. Keep lean.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### RESEARCH — Delegate a Question
 Structure the prompt with: what you're looking for, constraints (our data: 1-min OHLCV, sentiment, volume), what to return.
 ```
-exec(command: "copilot --agent orchestrator -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
+exec(command: "copilot --agent orchestrator -p 'Search the web for <topic>. Return: name, formula, data requirements, references.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ### ENGINEER — Delegate Implementation
 Structure the prompt with: exact files, existing patterns to follow, tech requirements, verification command.
 ```
-exec(command: "copilot --agent orchestrator -p '<task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
+exec(command: "copilot --agent orchestrator -p '<task>. Follow pattern in <file>. Run uv run pytest after.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, background: true, workdir: "/home/dev/repos/quantipy")
 ```
 
 ## Prompt Discipline
@@ -270,3 +270,25 @@ After launching, completing, or failing a background task, post a structured sta
 | Timeout | `[TASK:timeout] <description> \| exceeded 2h TTL` |
 
 These markers allow the gateway to detect task status on reconnect and display it on G2 glasses.
+
+## Known Issues
+
+### Researcher Agent Hangs During Multi-Agent Debates
+
+**Symptom:** `--agent researcher` process hangs after 20-40 min with events.jsonl stale, 0-1% CPU, sleeping state, no ESTABLISHED TCP connections (only LISTEN). The subagent (theorist/critic) may complete but the parent session loses its API connection and never reconnects.
+
+**Diagnosis:**
+```bash
+# Check events freshness (>600s stale = likely hung)
+stat --format="%Y" "$HOME/.copilot/session-state/<session>/events.jsonl" | python3 -c "import sys,time; t=int(sys.stdin.readline()); print(f'{int(time.time()-t)}s')"
+# Check for established outbound connections (should have some)
+cat /proc/<pid>/net/tcp | awk 'NR>1{print $4}' | grep -v '0000:0000'
+```
+
+**Fix:** Use `--agent orchestrator` instead of `--agent researcher` for debate generation. Add `Do NOT spawn subagents` to the prompt. The orchestrator writes the debate file directly without the subagent hang risk.
+
+### `jupyter execute` Does Not Persist Outputs
+
+**Symptom:** `jupyter execute notebook.ipynb` runs all cells but does NOT write outputs back to the notebook file. The notebook still shows 0 outputs after execution.
+
+**Fix:** Always use `jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=3600 notebook.ipynb` to persist outputs in-place.

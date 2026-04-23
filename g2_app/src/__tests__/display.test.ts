@@ -183,7 +183,7 @@ describe('DisplayManager', () => {
       expect(calls.length).toBe(1);
       const call = calls[0][0];
       // Full replace: content is formatReverse output, offset 0
-      expect(call.containerID).toBe(3); // ID_TRANSCRIPT
+      expect(call.containerID).toBe(2); // ID_TRANSCRIPT
       expect(call.contentOffset).toBe(0);
       expect(call.content).toContain('hello');
     });
@@ -278,7 +278,7 @@ describe('DisplayManager', () => {
 
       // Validate the batch flush does a full replace (offset 0)
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(contentCall.containerID).toBe(3);
+      expect(contentCall.containerID).toBe(2);
       expect(contentCall.contentOffset).toBe(0);
       expect(contentCall.content).toContain('abc');
     });
@@ -479,7 +479,7 @@ describe('DisplayManager', () => {
       await dm.finaliseStream();
 
       const contentCall = mock.textContainerUpgrade.mock.calls[0][0];
-      expect(contentCall.containerID).toBe(3);
+      expect(contentCall.containerID).toBe(2);
       expect(contentCall.contentOffset).toBe(0);
       expect(contentCall.content).toContain('abc');
     });
@@ -507,7 +507,7 @@ describe('DisplayManager', () => {
 
       // Should update transcript with conversation content containing the label
       const transcriptCall = mock.textContainerUpgrade.mock.calls.find(
-        (c: any[]) => c[0].containerID === 3,
+        (c: any[]) => c[0].containerID === 2,
       );
       expect(transcriptCall).toBeDefined();
       expect(transcriptCall![0].content).toContain('Session reset');
@@ -558,7 +558,7 @@ describe('DisplayManager', () => {
       expect(mock.textContainerUpgrade).toHaveBeenCalled();
 
       const transcriptReplace = mock.textContainerUpgrade.mock.calls.find(
-        (c: any[]) => c[0].containerID === 3,
+        (c: any[]) => c[0].containerID === 2,
       );
       expect(transcriptReplace).toBeDefined();
       expect(transcriptReplace![0].content).toContain('Session reset');
@@ -586,7 +586,7 @@ describe('DisplayManager', () => {
 
       // Transcript should be a full replace (offset 0)
       const transcriptCall = mock.textContainerUpgrade.mock.calls.find(
-        (c: any[]) => c[0].containerID === 3,
+        (c: any[]) => c[0].containerID === 2,
       );
       expect(transcriptCall).toBeDefined();
       expect(transcriptCall![0].contentOffset).toBe(0);
@@ -714,9 +714,8 @@ describe('DisplayManager', () => {
       expect(dm.mode).toBe('transcript');
       expect(mock.rebuildPageContainer).toHaveBeenCalledOnce();
       const arg = mock.rebuildPageContainer.mock.calls[0][0];
-      expect(arg.containerTotalNum).toBe(4);
+      expect(arg.containerTotalNum).toBe(3);
       expect(arg.textObject).toHaveLength(3);
-      expect(arg.listObject).toHaveLength(1);
       // Transcript container should be a text container with event capture
       const transcript = arg.textObject.find((t: any) => t.containerName === 'transcript');
       expect(transcript).toBeDefined();

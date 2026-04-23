@@ -49,8 +49,14 @@ export class InputHandler {
     deps.bridge.onEvenHubEvent((event) => {
       console.log('[Input] Event received:', JSON.stringify(event));
 
-      // Audio events are ignored in HIL mode.
+      // Forward PCM audio to gateway when recording
       if (event.audioEvent) {
+        if (this.sm.current === 'recording' && event.audioEvent.audioPcm) {
+          const pcm = event.audioEvent.audioPcm;
+          // Copy to own ArrayBuffer (pcm may be a view into a larger buffer)
+          const bytes = new Uint8Array(pcm);
+          this.gateway.send(bytes.buffer as ArrayBuffer);
+        }
         return;
       }
 
@@ -120,12 +126,13 @@ export class InputHandler {
     return true;
   }
 
-  /** Start a recording session — sends start_audio to gateway. */
+  /** Start a recording session — opens mic and sends start_audio to gateway. */
   startRecording(): boolean {
     if (this.sm.current !== 'idle') {
       console.warn('[Input] Cannot start recording — state is', this.sm.current);
       return false;
     }
+    this.bridge.audioControl(true);
     this.gateway.sendJson({
       type: 'start_audio',
       sampleRate: 16000,
@@ -135,12 +142,13 @@ export class InputHandler {
     return true;
   }
 
-  /** Stop recording — sends stop_audio to gateway with optional hilText. */
+  /** Stop recording — closes mic and sends stop_audio to gateway with optional hilText. */
   stopRecording(hilText?: string): boolean {
     if (this.sm.current !== 'recording') {
       console.warn('[Input] Cannot stop recording — state is', this.sm.current);
       return false;
     }
+    this.bridge.audioControl(false);
     const frame: { type: 'stop_audio'; hilText?: string } = { type: 'stop_audio' };
     if (hilText?.trim()) {
       frame.hilText = hilText.trim();
@@ -301,6 +309,9 @@ export class InputHandler {
       this.gateway.sendForceStop();
       this.sm.transition('idle');
       this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    } else if (state === 'error') {
+      this.sm.transition('idle');
+      this.openSessionMenu();
     }
   }
 
@@ -368,6 +379,10 @@ export class InputHandler {
   /** Force-stop: kill the OpenClaw session and return to idle. Works from any state. */
   forceStop(): boolean {
     console.log('[Input] Force stop requested');
+    // Close mic if we were recording
+    if (this.sm.current === 'recording') {
+      this.bridge.audioControl(false);
+    }
     this.gateway.sendForceStop();
     const current = this.sm.current;
     if (current !== 'idle' && current !== 'loading' && current !== 'disconnected') {

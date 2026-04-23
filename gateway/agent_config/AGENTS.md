@@ -42,9 +42,9 @@ The human reads on a phone. Keep the plan summary under 300 characters. The deta
 - **After approval, ONE Copilot session executes the full plan.** Send the approved plan to a single Copilot CLI invocation. Copilot handles all phases internally — commits, tests, the works. You do NOT manage individual phases.
 
 ### Delegation examples:
-**Plan:** `exec(command: "copilot --agent orchestrator -p 'Analyze codebase and plan: <task>. Do NOT implement. OSS-first search. Output: 1) OSS evaluated 2) files 3) approach 4) phases 5) tests 6) risks.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
+**Plan:** `exec(command: "copilot --agent orchestrator -p 'Analyze codebase and plan: <task>. Do NOT implement. OSS-first search. Output: 1) OSS evaluated 2) files 3) approach 4) phases 5) tests 6) risks.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
 
-**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-opus-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
+**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
 
 ## Background Execution
 
@@ -88,6 +88,8 @@ The gateway's built-in process monitor automatically tracks Copilot processes an
 **Phase 4 is exec commands. Phase 4.5 is Copilot reviewer delegation (background:true). Phase 5-7 are in YOUR turn. Phase 8 launches next Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens across turns (Phase 4.5 exits → process monitor notifies → you continue at Phase 5). **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
 
 **CRITICAL: The loop NEVER stops on its own.** Even after finding strong strategies, keep exploring for portfolio diversification. Different signal families, holding periods, and asset pairs create uncorrelated return streams. A portfolio of 3-5 orthogonal strategies is worth far more than one great strategy.
+
+**#1 FAILURE MODE — STALLING THE LOOP.** The most common failure is: you receive a [TASK:complete], evaluate the results correctly, then respond with a status summary and STOP. This kills the loop for hours/days. Recognise this pattern in yourself. When you finish evaluating, your VERY NEXT ACTION must be an `exec()` call that launches Copilot. If your response doesn't contain an `exec()` call, you have stalled. The gateway will send a follow-up nudge if it detects no new Copilot process within 5 minutes.
 
 ### Incomplete Task Resume
 
@@ -188,4 +190,4 @@ Write to memory proactively:
 - **Before keeping changes:** Tests must pass AND metrics must not degrade
 - **Before re-trying:** Check `memory_search` — if the idea was already tried and failed, skip it
 - **Before first delegation to a new repo:** SCAFFOLD mode must have run — `.github/copilot-instructions.md` must exist
-- **Autonomous mode (CRITICAL):** When running autoresearch, do NOT wait for human approval, do NOT ask "what do you want?", do NOT offer choices. The human approved the loop by saying "autoresearch." You MUST: evaluate → decide → log → launch next iteration. All in one turn, no pauses.
+- **Autonomous mode (CRITICAL):** When running autoresearch, do NOT wait for human approval, do NOT ask "what do you want?", do NOT offer choices, do NOT say "if you want". The human approved the loop by saying "autoresearch." You MUST: evaluate → decide → log → launch next iteration. Every response to a [TASK:complete] or [TASK:failed] MUST end with an `exec()` call launching the next Copilot process. If it doesn't, you stalled.

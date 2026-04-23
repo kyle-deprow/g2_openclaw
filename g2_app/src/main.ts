@@ -310,11 +310,16 @@ async function boot(): Promise<void> {
   console.log('[Main] EvenAppBridge ready');
 
   // 2. Initialise conversation model + display
+  console.log('[Main] Creating ConversationHistory...');
   conversation = new ConversationHistory();
+  console.log('[Main] Creating DisplayManager...');
   display = new DisplayManager();
+  console.log('[Main] Calling display.init()...');
   await display.init(bridge, conversation);
   console.log('[Main] DisplayManager initialised');
+  console.log('[Main] Calling display.showLoading()...');
   await display.showLoading();
+  console.log('[Main] showLoading() done');
 
   // 3. Create the state machine (starts in 'loading')
   sm = new StateMachine();
@@ -353,11 +358,12 @@ async function boot(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 boot().catch((err) => {
-  console.error('[Main] Fatal boot error:', err);
+  const msg = err instanceof Error ? err.message : String(err);
+  const stack = err instanceof Error ? err.stack : '(no stack)';
+  console.error('[Main] Fatal boot error:', msg);
+  console.error('[Main] Error type:', typeof err, Object.prototype.toString.call(err));
+  console.error('[Main] Stack:', stack);
   if (display) {
-    display.showError(
-      err instanceof Error ? err.message : 'Unknown boot error',
-      'Restart the app',
-    );
+    display.showError(msg || 'Unknown boot error', 'Restart the app');
   }
 });

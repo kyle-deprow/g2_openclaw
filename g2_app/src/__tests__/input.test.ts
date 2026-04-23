@@ -47,6 +47,7 @@ function createMockGateway() {
   return {
     connect: vi.fn(),
     sendJson: vi.fn(),
+    send: vi.fn(),
     sendForceStop: vi.fn(),
     requestSessionList: vi.fn(),
     switchSession: vi.fn(),
@@ -71,6 +72,7 @@ function createMockBridge() {
   return {
     onEvenHubEvent: vi.fn(),
     shutDownContaniner: vi.fn(),
+    audioControl: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -107,9 +109,10 @@ describe('InputHandler', () => {
   // ---------------------------------------------------------------------------
 
   describe('recording flow', () => {
-    it('tap in idle sends start_audio', () => {
+    it('tap in idle sends start_audio and opens mic', () => {
       sm._current = 'idle';
       handlerAny._handleEvent(CLICK);
+      expect(bridge.audioControl).toHaveBeenCalledWith(true);
       expect(gateway.sendJson).toHaveBeenCalledWith({
         type: 'start_audio',
         sampleRate: 16000,
@@ -118,9 +121,10 @@ describe('InputHandler', () => {
       });
     });
 
-    it('tap in recording sends stop_audio', () => {
+    it('tap in recording sends stop_audio and closes mic', () => {
       sm._current = 'recording';
       handlerAny._handleEvent(CLICK);
+      expect(bridge.audioControl).toHaveBeenCalledWith(false);
       expect(gateway.sendJson).toHaveBeenCalledWith({ type: 'stop_audio' });
     });
 
@@ -303,6 +307,7 @@ describe('InputHandler', () => {
     sm._current = 'idle';
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     handlerAny._handleEvent(undefined);
+    expect(bridge.audioControl).toHaveBeenCalledWith(true);
     expect(gateway.sendJson).toHaveBeenCalledWith({
       type: 'start_audio',
       sampleRate: 16000,
@@ -459,11 +464,23 @@ describe('InputHandler', () => {
     });
   });
 
-  it('audio event is ignored', () => {
+  it('audio event is ignored when not recording', () => {
     sm._current = 'idle';
     const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
     eventCallback({ audioEvent: { audioPcm: new Uint8Array(3200) } });
     expect(gateway.sendJson).not.toHaveBeenCalled();
+    expect(gateway.send).not.toHaveBeenCalled();
+  });
+
+  it('audio PCM is forwarded to gateway when recording', () => {
+    sm._current = 'recording';
+    const pcm = new Uint8Array([1, 2, 3, 4]);
+    const eventCallback = bridge.onEvenHubEvent.mock.calls[0][0];
+    eventCallback({ audioEvent: { audioPcm: pcm } });
+    expect(gateway.send).toHaveBeenCalledTimes(1);
+    const sent = gateway.send.mock.calls[0][0] as ArrayBuffer;
+    expect(sent).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(sent)).toEqual(pcm);
   });
 
   // ---------------------------------------------------------------------------
@@ -594,6 +611,29 @@ describe('InputHandler', () => {
       handlerAny._handleEvent(DOUBLE_CLICK);
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('double-tap in error opens session menu', () => {
+      sm._current = 'error';
+      handlerAny._handleEvent(DOUBLE_CLICK);
+      expect(sm.transition).toHaveBeenCalledWith('idle');
+      expect(sm.transition).toHaveBeenCalledWith('menu');
+      expect(gateway.requestSessionList).toHaveBeenCalled();
+      expect(display.showSessionMenu).toHaveBeenCalled();
+    });
+
+    it('forceStop closes mic when recording', () => {
+      sm._current = 'recording';
+      handler.forceStop();
+      expect(bridge.audioControl).toHaveBeenCalledWith(false);
+      expect(gateway.sendForceStop).toHaveBeenCalled();
+    });
+
+    it('forceStop does not close mic when idle', () => {
+      sm._current = 'idle';
+      handler.forceStop();
+      expect(bridge.audioControl).not.toHaveBeenCalled();
+      expect(gateway.sendForceStop).toHaveBeenCalled();
     });
 
     it('tap in menu with no session list is graceful no-op (loading guard)', () => {

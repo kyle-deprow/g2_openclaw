@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import signal
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -549,3 +550,320 @@ class TestCopilotMonitorReaperIntegration:
         """stop() should propagate to the reaper."""
         monitor.stop()
         assert monitor._reaper._running is False
+
+
+class TestNudgeMechanism:
+    """Tests for the follow-up nudge when OpenClaw doesn't continue."""
+
+    @pytest.mark.asyncio()
+    async def test_nudge_scheduled_after_death(
+        self, monitor: CopilotProcessMonitor, mock_notify: AsyncMock
+    ) -> None:
+        """Should schedule a nudge task after sending a death report."""
+        fake_session = MagicMock()
+        fake_session.pid = 12345
+        fake_session.session_id = "abc"
+        fake_session.cwd = "/home/dev/repos/quantipy"
+        fake_session.summary = "test task"
+
+        # Discover
+        with patch(
+            "gateway.process_monitor.list_copilot_sessions",
+            return_value=[fake_session],
+        ):
+            await monitor._poll()
+
+        # Die
+        with (
+            patch(
+                "gateway.process_monitor.list_copilot_sessions",
+                return_value=[],
+            ),
+            patch.object(
+                monitor,
+                "_build_report",
+                return_value=DeathReport(
+                    pid=12345,
+                    cwd="/home/dev/repos/quantipy",
+                    summary="test task",
+                    recent_commits="abc fix",
+                    sanity_output="",
+                    has_uncommitted=False,
+                ),
+            ),
+        ):
+            await monitor._poll()
+
+        assert monitor._pending_nudge is not None
+        assert not monitor._pending_nudge.done()
+        # Clean up
+        monitor._pending_nudge.cancel()
+
+    @pytest.mark.asyncio()
+    async def test_nudge_cancelled_when_new_process_appears(
+        self, monitor: CopilotProcessMonitor, mock_notify: AsyncMock
+    ) -> None:
+        """Nudge should be cancelled if a new Copilot process is discovered."""
+        fake_session1 = MagicMock()
+        fake_session1.pid = 11111
+        fake_session1.session_id = "s1"
+        fake_session1.cwd = "/home/dev/repos/quantipy"
+        fake_session1.summary = "task 1"
+
+        # Discover + die to schedule nudge
+        with patch(
+            "gateway.process_monitor.list_copilot_sessions",
+            return_value=[fake_session1],
+        ):
+            await monitor._poll()
+        with (
+            patch("gateway.process_monitor.list_copilot_sessions", return_value=[]),
+            patch.object(
+                monitor,
+                "_build_report",
+                return_value=DeathReport(
+                    pid=11111,
+                    cwd="/home/dev/repos/quantipy",
+                    summary="task 1",
+                    recent_commits="",
+                    sanity_output="",
+                    has_uncommitted=False,
+                ),
+            ),
+        ):
+            await monitor._poll()
+
+        nudge_task = monitor._pending_nudge
+        assert nudge_task is not None
+
+        # New process appears
+        fake_session2 = MagicMock()
+        fake_session2.pid = 22222
+        fake_session2.session_id = "s2"
+        fake_session2.cwd = "/home/dev/repos/quantipy"
+        fake_session2.summary = "task 2"
+
+        with patch(
+            "gateway.process_monitor.list_copilot_sessions",
+            return_value=[fake_session2],
+        ):
+            await monitor._poll()
+
+        assert nudge_task.cancelled() or nudge_task.cancelling()
+
+    @pytest.mark.asyncio()
+    async def test_nudge_sends_message_when_idle(
+        self, monitor: CopilotProcessMonitor, mock_notify: AsyncMock
+    ) -> None:
+        """Nudge should send a stall message if no processes are tracked."""
+        from gateway.process_monitor import _NUDGE_MESSAGE
+
+        with patch("gateway.process_monitor.asyncio.sleep", new_callable=AsyncMock):
+            await monitor._send_nudge_after_delay()
+
+        mock_notify.assert_called_once_with(_NUDGE_MESSAGE)
+
+    @pytest.mark.asyncio()
+    async def test_nudge_skipped_when_process_running(
+        self, monitor: CopilotProcessMonitor, mock_notify: AsyncMock
+    ) -> None:
+        """Nudge should NOT send if a Copilot process is already tracked."""
+        from gateway.process_monitor import TrackedProcess
+
+        monitor._tracked[99999] = TrackedProcess(
+            pid=99999, session_id="x", cwd="/home/dev/repos/quantipy", summary="running"
+        )
+
+        with patch("gateway.process_monitor.asyncio.sleep", new_callable=AsyncMock):
+            await monitor._send_nudge_after_delay()
+
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_stop_cancels_pending_nudge(self, monitor: CopilotProcessMonitor) -> None:
+        """stop() should cancel any pending nudge task."""
+        task = asyncio.create_task(asyncio.sleep(999))
+        monitor._pending_nudge = task
+        await asyncio.sleep(0)  # let task start
+        monitor.stop()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+class TestFormatMessageStrength:
+    """Tests that death report messages contain strong continuation directives."""
+
+    def test_message_contains_action_required(self, monitor: CopilotProcessMonitor) -> None:
+        """Death report should contain explicit action instructions."""
+        report = DeathReport(
+            pid=1000,
+            cwd="/home/dev/repos/quantipy",
+            summary="test",
+            recent_commits="abc fix",
+            sanity_output="",
+            has_uncommitted=False,
+        )
+        msg = monitor._format_message(report)
+        assert "ACTION REQUIRED" in msg
+        assert "Phase 8 CONTINUE" in msg
+        assert "Do NOT summarize status and wait" in msg
+        assert "LAUNCH the next step NOW" in msg
+
+
+class TestMemoryPressure:
+    """Tests for memory pressure detection and aggressive reaping."""
+
+    def test_check_memory_pressure_under_threshold(self) -> None:
+        """Should return False when memory usage is normal."""
+        meminfo = "MemTotal:       65536000 kB\nMemAvailable:   40000000 kB\n"
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__ = lambda s: iter(meminfo.splitlines(keepends=True))
+            mock_open.return_value.__exit__ = MagicMock(return_value=False)
+            assert OrphanReaper._check_memory_pressure() is False
+
+    def test_check_memory_pressure_over_threshold(self) -> None:
+        """Should return True when memory usage exceeds 85%."""
+        # 90% used: 65536000 total, 6553600 available
+        meminfo = "MemTotal:       65536000 kB\nMemAvailable:    6553600 kB\n"
+        with patch("builtins.open", create=True) as mock_open:
+            mock_open.return_value.__enter__ = lambda s: iter(meminfo.splitlines(keepends=True))
+            mock_open.return_value.__exit__ = MagicMock(return_value=False)
+            assert OrphanReaper._check_memory_pressure() is True
+
+    def test_check_memory_pressure_file_error(self) -> None:
+        """Should return False on /proc/meminfo read errors."""
+        with patch("builtins.open", side_effect=OSError("no proc")):
+            assert OrphanReaper._check_memory_pressure() is False
+
+    def test_find_pressure_targets_large_python(self) -> None:
+        """Should find large orphaned python processes with ppid=1."""
+        ps_output = _ps_line(8001, 1, 600, 500000, "/usr/bin/python some_big_script.py")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            targets = OrphanReaper._find_pressure_targets()
+
+        assert len(targets) == 1
+        assert targets[0].pid == 8001
+
+    def test_find_pressure_targets_ignores_small(self) -> None:
+        """Should ignore python processes under 200 MB RSS."""
+        ps_output = _ps_line(8002, 1, 600, 100000, "/usr/bin/python small_script.py")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            targets = OrphanReaper._find_pressure_targets()
+
+        assert len(targets) == 0
+
+    def test_find_pressure_targets_excludes_openclaw(self) -> None:
+        """Should never kill openclaw-gateway even under pressure."""
+        ps_output = _ps_line(8003, 1, 600, 500000, "python openclaw-gateway daemon")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            targets = OrphanReaper._find_pressure_targets()
+
+        assert len(targets) == 0
+
+    def test_find_pressure_targets_excludes_vscode(self) -> None:
+        """Should never kill vscode processes even under pressure."""
+        ps_output = _ps_line(8004, 1, 600, 500000, "node /usr/share/code/vscode-server thing")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            targets = OrphanReaper._find_pressure_targets()
+
+        assert len(targets) == 0
+
+    def test_find_pressure_targets_requires_ppid_1(self) -> None:
+        """Should only target processes reparented to init."""
+        ps_output = _ps_line(8005, 5000, 600, 500000, "/usr/bin/python big_script.py")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            targets = OrphanReaper._find_pressure_targets()
+
+        assert len(targets) == 0
+
+    @pytest.mark.asyncio()
+    async def test_reap_under_pressure_adds_targets(self) -> None:
+        """Under memory pressure, reap should include pressure targets too."""
+        reaper = OrphanReaper()
+        std_orphan = _OrphanCandidate(pid=7001, ppid=1, etimes=600, rss_kb=256000, args="loky")
+        pressure_target = _OrphanCandidate(
+            pid=7002, ppid=1, etimes=600, rss_kb=512000, args="python big_kernel"
+        )
+
+        with (
+            patch.object(reaper, "_check_memory_pressure", return_value=True),
+            patch.object(reaper, "_find_orphans", return_value=[std_orphan]),
+            patch.object(reaper, "_find_pressure_targets", return_value=[pressure_target]),
+            patch.object(reaper, "_kill_process", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await reaper._reap()
+
+        assert result.killed == 2
+        assert result.freed_mb == (256000 + 512000) // 1024
+
+    @pytest.mark.asyncio()
+    async def test_reap_no_pressure_skips_pressure_targets(self) -> None:
+        """Without memory pressure, should not look for pressure targets."""
+        reaper = OrphanReaper()
+        std_orphan = _OrphanCandidate(pid=7001, ppid=1, etimes=600, rss_kb=256000, args="loky")
+
+        with (
+            patch.object(reaper, "_check_memory_pressure", return_value=False),
+            patch.object(reaper, "_find_orphans", return_value=[std_orphan]),
+            patch.object(reaper, "_find_pressure_targets") as mock_pressure,
+            patch.object(reaper, "_kill_process", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await reaper._reap()
+
+        mock_pressure.assert_not_called()
+        assert result.killed == 1
+
+    @pytest.mark.asyncio()
+    async def test_reap_pressure_deduplicates_by_pid(self) -> None:
+        """Should not double-count a PID that appears in both orphan and pressure lists."""
+        reaper = OrphanReaper()
+        orphan = _OrphanCandidate(pid=7001, ppid=1, etimes=600, rss_kb=300000, args="ipykernel")
+        pressure_dup = _OrphanCandidate(
+            pid=7001, ppid=1, etimes=600, rss_kb=300000, args="ipykernel"
+        )
+
+        with (
+            patch.object(reaper, "_check_memory_pressure", return_value=True),
+            patch.object(reaper, "_find_orphans", return_value=[orphan]),
+            patch.object(reaper, "_find_pressure_targets", return_value=[pressure_dup]),
+            patch.object(reaper, "_kill_process", new_callable=AsyncMock, return_value=True),
+        ):
+            result = await reaper._reap()
+
+        assert result.killed == 1  # deduplicated
+
+
+class TestExpandedOrphanMarkers:
+    """Tests that the expanded orphan markers catch nbconvert and jupyter."""
+
+    def test_finds_nbconvert_orphan(self) -> None:
+        """nbconvert process with ppid=1 should be detected."""
+        ps_output = _ps_line(9010, 1, 300, 400000, "python -m nbconvert --execute notebook.ipynb")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9010
+
+    def test_finds_jupyter_orphan(self) -> None:
+        """jupyter process with ppid=1 should be detected."""
+        ps_output = _ps_line(9011, 1, 250, 350000, "python /usr/bin/jupyter execute nb.ipynb")
+        result = MagicMock(returncode=0, stdout=ps_output)
+
+        with patch("gateway.process_monitor.subprocess.run", return_value=result):
+            orphans = OrphanReaper._find_orphans()
+
+        assert len(orphans) == 1
+        assert orphans[0].pid == 9011
