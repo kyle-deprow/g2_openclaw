@@ -66,12 +66,6 @@ def _record_span_error(exc: BaseException) -> None:
     span.record_exception(exc)
 
 
-_MOCK_DELTAS = [
-    "This is a ",
-    "mock response ",
-    "from the gateway.",
-]
-
 _MAX_RECORDING_SECONDS = 90
 
 _BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
@@ -160,6 +154,7 @@ class InflightBuffer:
     deltas: list[str] = field(default_factory=list)
     complete: bool = False
     error: str | None = None
+    error_code: ErrorCode = ErrorCode.OPENCLAW_ERROR
     created_at: float = field(default_factory=_time_module.monotonic)
     _char_count: int = field(default=0, init=False, repr=False)
 
@@ -195,10 +190,7 @@ class SessionState(StrEnum):
 
 
 class ResponseHandler(Protocol):
-    """Protocol for handling text messages.
-
-    Phase 2 will provide a real implementation backed by OpenClaw.
-    """
+    """Protocol for handling text messages."""
 
     async def handle(
         self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
@@ -207,22 +199,6 @@ class ResponseHandler(Protocol):
     async def close(self) -> None:
         """Release resources held by this handler."""
         ...
-
-
-class MockResponseHandler:
-    """Default mock handler that returns canned responses."""
-
-    async def handle(
-        self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
-    ) -> None:
-        await asyncio.sleep(0.1)
-        await send_frame({"type": "status", "status": "streaming"})
-        for delta in _MOCK_DELTAS:
-            await send_frame({"type": "assistant", "delta": delta})
-        await send_frame({"type": "end"})
-
-    async def close(self) -> None:
-        """No-op for mock handler."""
 
 
 class OpenClawResponseHandler:
@@ -277,7 +253,9 @@ class GatewaySession:
     ) -> None:
         self.ws = ws
         self._state = SessionState.IDLE
-        self._handler: ResponseHandler = handler or MockResponseHandler()
+        if handler is None:
+            raise ValueError("GatewaySession requires an explicit response handler")
+        self._handler: ResponseHandler = handler
         self._transcriber = transcriber
         self._audio_buffer: AudioBuffer | None = None
         self._timeout = timeout
@@ -1250,6 +1228,9 @@ class GatewayServer:
         self._process_monitor: CopilotProcessMonitor | None = None
         self._process_monitor_task: asyncio.Task[None] | None = None
 
+        if config.gateway_token is None:
+            raise ValueError("GatewayServer requires GATEWAY_TOKEN")
+
         if handler is not None:
             self._handler: ResponseHandler = handler
         elif config.openclaw_gateway_token:
@@ -1262,7 +1243,9 @@ class GatewayServer:
                 client, get_session_key=lambda: self._session_key
             )
         else:
-            self._handler = MockResponseHandler()
+            raise ValueError(
+                "GatewayServer requires OPENCLAW_GATEWAY_TOKEN or an explicit test handler"
+            )
 
     async def handler(self, ws: ServerConnection) -> None:
         """Handle a new WebSocket connection."""
@@ -1654,7 +1637,16 @@ class GatewayServer:
                     f"--- {buffer.user_question} "
                     f"[{_time_module.strftime('%Y-%m-%dT%H:%M:%SZ', _time_module.gmtime())}] ---\n"
                 )
-            async for delta in stream:
+            stream_iter = aiter(stream)
+            while True:
+                remaining = self.config.agent_timeout - (_time_module.monotonic() - openclaw_start)
+                if remaining <= 0:
+                    raise TimeoutError(f"Agent cycle exceeded {self.config.agent_timeout}s timeout")
+                try:
+                    delta = await asyncio.wait_for(anext(stream_iter), timeout=remaining)
+                except StopAsyncIteration:
+                    break
+
                 if not buffer.append_delta(delta):
                     logger.warning(
                         "Inflight buffer exceeded %d chars — truncating", _BUFFER_MAX_CHARS
@@ -1670,9 +1662,17 @@ class GatewayServer:
                     except Exception:
                         logger.info("Phone disconnected mid-stream — continuing to buffer")
             buffer.complete = True
+        except TimeoutError as exc:
+            gateway_metrics.record_openclaw_error()
+            buffer.error_code = ErrorCode.TIMEOUT
+            buffer.error = str(exc) or f"Agent cycle exceeded {self.config.agent_timeout}s timeout"
+            logger.error("OpenClaw inflight stream timed out: %s", buffer.error)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._handler.close(), timeout=1.0)
         except OpenClawError as exc:
             gateway_metrics.record_openclaw_error()
             buffer.error = str(exc)
+            buffer.error_code = ErrorCode.OPENCLAW_ERROR
             logger.error("OpenClaw error during inflight stream: %s", exc)
         except asyncio.CancelledError:
             raise  # let cancellation propagate
@@ -1702,7 +1702,7 @@ class GatewayServer:
                         {
                             "type": "error",
                             "detail": f"Agent error: {buffer.error}",
-                            "code": ErrorCode.OPENCLAW_ERROR,
+                            "code": buffer.error_code,
                         }
                     )
                     session._state = SessionState.IDLE
@@ -1846,9 +1846,9 @@ class GatewayServer:
                 await self._stop_process_monitor()
 
     async def _start_process_monitor(self) -> None:
-        """Start the background Copilot process monitor if OpenClaw is configured."""
+        """Start the background Copilot process monitor."""
         if not self.config.openclaw_gateway_token:
-            return
+            raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required for process monitoring")
 
         monitor_client = OpenClawClient(
             host=self.config.openclaw_host,
@@ -1946,14 +1946,10 @@ async def main() -> None:
 
     _setup_cuda_library_paths()
 
-    transcriber: Transcriber | None = None
-    try:
-        transcriber = Transcriber(
-            config.whisper_model, config.whisper_device, config.whisper_compute_type
-        )
-        logger.info("Transcriber loaded (model=%s)", config.whisper_model)
-    except Exception:
-        logger.exception("Failed to load transcriber — audio transcription disabled")
+    transcriber = Transcriber(
+        config.whisper_model, config.whisper_device, config.whisper_compute_type
+    )
+    logger.info("Transcriber loaded (model=%s)", config.whisper_model)
 
     server = GatewayServer(config, transcriber=transcriber)
     await server.serve()

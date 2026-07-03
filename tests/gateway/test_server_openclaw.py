@@ -17,7 +17,6 @@ from gateway.openclaw_client import OpenClawClient, OpenClawError
 from gateway.server import (
     GatewayServer,
     GatewaySession,
-    MockResponseHandler,
     OpenClawResponseHandler,
     SessionState,
 )
@@ -30,6 +29,12 @@ from gateway.server import (
 async def _recv_json(ws: websockets.ClientConnection) -> dict[str, Any]:
     result: dict[str, Any] = json.loads(await ws.recv())
     return result
+
+
+async def _auth_connect(url: str, token: str = "test-token") -> websockets.ClientConnection:
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    return ws
 
 
 class _FakeStream:
@@ -74,6 +79,19 @@ class _ErrorStream:
         for d in self._deltas:
             yield d
         raise OpenClawError(self._error_msg)
+
+
+class _StaticResponseHandler:
+    """Explicit static response handler for tests that do not need OpenClaw."""
+
+    async def handle(self, message: str, send_frame: Any) -> None:
+        await send_frame({"type": "status", "status": "streaming"})
+        for delta in ["This is a ", "test response ", "from the gateway."]:
+            await send_frame({"type": "assistant", "delta": delta})
+        await send_frame({"type": "end"})
+
+    async def close(self) -> None:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +287,7 @@ class TestEmptyTranscriptionSkipsOpenClaw:
         mock_transcriber = AsyncMock()
         mock_transcriber.transcribe.return_value = transcription_text
 
-        handler = MockResponseHandler()
+        handler = _StaticResponseHandler()
         fake_ws = _FakeWebSocket()
         session = GatewaySession(
             fake_ws,  # type: ignore[arg-type]
@@ -305,7 +323,7 @@ class TestEmptyTranscriptionSkipsOpenClaw:
         mock_transcriber = AsyncMock()
         mock_transcriber.transcribe.return_value = "hello world"
 
-        handler = MockResponseHandler()
+        handler = _StaticResponseHandler()
         fake_ws = _FakeWebSocket()
         session = GatewaySession(
             fake_ws,  # type: ignore[arg-type]
@@ -339,22 +357,23 @@ class TestEmptyTranscriptionSkipsOpenClaw:
 class TestAutoHandlerSelection:
     """GatewayServer picks the correct handler based on config."""
 
-    def test_no_token_defaults_to_mock(self) -> None:
-        """Without openclaw_gateway_token, MockResponseHandler is used."""
-        config = GatewayConfig(openclaw_gateway_token=None)
-        server = GatewayServer(config)
-        assert isinstance(server._handler, MockResponseHandler)
+    def test_no_token_raises(self) -> None:
+        """Without openclaw_gateway_token, GatewayServer fails fast."""
+        config = GatewayConfig(gateway_token="test-token", openclaw_gateway_token=None)
+        with pytest.raises(ValueError, match="OPENCLAW_GATEWAY_TOKEN"):
+            GatewayServer(config)
 
     def test_explicit_handler_overrides_config(self) -> None:
         """Explicitly passed handler wins regardless of token."""
-        config = GatewayConfig(openclaw_gateway_token="some-token")
-        mock = MockResponseHandler()
+        config = GatewayConfig(gateway_token="test-token", openclaw_gateway_token="some-token")
+        mock = _StaticResponseHandler()
         server = GatewayServer(config, handler=mock)
         assert server._handler is mock
 
     def test_token_creates_openclaw_handler(self) -> None:
         """With openclaw_gateway_token set, OpenClawResponseHandler is created."""
         config = GatewayConfig(
+            gateway_token="test-token",
             openclaw_gateway_token="test-token",
             openclaw_host="10.0.0.1",
             openclaw_port=9999,
@@ -449,14 +468,15 @@ class TestFullWebSocketIntegration:
             config = GatewayConfig(
                 gateway_host="127.0.0.1",
                 gateway_port=0,
-                gateway_token=None,
+                gateway_token="test-token",
             )
             gw = GatewayServer(config, handler=oc_handler)
             gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)
             gw_port = gw_server.sockets[0].getsockname()[1]
 
             try:
-                async with websockets.connect(f"ws://127.0.0.1:{gw_port}") as ws:
+                ws = await _auth_connect(f"ws://127.0.0.1:{gw_port}")
+                async with ws:
                     # Handshake
                     connected = await _recv_json(ws)
                     assert connected["type"] == "connected"

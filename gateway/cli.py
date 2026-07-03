@@ -278,7 +278,8 @@ def _render_env(
 # Your local IP: {local_ip} — use this in the G2 app's VITE_GATEWAY_URL.
 GATEWAY_HOST=0.0.0.0
 GATEWAY_PORT=8765
-# Auth token — the G2 app must send this as ?token= query param when connecting.
+# Auth token — the G2 app reads this from VITE_GATEWAY_URL, strips it from the
+# WebSocket URL, and sends it in the first auth frame.
 GATEWAY_TOKEN={gateway_token}
 {tailscale_section}
 # --- Whisper (Speech-to-Text) ---
@@ -417,7 +418,7 @@ def init_env(
             ]
             if tailscale_ip:
                 lines.append("")
-                lines.append("# LAN fallback (home network only):")
+                lines.append("# Alternate LAN URL (home network only):")
                 lines.append(f"# VITE_GATEWAY_URL=ws://{local_ip}:8765?token={gateway_token}")
             g2_env_content = "\n".join(lines) + "\n"
             g2_env_path.write_text(g2_env_content, encoding="utf-8")

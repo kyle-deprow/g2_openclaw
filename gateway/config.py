@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +32,6 @@ class GatewayConfig:
 
 _WEAK_TOKENS = {"changeme", "test", "password", "secret", "token", "admin", ""}
 
-_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-
-logger = logging.getLogger(__name__)
-
 
 def _parse_int_env(name: str, default: str) -> int:
     """Parse an integer environment variable with a clear error on bad values."""
@@ -54,13 +49,13 @@ def load_config() -> GatewayConfig:
 
     - ``GATEWAY_HOST`` (default ``"127.0.0.1"``)
     - ``GATEWAY_PORT`` (default ``8765``)
-    - ``GATEWAY_TOKEN`` (default ``None`` — no auth)
+    - ``GATEWAY_TOKEN`` (required)
     - ``WHISPER_MODEL`` (default ``"base.en"``)
     - ``WHISPER_DEVICE`` (default ``"cpu"``)
     - ``WHISPER_COMPUTE_TYPE`` (default ``"int8"``)
     - ``OPENCLAW_HOST`` (default ``"127.0.0.1"``)
     - ``OPENCLAW_PORT`` (default ``18789``)
-    - ``OPENCLAW_GATEWAY_TOKEN`` (default ``None``)
+    - ``OPENCLAW_GATEWAY_TOKEN`` (required)
     - ``AGENT_TIMEOUT`` (default ``120``)
     - ``AUTH_TIMEOUT`` (default ``5.0``)
     - ``ALLOWED_ORIGINS`` (default ``None`` — comma-separated list of allowed origins)
@@ -116,36 +111,27 @@ def load_config() -> GatewayConfig:
     )
 
     if cfg.gateway_token is None:
-        if cfg.gateway_host not in _LOOPBACK_HOSTS:
-            raise ValueError(
-                f"GATEWAY_TOKEN is required when listening on non-loopback interface "
-                f"({cfg.gateway_host}). Set GATEWAY_TOKEN to a strong random value."
-            )
-        logger.warning(
-            "GATEWAY_TOKEN is not set — the gateway is running WITHOUT authentication. "
-            "Set GATEWAY_TOKEN to a strong random value for production use."
+        raise ValueError(
+            "GATEWAY_TOKEN is required. Generate one with: "
+            'python -c "import secrets; print(secrets.token_urlsafe(32))"'
         )
     elif cfg.gateway_token in _WEAK_TOKENS:
-        if cfg.gateway_host not in _LOOPBACK_HOSTS:
-            raise ValueError(
-                f"GATEWAY_TOKEN is set to a weak/common value and the gateway is "
-                f"listening on {cfg.gateway_host}. Generate a strong token: "
-                'python -c "import secrets; print(secrets.token_hex(24))"'
-            )
-        logger.warning(
-            "GATEWAY_TOKEN is set to a weak value. "
-            'Generate a strong token, e.g.: python -c "import secrets;'
-            ' print(secrets.token_urlsafe(32))"'
+        raise ValueError(
+            "GATEWAY_TOKEN is set to a weak/common value. Generate a strong token: "
+            'python -c "import secrets; print(secrets.token_hex(24))"'
         )
     elif len(cfg.gateway_token) < 16:
-        if cfg.gateway_host not in _LOOPBACK_HOSTS:
-            raise ValueError(
-                f"GATEWAY_TOKEN is too short ({len(cfg.gateway_token)} chars). "
-                "Use at least 16 characters for a non-loopback host. "
-                'Generate one: python -c "import secrets; print(secrets.token_hex(24))"'
-            )
-        logger.warning(
-            "GATEWAY_TOKEN is shorter than 16 characters — consider using a longer token."
+        raise ValueError(
+            f"GATEWAY_TOKEN is too short ({len(cfg.gateway_token)} chars). "
+            "Use at least 16 characters. "
+            'Generate one: python -c "import secrets; print(secrets.token_hex(24))"'
+        )
+
+    if cfg.openclaw_gateway_token is None:
+        raise ValueError(
+            "OPENCLAW_GATEWAY_TOKEN is required. Run `uv run python -m gateway init-env` "
+            "after OpenClaw is onboarded, or copy gateway.auth.token from "
+            "~/.openclaw/openclaw.json."
         )
 
     return cfg

@@ -1,6 +1,6 @@
 """End-to-end integration tests for the G2 OpenClaw Gateway vertical slice.
 
-Proves: WebSocket connect → text message → mock streamed response → proper frame sequence.
+Proves: WebSocket connect → text message → streamed response → proper frame sequence.
 """
 
 from __future__ import annotations
@@ -28,11 +28,19 @@ async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
 
 async def _consume_handshake(
     ws: websockets.ClientConnection,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Receive and return the (connected, status:idle) handshake pair."""
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Receive and return the (connected, history, status:idle) handshake frames."""
     connected = await _recv(ws)
+    history = await _recv(ws)
     idle = await _recv(ws)
-    return connected, idle
+    return connected, history, idle
+
+
+async def _auth_connect(url: str, token: str = "integration-token") -> websockets.ClientConnection:
+    """Connect to the gateway and send first-message auth."""
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    return ws
 
 
 async def _send_text(ws: websockets.ClientConnection, message: str) -> None:
@@ -61,10 +69,12 @@ class TestHappyPathAuth:
 
     async def test_full_sequence(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=integration-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             # Handshake
-            connected, idle = await _consume_handshake(ws)
+            connected, history, idle = await _consume_handshake(ws)
             assert connected == {"type": "connected", "version": "1.0"}
+            assert history["type"] == "history"
             assert idle == {"type": "status", "status": "idle"}
 
             # Send text
@@ -79,7 +89,7 @@ class TestHappyPathAuth:
             deltas = [f["delta"] for f in frames if f["type"] == "assistant"]
             assert deltas == [
                 "This is a ",
-                "mock response ",
+                "test response ",
                 "from the gateway.",
             ]
 
@@ -87,42 +97,6 @@ class TestHappyPathAuth:
             assert frames[-1] == {"type": "status", "status": "idle"}
 
             # Connection should stay open — no more frames arrive
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(ws.recv(), timeout=0.3)
-
-
-# ---------------------------------------------------------------------------
-# Full happy path WITHOUT auth
-# ---------------------------------------------------------------------------
-
-
-class TestHappyPathNoAuth:
-    """Full vertical slice without token authentication."""
-
-    async def test_full_sequence_noauth(self, noauth_gateway: tuple[str, object]) -> None:
-        url, _ = noauth_gateway
-        async with websockets.connect(url) as ws:
-            connected, idle = await _consume_handshake(ws)
-            assert connected == {"type": "connected", "version": "1.0"}
-            assert idle == {"type": "status", "status": "idle"}
-
-            await _send_text(ws, "hello world")
-
-            frames = await _collect_response(ws)
-
-            assert frames[0] == {"type": "status", "status": "thinking"}
-            assert frames[1] == {"type": "status", "status": "streaming"}
-
-            deltas = [f["delta"] for f in frames if f["type"] == "assistant"]
-            assert deltas == [
-                "This is a ",
-                "mock response ",
-                "from the gateway.",
-            ]
-
-            assert frames[-2] == {"type": "end"}
-            assert frames[-1] == {"type": "status", "status": "idle"}
-
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(ws.recv(), timeout=0.3)
 
@@ -137,7 +111,8 @@ class TestSequentialRequests:
 
     async def test_two_sequential_requests(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=integration-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # --- First request ---
@@ -169,13 +144,15 @@ class TestConnectionReplacement:
         url, _ = auth_gateway
 
         # Client A connects and completes handshake
-        ws_a = await websockets.connect(f"{url}?token=integration-token")
+        ws_a = await _auth_connect(url)
         await _consume_handshake(ws_a)
 
         # Client B connects and completes handshake
-        async with websockets.connect(f"{url}?token=integration-token") as ws_b:
-            connected_b, idle_b = await _consume_handshake(ws_b)
+        ws_b = await _auth_connect(url)
+        async with ws_b:
+            connected_b, history_b, idle_b = await _consume_handshake(ws_b)
             assert connected_b["type"] == "connected"
+            assert history_b["type"] == "history"
             assert idle_b == {"type": "status", "status": "idle"}
 
         # Client A should have been closed by the server
@@ -195,7 +172,8 @@ class TestErrorRecovery:
 
     async def test_invalid_json_then_valid_text(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=integration-token") as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # Send invalid JSON
@@ -212,7 +190,7 @@ class TestErrorRecovery:
             deltas = [f["delta"] for f in frames if f["type"] == "assistant"]
             assert deltas == [
                 "This is a ",
-                "mock response ",
+                "test response ",
                 "from the gateway.",
             ]
             assert frames[-1] == {"type": "status", "status": "idle"}
@@ -228,7 +206,8 @@ class TestAuthRejection:
 
     async def test_wrong_token_closed_4001(self, auth_gateway: tuple[str, object]) -> None:
         url, _ = auth_gateway
-        async with websockets.connect(f"{url}?token=wrong-token") as ws:
+        ws = await _auth_connect(url, token="wrong-token")
+        async with ws:
             with pytest.raises(websockets.ConnectionClosedError) as exc_info:
                 await asyncio.wait_for(ws.recv(), timeout=TIMEOUT)
             assert exc_info.value.rcvd.code == 4001  # type: ignore[union-attr]

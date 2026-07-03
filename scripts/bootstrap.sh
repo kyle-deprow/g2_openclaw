@@ -250,7 +250,7 @@ setup_openclaw() {
   else
     info "OpenClaw CLI not found"
     if prompt_yn "Install OpenClaw globally via npm?"; then
-      sudo npm install -g openclaw
+      sudo npm install -g openclaw@latest
       if command -v openclaw &>/dev/null; then
         ok "OpenClaw installed: $(openclaw --version 2>&1 | head -1)"
         summary_add "Installed OpenClaw globally"
@@ -260,8 +260,8 @@ setup_openclaw() {
         return
       fi
     else
-      info "Skipped OpenClaw install — gateway will run in mock mode"
-      summary_add "OpenClaw: not installed (mock mode)"
+      warn "Skipped OpenClaw install — gateway startup requires OpenClaw"
+      summary_add "OpenClaw: not installed (gateway will not start)"
       return
     fi
   fi
@@ -368,7 +368,7 @@ install_optional_tools() {
   fi
 
   if prompt_yn "Install @evenrealities/evenhub-simulator globally?"; then
-    npm i -g @evenrealities/evenhub-simulator
+    npm i -g @evenrealities/evenhub-simulator@latest
     ok "evenhub-simulator installed"
     summary_add "Installed evenhub-simulator (global)"
   else
@@ -376,7 +376,7 @@ install_optional_tools() {
   fi
 
   if prompt_yn "Install @evenrealities/evenhub-cli globally?"; then
-    npm i -g @evenrealities/evenhub-cli
+    npm i -g @evenrealities/evenhub-cli@latest
     ok "evenhub-cli installed"
     summary_add "Installed evenhub-cli (global)"
   else
@@ -454,7 +454,7 @@ check_tailscale() {
         summary_add "Security: gateway token is weak ($token_len chars)"
       fi
     else
-      warn "No GATEWAY_TOKEN in .env — auth is disabled"
+      warn "No GATEWAY_TOKEN in .env — gateway startup will fail"
       summary_add "Security: no gateway token set"
     fi
   fi

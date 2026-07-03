@@ -145,11 +145,10 @@ describe('parseFrame', () => {
     expect((frame as unknown as Record<string, unknown>).phase).toBeUndefined();
   });
 
-  it('ignores wrong-type optional metadata on status frame', () => {
-    const frame = parseFrame(
+  it('throws on wrong-type optional metadata on status frame', () => {
+    expect(() => parseFrame(
       '{"type":"status","status":"idle","question":123,"elapsedMs":"slow","phase":true}',
-    );
-    expect(frame).toEqual({ type: 'status', status: 'idle' });
+    )).toThrow('Field "question" must be string');
   });
 
   // --- Session reset frame ---
@@ -242,12 +241,10 @@ describe('parseFrame', () => {
     expect((frame as unknown as Record<string, unknown>).sessionStartedAt).toBeUndefined();
   });
 
-  it('silently drops optional connected fields with wrong type', () => {
-    const frame = parseFrame(
+  it('throws on optional connected fields with wrong type', () => {
+    expect(() => parseFrame(
       '{"type":"connected","version":"1.0.0","sessionId":123,"sessionKey":true}',
-    );
-    expect(frame).toEqual({ type: 'connected', version: '1.0.0' });
-    expect((frame as unknown as Record<string, unknown>).sessionId).toBeUndefined();
+    )).toThrow('Field "sessionId" must be string');
   });
 
   // --- Status frame with optional question/elapsedMs/phase ---
@@ -309,8 +306,8 @@ describe('parseFrame', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', preview: 'First session', updatedAt: '2026-03-07T10:00:00Z', messageCount: 5 },
-        { sessionKey: 'key2', sessionId: 'id2', preview: 'Second session', updatedAt: '2026-03-07T09:00:00Z', messageCount: 3 },
+        { sessionKey: 'key1', sessionId: 'id1', preview: 'First session', updatedAt: '2026-03-07T10:00:00Z', messageCount: 5, label: 'First session', isActive: true },
+        { sessionKey: 'key2', sessionId: 'id2', preview: 'Second session', updatedAt: '2026-03-07T09:00:00Z', messageCount: 3, label: 'Second session', isActive: false },
       ],
       activeSessionKey: 'key1',
     }));
@@ -354,28 +351,22 @@ describe('parseFrame', () => {
     );
   });
 
-  it('filters out malformed session entries', () => {
-    const frame = parseFrame(JSON.stringify({
+  it('throws on malformed session entries', () => {
+    expect(() => parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
-        { sessionKey: 'key1', updatedAt: '2026-03-07T10:00:00Z', preview: 'Good', messageCount: 1 },
+        { sessionKey: 'key1', sessionId: 'id1', updatedAt: '2026-03-07T10:00:00Z', preview: 'Good', messageCount: 1, label: 'Good', isActive: false },
         { sessionKey: 123, updatedAt: '2026-03-07T09:00:00Z', preview: 'Bad key', messageCount: 0 },
-        { updatedAt: '2026-03-07T08:00:00Z', preview: 'Missing key', messageCount: 0 },
-        'not-an-object',
-        null,
       ],
       activeSessionKey: '',
-    }));
-    const sl = frame as any;
-    expect(sl.sessions).toHaveLength(1);
-    expect(sl.sessions[0].sessionKey).toBe('key1');
+    }))).toThrow('session_list.sessions[1].sessionKey must be string');
   });
 
-  it('derives isActive from activeSessionKey', () => {
+  it('uses activeSessionKey to prevent stale active flags', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', preview: 'Test', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0 },
+        { sessionKey: 'key1', sessionId: 'id1', preview: 'Test', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0, label: 'Test', isActive: true },
       ],
       activeSessionKey: 'other-key',
     }));
@@ -383,11 +374,11 @@ describe('parseFrame', () => {
     expect(sl.sessions[0].isActive).toBe(false);
   });
 
-  it('derives label from preview when present', () => {
+  it('preserves server-provided label', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
-        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: 'My Chat', updatedAt: '2026-03-07T10:00:00Z', messageCount: 2 },
+        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: 'My Chat', updatedAt: '2026-03-07T10:00:00Z', messageCount: 2, label: 'My Chat', isActive: false },
       ],
       activeSessionKey: '',
     }));
@@ -395,11 +386,11 @@ describe('parseFrame', () => {
     expect(sl.sessions[0].label).toBe('My Chat');
   });
 
-  it('derives label from sessionKey when preview is empty', () => {
+  it('accepts empty preview when label is provided', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
-        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: '', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0 },
+        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: '', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0, label: 'abc', isActive: false },
       ],
       activeSessionKey: '',
     }));
@@ -407,16 +398,14 @@ describe('parseFrame', () => {
     expect(sl.sessions[0].label).toBe('abc');
   });
 
-  it('defaults messageCount to 0 when missing', () => {
-    const frame = parseFrame(JSON.stringify({
+  it('throws when messageCount is missing', () => {
+    expect(() => parseFrame(JSON.stringify({
       type: 'session_list',
       sessions: [
         { sessionKey: 'key1', sessionId: 'id1', preview: 'Test', updatedAt: '2026-03-07T10:00:00Z' },
       ],
       activeSessionKey: '',
-    }));
-    const sl = frame as any;
-    expect(sl.sessions[0].messageCount).toBe(0);
+    }))).toThrow('session_list.sessions[0].messageCount must be number');
   });
 
   // --- Session switched frame ---
@@ -458,8 +447,9 @@ describe('parseFrame', () => {
     );
   });
 
-  it('silently drops sessionId with wrong type on session_switched', () => {
-    const frame = parseFrame('{"type":"session_switched","sessionKey":"k","sessionId":123}');
-    expect(frame).toEqual({ type: 'session_switched', sessionKey: 'k' });
+  it('throws when sessionId has wrong type on session_switched', () => {
+    expect(() => parseFrame('{"type":"session_switched","sessionKey":"k","sessionId":123}')).toThrow(
+      'Field "sessionId" must be string',
+    );
   });
 });

@@ -4,6 +4,13 @@ import pytest
 from gateway.config import GatewayConfig, load_config
 
 
+@pytest.fixture(autouse=True)
+def _required_auth_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Most load_config tests need production-required auth tokens."""
+    monkeypatch.setenv("GATEWAY_TOKEN", "gateway-token-1234567890")
+    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "openclaw-token-1234567890")
+
+
 class TestGatewayConfigDefaults:
     """GatewayConfig defaults."""
 
@@ -31,33 +38,31 @@ class TestLoadConfig:
     def test_reads_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.setenv("GATEWAY_PORT", "9000")
-        monkeypatch.setenv("GATEWAY_TOKEN", "s3cret")
+        monkeypatch.setenv("GATEWAY_TOKEN", "gateway-token-abcdef")
 
         cfg = load_config()
 
         assert cfg.gateway_host == "127.0.0.1"
         assert cfg.gateway_port == 9000
-        assert cfg.gateway_token == "s3cret"
+        assert cfg.gateway_token == "gateway-token-abcdef"
 
-    def test_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_optional_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.delenv("GATEWAY_HOST", raising=False)
         monkeypatch.delenv("GATEWAY_PORT", raising=False)
-        monkeypatch.delenv("GATEWAY_TOKEN", raising=False)
 
         cfg = load_config()
 
         assert cfg.gateway_host == "127.0.0.1"
         assert cfg.gateway_port == 8765
-        assert cfg.gateway_token is None
+        assert cfg.gateway_token == "gateway-token-1234567890"
 
-    def test_empty_token_treated_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.setenv("GATEWAY_TOKEN", "")
 
-        cfg = load_config()
-
-        assert cfg.gateway_token is None
+        with pytest.raises(ValueError, match="GATEWAY_TOKEN is required"):
+            load_config()
 
     def test_config_whisper_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("WHISPER_MODEL", "large-v3")
@@ -110,26 +115,26 @@ class TestOpenClawLoadConfig:
         assert cfg.openclaw_gateway_token == "oc-secret"
         assert cfg.agent_timeout == 60
 
-    def test_openclaw_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_openclaw_optional_defaults_when_env_absent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.delenv("OPENCLAW_HOST", raising=False)
         monkeypatch.delenv("OPENCLAW_PORT", raising=False)
-        monkeypatch.delenv("OPENCLAW_GATEWAY_TOKEN", raising=False)
         monkeypatch.delenv("AGENT_TIMEOUT", raising=False)
 
         cfg = load_config()
 
         assert cfg.openclaw_host == "127.0.0.1"
         assert cfg.openclaw_port == 18789
-        assert cfg.openclaw_gateway_token is None
+        assert cfg.openclaw_gateway_token == "openclaw-token-1234567890"
         assert cfg.agent_timeout == 120
 
-    def test_empty_openclaw_token_treated_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_empty_openclaw_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "")
 
-        cfg = load_config()
-
-        assert cfg.openclaw_gateway_token is None
+        with pytest.raises(ValueError, match="OPENCLAW_GATEWAY_TOKEN is required"):
+            load_config()
 
 
 class TestSecurityConfig:
@@ -164,38 +169,24 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="GATEWAY_TOKEN is required"):
             load_config()
 
-    def test_loopback_without_token_warns(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Loopback host without token logs a warning but does not raise."""
+    def test_loopback_without_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Loopback host without token raises ValueError."""
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.delenv("GATEWAY_TOKEN", raising=False)
 
-        import logging
+        with pytest.raises(ValueError, match="GATEWAY_TOKEN is required"):
+            load_config()
 
-        with caplog.at_level(logging.WARNING):
-            cfg = load_config()
-
-        assert cfg.gateway_token is None
-        assert "WITHOUT authentication" in caplog.text
-
-    def test_weak_token_warning_does_not_contain_token(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Weak token warning must not leak the actual token value."""
+    def test_weak_token_raises_without_leaking_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Weak token raises without leaking the actual token value."""
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.setenv("GATEWAY_TOKEN", "changeme")
 
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            cfg = load_config()
-
-        assert cfg.gateway_token == "changeme"
-        assert "weak value" in caplog.text
-        assert "changeme" not in caplog.text
+        with pytest.raises(ValueError, match="weak/common value") as exc_info:
+            load_config()
+        assert "changeme" not in str(exc_info.value)
 
     def test_weak_token_non_loopback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Weak token on non-loopback host raises ValueError."""
@@ -215,21 +206,14 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="too short"):
             load_config()
 
-    def test_short_token_loopback_warns(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Short token on loopback host logs a warning but does not raise."""
+    def test_short_token_loopback_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Short token on loopback host raises ValueError."""
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.setenv("GATEWAY_HOST", "127.0.0.1")
         monkeypatch.setenv("GATEWAY_TOKEN", "short")
 
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            cfg = load_config()
-
-        assert cfg.gateway_token == "short"
-        assert "shorter than 16" in caplog.text
+        with pytest.raises(ValueError, match="too short"):
+            load_config()
 
     def test_parse_int_env_invalid_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-integer GATEWAY_PORT raises clear ValueError."""

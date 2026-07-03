@@ -478,8 +478,9 @@ class TestDiscardInflight:
         config = GatewayConfig(
             gateway_host="127.0.0.1",
             gateway_port=0,
+            gateway_token="test-token",
         )
-        gw = GatewayServer(config)
+        gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 
         # Set up fake buffer and task
         gw._inflight_buffer = InflightBuffer(user_question="test")
@@ -501,8 +502,9 @@ class TestDiscardInflight:
         config = GatewayConfig(
             gateway_host="127.0.0.1",
             gateway_port=0,
+            gateway_token="test-token",
         )
-        gw = GatewayServer(config)
+        gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 
         assert gw._inflight_buffer is None
         assert gw._inflight_task is None
@@ -517,8 +519,9 @@ class TestDiscardInflight:
         config = GatewayConfig(
             gateway_host="127.0.0.1",
             gateway_port=0,
+            gateway_token="test-token",
         )
-        gw = GatewayServer(config)
+        gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 
         async def _instant() -> None:
             return

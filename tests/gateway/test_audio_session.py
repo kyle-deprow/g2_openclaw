@@ -74,6 +74,20 @@ class MockTranscriber:
         return self._result
 
 
+class StaticResponseHandler:
+    """Explicit response handler for audio session tests."""
+
+    async def handle(
+        self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        await send_frame({"type": "status", "status": "streaming"})
+        await send_frame({"type": "assistant", "delta": "test response"})
+        await send_frame({"type": "end"})
+
+    async def close(self) -> None:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Helper to build a start_audio frame
 # ---------------------------------------------------------------------------
@@ -112,7 +126,7 @@ class TestStartAudio:
     async def test_start_audio_transitions_to_recording(self) -> None:
         """Send start_audio while idle → status:recording."""
         ws = FakeWebSocket(messages=[_start_audio_frame()])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -149,7 +163,7 @@ class TestStartAudio:
     async def test_start_audio_while_not_idle_returns_error(self) -> None:
         """Directly test dispatch rejects start_audio when not idle."""
         ws = FakeWebSocket(messages=[])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         session._state = SessionState.THINKING
 
         frame = {"type": "start_audio", "sampleRate": 16000, "channels": 1, "sampleWidth": 2}
@@ -166,7 +180,7 @@ class TestBinaryData:
         """Binary data during RECORDING is appended to the audio buffer."""
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         # After start_audio, buffer was created and binary data appended.
@@ -179,7 +193,7 @@ class TestBinaryData:
         """Binary data while IDLE produces no error, just ignored."""
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[pcm])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -192,7 +206,7 @@ class TestStopAudio:
         transcriber = MockTranscriber(result="hello world")
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -219,7 +233,7 @@ class TestStopAudio:
         """start_audio then immediately stop_audio (no binary data) → error."""
         transcriber = MockTranscriber()
         ws = FakeWebSocket(messages=[_start_audio_frame(), _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -235,7 +249,7 @@ class TestStopAudio:
     async def test_stop_audio_without_recording_returns_error(self) -> None:
         """stop_audio while idle → INVALID_STATE error."""
         ws = FakeWebSocket(messages=[_stop_audio_frame()])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -248,7 +262,7 @@ class TestBufferOverflow:
     async def test_buffer_overflow_sends_error(self) -> None:
         """Exceeding buffer capacity sends BUFFER_OVERFLOW error."""
         ws = FakeWebSocket(messages=[])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
 
         # Manually set up recording state and buffer
         session._state = SessionState.RECORDING
@@ -276,7 +290,7 @@ class TestTranscriptionErrors:
         transcriber = MockTranscriber(result=TranscriptionError("model failed"))
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -291,7 +305,7 @@ class TestTranscriptionErrors:
         transcriber = MockTranscriber(result=TimeoutError())
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -307,7 +321,7 @@ class TestTranscriptionErrors:
         """No transcriber configured → TRANSCRIPTION_FAILED error frame."""
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=None)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=None)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -324,7 +338,7 @@ class TestTranscriptionErrors:
         transcriber = MockTranscriber(result=RuntimeError("kaboom"))
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -338,11 +352,11 @@ class TestTranscriptionErrors:
 
 class TestFullPipeline:
     async def test_full_audio_pipeline(self) -> None:
-        """End-to-end: start_audio → binary → stop_audio → transcription → mock response → idle."""
+        """End-to-end: start_audio → binary → stop_audio → transcription → idle."""
         transcriber = MockTranscriber(result="hello")
         pcm = _pcm_silence(3200)
         ws = FakeWebSocket(messages=[_start_audio_frame(), pcm, _stop_audio_frame()])
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -383,7 +397,7 @@ class TestStartAudioValidation:
     async def test_unsupported_sample_width_returns_error(self) -> None:
         """start_audio with sample_width != 2 → INVALID_FRAME error."""
         ws = FakeWebSocket(messages=[_start_audio_frame(sample_width=4)])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -396,7 +410,7 @@ class TestStartAudioValidation:
     async def test_invalid_sample_rate_returns_error(self) -> None:
         """start_audio with sample_rate=0 → INVALID_FRAME error."""
         ws = FakeWebSocket(messages=[_start_audio_frame(sample_rate=0)])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -407,7 +421,7 @@ class TestStartAudioValidation:
     async def test_invalid_sample_rate_too_high_returns_error(self) -> None:
         """start_audio with sample_rate > 48000 → INVALID_FRAME error."""
         ws = FakeWebSocket(messages=[_start_audio_frame(sample_rate=96_000)])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -418,7 +432,7 @@ class TestStartAudioValidation:
     async def test_invalid_channels_returns_error(self) -> None:
         """start_audio with channels=0 → INVALID_FRAME error."""
         ws = FakeWebSocket(messages=[_start_audio_frame(channels=0)])
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]
@@ -431,7 +445,7 @@ class TestStartAudioValidation:
         ws = FakeWebSocket(
             messages=[_start_audio_frame(sample_rate=44_100, channels=2, sample_width=2)]
         )
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         statuses = [f for f in ws.sent_frames if f["type"] == "status"]
@@ -452,7 +466,7 @@ class TestOddByteChunk:
                 good_chunk,  # Ignored because session reset to idle after error
             ]
         )
-        session = GatewaySession(ws)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler())  # type: ignore[arg-type]
         await session.handle()
 
         errors = [f for f in ws.sent_frames if f["type"] == "error"]

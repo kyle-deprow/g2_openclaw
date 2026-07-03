@@ -83,6 +83,7 @@ let mockLocalStorage: {
 };
 
 let savedViteGatewayUrl: string | undefined;
+const TEST_URL = 'ws://127.0.0.1:1234?token=test-token';
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -124,18 +125,18 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 describe('Gateway', () => {
   describe('resolveUrl()', () => {
-    it('returns fallback when no sources available', () => {
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+    it('throws when no sources are available', () => {
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
 
     it('prefers hash over everything', () => {
-      window.location.hash = '#ws://192.168.1.100:1234';
-      expect(gateway.resolveUrl()).toBe('ws://192.168.1.100:1234');
+      window.location.hash = '#ws://192.168.1.100:1234?token=abc';
+      expect(gateway.resolveUrl()).toBe('ws://192.168.1.100:1234?token=abc');
     });
 
     it('prefers query param over localStorage', () => {
-      window.location.search = '?gateway=ws://10.0.0.5:5678';
-      expect(gateway.resolveUrl()).toBe('ws://10.0.0.5:5678');
+      window.location.search = '?gateway=ws://10.0.0.5:5678?token=abc';
+      expect(gateway.resolveUrl()).toBe('ws://10.0.0.5:5678?token=abc');
     });
 
     it('uses localStorage when no hash/query', () => {
@@ -147,12 +148,12 @@ describe('Gateway', () => {
   describe('URL security', () => {
     it('rejects ws:// to public hostnames', () => {
       window.location.hash = '#ws://evil.com:8765';
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
 
     it('rejects ws:// to DNS names starting with private IP prefix', () => {
       window.location.hash = '#ws://10.evil.com:8765';
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
 
     it('accepts wss:// to public hostnames', () => {
@@ -162,7 +163,7 @@ describe('Gateway', () => {
 
     it('rejects non-ws protocols', () => {
       window.location.hash = '#http://localhost:8765';
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
 
     it('accepts ws:// to Tailscale CGNAT IPs (100.64-127.x.x)', () => {
@@ -177,12 +178,12 @@ describe('Gateway', () => {
 
     it('rejects ws:// to non-Tailscale 100.x IPs outside CGNAT range', () => {
       window.location.hash = '#ws://100.63.0.1:8765';
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
 
     it('rejects ws:// to 100.128.x.x (above CGNAT range)', () => {
       window.location.hash = '#ws://100.128.0.1:8765';
-      expect(gateway.resolveUrl()).toBe('ws://localhost:8765');
+      expect(() => gateway.resolveUrl()).toThrow('Gateway URL is not configured');
     });
   });
 
@@ -190,7 +191,7 @@ describe('Gateway', () => {
     it('emits connected event on ws open', () => {
       const events: GatewayEvent[] = [];
       gateway.onEvent((e) => events.push(e));
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
 
       MockWebSocket.last!.simulateOpen();
       expect(events).toContain('connected');
@@ -199,7 +200,7 @@ describe('Gateway', () => {
 
   describe('sendJson', () => {
     it('sends JSON string when connected', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       const ws = MockWebSocket.last!;
       ws.simulateOpen();
 
@@ -208,7 +209,7 @@ describe('Gateway', () => {
     });
 
     it('is no-op when disconnected', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       // Don't open the socket — readyState stays CONNECTING
       gateway.sendJson({ type: 'pong' });
       expect(MockWebSocket.last!.sent).toHaveLength(0);
@@ -217,7 +218,7 @@ describe('Gateway', () => {
 
   describe('disconnect()', () => {
     it('clears reconnect timer and closes ws', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       const ws = MockWebSocket.last!;
       ws.simulateOpen();
 
@@ -229,7 +230,7 @@ describe('Gateway', () => {
     it('prevents reconnect after intentional close', () => {
       const events: GatewayEvent[] = [];
       gateway.onEvent((e) => events.push(e));
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       const ws = MockWebSocket.last!;
       ws.simulateOpen();
 
@@ -245,7 +246,7 @@ describe('Gateway', () => {
     it('delivers parsed frames to callbacks', () => {
       const frames: InboundFrame[] = [];
       gateway.onMessage((f) => frames.push(f));
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
 
       MockWebSocket.last!.simulateMessage('{"type":"status","status":"idle"}');
@@ -256,7 +257,7 @@ describe('Gateway', () => {
     it('auto-replies pong to ping and does not forward to callbacks', () => {
       const frames: InboundFrame[] = [];
       gateway.onMessage((f) => frames.push(f));
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       const ws = MockWebSocket.last!;
       ws.simulateOpen();
 
@@ -270,7 +271,7 @@ describe('Gateway', () => {
     it('emits disconnected and reconnecting on unexpected close', () => {
       const events: GatewayEvent[] = [];
       gateway.onEvent((e) => events.push(e));
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
 
       MockWebSocket.last!.simulateClose();
@@ -282,7 +283,7 @@ describe('Gateway', () => {
   describe('binary message handling', () => {
     it('warns on binary message', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
 
       MockWebSocket.last!.simulateBinaryMessage(new ArrayBuffer(8));
@@ -295,14 +296,14 @@ describe('Gateway', () => {
   // -----------------------------------------------------------------------
   describe('session menu methods', () => {
     it('requestSessionList sends correct frame', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
       gateway.requestSessionList();
       expect(MockWebSocket.last!.sent).toContain('{"type":"session_list_request"}');
     });
 
     it('switchSession sends correct frame with sessionKey', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
       gateway.switchSession('agent:claw:g2:abc123');
       expect(MockWebSocket.last!.sent).toContain(
@@ -311,7 +312,7 @@ describe('Gateway', () => {
     });
 
     it('createNewSession sends correct frame', () => {
-      gateway.connect('ws://test:1234');
+      gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
       gateway.createNewSession();
       expect(MockWebSocket.last!.sent).toContain('{"type":"session_create"}');

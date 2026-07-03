@@ -33,11 +33,19 @@ async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
 
 async def _consume_handshake(
     ws: websockets.ClientConnection,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Receive and return the (connected, status:idle) handshake pair."""
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Receive and return the (connected, history, status:idle) handshake frames."""
     connected = await _recv(ws)
+    history = await _recv(ws)
     idle = await _recv(ws)
-    return connected, idle
+    return connected, history, idle
+
+
+async def _auth_connect(url: str, token: str = "audio-token") -> websockets.ClientConnection:
+    """Connect to the gateway and send first-message auth."""
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    return ws
 
 
 async def _send_json(ws: websockets.ClientConnection, frame: dict[str, Any]) -> None:
@@ -72,6 +80,19 @@ class FakeTranscriber:
         return self._result
 
 
+class StaticResponseHandler:
+    """Explicit test response handler for audio integration tests."""
+
+    async def handle(self, message: str, send_frame: Any) -> None:
+        await send_frame({"type": "status", "status": "streaming"})
+        for delta in ("This is a ", "test response ", "from the gateway."):
+            await send_frame({"type": "assistant", "delta": delta})
+        await send_frame({"type": "end"})
+
+    async def close(self) -> None:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -91,7 +112,11 @@ async def audio_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
         gateway_token="audio-token",
     )
     fake_transcriber = FakeTranscriber(result=FAKE_TEXT)
-    gw = GatewayServer(config, transcriber=fake_transcriber)  # type: ignore[arg-type]
+    gw = GatewayServer(
+        config,
+        handler=StaticResponseHandler(),
+        transcriber=fake_transcriber,  # type: ignore[arg-type]
+    )
     server = await websockets.serve(gw.handler, config.gateway_host, 0)
     port = server.sockets[0].getsockname()[1]
     try:
@@ -99,10 +124,6 @@ async def audio_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
     finally:
         server.close()
         await server.wait_closed()
-
-
-def _ws_url(base: str) -> str:
-    return f"{base}?token=audio-token"
 
 
 # Fake PCM: 200 bytes of 16-bit silence-ish data
@@ -119,10 +140,12 @@ class TestFullAudioPipeline:
 
     async def test_full_audio_pipeline(self, audio_gateway: tuple[str, GatewayServer]) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             # Handshake
-            connected, idle = await _consume_handshake(ws)
+            connected, history, idle = await _consume_handshake(ws)
             assert connected == {"type": "connected", "version": "1.0"}
+            assert history["type"] == "history"
             assert idle == {"type": "status", "status": "idle"}
 
             # Start audio
@@ -145,25 +168,31 @@ class TestFullAudioPipeline:
             # Stop audio
             await _send_json(ws, {"type": "stop_audio"})
 
-            # Collect all frames through status:idle
-            frames = await _collect_until_idle(ws)
+            # Collect transcription frames through status:idle. The app must
+            # explicitly confirm by sending a text frame after transcription.
+            transcription_frames = await _collect_until_idle(ws)
 
             # Extract frame types
-            types = [f["type"] for f in frames]
+            transcription_types = [f["type"] for f in transcription_frames]
 
             # Must see transcribing status
-            assert {"type": "status", "status": "transcribing"} in frames
+            assert {"type": "status", "status": "transcribing"} in transcription_frames
             # Must see transcription with fake text
-            assert {"type": "transcription", "text": FAKE_TEXT} in frames
+            assert {"type": "transcription", "text": FAKE_TEXT} in transcription_frames
+            assert transcription_frames[-1] == {"type": "status", "status": "idle"}
+
+            await _send_json(ws, {"type": "text", "message": FAKE_TEXT})
+            frames = await _collect_until_idle(ws)
+
             # Must see thinking
             assert {"type": "status", "status": "thinking"} in frames
-            # Must see streaming (from MockResponseHandler)
+            # Must see streaming from the explicit integration test handler
             assert {"type": "status", "status": "streaming"} in frames
             # Must see assistant deltas
             deltas = [f["delta"] for f in frames if f["type"] == "assistant"]
             assert deltas == [
                 "This is a ",
-                "mock response ",
+                "test response ",
                 "from the gateway.",
             ]
             # Must see end
@@ -172,19 +201,21 @@ class TestFullAudioPipeline:
             assert frames[-1] == {"type": "status", "status": "idle"}
 
             # Verify ordering: transcribing < transcription < thinking < streaming < end < idle
-            idx_transcribing = types.index("transcription") - 1
-            assert frames[idx_transcribing] == {
+            idx_transcribing = transcription_types.index("transcription") - 1
+            assert transcription_frames[idx_transcribing] == {
                 "type": "status",
                 "status": "transcribing",
             }
-            idx_transcription = types.index("transcription")
+            idx_transcription = transcription_types.index("transcription")
+            assert idx_transcribing < idx_transcription
+
             idx_thinking = next(
                 i
                 for i, f in enumerate(frames)
                 if f.get("type") == "status" and f.get("status") == "thinking"
             )
             idx_end = next(i for i, f in enumerate(frames) if f.get("type") == "end")
-            assert idx_transcription < idx_thinking < idx_end
+            assert idx_thinking < idx_end
 
             # Connection stays open
             with pytest.raises(asyncio.TimeoutError):
@@ -198,7 +229,8 @@ class TestStartAudioWhileRecording:
         self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # First start_audio — should succeed
@@ -236,7 +268,8 @@ class TestStopAudioWithoutRecording:
         self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # Send stop_audio without ever starting
@@ -253,7 +286,8 @@ class TestStopAudioWithNoData:
         self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # Start audio
@@ -292,7 +326,8 @@ class TestTextWhileRecording:
         self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # Start audio
@@ -322,7 +357,8 @@ class TestBinaryDataWhileIdle:
         self, audio_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = audio_gateway
-        async with websockets.connect(_ws_url(url)) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             await _consume_handshake(ws)
 
             # Send binary data without start_audio — should be silently ignored
@@ -337,7 +373,7 @@ class TestBinaryDataWhileIdle:
             deltas = [f["delta"] for f in frames if f["type"] == "assistant"]
             assert deltas == [
                 "This is a ",
-                "mock response ",
+                "test response ",
                 "from the gateway.",
             ]
             assert frames[-1] == {"type": "status", "status": "idle"}

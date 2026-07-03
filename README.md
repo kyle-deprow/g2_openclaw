@@ -98,11 +98,11 @@ Python WebSocket server that accepts G2 App connections, runs Whisper transcript
 
 **Key features:**
 
-- Whisper transcription via faster-whisper (CUDA or CPU); falls back to mock when token unset
-- OpenClaw integration with Ed25519 auth; falls back to `MockResponseHandler`
+- Whisper transcription via faster-whisper (CUDA or CPU); startup fails if the model cannot load
+- OpenClaw integration with Ed25519 auth; `OPENCLAW_GATEWAY_TOKEN` is required
 - Session management: list, switch, create; daily auto-reset on date rollover
 - Inflight response buffering: captures deltas during disconnect, replays on reconnect (200KB cap, 5min TTL)
-- Auth: HMAC token, rate limiting (5 failures/60s/IP), weak-token warning
+- Auth: first-message HMAC token handshake, rate limiting (5 failures/60s/IP), weak-token rejection
 - Health endpoint: `/healthz` → HTTP 200
 - Local audio capture mode (`--local-audio`)
 - CUDA library pre-loading for GPU inference
@@ -198,7 +198,8 @@ uv run python -m gateway launch              # gateway + vite + simulator
 uv run python -m gateway launch --no-simulator  # gateway + vite only
 ```
 
-The gateway listens on `ws://127.0.0.1:8765`. Clients connect with `?token=<GATEWAY_TOKEN>`.
+The gateway listens on `ws://127.0.0.1:8765`. Clients must send
+`{"type":"auth","token":"<GATEWAY_TOKEN>"}` as the first WebSocket frame.
 
 To push OpenClaw config changes:
 
@@ -340,13 +341,13 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT=none` in `.env` or environment to disable all t
 |----------|---------|-------------|
 | `GATEWAY_HOST` | `127.0.0.1` | Bind address |
 | `GATEWAY_PORT` | `8765` | Bind port |
-| `GATEWAY_TOKEN` | — | Auth token (required for non-loopback) |
+| `GATEWAY_TOKEN` | — | Required G2 app auth token |
 | `WHISPER_MODEL` | `base.en` | faster-whisper model |
 | `WHISPER_DEVICE` | `cpu` | `cpu` or `cuda` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | Inference precision |
 | `OPENCLAW_HOST` | `127.0.0.1` | OpenClaw host |
 | `OPENCLAW_PORT` | `18789` | OpenClaw port |
-| `OPENCLAW_GATEWAY_TOKEN` | — | OpenClaw auth token (unset = mock mode) |
+| `OPENCLAW_GATEWAY_TOKEN` | — | Required OpenClaw gateway auth token |
 | `AGENT_TIMEOUT` | `120` | Max seconds for AI response |
 | `AUTH_TIMEOUT` | `5.0` | Auth handshake timeout |
 | `ALLOWED_ORIGINS` | — | Comma-separated origins |
@@ -368,7 +369,7 @@ Resolved in priority order:
 
 Binary + JSON protocol between Gateway and G2 App.
 
-**Authentication:** Token via query parameter (`?token=...`). Single connection at a time — new connections replace existing ones.
+**Authentication:** first client frame must be `{"type":"auth","token":"..."}` when `GATEWAY_TOKEN` is configured. The G2 app may receive the token in its URL, but it strips the token before opening the WebSocket and sends this auth frame. Single connection at a time — new connections replace existing ones.
 
 ### Client → Gateway (9 frame types)
 

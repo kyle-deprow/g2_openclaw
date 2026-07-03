@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import secrets
 import socket
 from collections.abc import Callable, Coroutine
 from typing import Any, cast
@@ -62,8 +63,16 @@ async def _consume_handshake(
     ws: websockets.ClientConnection,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     connected = await _recv(ws)
+    history = await _recv(ws)
+    assert history["type"] == "history"
     idle = await _recv(ws)
     return connected, idle
+
+
+async def _auth_connect(url: str, token: str = "e2e-token") -> websockets.ClientConnection:
+    ws = await websockets.connect(url)
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    return ws
 
 
 async def _send_text(ws: websockets.ClientConnection, message: str) -> None:
@@ -120,8 +129,22 @@ class MockTranscriber:
 # ---------------------------------------------------------------------------
 
 
+async def _send_connect_challenge(ws: websockets.ServerConnection) -> None:
+    """Send the current OpenClaw connect challenge event."""
+    await ws.send(
+        json.dumps(
+            {
+                "type": "event",
+                "event": "connect.challenge",
+                "payload": {"nonce": secrets.token_urlsafe(16)},
+            }
+        )
+    )
+
+
 async def _standard_oc_handler(ws: websockets.ServerConnection) -> None:
     """Standard mock: connect ack + agent with 2 deltas + lifecycle end."""
+    await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -165,6 +188,7 @@ async def _standard_oc_handler(ws: websockets.ServerConnection) -> None:
 
 async def _long_response_oc_handler(ws: websockets.ServerConnection) -> None:
     """Sends 100 deltas of 50 chars each (5 000 chars total)."""
+    await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -211,6 +235,7 @@ async def _long_response_oc_handler(ws: websockets.ServerConnection) -> None:
 
 async def _hanging_oc_handler(ws: websockets.ServerConnection) -> None:
     """Accepts agent request but never sends deltas — simulates a hang."""
+    await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -236,6 +261,7 @@ async def _hanging_oc_handler(ws: websockets.ServerConnection) -> None:
 
 async def _error_mid_stream_oc_handler(ws: websockets.ServerConnection) -> None:
     """Sends 2 deltas then a lifecycle error event."""
+    await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -366,7 +392,8 @@ class TestFullTextFlow:
     async def test_full_text_e2e(self) -> None:
         url, gw_server, oc_server, client = await _make_openclaw_gateway(_standard_oc_handler)
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 # Handshake
                 connected, idle = await _consume_handshake(ws)
                 assert connected == {"type": "connected", "version": "1.0"}
@@ -410,7 +437,8 @@ class TestFullVoiceFlow:
             _standard_oc_handler, transcriber=transcriber
         )
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 connected, idle = await _consume_handshake(ws)
                 assert connected == {"type": "connected", "version": "1.0"}
                 assert idle == {"type": "status", "status": "idle"}
@@ -435,13 +463,18 @@ class TestFullVoiceFlow:
                 # Stop audio
                 await _send_json(ws, {"type": "stop_audio"})
 
-                # Collect through final idle
-                frames = await _collect_until_idle(ws)
+                # Collect transcription through idle, then confirm via text.
+                transcription_frames = await _collect_until_idle(ws)
 
                 # Must have transcribing status
-                assert {"type": "status", "status": "transcribing"} in frames
+                assert {"type": "status", "status": "transcribing"} in transcription_frames
                 # Must have transcription
-                assert {"type": "transcription", "text": "hello world"} in frames
+                assert {"type": "transcription", "text": "hello world"} in transcription_frames
+                assert transcription_frames[-1] == {"type": "status", "status": "idle"}
+
+                await _send_text(ws, "hello world")
+                frames = await _collect_until_idle(ws)
+
                 # Thinking
                 assert {"type": "status", "status": "thinking"} in frames
                 # Streaming
@@ -454,14 +487,16 @@ class TestFullVoiceFlow:
                 # Final idle
                 assert frames[-1] == {"type": "status", "status": "idle"}
 
-                # Ordering: transcribing < transcription < thinking < streaming < end < idle
+                # Ordering: transcription completes before the confirmed text response starts.
                 idx_transcribing = next(
                     i
-                    for i, f in enumerate(frames)
+                    for i, f in enumerate(transcription_frames)
                     if f.get("type") == "status" and f.get("status") == "transcribing"
                 )
                 idx_transcription = next(
-                    i for i, f in enumerate(frames) if f.get("type") == "transcription"
+                    i
+                    for i, f in enumerate(transcription_frames)
+                    if f.get("type") == "transcription"
                 )
                 idx_thinking = next(
                     i
@@ -469,7 +504,8 @@ class TestFullVoiceFlow:
                     if f.get("type") == "status" and f.get("status") == "thinking"
                 )
                 idx_end = next(i for i, f in enumerate(frames) if f.get("type") == "end")
-                assert idx_transcribing < idx_transcription < idx_thinking < idx_end
+                assert idx_transcribing < idx_transcription
+                assert idx_thinking < idx_end
         finally:
             await _cleanup(gw_server, oc_server, client)
 
@@ -481,7 +517,8 @@ class TestLongResponseTruncation:
     async def test_100_deltas_all_arrive(self) -> None:
         url, gw_server, oc_server, client = await _make_openclaw_gateway(_long_response_oc_handler)
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
                 await _send_text(ws, "give me a long answer")
 
@@ -510,7 +547,8 @@ class TestMultipleSequentialQueries:
     async def test_two_queries_no_state_leak(self) -> None:
         url, gw_server, oc_server, client = await _make_openclaw_gateway(_standard_oc_handler)
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
 
                 # --- First query ---
@@ -563,7 +601,8 @@ class TestOpenClawNotRunning:
         gw_port = gw_server.sockets[0].getsockname()[1]
 
         try:
-            async with websockets.connect(f"ws://127.0.0.1:{gw_port}?token=e2e-token") as ws:
+            ws = await _auth_connect(f"ws://127.0.0.1:{gw_port}")
+            async with ws:
                 await _consume_handshake(ws)
 
                 await _send_text(ws, "hello?")
@@ -594,7 +633,8 @@ class TestAgentTimeout:
             _hanging_oc_handler, agent_timeout=2
         )
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
 
                 t0 = asyncio.get_event_loop().time()
@@ -629,7 +669,8 @@ class TestOpenClawErrorDuringStreaming:
             _error_mid_stream_oc_handler
         )
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
 
                 await _send_text(ws, "this will error mid-stream")
@@ -655,6 +696,7 @@ class TestOpenClawErrorDuringStreaming:
 
 async def _empty_response_oc_handler(ws: websockets.ServerConnection) -> None:
     """Accepts agent request and immediately sends lifecycle end — zero deltas."""
+    await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
         method = msg.get("method")
@@ -693,7 +735,8 @@ class TestEmptyResponse:
     async def test_empty_response(self) -> None:
         url, gw_server, oc_server, client = await _make_openclaw_gateway(_empty_response_oc_handler)
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
                 await _send_text(ws, "give me an empty response")
 
@@ -720,6 +763,7 @@ class TestRecoveryAfterError:
         agent_calls = [0]
 
         async def oc_handler(ws: websockets.ServerConnection) -> None:
+            await _send_connect_challenge(ws)
             async for raw in ws:
                 msg = json.loads(raw)
                 method = msg.get("method")
@@ -789,7 +833,8 @@ class TestRecoveryAfterError:
 
         url, gw_server, oc_server, client = await _make_openclaw_gateway(oc_handler)
         try:
-            async with websockets.connect(f"{url}?token=e2e-token") as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 await _consume_handshake(ws)
 
                 # --- First query: errors ---

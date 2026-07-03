@@ -73,7 +73,7 @@ export interface SessionResetFrame {
 export interface SessionListEntry {
   sessionKey: string;
   sessionId: string;
-  updatedAt: string;
+  updatedAt: string | null;
   preview: string;
   messageCount: number;
   label: string;
@@ -259,15 +259,14 @@ const VALID_ERROR_CODES = new Set([
 /** Valid session_reset reason values. */
 const VALID_REASONS = new Set(['user_request', 'daily_reset', 'force_stop']);
 
-/** Expected types for required fields (runtime validation). */
 /** Expected types for required and optional fields (runtime validation).
- *  Required fields throw on type mismatch; optional fields are silently dropped. */
+ *  Any declared field with a wrong type is rejected. */
 const FIELD_TYPES: Record<string, Record<string, string>> = {
   status: { status: 'string', question: 'string', elapsedMs: 'number', phase: 'string' },
   transcription: { text: 'string' },
   assistant: { delta: 'string' },
   error: { detail: 'string', code: 'string' },
-  connected: { version: 'string', sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
+  connected: { version: 'string', sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string', taskSummary: 'string' },
   history: { entries: 'object' },
   session_reset: { reason: 'string' },
   session_list: { sessions: 'object', activeSessionKey: 'string' },
@@ -303,17 +302,12 @@ export function parseFrame(data: string): InboundFrame {
     }
   }
 
-  // Validate field types (throw on required field mismatch; silently drop optional mismatches)
+  // Validate known field types. Unknown fields are omitted from the returned object below.
   const typeChecks = FIELD_TYPES[frame.type as string];
   if (typeChecks) {
-    const requiredSet = new Set(required ?? []);
     for (const [field, expectedType] of Object.entries(typeChecks)) {
       if (field in frame && typeof frame[field] !== expectedType) {
-        if (requiredSet.has(field)) {
-          throw new Error(`Field "${field}" must be ${expectedType}, got ${typeof frame[field]}`);
-        }
-        // Optional field with wrong type — delete so it won't be copied later
-        delete frame[field];
+        throw new Error(`Field "${field}" must be ${expectedType}, got ${typeof frame[field]}`);
       }
     }
   }
@@ -328,6 +322,7 @@ export function parseFrame(data: string): InboundFrame {
     if (typeof frame.sessionId === 'string') clean.sessionId = frame.sessionId;
     if (typeof frame.sessionKey === 'string') clean.sessionKey = frame.sessionKey;
     if (typeof frame.sessionStartedAt === 'string') clean.sessionStartedAt = frame.sessionStartedAt;
+    if (typeof frame.taskSummary === 'string') clean.taskSummary = frame.taskSummary;
   }
 
   // Copy optional status metadata fields
@@ -342,43 +337,64 @@ export function parseFrame(data: string): InboundFrame {
     if (!Array.isArray(frame.entries)) {
       throw new Error('history.entries must be an array');
     }
-    clean.entries = (frame.entries as unknown[]).filter((entry): entry is Record<string, unknown> => {
-      if (typeof entry !== 'object' || entry === null) return false;
+    clean.entries = (frame.entries as unknown[]).map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null) {
+        throw new Error(`history.entries[${index}] must be an object`);
+      }
       const e = entry as Record<string, unknown>;
-      if (typeof e.role !== 'string' || typeof e.text !== 'string') return false;
-      if (typeof e.ts !== 'number') return false;
-      if (e.role !== 'user' && e.role !== 'assistant') return false;
-      return true;
-    }).map(e => {
-      const r = e as Record<string, unknown>;
-      return { role: r.role as string, text: r.text as string, ts: r.ts as number };
+      if (e.role !== 'user' && e.role !== 'assistant') {
+        throw new Error(`history.entries[${index}].role must be user or assistant`);
+      }
+      if (typeof e.text !== 'string') {
+        throw new Error(`history.entries[${index}].text must be string`);
+      }
+      if (typeof e.ts !== 'number') {
+        throw new Error(`history.entries[${index}].ts must be number`);
+      }
+      return { role: e.role, text: e.text, ts: e.ts };
     });
   }
 
-  // Copy session_list sessions array (filter out malformed entries)
+  // Copy session_list sessions array.
   if (clean.type === 'session_list') {
     if (!Array.isArray(frame.sessions)) {
       throw new Error('session_list.sessions must be an array');
     }
     const activeKey = typeof clean.activeSessionKey === 'string' ? (clean.activeSessionKey as string) : '';
-    clean.sessions = (frame.sessions as unknown[]).filter((entry): entry is Record<string, unknown> => {
-      if (typeof entry !== 'object' || entry === null) return false;
+    clean.sessions = (frame.sessions as unknown[]).map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null) {
+        throw new Error(`session_list.sessions[${index}] must be an object`);
+      }
       const e = entry as Record<string, unknown>;
-      if (typeof e.sessionKey !== 'string') return false;
-      if (typeof e.updatedAt !== 'string') return false;
-      return true;
-    }).map(e => {
-      const r = e as Record<string, unknown>;
-      const sessionKey = r.sessionKey as string;
-      const preview = typeof r.preview === 'string' ? r.preview : '';
+      if (typeof e.sessionKey !== 'string') {
+        throw new Error(`session_list.sessions[${index}].sessionKey must be string`);
+      }
+      if (typeof e.sessionId !== 'string') {
+        throw new Error(`session_list.sessions[${index}].sessionId must be string`);
+      }
+      if (e.updatedAt !== null && typeof e.updatedAt !== 'string') {
+        throw new Error(`session_list.sessions[${index}].updatedAt must be string or null`);
+      }
+      if (typeof e.preview !== 'string') {
+        throw new Error(`session_list.sessions[${index}].preview must be string`);
+      }
+      if (typeof e.messageCount !== 'number') {
+        throw new Error(`session_list.sessions[${index}].messageCount must be number`);
+      }
+      if (typeof e.label !== 'string') {
+        throw new Error(`session_list.sessions[${index}].label must be string`);
+      }
+      if (typeof e.isActive !== 'boolean') {
+        throw new Error(`session_list.sessions[${index}].isActive must be boolean`);
+      }
       return {
-        sessionKey,
-        sessionId: typeof r.sessionId === 'string' ? (r.sessionId as string) : '',
-        updatedAt: r.updatedAt as string,
-        preview,
-        messageCount: typeof r.messageCount === 'number' ? (r.messageCount as number) : 0,
-        label: preview || sessionKey.split(':').pop() || sessionKey,
-        isActive: sessionKey === activeKey,
+        sessionKey: e.sessionKey,
+        sessionId: e.sessionId,
+        updatedAt: e.updatedAt,
+        preview: e.preview,
+        messageCount: e.messageCount,
+        label: e.label,
+        isActive: e.sessionKey === activeKey ? e.isActive : false,
       };
     });
   }
@@ -404,26 +420,33 @@ export function parseFrame(data: string): InboundFrame {
     throw new Error(`Invalid session_reset reason: "${clean.reason}"`);
   }
 
-  // Copy copilot_session_list sessions array (filter out malformed entries)
+  // Copy copilot_session_list sessions array.
   if (clean.type === 'copilot_session_list') {
     if (!Array.isArray(frame.sessions)) {
       throw new Error('copilot_session_list.sessions must be an array');
     }
-    clean.sessions = (frame.sessions as unknown[]).filter((entry): entry is Record<string, unknown> => {
-      if (typeof entry !== 'object' || entry === null) return false;
+    clean.sessions = (frame.sessions as unknown[]).map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null) {
+        throw new Error(`copilot_session_list.sessions[${index}] must be an object`);
+      }
       const e = entry as Record<string, unknown>;
-      return typeof e.sessionId === 'string' && typeof e.cwd === 'string';
-    }).map(e => {
-      const r = e as Record<string, unknown>;
+      for (const field of ['sessionId', 'cwd', 'dirName', 'repository', 'branch', 'summary', 'updatedAt']) {
+        if (typeof e[field] !== 'string') {
+          throw new Error(`copilot_session_list.sessions[${index}].${field} must be string`);
+        }
+      }
+      if (typeof e.isRunning !== 'boolean') {
+        throw new Error(`copilot_session_list.sessions[${index}].isRunning must be boolean`);
+      }
       return {
-        sessionId: r.sessionId as string,
-        cwd: r.cwd as string,
-        dirName: typeof r.dirName === 'string' ? r.dirName : '',
-        repository: typeof r.repository === 'string' ? r.repository : '',
-        branch: typeof r.branch === 'string' ? r.branch : '',
-        summary: typeof r.summary === 'string' ? r.summary : '',
-        updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
-        isRunning: typeof r.isRunning === 'boolean' ? r.isRunning : false,
+        sessionId: e.sessionId,
+        cwd: e.cwd,
+        dirName: e.dirName,
+        repository: e.repository,
+        branch: e.branch,
+        summary: e.summary,
+        updatedAt: e.updatedAt,
+        isRunning: e.isRunning,
       };
     });
   }
@@ -433,13 +456,21 @@ export function parseFrame(data: string): InboundFrame {
     if (!Array.isArray(frame.entries)) {
       throw new Error('copilot_history.entries must be an array');
     }
-    clean.entries = (frame.entries as unknown[]).filter((entry): entry is Record<string, unknown> => {
-      if (typeof entry !== 'object' || entry === null) return false;
+    clean.entries = (frame.entries as unknown[]).map((entry, index) => {
+      if (typeof entry !== 'object' || entry === null) {
+        throw new Error(`copilot_history.entries[${index}] must be an object`);
+      }
       const e = entry as Record<string, unknown>;
-      return typeof e.role === 'string' && typeof e.text === 'string' && typeof e.ts === 'number';
-    }).map(e => {
-      const r = e as Record<string, unknown>;
-      return { role: r.role as string, text: r.text as string, ts: r.ts as number };
+      if (e.role !== 'user' && e.role !== 'assistant' && e.role !== 'system') {
+        throw new Error(`copilot_history.entries[${index}].role must be user, assistant, or system`);
+      }
+      if (typeof e.text !== 'string') {
+        throw new Error(`copilot_history.entries[${index}].text must be string`);
+      }
+      if (typeof e.ts !== 'number') {
+        throw new Error(`copilot_history.entries[${index}].ts must be number`);
+      }
+      return { role: e.role, text: e.text, ts: e.ts };
     });
   }
 

@@ -67,7 +67,7 @@ function text(
     height: h,
     borderWidth: 0,
     borderColor: 0,
-    borderRdaius: 0, // SDK typo — intentional
+    borderRadius: 0,
     paddingLength: 0,
     isEventCapture: eventCapture,
   });
@@ -550,7 +550,7 @@ export class DisplayManager {
             height: 212,
             borderWidth: 0,
             borderColor: 0,
-            borderRdaius: 0,
+            borderRadius: 0,
             paddingLength: 0,
             containerID: ID_MENU_LIST,
             containerName: 'menu-list',

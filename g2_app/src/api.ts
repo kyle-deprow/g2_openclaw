@@ -9,7 +9,12 @@ import type { ConversationHistory } from './conversation';
 import type { Gateway } from './gateway';
 import type { InputHandler } from './input';
 import type { StateMachine } from './state';
-import type { AppStatus, CopilotSessionEntry, CopilotHistoryEntry } from './protocol';
+import type {
+  AppStatus,
+  CopilotSessionEntry,
+  CopilotHistoryEntry,
+  SessionListEntry,
+} from './protocol';
 
 export interface AppApi {
   // State
@@ -34,7 +39,7 @@ export interface AppApi {
   getPendingTranscription(): string | null;
 
   // Sessions
-  getSessionList(): Array<{ sessionKey: string; sessionId: string; updatedAt: string; preview: string; messageCount: number; label: string; isActive: boolean }> | null;
+  getSessionList(): SessionListEntry[] | null;
   openSessionMenu(): boolean;
   closeSessionMenu(): boolean;
   selectSession(index: number): boolean;

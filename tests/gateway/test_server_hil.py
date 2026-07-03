@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -59,6 +59,20 @@ class MockTranscriber:
         return self._result
 
 
+class StaticResponseHandler:
+    """Explicit response handler for HIL tests."""
+
+    async def handle(
+        self, message: str, send_frame: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        await send_frame({"type": "status", "status": "streaming"})
+        await send_frame({"type": "assistant", "delta": "test response"})
+        await send_frame({"type": "end"})
+
+    async def close(self) -> None:
+        return None
+
+
 def _start_audio_frame() -> str:
     return json.dumps(
         {
@@ -86,7 +100,7 @@ class TestHilTtsFlow:
                 _stop_audio_frame_hil("hello world"),
             ]
         )
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -118,7 +132,7 @@ class TestHilTtsFlow:
                 json.dumps({"type": "stop_audio"}),
             ]
         )
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames
@@ -141,7 +155,7 @@ class TestHilTtsFlow:
                 json.dumps({"type": "stop_audio"}),
             ]
         )
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         # Session should be idle
@@ -170,7 +184,7 @@ class TestConfirmFlow:
                 json.dumps({"type": "text", "message": "hello"}),
             ]
         )
-        session = GatewaySession(ws, transcriber=transcriber)  # type: ignore[arg-type]
+        session = GatewaySession(ws, handler=StaticResponseHandler(), transcriber=transcriber)  # type: ignore[arg-type]
         await session.handle()
 
         frames = ws.sent_frames

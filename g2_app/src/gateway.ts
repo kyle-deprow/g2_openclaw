@@ -78,7 +78,7 @@ export class Gateway {
   private intentionalClose = false;
   private token: string | undefined;
 
-  /** Resolve Gateway URL from hash > query > localStorage > env */
+  /** Resolve Gateway URL from hash > query > localStorage > env. */
   resolveUrl(): string {
     // Hash: #ws://192.168.1.100:8765?token=abc
     const hash = window.location.hash.slice(1);
@@ -105,20 +105,21 @@ export class Gateway {
     const envUrl = import.meta.env?.VITE_GATEWAY_URL;
     if (envUrl && isAllowedUrl(envUrl)) return envUrl;
 
-    // Fallback
-    return 'ws://localhost:8765';
+    throw new Error('Gateway URL is not configured. Set VITE_GATEWAY_URL or pass a URL.');
   }
 
   connect(url?: string): void {
     const resolved = url ?? this.resolveUrl();
     this.token = extractToken(resolved);
-    // If the resolved URL has no token (e.g. localStorage stripped it),
-    // fall back to the build-time env var which includes the token.
+    // Persisted URLs omit credentials; recover the token from build-time config.
     if (!this.token) {
       const envUrl = import.meta.env?.VITE_GATEWAY_URL;
       if (envUrl) {
         this.token = extractToken(envUrl);
       }
+    }
+    if (!this.token) {
+      throw new Error('Gateway token is not configured.');
     }
     this.url = stripToken(resolved);
     this.intentionalClose = false;

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import urlparse
@@ -53,9 +52,9 @@ class TestConnection:
 
 
 class TestTextMessage:
-    """Sending a text message triggers mock response flow."""
+    """Sending a text message triggers the explicit test response handler."""
 
-    async def test_text_triggers_mock_response(
+    async def test_text_triggers_test_response(
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         url, _ = auth_gateway
@@ -82,7 +81,7 @@ class TestTextMessage:
 
             assert deltas == [
                 "This is a ",
-                "mock response ",
+                "test response ",
                 "from the gateway.",
             ]
 
@@ -180,36 +179,15 @@ class TestConcurrentRejection:
             assert error["code"] == "INVALID_STATE"
 
 
-class TestNoAuth:
-    """Connection without token succeeds when gateway_token is None."""
+class TestRequiredAuth:
+    """GatewayServer requires explicit client auth configuration."""
 
-    async def test_noauth_connection_receives_connected_and_idle(
-        self, noauth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        url, _ = noauth_gateway
-        async with websockets.connect(url) as ws:
-            connected = await _recv_json(ws)
-            assert connected == {"type": "connected", "version": "1.0"}
+    async def test_missing_gateway_token_rejected(self) -> None:
+        from gateway.config import GatewayConfig
 
-            history = await _recv_json(ws)
-            assert history["type"] == "history"
-
-            status = await _recv_json(ws)
-            assert status == {"type": "status", "status": "idle"}
-
-    async def test_noauth_text_triggers_mock_response(
-        self, noauth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        url, _ = noauth_gateway
-        async with websockets.connect(url) as ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # idle
-
-            await ws.send(json.dumps({"type": "text", "message": "hello"}))
-
-            thinking = await _recv_json(ws)
-            assert thinking == {"type": "status", "status": "thinking"}
+        config = GatewayConfig(gateway_token=None)
+        with pytest.raises(ValueError, match="GATEWAY_TOKEN"):
+            GatewayServer(config)
 
 
 @pytest.fixture()
@@ -237,7 +215,7 @@ def main_mocks() -> Iterator[tuple[MagicMock, MagicMock, AsyncMock]]:
 
 
 class TestMainTranscriber:
-    """main() instantiates Transcriber with graceful fallback."""
+    """main() instantiates Transcriber and fails fast on startup errors."""
 
     async def test_main_creates_transcriber_on_success(
         self, main_mocks: tuple[MagicMock, MagicMock, AsyncMock]
@@ -258,36 +236,29 @@ class TestMainTranscriber:
             )
             mock_server.serve.assert_awaited_once()
 
-    async def test_main_falls_back_on_generic_exception(
+    async def test_main_raises_on_transcriber_exception(
         self,
         main_mocks: tuple[MagicMock, MagicMock, AsyncMock],
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        mock_config, mock_gw_cls, mock_server = main_mocks
+        _mock_config, mock_gw_cls, mock_server = main_mocks
 
-        with (
-            patch(
-                "gateway.server.Transcriber",
-                side_effect=RuntimeError("CUDA not available"),
-            ),
-            caplog.at_level(logging.WARNING, logger="gateway.server"),
+        with patch(
+            "gateway.server.Transcriber",
+            side_effect=RuntimeError("CUDA not available"),
         ):
-            await main()
+            with pytest.raises(RuntimeError, match="CUDA not available"):
+                await main()
 
-            mock_gw_cls.assert_called_once_with(
-                mock_config,
-                transcriber=None,
-            )
-            mock_server.serve.assert_awaited_once()
-            assert "Failed to load transcriber" in caplog.text
+            mock_gw_cls.assert_not_called()
+            mock_server.serve.assert_not_awaited()
 
 
 class TestHealthCheck:
     """Tests for the /healthz HTTP health check endpoint."""
 
-    async def test_healthz_returns_200(self, noauth_gateway: tuple[str, GatewayServer]) -> None:
+    async def test_healthz_returns_200(self, auth_gateway: tuple[str, GatewayServer]) -> None:
         """GET /healthz should return 200 OK without upgrading to WebSocket."""
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         parsed = urlparse(url)
         host = parsed.hostname
         port = parsed.port
@@ -305,10 +276,10 @@ class TestHealthCheck:
             await writer.wait_closed()
 
     async def test_websocket_still_works_after_healthz(
-        self, noauth_gateway: tuple[str, GatewayServer]
+        self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
         """WebSocket connections should still work alongside health checks."""
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         parsed = urlparse(url)
         host = parsed.hostname
         port = parsed.port
@@ -325,7 +296,8 @@ class TestHealthCheck:
             await writer.wait_closed()
 
         # Then normal WebSocket
-        async with websockets.connect(url) as ws:
+        ws = await _auth_connect(url)
+        async with ws:
             connected = await asyncio.wait_for(ws.recv(), timeout=5)
             assert json.loads(connected)["type"] == "connected"
             history = await asyncio.wait_for(ws.recv(), timeout=5)
@@ -338,16 +310,17 @@ class TestConnectedSessionMeta:
     """Connected frame carries session metadata when available."""
 
     async def test_connected_frame_includes_session_meta_when_available(
-        self, noauth_gateway: tuple[str, GatewayServer]
+        self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         meta = SessionMeta(
             session_id="ses_test_123",
             session_key="agent:claw:g2",
             updated_at="2026-03-07T10:00:00Z",
         )
         with patch("gateway.server.resolve_session", return_value=meta):
-            async with websockets.connect(url) as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 connected = await _recv_json(ws)
                 assert connected["type"] == "connected"
                 assert connected["version"] == "1.0"
@@ -356,11 +329,12 @@ class TestConnectedSessionMeta:
                 assert connected["sessionStartedAt"] == "2026-03-07T10:00:00Z"
 
     async def test_connected_frame_omits_session_fields_when_unavailable(
-        self, noauth_gateway: tuple[str, GatewayServer]
+        self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         with patch("gateway.server.resolve_session", return_value=None):
-            async with websockets.connect(url) as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 connected = await _recv_json(ws)
                 assert connected == {"type": "connected", "version": "1.0"}
 
@@ -369,9 +343,9 @@ class TestHistoryFrame:
     """History frame sent between connected and idle."""
 
     async def test_connected_sends_history_frame(
-        self, noauth_gateway: tuple[str, GatewayServer]
+        self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         from gateway.session_history import HistoryEntry
 
         mock_entries = [
@@ -379,7 +353,8 @@ class TestHistoryFrame:
             HistoryEntry(role="assistant", text="hi there", ts=1700000001000),
         ]
         with patch("gateway.session_history.read_history", return_value=mock_entries):
-            async with websockets.connect(url) as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 connected = await _recv_json(ws)
                 assert connected["type"] == "connected"
 
@@ -401,14 +376,15 @@ class TestHistoryFrame:
                 assert idle == {"type": "status", "status": "idle"}
 
     async def test_history_failure_does_not_block_session(
-        self, noauth_gateway: tuple[str, GatewayServer]
+        self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
-        url, _ = noauth_gateway
+        url, _ = auth_gateway
         with patch(
             "gateway.session_history.read_history",
             side_effect=RuntimeError("disk error"),
         ):
-            async with websockets.connect(url) as ws:
+            ws = await _auth_connect(url)
+            async with ws:
                 connected = await _recv_json(ws)
                 assert connected["type"] == "connected"
 

@@ -1,6 +1,6 @@
 # G2 OpenClaw Gateway
 
-WebSocket gateway that bridges the G2 glasses (via a phone companion app) to the OpenClaw AI agent. Phase 1 provides a working vertical slice with mock responses.
+WebSocket gateway that bridges the G2 glasses (via a phone companion app) to the OpenClaw AI agent.
 
 ## Prerequisites
 
@@ -17,13 +17,14 @@ uv sync
 
 ## Configuration
 
-The gateway reads three environment variables (all optional):
+The gateway reads these environment variables:
 
 | Variable         | Default     | Description                              |
 | ---------------- | ----------- | ---------------------------------------- |
 | `GATEWAY_HOST`   | `0.0.0.0`  | Bind address                             |
 | `GATEWAY_PORT`   | `8765`      | Listen port                              |
-| `GATEWAY_TOKEN`  | *(none)*    | Shared secret for `?token=` auth. If unset, auth is disabled. |
+| `GATEWAY_TOKEN`  | *(required)* | Shared secret sent in the first WebSocket `auth` frame. |
+| `OPENCLAW_GATEWAY_TOKEN` | *(required)* | Token copied from `~/.openclaw/openclaw.json` → `gateway.auth.token`. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP endpoint. `none` or empty disables telemetry |
 
 You can place these in a `.env` file at the repo root; `python-dotenv` will load it automatically.
@@ -42,7 +43,7 @@ The gateway will log to stdout:
 2026-02-22 12:00:00 INFO gateway.server: Gateway listening on 0.0.0.0:8765
 ```
 
-Connect a WebSocket client to `ws://localhost:8765` (append `?token=<TOKEN>` if `GATEWAY_TOKEN` is set).
+Connect a WebSocket client to `ws://localhost:8765`, then send `{"type":"auth","token":"<GATEWAY_TOKEN>"}` as the first frame.
 
 ## Testing
 
@@ -101,9 +102,9 @@ Key modules:
 
 When OTel is disabled, the gateway uses console + file logging (`logs/gateway.log`).
 
-## Phase 1 Limitations
+## Operational Notes
 
-- **Mock responses only** — the `MockResponseHandler` returns three hardcoded text deltas. No AI backend is connected yet.
-- **No audio support** — `start_audio` / `stop_audio` frames are logged but not processed.
-- **Single connection** — only one WebSocket client is active at a time; a new connection replaces the previous one.
-- **No TLS** — use a reverse proxy for production encryption.
+- `OPENCLAW_GATEWAY_TOKEN` is required; startup does not fall back to mock responses.
+- Audio transcription is active when `Transcriber` loads successfully; startup fails if the Whisper model cannot load.
+- Single connection model: only one WebSocket client is active at a time; a new connection replaces the previous one.
+- No TLS is provided by the gateway; use a reverse proxy or private network for production encryption.
