@@ -312,6 +312,26 @@ _project_root_option = typer.Option(
     hidden=True,
     help="Override project root (for testing).",
 )
+_openclaw_config_option = typer.Option(
+    Path("gateway/openclaw_config/openclaw.json"),
+    "--openclaw-config",
+    hidden=True,
+    help="Override autoresearch config path (for testing).",
+)
+_quantipy_root_option = typer.Option(
+    Path("/home/dev/repos/quantipy"),
+    "--quantipy-root",
+    hidden=True,
+    help="Override Quantipy root for autoresearch receipts (for testing).",
+)
+_state_path_argument = typer.Argument(..., exists=True, dir_okay=False, readable=True)
+_artifact_path_argument = typer.Argument(..., exists=True, dir_okay=False, readable=True)
+_output_path_option = typer.Option(
+    ...,
+    "--output",
+    dir_okay=False,
+    help="Path to write the updated autoresearch state JSON.",
+)
 
 
 @app.command()
@@ -439,6 +459,117 @@ def init_env(
     if g2_env_path is not None:
         rows.append(f"[bold]G2 app env:[/bold]    {g2_env_path}")
     console.print(Panel("\n".join(rows), title="init-env summary", border_style="green"))
+
+
+@app.command("autoresearch-next")
+def autoresearch_next(
+    state_path: Path = _state_path_argument,
+    openclaw_config: Path = _openclaw_config_option,
+    quantipy_root: Path = _quantipy_root_option,
+) -> None:
+    """Validate autoresearch state/config and print the deterministic next action."""
+    from gateway.autoresearch_runner import (
+        build_receipt_catalog,
+        load_autoresearch_policy,
+        load_state_file,
+        next_action,
+    )
+
+    try:
+        state = load_state_file(state_path)
+        policy = load_autoresearch_policy(openclaw_config)
+        receipts = build_receipt_catalog(quantipy_root)
+        action = next_action(state, policy, receipts)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-next failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print_json(json.dumps(action.to_dict(), indent=2, sort_keys=True))
+
+
+@app.command("autoresearch-advance")
+def autoresearch_advance(
+    state_path: Path = _state_path_argument,
+    artifact_path: Path = _artifact_path_argument,
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+) -> None:
+    """Advance autoresearch state with a validated artifact and persist the result."""
+    from gateway.autoresearch_runner import (
+        advance_state,
+        load_artifact_file,
+        load_autoresearch_policy,
+        load_state_file,
+        save_state_file,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        artifact = load_artifact_file(artifact_path, state, policy)
+        next_state = advance_state(state, artifact, policy)
+        save_state_file(output_path, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-advance failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-mark-memory")
+def autoresearch_mark_memory(
+    state_path: Path = _state_path_argument,
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+) -> None:
+    """Mark MemPalace logging complete for a finished autoresearch iteration."""
+    from gateway.autoresearch_runner import (
+        load_autoresearch_policy,
+        load_state_file,
+        mark_memory_written,
+        save_state_file,
+        validate_state,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        validate_state(state, policy)
+        next_state = mark_memory_written(state)
+        save_state_file(output_path, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-start-next")
+def autoresearch_start_next(
+    state_path: Path = _state_path_argument,
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+) -> None:
+    """Start the next persisted autoresearch iteration after memory is written."""
+    from gateway.autoresearch_runner import (
+        load_autoresearch_policy,
+        load_state_file,
+        save_state_file,
+        start_next_iteration,
+        validate_state,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        validate_state(state, policy)
+        next_state = start_next_iteration(state)
+        save_state_file(output_path, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-start-next failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
 
 
 # ---------------------------------------------------------------------------

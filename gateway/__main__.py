@@ -40,7 +40,16 @@ if __name__ == "__main__" or not sys.argv[0].endswith("__main__.py"):
     pass  # allow import without side-effects
 
 # Route based on first positional arg
-_cli_commands = {"init-env", "launch", "push-config", "stop"}
+_cli_commands = {
+    "init-env",
+    "launch",
+    "push-config",
+    "stop",
+    "autoresearch-next",
+    "autoresearch-advance",
+    "autoresearch-mark-memory",
+    "autoresearch-start-next",
+}
 if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
     _run_cli()
 else:

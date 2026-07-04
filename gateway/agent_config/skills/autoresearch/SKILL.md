@@ -6,14 +6,16 @@ version: 7.0.0
 
 # Autoresearch
 
-Autoresearch is a PM-owned loop. The PM keeps the state, chooses the next
-stage, verifies metrics, logs to MemPalace, and repeats until the human says
-`stop`.
+Autoresearch is a PM-owned loop, but the loop state and next-stage selection
+must come from the deterministic runner in `gateway.autoresearch_runner` (or
+`gateway-cli autoresearch-next`), not from prompt memory. The PM uses that
+control-plane output to choose the next stage, verify metrics, log to
+MemPalace, and repeat until the human says `stop`.
 
 Durable research memory is MemPalace only. Do not use `memory_search`,
-`memory_get`, flat daily memory files, or OpenClaw memory flush for research
-continuity. Only the PM loads the write-capable `mempalace` skill; all stage
-agents load `mempalace-readonly`.
+`memory_get`, flat daily memory files, OpenClaw memory flush, or prompt-only
+loop memory for research continuity. Only the PM loads the write-capable
+`mempalace` skill; all stage agents load `mempalace-readonly`.
 
 ## Loop
 
@@ -22,6 +24,7 @@ context-curator
   -> 5-agent debate
   -> consensus
   -> implement
+  -> verify
   -> single reviewer
   -> fix/test
   -> decide/log

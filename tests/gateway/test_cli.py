@@ -11,6 +11,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from dotenv import dotenv_values
+from gateway.autoresearch_runner import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    AutoresearchState,
+    FinalDecision,
+    FinalDecisionArtifact,
+    MetricDirection,
+    Phase,
+    ReviewVerdict,
+    SetupContextArtifact,
+)
 from gateway.cli import (
     _choose_whisper_model,
     _detect_gpu,
@@ -354,6 +364,112 @@ class TestInitEnvCommand:
         assert values["GATEWAY_HOST"] == "0.0.0.0"
         assert values["WHISPER_DEVICE"] == "cuda"
         assert values["OPENCLAW_GATEWAY_TOKEN"] == "tok-x"
+
+
+class TestAutoresearchCliCommands:
+    def test_autoresearch_advance_persists_state(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        artifact_path = tmp_path / "artifact.json"
+        output_path = tmp_path / "state-out.json"
+        state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+        artifact_path.write_text(
+            json.dumps(
+                SetupContextArtifact(
+                    goal="Find a profitable intraday alpha",
+                    metric_name="OOS Sharpe net",
+                    metric_direction=MetricDirection.MAXIMIZE,
+                    target_repo="/home/dev/repos/quantipy",
+                    writable_scope="src/quantipy/alpha",
+                    baseline_summary="Baseline OOS Sharpe net is 0.18.",
+                    hard_constraints=("No overnight holds",),
+                    data_sources=("qp.prices()",),
+                ).to_dict()
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-advance",
+                str(state_path),
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+            ],
+        )
+
+        assert result.exit_code == 0
+        saved = json.loads(output_path.read_text(encoding="utf-8"))
+        assert saved["phase"] == "setup_context"
+        assert saved["setup"]["metric_name"] == "OOS Sharpe net"
+
+    def test_autoresearch_mark_memory_and_start_next_persist_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        repeat_state = AutoresearchState(
+            phase=Phase.REPEAT,
+            iteration=3,
+            setup=SetupContextArtifact(
+                goal="Find a profitable intraday alpha",
+                metric_name="OOS Sharpe net",
+                metric_direction=MetricDirection.MAXIMIZE,
+                target_repo="/home/dev/repos/quantipy",
+                writable_scope="src/quantipy/alpha",
+                baseline_summary="Baseline OOS Sharpe net is 0.18.",
+                hard_constraints=("No overnight holds",),
+                data_sources=("qp.prices()",),
+            ),
+            final_decision=FinalDecisionArtifact(
+                decision=FinalDecision.KEEP,
+                recommended_metric_name="OOS Sharpe net",
+                recommended_metric_value=0.38,
+                reviewer_verdict=ReviewVerdict.PASS.value,
+                rationale="Improves baseline without review blockers.",
+                log_summary="KEEP vwap_obv_intraday with updated baseline review.",
+                continue_loop=True,
+                memory_write_required=True,
+            ),
+        )
+        state_path = tmp_path / "repeat-state.json"
+        memory_state_path = tmp_path / "memory-state.json"
+        next_state_path = tmp_path / "next-state.json"
+        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
+
+        mark_result = runner.invoke(
+            app,
+            [
+                "autoresearch-mark-memory",
+                str(state_path),
+                "--output",
+                str(memory_state_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+            ],
+        )
+        assert mark_result.exit_code == 0
+        marked = json.loads(memory_state_path.read_text(encoding="utf-8"))
+        assert marked["memory_written"] is True
+
+        next_result = runner.invoke(
+            app,
+            [
+                "autoresearch-start-next",
+                str(memory_state_path),
+                "--output",
+                str(next_state_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+            ],
+        )
+        assert next_result.exit_code == 0
+        next_state = json.loads(next_state_path.read_text(encoding="utf-8"))
+        assert next_state["phase"] == "setup_context"
+        assert next_state["iteration"] == 4
+        assert next_state["setup"]["metric_name"] == "OOS Sharpe net"
 
 
 # ---------------------------------------------------------------------------

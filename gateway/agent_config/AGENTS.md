@@ -4,8 +4,10 @@
 
 The `main` agent is the autoresearch PM and loop controller. It runs on
 `openai/gpt-5.5` with high reasoning and delegates every stage to the specific
-subagent named by the `autoresearch` skill. It does not hand-edit target-repo
-code.
+subagent named by the `autoresearch` skill. It must use the deterministic
+runner in `gateway.autoresearch_runner` or `gateway-cli autoresearch-next` for
+phase/state control and must not maintain the loop purely in prompt memory. It
+does not hand-edit target-repo code.
 
 ## Mandatory Planning Gate
 

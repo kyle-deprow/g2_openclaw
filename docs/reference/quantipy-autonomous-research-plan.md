@@ -112,7 +112,10 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 The `quantipy-methodology` skill is assigned to `context-curator`, all
 `debater-*` agents, `consensus-arbiter`, `implementer`, `reviewer`, and
 `fixer`. It does not vendor Quantipy methodology into this repo; agents must
-read the live target-repo files at stage time.
+read the live target-repo files at stage time. The PM must use the
+deterministic runner in `gateway.autoresearch_runner` or
+`gateway-cli autoresearch-next` for phase selection, retry gates, and receipt
+validation instead of prompt-only loop memory.
 
 ## Success Criteria
 
