@@ -29,6 +29,10 @@ Use the OpenClaw stage agents from the `autoresearch` skill. Existing target
 repo Codex instructions can inform prompt content, but the stage names below
 are authoritative:
 
+Spawn these configured agent IDs directly. Do not use generic/default subagents,
+inherited models, or per-spawn model overrides for autoresearch stages; the
+repo config binds each stage to its model.
+
 | OpenClaw stage | Role |
 |---|---|
 | `context-curator` | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
@@ -44,11 +48,11 @@ are authoritative:
 
 ## Implementation/Review/Fix Pattern
 
-1. Spawn an implementation subagent with a narrow prompt and required tests.
+1. Spawn the configured `implementer` agent with a narrow prompt and required tests.
 2. Wait for completion and inspect the returned summary, changed files, and
    verification output.
-3. Spawn exactly one reviewer subagent against the diff.
-4. If findings exist, spawn a fixer subagent with only those findings.
+3. Spawn exactly one configured `reviewer` agent against the diff.
+4. If findings exist, spawn the configured `fixer` agent with only those findings.
 5. Repeat review/fix until the reviewer reports no must-fix issues.
 6. Run final verification from the parent context.
 

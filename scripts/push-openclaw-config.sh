@@ -39,7 +39,7 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
 fi
 
 # ── Load env vars from .env ───────────────────────────────────────────────────
-PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENAI_PM_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
+PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
 declare -A PRESERVED_ENV=()
 for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
   if [[ -v "${VAR_NAME}" ]]; then
@@ -150,6 +150,17 @@ if [[ -n "${REPO_AGENT_MEMORY_FLUSH}" ]]; then
   ')
 fi
 
+# ── Force-set managed agent roster ──────────────────────────────────────────
+# Autoresearch stage models, skills, subagent allowlists, and tool denies are
+# repo-owned. Replace the local roster so hand edits in ~/.openclaw cannot alter
+# the loop topology or silently change stage models.
+REPO_AGENTS_LIST=$(jq '.agents.list // empty' "${REPO_CONFIG}")
+if [[ -n "${REPO_AGENTS_LIST}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --argjson agents_list "${REPO_AGENTS_LIST}" '
+    .agents.list = $agents_list
+  ')
+fi
+
 # ── Resolve env: references in provider apiKey fields ────────────────────────
 # The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
 # NOT resolve these natively for custom provider apiKey fields — the literal
@@ -216,13 +227,21 @@ if ! echo "${MERGED}" | jq -e --arg provider "${MODEL_PROVIDER}" --arg model "${
   exit 1
 fi
 
-PM_MODEL_ID="${OPENAI_PM_MODEL:-gpt-5.5}"
-PM_MODEL_PRIMARY="openai/${PM_MODEL_ID}"
+PM_MODEL_PRIMARY=$(jq -r '.agents.list[] | select(.id == "main") | .model.primary // empty' "${REPO_CONFIG}")
+if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
+  echo "ERROR: Repo config must pin agents.list[].id == \"main\" to a model.primary." >&2
+  exit 1
+fi
+PM_MODEL_ID="${PM_MODEL_PRIMARY#openai/}"
+if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
+  echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
+  exit 1
+fi
 if ! echo "${MERGED}" | jq -e --arg model "${PM_MODEL_ID}" '
   any(.models.providers.openai.models[]?; .id == $model)
 ' >/dev/null; then
   echo "ERROR: PM model '${PM_MODEL_PRIMARY}' is not declared in repo config." >&2
-  echo "       Add it to gateway/openclaw_config/openclaw.json or choose a configured OPENAI_PM_MODEL." >&2
+  echo "       Add it to gateway/openclaw_config/openclaw.json before pushing." >&2
   exit 1
 fi
 
@@ -260,10 +279,26 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
     "mempalace_sync",
     "mempalace_update_drawer"
   ];
+  def expected_models: {
+    "main": $pm,
+    "context-curator": "openai/gpt-5.4",
+    "debater-microstructure": "openai/gpt-5.5",
+    "debater-data": "openai/gpt-5.5",
+    "debater-skeptic": "openai/gpt-5.5",
+    "debater-theory": "openai/gpt-5.4",
+    "debater-implementation": "openai/gpt-5.4",
+    "consensus-arbiter": "openai/gpt-5.4",
+    "implementer": "openai/gpt-5.4",
+    "reviewer": "openai/gpt-5.5",
+    "fixer": "openai/gpt-5.4"
+  };
   (.agents.defaults.thinkingDefault == "high")
   and (.agents.defaults.memorySearch.enabled == false)
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
+  and (([.agents.list[].id] | sort) == (expected_models | keys | sort))
+  and all(.agents.list[]; .model.primary == expected_models[.id])
+  and all(.agents.list[]; .thinkingDefault == "high")
   and ([.agents.list[] | select(
     .id == "main"
     and .model.primary == $pm
@@ -279,7 +314,7 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
   echo "       Check main PM model/skills, MemPalace read-only stage agents, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: PM model, high reasoning, MemPalace split, built-in memory disabled."
+echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"

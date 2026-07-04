@@ -36,13 +36,16 @@ context-curator
   reasoning. The configured panel uses three.
 - The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.5` with high
   reasoning. Do not run a reviewer panel.
+- Spawn by configured agent ID only. Do not use generic/default agents,
+  inherited parent models, or per-spawn model overrides for autoresearch stages.
 - Do not silently switch provider, runtime, model, or reasoning level. If the
   configured route is unavailable, fail closed and report the blocker.
 
 ## Stage Agents
 
-Use the configured agents. Prior target-repo Codex roles may inform prompt
-content, but they are not OpenClaw stage names.
+Use the configured agents by ID. Their model bindings are part of the repo
+config and are validated by the push script. Prior target-repo Codex roles may
+inform prompt content, but they are not OpenClaw stage names.
 
 | Stage | Agent | Model intent |
 |-------|-------|--------------|
@@ -87,9 +90,10 @@ single next theory.
 
 ## 2. Five-Agent Debate
 
-Spawn the five debate agents with the same context packet and ask each for one
-theory, a vote on the strongest theory family, and objections to likely failure
-modes.
+Spawn the five configured debate agent IDs with the same context packet and ask
+each for one theory, a vote on the strongest theory family, and objections to
+likely failure modes. Do not substitute a generic debater or override the
+configured model.
 
 Every proposal must include:
 
@@ -176,7 +180,8 @@ If a bug signal appears, send a targeted fix to `fixer`, then rerun verification
 
 ## 6. Single Reviewer
 
-Spawn exactly one `reviewer` on `openai/gpt-5.5` high reasoning.
+Spawn exactly one `reviewer` on its configured `openai/gpt-5.5` high-reasoning
+binding.
 
 Reviewer focus:
 

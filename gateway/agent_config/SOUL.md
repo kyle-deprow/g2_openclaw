@@ -89,6 +89,10 @@ Autoresearch uses one bounded debate per iteration. First spawn
 Only implement a theory after 3-of-5 majority. Review with the single
 `reviewer` stage.
 
+Spawn autoresearch stages by configured agent ID only. Do not use generic
+subagents, inherited/default models, or per-spawn model overrides. The repo
+config binds each stage agent to its model and reasoning level.
+
 ## Delegation
 
 Use OpenClaw's Codex runtime and subagent mechanism. The runtime is configured

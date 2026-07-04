@@ -67,7 +67,8 @@ these settings into the local config with `jq`, preserving everything else.
   MemPalace MCP server.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
-- **Agent defaults** — primary model, high reasoning, disabled built-in memory
+- **Agent roster** — exact autoresearch stage-agent IDs, model assignments,
+  high reasoning, MemPalace skill split, tool denies, disabled built-in memory
   search/flush, and concurrency limits.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
@@ -142,12 +143,12 @@ The script will:
 
 1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
 2. Deep-merge the repo config into the local config (local-only keys preserved)
-3. Set the selected primary model, pin `main` to the PM model, and fail if
-   either model is not declared
+3. Set the selected default model, force the repo-managed agent roster, and
+   fail if any pinned agent model is not declared
 4. Resolve the required MemPalace MCP command and palace path
 5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
-6. Validate repo-managed invariants for PM model, high reasoning, memory policy,
-   and MemPalace skill/tool split
+6. Validate repo-managed invariants for exact stage-agent models, high
+   reasoning, memory policy, and MemPalace skill/tool split
 7. Copy agent bootstrap files, repo skills, and `azure-api-version-preload.cjs`
 8. Validate the result with `openclaw config validate`
 
@@ -171,11 +172,8 @@ The push script selects the active provider via `OPENCLAW_PROVIDER`.
 # Default OpenAI/Codex path
 uv run python -m gateway push-config
 
-# Use a specific configured OpenAI model for default stage agents
+# Use a specific configured OpenAI model for unspecified/default agents
 OPENCLAW_PROVIDER=codex OPENAI_MODEL=gpt-5-mini uv run python -m gateway push-config
-
-# Use a specific configured OpenAI model for the main PM
-OPENCLAW_PROVIDER=codex OPENAI_PM_MODEL=gpt-5.5 uv run python -m gateway push-config
 
 # Use Azure explicitly
 OPENCLAW_PROVIDER=azure uv run python -m gateway push-config
@@ -186,6 +184,11 @@ OPENCLAW_PROVIDER=openrouter OPENROUTER_MODEL=openai/gpt-4.1 uv run python -m ga
 
 The default provider is `codex`. Unsupported model selections fail instead of
 falling back to another provider or model.
+
+Autoresearch stage-agent models are not selected by environment variables.
+Change them in `gateway/openclaw_config/openclaw.json` and run the push script;
+the script validates the exact model matrix before writing local OpenClaw
+config.
 
 ## OpenAI/Codex Provider Details
 

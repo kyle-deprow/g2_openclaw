@@ -23,6 +23,8 @@ Key rules:
 - Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
   `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
   in the autoresearch skill.
+- Spawn configured stage agents by ID. Do not spawn generic/default agents for
+  autoresearch stages, and do not pass ad hoc model overrides.
 - Run long implementation and review tasks in the background.
 - Do not silently fall back to another runtime, provider, or model if Codex auth
   or runtime selection fails.
