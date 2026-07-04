@@ -2,9 +2,9 @@
 
 ## Primary: OpenClaw Codex Runtime
 
-Delegate coding, research, and review work through OpenClaw's bundled Codex
-runtime and subagent mechanism. The repo-managed config enables the bundled
-`codex` plugin and pins the OpenAI provider runtime to `codex`.
+Delegate coding, research, and review work through OpenClaw's Codex runtime and
+subagent mechanism. The repo-managed config enables the `codex` plugin and pins
+the OpenAI provider runtime to `codex`.
 
 Auth requirement for the host:
 

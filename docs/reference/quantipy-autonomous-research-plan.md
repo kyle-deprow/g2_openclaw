@@ -35,7 +35,7 @@ OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.4 via Codex runtime)
   ↓
 Gateway (:8765) — G2 transport, reconnect briefing, and task status display
   ↓
-OpenClaw Codex runtime (bundled codex plugin, OpenAI auth)
+OpenClaw Codex runtime (codex plugin, OpenAI auth)
   ↓
 ~/repos/quantipy — all kept changes committed by implementation subagents
 ```

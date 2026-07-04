@@ -84,9 +84,9 @@ Then delegate implementation to `orchestrator` and methodology review to
 
 ## Delegation
 
-Use OpenClaw's bundled Codex runtime and subagent mechanism. The runtime is
-configured by the repo-managed OpenClaw config by pinning the OpenAI provider
-runtime to `codex`.
+Use OpenClaw's Codex runtime and subagent mechanism. The runtime is configured
+by the repo-managed OpenClaw config by pinning the OpenAI provider runtime to
+`codex`.
 
 Key principles:
 

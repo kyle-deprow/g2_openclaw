@@ -21,7 +21,8 @@ sudo npm install -g openclaw
 # 2. Create the ~/.openclaw/ scaffold
 openclaw onboard --local
 
-# 3. Authenticate OpenAI/Codex
+# 3. Install/enable the Codex plugin, then authenticate OpenAI/Codex
+openclaw plugins install @openclaw/codex
 openclaw models auth login --provider openai
 
 # 4. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
@@ -52,8 +53,8 @@ these settings into the local config with `jq`, preserving everything else.
 
 ### What is managed here
 
-- **Codex runtime** — enables the bundled `codex` plugin, sets the OpenAI
-  provider `agentRuntime.id` to `codex`, and defaults the primary model to
+- **Codex runtime** — enables the `codex` plugin, sets the OpenAI provider
+  `agentRuntime.id` to `codex`, and defaults the primary model to
   `openai/gpt-5.4`.
 - **OpenAI provider** — declares `gpt-5.4` and `gpt-5-mini` model refs for
   authenticated OpenAI/Codex use.
@@ -73,11 +74,12 @@ these settings into the local config with `jq`, preserving everything else.
 
 > **First time?** See the [Cold-Start Install](#cold-start-install-fresh-machine) section above.
 
-### 1. Authenticate OpenAI/Codex
+### 1. Install the Codex plugin and authenticate OpenAI/Codex
 
 The default provider is `codex`, which uses OpenAI auth managed by OpenClaw:
 
 ```bash
+openclaw plugins install @openclaw/codex
 openclaw models auth login --provider openai
 ```
 
@@ -168,7 +170,7 @@ falling back to another provider or model.
 |---|---|
 | Auth | `openclaw models auth login --provider openai` |
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
-| Plugin | bundled `codex` plugin enabled |
+| Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
 | Default model | `openai/gpt-5.4` |
 | Alternate model | `openai/gpt-5-mini` |
 

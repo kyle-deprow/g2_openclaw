@@ -300,7 +300,7 @@ if [[ "${PROVIDER}" == "codex" ]]; then
   echo "── OpenAI / Codex ──"
   echo "Using model: ${MODEL_PRIMARY}"
   echo "Required auth: openclaw models auth login --provider openai"
-  echo "Bundled codex plugin is enabled; OpenAI provider runtime is pinned to codex."
+  echo "Codex plugin is enabled; OpenAI provider runtime is pinned to codex."
   echo ""
 elif [[ "${PROVIDER}" == "azure" ]]; then
   echo "── Azure Entra preload ──"

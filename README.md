@@ -134,8 +134,8 @@ TypeScript thin client running on iPhone via EvenHub. Bridges G2 glasses (BLE) t
 
 ### Coding Tasks
 
-Coding tasks (code generation, refactoring, etc.) run through OpenClaw's bundled
-Codex runtime and subagent model. Authenticate once with
+Coding tasks (code generation, refactoring, etc.) run through OpenClaw's Codex
+runtime and subagent model. Authenticate once with
 `openclaw models auth login --provider openai`, then push the repo-managed
 OpenClaw config.
 
