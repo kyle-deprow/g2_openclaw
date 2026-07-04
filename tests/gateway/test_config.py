@@ -97,6 +97,7 @@ class TestOpenClawConfigDefaults:
         assert cfg.openclaw_port == 18789
         assert cfg.openclaw_gateway_token is None
         assert cfg.agent_timeout == 120
+        assert cfg.openclaw_agent_id == "main"
 
 
 class TestOpenClawLoadConfig:
@@ -114,6 +115,7 @@ class TestOpenClawLoadConfig:
         assert cfg.openclaw_port == 9999
         assert cfg.openclaw_gateway_token == "oc-secret"
         assert cfg.agent_timeout == 60
+        assert cfg.openclaw_agent_id == "main"
 
     def test_openclaw_optional_defaults_when_env_absent(
         self, monkeypatch: pytest.MonkeyPatch

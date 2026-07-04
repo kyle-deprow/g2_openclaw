@@ -96,7 +96,7 @@ def _record_auth_failure(remote_ip: str) -> None:
     _auth_failures[remote_ip] = [t for t in attempts if now - t < _AUTH_WINDOW_SECONDS]
 
 
-def _generate_session_key(agent_id: str = "claw") -> str:
+def _generate_session_key(agent_id: str = "main") -> str:
     """Generate a new unique session key."""
     if not agent_id:
         raise ValueError("agent_id is required")
@@ -174,7 +174,7 @@ class OpenClawResponseHandler:
         get_session_key: Callable[[], str] | None = None,
     ) -> None:
         self._client = client
-        self._get_session_key = get_session_key or (lambda: "agent:claw:g2")
+        self._get_session_key = get_session_key or (lambda: "agent:main:g2")
 
     async def start_stream(self, message: str) -> AsyncIterator[str]:
         """Initiate an OpenClaw agent request and return the delta stream."""
@@ -211,8 +211,8 @@ class GatewaySession:
         timeout: int = 120,
         local_audio: bool = False,
         history_limit: int = 10,
-        session_key: str = "agent:claw:g2",
-        agent_id: str = "claw",
+        session_key: str = "agent:main:g2",
+        agent_id: str = "main",
         server: GatewayServer | None = None,
     ) -> None:
         self.ws = ws

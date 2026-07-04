@@ -53,6 +53,7 @@ _DEFAULT_CLIENT_MODE = "backend"
 _DEFAULT_CLIENT_VERSION = "dev"
 _DEFAULT_ROLE = "operator"
 _DEFAULT_SCOPES = ["operator.admin"]
+_OPENCLAW_PROTOCOL_VERSION = 4
 
 # Timeout for the server's ``connect.challenge`` event after WS open
 _CHALLENGE_TIMEOUT_S = 5.0
@@ -248,8 +249,8 @@ class OpenClawClient:
             "id": str(auth_id),
             "method": "connect",
             "params": {
-                "minProtocol": 3,
-                "maxProtocol": 3,
+                "minProtocol": _OPENCLAW_PROTOCOL_VERSION,
+                "maxProtocol": _OPENCLAW_PROTOCOL_VERSION,
                 "client": {
                     "id": self._client_id,
                     "version": self._client_version,
@@ -285,7 +286,7 @@ class OpenClawClient:
     async def send_message(
         self,
         text: str,
-        session_key: str = "agent:claw:g2",
+        session_key: str = "agent:main:g2",
     ) -> AsyncIterator[str]:
         """Send an agent request and yield assistant delta strings.
 
@@ -297,7 +298,7 @@ class OpenClawClient:
     async def _send_message_inner(
         self,
         text: str,
-        session_key: str = "agent:claw:g2",
+        session_key: str = "agent:main:g2",
     ) -> AsyncIterator[str]:
         await self.ensure_connected()
         if self._ws is None:

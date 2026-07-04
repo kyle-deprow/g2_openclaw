@@ -11,7 +11,7 @@ import pytest
 from gateway.session_resolver import SessionMeta, list_sessions, resolve_session
 
 
-def _write_sessions(tmp_path: Path, data: Any, agent_id: str = "claw") -> Path:
+def _write_sessions(tmp_path: Path, data: Any, agent_id: str = "main") -> Path:
     """Write a sessions.json fixture and return the file path."""
     sessions_dir = tmp_path / ".openclaw" / "agents" / agent_id / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -27,14 +27,14 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_abc123",
                 "updatedAt": "2026-03-07T10:00:00Z",
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = resolve_session()
@@ -42,7 +42,7 @@ class TestResolveSession:
         assert result is not None
         assert result == SessionMeta(
             session_id="ses_abc123",
-            session_key="agent:claw:g2",
+            session_key="agent:main:g2",
             updated_at="2026-03-07T10:00:00Z",
         )
 
@@ -51,7 +51,7 @@ class TestResolveSession:
     ) -> None:
         missing = tmp_path / "nonexistent" / "sessions.json"
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": missing
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": missing
         )
 
         assert resolve_session() is None
@@ -60,13 +60,13 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:other": {
+            "agent:main:other": {
                 "sessionId": "ses_other",
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         assert resolve_session() is None
@@ -74,12 +74,12 @@ class TestResolveSession:
     def test_returns_none_on_corrupt_json(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        sessions_dir = tmp_path / ".openclaw" / "agents" / "claw" / "sessions"
+        sessions_dir = tmp_path / ".openclaw" / "agents" / "main" / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         path = sessions_dir / "sessions.json"
         path.write_text("{not valid json!!")
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         assert resolve_session() is None
@@ -88,13 +88,13 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "updatedAt": "2026-03-07T10:00:00Z",
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         assert resolve_session() is None
@@ -103,13 +103,13 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": 12345,
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         assert resolve_session() is None
@@ -118,7 +118,7 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_custom",
             }
         }
@@ -139,13 +139,13 @@ class TestResolveSession:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_no_ts",
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = resolve_session()
@@ -158,14 +158,14 @@ class TestResolveSession:
     ) -> None:
         """A numeric updatedAt (Unix timestamp) is converted to an ISO 8601 string."""
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_numeric_ts",
                 "updatedAt": 1772028800,
             }
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = resolve_session()
@@ -182,18 +182,18 @@ class TestListSessions:
 
     def test_returns_all_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_1",
                 "updatedAt": "2026-03-07T10:00:00Z",
             },
-            "agent:claw:g2:123:abc": {
+            "agent:main:g2:123:abc": {
                 "sessionId": "ses_2",
                 "updatedAt": "2026-03-07T12:00:00Z",
             },
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()
@@ -204,21 +204,21 @@ class TestListSessions:
 
     def test_skips_invalid_entries(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         sessions: dict[str, Any] = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_valid",
                 "updatedAt": "2026-03-07T10:00:00Z",
             },
-            "agent:claw:no_id": {
+            "agent:main:no_id": {
                 "updatedAt": "2026-03-07T11:00:00Z",
             },
-            "agent:claw:bad_id": {
+            "agent:main:bad_id": {
                 "sessionId": 12345,
             },
-            "agent:claw:not_dict": "just_a_string",
+            "agent:main:not_dict": "just_a_string",
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()
@@ -244,7 +244,7 @@ class TestListSessions:
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()
@@ -255,7 +255,7 @@ class TestListSessions:
     ) -> None:
         path = _write_sessions(tmp_path, {})
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()
@@ -266,7 +266,7 @@ class TestListSessions:
     ) -> None:
         missing = tmp_path / "nonexistent" / "sessions.json"
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": missing
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": missing
         )
 
         result = list_sessions()
@@ -275,14 +275,14 @@ class TestListSessions:
     def test_handles_ms_timestamps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """JS Date.now() style timestamps (milliseconds) are parsed correctly."""
         sessions = {
-            "agent:claw:g2": {
+            "agent:main:g2": {
                 "sessionId": "ses_ms",
                 "updatedAt": 1772028800000,  # ms timestamp
             },
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()
@@ -305,7 +305,7 @@ class TestListSessions:
         }
         path = _write_sessions(tmp_path, sessions)
         monkeypatch.setattr(
-            "gateway.session_resolver._sessions_json_path", lambda agent_id="claw": path
+            "gateway.session_resolver._sessions_json_path", lambda agent_id="main": path
         )
 
         result = list_sessions()

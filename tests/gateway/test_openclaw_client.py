@@ -264,6 +264,8 @@ class TestHappyPath:
             # Verify scopes and role
             assert captured["scopes"] == ["operator.admin"]
             assert captured["role"] == "operator"
+            assert captured["minProtocol"] == 4
+            assert captured["maxProtocol"] == 4
 
             await client.close()
         finally:

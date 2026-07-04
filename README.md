@@ -366,7 +366,7 @@ Set `OTEL_EXPORTER_OTLP_ENDPOINT=none` in `.env` or environment to disable all t
 | `ALLOWED_ORIGINS` | — | Comma-separated origins |
 | `G2_LOCAL_AUDIO` | `false` | Use local mic instead of WebSocket audio |
 | `HISTORY_LIMIT` | `10` | History entries sent on connect |
-| `OPENCLAW_AGENT_ID` | `claw` | Agent ID |
+| `OPENCLAW_AGENT_ID` | `main` | OpenClaw agent ID used for G2 sessions |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint. Set to `none` or empty to disable OTel |
 
 ### G2 App Gateway URL

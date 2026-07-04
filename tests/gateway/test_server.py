@@ -315,7 +315,7 @@ class TestConnectedSessionMeta:
         url, _ = auth_gateway
         meta = SessionMeta(
             session_id="ses_test_123",
-            session_key="agent:claw:g2",
+            session_key="agent:main:g2",
             updated_at="2026-03-07T10:00:00Z",
         )
         with patch("gateway.server.resolve_session", return_value=meta):
@@ -325,7 +325,7 @@ class TestConnectedSessionMeta:
                 assert connected["type"] == "connected"
                 assert connected["version"] == "1.0"
                 assert connected["sessionId"] == "ses_test_123"
-                assert connected["sessionKey"] == "agent:claw:g2"
+                assert connected["sessionKey"] == "agent:main:g2"
                 assert connected["sessionStartedAt"] == "2026-03-07T10:00:00Z"
 
     async def test_connected_frame_omits_session_fields_when_unavailable(
@@ -573,7 +573,7 @@ class TestSessionReset:
             await _recv_json(ws)  # session_reset frame
 
             assert gw._session_key != old_key
-            assert gw._session_key.startswith("agent:claw:g2:")
+            assert gw._session_key.startswith("agent:main:g2:")
 
 
 class TestGenerateSessionKey:
@@ -582,7 +582,7 @@ class TestGenerateSessionKey:
     def test_format_and_prefix(self) -> None:
         from gateway.server import _generate_session_key
 
-        key = _generate_session_key()
+        key = _generate_session_key("claw")
         assert key.startswith("agent:claw:g2:")
         rest = key[len("agent:claw:g2:") :]
         # Format: {timestamp}:{hex6}
@@ -657,7 +657,7 @@ class TestResetSessionCleansUpInflight:
             reset_frame = await _recv_json(ws)
             assert reset_frame == {"type": "session_reset", "reason": "user_request"}
 
-            assert gw._session_key.startswith("agent:claw:g2:")
+            assert gw._session_key.startswith("agent:main:g2:")
 
 
 class TestSessionMenu:
@@ -672,7 +672,7 @@ class TestSessionMenu:
         url, gw = auth_gateway
         summaries = [
             SessionSummary(
-                session_key="agent:claw:g2",
+                session_key="agent:main:g2",
                 session_id="ses_1",
                 updated_at="2026-03-07T10:00:00Z",
                 preview="Hello world",
@@ -695,7 +695,7 @@ class TestSessionMenu:
             assert resp["type"] == "session_list"
             assert resp["activeSessionKey"] == gw._session_key
             assert len(resp["sessions"]) == 1
-            assert resp["sessions"][0]["sessionKey"] == "agent:claw:g2"
+            assert resp["sessions"][0]["sessionKey"] == "agent:main:g2"
             assert resp["sessions"][0]["preview"] == "Hello world"
             assert resp["sessions"][0]["messageCount"] == 5
             assert resp["sessions"][0]["updatedAt"] == "2026-03-07T10:00:00Z"
@@ -810,7 +810,7 @@ class TestSessionMenu:
 
             assert switched["type"] == "session_switched"
             assert switched["sessionKey"] != old_key
-            assert switched["sessionKey"].startswith("agent:claw:g2:")
+            assert switched["sessionKey"].startswith("agent:main:g2:")
             assert history["type"] == "history"
             assert history["entries"] == []
             assert gw._session_key == switched["sessionKey"]
@@ -1012,7 +1012,7 @@ class TestForceStop:
             reset_frame = await _recv_json(ws)
             assert reset_frame == {"type": "session_reset", "reason": "force_stop"}
             assert gw._session_key != old_key
-            assert gw._session_key.startswith("agent:claw:g2:")
+            assert gw._session_key.startswith("agent:main:g2:")
 
     async def test_force_stop_while_thinking(self, auth_gateway: tuple[str, GatewayServer]) -> None:
         """force_stop works from non-idle states (no state guard)."""

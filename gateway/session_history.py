@@ -11,7 +11,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_AGENT_ID = "claw"
+_DEFAULT_AGENT_ID = "main"
 _OPENCLAW_BASE = Path.home() / ".openclaw" / "agents"
 DEFAULT_HISTORY_LIMIT = 10
 _DEFAULT_PREVIEW_MAX_LEN = 80
@@ -69,7 +69,7 @@ def _strip_bracket_prefixes(text: str) -> str:
 
 
 def resolve_session_file(
-    session_key: str = "agent:claw:g2",
+    session_key: str = "agent:main:g2",
     agent_id: str = _DEFAULT_AGENT_ID,
     base_path: Path | None = None,
 ) -> Path | None:
@@ -106,7 +106,7 @@ def resolve_session_file(
 
 
 def read_history(
-    session_key: str = "agent:claw:g2",
+    session_key: str = "agent:main:g2",
     agent_id: str = _DEFAULT_AGENT_ID,
     limit: int = DEFAULT_HISTORY_LIMIT,
     base_path: Path | None = None,

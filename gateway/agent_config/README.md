@@ -25,4 +25,4 @@ Later files can reference concepts from earlier ones.
 
 ## Session Key
 
-The Gateway uses `agent:claw:g2` as the session key for all interactions.
+The Gateway uses `agent:main:g2` as the base session key for G2 interactions.

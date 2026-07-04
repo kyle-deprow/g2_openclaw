@@ -10,7 +10,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_AGENT_ID = "claw"
+_DEFAULT_AGENT_ID = "main"
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ def _sessions_json_path(agent_id: str = _DEFAULT_AGENT_ID) -> Path:
 
 
 def resolve_session(
-    session_key: str = "agent:claw:g2",
+    session_key: str = "agent:main:g2",
     agent_id: str = _DEFAULT_AGENT_ID,
 ) -> SessionMeta | None:
     """Read sessions.json and return metadata for the given session key.

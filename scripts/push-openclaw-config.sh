@@ -507,6 +507,16 @@ done
 
 # ── Copy repo skills ─────────────────────────────────────────────────────────
 SKILLS_DST="${OPENCLAW_HOME}/skills"
+STALE_SKILLS=(
+  "copilot-cli"
+)
+for SKILL_NAME in "${STALE_SKILLS[@]}"; do
+  if [[ -d "${SKILLS_DST}/${SKILL_NAME}" ]]; then
+    rm -rf "${SKILLS_DST:?}/${SKILL_NAME}"
+    echo "Removed stale skill ${SKILL_NAME} from ${SKILLS_DST}"
+  fi
+done
+
 if [[ -d "${SKILLS_SRC}" ]]; then
   # Copy repo skills to local
   for SKILL_DIR in "${SKILLS_SRC}"/*/; do
