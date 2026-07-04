@@ -32,9 +32,9 @@ async def _consume_handshake(ws: websockets.ClientConnection) -> None:
     assert history["type"] == "history", f"Expected history, got {history}"
 
     status = json.loads(await ws.recv())
-    assert (
-        status["type"] == "status" and status["status"] == "idle"
-    ), f"Expected status:idle, got {status}"
+    assert status["type"] == "status" and status["status"] == "idle", (
+        f"Expected status:idle, got {status}"
+    )
 
 
 # ---------------------------------------------------------------------------
