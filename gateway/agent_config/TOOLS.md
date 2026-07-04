@@ -18,7 +18,8 @@ Model references use configured OpenAI IDs such as `openai/gpt-5.4`,
 Key rules:
 
 - Use OpenClaw subagents for target-repo coding and review work.
-- The `main` agent is the autoresearch PM and loop controller.
+- The `main` agent is the autoresearch PM and loop controller on
+  `openai/gpt-5.5` high.
 - Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
   `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
   in the autoresearch skill.

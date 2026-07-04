@@ -39,7 +39,7 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
 fi
 
 # ── Load env vars from .env ───────────────────────────────────────────────────
-PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
+PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENAI_PM_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
 declare -A PRESERVED_ENV=()
 for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
   if [[ -v "${VAR_NAME}" ]]; then
@@ -216,11 +216,70 @@ if ! echo "${MERGED}" | jq -e --arg provider "${MODEL_PROVIDER}" --arg model "${
   exit 1
 fi
 
+PM_MODEL_ID="${OPENAI_PM_MODEL:-gpt-5.5}"
+PM_MODEL_PRIMARY="openai/${PM_MODEL_ID}"
+if ! echo "${MERGED}" | jq -e --arg model "${PM_MODEL_ID}" '
+  any(.models.providers.openai.models[]?; .id == $model)
+' >/dev/null; then
+  echo "ERROR: PM model '${PM_MODEL_PRIMARY}' is not declared in repo config." >&2
+  echo "       Add it to gateway/openclaw_config/openclaw.json or choose a configured OPENAI_PM_MODEL." >&2
+  exit 1
+fi
+
 MERGED=$(echo "${MERGED}" | jq --arg primary "${MODEL_PRIMARY}" '
   .agents.defaults.model.primary = $primary
   | .agents.defaults.models = { ($primary): {} }
 ')
-echo "Active provider: ${PROVIDER} → model: ${MODEL_PRIMARY}"
+
+MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
+  (.agents.list[] | select(.id == "main") | .model.primary) = $pm
+  | (.agents.list[] | select(.id == "main") | .thinkingDefault) = "high"
+')
+
+echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
+
+# ── Managed invariant validation ─────────────────────────────────────────────
+# Fail before writing if a local merge or env selection would violate the
+# repo-managed autoresearch target shape.
+if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
+  def mutators: [
+    "mempalace_add_drawer",
+    "mempalace_check_duplicate",
+    "mempalace_checkpoint",
+    "mempalace_create_tunnel",
+    "mempalace_delete_by_source",
+    "mempalace_delete_drawer",
+    "mempalace_delete_hallway",
+    "mempalace_delete_tunnel",
+    "mempalace_diary_write",
+    "mempalace_hook_settings",
+    "mempalace_kg_add",
+    "mempalace_kg_invalidate",
+    "mempalace_mine",
+    "mempalace_reconnect",
+    "mempalace_sync",
+    "mempalace_update_drawer"
+  ];
+  (.agents.defaults.thinkingDefault == "high")
+  and (.agents.defaults.memorySearch.enabled == false)
+  and (.agents.defaults.compaction.memoryFlush.enabled == false)
+  and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
+  and ([.agents.list[] | select(
+    .id == "main"
+    and .model.primary == $pm
+    and .thinkingDefault == "high"
+    and ((.skills // []) | contains(["mempalace", "autoresearch"]))
+  )] | length) == 1
+  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
+  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
+  and ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains(mutators)) | not))] | length) == 0
+  and (((.agents.list[] | select(.id == "main") | .tools.deny // []) | index("mempalace_add_drawer")) | not)
+' >/dev/null; then
+  echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
+  echo "       Check main PM model/skills, MemPalace read-only stage agents, and memory tool denies." >&2
+  exit 1
+fi
+echo "Managed invariants validated: PM model, high reasoning, MemPalace split, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"

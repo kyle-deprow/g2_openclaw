@@ -22,7 +22,7 @@ infrastructure in this repo.
 ```
 Human (G2 glasses — connect/steer/disconnect)
   ↓
-OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.4 via Codex runtime)
+OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.5 high via Codex runtime)
   ├─ MemPalace MCP (stdio) → local palace
   ├─ Phase 1: Context — PM + context-curator read RESEARCH_LOG.md and MemPalace
   ├─ Phase 2: Debate — five OpenClaw agents, require 3-of-5 majority
@@ -82,7 +82,7 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 
 | Agent | Role |
 |-------|------|
-| main | PM; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
+| main | PM; openai/gpt-5.5 high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
 | context-curator | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
 | debater-microstructure | Market mechanics theory |
 | debater-data | Data availability, coverage, and target construction |

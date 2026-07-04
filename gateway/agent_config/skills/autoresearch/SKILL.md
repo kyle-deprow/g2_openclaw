@@ -31,6 +31,7 @@ context-curator
 ## Model Policy
 
 - Every gpt-5.4 stage must run with high reasoning.
+- The PM agent `main` must run on `openai/gpt-5.5` with high reasoning.
 - At least half of the five debate agents must be `openai/gpt-5.5` with high
   reasoning. The configured panel uses three.
 - The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.5` with high
