@@ -296,6 +296,19 @@ setup_openclaw() {
     exit 1
   fi
 
+  local mempalace_python="$HOME/.local/share/mempalace/venv/bin/python"
+  local mempalace_health="$REPO_ROOT/scripts/check-mempalace-health.py"
+  if FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-$HOME/.cache/fastembed}" \
+    MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}" \
+    HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" \
+    "$mempalace_python" "$mempalace_health"; then
+    ok "MemPalace healthcheck passed"
+    summary_add "MemPalace: healthcheck passed"
+  else
+    fail "MemPalace healthcheck failed — fix the palace explicitly; bootstrap will not repair or fall back"
+    exit 1
+  fi
+
   # --- Push repo config ---
   local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"
   if [[ -f "$push_script" ]]; then

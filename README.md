@@ -187,6 +187,16 @@ bash scripts/push-openclaw-config.sh
 cd g2_app && npm install && cd ..
 ```
 
+MemPalace is a strict startup dependency for OpenClaw research memory. Cold
+start, config push, and the CLI launcher validate that the active palace uses
+the configured local embedding model and a cosine Chroma index. The expected
+runtime cache is durable, not `/tmp`:
+
+```bash
+export FASTEMBED_CACHE_PATH="$HOME/.cache/fastembed"
+make mempalace-health
+```
+
 ### Running
 
 ```bash
@@ -277,6 +287,7 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 | `make typecheck` | Type-check all components |
 | `make cold-start` | Full setup: deps, env, security, smoke tests |
 | `make push-config` | Push OpenClaw config to `~/.openclaw/` |
+| `make mempalace-health` | Validate MemPalace embedding and index invariants |
 | `make clean` | Remove caches, dist/, logs/, node_modules/ |
 | `make sim-lite` | Start gateway only (no OTel Docker stack) |
 | `make otel-up` | Start OTel observability Docker services |

@@ -35,6 +35,10 @@ console = Console()
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PID_FILE = _PROJECT_ROOT / "logs" / ".sim.pid"
+_MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
+_MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
+_MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
+_MEMPALACE_EMBEDDING_MODEL = "bge-base"
 
 
 def _write_pid_file(pids: dict[str, int]) -> None:
@@ -56,6 +60,47 @@ def _remove_pid_file() -> None:
     """Remove the PID file if it exists."""
     with contextlib.suppress(FileNotFoundError):
         _PID_FILE.unlink()
+
+
+def _mempalace_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return environment variables required for strict MemPalace startup."""
+    env = dict(os.environ if base_env is None else base_env)
+    env.setdefault("FASTEMBED_CACHE_PATH", str(_MEMPALACE_CACHE_PATH))
+    env.setdefault("MEMPALACE_EMBEDDING_MODEL", _MEMPALACE_EMBEDDING_MODEL)
+    env.setdefault("MEMPALACE_EXPECTED_EMBEDDING_MODEL", _MEMPALACE_EMBEDDING_MODEL)
+    env.setdefault("MEMPALACE_EXPECTED_EMBEDDING_DIMENSION", "768")
+    env.setdefault("HF_HUB_OFFLINE", "1")
+    return env
+
+
+def _check_mempalace_health() -> bool:
+    """Run the strict MemPalace startup healthcheck."""
+    if not _MEMPALACE_PYTHON.is_file():
+        console.print(f"  [red]✗[/red] MemPalace Python not found: {_MEMPALACE_PYTHON}")
+        return False
+    if not _MEMPALACE_HEALTH_SCRIPT.is_file():
+        console.print(
+            f"  [red]✗[/red] MemPalace health script not found: {_MEMPALACE_HEALTH_SCRIPT}"
+        )
+        return False
+    _MEMPALACE_CACHE_PATH.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [str(_MEMPALACE_PYTHON), str(_MEMPALACE_HEALTH_SCRIPT)],
+        cwd=str(_PROJECT_ROOT),
+        env=_mempalace_env(),
+        text=True,
+        capture_output=True,
+    )
+    if result.stdout.strip():
+        console.print(f"  [dim]{result.stdout.strip()}[/dim]")
+    if result.returncode == 0:
+        console.print("  [green]✓[/green] MemPalace healthcheck passed")
+        return True
+    if result.stderr.strip():
+        console.print(f"  [red]✗[/red] {result.stderr.strip()}")
+    else:
+        console.print("  [red]✗[/red] MemPalace healthcheck failed")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -924,6 +969,7 @@ def push_config(
             ["openclaw", "daemon", "restart"],
             check=False,
             capture_output=True,
+            env=_mempalace_env(),
         )
         _wait_for_port(openclaw_port, label="OpenClaw daemon")
         daemon_restarted = True
@@ -1013,6 +1059,11 @@ def launch(
             check=False,
         )
         raise typer.Exit()
+
+    if not no_openclaw:
+        console.print("[bold]MemPalace health[/bold]")
+        if not _check_mempalace_health():
+            raise typer.Exit(code=1)
 
     # -- OTel init (before any server import) ---------------------------------
     from gateway.otel_setup import init_otel
@@ -1108,6 +1159,7 @@ def launch(
                     ["openclaw", "daemon", "restart"],
                     check=False,
                     capture_output=True,
+                    env=_mempalace_env(),
                 )
             else:
                 console.print(f"  Starting OpenClaw daemon on port {openclaw_port}…")
@@ -1115,6 +1167,7 @@ def launch(
                     ["openclaw", "daemon", "start"],
                     check=False,
                     capture_output=True,
+                    env=_mempalace_env(),
                 )
             _wait_for_port(openclaw_port, label="OpenClaw daemon")
 

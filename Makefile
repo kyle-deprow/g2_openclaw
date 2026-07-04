@@ -17,9 +17,12 @@ RESET := \033[0m
 # MemPalace paths
 MEMPALACE_VENV    := $(HOME)/.local/share/mempalace/venv
 MEMPALACE_PYTHON  := $(MEMPALACE_VENV)/bin/python
-MEMPALACE_VERSION := 3.5.0
+MEMPALACE_BRANCH  := deprow/feature/fastembed-embeddings
+MEMPALACE_REPO    := https://github.com/kyle-deprow/mempalace.git
+MEMPALACE_EMBEDDING_MODEL := bge-base
+MEMPALACE_CACHE_PATH := $(HOME)/.cache/fastembed
 OTEL_INSTRUMENTATION_VERSION := 0.64b0
-MEMPALACE_PACKAGE := mempalace==$(MEMPALACE_VERSION)
+MEMPALACE_PACKAGE := mempalace[fastembed] @ git+$(MEMPALACE_REPO)@$(MEMPALACE_BRANCH)
 OTEL_INSTRUMENTATION_PACKAGES := \
 	opentelemetry-instrumentation==$(OTEL_INSTRUMENTATION_VERSION) \
 	opentelemetry-instrumentation-asgi==$(OTEL_INSTRUMENTATION_VERSION) \
@@ -97,7 +100,7 @@ pre-commit: ## Run all pre-commit hooks
 # Gateway Operations
 # ============================================================================
 
-.PHONY: init-env launch stop sim restart push-config mempalace-install
+.PHONY: init-env launch stop sim restart push-config mempalace-install mempalace-health
 
 init-env: ## Generate .env from system detection
 	@uv run python -m gateway init-env
@@ -134,7 +137,17 @@ mempalace-install: ## Install/upgrade required MemPalace MCP server (idempotent)
 	@uv pip install --python "$(MEMPALACE_PYTHON)" --upgrade $(OTEL_INSTRUMENTATION_PACKAGES)
 	@uv pip check --python "$(MEMPALACE_PYTHON)"
 	@"$(MEMPALACE_PYTHON)" -c 'import mempalace.mcp_server'
+	@mkdir -p "$(MEMPALACE_CACHE_PATH)"
+	@MEMPALACE_EMBEDDING_MODEL="$(MEMPALACE_EMBEDDING_MODEL)" "$(MEMPALACE_PYTHON)" -c 'from mempalace.config import MempalaceConfig; MempalaceConfig().set_embedding_model("$(MEMPALACE_EMBEDDING_MODEL)")'
 	@echo -e "$(GREEN)$(BOLD)>>> MemPalace ready$(RESET)"
+
+mempalace-health: ## Validate MemPalace embedding/index invariants
+	@FASTEMBED_CACHE_PATH="$(MEMPALACE_CACHE_PATH)" \
+	MEMPALACE_EMBEDDING_MODEL="$(MEMPALACE_EMBEDDING_MODEL)" \
+	MEMPALACE_EXPECTED_EMBEDDING_MODEL="$(MEMPALACE_EMBEDDING_MODEL)" \
+	MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="768" \
+	HF_HUB_OFFLINE="1" \
+	"$(MEMPALACE_PYTHON)" scripts/check-mempalace-health.py
 
 
 # ============================================================================

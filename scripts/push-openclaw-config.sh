@@ -170,6 +170,14 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
 MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
 MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
 MEMPALACE_PALACE="${HOME}/.mempalace/palace"
+MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
+MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
+MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
+FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-${HOME}/.cache/fastembed}"
+HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export FASTEMBED_CACHE_PATH MEMPALACE_EMBEDDING_MODEL
+export MEMPALACE_EXPECTED_EMBEDDING_MODEL MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+export HF_HUB_OFFLINE
 
 if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
   echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
@@ -186,15 +194,33 @@ if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; the
 fi
 
 mkdir -p "${MEMPALACE_PALACE}"
+mkdir -p "${FASTEMBED_CACHE_PATH}"
+
+if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
+  echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
+  echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
+  cp "${BACKUP}" "${LOCAL_CONFIG}"
+  exit 1
+fi
+
 MERGED=$(echo "${MERGED}" | jq \
   --arg cmd "${MEMPALACE_PYTHON}" \
-  --arg palace "${MEMPALACE_PALACE}" '
+  --arg palace "${MEMPALACE_PALACE}" \
+  --arg cache "${FASTEMBED_CACHE_PATH}" \
+  --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
+  --arg offline "${HF_HUB_OFFLINE}" '
   .mcp.servers.mempalace = {
     "command": $cmd,
-    "args": ["-m", "mempalace.mcp_server", "--palace", $palace]
+    "args": ["-m", "mempalace.mcp_server", "--palace", $palace],
+    "env": {
+      "FASTEMBED_CACHE_PATH": $cache,
+      "MEMPALACE_EMBEDDING_MODEL": $model,
+      "HF_HUB_OFFLINE": $offline
+    }
   }
 ')
 echo "Resolved required MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
+echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
 
 # ── Force-set tools section from repo config ─────────────────────────────────
 # Deep merge preserves stale keys (e.g. tools.allow from a previous push).
