@@ -599,6 +599,13 @@ class TestGenerateSessionKey:
         # UUID hex suffix should make each key unique
         assert len(keys) == 10
 
+    def test_uses_configured_agent_id(self) -> None:
+        from gateway.server import _generate_session_key
+
+        key = _generate_session_key("main")
+
+        assert key.startswith("agent:main:g2:")
+
 
 class TestCheckDailyResetNoOp:
     """_check_daily_reset is a no-op when the date hasn't changed."""

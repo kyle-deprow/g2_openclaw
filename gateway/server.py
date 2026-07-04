@@ -96,9 +96,11 @@ def _record_auth_failure(remote_ip: str) -> None:
     _auth_failures[remote_ip] = [t for t in attempts if now - t < _AUTH_WINDOW_SECONDS]
 
 
-def _generate_session_key() -> str:
+def _generate_session_key(agent_id: str = "claw") -> str:
     """Generate a new unique session key."""
-    return f"agent:claw:g2:{int(_time_module.time())}:{uuid.uuid4().hex[:6]}"
+    if not agent_id:
+        raise ValueError("agent_id is required")
+    return f"agent:{agent_id}:g2:{int(_time_module.time())}:{uuid.uuid4().hex[:6]}"
 
 
 def _today_utc() -> str:
@@ -1087,7 +1089,7 @@ class GatewayServer:
         self._current_session: GatewaySession | None = None
         self._inflight_buffer: InflightBuffer | None = None
         self._inflight_task: asyncio.Task[None] | None = None
-        self._session_key: str = "agent:claw:g2"
+        self._session_key: str = f"agent:{config.openclaw_agent_id}:g2"
         self._session_date: str = _today_utc()
         self._pending_reset_reason: str | None = None
 
@@ -1201,7 +1203,7 @@ class GatewayServer:
     async def reset_session(self, reason: str) -> None:
         """Generate a new session key and notify the connected client."""
         old_key = self._session_key
-        self._session_key = _generate_session_key()
+        self._session_key = _generate_session_key(self.config.openclaw_agent_id)
         self._session_date = _today_utc()
         logger.info("Session reset (%s): %s → %s", reason, old_key, self._session_key)
 
@@ -1226,7 +1228,7 @@ class GatewayServer:
         await self._discard_inflight()
         await self._handler.close()
         old_key = self._session_key
-        self._session_key = _generate_session_key()
+        self._session_key = _generate_session_key(self.config.openclaw_agent_id)
         self._session_date = _today_utc()
         logger.info("Force stop: session reset %s → %s", old_key, self._session_key)
 
@@ -1312,7 +1314,7 @@ class GatewayServer:
         The session won't appear in sessions.json until the first OpenClaw
         message is sent (OpenClaw creates the entry on first use).
         """
-        new_key = _generate_session_key()
+        new_key = _generate_session_key(self.config.openclaw_agent_id)
         old_key = self._session_key
         self._session_key = new_key
         logger.info("Session created: %s (was %s)", new_key, old_key)
@@ -1346,7 +1348,7 @@ class GatewayServer:
                 today,
             )
             old_key = self._session_key
-            self._session_key = _generate_session_key()
+            self._session_key = _generate_session_key(self.config.openclaw_agent_id)
             self._session_date = today
             await self._handler.close()
             self._pending_reset_reason = "daily_reset"
