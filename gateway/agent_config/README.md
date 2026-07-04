@@ -5,7 +5,7 @@ Deploy them with `bash scripts/push-openclaw-config.sh`.
 
 ## Files
 
-- `SOUL.md` — Core personality: orchestrator identity, boundaries, tone.
+- `SOUL.md` — Core personality: Research PM identity, boundaries, tone.
 - `AGENTS.md` — Operational rules: orchestration loop, HIL gates, session management.
 - `TOOLS.md` — Tool usage guide for OpenClaw Codex runtime and built-in tools.
 - `BOOTSTRAP.md` — Project context: tech stack, repo layout, conventions.

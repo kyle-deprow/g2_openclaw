@@ -7,6 +7,7 @@
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
 #   - openclaw CLI on PATH
+#   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai'
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
@@ -64,6 +65,11 @@ if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_AP
   exit 1
 fi
 
+if [[ "${OPENCLAW_PROVIDER:-codex}" == "codex" ]] && ! command -v openclaw &>/dev/null; then
+  echo "ERROR: openclaw CLI is required for OPENCLAW_PROVIDER=codex." >&2
+  exit 1
+fi
+
 # ── Backup ───────────────────────────────────────────────────────────────────
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="${LOCAL_CONFIG}.bak.${TIMESTAMP}"
@@ -80,26 +86,35 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
   | del(.mcp)
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
-# ── Resolve MemPalace MCP server path ─────────────────────────────────────────
+# ── Resolve required MemPalace MCP server path ────────────────────────────────
 MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
 MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
 MEMPALACE_PALACE="${HOME}/.mempalace/palace"
 
-if [[ -x "${MEMPALACE_PYTHON}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq \
-    --arg cmd "${MEMPALACE_PYTHON}" \
-    --arg palace "${MEMPALACE_PALACE}" '
-    .mcp.servers.mempalace = {
-      "command": $cmd,
-      "args": ["-m", "mempalace.mcp_server", "--palace", $palace]
-    }
-  ')
-  echo "Resolved MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
-else
-  echo "WARNING: MemPalace not installed at ${MEMPALACE_VENV}. Run 'make mempalace-install' first." >&2
-  # Remove placeholder
-  MERGED=$(echo "${MERGED}" | jq 'del(.mcp.servers.mempalace)')
+if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
+  echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
+  echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
+  cp "${BACKUP}" "${LOCAL_CONFIG}"
+  exit 1
 fi
+
+if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
+  echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
+  echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
+  cp "${BACKUP}" "${LOCAL_CONFIG}"
+  exit 1
+fi
+
+mkdir -p "${MEMPALACE_PALACE}"
+MERGED=$(echo "${MERGED}" | jq \
+  --arg cmd "${MEMPALACE_PYTHON}" \
+  --arg palace "${MEMPALACE_PALACE}" '
+  .mcp.servers.mempalace = {
+    "command": $cmd,
+    "args": ["-m", "mempalace.mcp_server", "--palace", $palace]
+  }
+')
+echo "Resolved required MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
 
 # ── Force-set tools section from repo config ─────────────────────────────────
 # Deep merge preserves stale keys (e.g. tools.allow from a previous push).
@@ -115,6 +130,24 @@ fi
 REPO_MEMORY=$(jq '.memory // empty' "${REPO_CONFIG}")
 if [[ -n "${REPO_MEMORY}" ]]; then
   MERGED=$(echo "${MERGED}" | jq --argjson memory "${REPO_MEMORY}" '.memory = $memory')
+fi
+
+# ── Force-set disabled built-in agent memory controls ────────────────────────
+# Recursive merge keeps stale vector-search/session-memory children even when
+# memorySearch.enabled is false. Replace the managed memory controls exactly so
+# MemPalace remains the only durable research memory layer.
+REPO_AGENT_MEMORY_SEARCH=$(jq '.agents.defaults.memorySearch // empty' "${REPO_CONFIG}")
+if [[ -n "${REPO_AGENT_MEMORY_SEARCH}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --argjson memory_search "${REPO_AGENT_MEMORY_SEARCH}" '
+    .agents.defaults.memorySearch = $memory_search
+  ')
+fi
+
+REPO_AGENT_MEMORY_FLUSH=$(jq '.agents.defaults.compaction.memoryFlush // empty' "${REPO_CONFIG}")
+if [[ -n "${REPO_AGENT_MEMORY_FLUSH}" ]]; then
+  MERGED=$(echo "${MERGED}" | jq --argjson memory_flush "${REPO_AGENT_MEMORY_FLUSH}" '
+    .agents.defaults.compaction.memoryFlush = $memory_flush
+  ')
 fi
 
 # ── Resolve env: references in provider apiKey fields ────────────────────────
@@ -285,6 +318,19 @@ if command -v openclaw &>/dev/null; then
     cp "${BACKUP}" "${LOCAL_CONFIG}"
     echo "ERROR: 'openclaw config validate' failed. Restored backup ${BACKUP}." >&2
     exit 1
+  fi
+  if [[ "${PROVIDER}" == "codex" ]]; then
+    echo "Running: openclaw plugins inspect codex --json"
+    if ! openclaw plugins inspect codex --json | jq -e '
+      .plugin.id == "codex"
+      and .plugin.enabled == true
+      and .plugin.status == "loaded"
+    ' >/dev/null; then
+      cp "${BACKUP}" "${LOCAL_CONFIG}"
+      echo "ERROR: Required Codex plugin is not installed, enabled, and loaded. Restored backup ${BACKUP}." >&2
+      echo "       Run: openclaw plugins install @openclaw/codex" >&2
+      exit 1
+    fi
   fi
 else
   cp "${BACKUP}" "${LOCAL_CONFIG}"

@@ -17,6 +17,13 @@ RESET := \033[0m
 # MemPalace paths
 MEMPALACE_VENV    := $(HOME)/.local/share/mempalace/venv
 MEMPALACE_PYTHON  := $(MEMPALACE_VENV)/bin/python
+MEMPALACE_VERSION := 3.5.0
+OTEL_INSTRUMENTATION_VERSION := 0.64b0
+MEMPALACE_PACKAGE := mempalace==$(MEMPALACE_VERSION)
+OTEL_INSTRUMENTATION_PACKAGES := \
+	opentelemetry-instrumentation==$(OTEL_INSTRUMENTATION_VERSION) \
+	opentelemetry-instrumentation-asgi==$(OTEL_INSTRUMENTATION_VERSION) \
+	opentelemetry-instrumentation-fastapi==$(OTEL_INSTRUMENTATION_VERSION)
 
 # ============================================================================
 # Setup
@@ -111,18 +118,22 @@ sim-lite: ## G2 + OpenClaw only (no OTel Docker stack)
 
 restart: sim ## Alias for sim
 
-push-config: ## Push OpenClaw config to the gateway
+push-config: mempalace-install ## Push OpenClaw config to the gateway
 	@uv run python -m gateway push-config
 
-mempalace-install: ## Install MemPalace MCP server (idempotent)
-	@echo -e "$(CYAN)$(BOLD)>>> Installing MemPalace...$(RESET)"
-	@if [ -d "$(MEMPALACE_VENV)" ]; then \
-		echo "MemPalace venv exists, upgrading..."; \
-		uv pip install --python $(MEMPALACE_PYTHON) --upgrade mempalace 2>&1 | tail -1; \
-	else \
-		uv venv $(MEMPALACE_VENV); \
-		uv pip install --python $(MEMPALACE_PYTHON) mempalace 2>&1 | tail -1; \
+mempalace-install: ## Install/upgrade required MemPalace MCP server (idempotent)
+	@echo -e "$(CYAN)$(BOLD)>>> Installing/upgrading MemPalace...$(RESET)"
+	@if [ ! -x "$(MEMPALACE_PYTHON)" ]; then \
+		if [ -d "$(MEMPALACE_VENV)" ]; then \
+			echo "MemPalace venv exists but is incomplete, recreating..."; \
+			rm -rf "$(MEMPALACE_VENV)"; \
+		fi; \
+		uv venv "$(MEMPALACE_VENV)"; \
 	fi
+	@uv pip install --python "$(MEMPALACE_PYTHON)" --upgrade "$(MEMPALACE_PACKAGE)"
+	@uv pip install --python "$(MEMPALACE_PYTHON)" --upgrade $(OTEL_INSTRUMENTATION_PACKAGES)
+	@uv pip check --python "$(MEMPALACE_PYTHON)"
+	@"$(MEMPALACE_PYTHON)" -c 'import mempalace.mcp_server'
 	@echo -e "$(GREEN)$(BOLD)>>> MemPalace ready$(RESET)"
 
 

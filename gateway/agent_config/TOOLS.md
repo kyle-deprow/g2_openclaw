@@ -12,15 +12,16 @@ Auth requirement for the host:
 openclaw models auth login --provider openai
 ```
 
-Model references use configured OpenAI IDs such as `openai/gpt-5.4` and
-`openai/gpt-5-mini`.
+Model references use configured OpenAI IDs such as `openai/gpt-5.4`,
+`openai/gpt-5.5`, and `openai/gpt-5-mini`.
 
 Key rules:
 
 - Use OpenClaw subagents for target-repo coding and review work.
-- Prefer the `orchestrator` subagent for implementation and planning.
-- Use `researcher`, `contrarian`, `explorer`, `theorist`, and `reviewer` for the
-  autoresearch phases described in the autoresearch skill.
+- The `main` agent is the autoresearch PM and loop controller.
+- Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
+  `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
+  in the autoresearch skill.
 - Run long implementation and review tasks in the background.
 - Do not silently fall back to another runtime, provider, or model if Codex auth
   or runtime selection fails.
@@ -33,7 +34,6 @@ Key rules:
 | `process` | Monitor background tasks: `process action:log sessionId:<id>` |
 | `Read` / `Write` | File operations scoped to the OpenClaw workspace |
 | `Glob` / `Grep` | File search scoped to the OpenClaw workspace |
-| `memory_search` | Search OpenClaw memory |
 | `web_search` / `web_fetch` | Web research |
 | `cron_create` | Schedule recurring or one-shot tasks |
 | `cron_delete` | Remove a scheduled task by ID |
@@ -47,28 +47,39 @@ Critical: never use `exec` to create, modify, or delete code files in target
 repos. Implementation changes go through OpenClaw Codex subagents so the work
 has a plan, verification, commits, and recoverable history.
 
+OpenClaw built-in memory tools (`memory_search`, `memory_get`) are denied by
+policy. Use MemPalace read tools for research context. Only the PM agent loads
+the write-capable `mempalace` skill and MemPalace write tools; non-PM agents
+load `mempalace-readonly`.
+
 ## Memory (via MemPalace MCP)
 
 | Tool | Use |
 |------|-----|
 | `mempalace_status` | Palace health and drawer overview |
 | `mempalace_search` | Semantic search across stored experiment content |
-| `mempalace_add_drawer` | Store verbatim experiment results |
-| `mempalace_delete_drawer` | Remove a drawer by ID for data correction |
+| `mempalace_add_drawer` | PM-only final experiment logging |
+| `mempalace_delete_drawer` | PM-only correction of completed records |
 | `mempalace_kg_query` | Query entity relationships from the knowledge graph |
-| `mempalace_kg_add` | Add temporal fact |
-| `mempalace_kg_invalidate` | Mark a fact as no longer true |
+| `mempalace_kg_add` | PM-only final experiment fact logging |
+| `mempalace_kg_invalidate` | PM-only correction of completed records |
 | `mempalace_kg_timeline` | Chronological story of an entity |
 | `mempalace_kg_stats` | Knowledge graph overview |
-| `mempalace_diary_write` | Record session summary for continuity |
+| `mempalace_diary_write` | PM-only summary after completed experiment decisions |
 | `mempalace_diary_read` | Browse past session notes |
 | `mempalace_list_wings` | List all wings with drawer counts |
 | `mempalace_list_rooms` | List rooms within a wing |
-| `mempalace_check_duplicate` | Pre-write duplicate detection |
+| `mempalace_check_duplicate` | PM-only pre-write duplicate detection |
 
-Read the `mempalace` skill for when and how to use each tool in the autoresearch
-loop. If MemPalace tools error, continue without them; they are additive, not
-blocking.
+Read `mempalace` only when acting as the PM. Read `mempalace-readonly` when
+acting as any context, debate, implementation, review, or fix stage agent. If
+MemPalace tools error, stop the loop and report the blocker. Do not continue
+with hidden or unstructured state.
+
+Non-PM stage agents both deny every MemPalace mutation/operation tool in config
+and avoid the write-capable `mempalace` skill. They may read context, but they
+cannot write or alter drawers, KG facts, diaries, tunnels, hallways, hook
+settings, mined content, checkpoints, sync state, or source-linked records.
 
 ## Long-Running Tasks
 

@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-03-28
+**Last Updated:** 2026-07-03
 
 ## Goal
 
@@ -23,15 +23,16 @@ infrastructure in this repo.
 Human (G2 glasses — connect/steer/disconnect)
   ↓
 OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.4 via Codex runtime)
-  ├─ MemPalace MCP (stdio) → SQLite + ChromaDB (local, no Docker)
-  ├─ Phase 1: Resume — read RESEARCH_LOG.md + memory + knowledge graph
-  ├─ Phase 2: Ideate — researcher subagent (3-agent debate)
-  ├─ Phase 3: Implement — orchestrator subagent (code + test + notebook)
-  ├─ Phase 4: Verify — sanity checks (Sharpe >10 = BUG, OOS >2× IS = unreliable)
-  ├─ Phase 4.5: Review — reviewer subagent (adversarial 8-point audit)
-  ├─ Phase 5: Decide — IS walk-forward Sharpe is the primary metric
-  ├─ Phase 6-7: Log + reflect + mempalace_add_drawer + mempalace_kg_add
-  └─ Phase 8: Continue — loop NEVER self-terminates, seek orthogonal strategies
+  ├─ MemPalace MCP (stdio) → local palace
+  ├─ Phase 1: Context — PM + context-curator read RESEARCH_LOG.md and MemPalace
+  ├─ Phase 2: Debate — five OpenClaw agents, require 3-of-5 majority
+  ├─ Phase 3: Consensus — consensus-arbiter emits one implementation brief
+  ├─ Phase 4: Implement — implementer subagent (code + test + notebook)
+  ├─ Phase 5: Verify — sanity checks (Sharpe >10 = BUG, OOS >2x IS = unreliable)
+  ├─ Phase 6: Review — single openai/gpt-5.5 high reviewer
+  ├─ Phase 7: Fix/test — fixer handles concrete defects only
+  ├─ Phase 8: Decide/log — PM writes final experiment outcome to MemPalace
+  └─ Continue — loop NEVER self-terminates, seek orthogonal strategies
   ↓
 Gateway (:8765) — G2 transport, reconnect briefing, and task status display
   ↓
@@ -75,19 +76,23 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | 95% data range coverage | Experiments limited to 6mo caused useless OOS; use full 2021-2026 range |
 | Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
 | Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
-| 3-agent research debate | Researcher, contrarian, explorer/theorist — prevents tunnel vision |
+| 5-agent research debate | Three gpt-5.5 high and two gpt-5.4 high debaters prevent tunnel vision |
 
-## Codex Subagent Roster (in quantipy)
+## OpenClaw Stage Roster
 
 | Agent | Role |
 |-------|------|
-| researcher | Orchestrates 3-specialist debate, produces ranked proposals |
-| orchestrator | Implements experiments end-to-end (module + tests + notebook) |
-| reviewer | Adversarial 8-point audit (OOS reliability, leakage, feature importance, costs) |
-| contrarian | Challenges consensus, proposes unconventional directions |
-| explorer | Broad creative search, novel feature families |
-| theorist | Academically grounded proposals with citations |
-| backend-python | Platform infrastructure work |
+| main | PM; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
+| context-curator | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
+| debater-microstructure | Market mechanics theory |
+| debater-data | Data availability, coverage, and target construction |
+| debater-skeptic | Leakage, overfit, and cherry-picking pressure |
+| debater-theory | Statistical and finance rationale |
+| debater-implementation | Buildability and verification cost |
+| consensus-arbiter | 3-of-5 majority decision and implementation brief |
+| implementer | End-to-end implementation |
+| reviewer | Single openai/gpt-5.5 high methodology review |
+| fixer | Concrete fixes only |
 
 ## Config Files
 
@@ -99,7 +104,8 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | TOOLS.md | `gateway/agent_config/` | Tool reference, exec syntax |
 | autoresearch/ | `gateway/agent_config/skills/` | Full 8-phase autonomous loop protocol |
 | experiment-data/ | `quantipy .agents/skills/` | Data loading, walk-forward, sanity checks |
-| mempalace/ | `gateway/agent_config/skills/` | MemPalace MCP skill: structured experiment storage, semantic search, temporal knowledge graph |
+| mempalace/ | `gateway/agent_config/skills/` | PM-only MemPalace writes for completed experiment decisions |
+| mempalace-readonly/ | `gateway/agent_config/skills/` | Non-PM MemPalace search, diary reads, traversal, and KG queries |
 
 ## Success Criteria
 

@@ -39,7 +39,7 @@ What it does:
   1. Checks system prerequisites (Python ≥3.13, uv, Node.js ≥22, npm)
   2. Installs Python dependencies via uv
   3. Installs TypeScript dependencies (g2_app)
-  4. Installs OpenClaw CLI, onboards, pushes repo config, optionally installs MemPalace MCP
+  4. Installs OpenClaw CLI, onboards, installs MemPalace MCP, and pushes repo config
   5. Generates environment config via gateway init-env
   6. Installs pre-commit hooks
   7. Optionally installs EvenHub global tools
@@ -249,20 +249,13 @@ setup_openclaw() {
     ok "OpenClaw CLI: $oc_ver"
   else
     info "OpenClaw CLI not found"
-    if prompt_yn "Install OpenClaw globally via npm?"; then
-      sudo npm install -g openclaw@latest
-      if command -v openclaw &>/dev/null; then
-        ok "OpenClaw installed: $(openclaw --version 2>&1 | head -1)"
-        summary_add "Installed OpenClaw globally"
-      else
-        warn "OpenClaw installation failed — skipping setup"
-        summary_add "OpenClaw: install failed"
-        return
-      fi
+    sudo npm install -g openclaw@latest
+    if command -v openclaw &>/dev/null; then
+      ok "OpenClaw installed: $(openclaw --version 2>&1 | head -1)"
+      summary_add "Installed OpenClaw globally"
     else
-      warn "Skipped OpenClaw install — gateway startup requires OpenClaw"
-      summary_add "OpenClaw: not installed (gateway will not start)"
-      return
+      fail "OpenClaw installation failed — required for gateway startup"
+      exit 1
     fi
   fi
 
@@ -270,56 +263,52 @@ setup_openclaw() {
   local oc_config="$HOME/.openclaw/openclaw.json"
   if [[ ! -f "$oc_config" ]]; then
     info "OpenClaw not onboarded yet (~/.openclaw/openclaw.json not found)"
-    if prompt_yn "Run 'openclaw onboard --local' now?"; then
-      openclaw onboard --local
-      if [[ -f "$oc_config" ]]; then
-        ok "OpenClaw onboarded"
-        summary_add "OpenClaw: onboarded"
-      else
-        warn "Onboarding didn't create config — check output above"
-        summary_add "OpenClaw: onboarding may have failed"
-        return
-      fi
+    openclaw onboard --local
+    if [[ -f "$oc_config" ]]; then
+      ok "OpenClaw onboarded"
+      summary_add "OpenClaw: onboarded"
     else
-      info "Skipped onboarding — run 'openclaw onboard --local' manually"
-      summary_add "OpenClaw: not onboarded"
-      return
+      fail "OpenClaw onboarding did not create ${oc_config}"
+      exit 1
     fi
   else
     ok "OpenClaw config found: $oc_config"
   fi
 
+  # --- Install/enable required Codex plugin and remove Copilot routes ---
+  if openclaw plugins install @openclaw/codex; then
+    ok "Codex plugin installed/upgraded"
+    summary_add "OpenClaw: Codex plugin installed/upgraded"
+  else
+    fail "Codex plugin install failed — required for OpenAI/Codex routing"
+    exit 1
+  fi
+  openclaw plugins enable codex
+  openclaw plugins disable github-copilot || true
+  openclaw plugins disable copilot-proxy || true
+
+  # --- Install required MemPalace MCP server ---
+  if make -C "$REPO_ROOT" mempalace-install; then
+    ok "MemPalace installed/upgraded"
+    summary_add "MemPalace: installed/upgraded"
+  else
+    fail "MemPalace install failed — required for OpenClaw research memory"
+    exit 1
+  fi
+
   # --- Push repo config ---
   local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"
   if [[ -f "$push_script" ]]; then
-    if prompt_yn "Push repo OpenClaw config (models, persona, MCP)?"; then
-      if bash "$push_script"; then
-        ok "OpenClaw config pushed"
-        summary_add "OpenClaw: config pushed"
-      else
-        warn "Config push had issues — check output above"
-        summary_add "OpenClaw: config push had warnings"
-      fi
+    if bash "$push_script"; then
+      ok "OpenClaw config pushed"
+      summary_add "OpenClaw: config pushed"
     else
-      info "Skipped config push — run 'make push-config' manually"
-      summary_add "OpenClaw: config push skipped"
+      fail "OpenClaw config push failed — required for Codex and MemPalace routing"
+      exit 1
     fi
   else
-    warn "push-openclaw-config.sh not found at $push_script"
-  fi
-
-  # --- Install MemPalace MCP server ---
-  if prompt_yn "Install MemPalace MCP server (memory layer)?"; then
-    if make -C "$REPO_ROOT" mempalace-install; then
-      ok "MemPalace installed"
-      summary_add "MemPalace: installed"
-    else
-      warn "MemPalace install had issues — check output above"
-      summary_add "MemPalace: install had warnings"
-    fi
-  else
-    info "Skipped MemPalace — run 'make mempalace-install' manually"
-    summary_add "MemPalace: skipped"
+    fail "push-openclaw-config.sh not found at $push_script"
+    exit 1
   fi
 }
 

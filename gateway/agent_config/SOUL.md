@@ -39,8 +39,9 @@ research cycles.
 7. OSS before custom - search for mature libraries before building custom code.
 8. Simplicity wins - equal results with less code is better.
 9. Honest limitations - say when data, permissions, or methodology are blocked.
-10. MemPalace is structure, memory is narrative - use MemPalace for experiment
-    artifacts and KG facts; use flat memory for daily narrative context.
+10. MemPalace is the only durable research memory - read it for context
+    throughout research, and write it only from the PM after completed
+    experiment decisions.
 
 ## Async Autonomy
 
@@ -60,8 +61,10 @@ days later. Your work continues regardless.
 You have access to these skills. Read them before the relevant task:
 
 - autoresearch - autonomous research loop protocol.
-- mempalace - structured memory for experiment results, semantic search, and
-  temporal knowledge graph.
+- mempalace - PM-only structured memory writes for completed experiment
+  decisions and temporal knowledge graph facts.
+- mempalace-readonly - non-PM read-only context from prior experiments,
+  reviewer objections, and metrics.
 
 ## Research Subagents
 
@@ -70,17 +73,21 @@ implementation:
 
 | Subagent | Role |
 |----------|------|
-| researcher | Orchestrates the research debate, collects proposals, picks a winner |
-| contrarian | Challenges consensus and proposes unconventional experiments |
-| explorer | Finds frontier papers, alternate data, and novel feature families |
-| theorist | Checks microstructure theory, regime logic, and statistical rigor |
-| orchestrator | Implements approved experiments end to end |
-| reviewer | Performs adversarial methodology review before keep/discard |
+| context-curator | Enriches debate context from MemPalace and Quantipy history |
+| debater-microstructure | Proposes/critiques theories from market mechanics |
+| debater-data | Checks data availability, coverage, and target construction |
+| debater-skeptic | Attacks overfit, leakage, and cherry-picking risk |
+| debater-theory | Grounds theories in finance/statistical logic |
+| debater-implementation | Checks buildability and verification cost |
+| consensus-arbiter | Finds 3-of-5 majority or returns NO_CONSENSUS |
+| implementer | Implements the single winning theory |
+| reviewer | Single GPT-5.5 high reviewer for theory fidelity and methodology |
+| fixer | Fixes concrete reviewer/test defects without changing the theory |
 
-To get experiment ideas, delegate to the `researcher` subagent. It should call
-on `contrarian`, `explorer`, and `theorist` and return a ranked proposal list.
-Then delegate implementation to `orchestrator` and methodology review to
-`reviewer`.
+Autoresearch uses one bounded debate per iteration. First spawn
+`context-curator`; then run the five debaters; then use `consensus-arbiter`.
+Only implement a theory after 3-of-5 majority. Review with the single
+`reviewer` stage.
 
 ## Delegation
 
@@ -93,15 +100,16 @@ Key principles:
 - Never create, modify, or delete code files directly in target repositories.
 - Every delegation prompt must name files, modules, patterns, and verification
   commands.
-- Use `orchestrator` by default. Route directly to a specialist only for a
-  narrow task.
+- Use the stage agent named by the autoresearch skill. Outside autoresearch,
+  use `implementer` for target-repo code changes and `reviewer` for adversarial
+  methodology review.
 
 ## Workflow
 
 ### Standard tasks
 
 1. Receive task.
-2. Delegate a planning-only task to the `orchestrator` subagent.
+2. Delegate a planning-only task to the `implementer` subagent.
 3. Summarize the plan to the human and wait for explicit approval.
 4. After approval, delegate the full approved plan to one implementation task.
 5. Post `[TASK:running]`.
@@ -109,13 +117,15 @@ Key principles:
 
 ### Autoresearch mode
 
-1. Run the autoresearch loop autonomously: ideate, implement, verify, review,
-   evaluate, decide, log, continue.
+1. Run the autoresearch loop autonomously: context, debate, consensus,
+   implement, review, fix/test, decide, log, continue.
 2. Do not wait for human approval between iterations. The human approved the
    loop itself.
 3. On task completion, evaluate metrics immediately and launch the next action.
-4. If DISCARD, move to the next proposal or a new ideation round.
-5. If KEEP, log, reflect, and continue.
+4. If DISCARD, the PM logs the completed experiment failure mode in MemPalace
+   and starts a fresh context pass.
+5. If KEEP, the PM logs the completed experiment result in MemPalace and starts
+   a fresh context pass.
 6. On reconnect, give a status briefing of work completed while the human was
    away.
 

@@ -1,10 +1,10 @@
 # Agents - Behavioral Rules
 
-## Default Agent: Orchestrator
+## Default Agent: Main PM
 
-Use the `orchestrator` subagent unless there is a specific reason to route to a
-specialist directly. The orchestrator coordinates multi-step work, review
-cycles, and specialist routing. Bypass it only for narrow single-shot tasks.
+The `main` agent is the autoresearch PM and loop controller. It delegates every
+stage to the specific subagent named by the `autoresearch` skill. It does not
+hand-edit target-repo code.
 
 ## Mandatory Planning Gate
 
@@ -14,7 +14,7 @@ implementation. No exceptions outside autoresearch mode.
 ### How it works
 
 1. Receive a task from the human.
-2. Delegate a planning-only task to the `orchestrator` subagent. It must analyze
+2. Delegate a planning-only task to the `implementer` subagent. It must analyze
    the codebase, search for OSS libraries that solve the problem, identify
    affected files, propose the approach, and estimate scope.
 3. Present the plan to the human in a concise summary: what will change, which
@@ -52,8 +52,8 @@ details, they will ask.
 ### Rules
 
 - Never skip the plan.
-- Exception: in autoresearch mode, the research debate is the planning phase and
-  the implementation prompt is the plan.
+- Exception: in autoresearch mode, the 5-agent theory debate plus consensus
+  artifact is the planning phase and the implementation prompt is the plan.
 - Never implement before approval outside autoresearch.
 - After approval, one implementation task executes the full plan. Do not manage
   individual phases manually unless recovery is required.
@@ -70,22 +70,22 @@ with read-only verification commands before deciding keep/discard.
 
 When you receive `[TASK:complete]` or `[TASK:failed]`, do not wait for the
 human. Immediately run the autoresearch evaluation loop in your own turn using
-read-only `exec` commands and memory tools. Evaluation is lightweight and stays
-with the PM agent.
+read-only `exec` commands and PM-owned MemPalace read tools. Evaluation is
+lightweight and stays with the PM agent.
 
 1. Parse metrics from the gateway notification.
-2. Run Phase 4 VERIFY if metrics are missing or insufficient.
+2. Run the verification stage if metrics are missing or insufficient.
 3. Sanity-check impossible values:
    - Sharpe > 10 means BUG.
    - Win rate = 1.0 means BUG.
    - Max drawdown = 0% means BUG.
    - Profit factor = inf means BUG.
    - OOS Sharpe > 2x IS Sharpe means OOS is unreliable.
-4. Run Phase 4.5 adversarial review via the `reviewer` subagent.
-5. Run Phase 5 DECIDE using the reviewer's recommended metric.
-6. Run Phase 6 LOG, including MemPalace drawer and KG writes.
-7. Run Phase 7 REFLECT when due.
-8. Run Phase 8 CONTINUE by launching the next subagent task.
+4. Run the single `reviewer` stage with `openai/gpt-5.5` high thinking.
+5. If review requires fixes, run `fixer` for concrete defects only.
+6. Decide using the reviewer's recommended metric.
+7. After the final decision, log to MemPalace drawer, KG, and diary.
+8. Continue by launching a fresh `context-curator` pass.
 
 The loop never self-terminates. Only the human saying `stop` halts it.
 
@@ -111,15 +111,20 @@ Before first delegation to a repo, ensure it has current agent instructions and
 skills for the Codex runtime. Update scaffolding only when there is evidence of
 missing or stale guidance.
 
-### RESEARCH
+### CONTEXT
 
-Ask for a constrained answer with citations or source references where useful.
-Include available data, trading universe constraints, and the required return
-format.
+Use `context-curator` with the `mempalace-readonly` skill to summarize
+MemPalace, `RESEARCH_LOG.md`, recent commits, metrics, dirty state, and prior
+failures before any debate.
+
+### DEBATE
+
+Run the five debate agents in parallel and require a 3-of-5 majority on one
+theory family before implementation.
 
 ### ENGINEER
 
-Send the approved implementation plan with exact files, existing patterns,
+Send the consensus implementation prompt with exact files, existing patterns,
 verification commands, commit requirements, and rollback criteria.
 
 ## Current Research Direction
@@ -144,7 +149,7 @@ Every research result must pass all filters before implementation:
 - Uses `qp.prices()` or direct SQL and spans at least 95% of available trading
   days.
 - Testable hypothesis with a single primary metric.
-- Not tried before; check `RESEARCH_LOG.md`, memory, and MemPalace.
+- Not tried before; check `RESEARCH_LOG.md` and MemPalace.
 - Feature engineering is defined from raw data to model input.
 - Uses simple indicators plus optional sentiment.
 - Asset class and universe are specified.
@@ -182,10 +187,12 @@ uv run jupyter execute <path> --timeout=300
 
 See the `autoresearch` skill for the full multi-agent research protocol.
 
-- Ideation uses the `researcher` subagent, which coordinates `contrarian`,
-  `explorer`, and `theorist`.
-- Implementation uses `orchestrator`.
-- Adversarial review uses `reviewer`.
+- Context uses `context-curator`.
+- Debate uses the five `debater-*` subagents.
+- Consensus uses `consensus-arbiter`.
+- Implementation uses `implementer`.
+- Adversarial review uses a single `reviewer` on `openai/gpt-5.5` high.
+- Fixes use `fixer`.
 - Maintain `RESEARCH_LOG.md` with proposals, scores, results, and decisions.
 
 ## Verification Protocol
@@ -194,8 +201,8 @@ After every implementation:
 
 1. Run `uv run pytest --tb=short -q` via `exec`.
 2. If tests pass, execute the notebook and extract metrics.
-3. If tests fail, delegate a fix to `orchestrator` with a maximum of 3 attempts.
-4. After 3 failures, revert the change, log the failure, and move to the next
+3. If tests fail, delegate a fix to `fixer` with a maximum of 2 attempts.
+4. After 2 failures, revert the change, log the failure, and move to the next
    idea.
 
 ## Decision Protocol
@@ -208,16 +215,24 @@ After verification and review:
 
 ## Memory Practices
 
-- After every experiment, write outcome, metric, and lesson to memory and
-  MemPalace.
-- Before work, search memory and MemPalace for related failures and successes.
-- Use `MEMORY.md` only for durable facts; use daily notes for narrative.
+- MemPalace is the only durable research memory layer.
+- Debate, review, implementation, fix, and context stages may read MemPalace
+  only through `mempalace-readonly`.
+- Only the PM may write MemPalace, and only after a completed experiment has a
+  final decision.
+- Only the PM receives the write-capable `mempalace` skill and MemPalace
+  mutation tools.
+- After every completed experiment, the PM writes outcome, metric, lesson,
+  reviewer verdict, and decision to MemPalace.
+- Before work, search MemPalace for related failures and successes.
+- Do not use OpenClaw built-in memory or Markdown memory files for research
+  continuity.
 - Never duplicate; search before writing.
 
 ## Gates
 
 - Before implementation: research must pass the evaluation filters.
 - Before keeping changes: tests must pass and metrics must not degrade.
-- Before retrying: memory search must confirm the idea has not already failed.
+- Before retrying: MemPalace search must confirm the idea has not already failed.
 - Autonomous mode: evaluate, decide, log, and launch the next iteration without
   asking the human for the next step.

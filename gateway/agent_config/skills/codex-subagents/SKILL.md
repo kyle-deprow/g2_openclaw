@@ -14,7 +14,7 @@ surface for target-repo research, implementation, review, and fixes.
 Every delegated Codex task needs:
 
 1. Target repo and working directory.
-2. Agent name from `.codex/agents/`.
+2. OpenClaw stage agent name.
 3. Exact task objective.
 4. Files or directories to inspect first.
 5. Verification commands.
@@ -25,24 +25,29 @@ work. For small edits in this repo, a single Codex turn is usually enough.
 
 ## Quantipy Loop
 
-Use these agent roles from `/home/dev/repos/quantipy/.codex/agents/`:
+Use the OpenClaw stage agents from the `autoresearch` skill. Existing target
+repo Codex instructions can inform prompt content, but the stage names below
+are authoritative:
 
-| Agent | Role |
+| OpenClaw stage | Role |
 |---|---|
-| `researcher` | Multi-perspective ideation and proposal synthesis |
-| `orchestrator` | Implementation/review/fix coordination |
-| `backend-python` | Python services, tests, schemas, repositories, migrations |
-| `reviewer` | Adversarial statistical review |
-| `explorer` | Recent research and alternative-data search |
-| `theorist` | Theory-grounded experiment framing |
-| `contrarian` | Harsh critique and falsification pressure |
+| `context-curator` | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
+| `debater-microstructure` | Market mechanics theory |
+| `debater-data` | Data availability, coverage, and target construction |
+| `debater-skeptic` | Leakage, overfit, and cherry-picking pressure |
+| `debater-theory` | Statistical and finance rationale |
+| `debater-implementation` | Buildability and verification cost |
+| `consensus-arbiter` | 3-of-5 majority decision and implementation brief |
+| `implementer` | End-to-end implementation |
+| `reviewer` | Single GPT-5.5 high methodology review |
+| `fixer` | Concrete fixes only |
 
 ## Implementation/Review/Fix Pattern
 
 1. Spawn an implementation subagent with a narrow prompt and required tests.
 2. Wait for completion and inspect the returned summary, changed files, and
    verification output.
-3. Spawn a reviewer subagent against the diff.
+3. Spawn exactly one reviewer subagent against the diff.
 4. If findings exist, spawn a fixer subagent with only those findings.
 5. Repeat review/fix until the reviewer reports no must-fix issues.
 6. Run final verification from the parent context.

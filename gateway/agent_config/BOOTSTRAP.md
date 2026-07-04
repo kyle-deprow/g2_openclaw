@@ -126,8 +126,10 @@ All experiments produce Jupyter notebooks as primary output.
 
 The file `RESEARCH_LOG.md` in the quantipy repo tracks all experiments tried,
 rejected ideas, and insights. Read it before every ideation round. Update it
-after every experiment result. Pass this context to the `researcher` subagent
-when delegating ideation. Currently empty — this is a fresh start.
+after every experiment result. Pass this context to `context-curator`, then to
+the five debate agents through `consensus-arbiter`. MemPalace is the only
+durable research memory layer; use it for prior experiment summaries, metrics,
+reviewer objections, and failure patterns.
 
 ## Data APIs
 

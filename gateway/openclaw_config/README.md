@@ -25,17 +25,21 @@ openclaw onboard --local
 openclaw plugins install @openclaw/codex
 openclaw models auth login --provider openai
 
-# 4. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
+# 4. Install/upgrade required MemPalace MCP server
+make mempalace-install
+
+# 5. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 5. Push config + restart daemon (merges provider/runtime config and copies bootstrap files)
+# 6. Push config + restart daemon (merges provider/runtime config and copies bootstrap files)
 uv run python -m gateway push-config
 
-# 6. Launch everything
+# 7. Launch everything
 uv run python -m gateway launch
 ```
 
-Step 4 is idempotent — re-run it after any config change or key rotation.
+Steps 4 and 6 are idempotent. Re-run the push step after any config change or
+key rotation.
 The `launch` command handles `NODE_OPTIONS` for the OpenClaw daemon automatically.
 
 ## How It Works
@@ -56,12 +60,15 @@ these settings into the local config with `jq`, preserving everything else.
 - **Codex runtime** — enables the `codex` plugin, sets the OpenAI provider
   `agentRuntime.id` to `codex`, and defaults the primary model to
   `openai/gpt-5.4`.
-- **OpenAI provider** — declares `gpt-5.4` and `gpt-5-mini` model refs for
-  authenticated OpenAI/Codex use.
+- **OpenAI provider** — declares `gpt-5.4`, `gpt-5.5`, and `gpt-5-mini` model
+  refs for authenticated OpenAI/Codex use.
+- **MemPalace-only research memory** — disables built-in OpenClaw memory search
+  and memory flush, denies `memory_search`/`memory_get`, and requires the
+  MemPalace MCP server.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
-- **Agent defaults** — primary model, compaction mode, concurrency limits,
-  denied tools (browser, canvas, etc.).
+- **Agent defaults** — primary model, high reasoning, disabled built-in memory
+  search/flush, and concurrency limits.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -86,7 +93,16 @@ openclaw models auth login --provider openai
 No OpenAI key is stored in this repo. The login populates the local OpenClaw
 auth store.
 
-### 2. Optional env file
+### 2. Install/upgrade required MemPalace MCP
+
+```bash
+make mempalace-install
+```
+
+The push script fails closed if MemPalace is missing or the MCP module is not
+runnable.
+
+### 3. Optional env file
 
 Copy the example env file when changing models or selecting Azure/OpenRouter:
 
@@ -104,7 +120,7 @@ az cognitiveservices account keys list \
   --query key1 -o tsv
 ```
 
-### 3. Run the push script
+### 4. Run the push script
 
 From the repo root:
 
@@ -127,13 +143,14 @@ The script will:
 1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
 2. Deep-merge the repo config into the local config (local-only keys preserved)
 3. Set the selected primary model and fail if that model is not declared
-4. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
-5. Copy agent bootstrap files, repo skills, and `azure-api-version-preload.cjs`
-6. Validate the result with `openclaw config validate`
+4. Resolve the required MemPalace MCP command and palace path
+5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
+6. Copy agent bootstrap files, repo skills, and `azure-api-version-preload.cjs`
+7. Validate the result with `openclaw config validate`
 
 The script is idempotent — safe to run repeatedly.
 
-### 4. Enable the api-version preload for Azure only
+### 5. Enable the api-version preload for Azure only
 
 The `gateway launch` command sets `NODE_OPTIONS` automatically when spawning the
 OpenClaw daemon. If running OpenClaw standalone:
@@ -172,6 +189,7 @@ falling back to another provider or model.
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
 | Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
 | Default model | `openai/gpt-5.4` |
+| Debate/review model | `openai/gpt-5.5` |
 | Alternate model | `openai/gpt-5-mini` |
 
 ## Azure OpenAI Provider Details

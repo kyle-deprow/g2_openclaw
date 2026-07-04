@@ -18,6 +18,16 @@
             "maxTokens": 128000
           },
           {
+            "id": "gpt-5.5",
+            "name": "GPT-5.5 (OpenAI Codex runtime)",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 1047576,
+            "maxTokens": 128000
+          },
+          {
             "id": "gpt-5-mini",
             "name": "GPT-5 Mini (OpenAI Codex runtime)",
             "reasoning": false,
@@ -105,49 +115,14 @@
       "model": {
         "primary": "openai/gpt-5.4"
       },
+      "thinkingDefault": "high",
       "memorySearch": {
-        "enabled": true,
-        "sources": [
-          "memory",
-          "sessions"
-        ],
-        "provider": "local",
-        "store": {
-          "driver": "sqlite",
-          "vector": {
-            "enabled": true
-          }
-        },
-        "chunking": {
-          "tokens": 512,
-          "overlap": 50
-        },
-        "sync": {
-          "onSessionStart": true,
-          "onSearch": true,
-          "watch": true
-        },
-        "query": {
-          "maxResults": 20,
-          "minScore": 0.3,
-          "hybrid": {
-            "enabled": true,
-            "vectorWeight": 0.7,
-            "mmr": {
-              "enabled": true,
-              "lambda": 0.7
-            },
-            "temporalDecay": {
-              "enabled": true,
-              "halfLifeDays": 30
-            }
-          }
-        }
+        "enabled": false
       },
       "compaction": {
         "mode": "safeguard",
         "memoryFlush": {
-          "enabled": true,
+          "enabled": false,
           "softThresholdTokens": 4000
         }
       },
@@ -163,75 +138,359 @@
           "mempalace",
           "autoresearch"
         ],
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
         "subagents": {
           "allowAgents": [
-            "researcher",
-            "orchestrator",
+            "context-curator",
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation",
+            "consensus-arbiter",
+            "implementer",
             "reviewer",
-            "contrarian",
-            "explorer",
-            "theorist"
+            "fixer"
           ]
         }
       },
       {
-        "id": "researcher",
+        "id": "context-curator",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
         "skills": [
-          "mempalace"
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "debater-microstructure",
+        "model": {
+          "primary": "openai/gpt-5.5"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "debater-data",
+        "model": {
+          "primary": "openai/gpt-5.5"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "debater-skeptic",
+        "model": {
+          "primary": "openai/gpt-5.5"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "debater-theory",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "debater-implementation",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
+      },
+      {
+        "id": "consensus-arbiter",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
+        "skills": [
+          "mempalace-readonly"
         ],
         "subagents": {
           "allowAgents": [
-            "contrarian",
-            "explorer",
-            "theorist"
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation"
+          ]
+        },
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
           ]
         }
       },
       {
-        "id": "orchestrator",
+        "id": "implementer",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
         "skills": [
-          "mempalace"
-        ]
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
       },
       {
         "id": "reviewer",
+        "model": {
+          "primary": "openai/gpt-5.5"
+        },
+        "thinkingDefault": "high",
         "skills": [
-          "mempalace"
-        ]
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
       },
       {
-        "id": "contrarian",
+        "id": "fixer",
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high",
         "skills": [
-          "mempalace"
-        ]
-      },
-      {
-        "id": "explorer",
-        "skills": [
-          "mempalace"
-        ]
-      },
-      {
-        "id": "theorist",
-        "skills": [
-          "mempalace"
-        ]
+          "mempalace-readonly"
+        ],
+        "tools": {
+          "deny": [
+            "mempalace_add_drawer",
+            "mempalace_check_duplicate",
+            "mempalace_checkpoint",
+            "mempalace_create_tunnel",
+            "mempalace_delete_by_source",
+            "mempalace_delete_drawer",
+            "mempalace_delete_hallway",
+            "mempalace_delete_tunnel",
+            "mempalace_diary_write",
+            "mempalace_hook_settings",
+            "mempalace_kg_add",
+            "mempalace_kg_invalidate",
+            "mempalace_mine",
+            "mempalace_reconnect",
+            "mempalace_sync",
+            "mempalace_update_drawer"
+          ]
+        }
       }
     ]
   },
   "memory": {
-    "backend": "builtin"
+    "backend": "builtin",
+    "citations": "off"
   },
   "mcp": {
     "servers": {
       "mempalace": {
         "command": "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
-        "args": ["-m", "mempalace.mcp_server", "--palace", "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"]
+        "args": [
+          "-m",
+          "mempalace.mcp_server",
+          "--palace",
+          "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
+        ]
       }
     }
   },
   "tools": {
     "profile": "full",
+    "deny": [
+      "memory_search",
+      "memory_get"
+    ],
     "sessions": {
       "visibility": "all"
     },
@@ -243,6 +502,12 @@
     "entries": {
       "codex": {
         "enabled": true
+      },
+      "github-copilot": {
+        "enabled": false
+      },
+      "copilot-proxy": {
+        "enabled": false
       }
     }
   },
