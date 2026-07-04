@@ -91,8 +91,8 @@ Every container — regardless of type — has these common fields:
 
 | Property          | Type   | Range                          | Notes                           |
 | ----------------- | ------ | ------------------------------ | ------------------------------- |
-| `xPosition`       | number | signed integer (simulator uses i32 since v0.5.3) | Left edge of the container      |
-| `yPosition`       | number | signed integer (simulator uses i32 since v0.5.3) | Top edge of the container       |
+| `xPosition`       | number | signed integer (simulator uses i32 since v0.7.3) | Left edge of the container      |
+| `yPosition`       | number | signed integer (simulator uses i32 since v0.7.3) | Top edge of the container       |
 | `width`           | number | 0–576 (images: 20–200)         | Container width in pixels       |
 | `height`          | number | 0–288 (images: 20–100)         | Container height in pixels      |
 | `containerID`     | number | any                            | Must be unique within the page  |

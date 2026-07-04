@@ -44,4 +44,3 @@ def test_delete_patient_removes_record(service: PatientService) -> None:
     patient = service.create_patient(name="Jane", dob=date(1990, 1, 1))
     service.delete_patient(patient.id)
     assert service.get_patient(patient.id) is None
-```

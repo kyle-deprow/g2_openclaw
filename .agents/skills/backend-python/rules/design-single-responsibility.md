@@ -49,4 +49,3 @@ class SymptomService:
 async def create_symptom(body: SymptomEntryCreate) -> SymptomEntryResponse:
     entry = symptom_service.create(body, patient_id=current_patient_id())
     return SymptomEntryResponse.model_validate(entry, from_attributes=True)
-```

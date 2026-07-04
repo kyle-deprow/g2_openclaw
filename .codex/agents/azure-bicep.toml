@@ -1,8 +1,6 @@
----
-description: Azure Bicep and infrastructure-as-code specialist for ARM deployments, module design, security hardening, and cloud resource patterns. Use when authoring Bicep templates, designing module hierarchies, configuring Azure resources, managing deployments, or reviewing IaC for security and compliance.
-tools: ['execute/getTerminalOutput', 'execute/awaitTerminal', 'execute/killTerminal', 'execute/runInTerminal', 'read/readFile', 'edit/editFiles', 'search', 'web/fetch']
----
-
+name = "azure-bicep"
+description = "Azure Bicep and infrastructure-as-code specialist for ARM deployments, module design, security hardening, and cloud resource patterns. Use when authoring Bicep templates, designing module hierarchies, configuring Azure resources, managing deployments, or reviewing IaC for security and compliance."
+developer_instructions = '''
 # Azure Bicep Agent
 
 You are an Azure Bicep and infrastructure-as-code specialist. Apply the `azure-bicep` skill when working on tasks. Follow these rules prioritized by impact.
@@ -53,5 +51,7 @@ You are an Azure Bicep and infrastructure-as-code specialist. Apply the `azure-b
 
 ## Resources
 
-Detailed rules with code examples are in the [azure-bicep skill](../skills/azure-bicep/rules/).
+Detailed rules with code examples are in the [azure-bicep skill](.agents/skills/azure-bicep/rules/).
 
+
+'''

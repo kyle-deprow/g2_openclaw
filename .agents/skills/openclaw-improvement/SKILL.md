@@ -1,3 +1,9 @@
+---
+name: openclaw-improvement
+description:
+  Operational playbook for improving the OpenClaw autonomous research pipeline through skills, config deployment, Codex runtime diagnostics, process monitoring, memory hygiene, and failure recovery. Use when OpenClaw loops stall, produces empty output, forgets context, or needs new skills based on observed behavior.
+---
+
 # Improving OpenClaw — Lessons Learned & Optimization Playbook
 
 ## Purpose
@@ -16,7 +22,7 @@ This skill captures hard-won operational knowledge from running the OpenClaw aut
 | BOOTSTRAP.md | Config template | < 2k chars |
 | Skills (`skills/*/SKILL.md`) | Deep knowledge, examples, templates | Unlimited (on-demand) |
 
-**When you learn something new about how OpenClaw or Copilot behaves, PUT IT IN A SKILL — not in AGENTS.md.** Agent files are loaded on every turn. Skills are loaded when needed. Bloated agent files get truncated at 20k chars and the agent silently loses instructions.
+**When you learn something new about how OpenClaw or Codex behaves, PUT IT IN A SKILL — not in AGENTS.md.** Agent files are loaded on every turn. Skills are loaded when needed. Bloated agent files get truncated at 20k chars and the agent silently loses instructions.
 
 ### When to create a new skill
 - Same failure pattern occurs 2+ times → capture the fix in a skill
@@ -64,15 +70,15 @@ wc -c gateway/agent_config/TOOLS.md
 
 ## Process Monitor (replaced cron sentinels)
 
-The gateway's built-in process monitor polls every 30s for Copilot PID exit, then notifies OpenClaw via WebSocket. This replaced the earlier cron-based sentinel approach.
+The gateway's built-in process monitor polls every 30s for Codex PID exit, then notifies OpenClaw via WebSocket. This replaced the earlier cron-based sentinel approach.
 
 | Issue | Root cause | Fix |
 |-------|-----------|-----|
-| OpenClaw not notified of Copilot exit | Process monitor not running (gateway down) | Ensure gateway is running: `ss -tlnp \| grep 8765` |
+| OpenClaw not notified of Codex exit | Process monitor not running (gateway down) | Ensure gateway is running: `ss -tlnp \| grep 8765` |
 | Late notification (>2 min) | Death report builder timeout on long sessions | Check gateway logs for slow transcript parsing |
-| Double notification | Multiple gateway restarts while Copilot running | Only one gateway instance should run |
+| Double notification | Multiple gateway restarts while Codex running | Only one gateway instance should run |
 
-## Copilot CLI Output Failures
+## Codex subagent Output Failures
 
 ### Orchestrator produces nothing (most common)
 **Symptom:** PID exits after 5-15 min, 0 files_modified, plan.md in session-state only.
@@ -80,14 +86,14 @@ The gateway's built-in process monitor polls every 30s for Copilot PID exit, the
 **Evidence:** `shutdown_type: "routine"`, `lines_added: ~30`, `files_modified_count: 0` in session telemetry.
 **There is NO hard turn limit** — the agent simply chooses to stop after planning.
 
-**Fix:** Resume with `--resume=<session-id>` and explicit directive: "Skip exploration. Execute the implementation plan now." See the `copilot-cli` skill for the full resume protocol.
+**Fix:** Resume with `--resume=<session-id>` and explicit directive: "Skip exploration. Execute the implementation plan now." See the `codex-subagents` skill for the full resume protocol.
 
-### Copilot exits immediately (< 30s)
+### Codex exits immediately (< 30s)
 **Symptom:** PID appears then exits, no session created.
 **Root cause:** Auth failure, model not found, or preload error.
-**Diagnosis:** Check `~/.copilot/logs/process-*.log` (newest file). Look for error at top.
+**Diagnosis:** Check `~/.codex/logs/process-*.log` (newest file). Look for error at top.
 
-### Copilot hangs (alive > 1 hour)
+### Codex hangs (alive > 1 hour)
 **Symptom:** Sentinel keeps reporting "alive" past 1 hour.
 **Diagnosis:** `ps -p <PID> -o %cpu,rss` — if CPU is 0%, it's stuck waiting for input or network.
 **Fix:** Kill and re-launch with a simpler prompt. If consistent, the prompt is too complex.
@@ -102,15 +108,25 @@ The gateway's built-in process monitor polls every 30s for Copilot PID exit, the
 cat ~/.openclaw/agents/claw/agent/models.json
 ```
 
-### Azure preload
-`gateway/openclaw_config/azure-api-version-preload.cjs` patches `globalThis.fetch` to:
-1. Inject correct api-version for Azure OpenAI
-2. Cap `max_tokens` for specific models (gpt-5-mini → 16384)
-3. Replace Entra ID tokens with correct ones
+### Codex runtime route
+The default route is OpenClaw `openai/*` model refs through the Codex
+app-server runtime. Verify with:
 
-The preload is loaded via `NODE_OPTIONS="--require ..."` in the systemd service. Debug with `AZURE_PRELOAD_DEBUG=1`.
+```bash
+openclaw plugins list
+openclaw models list --provider openai
+openclaw models status --plain
+openclaw gateway health
+```
 
-**Never cap max_tokens for your main model** (GPT-5.4 should stay at 128000). Only cap mini models used for sentinels.
+Do not silently retry through another provider if OpenAI/Codex auth fails. Fix
+auth or fail the run.
+
+### Optional Azure preload
+Azure/OpenRouter are explicit non-default routes selected with
+`OPENCLAW_PROVIDER`. If Azure is selected, `azure-api-version-preload.cjs`
+patches Azure OpenAI requests with the required `api-version` parameter. Keep
+this out of the default Codex path.
 
 ## Session & Memory tips
 
@@ -144,7 +160,7 @@ When you observe a failure or suboptimal behavior:
 - **Maintained** — updated when root causes change or new patterns emerge
 
 ### What doesn't belong in a skill
-- Generic programming advice (use existing `.github/skills/` for that)
+- Generic programming advice (use existing `.agents/skills/` for that)
 - One-off debugging notes (put those in memory or commit messages)
 - Aspirational features that don't exist yet (put those in the plan doc)
 
@@ -152,9 +168,9 @@ When you observe a failure or suboptimal behavior:
 
 | Skill | Location | Purpose |
 |-------|----------|---------|
-| copilot-cli | `gateway/agent_config/skills/copilot-cli/` | Copilot invocation, background exec, sentinels, resume, debugging |
+| codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, sentinels, resume, debugging |
 | autoresearch | `gateway/agent_config/skills/autoresearch/` | Autonomous research loop protocol |
-| *(this skill)* | `.github/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |
+| *(this skill)* | `.agents/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |
 
 When creating new skills for OpenClaw, place them at `gateway/agent_config/skills/<name>/SKILL.md`.
-When creating skills for Copilot in this repo, place them at `.github/skills/<name>/SKILL.md`.
+When creating skills for Codex in this repo, place them at `.agents/skills/<name>/SKILL.md`.

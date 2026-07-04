@@ -10,7 +10,7 @@
 | Field              | Value                                          |
 | ------------------ | ---------------------------------------------- |
 | **Scoped name**    | `@evenrealities/evenhub-simulator`             |
-| **Latest version** | 0.4.1                                          |
+| **Latest version** | 0.7.3                                          |
 | **Description**    | EvenHub glasses app simulator                  |
 | **License**        | MIT                                            |
 | **Unpacked size**  | 6.34 kB (thin JS wrapper — native binaries are in optional deps) |
@@ -55,7 +55,7 @@ The npm package itself is a thin JavaScript wrapper (`bin/index.js`). The actual
 | `@evenrealities/sim-darwin-x64`          | macOS Intel    |
 | `@evenrealities/sim-darwin-arm64`        | macOS Apple Silicon |
 
-All optional dependency versions are pinned to match the simulator version (e.g., all at `0.4.1`).
+All optional dependency versions are pinned to match the simulator version (e.g., all at `0.7.3`).
 
 The package has **0 regular dependencies** — only the above optional native binaries.
 
@@ -210,7 +210,7 @@ Audio is supported but uses the host machine's microphone, which may produce dif
 
 ### 7.1 How It Connects to the SDK
 
-The simulator is designed to work with **EvenHub web applications** built using the `@evenrealities/even_hub_sdk` (v0.0.7 as of writing). The typical development workflow is:
+The simulator is designed to work with **EvenHub web applications** built using the `@evenrealities/even_hub_sdk` (v0.0.11 as of writing). The typical development workflow is:
 
 1. **Develop** your EvenHub app using `@evenrealities/even_hub_sdk` to build UI (list, text, and image containers) and handle events.
 2. **Run** your app on a local dev server (e.g., `http://localhost:3000`).
@@ -226,12 +226,12 @@ The simulator is designed to work with **EvenHub web applications** built using 
 
 | Package | Version | Description |
 | ------- | ------- | ----------- |
-| `@evenrealities/even_hub_sdk` | 0.0.7 | TypeScript SDK for EvenHub developers. Provides `EvenAppBridge` for communicating with the Even App / simulator. |
-| `@evenrealities/evenhub-cli` | 0.1.5 | CLI for EvenHub development: QR code generation for dev mode, project init, login, and packaging (`evenhub qr`, `evenhub init`, `evenhub login`, `evenhub pack`). |
-| `@evenrealities/sim-linux-x64` | 0.4.1 | Native simulator binary for Linux x64. |
-| `@evenrealities/sim-win32-x64` | 0.4.1 | Native simulator binary for Windows x64. |
-| `@evenrealities/sim-darwin-x64` | 0.4.1 | Native simulator binary for macOS Intel. |
-| `@evenrealities/sim-darwin-arm64` | 0.4.1 | Native simulator binary for macOS Apple Silicon. |
+| `@evenrealities/even_hub_sdk` | 0.0.11 | TypeScript SDK for EvenHub developers. Provides `EvenAppBridge` for communicating with the Even App / simulator. |
+| `@evenrealities/evenhub-cli` | 0.1.13 | CLI for EvenHub development: QR code generation for dev mode, project init, login, and packaging (`evenhub qr`, `evenhub init`, `evenhub login`, `evenhub pack`). |
+| `@evenrealities/sim-linux-x64` | 0.7.3 | Native simulator binary for Linux x64. |
+| `@evenrealities/sim-win32-x64` | 0.7.3 | Native simulator binary for Windows x64. |
+| `@evenrealities/sim-darwin-x64` | 0.7.3 | Native simulator binary for macOS Intel. |
+| `@evenrealities/sim-darwin-arm64` | 0.7.3 | Native simulator binary for macOS Apple Silicon. |
 | `@jappyjan/even-better-sdk` | 0.0.9 | Community wrapper around the official SDK with opinionated page composition API. |
 
 ### 7.3 Technical Implementation
@@ -408,10 +408,10 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
 
 | Package | Version | Platform |
 | ------- | ------- | -------- |
-| `@evenrealities/sim-linux-x64` | 0.4.1 | Linux x86_64 |
-| `@evenrealities/sim-win32-x64` | 0.4.1 | Windows x86_64 |
-| `@evenrealities/sim-darwin-x64` | 0.4.1 | macOS Intel x86_64 |
-| `@evenrealities/sim-darwin-arm64` | 0.4.1 | macOS Apple Silicon ARM64 |
+| `@evenrealities/sim-linux-x64` | 0.7.3 | Linux x86_64 |
+| `@evenrealities/sim-win32-x64` | 0.7.3 | Windows x86_64 |
+| `@evenrealities/sim-darwin-x64` | 0.7.3 | macOS Intel x86_64 |
+| `@evenrealities/sim-darwin-arm64` | 0.7.3 | macOS Apple Silicon ARM64 |
 
 ### 10.3 Peer Dependencies
 
@@ -433,8 +433,8 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
 
 | Version | Date | Changes |
 | ------- | ---- | ------- |
-| **0.4.1** | 2026-02-20 | Performance optimization. New `--print-config-path` flag. Fix completion command. |
-| **0.4.0** | 2026-02-20 | *(Release notes not detailed on npm — likely pre-release of 0.4.1 fixes)* |
+| **0.7.3** | 2026-02-20 | Performance optimization. New `--print-config-path` flag. Fix completion command. |
+| **0.4.0** | 2026-02-20 | *(Release notes not detailed on npm — likely pre-release of 0.7.3 fixes)* |
 | **0.3.2** | 2026-02-18 | Fix description of config file location. |
 | **0.3.1** | 2026-02-17 | Adjust audio input device listing format. |
 | **0.3.0** | 2026-02-17 | Shell completion support (`--completions`). |
@@ -476,4 +476,4 @@ File bug reports in the **Even Realities Discord** (no public GitHub Issues avai
 
 ---
 
-*Document generated from NPM registry data and package README for `@evenrealities/evenhub-simulator@0.4.1`.*
+*Document generated from NPM registry data and package README for `@evenrealities/evenhub-simulator@0.7.3`.*

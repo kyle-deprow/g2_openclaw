@@ -1,9 +1,6 @@
----
-name: 'orchestrator'
-description: 'Coordinates complex tasks by delegating to specialized subagents'
-tools: [execute/getTerminalOutput, execute/awaitTerminal, execute/killTerminal, execute/runInTerminal, read/problems, read/readFile, read/terminalSelection, read/terminalLastCommand, agent, edit/createDirectory, edit/createFile, edit/editFiles, search, web, todo]
----
-
+name = "orchestrator"
+description = "Coordinates complex tasks by delegating to specialized subagents"
+developer_instructions = '''
 # Orchestrator Agent
 
 ## Purpose
@@ -87,3 +84,5 @@ Never mark work as complete until:
 - Skip the review step
 - Accept 🔴 MAJOR ISSUES without fixes
 - Implement code directly (delegate to implementer)
+
+'''

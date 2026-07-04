@@ -55,4 +55,3 @@ def test_create_symptom(symptom_service: SymptomService, sample_patient: Patient
         patient_id=sample_patient.id, type="pain", severity=5,
     )
     assert entry.severity == 5
-```

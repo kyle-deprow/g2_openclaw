@@ -908,7 +908,7 @@ At minimum, the Even Hub SDK and Vite:
     "build": "vite build"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.7"
+    "@evenrealities/even_hub_sdk": "^0.0.11"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

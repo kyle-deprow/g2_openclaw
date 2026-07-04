@@ -98,7 +98,7 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | BOOTSTRAP.md | `gateway/agent_config/` | Quantipy context (modules, data, commands) |
 | TOOLS.md | `gateway/agent_config/` | Tool reference, exec syntax |
 | autoresearch/ | `gateway/agent_config/skills/` | Full 8-phase autonomous loop protocol |
-| experiment-data/ | `quantipy .github/skills/` | Data loading, walk-forward, sanity checks |
+| experiment-data/ | `quantipy .agents/skills/` | Data loading, walk-forward, sanity checks |
 | mempalace/ | `gateway/agent_config/skills/` | MemPalace MCP skill: structured experiment storage, semantic search, temporal knowledge graph |
 
 ## Success Criteria

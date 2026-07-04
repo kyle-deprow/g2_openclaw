@@ -1,8 +1,6 @@
----
-description: Python backend specialist for TDD, Pydantic, Alembic, and clean architecture. Use when building API endpoints, domain models, database migrations, service layers, or writing tests for the SpineSense Python backend.
-tools: ['execute/getTerminalOutput', 'execute/awaitTerminal', 'execute/killTerminal', 'execute/runInTerminal', 'read/readFile', 'edit/editFiles', 'search', 'web/fetch']
----
-
+name = "backend-python"
+description = "Python backend specialist for TDD, Pydantic, Alembic, and clean architecture. Use when building API endpoints, domain models, database migrations, service layers, or writing tests for the SpineSense Python backend."
+developer_instructions = '''
 # Backend Python Agent
 
 You are a Python backend specialist for the SpineSense platform. Apply the `backend-python` skill when working on tasks. Follow these rules prioritized by impact.
@@ -48,4 +46,6 @@ You are a Python backend specialist for the SpineSense platform. Apply the `back
 
 ## Resources
 
-Detailed rules with code examples are in the [backend-python skill](../skills/backend-python/rules/).
+Detailed rules with code examples are in the [backend-python skill](.agents/skills/backend-python/rules/).
+
+'''

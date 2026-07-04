@@ -2,8 +2,9 @@
 
 > **Source:** [`@evenrealities/even_hub_sdk`](https://www.npmjs.com/package/@evenrealities/even_hub_sdk)
 > **Fetched:** 2026-02-21
-> **NPM Version at time of analysis:** 0.0.7 (published ~11 days prior)
-> **README states "Current Version":** 0.0.6 (slightly behind — the NPM sidebar shows 0.0.7)
+> **Refreshed:** 2026-07-04 against npm latest and installed package metadata
+> **NPM Version at time of refresh:** 0.0.11
+> **README/package metadata current version:** 0.0.11
 
 ---
 
@@ -12,7 +13,7 @@
 | Field | Value |
 |---|---|
 | **Package name** | `@evenrealities/even_hub_sdk` |
-| **Version** | `0.0.7` |
+| **Version** | `0.0.11` |
 | **Description** | TypeScript SDK for WebView developers to communicate with Even App |
 | **License** | MIT |
 | **Author** | Whiskee (`whiskee.chen@evenrealities.com`) |
@@ -1874,8 +1875,8 @@ The `engines` field specifies `^20.0.0 || >=22.0.0`, but this SDK is fundamental
 - Support for EvenHub protocol core interfaces
 - Support for event listening mechanism
 
-### 0.0.2 – 0.0.7
-- No detailed changelog published for these versions (5 total published versions through 0.0.7)
+### 0.0.2 – 0.0.11
+- No detailed changelog was found in the package README for intermediate versions; verify API details against installed `dist/index.d.ts`.
 
 ---
 
@@ -1960,4 +1961,4 @@ import {
 
 ---
 
-*Document generated from NPM package analysis on 2026-02-21. Package version: 0.0.7.*
+*Document generated from NPM package analysis on 2026-02-21. Package version refreshed to 0.0.11.*

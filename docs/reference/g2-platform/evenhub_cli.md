@@ -1,6 +1,7 @@
 # EvenHub CLI — Exhaustive Developer Notes
 
 > **Document generated:** 2026-02-21
+> **Refreshed:** 2026-07-04 against npm latest and installed package metadata
 > **Source:** <https://www.npmjs.com/package/@evenrealities/evenhub-cli> and npm registry API
 
 ---
@@ -11,18 +12,17 @@
 |---|---|
 | **Package name** | `@evenrealities/evenhub-cli` |
 | **Registry** | npm (public) |
-| **Version (latest)** | `0.1.5` |
+| **Version (latest)** | `0.1.13` |
 | **Description** | Command-line interface for EvenHub development and app management. |
-| **License** | *none* (not specified in package metadata) |
+| **License** | *not specified in package metadata* |
 | **Unpacked size** | 1.6 MB (~1,595,766 bytes) |
 | **Total files** | 9 |
 | **Module entry** | `index.ts` |
 | **Package type** | `"type": "module"` (ESM) |
-| **Published** | 2026-01-28T10:29:15.068Z |
-| **Versions count** | 1 (only `0.1.5` has been published) |
-| **Node version used to publish** | 25.4.0 |
-| **npm version used to publish** | 11.7.0 |
-| **Built from** | `/Users/even/dev-portal/evenhub-cli/evenrealities-evenhub-cli-0.1.5.tgz` (local tgz) |
+| **Published** | npm latest observed as 0.1.13 during 2026-07-04 refresh |
+| **Versions count** | Multiple releases through `0.1.13` |
+| **Runtime** | Node.js package; repo uses Node 22+ |
+| **Built from** | npm package published as `@evenrealities/evenhub-cli@0.1.13` |
 | **Weekly downloads** | ~39 (at time of research) |
 | **Dependents** | 0 |
 
@@ -96,8 +96,8 @@ The CLI is one of three main developer tools in the Even Realities ecosystem:
 | Package | Purpose |
 |---|---|
 | `@evenrealities/evenhub-cli` | CLI for dev workflow: QR codes, init, login, packaging |
-| `@evenrealities/even_hub_sdk` (v0.0.7) | TypeScript SDK for WebView ↔ Even App communication |
-| `@evenrealities/evenhub-simulator` (v0.4.1) | Desktop simulator for previewing glasses UI |
+| `@evenrealities/even_hub_sdk` (v0.0.11) | TypeScript SDK for WebView ↔ Even App communication |
+| `@evenrealities/evenhub-simulator` (v0.7.3) | Desktop simulator for previewing glasses UI |
 
 **Development workflow:**
 1. Use `evenhub init` to create an `app.json` project config.
@@ -416,13 +416,13 @@ No environment variables are explicitly documented. The CLI relies on:
 
 | Package | Version | Description |
 |---|---|---|
-| `@evenrealities/evenhub-cli` | 0.1.5 | This CLI tool |
-| `@evenrealities/even_hub_sdk` | 0.0.7 | TypeScript SDK for Even App ↔ WebView communication (MIT) |
-| `@evenrealities/evenhub-simulator` | 0.4.1 | Desktop glasses simulator for dev/testing (MIT) |
-| `@evenrealities/sim-linux-x64` | 0.4.1 | Simulator binary for Linux x64 |
-| `@evenrealities/sim-darwin-arm64` | 0.4.1 | Simulator binary for macOS ARM64 |
-| `@evenrealities/sim-darwin-x64` | 0.4.1 | Simulator binary for macOS x64 |
-| `@evenrealities/sim-win32-x64` | 0.4.1 | Simulator binary for Windows x64 |
+| `@evenrealities/evenhub-cli` | 0.1.13 | This CLI tool |
+| `@evenrealities/even_hub_sdk` | 0.0.11 | TypeScript SDK for Even App ↔ WebView communication (MIT) |
+| `@evenrealities/evenhub-simulator` | 0.7.3 | Desktop glasses simulator for dev/testing (MIT) |
+| `@evenrealities/sim-linux-x64` | 0.7.3 | Simulator binary for Linux x64 |
+| `@evenrealities/sim-darwin-arm64` | 0.7.3 | Simulator binary for macOS ARM64 |
+| `@evenrealities/sim-darwin-x64` | 0.7.3 | Simulator binary for macOS x64 |
+| `@evenrealities/sim-win32-x64` | 0.7.3 | Simulator binary for Windows x64 |
 
 ### Community package
 | `@jappyjan/even-better-sdk` | 0.0.9 | Opinionated wrapper around the official SDK |
@@ -460,23 +460,31 @@ evenhub pack --check  →  verifies package ID availability on the platform
 
 ## 14. Known Limitations and Gotchas
 
-1. **No public repository:** There is no linked GitHub or source repository. The package is published from a local tgz file.
+1. **Version drift:** Even public docs still referenced CLI v0.1.12 when checked, while npm latest is 0.1.13. Prefer npm/package metadata for exact installed versions.
 
-2. **License not specified:** The `license` field is `"none"` in the npm metadata. This could mean the code is proprietary/all-rights-reserved.
+2. **No public repository:** There is no linked GitHub or source repository. The package is published from a local tgz file.
 
-3. **Only one published version:** As of 2026-02-21, only version `0.1.5` has been published. There is no version history or changelog.
+3. **License not specified:** The `license` field is `"none"` in the npm metadata. This could mean the code is proprietary/all-rights-reserved.
 
-4. **Bun-developed, Node-distributed:** The CLI is developed using Bun (`@types/bun` in devDependencies, `bun run` in scripts), but distributed as standard JavaScript (`main.js`) for Node.js consumption. There shouldn't be issues, but the Bun-specific development toolchain is worth noting.
+4. **Published versions:** `0.1.13` is the current npm latest; the package README includes a changelog through 0.1.13.
 
-5. **`@types/js-yaml` in dependencies:** The `@types/js-yaml` package is listed in `dependencies` rather than `devDependencies`. This is a minor packaging issue — it ships TypeScript type definitions to end users unnecessarily.
+5. **Bun-developed, Node-distributed:** The CLI is developed using Bun (`@types/bun` in devDependencies, `bun run` in scripts), but distributed as standard JavaScript (`main.js`) for Node.js consumption. There shouldn't be issues, but the Bun-specific development toolchain is worth noting.
 
-6. **Peer dependency on TypeScript:** The package declares `"typescript": "^5"` as a peer dependency, which may or may not be needed at runtime. If you don't have TypeScript installed, you may see peer dependency warnings.
+6. **`@types/js-yaml` in dependencies:** The `@types/js-yaml` package is listed in `dependencies` rather than `devDependencies`. This is a minor packaging issue — it ships TypeScript type definitions to end users unnecessarily.
 
-7. **Cached settings can be confusing:** The `evenhub qr` command silently caches your previous IP/port/path/scheme. If your network changes, you may get stale values. Use `--clear` to reset.
+7. **Peer dependency on TypeScript:** The package declares `"typescript": "^5"` as a peer dependency, which may or may not be needed at runtime. If you don't have TypeScript installed, you may see peer dependency warnings.
 
-8. **No documented `--help` or `--version` flags:** The README doesn't document global `--help` or `--version` flags, but since the CLI uses `commander` (v14), both `evenhub --help` and `evenhub --version` should work out of the box.
+8. **Cached settings can be confusing:** The `evenhub qr` command silently caches your previous IP/port/path/scheme. If your network changes, use `--clear` to reset.
 
-9. **Interactive prompts require a TTY:** The CLI uses `inquirer` for interactive prompts. Running in non-TTY environments (CI/CD pipelines) may fail unless all options are provided via flags.
+9. **No documented `--help` or `--version` flags:** The README does not document global flags, but the CLI uses `commander`; `evenhub --help` and `evenhub --version` should work.
+
+10. **Interactive prompts require a TTY:** The CLI uses `inquirer` for interactive prompts. In non-TTY environments, provide all required options as flags.
+
+8. **Cached settings can be confusing:** The `evenhub qr` command silently caches your previous IP/port/path/scheme. If your network changes, you may get stale values. Use `--clear` to reset.
+
+9. **No documented `--help` or `--version` flags:** The README doesn't document global `--help` or `--version` flags, but since the CLI uses `commander` (v14), both `evenhub --help` and `evenhub --version` should work out of the box.
+
+10. **Interactive prompts require a TTY:** The CLI uses `inquirer` for interactive prompts. Running in non-TTY environments (CI/CD pipelines) may fail unless all options are provided via flags.
 
 10. **No global `--verbose` or `--debug` flag documented:** There's no documented way to enable verbose/debug output.
 
@@ -610,7 +618,7 @@ evenhub pack app.json ./dist --check
 ```json
 {
   "name": "@evenrealities/evenhub-cli",
-  "version": "0.1.5",
+  "version": "0.1.13",
   "description": "Command-line interface for EvenHub development and app management.",
   "module": "index.ts",
   "type": "module",

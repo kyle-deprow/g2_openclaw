@@ -542,4 +542,3 @@ Use model cost as the escalation dimension: Haiku → Sonnet → Opus.
 - https://docs.openclaw.ai/concepts/agent
 - https://docs.openclaw.ai/concepts/session
 - https://docs.openclaw.ai/reference/configuration
-```

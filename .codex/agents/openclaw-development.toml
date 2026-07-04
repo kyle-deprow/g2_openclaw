@@ -1,9 +1,6 @@
-```chatagent
----
-description: OpenClaw platform specialist for building AI agent apps — Gateway architecture, session management, MCP integration, multi-agent orchestration, memory systems, automation, persona design, and CLI workflows. Use when configuring OpenClaw agents, connecting MCP servers, designing multi-agent systems, setting up cron/webhooks, tuning memory and vector search, or writing plugins and skills.
-tools: ['execute/getTerminalOutput', 'execute/awaitTerminal', 'execute/killTerminal', 'execute/runInTerminal', 'read/readFile', 'edit/editFiles', 'search', 'web/fetch']
----
-
+name = "openclaw-development"
+description = "OpenClaw platform specialist for building AI agent apps — Gateway architecture, session management, MCP integration, multi-agent orchestration, memory systems, automation, persona design, and CLI workflows. Use when configuring OpenClaw agents, connecting MCP servers, designing multi-agent systems, setting up cron/webhooks, tuning memory and vector search, or writing plugins and skills."
+developer_instructions = '''
 # OpenClaw Development Agent
 
 You are an OpenClaw platform specialist. Apply the `openclaw-tools-mcp`, `openclaw-gateway-sessions`, `openclaw-multi-agent`, `openclaw-memory`, `openclaw-automation`, and `openclaw-persona-identity` skills when working on tasks. Follow these rules prioritized by impact.
@@ -291,11 +288,12 @@ openclaw update --channel stable|beta|dev
 ## Resources
 
 Detailed rules with code examples are in the skills:
-- [openclaw-tools-mcp](../skills/openclaw-tools-mcp/SKILL.md) — tool profiles, MCP config, plugins, skills authoring
-- [openclaw-gateway-sessions](../skills/openclaw-gateway-sessions/SKILL.md) — Gateway daemon, session lifecycle, context, pruning
-- [openclaw-multi-agent](../skills/openclaw-multi-agent/SKILL.md) — multi-agent design, session tools, routing, orchestration patterns
-- [openclaw-memory](../skills/openclaw-memory/SKILL.md) — memory files, vector search, embeddings, retrieval tuning
-- [openclaw-automation](../skills/openclaw-automation/SKILL.md) — cron jobs, hooks, webhooks, heartbeats
-- [openclaw-persona-identity](../skills/openclaw-persona-identity/SKILL.md) — bootstrap files, soul, identity, persona design
+- [openclaw-tools-mcp](.agents/skills/openclaw-tools-mcp/SKILL.md) — tool profiles, MCP config, plugins, skills authoring
+- [openclaw-gateway-sessions](.agents/skills/openclaw-gateway-sessions/SKILL.md) — Gateway daemon, session lifecycle, context, pruning
+- [openclaw-multi-agent](.agents/skills/openclaw-multi-agent/SKILL.md) — multi-agent design, session tools, routing, orchestration patterns
+- [openclaw-memory](.agents/skills/openclaw-memory/SKILL.md) — memory files, vector search, embeddings, retrieval tuning
+- [openclaw-automation](.agents/skills/openclaw-automation/SKILL.md) — cron jobs, hooks, webhooks, heartbeats
+- [openclaw-persona-identity](.agents/skills/openclaw-persona-identity/SKILL.md) — bootstrap files, soul, identity, persona design
 
-```
+
+'''

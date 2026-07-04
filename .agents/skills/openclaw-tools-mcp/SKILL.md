@@ -168,10 +168,10 @@ Never hardcode secrets in MCP config. Use `env:VAR_NAME` syntax:
 
 ```json
 // ✅ Environment variable reference
-{ "env": { "API_KEY": "env:MY_SERVICE_API_KEY" } }
+{ "env": { "SERVICE_TOKEN_ENV": "env:MY_SERVICE_TOKEN_ENV" } }
 
-// ❌ Hardcoded secret
-{ "env": { "API_KEY": "sk-1234567890abcdef" } }
+// ❌ Hardcoded credential-like value
+{ "env": { "SERVICE_TOKEN_ENV": "literal-token-value" } }
 ```
 
 The `env:` prefix resolves at runtime from the Gateway's environment.
@@ -409,7 +409,7 @@ Skills can require environment variables. Inject them per-skill:
 {
   "skills": {
     "web-research": {
-      "env": { "SEARCH_API_KEY": "env:SEARCH_API_KEY" }
+      "env": { "SEARCH_TOKEN_ENV": "env:SEARCH_TOKEN_ENV" }
     }
   }
 }

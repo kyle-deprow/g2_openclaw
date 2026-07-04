@@ -30,9 +30,9 @@ Reference these guidelines when:
 
 | Package | Purpose | Version |
 |---|---|---|
-| `@evenrealities/even_hub_sdk` | TypeScript SDK for WebView ↔ Even App communication | 0.0.7 |
-| `@evenrealities/evenhub-cli` | CLI for dev workflow: QR codes, init, login, packaging | 0.1.7 |
-| `@evenrealities/evenhub-simulator` | Desktop simulator for previewing glasses UI | 0.5.3 |
+| `@evenrealities/even_hub_sdk` | TypeScript SDK for WebView ↔ Even App communication | 0.0.11 |
+| `@evenrealities/evenhub-cli` | CLI for dev workflow: QR codes, init, login, packaging | 0.1.13 |
+| `@evenrealities/evenhub-simulator` | Desktop simulator for previewing glasses UI | 0.7.3 |
 | `@jappyjan/even-realities-ui` | React component library for browser settings pages | community |
 
 ---
@@ -198,7 +198,7 @@ The simulator can export the current glasses display as an RGBA PNG:
 | Image processing | Processes images faster, does not enforce size constraints | Enforced size constraints |
 | List index 0 | Missing `currentSelectItemIndex` at list index 0 | Correct index tracking |
 | `CLICK_EVENT = 0` | Deserializes as `undefined` | Correct enum value |
-| x/y position type | i32 (signed, since v0.5.3) | u32 (unsigned) |
+| x/y position type | i32 (signed, since v0.7.3) | u32 (unsigned) |
 | Screenshot export | RGBA PNG to CWD (v0.5.0+) | N/A |
 
 ---
@@ -250,7 +250,7 @@ my-app/
     "pack": "npm run build && evenhub pack app.json dist -o myapp.ehpk"
   },
   "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.7"
+    "@evenrealities/even_hub_sdk": "^0.0.11"
   },
   "devDependencies": {
     "typescript": "^5.5.0",
@@ -316,7 +316,7 @@ console.log("G2 app started");
   "name": "My app",
   "version": "1.0.0",
   "min_app_version": "2.0.0",
-  "min_sdk_version": "0.0.7",
+  "min_sdk_version": "0.0.11",
   "entrypoint": "index.html",
   "permissions": [],
   "supported_languages": ["en"],
