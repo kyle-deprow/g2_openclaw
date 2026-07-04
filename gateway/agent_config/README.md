@@ -1,7 +1,15 @@
 # G2 OpenClaw Agent Configuration
 
-This directory contains bootstrap files for the OpenClaw agent identity.
-Deploy them with `bash scripts/push-openclaw-config.sh`.
+This directory contains repo-managed bootstrap files for OpenClaw agent
+identity. Deploy them with `bash scripts/push-openclaw-config.sh`.
+
+The push script copies `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and `BOOTSTRAP.md`
+to every configured agent workspace derived from
+`gateway/openclaw_config/openclaw.json`. The `main` agent lands in the default
+OpenClaw workspace at `~/.openclaw/workspace`; other agents default to
+`~/.openclaw/workspace-{id}` unless an explicit `.workspace` is configured. The
+script does not copy or overwrite local workspace files such as `USER.md`,
+`IDENTITY.md`, or personal notes.
 
 ## Files
 

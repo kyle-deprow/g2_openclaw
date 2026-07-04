@@ -46,7 +46,7 @@ openclaw models auth login --provider openai --device-code
 |---|---|
 | `gateway/openclaw_config/openclaw.json` | Repo-managed OpenClaw overlay with provider/runtime config |
 | `gateway/openclaw_config/.env.example` | Local provider/model selection template |
-| `gateway/agent_config/` | OpenClaw PM persona and runtime skills copied into `~/.openclaw/` |
+| `gateway/agent_config/` | Repo-managed bootstrap files copied to every configured OpenClaw agent workspace, plus runtime skills copied into `~/.openclaw/skills/` |
 | `scripts/push-openclaw-config.sh` | Idempotent merge/deploy script |
 
 Do not edit `~/.openclaw/openclaw.json` directly. Edit repo files, then push:

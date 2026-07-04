@@ -170,6 +170,7 @@ When you observe a failure or suboptimal behavior:
 |-------|----------|---------|
 | codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, sentinels, resume, debugging |
 | autoresearch | `gateway/agent_config/skills/autoresearch/` | Autonomous research loop protocol |
+| quantipy-methodology | `gateway/agent_config/skills/quantipy-methodology/` | Stage-agent preflight for loading live Quantipy AGENTS, skills, and Codex agent definitions |
 | *(this skill)* | `.agents/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |
 
 When creating new skills for OpenClaw, place them at `gateway/agent_config/skills/<name>/SKILL.md`.

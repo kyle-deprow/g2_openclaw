@@ -60,6 +60,13 @@ inform prompt content, but they are not OpenClaw stage names.
 | Review | `reviewer` | `openai/gpt-5.5`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
 
+Every stage agent except `main` loads `mempalace-readonly` and
+`quantipy-methodology`. The methodology skill requires stage agents to read the
+current Quantipy source-of-truth files from `/home/dev/repos/quantipy`
+(`AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents`) before
+context, debate, consensus, implementation, review, or fix work. Do not copy
+those target-repo files into G2 OpenClaw.
+
 ## Setup
 
 Do once before the first iteration:

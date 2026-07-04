@@ -164,7 +164,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -194,7 +195,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -224,7 +226,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -254,7 +257,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -284,7 +288,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -314,7 +319,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -344,7 +350,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "subagents": {
           "allowAgents": [
@@ -383,7 +390,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -413,7 +421,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [
@@ -443,7 +452,8 @@
         },
         "thinkingDefault": "high",
         "skills": [
-          "mempalace-readonly"
+          "mempalace-readonly",
+          "quantipy-methodology"
         ],
         "tools": {
           "deny": [

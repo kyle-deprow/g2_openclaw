@@ -17,6 +17,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 ENV_FILE="${REPO_ROOT}/gateway/openclaw_config/.env"
+QUANTIPY_ROOT="/home/dev/repos/quantipy"
+SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
@@ -37,6 +39,84 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
   echo "       Run 'openclaw onboard' first." >&2
   exit 1
 fi
+
+# The quantipy-methodology skill is intentionally a thin pointer to the live
+# Quantipy repo. Fail here if those source-of-truth files are unavailable.
+REQUIRED_QUANTIPY_FILES=(
+  "AGENTS.md"
+  ".agents/skills/backend-python/SKILL.md"
+  ".agents/skills/backtesting/SKILL.md"
+  ".agents/skills/data-collection/SKILL.md"
+  ".agents/skills/data-querying/SKILL.md"
+  ".agents/skills/experiment-data/SKILL.md"
+  ".codex/agents/backend-python.toml"
+  ".codex/agents/contrarian.toml"
+  ".codex/agents/explorer.toml"
+  ".codex/agents/orchestrator.toml"
+  ".codex/agents/researcher.toml"
+  ".codex/agents/reviewer.toml"
+  ".codex/agents/theorist.toml"
+)
+for FILE in "${REQUIRED_QUANTIPY_FILES[@]}"; do
+  if [[ ! -f "${QUANTIPY_ROOT}/${FILE}" ]]; then
+    echo "ERROR: Required Quantipy methodology file not found at ${QUANTIPY_ROOT}/${FILE}" >&2
+    echo "       The quantipy-methodology skill depends on the live Quantipy repo; restore this file before pushing." >&2
+    exit 1
+  fi
+done
+echo "Verified Quantipy methodology source files in ${QUANTIPY_ROOT}"
+
+if [[ ! -d "${SKILLS_SRC}" ]]; then
+  echo "ERROR: Repo-managed skills directory not found at ${SKILLS_SRC}" >&2
+  exit 1
+fi
+
+if ! jq -e '
+  [(.agents.defaults.skills // [])[], (.agents.list[]?.skills // [])[]]
+  | all(.[]; type == "string" and length > 0)
+' "${REPO_CONFIG}" >/dev/null; then
+  echo "ERROR: Every configured skill in ${REPO_CONFIG} must be a non-empty string." >&2
+  exit 1
+fi
+
+REQUIRED_REPO_SKILLS=(
+  "autoresearch"
+  "codex-subagents"
+  "mempalace"
+  "mempalace-readonly"
+  "quantipy-methodology"
+)
+
+mapfile -t CONFIGURED_SKILLS < <(jq -r '
+  [(.agents.defaults.skills // [])[], (.agents.list[]?.skills // [])[]]
+  | map(select(type == "string" and length > 0))
+  | unique[]
+' "${REPO_CONFIG}")
+
+declare -A REQUIRED_SKILL_FILES=()
+for SKILL_NAME in "${REQUIRED_REPO_SKILLS[@]}" "${CONFIGURED_SKILLS[@]}"; do
+  if [[ -n "${SKILL_NAME}" ]]; then
+    REQUIRED_SKILL_FILES["${SKILL_NAME}"]="${SKILLS_SRC}/${SKILL_NAME}/SKILL.md"
+  fi
+done
+
+mapfile -t SKILLS_TO_CHECK < <(printf '%s\n' "${!REQUIRED_SKILL_FILES[@]}" | sort)
+MISSING_SKILL_FILES=()
+for SKILL_NAME in "${SKILLS_TO_CHECK[@]}"; do
+  if [[ ! -f "${REQUIRED_SKILL_FILES[${SKILL_NAME}]}" ]]; then
+    MISSING_SKILL_FILES+=("${SKILL_NAME}")
+  fi
+done
+
+if [[ "${#MISSING_SKILL_FILES[@]}" -gt 0 ]]; then
+  echo "ERROR: Missing repo-managed skill definitions under ${SKILLS_SRC}:" >&2
+  for SKILL_NAME in "${MISSING_SKILL_FILES[@]}"; do
+    echo "       ${REQUIRED_SKILL_FILES[${SKILL_NAME}]}" >&2
+  done
+  echo "       Restore the missing skill directories before pushing OpenClaw config." >&2
+  exit 1
+fi
+echo "Verified repo-managed skill definitions: ${SKILLS_TO_CHECK[*]}"
 
 # ── Load env vars from .env ───────────────────────────────────────────────────
 PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
@@ -307,39 +387,92 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
   )] | length) == 1
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
+  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains(mutators)) | not))] | length) == 0
   and (((.agents.list[] | select(.id == "main") | .tools.deny // []) | index("mempalace_add_drawer")) | not)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check main PM model/skills, MemPalace read-only stage agents, and memory tool denies." >&2
+  echo "       Check main PM model/skills, MemPalace read-only stage agents, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, built-in memory disabled."
+echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
 echo "Merged repo config into ${LOCAL_CONFIG}"
 
 # ── Copy bootstrap files ────────────────────────────────────────────────────
-# OpenClaw resolves per-agent workspaces as {workspace_base}-{agent_id}.
-# Default agent is "claw" → workspace-claw/
-AGENT_ID="claw"
-BOOTSTRAP_DST="${OPENCLAW_HOME}/workspace-${AGENT_ID}"
-mkdir -p "${BOOTSTRAP_DST}"
-for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
+# OpenClaw uses ~/.openclaw/workspace for the main agent when no workspace is
+# configured. Other agents default to workspace-{agent_id}. An explicit
+# .workspace value is used as-is relative to OPENCLAW_HOME unless it is absolute.
+BOOTSTRAP_FILES=(AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md)
+for FILE in "${BOOTSTRAP_FILES[@]}"; do
   SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"
-  DST="${BOOTSTRAP_DST}/${FILE}"
-  if [[ -f "${SRC}" ]]; then
-    cp "${SRC}" "${DST}"
-    echo "Copied ${FILE} → ${DST}"
+  if [[ ! -f "${SRC}" ]]; then
+    echo "ERROR: Required repo bootstrap file not found at ${SRC}" >&2
+    exit 1
   fi
 done
 
-# Clean stale copies from wrong locations
-for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
-  for STALE_DIR in "${OPENCLAW_HOME}" "${OPENCLAW_HOME}/workspace"; do
+workspace_dir_for_target() {
+  local workspace_target="$1"
+  if [[ "${workspace_target}" == /* ]]; then
+    printf '%s\n' "${workspace_target}"
+  elif [[ "${workspace_target}" == "__OPENCLAW_DEFAULT_WORKSPACE__" ]]; then
+    printf '%s/workspace\n' "${OPENCLAW_HOME}"
+  else
+    printf '%s/%s\n' "${OPENCLAW_HOME}" "${workspace_target}"
+  fi
+}
+
+mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
+  def workspace_target:
+    if ((.workspace? | type) == "string" and (.workspace | length) > 0) then
+      .workspace
+    elif .id == "main" then
+      "__OPENCLAW_DEFAULT_WORKSPACE__"
+    else
+      "workspace-\(.id)"
+    end;
+  [.agents.list[]? | {agent: .id, workspace: workspace_target}]
+  | group_by(.workspace)
+  | map({workspace: .[0].workspace, agents: (map(.agent) | sort | join(","))})
+  | sort_by(.workspace)
+  | .[]
+  | [.workspace, .agents]
+  | @tsv
+' "${REPO_CONFIG}")
+
+if [[ "${#BOOTSTRAP_TARGETS[@]}" -eq 0 ]]; then
+  echo "ERROR: No configured OpenClaw agents found in ${REPO_CONFIG}" >&2
+  exit 1
+fi
+
+declare -A BOOTSTRAP_TARGET_DIRS=()
+echo "Copying managed bootstrap files to ${#BOOTSTRAP_TARGETS[@]} configured OpenClaw workspaces:"
+for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
+  IFS=$'\t' read -r WORKSPACE_ID AGENTS <<< "${TARGET}"
+  BOOTSTRAP_DST="$(workspace_dir_for_target "${WORKSPACE_ID}")"
+  BOOTSTRAP_TARGET_DIRS["${BOOTSTRAP_DST}"]=1
+  mkdir -p "${BOOTSTRAP_DST}"
+  for FILE in "${BOOTSTRAP_FILES[@]}"; do
+    cp "${REPO_ROOT}/gateway/agent_config/${FILE}" "${BOOTSTRAP_DST}/${FILE}"
+  done
+  echo "  ${AGENTS} → ${BOOTSTRAP_DST} (${BOOTSTRAP_FILES[*]})"
+done
+echo "Local workspace files such as USER.md and IDENTITY.md were left untouched."
+
+# Clean stale copies from wrong bootstrap locations without touching local
+# per-workspace files such as USER.md, IDENTITY.md, or other notes.
+STALE_BOOTSTRAP_DIRS=(
+  "${OPENCLAW_HOME}"
+  "${OPENCLAW_HOME}/workspace"
+  "${OPENCLAW_HOME}/workspace-claw"
+)
+for FILE in "${BOOTSTRAP_FILES[@]}"; do
+  for STALE_DIR in "${STALE_BOOTSTRAP_DIRS[@]}"; do
     STALE="${STALE_DIR}/${FILE}"
-    if [[ -f "${STALE}" ]] && [[ "${STALE_DIR}" != "${BOOTSTRAP_DST}" ]]; then
+    if [[ -f "${STALE}" ]] && [[ -z "${BOOTSTRAP_TARGET_DIRS[${STALE_DIR}]:-}" ]]; then
       rm "${STALE}"
       echo "Removed stale ${STALE}"
     fi
@@ -347,7 +480,6 @@ for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
 done
 
 # ── Copy repo skills ─────────────────────────────────────────────────────────
-SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 SKILLS_DST="${OPENCLAW_HOME}/skills"
 if [[ -d "${SKILLS_SRC}" ]]; then
   # Copy repo skills to local

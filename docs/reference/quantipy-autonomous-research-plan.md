@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-07-03
+**Last Updated:** 2026-07-04
 
 ## Goal
 
@@ -77,6 +77,7 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
 | Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
 | 5-agent research debate | Three gpt-5.5 high and two gpt-5.4 high debaters prevent tunnel vision |
+| Deterministic methodology loading | Stage agents read Quantipy's current `AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents` before context/debate/implementation/review/fix |
 
 ## OpenClaw Stage Roster
 
@@ -106,6 +107,12 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | experiment-data/ | `quantipy .agents/skills/` | Data loading, walk-forward, sanity checks |
 | mempalace/ | `gateway/agent_config/skills/` | PM-only MemPalace writes for completed experiment decisions |
 | mempalace-readonly/ | `gateway/agent_config/skills/` | Non-PM MemPalace search, diary reads, traversal, and KG queries |
+| quantipy-methodology/ | `gateway/agent_config/skills/` | Stage-agent preflight that loads Quantipy source-of-truth instructions from `/home/dev/repos/quantipy` |
+
+The `quantipy-methodology` skill is assigned to `context-curator`, all
+`debater-*` agents, `consensus-arbiter`, `implementer`, `reviewer`, and
+`fixer`. It does not vendor Quantipy methodology into this repo; agents must
+read the live target-repo files at stage time.
 
 ## Success Criteria
 

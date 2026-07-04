@@ -68,8 +68,13 @@ these settings into the local config with `jq`, preserving everything else.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent roster** — exact autoresearch stage-agent IDs, model assignments,
-  high reasoning, MemPalace skill split, tool denies, disabled built-in memory
-  search/flush, and concurrency limits.
+  high reasoning, MemPalace skill split, Quantipy methodology loading, tool
+  denies, disabled built-in memory search/flush, and concurrency limits.
+- **Managed bootstrap files** — `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and
+  `BOOTSTRAP.md` are copied to every configured OpenClaw agent workspace derived
+  from `agents.list`; `main` uses `~/.openclaw/workspace`, other agents default
+  to `~/.openclaw/workspace-{id}` unless `.workspace` is set, and local files
+  such as `USER.md` and `IDENTITY.md` are left untouched.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -149,7 +154,9 @@ The script will:
 5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
 6. Validate repo-managed invariants for exact stage-agent models, high
    reasoning, memory policy, and MemPalace skill/tool split
-7. Copy agent bootstrap files, repo skills, and `azure-api-version-preload.cjs`
+7. Copy managed agent bootstrap files to every configured agent workspace, copy
+   repo skills after validating the referenced skill directories, and copy
+   `azure-api-version-preload.cjs`
 8. Validate the result with `openclaw config validate`
 
 The script is idempotent — safe to run repeatedly.
