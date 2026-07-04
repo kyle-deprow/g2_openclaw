@@ -20,7 +20,6 @@ import type { InboundFrame } from './protocol';
 import { StateMachine } from './state';
 import { createAppApi, SESSION_ID_KEY } from './api';
 import type { ActiveTab } from './api';
-import type { CopilotSessionEntry, CopilotHistoryEntry } from './protocol';
 
 // ---------------------------------------------------------------------------
 // Module-level references (accessible to routing functions)
@@ -31,10 +30,6 @@ let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
 
-// Copilot tab state
-const MAX_COPILOT_ENTRIES = 500;
-let copilotSessions: CopilotSessionEntry[] | null = null;
-let copilotConversation: CopilotHistoryEntry[] = [];
 let activeTab: ActiveTab = 'openclaw';
 
 // ---------------------------------------------------------------------------
@@ -231,47 +226,6 @@ function routeFrame(frame: InboundFrame): void {
       }
       break;
     }
-
-    // -- Copilot session list response ----------------------------------
-    case 'copilot_session_list': {
-      console.log(`[Main] Copilot sessions: ${frame.sessions.length}`);
-      copilotSessions = frame.sessions;
-      break;
-    }
-
-    // -- Copilot history on watch start ---------------------------------
-    case 'copilot_history': {
-      console.log(`[Main] Copilot history: ${frame.entries.length} entries for ${frame.sessionId}`);
-      copilotConversation = frame.entries.length > MAX_COPILOT_ENTRIES
-        ? frame.entries.slice(-MAX_COPILOT_ENTRIES)
-        : frame.entries;
-      break;
-    }
-
-    // -- Copilot transcript delta (live) --------------------------------
-    case 'copilot_transcript': {
-      copilotConversation.push({ role: frame.role, text: frame.delta, ts: Date.now() });
-      if (copilotConversation.length > MAX_COPILOT_ENTRIES) {
-        copilotConversation.splice(0, copilotConversation.length - MAX_COPILOT_ENTRIES);
-      }
-      break;
-    }
-
-    // -- Copilot transcript end -----------------------------------------
-    case 'copilot_transcript_end': {
-      console.log(`[Main] Copilot session ended: ${frame.sessionId}`);
-      break;
-    }
-
-    // -- Copilot session killed -----------------------------------------
-    case 'copilot_killed': {
-      console.log(`[Main] Copilot kill result: ${frame.sessionId} success=${frame.success}`);
-      // Refresh the session list after a kill
-      if (activeTab === 'copilot') {
-        gateway.sendJson({ type: 'copilot_session_list_request' });
-      }
-      break;
-    }
   }
 }
 
@@ -346,8 +300,6 @@ async function boot(): Promise<void> {
     input,
     conversation,
     gateway,
-    getCopilotSessions: () => copilotSessions,
-    getCopilotConversation: () => copilotConversation,
     getActiveTab: () => activeTab,
     setActiveTab: (tab) => { activeTab = tab; },
   });

@@ -93,52 +93,6 @@ export interface SessionSwitchedFrame {
   sessionStartedAt?: string;
 }
 
-export interface CopilotSessionEntry {
-  sessionId: string;
-  cwd: string;
-  dirName: string;
-  repository: string;
-  branch: string;
-  summary: string;
-  updatedAt: string;
-  isRunning: boolean;
-}
-
-export interface CopilotSessionListFrame {
-  type: 'copilot_session_list';
-  sessions: CopilotSessionEntry[];
-}
-
-export interface CopilotHistoryEntry {
-  role: 'user' | 'assistant' | 'system';
-  text: string;
-  ts: number;
-}
-
-export interface CopilotHistoryFrame {
-  type: 'copilot_history';
-  sessionId: string;
-  entries: CopilotHistoryEntry[];
-}
-
-export interface CopilotTranscriptFrame {
-  type: 'copilot_transcript';
-  sessionId: string;
-  delta: string;
-  role: 'user' | 'assistant' | 'system';
-}
-
-export interface CopilotTranscriptEndFrame {
-  type: 'copilot_transcript_end';
-  sessionId: string;
-}
-
-export interface CopilotKilledFrame {
-  type: 'copilot_killed';
-  sessionId: string;
-  success: boolean;
-}
-
 export type InboundFrame =
   | StatusFrame
   | TranscriptionFrame
@@ -150,12 +104,7 @@ export type InboundFrame =
   | HistoryFrame
   | SessionResetFrame
   | SessionListFrame
-  | SessionSwitchedFrame
-  | CopilotSessionListFrame
-  | CopilotHistoryFrame
-  | CopilotTranscriptFrame
-  | CopilotTranscriptEndFrame
-  | CopilotKilledFrame;
+  | SessionSwitchedFrame;
 
 // === Outbound frames (App → Gateway) ===
 export interface TextFrame {
@@ -204,28 +153,10 @@ export interface ForceStopFrame {
   type: 'force_stop';
 }
 
-export interface CopilotSessionListRequestFrame {
-  type: 'copilot_session_list_request';
-}
-
-export interface CopilotWatchFrame {
-  type: 'copilot_watch';
-  sessionId: string;
-}
-
-export interface CopilotUnwatchFrame {
-  type: 'copilot_unwatch';
-}
-
-export interface CopilotKillRequestFrame {
-  type: 'copilot_kill';
-  sessionId: string;
-}
-
-export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame | CopilotSessionListRequestFrame | CopilotWatchFrame | CopilotUnwatchFrame | CopilotKillRequestFrame;
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame;
 
 // === Frame parsing ===
-const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched', 'copilot_session_list', 'copilot_history', 'copilot_transcript', 'copilot_transcript_end', 'copilot_killed']);
+const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched']);
 
 /** Required fields per inbound frame type (mirrors Python gateway validation). */
 const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -240,11 +171,6 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   session_reset: ['reason'],
   session_list: ['sessions', 'activeSessionKey'],
   session_switched: ['sessionKey'],
-  copilot_session_list: ['sessions'],
-  copilot_history: ['sessionId', 'entries'],
-  copilot_transcript: ['sessionId', 'delta', 'role'],
-  copilot_transcript_end: ['sessionId'],
-  copilot_killed: ['sessionId', 'success'],
 };
 
 /** Valid status values (matches GatewayStatus union). */
@@ -271,11 +197,6 @@ const FIELD_TYPES: Record<string, Record<string, string>> = {
   session_reset: { reason: 'string' },
   session_list: { sessions: 'object', activeSessionKey: 'string' },
   session_switched: { sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
-  copilot_session_list: { sessions: 'object' },
-  copilot_history: { sessionId: 'string', entries: 'object' },
-  copilot_transcript: { sessionId: 'string', delta: 'string', role: 'string' },
-  copilot_transcript_end: { sessionId: 'string' },
-  copilot_killed: { sessionId: 'string', success: 'boolean' },
 };
 
 export function parseFrame(data: string): InboundFrame {
@@ -418,60 +339,6 @@ export function parseFrame(data: string): InboundFrame {
   // Validate session_reset reason against known union
   if (clean.type === 'session_reset' && !VALID_REASONS.has(clean.reason as string)) {
     throw new Error(`Invalid session_reset reason: "${clean.reason}"`);
-  }
-
-  // Copy copilot_session_list sessions array.
-  if (clean.type === 'copilot_session_list') {
-    if (!Array.isArray(frame.sessions)) {
-      throw new Error('copilot_session_list.sessions must be an array');
-    }
-    clean.sessions = (frame.sessions as unknown[]).map((entry, index) => {
-      if (typeof entry !== 'object' || entry === null) {
-        throw new Error(`copilot_session_list.sessions[${index}] must be an object`);
-      }
-      const e = entry as Record<string, unknown>;
-      for (const field of ['sessionId', 'cwd', 'dirName', 'repository', 'branch', 'summary', 'updatedAt']) {
-        if (typeof e[field] !== 'string') {
-          throw new Error(`copilot_session_list.sessions[${index}].${field} must be string`);
-        }
-      }
-      if (typeof e.isRunning !== 'boolean') {
-        throw new Error(`copilot_session_list.sessions[${index}].isRunning must be boolean`);
-      }
-      return {
-        sessionId: e.sessionId,
-        cwd: e.cwd,
-        dirName: e.dirName,
-        repository: e.repository,
-        branch: e.branch,
-        summary: e.summary,
-        updatedAt: e.updatedAt,
-        isRunning: e.isRunning,
-      };
-    });
-  }
-
-  // Copy copilot_history entries array
-  if (clean.type === 'copilot_history') {
-    if (!Array.isArray(frame.entries)) {
-      throw new Error('copilot_history.entries must be an array');
-    }
-    clean.entries = (frame.entries as unknown[]).map((entry, index) => {
-      if (typeof entry !== 'object' || entry === null) {
-        throw new Error(`copilot_history.entries[${index}] must be an object`);
-      }
-      const e = entry as Record<string, unknown>;
-      if (e.role !== 'user' && e.role !== 'assistant' && e.role !== 'system') {
-        throw new Error(`copilot_history.entries[${index}].role must be user, assistant, or system`);
-      }
-      if (typeof e.text !== 'string') {
-        throw new Error(`copilot_history.entries[${index}].text must be string`);
-      }
-      if (typeof e.ts !== 'number') {
-        throw new Error(`copilot_history.entries[${index}].ts must be number`);
-      }
-      return { role: e.role, text: e.text, ts: e.ts };
-    });
   }
 
   return clean as unknown as InboundFrame;

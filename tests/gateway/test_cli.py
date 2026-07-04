@@ -427,6 +427,7 @@ class TestInitEnvG2App:
             patch("gateway.cli._detect_gpu", return_value=(None, 0.0)),
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._get_local_ip", return_value="172.16.0.1"),
+            patch("gateway.cli._get_tailscale_ip", return_value=None),
             patch("gateway.cli.secrets.token_hex", return_value="deadbeef" * 6),
         ):
             result = runner.invoke(app, ["init-env", "--project-root", str(tmp_path)])

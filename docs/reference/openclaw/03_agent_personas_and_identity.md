@@ -248,7 +248,7 @@ A catch-all file for additional context the user wants injected:
 
 ## Environment
 - OS: macOS Sequoia
-- Editor: VS Code with Copilot
+- Editor: VS Code
 - Shell: zsh with oh-my-zsh
 
 ## Custom Rules

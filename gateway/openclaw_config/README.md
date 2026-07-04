@@ -7,7 +7,7 @@ configuration used by the G2 Gateway.
 
 | File | Purpose |
 |---|---|
-| `openclaw.json` | Model providers (Azure + OpenRouter), agent defaults, session settings |
+| `openclaw.json` | Model providers (OpenAI/Codex + Azure + OpenRouter), agent defaults, session settings |
 | `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `README.md` | This file |
@@ -21,20 +21,16 @@ sudo npm install -g openclaw
 # 2. Create the ~/.openclaw/ scaffold
 openclaw onboard --local
 
-# 3. Set the Azure API key (pick one)
-#    Option A: fetch from Azure
-az cognitiveservices account keys list \
-  --name oai-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus2 \
-  --query key1 -o tsv \
-  | xargs -I{} sh -c 'echo "AZURE_OAI_API_KEY={}" > gateway/openclaw_config/.env'
-#    Option B: copy and edit
+# 3. Authenticate OpenAI/Codex
+openclaw models auth login --provider openai
+
+# 4. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 4. Push config + restart daemon (merges provider, resolves API key, copies preload + SOUL.md)
+# 5. Push config + restart daemon (merges provider/runtime config and copies bootstrap files)
 uv run python -m gateway push-config
 
-# 5. Launch everything (OpenClaw daemon started automatically with preload)
+# 6. Launch everything
 uv run python -m gateway launch
 ```
 
@@ -49,12 +45,18 @@ auth tokens, wizard state, metadata timestamps) that **must not** be
 overwritten.
 
 The `openclaw.json` in this directory holds only the settings we want to
-version-control — primarily the Azure OpenAI custom provider and agent
-defaults. The companion push script (`scripts/push-openclaw-config.sh`) merges
+version-control — primarily the OpenAI/Codex runtime path, optional Azure and
+OpenRouter providers, and agent defaults. The companion push script
+(`scripts/push-openclaw-config.sh`) merges
 these settings into the local config with `jq`, preserving everything else.
 
 ### What is managed here
 
+- **Codex runtime** — enables the bundled `codex` plugin, sets the OpenAI
+  provider `agentRuntime.id` to `codex`, and defaults the primary model to
+  `openai/gpt-5.4`.
+- **OpenAI provider** — declares `gpt-5.4` and `gpt-5-mini` model refs for
+  authenticated OpenAI/Codex use.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent defaults** — primary model, compaction mode, concurrency limits,
@@ -71,16 +73,27 @@ these settings into the local config with `jq`, preserving everything else.
 
 > **First time?** See the [Cold-Start Install](#cold-start-install-fresh-machine) section above.
 
-### 1. Set the API key
+### 1. Authenticate OpenAI/Codex
 
-Copy the example env file and fill in the key:
+The default provider is `codex`, which uses OpenAI auth managed by OpenClaw:
+
+```bash
+openclaw models auth login --provider openai
+```
+
+No OpenAI key is stored in this repo. The login populates the local OpenClaw
+auth store.
+
+### 2. Optional env file
+
+Copy the example env file when changing models or selecting Azure/OpenRouter:
 
 ```bash
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
-# Edit .env and paste the key
+# Edit .env
 ```
 
-Or retrieve it from Azure:
+For Azure, retrieve the key if your local config does not already have one:
 
 ```bash
 az cognitiveservices account keys list \
@@ -89,7 +102,7 @@ az cognitiveservices account keys list \
   --query key1 -o tsv
 ```
 
-### 2. Run the push script
+### 3. Run the push script
 
 From the repo root:
 
@@ -111,13 +124,14 @@ The script will:
 
 1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
 2. Deep-merge the repo config into the local config (local-only keys preserved)
-3. Resolve `env:AZURE_OAI_API_KEY` → actual key value in the provider block
-4. Copy `SOUL.md` and `azure-api-version-preload.cjs` to `~/.openclaw/`
-5. Validate the result with `openclaw models status`
+3. Set the selected primary model and fail if that model is not declared
+4. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
+5. Copy agent bootstrap files, repo skills, and `azure-api-version-preload.cjs`
+6. Validate the result with `openclaw config validate`
 
 The script is idempotent — safe to run repeatedly.
 
-### 3. Enable the api-version preload
+### 4. Enable the api-version preload for Azure only
 
 The `gateway launch` command sets `NODE_OPTIONS` automatically when spawning the
 OpenClaw daemon. If running OpenClaw standalone:
@@ -126,6 +140,37 @@ OpenClaw daemon. If running OpenClaw standalone:
 export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
 openclaw daemon
 ```
+
+## Provider Selection
+
+The push script selects the active provider via `OPENCLAW_PROVIDER`.
+
+```bash
+# Default OpenAI/Codex path
+uv run python -m gateway push-config
+
+# Use a specific configured OpenAI model
+OPENCLAW_PROVIDER=codex OPENAI_MODEL=gpt-5-mini uv run python -m gateway push-config
+
+# Use Azure explicitly
+OPENCLAW_PROVIDER=azure uv run python -m gateway push-config
+
+# Use OpenRouter explicitly
+OPENCLAW_PROVIDER=openrouter OPENROUTER_MODEL=openai/gpt-4.1 uv run python -m gateway push-config
+```
+
+The default provider is `codex`. Unsupported model selections fail instead of
+falling back to another provider or model.
+
+## OpenAI/Codex Provider Details
+
+| Setting | Value |
+|---|---|
+| Auth | `openclaw models auth login --provider openai` |
+| Runtime | OpenAI provider `agentRuntime.id: "codex"` |
+| Plugin | bundled `codex` plugin enabled |
+| Default model | `openai/gpt-5.4` |
+| Alternate model | `openai/gpt-5-mini` |
 
 ## Azure OpenAI Provider Details
 
@@ -155,23 +200,6 @@ Anthropic, OpenAI, Google, and others through a single API key.
    cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
    # Edit .env and set OPENROUTER_API_KEY=sk-or-...
    ```
-
-### Switching Providers
-
-The push script selects the active provider via the `OPENCLAW_PROVIDER` env var:
-
-```bash
-# Use OpenRouter with default model (Claude Sonnet 4)
-OPENCLAW_PROVIDER=openrouter uv run python -m gateway push-config
-
-# Use OpenRouter with specific model
-OPENCLAW_PROVIDER=openrouter OPENROUTER_MODEL=openai/gpt-4.1 uv run python -m gateway push-config
-
-# Switch back to Azure
-OPENCLAW_PROVIDER=azure uv run python -m gateway push-config
-```
-
-The default provider is `azure` — if `OPENCLAW_PROVIDER` is unset, nothing changes.
 
 ### Available Models
 

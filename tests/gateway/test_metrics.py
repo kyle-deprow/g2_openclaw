@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -45,7 +46,6 @@ class TestGatewayMetricsInitializes:
         assert gm._transcription_duration is not None
         assert gm._openclaw_request_duration is not None
         assert gm._openclaw_errors is not None
-        assert gm._orphans_reaped is not None
 
     def test_all_noop_when_otel_unavailable(self) -> None:
         with patch("gateway.metrics._HAS_OTEL", False):
@@ -57,7 +57,6 @@ class TestGatewayMetricsInitializes:
         assert gm._transcription_duration is None
         assert gm._openclaw_request_duration is None
         assert gm._openclaw_errors is None
-        assert gm._orphans_reaped is None
 
     def test_noop_methods_do_not_raise(self) -> None:
         with patch("gateway.metrics._HAS_OTEL", False):
@@ -70,7 +69,6 @@ class TestGatewayMetricsInitializes:
         gm.record_transcription_duration(1.5)
         gm.record_openclaw_request_duration(2.0)
         gm.record_openclaw_error()
-        gm.record_orphans_reaped(3)
 
 
 class TestMetricMethods:
@@ -82,7 +80,6 @@ class TestMetricMethods:
         gm.record_transcription_duration(0.5)
         gm.record_openclaw_request_duration(1.2)
         gm.record_openclaw_error()
-        gm.record_orphans_reaped(2)
 
     def test_connection_counting(self, metric_reader: InMemoryMetricReader) -> None:
         gm = _fresh_metrics()
@@ -104,7 +101,7 @@ class TestMetricMethods:
         points = list(connection_metrics[0].data.data_points)
         assert len(points) == 1
         # Two opens + one close = net +1
-        assert points[0].value == 1
+        assert cast(Any, points[0]).value == 1
 
     def test_transcription_duration_recorded(self, metric_reader: InMemoryMetricReader) -> None:
         gm = _fresh_metrics()
@@ -123,7 +120,7 @@ class TestMetricMethods:
         assert len(hist_metrics) == 1
         points = list(hist_metrics[0].data.data_points)
         assert len(points) == 1
-        assert points[0].sum == pytest.approx(0.42)
+        assert cast(Any, points[0]).sum == pytest.approx(0.42)
 
     def test_openclaw_error_counter(self, metric_reader: InMemoryMetricReader) -> None:
         gm = _fresh_metrics()
@@ -143,23 +140,4 @@ class TestMetricMethods:
         assert len(err_metrics) == 1
         points = list(err_metrics[0].data.data_points)
         assert len(points) == 1
-        assert points[0].value == 2
-
-    def test_orphans_reaped_counter(self, metric_reader: InMemoryMetricReader) -> None:
-        gm = _fresh_metrics()
-
-        gm.record_orphans_reaped(5)
-
-        data = metric_reader.get_metrics_data()
-        assert data is not None
-        reap_metrics = [
-            m
-            for rm in data.resource_metrics
-            for sm in rm.scope_metrics
-            for m in sm.metrics
-            if m.name == "gateway.process_monitor.orphans_reaped_total"
-        ]
-        assert len(reap_metrics) == 1
-        points = list(reap_metrics[0].data.data_points)
-        assert len(points) == 1
-        assert points[0].value == 5
+        assert cast(Any, points[0]).value == 2

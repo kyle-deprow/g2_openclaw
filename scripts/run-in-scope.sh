@@ -16,7 +16,7 @@
 #
 # Examples:
 #   scripts/run-in-scope.sh -- uv run jupyter nbconvert --execute notebook.ipynb
-#   scripts/run-in-scope.sh --mem 20G --timeout 1800 -- copilot agent --local --agent main
+#   scripts/run-in-scope.sh --mem 20G --timeout 1800 -- openclaw agent --agent main
 #   scripts/run-in-scope.sh --name vlc-experiment -- uv run pytest tests/ -v
 
 set -uo pipefail

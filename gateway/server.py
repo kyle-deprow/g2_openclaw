@@ -23,11 +23,8 @@ from websockets import ServerConnection
 
 from gateway.audio_buffer import AudioBuffer, BufferOverflow
 from gateway.config import GatewayConfig, load_config
-from gateway.copilot_sessions import kill_copilot_session, list_copilot_sessions
-from gateway.copilot_watcher import CopilotSessionWatcher
 from gateway.metrics import gateway_metrics
 from gateway.openclaw_client import OpenClawClient, OpenClawError
-from gateway.process_monitor import CopilotProcessMonitor
 from gateway.protocol import (
     ErrorCode,
     ProtocolError,
@@ -72,41 +69,6 @@ _BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
 _BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
 
 _STREAM_LOG = Path(__file__).resolve().parent.parent / "logs" / "openclaw-stream.log"
-
-_NOTIFY_RETRY_DELAYS = (5, 15, 30)
-
-
-async def _notify_openclaw_with_retry(
-    client: OpenClawClient,
-    message: str,
-    session_key: str,
-) -> None:
-    """Send notification to OpenClaw with increasing-delay retries."""
-    max_attempts = len(_NOTIFY_RETRY_DELAYS) + 1
-    for attempt in range(max_attempts):
-        try:
-            stream = await client.send_message(message, session_key=session_key)
-            async for _delta in stream:
-                pass  # drain — we don't display the response
-            return
-        except OpenClawError:
-            if attempt >= len(_NOTIFY_RETRY_DELAYS):
-                logger.error(
-                    "Process monitor: failed to notify OpenClaw after %d attempts",
-                    max_attempts,
-                    exc_info=True,
-                )
-                return
-            delay = _NOTIFY_RETRY_DELAYS[attempt]
-            logger.warning(
-                "Process monitor: notify attempt %d/%d failed, retrying in %ds",
-                attempt + 1,
-                max_attempts,
-                delay,
-                exc_info=True,
-            )
-            await client.disconnect()
-            await asyncio.sleep(delay)
 
 
 # --- Auth rate limiting ---
@@ -380,33 +342,7 @@ class GatewaySession:
         if task_info:
             parts.append(f"[{task_info.status.upper()}] {task_info.description[:80]}")
 
-        # 2. Copilot processes
-        try:
-            result = subprocess.run(
-                ["pgrep", "-fa", "copilot.*-p"],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            copilot_lines = [
-                line
-                for line in result.stdout.strip().splitlines()
-                if "tsserver" not in line and "vscode" not in line
-            ]
-            if copilot_lines:
-                parts.append(f"Copilot: {len(copilot_lines)} running")
-            else:
-                parts.append("Copilot: idle")
-        except Exception:
-            parts.append("Copilot: unknown")
-
-        # 3. Process monitor tracked PIDs
-        if self._server and self._server._process_monitor:
-            tracked = self._server._process_monitor.tracked_pids
-            if tracked:
-                parts.append(f"Monitored: {len(tracked)} PIDs")
-
-        # 4. Git status of quantipy
+        # 2. Git status of quantipy
         quantipy_dir = "/home/dev/repos/quantipy"
         try:
             result = subprocess.run(
@@ -463,65 +399,6 @@ class GatewaySession:
                     "type": "error",
                     "detail": "Failed to list sessions",
                     "code": ErrorCode.INTERNAL_ERROR,
-                }
-            )
-
-    async def _handle_copilot_session_list(self) -> None:
-        """Return running Copilot CLI sessions to the client."""
-        try:
-            sessions = list_copilot_sessions(running_only=True)
-            logger.info("Copilot session list: %d sessions found", len(sessions))
-            await self.send_frame(
-                {
-                    "type": "copilot_session_list",
-                    "sessions": [
-                        {
-                            "sessionId": s.session_id,
-                            "cwd": s.cwd,
-                            "dirName": s.dir_name,
-                            "repository": s.repository or "",
-                            "branch": s.branch or "",
-                            "summary": s.summary,
-                            "updatedAt": s.updated_at,
-                            "isRunning": s.is_running,
-                        }
-                        for s in sessions
-                    ],
-                }
-            )
-        except Exception:
-            logger.warning("Failed to list Copilot sessions", exc_info=True)
-            await self.send_frame(
-                {
-                    "type": "error",
-                    "detail": "Failed to list Copilot sessions",
-                    "code": ErrorCode.INTERNAL_ERROR,
-                }
-            )
-
-    async def _handle_copilot_kill(self, frame: dict[str, Any]) -> None:
-        """Kill a running Copilot CLI session by sending SIGTERM to its PID."""
-        session_id = frame["sessionId"]
-        try:
-            success = kill_copilot_session(session_id)
-            await self.send_frame(
-                {
-                    "type": "copilot_killed",
-                    "sessionId": session_id,
-                    "success": success,
-                }
-            )
-            if success:
-                logger.info("Killed Copilot session %s", session_id)
-            else:
-                logger.warning("Failed to kill Copilot session %s", session_id)
-        except Exception:
-            logger.warning("Error killing Copilot session %s", session_id, exc_info=True)
-            await self.send_frame(
-                {
-                    "type": "copilot_killed",
-                    "sessionId": session_id,
-                    "success": False,
                 }
             )
 
@@ -681,16 +558,6 @@ class GatewaySession:
         elif frame_type == "force_stop":
             if self._server is not None:
                 await self._server.force_stop()
-        elif frame_type == "copilot_session_list_request":
-            await self._handle_copilot_session_list()
-        elif frame_type == "copilot_watch":
-            if self._server is not None:
-                await self._server.handle_copilot_watch(frame["sessionId"])
-        elif frame_type == "copilot_unwatch":
-            if self._server is not None:
-                await self._server.handle_copilot_unwatch()
-        elif frame_type == "copilot_kill":
-            await self._handle_copilot_kill(frame)
         else:
             await self.send_frame(
                 {
@@ -1223,10 +1090,6 @@ class GatewayServer:
         self._session_key: str = "agent:claw:g2"
         self._session_date: str = _today_utc()
         self._pending_reset_reason: str | None = None
-        self._copilot_watcher: CopilotSessionWatcher | None = None
-        self._copilot_watch_task: asyncio.Task[None] | None = None
-        self._process_monitor: CopilotProcessMonitor | None = None
-        self._process_monitor_task: asyncio.Task[None] | None = None
 
         if config.gateway_token is None:
             raise ValueError("GatewayServer requires GATEWAY_TOKEN")
@@ -1331,7 +1194,6 @@ class GatewayServer:
         finally:
             # Clean up local audio stream on disconnect
             session._stop_local_stream()
-            await self._stop_copilot_watch()
             if self._current_session is session:
                 self._current_session = None
             # NOTE: Do NOT cancel _inflight_task — it must finish draining
@@ -1357,100 +1219,6 @@ class GatewayServer:
                 )
             except Exception:
                 logger.debug("Failed to send session_reset frame", exc_info=True)
-
-    async def handle_copilot_watch(self, session_id: str) -> None:
-        """Start watching a Copilot CLI session's transcript."""
-        if "/" in session_id or ".." in session_id:
-            session = self._current_session
-            if session is not None:
-                await session.send_frame(
-                    {
-                        "type": "error",
-                        "detail": "Invalid session ID",
-                        "code": ErrorCode.INVALID_FRAME,
-                    }
-                )
-            return
-
-        await self._stop_copilot_watch()
-
-        session_dir = Path.home() / ".copilot" / "session-state" / session_id
-        if not session_dir.exists():
-            session = self._current_session
-            if session is not None:
-                await session.send_frame(
-                    {
-                        "type": "error",
-                        "detail": f"Copilot session not found: {session_id}",
-                        "code": ErrorCode.INTERNAL_ERROR,
-                    }
-                )
-            return
-
-        watcher = CopilotSessionWatcher(session_dir)
-        self._copilot_watcher = watcher
-
-        # Send initial history
-        history = watcher.read_recent_history(limit=20)
-        session = self._current_session
-        if session is not None:
-            await session.send_frame(
-                {
-                    "type": "copilot_history",
-                    "sessionId": session_id,
-                    "entries": history,
-                }
-            )
-
-        # Start background tail task
-        self._copilot_watch_task = asyncio.create_task(
-            self._run_copilot_stream(watcher, session_id)
-        )
-
-    async def handle_copilot_unwatch(self) -> None:
-        """Stop watching the current Copilot CLI session."""
-        await self._stop_copilot_watch()
-
-    async def _run_copilot_stream(self, watcher: CopilotSessionWatcher, session_id: str) -> None:
-        """Background task: tail events.jsonl, forward events to client."""
-        try:
-            async for event in watcher.stream_events():
-                session = self._current_session
-                if session is None:
-                    break
-                await session.send_frame(
-                    {
-                        "type": "copilot_transcript",
-                        "sessionId": session_id,
-                        "delta": event["text"],
-                        "role": event["role"],
-                    }
-                )
-        except asyncio.CancelledError:
-            pass
-        finally:
-            session = self._current_session
-            if session is not None:
-                try:
-                    await session.send_frame(
-                        {
-                            "type": "copilot_transcript_end",
-                            "sessionId": session_id,
-                        }
-                    )
-                except Exception:
-                    logger.debug("Failed to send copilot_transcript_end", exc_info=True)
-
-    async def _stop_copilot_watch(self) -> None:
-        """Stop any active copilot watcher and cancel the tail task."""
-        if self._copilot_watcher is not None:
-            self._copilot_watcher.stop()
-        if self._copilot_watch_task is not None and not self._copilot_watch_task.done():
-            self._copilot_watch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._copilot_watch_task
-        self._copilot_watcher = None
-        self._copilot_watch_task = None
 
     async def force_stop(self) -> None:
         """Hard-kill: abort inflight stream, close OpenClaw connection, reset session."""
@@ -1839,40 +1607,7 @@ class GatewayServer:
             self.config.gateway_port,
             **serve_kwargs,  # type: ignore[arg-type]
         ):
-            await self._start_process_monitor()
-            try:
-                await asyncio.Future()  # block forever
-            finally:
-                await self._stop_process_monitor()
-
-    async def _start_process_monitor(self) -> None:
-        """Start the background Copilot process monitor."""
-        if not self.config.openclaw_gateway_token:
-            raise RuntimeError("OPENCLAW_GATEWAY_TOKEN is required for process monitoring")
-
-        monitor_client = OpenClawClient(
-            host=self.config.openclaw_host,
-            port=self.config.openclaw_port,
-            token=self.config.openclaw_gateway_token,
-        )
-
-        async def notify(message: str) -> None:
-            """Send a notification to OpenClaw with retry on failure."""
-            key = self._session_key  # snapshot before retries
-            await _notify_openclaw_with_retry(monitor_client, message, key)
-
-        self._process_monitor = CopilotProcessMonitor(notify_callback=notify)
-        self._process_monitor_task = asyncio.create_task(self._process_monitor.run())
-        logger.info("Copilot process monitor started")
-
-    async def _stop_process_monitor(self) -> None:
-        """Stop the background process monitor."""
-        if self._process_monitor is not None:
-            self._process_monitor.stop()
-        if self._process_monitor_task is not None:
-            self._process_monitor_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._process_monitor_task
+            await asyncio.Future()  # block forever
 
 
 def _setup_cuda_library_paths() -> None:

@@ -448,7 +448,6 @@ function sessionPanel(): Plugin {
   <div id="sp-header">
     <div class="sp-tabs">
       <button class="sp-tab sp-tab-active" id="sp-tab-openclaw">OpenClaw</button>
-      <button class="sp-tab" id="sp-tab-copilot">Copilot</button>
       <button class="sp-tab" id="sp-tab-telemetry">Telemetry</button>
     </div>
     <span class="sp-header-spacer"></span>
@@ -465,20 +464,15 @@ function sessionPanel(): Plugin {
   var titleEl = document.getElementById('sp-title');
   var backBtn = document.getElementById('sp-back');
   var tabOC = document.getElementById('sp-tab-openclaw');
-  var tabCP = document.getElementById('sp-tab-copilot');
   var tabTel = document.getElementById('sp-tab-telemetry');
   var telemetryEl = document.getElementById('dev-telemetry');
   var lastState = '';
   var lastConvLen = -1;
-  // Reference equality: getSessionList() / getCopilotSessions() return the
-  // same array object until the session list is replaced by a new WebSocket
-  // frame, so !== detects changes without deep comparison.
+  // Reference equality: getSessionList() returns the same array object until
+  // the session list is replaced by a new WebSocket frame, so !== detects
+  // changes without deep comparison.
   var lastSessionRef = null;
-  var lastCopilotRef = null;
-  var lastCopilotConvLen = -1;
   var autoScroll = true;
-  var copilotPollTimer = null;
-  var watchingCopilotId = null;
 
   function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
@@ -536,58 +530,6 @@ function sessionPanel(): Plugin {
     }
   }
 
-  function renderCopilotSessions(sessions) {
-    if (!sessions || sessions.length === 0) {
-      sessionsEl.innerHTML = '<div class="sp-empty">No running Copilot sessions.<br>Start a Copilot CLI session to see it here.</div>';
-      return;
-    }
-    var html = '';
-    for (var i = 0; i < sessions.length; i++) {
-      var s = sessions[i];
-      var label = s.dirName || s.cwd.split('/').pop() || s.sessionId.slice(0,8);
-      var branchLabel = s.branch ? ' (' + esc(s.branch) + ')' : '';
-      html += '<div class="sp-card sp-active" data-copilot-id="' + esc(s.sessionId) + '">'
-        + '<div class="sp-card-label">' + esc(label) + branchLabel + '</div>'
-        + '<div class="sp-card-preview">' + esc(s.summary || 'No summary') + '</div>'
-        + '<div class="sp-card-meta">'
-        + (s.repository ? '<span>' + esc(s.repository) + '</span>' : '')
-        + '<span>' + relTime(s.updatedAt) + '</span>'
-        + '<span style="color:#3fb950">\\u25cf Running</span>'
-        + '</div>'
-        + '<div class="sp-card-cwd">' + esc(s.cwd) + '</div>'
-        + '<div class="sp-card-actions">'
-        + '<button class="sp-kill-btn" data-kill-copilot="' + esc(s.sessionId) + '">Kill Session</button>'
-        + '</div>'
-        + '</div>';
-    }
-    sessionsEl.innerHTML = html;
-
-    var cards = sessionsEl.querySelectorAll('.sp-card');
-    for (var j = 0; j < cards.length; j++) {
-      cards[j].addEventListener('click', function(e) {
-        if (e.target.classList.contains('sp-kill-btn')) return;
-        var sid = this.getAttribute('data-copilot-id');
-        if (window.__g2Api && sid) {
-          watchingCopilotId = sid;
-          window.__g2Api.watchCopilotSession(sid);
-          showCopilotConversationView(sid);
-        }
-      });
-    }
-    var killBtns = sessionsEl.querySelectorAll('.sp-kill-btn[data-kill-copilot]');
-    for (var k = 0; k < killBtns.length; k++) {
-      killBtns[k].addEventListener('click', function(e) {
-        e.stopPropagation();
-        var sid = this.getAttribute('data-kill-copilot');
-        if (window.__g2Api && sid) {
-          if (confirm('Kill Copilot session ' + sid.slice(0,8) + '...? This sends SIGTERM to the process.')) {
-            window.__g2Api.killCopilotSession(sid);
-          }
-        }
-      });
-    }
-  }
-
   function renderConversation(entries) {
     if (!entries || entries.length === 0) {
       convEl.innerHTML = '<div class="sp-empty">No messages yet. Send one below!</div>';
@@ -615,7 +557,6 @@ function sessionPanel(): Plugin {
     convEl.style.display = 'none';
     backBtn.style.display = 'none';
     titleEl.textContent = 'Sessions';
-    watchingCopilotId = null;
   }
 
   function showConversationView() {
@@ -626,25 +567,12 @@ function sessionPanel(): Plugin {
     autoScroll = true;
   }
 
-  function showCopilotConversationView(sessionId) {
-    sessionsEl.style.display = 'none';
-    convEl.style.display = '';
-    backBtn.style.display = '';
-    titleEl.textContent = 'Copilot: ' + (sessionId || '').slice(0,8) + '...';
-    autoScroll = true;
-  }
-
   function setActiveTab(tab) {
     if (window.__g2Api) window.__g2Api.setActiveTab(tab);
     tabOC.classList.remove('sp-tab-active');
-    tabCP.classList.remove('sp-tab-active');
     tabTel.classList.remove('sp-tab-active');
     if (tab === 'telemetry') {
       tabTel.classList.add('sp-tab-active');
-      stopCopilotPolling();
-      watchingCopilotId = null;
-      lastCopilotRef = null;
-      lastCopilotConvLen = -1;
       sessionsEl.style.display = 'none';
       convEl.style.display = 'none';
       backBtn.style.display = 'none';
@@ -652,15 +580,6 @@ function sessionPanel(): Plugin {
       if (telemetryEl) telemetryEl.style.display = 'flex';
     } else if (tab === 'openclaw') {
       tabOC.classList.add('sp-tab-active');
-      stopCopilotPolling();
-      watchingCopilotId = null;
-      lastCopilotRef = null;
-      lastCopilotConvLen = -1;
-      if (telemetryEl) telemetryEl.style.display = 'none';
-      showSessionView();
-    } else {
-      tabCP.classList.add('sp-tab-active');
-      startCopilotPolling();
       if (telemetryEl) telemetryEl.style.display = 'none';
       showSessionView();
     }
@@ -669,36 +588,13 @@ function sessionPanel(): Plugin {
     lastSessionRef = null;
   }
 
-  function startCopilotPolling() {
-    stopCopilotPolling();
-    if (window.__g2Api) window.__g2Api.requestCopilotSessions();
-    copilotPollTimer = setInterval(function() {
-      if (document.hidden) return;
-      if (window.__g2Api) window.__g2Api.requestCopilotSessions();
-    }, 3000);
-  }
-
-  function stopCopilotPolling() {
-    if (copilotPollTimer) { clearInterval(copilotPollTimer); copilotPollTimer = null; }
-  }
-
   tabOC.addEventListener('click', function() { setActiveTab('openclaw'); });
-  tabCP.addEventListener('click', function() { setActiveTab('copilot'); });
   tabTel.addEventListener('click', function() { setActiveTab('telemetry'); });
 
   backBtn.addEventListener('click', function() {
     var api = window.__g2Api;
     if (!api) return;
-    var tab = api.getActiveTab ? api.getActiveTab() : 'openclaw';
-    if (tab === 'copilot') {
-      if (watchingCopilotId) {
-        api.unwatchCopilotSession();
-        watchingCopilotId = null;
-      }
-      showSessionView();
-    } else {
-      api.openSessionMenu();
-    }
+    api.openSessionMenu();
   });
 
   setInterval(function() {
@@ -706,28 +602,9 @@ function sessionPanel(): Plugin {
     var api = window.__g2Api;
     if (!api) return;
 
-    var tab = api.getActiveTab ? api.getActiveTab() : 'openclaw';
+    var tab = api.getActiveTab();
 
     if (tab === 'telemetry') return;
-
-    if (tab === 'copilot') {
-      // Copilot tab: show copilot sessions or copilot conversation
-      if (watchingCopilotId) {
-        var conv = api.getCopilotConversation ? api.getCopilotConversation() : [];
-        if (conv && conv.length !== lastCopilotConvLen) {
-          lastCopilotConvLen = conv.length;
-          renderConversation(conv);
-        }
-      } else {
-        var sessions = api.getCopilotSessions ? api.getCopilotSessions() : null;
-        if (sessions !== lastCopilotRef) {
-          lastCopilotRef = sessions;
-          renderCopilotSessions(sessions);
-        }
-      }
-      lastState = 'copilot';
-      return;
-    }
 
     // OpenClaw tab: original behavior
     var state = api.getState();

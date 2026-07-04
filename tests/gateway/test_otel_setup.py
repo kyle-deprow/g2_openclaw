@@ -6,6 +6,7 @@ import contextlib
 import logging
 from collections.abc import Iterator
 from logging.handlers import RotatingFileHandler
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -121,7 +122,8 @@ class TestLoggingInstrumentorActive:
         # Attach an in-memory log exporter to verify OTel sees log records
         from opentelemetry.sdk._logs.export import InMemoryLogRecordExporter
 
-        in_memory_exporter = InMemoryLogRecordExporter()
+        exporter_factory = cast(Any, InMemoryLogRecordExporter)
+        in_memory_exporter = exporter_factory()
         logger_provider = LoggerProvider()
         logger_provider.add_log_record_processor(SimpleLogRecordProcessor(in_memory_exporter))
 

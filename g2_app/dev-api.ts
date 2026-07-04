@@ -1,7 +1,7 @@
 /**
  * dev-api.ts — Vite plugin providing HTTP automation API endpoints.
  *
- * Lets an external tool (Copilot / curl) control the G2 app running in the
+ * Lets an external tool or curl control the G2 app running in the
  * simulator's webview via a simple command-queue-and-poll pattern:
  *
  *   External caller  ──POST /_dev/cmd──►  Vite middleware  ◄──GET /_dev/poll──  Browser

@@ -7,7 +7,7 @@
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
 #   - openclaw CLI on PATH
-#   - For copilot: run 'openclaw github-copilot login' (or set GH_TOKEN env var)
+#   - For codex: run 'openclaw models auth login --provider openai'
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
 set -euo pipefail
@@ -38,6 +38,14 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
 fi
 
 # ── Load env vars from .env ───────────────────────────────────────────────────
+PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
+declare -A PRESERVED_ENV=()
+for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
+  if [[ -v "${VAR_NAME}" ]]; then
+    PRESERVED_ENV["${VAR_NAME}"]="${!VAR_NAME}"
+  fi
+done
+
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   set -a
@@ -45,9 +53,15 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
-if [[ "${OPENCLAW_PROVIDER:-copilot}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-  echo "WARNING: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
-  echo "         Set it in ${ENV_FILE} or export it before running this script." >&2
+for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
+  printf -v "${VAR_NAME}" '%s' "${PRESERVED_ENV[${VAR_NAME}]}"
+  export "${VAR_NAME}"
+done
+
+if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+  echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
+  echo "       Set it in ${ENV_FILE} or export it before running this script." >&2
+  exit 1
 fi
 
 # ── Backup ───────────────────────────────────────────────────────────────────
@@ -59,19 +73,11 @@ echo "Backed up local config → ${BACKUP}"
 # ── Deep merge ───────────────────────────────────────────────────────────────
 # jq's * operator does recursive object merge (right wins on conflicts).
 # We read the local config as base and overlay the repo config on top.
-# Then remove stale model references that don't match the repo's primary model.
+# Later provider selection installs a strict selected-model allowlist.
 REPO_PRIMARY=$(jq -r '.agents.defaults.model.primary // empty' "${REPO_CONFIG}")
 MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
   .[0] * .[1]
   | del(.mcp)
-  | if $primary != "" then
-      # Build models allowlist from ALL configured providers (not just primary).
-      # Each provider/modelId pair becomes an allowed model for agent use + cron.
-      .agents.defaults.models = (
-        [.models.providers | to_entries[] | .key as $p | .value.models[]? | {("\($p)/\(.id)"): {}}]
-        | add // { ($primary): {} }
-      )
-    else . end
 ' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
 
 # ── Resolve MemPalace MCP server path ─────────────────────────────────────────
@@ -116,7 +122,7 @@ fi
 # NOT resolve these natively for custom provider apiKey fields — the literal
 # string is passed to the SDK. We must substitute the actual value here.
 # Note: Azure OpenAI uses Entra ID auth (injected by the preload) — no apiKey needed.
-if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   MERGED=$(echo "${MERGED}" | jq --arg key "${OPENROUTER_API_KEY}" '
     (.models.providers // {}) |= with_entries(
       if .value.apiKey == "env:OPENROUTER_API_KEY" then
@@ -146,25 +152,40 @@ MERGED=$(echo "${MERGED}" | jq '
 ')
 
 # ── Provider selection ───────────────────────────────────────────────────────
-PROVIDER="${OPENCLAW_PROVIDER:-copilot}"
+PROVIDER="${OPENCLAW_PROVIDER:-codex}"
 case "${PROVIDER}" in
-  copilot)
-    MODEL_PRIMARY="github-copilot/${COPILOT_MODEL:-claude-sonnet-4.6}"
+  codex)
+    MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
+    MODEL_PROVIDER="openai"
+    MODEL_ID="${OPENAI_MODEL:-gpt-5.4}"
     ;;
   azure)
     MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
+    MODEL_PROVIDER="azure-oai-g2"
+    MODEL_ID="gpt-5.4"
     ;;
   openrouter)
     MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+    MODEL_PROVIDER="openrouter"
+    MODEL_ID="${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
     ;;
   *)
-    echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'copilot', 'azure', or 'openrouter'." >&2
+    echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
     exit 1
     ;;
 esac
 
+if ! echo "${MERGED}" | jq -e --arg provider "${MODEL_PROVIDER}" --arg model "${MODEL_ID}" '
+  any(.models.providers[$provider].models[]?; .id == $model)
+' >/dev/null; then
+  echo "ERROR: Selected model '${MODEL_PRIMARY}' is not declared in repo config." >&2
+  echo "       Add it to gateway/openclaw_config/openclaw.json or choose a configured model." >&2
+  exit 1
+fi
+
 MERGED=$(echo "${MERGED}" | jq --arg primary "${MODEL_PRIMARY}" '
   .agents.defaults.model.primary = $primary
+  | .agents.defaults.models = { ($primary): {} }
 ')
 echo "Active provider: ${PROVIDER} → model: ${MODEL_PRIMARY}"
 
@@ -177,6 +198,7 @@ echo "Merged repo config into ${LOCAL_CONFIG}"
 # Default agent is "claw" → workspace-claw/
 AGENT_ID="claw"
 BOOTSTRAP_DST="${OPENCLAW_HOME}/workspace-${AGENT_ID}"
+mkdir -p "${BOOTSTRAP_DST}"
 for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"
   DST="${BOOTSTRAP_DST}/${FILE}"
@@ -197,27 +219,20 @@ for FILE in SOUL.md AGENTS.md TOOLS.md BOOTSTRAP.md; do
   done
 done
 
-# ── Copy skills (and prune stale ones) ───────────────────────────────────────
+# ── Copy repo skills ─────────────────────────────────────────────────────────
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 SKILLS_DST="${OPENCLAW_HOME}/skills"
 if [[ -d "${SKILLS_SRC}" ]]; then
   # Copy repo skills to local
   for SKILL_DIR in "${SKILLS_SRC}"/*/; do
     SKILL_NAME="$(basename "${SKILL_DIR}")"
+    if [[ ! -f "${SKILL_DIR}SKILL.md" ]]; then
+      continue
+    fi
     mkdir -p "${SKILLS_DST}/${SKILL_NAME}"
     cp "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
     echo "Copied skill ${SKILL_NAME} → ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
   done
-  # Remove skills that no longer exist in repo
-  if [[ -d "${SKILLS_DST}" ]]; then
-    for LOCAL_SKILL in "${SKILLS_DST}"/*/; do
-      LOCAL_NAME="$(basename "${LOCAL_SKILL}")"
-      if [[ ! -d "${SKILLS_SRC}/${LOCAL_NAME}" ]]; then
-        rm -rf "${LOCAL_SKILL}"
-        echo "Removed stale skill ${LOCAL_NAME}"
-      fi
-    done
-  fi
 fi
 
 # ── Copy Azure API-version preload if present ────────────────────────────────
@@ -266,26 +281,32 @@ echo ""
 echo "── Validating config ──"
 if command -v openclaw &>/dev/null; then
   echo "Running: openclaw config validate"
-  openclaw config validate || echo "WARNING: 'openclaw config validate' returned non-zero."
+  if ! openclaw config validate; then
+    cp "${BACKUP}" "${LOCAL_CONFIG}"
+    echo "ERROR: 'openclaw config validate' failed. Restored backup ${BACKUP}." >&2
+    exit 1
+  fi
 else
-  echo "openclaw CLI not found on PATH — skipping validation."
-  echo "Verify manually: openclaw models status"
+  cp "${BACKUP}" "${LOCAL_CONFIG}"
+  echo "ERROR: openclaw CLI not found on PATH. Restored backup ${BACKUP}." >&2
+  echo "       Install OpenClaw and rerun validation." >&2
+  exit 1
 fi
 
 echo ""
 echo "Done. Config pushed successfully."
 echo ""
-if [[ "${PROVIDER}" == "azure" ]]; then
+if [[ "${PROVIDER}" == "codex" ]]; then
+  echo "── OpenAI / Codex ──"
+  echo "Using model: ${MODEL_PRIMARY}"
+  echo "Required auth: openclaw models auth login --provider openai"
+  echo "Bundled codex plugin is enabled; OpenAI provider runtime is pinned to codex."
+  echo ""
+elif [[ "${PROVIDER}" == "azure" ]]; then
   echo "── Azure Entra preload ──"
   echo "Ensure 'az login' has been run and NODE_OPTIONS is set before starting the daemon:"
   echo ""
   echo "  az login"
   echo "  export NODE_OPTIONS=\"--require \$HOME/.openclaw/azure-api-version-preload.cjs\""
-  echo ""
-elif [[ "${PROVIDER}" == "copilot" ]]; then
-  echo "── GitHub Copilot ──"
-  echo "Using model: ${MODEL_PRIMARY}"
-  echo "The daemon will auto-exchange your GitHub token for Copilot API tokens."
-  echo "No NODE_OPTIONS preload needed."
   echo ""
 fi

@@ -1,193 +1,223 @@
-# Agents — Behavioral Rules
+# Agents - Behavioral Rules
 
 ## Default Agent: Orchestrator
 
-Always use `--agent orchestrator` unless you have a specific reason to route to a specialist directly. The orchestrator reads the other `.agent.md` files in the repo and delegates internally — it handles multi-step work, review cycles, and specialist routing on its own. Only bypass it with `--agent <name>` when you need a single-shot specialist task (e.g. a quick migration fix → `--agent backend-python`).
+Use the `orchestrator` subagent unless there is a specific reason to route to a
+specialist directly. The orchestrator coordinates multi-step work, review
+cycles, and specialist routing. Bypass it only for narrow single-shot tasks.
 
 ## Mandatory Planning Gate
 
-**Every feature, task, or change — no matter how small — MUST go through a PLAN phase before implementation.** No exceptions.
+Every feature, task, or change must go through a plan phase before
+implementation. No exceptions outside autoresearch mode.
 
-### How it works:
-1. Receive a task from the human
-2. Delegate a **planning-only** Copilot session: analyze the codebase, **search for existing OSS libraries** that solve the problem, identify affected files, propose the approach, estimate scope
-3. Present the plan to the human in a concise summary: what will change, which files, what approach, how many phases
-4. **WAIT for explicit human approval** ("approved", "go", "yes", "looks good", "do it")
-5. Only after approval: execute the plan in phases using ENGINEER mode
+### How it works
+
+1. Receive a task from the human.
+2. Delegate a planning-only task to the `orchestrator` subagent. It must analyze
+   the codebase, search for OSS libraries that solve the problem, identify
+   affected files, propose the approach, and estimate scope.
+3. Present the plan to the human in a concise summary: what will change, which
+   files, what approach, and how many phases.
+4. Wait for explicit human approval.
+5. After approval, delegate the full approved plan to one implementation task.
 
 ### OSS-First Rule
-**During every planning phase, Copilot MUST search for open-source libraries that already solve the problem before proposing to build anything from scratch.** If a mature, well-maintained OSS library exists:
-- Use it. Add it as a dependency.
-- Write integration/adapter code, not a reimplementation.
-- Only build custom when OSS genuinely doesn't fit (wrong data model, abandoned, critical missing feature).
 
-The plan must explicitly state: "OSS evaluated: <library names> — chosen: <name> because <reason>" or "No suitable OSS found because <reason>." Plans that skip this are rejected.
+During every planning phase, the subagent must search for open-source libraries
+that already solve the problem before proposing custom code. If a mature,
+well-maintained OSS library exists:
 
-### Plan format (present to human — MAX 300 CHARACTERS):
-```
+- Use it as a dependency.
+- Write integration or adapter code instead of reimplementing it.
+- Build custom only when OSS genuinely does not fit.
+
+The plan must state: `OSS evaluated: <library names> - chosen: <name> because
+<reason>` or `No suitable OSS found because <reason>`.
+
+### Plan Format
+
+Present to the human in 300 characters or less:
+
+```text
 PLAN: <name>
 <approach in 1 line>
 1. <phase 1>  2. <phase 2>
 Risk: <1 line>
 ```
 
-The human reads on a phone. Keep the plan summary under 300 characters. The detailed plan lives in the Copilot session — the summary is just for approval. If the human wants details, they'll ask.
+The detailed plan lives in the subagent task output. If the human wants
+details, they will ask.
 
-### Rules:
-- **Never skip the plan.** Even for "simple" tasks. The human decides what's simple, not you.
-- **Exception: autoresearch mode.** When running autoresearch, the research debate IS the planning phase and the implementation prompt IS the plan. You do not present each experiment for human approval — the human approved the loop by saying "autoresearch."
-- **Never implement before approval** (outside autoresearch). If the human hasn't said yes, you wait.
-- **Plan via Copilot.** Delegate the planning to Copilot CLI too — it reads the codebase and proposes the approach. You summarize and present.
-- **Plans are cheap, bad implementations are expensive.** A 30-second plan review saves 10-minute reverts.
-- **After approval, ONE Copilot session executes the full plan.** Send the approved plan to a single Copilot CLI invocation. Copilot handles all phases internally — commits, tests, the works. You do NOT manage individual phases.
+### Rules
 
-### Delegation examples:
-**Plan:** `exec(command: "copilot --agent orchestrator -p 'Analyze codebase and plan: <task>. Do NOT implement. OSS-first search. Output: 1) OSS evaluated 2) files 3) approach 4) phases 5) tests 6) risks.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
-
-**Implement (after approval):** `exec(command: "copilot --agent orchestrator -p 'Execute plan: <plan>. Run pytest per phase. Commit if pass. Max 3 fix attempts. Revert and skip if unfixable.' --yolo --model claude-sonnet-4.6 --no-auto-update", pty: true, workdir: "/home/dev/repos/quantipy")`
+- Never skip the plan.
+- Exception: in autoresearch mode, the research debate is the planning phase and
+  the implementation prompt is the plan.
+- Never implement before approval outside autoresearch.
+- After approval, one implementation task executes the full plan. Do not manage
+  individual phases manually unless recovery is required.
 
 ## Background Execution
 
-**Read the `copilot-cli` skill for the full protocol** — launch sequence, exec syntax, and configuration rules.
+All implementation and adversarial review tasks should run in the background.
+Record target repo HEAD before launch, post `[TASK:running]`, and evaluate the
+subagent result when OpenClaw returns or announces completion. If the result
+does not include metrics, git status, or notebook sanity output, collect those
+with read-only verification commands before deciding keep/discard.
 
-**ALL implementation sessions MUST use `background:true`.** The 3-step launch sequence (HEAD → copilot → confirm) must execute in ONE turn.
+## Autonomous Post-Completion Evaluation
 
-The gateway's built-in process monitor automatically tracks Copilot processes and sends `[TASK:complete]` or `[TASK:failed]` to your session when they exit. It includes git log, notebook sanity check output, and dirty-tree detection.
+When you receive `[TASK:complete]` or `[TASK:failed]`, do not wait for the
+human. Immediately run the autoresearch evaluation loop in your own turn using
+read-only `exec` commands and memory tools. Evaluation is lightweight and stays
+with the PM agent.
 
-### Autonomous Post-Completion Evaluation
+1. Parse metrics from the gateway notification.
+2. Run Phase 4 VERIFY if metrics are missing or insufficient.
+3. Sanity-check impossible values:
+   - Sharpe > 10 means BUG.
+   - Win rate = 1.0 means BUG.
+   - Max drawdown = 0% means BUG.
+   - Profit factor = inf means BUG.
+   - OOS Sharpe > 2x IS Sharpe means OOS is unreliable.
+4. Run Phase 4.5 adversarial review via the `reviewer` subagent.
+5. Run Phase 5 DECIDE using the reviewer's recommended metric.
+6. Run Phase 6 LOG, including MemPalace drawer and KG writes.
+7. Run Phase 7 REFLECT when due.
+8. Run Phase 8 CONTINUE by launching the next subagent task.
 
-**When you receive a [TASK:complete] or [TASK:failed] from the gateway — DO NOT WAIT FOR THE HUMAN.** Immediately run the autoresearch evaluation loop **IN YOUR OWN TURN using exec commands. Do NOT delegate evaluation to Copilot** — evaluation is lightweight (extract metrics, compare thresholds, decide). Only Phase 2 (ideation) and Phase 3 (implementation) use Copilot delegation.
+The loop never self-terminates. Only the human saying `stop` halts it.
 
-1. **Parse the metrics** from the gateway's notification (includes git log and notebook sanity output)
-2. **Run Phase 4 VERIFY** — execute the notebook if not already done, extract all metrics with exec commands:
-   ```
-   exec(command: "cd /home/dev/repos/quantipy && uv run jupyter nbconvert --execute --inplace --ExecutePreprocessor.timeout=300 notebooks/experiments/<name>.ipynb 2>&1 | tail -5")
-   exec(command: "cd /home/dev/repos/quantipy && python3 -c \"import json,glob; nbs=sorted(glob.glob('notebooks/experiments/*.ipynb'),key=__import__('os').path.getmtime,reverse=True); nb=json.load(open(nbs[0])); [print(''.join(o.get('text',[]))) for c in nb.get('cells',[]) if c.get('cell_type')=='code' for o in c.get('outputs',[]) if any(k in ''.join(o.get('text',[])).lower() for k in ['sharpe','return','drawdown','accuracy','trade','result'])]\" 2>&1 | tail -30")
-   ```
-3. **SANITY CHECK FIRST** — before interpreting metrics, check for impossible values:
-   - Sharpe > 10 → BUG (not alpha). Win rate = 1.0 → BUG. Max drawdown = 0% → BUG. Profit factor = inf → BUG.
-   - OOS Sharpe > 2× IS Sharpe → OOS unreliable (lucky period). Use IS walk-forward as decision metric.
-   - OOS Sharpe > 5 on < 60 trading days → OOS unreliable. Use IS walk-forward as decision metric.
-   - If any bug-level sanity check triggers: verdict is BUG. Delegate fix to Copilot. Re-evaluate after fix.
-4. **Run Phase 4.5 ADVERSARIAL REVIEW** — delegate to Copilot `--agent reviewer` (background:true). The reviewer validates methodology, checks for leakage, and provides a corrected decision metric. See autoresearch skill Phase 4.5 for the full prompt template.
-5. **Run Phase 5 DECIDE** — apply thresholds from autoresearch skill using the **reviewer's recommended metric** (IS walk-forward Sharpe net), NOT raw OOS Sharpe.
-6. **Run Phase 6 LOG** — record results + reviewer verdict in RESEARCH_LOG.md and memory
-6b. **Log to MemPalace** — call `mempalace_add_drawer` with the full experiment result (wing: `wing_quantipy`, room: `room_<experiment_id>`). Then call `mempalace_kg_add` for each structured fact (experiment→feature, experiment→metric, experiment→model, experiment→decision). Read the `mempalace` skill for the drawer content template and KG triple examples. One drawer per experiment. If mempalace tools error, continue — it's additive, not blocking.
-7. **Run Phase 7 REFLECT** — if this is the 3rd implementation or all proposals are done
-   - Query MemPalace: `mempalace_search` + `mempalace_kg_query` to find which feature/model combinations have consistently succeeded or failed. Include in reflect summary.
-8. **Run Phase 8 CONTINUE** — pick next action autonomously and launch it immediately:
-   - BUG detected → launch Copilot orchestrator to fix the backtest, re-evaluate
-   - Reviewer FAIL → launch Copilot orchestrator to fix issues, re-review
-   - KEEP with low Sharpe → launch Copilot orchestrator for feature iteration
-   - DISCARD → launch Copilot orchestrator/researcher for next proposal or new ideation round
-   - All proposals exhausted → launch Copilot researcher for new ideation with updated context
-   - STRONG KEEP (IS Sharpe > 1.0, reviewer PASS) → log as portfolio candidate, post [PORTFOLIO] status, then KEEP EXPLORING for orthogonal strategies
-   - Before ideation: `mempalace_search` + `mempalace_kg_query` for cross-experiment patterns. Include findings in the researcher prompt. Skip if mempalace unavailable.
-   - The loop NEVER self-terminates. Only the human saying "stop" halts it.
+## Incomplete Task Recovery
 
-**Phase 4 is exec commands. Phase 4.5 is Copilot reviewer delegation (background:true). Phase 5-7 are in YOUR turn. Phase 8 launches next Copilot process with background:true.** The entire evaluation-to-next-launch sequence happens across turns (Phase 4.5 exits → process monitor notifies → you continue at Phase 5). **NEVER ask the human what to do next — the autoresearch protocol defines the next action. Decide and execute.**
+When a task fails with a dirty tree, inspect `git status` and the diff in the
+target repo. If the work is salvageable, complete verification and commit it.
+Otherwise revert the failed target-repo change, log the failure, and move to the
+next action.
 
-**CRITICAL: The loop NEVER stops on its own.** Even after finding strong strategies, keep exploring for portfolio diversification. Different signal families, holding periods, and asset pairs create uncorrelated return streams. A portfolio of 3-5 orthogonal strategies is worth far more than one great strategy.
+When a task exits without commits or useful artifacts, treat it as incomplete.
+Relaunch once with a narrower implementation prompt. If the second attempt also
+produces no output, mark the proposal failed and move on.
 
-**#1 FAILURE MODE — STALLING THE LOOP.** The most common failure is: you receive a [TASK:complete], evaluate the results correctly, then respond with a status summary and STOP. This kills the loop for hours/days. Recognise this pattern in yourself. When you finish evaluating, your VERY NEXT ACTION must be an `exec()` call that launches Copilot. If your response doesn't contain an `exec()` call, you have stalled. The gateway will send a follow-up nudge if it detects no new Copilot process within 5 minutes.
+## Code Delegation and Modes
 
-### Incomplete Task Resume
+Never create, modify, or delete code files directly in target repositories. All
+target-repo code changes go through OpenClaw Codex subagents.
 
-When a `[TASK:failed]` indicates dirty tree (uncommitted changes), the Copilot may have died mid-work. Check `git status`, review the changes, and decide whether to commit or discard. If the work is salvageable, commit it and evaluate. Otherwise, `git checkout .` and re-launch.
+### SCAFFOLD
 
-## Code Delegation & Modes
+Before first delegation to a repo, ensure it has current agent instructions and
+skills for the Codex runtime. Update scaffolding only when there is evidence of
+missing or stale guidance.
 
-**NEVER create, modify, or delete code files directly.** ALL code changes go through Copilot CLI. See the `copilot-cli` skill for delegation modes (SCAFFOLD, RESEARCH, ENGINEER), prompt discipline, invocation examples, and **pre-handoff scaffolding review** (evaluate target repo agents before each delegation — update only if evidence of failure).
+### RESEARCH
 
-## Current Research Direction (from the human)
+Ask for a constrained answer with citations or source references where useful.
+Include available data, trading universe constraints, and the required return
+format.
 
-**Simple indicator intraday trading on small/mid cap equities + Reddit sentiment.**
-- Features: Moving Averages, Bollinger Bands, OBV + Reddit sentiment correlation
-- Universe: 4-10 small/mid cap equities ($1B-$20B market cap). NO mega-caps.
-- Holding: Intraday only. Flat by 15:50 ET. No entries before 9:45.
-- ML model: freely choose, iterate. No restrictions.
-- Do NOT propose exotic features (wavelets, entropy, topology, etc). Simple indicators only.
+### ENGINEER
+
+Send the approved implementation plan with exact files, existing patterns,
+verification commands, commit requirements, and rollback criteria.
+
+## Current Research Direction
+
+Simple indicator intraday trading on small/mid cap equities plus Reddit
+sentiment.
+
+- Features: Moving Averages, Bollinger Bands, OBV, VWAP, volume profiles, and
+  Reddit/news sentiment conditioning.
+- Universe: 4-10 small/mid cap equities ($500M-$20B market cap). No mega-caps as
+  traded positions.
+- Holding: intraday only. Flat by 15:50 ET. No entries before 9:45.
+- ML model: freely choose and iterate.
+- Do not propose exotic features. Simple indicators and defensible interactions
+  are the focus.
 
 ## Evaluation Filters
 
-Every research result must pass ALL before implementation:
-- Data available (real OHLCV in PostgreSQL — NEVER synthetic data)
-- Uses real data from the database — `qp.prices()` auto-fetches missing tickers on first call
-- **Data range coverage: experiments MUST use at least 95% of available trading days.** If we have 2021–2026 data, the experiment spans 2021–2026. No cherry-picking 6-month windows.
-- Testable hypothesis ("if X then Y within Z timeframe")
-- Single metric (Sharpe, hit rate, drawdown, profit factor)
-- Not tried before (check experiment log + `memory_search`)
-- Feature engineering defined (raw data → features → model input)
-- **Uses simple indicators (MA, Bollinger, OBV) + sentiment — no exotic features**
-- **Universe: small/mid cap equities ($1B-$20B market cap) — NO mega-caps**
-- **Asset class / universe specified** (which tickers, why, how to evaluate)
-- **Hyperparameter tuning plan** (RandomizedSearchCV + TimeSeriesSplit, never hardcoded)
-- **Transaction cost model** (spread + slippage per ticker, report gross AND net Sharpe)
-- **Data split defined** — use multi-year data. OOS must be at least 120 trading days (~6 months). Train/CV should cover 3+ years.
+Every research result must pass all filters before implementation:
+
+- Real OHLCV data in PostgreSQL; never synthetic data.
+- Uses `qp.prices()` or direct SQL and spans at least 95% of available trading
+  days.
+- Testable hypothesis with a single primary metric.
+- Not tried before; check `RESEARCH_LOG.md`, memory, and MemPalace.
+- Feature engineering is defined from raw data to model input.
+- Uses simple indicators plus optional sentiment.
+- Asset class and universe are specified.
+- Hyperparameter tuning uses RandomizedSearchCV plus TimeSeriesSplit where
+  applicable.
+- Transaction cost model reports gross and net Sharpe.
+- OOS holdout is at least 120 trading days.
 
 ## Experiment Output Convention
 
-Every experiment MUST produce a Jupyter notebook at `notebooks/experiments/<strategy_name>.ipynb`.
-The notebook must read the `experiment-data` skill (`.github/skills/experiment-data/SKILL.md`) and follow its methodology.
+Every experiment must produce a Jupyter notebook at
+`notebooks/experiments/<strategy_name>.ipynb`.
 
 Required sections:
-1. Data inventory (actual DB rows/dates loaded — must show full date range)
-2. Hypothesis + universe choice (which tickers, why)
-3. Data loading (real OHLCV via `qp.prices()` — NEVER synthetic. Auto-fetches missing data on first call.)
-4. Feature engineering (on real data, show distributions)
-5. Hyperparameter tuning (RandomizedSearchCV + TimeSeriesSplit, report best params)
-6. Walk-forward backtest (20-day train, 5-day test, 1-day embargo, min 20 folds across multi-year data)
-7. Transaction costs (report gross AND net Sharpe)
-8. OOS evaluation (min 120 trading days / ~6 months, NEVER touched during training)
-9. Null tests (shuffled labels, random features, bootstrap Sharpe CI)
-10. Conclusion (keep/iterate/discard)
 
-**DATA RANGE RULE: Use 2021–2026 data. `qp.prices()` auto-fetches missing tickers/dates — no manual fetch needed. Just request the full date range.**
+1. Data inventory.
+2. Hypothesis and universe choice.
+3. Data loading with real OHLCV via `qp.prices()`.
+4. Feature engineering.
+5. Hyperparameter tuning.
+6. Walk-forward backtest.
+7. Transaction costs.
+8. OOS evaluation.
+9. Null tests.
+10. Conclusion.
 
-Module code in `src/quantipy/alpha/<strategy_name>/` — notebook imports it.
-Must execute via `uv run jupyter execute <path> --timeout=300`.
-API server must be running: `uv run uvicorn 'quantipy.api.main:create_app' --factory --host 127.0.0.1 --port 8000 &`
+Module code belongs in `src/quantipy/alpha/<strategy_name>/`. The notebook
+imports it. Execute with:
 
-## Research via Copilot Agents
+```bash
+uv run jupyter execute <path> --timeout=300
+```
 
-See the `autoresearch` skill for the full multi-agent research protocol. Key points:
-- Ideation uses `--agent researcher` which orchestrates contrarian/explorer/theorist
-- Implementation uses `--agent orchestrator`
-- Scaffolding: ensure target repo has `.github/agents/researcher.agent.md` + contrarian + explorer + theorist (from `~/repos/ai_scaffolding/agents/`)
-- Maintain `RESEARCH_LOG.md` — all proposals ranked with scores, all results logged
+## Research via OpenClaw Subagents
+
+See the `autoresearch` skill for the full multi-agent research protocol.
+
+- Ideation uses the `researcher` subagent, which coordinates `contrarian`,
+  `explorer`, and `theorist`.
+- Implementation uses `orchestrator`.
+- Adversarial review uses `reviewer`.
+- Maintain `RESEARCH_LOG.md` with proposals, scores, results, and decisions.
 
 ## Verification Protocol
 
 After every implementation:
-1. Run `uv run pytest --tb=short -q` via exec
-2. All tests pass → proceed
-3. Tests fail → delegate fix to Copilot (max 3 attempts)
-4. 3 failures → `git revert HEAD`, log failure, move to next idea
+
+1. Run `uv run pytest --tb=short -q` via `exec`.
+2. If tests pass, execute the notebook and extract metrics.
+3. If tests fail, delegate a fix to `orchestrator` with a maximum of 3 attempts.
+4. After 3 failures, revert the change, log the failure, and move to the next
+   idea.
 
 ## Decision Protocol
 
-After verification, compare metrics to baseline:
-- Metrics improved or neutral → `git commit`, keep
-- Metrics degraded → `git revert`, log why
+After verification and review:
+
+- Metrics improved or neutral: keep and commit.
+- Metrics degraded or review fails: revert and log why.
 - No subjective judgment. Numbers decide.
 
 ## Memory Practices
 
-Write to memory proactively:
-- After every experiment: outcome, metric, what worked/failed → `memory/YYYY-MM-DD.md`
-- After every decision/research round: record it
-- Before starting work: `memory_search` for related past experiments
-- MEMORY.md: only durable facts. Daily notes: `memory/YYYY-MM-DD.md`
-- Never duplicate — search before writing
-
-## Stuck Detection
-
-5 consecutive discards in the same research area → pivot to a different area. Don't grind.
+- After every experiment, write outcome, metric, and lesson to memory and
+  MemPalace.
+- Before work, search memory and MemPalace for related failures and successes.
+- Use `MEMORY.md` only for durable facts; use daily notes for narrative.
+- Never duplicate; search before writing.
 
 ## Gates
 
-- **Before implementation:** Research must pass all evaluation filters above
-- **Before keeping changes:** Tests must pass AND metrics must not degrade
-- **Before re-trying:** Check `memory_search` — if the idea was already tried and failed, skip it
-- **Before first delegation to a new repo:** SCAFFOLD mode must have run — `.github/copilot-instructions.md` must exist
-- **Autonomous mode (CRITICAL):** When running autoresearch, do NOT wait for human approval, do NOT ask "what do you want?", do NOT offer choices, do NOT say "if you want". The human approved the loop by saying "autoresearch." You MUST: evaluate → decide → log → launch next iteration. Every response to a [TASK:complete] or [TASK:failed] MUST end with an `exec()` call launching the next Copilot process. If it doesn't, you stalled.
+- Before implementation: research must pass the evaluation filters.
+- Before keeping changes: tests must pass and metrics must not degrade.
+- Before retrying: memory search must confirm the idea has not already failed.
+- Autonomous mode: evaluate, decide, log, and launch the next iteration without
+  asking the human for the next step.

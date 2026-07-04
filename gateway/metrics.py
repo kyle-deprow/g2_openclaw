@@ -31,7 +31,6 @@ class GatewayMetrics:
             self._transcription_duration = None
             self._openclaw_request_duration = None
             self._openclaw_errors = None
-            self._orphans_reaped = None
             return
 
         self._connections = meter.create_up_down_counter(
@@ -51,10 +50,6 @@ class GatewayMetrics:
         self._openclaw_errors = meter.create_counter(
             "gateway.openclaw.errors_total",
             description="OpenClaw communication errors",
-        )
-        self._orphans_reaped = meter.create_counter(
-            "gateway.process_monitor.orphans_reaped_total",
-            description="Orphan processes killed by reaper",
         )
 
     def connection_opened(self) -> None:
@@ -76,10 +71,6 @@ class GatewayMetrics:
     def record_openclaw_error(self) -> None:
         if self._openclaw_errors:
             self._openclaw_errors.add(1)
-
-    def record_orphans_reaped(self, count: int) -> None:
-        if self._orphans_reaped:
-            self._orphans_reaped.add(count)
 
 
 # Module-level singleton

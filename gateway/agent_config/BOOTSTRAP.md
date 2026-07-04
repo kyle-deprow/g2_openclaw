@@ -35,7 +35,9 @@
 
 ## Compute Resources
 
-You are on a machine with a Nvidia graphics card. Feel free to designate true ML training routines to copilot to train complex models if your experiments are pushing you in that direction.
+You are on a machine with a Nvidia graphics card. Feel free to designate true ML
+training routines to Codex subagents if your experiments are pushing you in
+that direction.
 
 ## Intraday Trading Focus
 
@@ -114,17 +116,26 @@ All experiments produce Jupyter notebooks as primary output.
 
 - **Location:** `notebooks/experiments/<strategy_name>.ipynb`
 - **Existing:** `notebooks/llm_comparison_experiment.ipynb` (pre-existing)
-- **Deps:** `jupyter` and `nbformat` are NOT yet in pyproject.toml — Copilot must add them when creating the first experiment notebook. Also add `matplotlib` for visualizations if not present.
+- **Deps:** `jupyter` and `nbformat` are NOT yet in pyproject.toml — the
+  implementation subagent must add them when creating the first experiment
+  notebook. Also add `matplotlib` for visualizations if not present.
 - **Execution:** `uv run jupyter execute <notebook.ipynb> --timeout=300`
 - **Convention:** Notebook imports module code from `src/quantipy/alpha/<strategy_name>/` — it orchestrates the experiment, not duplicates the code.
 
 ## Shared Experiment Memory
 
-The file `RESEARCH_LOG.md` in the quantipy repo tracks all experiments tried, rejected ideas, and insights. Read it before every ideation round. Update it after every experiment result. Pass this context to Copilot's researcher agent when delegating ideation. Currently empty — this is a fresh start.
+The file `RESEARCH_LOG.md` in the quantipy repo tracks all experiments tried,
+rejected ideas, and insights. Read it before every ideation round. Update it
+after every experiment result. Pass this context to the `researcher` subagent
+when delegating ideation. Currently empty — this is a fresh start.
 
 ## Data APIs
 
-You are authorized to instruct copilot to pull data (OHLC) from an available api. Make sure that data is persisted on disk in the sql databases and you are not making repeated requests, but this should be done as part of the infrastructure. DO NOT MAKE MANUAL PUSHES OR HAVE COPILOT DO THAT. If features need to be added to the codebase to handle this, delegate to copilot for planning and implementation.
+You are authorized to instruct Codex subagents to pull OHLC data from an
+available API. Make sure that data is persisted on disk in the SQL databases and
+you are not making repeated requests. Do not make manual pushes. If features
+need to be added to the codebase to handle this, delegate planning and
+implementation to the appropriate subagent.
 
 ## Commands
 

@@ -134,7 +134,10 @@ TypeScript thin client running on iPhone via EvenHub. Bridges G2 glasses (BLE) t
 
 ### Coding Tasks
 
-Coding tasks (code generation, refactoring, etc.) are delegated to the **Copilot CLI** (`copilot`) invoked via OpenClaw's `coding-agent` skill. No separate bridge component is needed.
+Coding tasks (code generation, refactoring, etc.) run through OpenClaw's bundled
+Codex runtime and subagent model. Authenticate once with
+`openclaw models auth login --provider openai`, then push the repo-managed
+OpenClaw config.
 
 ### Infrastructure (`infra/`)
 
@@ -324,7 +327,6 @@ Default Grafana credentials: `admin` / `admin`.
 - `gateway.transcription.duration_seconds` — Whisper transcription time (Histogram)
 - `gateway.openclaw.request_duration_seconds` — OpenClaw request time (Histogram)
 - `gateway.openclaw.errors_total` — OpenClaw error count (Counter)
-- `gateway.process_monitor.orphans_reaped_total` — Orphan processes killed (Counter)
 
 **Logs** (visible in Loki via Grafana):
 All stdlib `logging` calls are bridged to OTel via `LoggingInstrumentor`. Log records include trace context (trace_id, span_id) for correlation.

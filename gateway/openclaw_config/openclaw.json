@@ -1,14 +1,34 @@
 {
-  "auth": {
-    "profiles": {
-      "github-copilot:github": {
-        "provider": "github-copilot",
-        "mode": "token"
-      }
-    }
-  },
   "models": {
     "providers": {
+      "openai": {
+        "api": "openai-responses",
+        "agentRuntime": {
+          "id": "codex"
+        },
+        "models": [
+          {
+            "id": "gpt-5.4",
+            "name": "GPT-5.4 (OpenAI Codex runtime)",
+            "reasoning": true,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 1047576,
+            "maxTokens": 128000
+          },
+          {
+            "id": "gpt-5-mini",
+            "name": "GPT-5 Mini (OpenAI Codex runtime)",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "contextWindow": 1047576,
+            "maxTokens": 16384
+          }
+        ]
+      },
       "azure-oai-g2": {
         "baseUrl": "https://oai-ss-aisense-dev-eastus2.openai.azure.com/openai/deployments/gpt-5-4",
         "api": "openai-completions",
@@ -83,7 +103,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "azure-oai-g2/gpt-5.4"
+        "primary": "openai/gpt-5.4"
       },
       "memorySearch": {
         "enabled": true,
@@ -145,11 +165,57 @@
         ],
         "subagents": {
           "allowAgents": [
+            "researcher",
+            "orchestrator",
+            "reviewer",
             "contrarian",
             "explorer",
             "theorist"
           ]
         }
+      },
+      {
+        "id": "researcher",
+        "skills": [
+          "mempalace"
+        ],
+        "subagents": {
+          "allowAgents": [
+            "contrarian",
+            "explorer",
+            "theorist"
+          ]
+        }
+      },
+      {
+        "id": "orchestrator",
+        "skills": [
+          "mempalace"
+        ]
+      },
+      {
+        "id": "reviewer",
+        "skills": [
+          "mempalace"
+        ]
+      },
+      {
+        "id": "contrarian",
+        "skills": [
+          "mempalace"
+        ]
+      },
+      {
+        "id": "explorer",
+        "skills": [
+          "mempalace"
+        ]
+      },
+      {
+        "id": "theorist",
+        "skills": [
+          "mempalace"
+        ]
       }
     ]
   },
@@ -171,6 +237,13 @@
     },
     "agentToAgent": {
       "enabled": true
+    }
+  },
+  "plugins": {
+    "entries": {
+      "codex": {
+        "enabled": true
+      }
     }
   },
   "messages": {

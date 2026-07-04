@@ -75,24 +75,6 @@ class ForceStopFrame(TypedDict):
     type: Literal["force_stop"]
 
 
-class CopilotSessionListRequestFrame(TypedDict):
-    type: Literal["copilot_session_list_request"]
-
-
-class CopilotWatchFrame(TypedDict):
-    type: Literal["copilot_watch"]
-    sessionId: str
-
-
-class CopilotUnwatchFrame(TypedDict):
-    type: Literal["copilot_unwatch"]
-
-
-class CopilotKillFrame(TypedDict):
-    type: Literal["copilot_kill"]
-    sessionId: str
-
-
 InboundFrame = (
     StartAudioFrame
     | StopAudioFrame
@@ -104,10 +86,6 @@ InboundFrame = (
     | SessionSwitchFrame
     | SessionCreateFrame
     | ForceStopFrame
-    | CopilotSessionListRequestFrame
-    | CopilotWatchFrame
-    | CopilotUnwatchFrame
-    | CopilotKillFrame
 )
 
 MAX_TEXT_MESSAGE_LENGTH = 10_000
@@ -198,52 +176,6 @@ class SessionSwitchedFrame(TypedDict):
     sessionStartedAt: NotRequired[str]
 
 
-class CopilotSessionEntryDict(TypedDict):
-    sessionId: str
-    cwd: str
-    dirName: str
-    repository: str
-    branch: str
-    summary: str
-    updatedAt: str
-    isRunning: bool
-
-
-class CopilotSessionListOutFrame(TypedDict):
-    type: Literal["copilot_session_list"]
-    sessions: list[CopilotSessionEntryDict]
-
-
-class CopilotHistoryEntryDict(TypedDict):
-    role: str
-    text: str
-    ts: int
-
-
-class CopilotHistoryFrame(TypedDict):
-    type: Literal["copilot_history"]
-    sessionId: str
-    entries: list[CopilotHistoryEntryDict]
-
-
-class CopilotTranscriptFrame(TypedDict):
-    type: Literal["copilot_transcript"]
-    sessionId: str
-    delta: str
-    role: str
-
-
-class CopilotTranscriptEndFrame(TypedDict):
-    type: Literal["copilot_transcript_end"]
-    sessionId: str
-
-
-class CopilotKilledFrame(TypedDict):
-    type: Literal["copilot_killed"]
-    sessionId: str
-    success: bool
-
-
 # ---------------------------------------------------------------------------
 # Required fields per frame type (excluding the 'type' key itself)
 # ---------------------------------------------------------------------------
@@ -259,10 +191,6 @@ _INBOUND_FIELDS: dict[str, list[str]] = {
     "session_switch": ["sessionKey"],
     "session_create": [],
     "force_stop": [],
-    "copilot_session_list_request": [],
-    "copilot_watch": ["sessionId"],
-    "copilot_unwatch": [],
-    "copilot_kill": ["sessionId"],
 }
 
 _OUTBOUND_FIELDS: dict[str, list[str]] = {
@@ -277,11 +205,6 @@ _OUTBOUND_FIELDS: dict[str, list[str]] = {
     "session_reset": ["reason"],
     "session_list": ["sessions", "activeSessionKey"],
     "session_switched": ["sessionKey"],
-    "copilot_session_list": ["sessions"],
-    "copilot_history": ["sessionId", "entries"],
-    "copilot_transcript": ["sessionId", "delta", "role"],
-    "copilot_transcript_end": ["sessionId"],
-    "copilot_killed": ["sessionId", "success"],
 }
 
 _ALL_FIELDS: dict[str, list[str]] = {**_INBOUND_FIELDS, **_OUTBOUND_FIELDS}
@@ -310,14 +233,6 @@ _FIELD_TYPES: dict[str, type] = {
     "activeSessionKey": str,
     "messageCount": int,
     "preview": str,
-    "dirName": str,
-    "repository": str,
-    "branch": str,
-    "summary": str,
-    "isRunning": bool,
-    "cwd": str,
-    "role": str,
-    "success": bool,
 }
 
 
