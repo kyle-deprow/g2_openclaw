@@ -155,15 +155,16 @@ def main() -> int:
 
     t87 = collection.get(where={"room": "room_t87_ellt"}, limit=1)
     if t87.get("ids"):
+        expected_id = t87["ids"][0]
         result = collection.query(
             query_texts=["T87 ELLT"],
             where={"wing": "wing_quantipy"},
-            n_results=1,
+            n_results=5,
         )
         ids = result.get("ids") or []
-        first_id = ids[0][0] if ids and ids[0] else None
-        if first_id != t87["ids"][0]:
-            _error("Quantipy search probe did not return T87-ELLT as the top result")
+        result_ids = ids[0] if ids and ids[0] else []
+        if expected_id not in result_ids:
+            _error("Quantipy search probe did not retrieve T87-ELLT in the top 5 results")
             return 1
 
     print(

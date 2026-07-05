@@ -509,6 +509,9 @@
     }
   },
   "plugins": {
+    "allow": [
+      "codex"
+    ],
     "entries": {
       "codex": {
         "enabled": true

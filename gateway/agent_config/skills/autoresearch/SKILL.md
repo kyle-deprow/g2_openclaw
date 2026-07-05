@@ -70,6 +70,21 @@ current Quantipy source-of-truth files from `/home/dev/repos/quantipy`
 context, debate, consensus, implementation, review, or fix work. Do not copy
 those target-repo files into G2 OpenClaw.
 
+## Execution Hygiene
+
+The loop has full authority to choose and test research strategies. Infra
+guardrails exist only to keep execution clean:
+
+- `gateway-cli autoresearch-next` fails closed if the Quantipy worktree contains
+  unapproved dirty files before a stage launch. The persistent
+  `docs/quantipy_experiment_mempalace_preload.md` audit note is the only
+  default allowlisted local file.
+- Implementation and fix stages must work from an isolated branch or disposable
+  git worktree, stop their background jobs before exit, and commit accepted
+  changes before emitting their artifact.
+- Crash residue from a prior iteration is not evidence and must not be reused
+  as scaffolding unless a later committed experiment explicitly owns it.
+
 ## Setup
 
 Do once before the first iteration:

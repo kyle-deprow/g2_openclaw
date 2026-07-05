@@ -41,6 +41,7 @@ from gateway.autoresearch_runner import (
     mark_memory_written,
     next_action,
     start_next_iteration,
+    validate_target_worktree_clean,
 )
 
 
@@ -161,6 +162,8 @@ def _no_consensus(round_number: int) -> ConsensusResultArtifact:
 def _implementation_result() -> ImplementationResultArtifact:
     return ImplementationResultArtifact(
         summary="Added strategy module and experiment notebook.",
+        workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+        commit_sha="abc1234",
         module_path="src/quantipy/alpha/vwap_obv_intraday/",
         notebook_path="notebooks/experiments/vwap_obv_intraday.ipynb",
         tests_added_or_updated=("tests/test_vwap_obv.py",),
@@ -206,6 +209,8 @@ def _fix_result(trigger_phase: FixTriggerPhase) -> FixResultArtifact:
     return FixResultArtifact(
         trigger_phase=trigger_phase,
         summary="Applied the requested narrow fix.",
+        workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+        commit_sha="def5678",
         fixes_applied=("Expanded ticker coverage to 5 names",),
         tests_rerun=("uv run pytest",),
         remaining_issues=(),
@@ -338,6 +343,33 @@ def test_no_implementation_without_majority(
         advance_state(invalid, _implementation_result(), policy)
 
 
+def test_implementation_result_requires_workspace_identity() -> None:
+    with pytest.raises(AutoresearchValidationError, match="workspace_path"):
+        ImplementationResultArtifact.from_dict(
+            {
+                "summary": "Added strategy module and notebook.",
+                "module_path": "src/quantipy/alpha/vwap_obv_intraday/",
+                "notebook_path": "notebooks/experiments/vwap_obv_intraday.ipynb",
+                "tests_added_or_updated": ["tests/test_vwap_obv.py"],
+                "commands_run": ["uv run pytest tests/test_vwap_obv.py"],
+            }
+        )
+
+
+def test_implementation_result_rejects_main_target_checkout(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    implementation = replace(
+        _implementation_result(),
+        workspace_path="/home/dev/repos/quantipy",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="isolated worktree"):
+        advance_state(state, implementation, policy)
+
+
 def test_review_fix_cycle_routes_back_through_verification(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -407,6 +439,76 @@ def test_fix_result_trigger_must_match_pending_verification_failure(
         match="fix_result trigger_phase must match the pending fix source",
     ):
         advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+
+
+def test_fix_result_requires_workspace_identity() -> None:
+    with pytest.raises(AutoresearchValidationError, match="workspace_path"):
+        FixResultArtifact.from_dict(
+            {
+                "trigger_phase": "verification",
+                "summary": "Applied the requested fix.",
+                "fixes_applied": ["Expanded coverage"],
+                "tests_rerun": ["uv run pytest"],
+                "remaining_issues": [],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("workspace_path", "commit_sha", "match"),
+    [
+        ("relative/worktree", "def5678", "absolute"),
+        ("/tmp/worktree", "not-a-sha", "commit_sha"),
+    ],
+)
+def test_fix_result_rejects_invalid_workspace_identity(
+    workspace_path: str,
+    commit_sha: str,
+    match: str,
+) -> None:
+    with pytest.raises(AutoresearchValidationError, match=match):
+        FixResultArtifact.from_dict(
+            {
+                "trigger_phase": "verification",
+                "summary": "Applied the requested fix.",
+                "workspace_path": workspace_path,
+                "commit_sha": commit_sha,
+                "fixes_applied": ["Expanded coverage"],
+                "tests_rerun": ["uv run pytest"],
+                "remaining_issues": [],
+            }
+        )
+
+
+def test_fix_result_updates_implementation_commit_for_reverification(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    implementation = _implementation_result()
+    state = advance_state(state, implementation, policy)
+    state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
+
+    fixed = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+
+    assert fixed.phase is Phase.VERIFICATION
+    assert fixed.implementation_result is not None
+    assert fixed.implementation_result.workspace_path == implementation.workspace_path
+    assert fixed.implementation_result.commit_sha == "def5678"
+    assert fixed.fix_history[-1].commit_sha == fixed.implementation_result.commit_sha
+
+
+def test_fix_result_rejects_different_workspace(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
+    fix_result = replace(_fix_result(FixTriggerPhase.VERIFICATION), workspace_path="/tmp/other")
+
+    with pytest.raises(AutoresearchValidationError, match="workspace_path must match"):
+        advance_state(state, fix_result, policy)
 
 
 def test_verification_failure_routes_fix_test_with_pending_trigger(
@@ -608,6 +710,54 @@ def test_final_decision_no_consensus_requires_no_consensus_artifact(
         )
 
 
+def test_target_worktree_guard_allows_only_known_persistent_audit_doc() -> None:
+    validate_target_worktree_clean(
+        ("?? docs/quantipy_experiment_mempalace_preload.md",),
+        allowed_status_lines=("?? docs/quantipy_experiment_mempalace_preload.md",),
+    )
+
+
+def test_target_worktree_guard_rejects_crash_residue() -> None:
+    with pytest.raises(AutoresearchValidationError, match="target repo worktree is dirty"):
+        validate_target_worktree_clean(
+            (
+                "?? docs/quantipy_experiment_mempalace_preload.md",
+                "?? src/quantipy/alpha/t105_osaf_r2/",
+            ),
+            allowed_status_lines=("?? docs/quantipy_experiment_mempalace_preload.md",),
+        )
+
+
+def test_implementation_prompt_contains_workspace_isolation_contract(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert "Workspace isolation contract" in prompt
+    assert "disposable git worktree" in prompt
+    assert "Commit all accepted implementation changes" in prompt
+    assert "workspace_path" in prompt
+    assert "commit_sha" in prompt
+
+
+def test_verification_prompt_uses_recorded_workspace(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert "implementation_result.workspace_path" in prompt
+    assert "implementation_result.commit_sha" in prompt
+
+
 def _load_config() -> dict[str, object]:
     raw: object = json.loads(DEFAULT_OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
     return cast(dict[str, object], raw)
@@ -618,6 +768,11 @@ def _set_openai_api(config: dict[str, object]) -> None:
     providers = cast(dict[str, object], models["providers"])
     openai = cast(dict[str, object], providers["openai"])
     openai["api"] = "openai-completions"
+
+
+def _drop_codex_plugin_allow(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    plugins["allow"] = []
 
 
 def _set_agent_runtime_id(config: dict[str, object]) -> None:
@@ -650,6 +805,7 @@ def _remove_stage_agent_mempalace_denies(config: dict[str, object]) -> None:
 @pytest.mark.parametrize(
     ("mutator", "match"),
     [
+        (_drop_codex_plugin_allow, "plugins.allow must explicitly include codex"),
         (_set_openai_api, "providers.openai.api must be openai-responses"),
         (_set_agent_runtime_id, "providers.openai.agentRuntime.id must be codex"),
         (_drop_main_mempalace_skill, "main must load exactly mempalace and autoresearch"),

@@ -119,6 +119,7 @@ MEMPALACE_MUTATION_TOOLS = (
     "mempalace_sync",
     "mempalace_update_drawer",
 )
+DEFAULT_ALLOWED_TARGET_STATUS_LINES = ("?? docs/quantipy_experiment_mempalace_preload.md",)
 
 
 def _ensure_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -175,6 +176,29 @@ def _optional_string_list(raw: Mapping[str, object], field_name: str) -> tuple[s
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def validate_target_worktree_clean(
+    status_lines: Sequence[str],
+    *,
+    allowed_status_lines: Sequence[str] = DEFAULT_ALLOWED_TARGET_STATUS_LINES,
+) -> None:
+    """Fail if the target repo has unapproved dirty files.
+
+    The autoresearch loop may choose any strategy, but each stage must start
+    from an uncontaminated target repo. Known persistent local docs can be
+    allowlisted explicitly; crash residue and late writer output cannot.
+    """
+    allowed = set(allowed_status_lines)
+    unexpected = tuple(line for line in status_lines if line and line not in allowed)
+    if unexpected:
+        details = "\n".join(f"- {line}" for line in unexpected)
+        raise AutoresearchValidationError(
+            "target repo worktree is dirty with unapproved changes:\n"
+            f"{details}\n"
+            "Stop stale writers and clean or commit the target repo before "
+            "launching the next autoresearch stage."
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +535,8 @@ class ConsensusResultArtifact:
 @dataclass(frozen=True, slots=True)
 class ImplementationResultArtifact:
     summary: str
+    workspace_path: str
+    commit_sha: str
     module_path: str
     notebook_path: str
     tests_added_or_updated: tuple[str, ...]
@@ -519,17 +545,34 @@ class ImplementationResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ImplementationResultArtifact:
         data = _ensure_mapping(raw, label="implementation_result")
-        return cls(
+        artifact = cls(
             summary=_require_str(data, "summary"),
+            workspace_path=_require_str(data, "workspace_path"),
+            commit_sha=_require_str(data, "commit_sha"),
             module_path=_require_str(data, "module_path"),
             notebook_path=_require_str(data, "notebook_path"),
             tests_added_or_updated=_require_string_list(data, "tests_added_or_updated"),
             commands_run=_require_string_list(data, "commands_run"),
         )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        path = Path(self.workspace_path).expanduser()
+        if not path.is_absolute():
+            raise AutoresearchValidationError(
+                "implementation_result workspace_path must be absolute"
+            )
+        if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
+            raise AutoresearchValidationError(
+                "implementation_result commit_sha must be a Git commit SHA"
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "summary": self.summary,
+            "workspace_path": self.workspace_path,
+            "commit_sha": self.commit_sha,
             "module_path": self.module_path,
             "notebook_path": self.notebook_path,
             "tests_added_or_updated": list(self.tests_added_or_updated),
@@ -657,6 +700,8 @@ class ReviewResultArtifact:
 class FixResultArtifact:
     trigger_phase: FixTriggerPhase
     summary: str
+    workspace_path: str
+    commit_sha: str
     fixes_applied: tuple[str, ...]
     tests_rerun: tuple[str, ...]
     remaining_issues: tuple[str, ...]
@@ -664,18 +709,31 @@ class FixResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> FixResultArtifact:
         data = _ensure_mapping(raw, label="fix_result")
-        return cls(
+        artifact = cls(
             trigger_phase=FixTriggerPhase(_require_str(data, "trigger_phase")),
             summary=_require_str(data, "summary"),
+            workspace_path=_require_str(data, "workspace_path"),
+            commit_sha=_require_str(data, "commit_sha"),
             fixes_applied=_require_string_list(data, "fixes_applied"),
             tests_rerun=_require_string_list(data, "tests_rerun"),
             remaining_issues=_require_string_list(data, "remaining_issues"),
         )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        path = Path(self.workspace_path).expanduser()
+        if not path.is_absolute():
+            raise AutoresearchValidationError("fix_result workspace_path must be absolute")
+        if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
+            raise AutoresearchValidationError("fix_result commit_sha must be a Git commit SHA")
 
     def to_dict(self) -> dict[str, object]:
         return {
             "trigger_phase": self.trigger_phase.value,
             "summary": self.summary,
+            "workspace_path": self.workspace_path,
+            "commit_sha": self.commit_sha,
             "fixes_applied": list(self.fixes_applied),
             "tests_rerun": list(self.tests_rerun),
             "remaining_issues": list(self.remaining_issues),
@@ -1033,6 +1091,8 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
     ArtifactType.IMPLEMENTATION_RESULT: {
         "required_fields": [
             "summary",
+            "workspace_path",
+            "commit_sha",
             "module_path",
             "notebook_path",
             "tests_added_or_updated",
@@ -1072,6 +1132,8 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
         "required_fields": [
             "trigger_phase",
             "summary",
+            "workspace_path",
+            "commit_sha",
             "fixes_applied",
             "tests_rerun",
             "remaining_issues",
@@ -1143,6 +1205,13 @@ def load_autoresearch_policy(
     config_path: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
 ) -> AutoresearchPolicy:
     config = _load_json(config_path)
+    plugins = _ensure_mapping(config.get("plugins"), label="plugins")
+    try:
+        plugin_allow = _require_string_list(plugins, "allow")
+    except AutoresearchValidationError as exc:
+        raise AutoresearchConfigError("plugins.allow must explicitly include codex") from exc
+    if "codex" not in plugin_allow:
+        raise AutoresearchConfigError("plugins.allow must explicitly include codex")
     models = _ensure_mapping(config.get("models"), label="models")
     providers = _ensure_mapping(models.get("providers"), label="providers")
     openai_provider = _ensure_mapping(providers.get("openai"), label="providers.openai")
@@ -1287,6 +1356,8 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
     ):
         raise AutoresearchValidationError("implementation_result requires a majority consensus")
+    if state.implementation_result:
+        _validate_implementation_workspace(state, state.implementation_result)
     if state.verification_history and state.implementation_result is None:
         raise AutoresearchValidationError("verification history requires an implementation_result")
     if state.review_history and not state.verification_history:
@@ -1365,6 +1436,39 @@ def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPo
         raise AutoresearchValidationError(
             "review_result must come from the single configured reviewer"
         )
+
+
+def _validate_implementation_workspace(
+    state: AutoresearchState,
+    artifact: ImplementationResultArtifact,
+) -> None:
+    artifact.validate()
+    if state.setup is None:
+        return
+    workspace_path = Path(artifact.workspace_path).expanduser().resolve()
+    target_repo = Path(state.setup.target_repo).expanduser().resolve()
+    if workspace_path == target_repo:
+        raise AutoresearchValidationError(
+            "implementation_result workspace_path must be an isolated worktree, "
+            "not the main target_repo"
+        )
+
+
+def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifact) -> None:
+    artifact.validate()
+    if state.implementation_result is None:
+        raise AutoresearchValidationError("fix_result requires implementation_result")
+    if artifact.workspace_path != state.implementation_result.workspace_path:
+        raise AutoresearchValidationError(
+            "fix_result workspace_path must match implementation_result workspace_path"
+        )
+    _validate_implementation_workspace(
+        state,
+        replace(
+            state.implementation_result,
+            commit_sha=artifact.commit_sha,
+        ),
+    )
 
 
 def _json_block(payload: Mapping[str, object]) -> str:
@@ -1592,6 +1696,8 @@ def _phase_instruction(
         ),
         Phase.VERIFICATION: (
             "Verify the produced experiment deterministically. "
+            "Use implementation_result.workspace_path and "
+            "implementation_result.commit_sha as the source under test. "
             "Reject impossible metrics, failing tests, "
             "or incomplete required metrics."
         ),
@@ -1618,13 +1724,33 @@ def _phase_instruction(
     contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type])
     state_json = _json_block(_artifact_context(state))
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
+    workspace_contract = _workspace_isolation_contract(phase)
     return (
         f"Autoresearch phase: {phase.value}\n"
         f"Target agents: {agent_text}\n"
         f"Expected artifact type: {expected_artifact_type.value}\n"
         f"Phase instruction:\n{instructions[phase]}\n\n"
+        f"{workspace_contract}"
         f"Artifact contract:\n{contract}\n\n"
         f"Current state snapshot:\n{state_json}"
+    )
+
+
+def _workspace_isolation_contract(phase: Phase) -> str:
+    if phase not in (Phase.IMPLEMENTATION, Phase.FIX_TEST):
+        return ""
+    return (
+        "Workspace isolation contract:\n"
+        "- Create and use a disposable git worktree for this iteration before editing "
+        "Quantipy; do not implement directly in the main target repo checkout.\n"
+        "- Do not leave background experiment, notebook, pytest, or data-generation "
+        "processes running after the stage exits.\n"
+        "- Commit all accepted implementation changes before emitting the artifact; if "
+        "the worktree cannot be made clean, fail closed and report that blocker.\n"
+        "- Include the disposable worktree path in workspace_path and the accepted "
+        "commit SHA in commit_sha.\n"
+        "- Preserve unrelated user files such as "
+        "docs/quantipy_experiment_mempalace_preload.md.\n\n"
     )
 
 
@@ -1757,6 +1883,7 @@ def advance_state(
             raise AutoresearchValidationError(
                 "cannot advance implementation without consensus majority"
             )
+        _validate_implementation_workspace(state, artifact)
         return replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
 
     if state.phase is Phase.VERIFICATION:
@@ -1821,8 +1948,15 @@ def advance_state(
             next_attempts = state.verification_fix_attempts + 1
         else:
             next_attempts = state.verification_fix_attempts
+        _validate_fix_workspace(state, artifact)
+        assert state.implementation_result is not None
+        next_implementation = replace(
+            state.implementation_result,
+            commit_sha=artifact.commit_sha,
+        )
         return replace(
             state,
+            implementation_result=next_implementation,
             fix_history=(*state.fix_history, artifact),
             verification_fix_attempts=next_attempts,
             pending_fix_trigger=None,

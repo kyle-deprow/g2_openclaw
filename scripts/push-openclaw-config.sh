@@ -399,6 +399,7 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
     "fixer": "openai/gpt-5.4"
   };
   (.agents.defaults.thinkingDefault == "high")
+  and ((.plugins.allow // []) | contains(["codex"]))
   and (.agents.defaults.memorySearch.enabled == false)
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
@@ -418,7 +419,7 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
   and (((.agents.list[] | select(.id == "main") | .tools.deny // []) | index("mempalace_add_drawer")) | not)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check main PM model/skills, MemPalace read-only stage agents, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, main PM model/skills, MemPalace read-only stage agents, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
 echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."

@@ -13,6 +13,7 @@ import pytest
 from dotenv import dotenv_values
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    QUANTIPY_RECEIPT_PATHS,
     AutoresearchState,
     FinalDecision,
     FinalDecisionArtifact,
@@ -22,12 +23,14 @@ from gateway.autoresearch_runner import (
     SetupContextArtifact,
 )
 from gateway.cli import (
+    _active_target_writer_processes,
     _choose_whisper_model,
     _detect_gpu,
     _get_local_ip,
     _parse_gpu_output,
     _read_openclaw_config,
     _render_env,
+    _signal_process_group,
     app,
 )
 from typer.testing import CliRunner
@@ -367,6 +370,13 @@ class TestInitEnvCommand:
 
 
 class TestAutoresearchCliCommands:
+    @staticmethod
+    def _write_quantipy_receipts(root: Path) -> None:
+        for relative_path in QUANTIPY_RECEIPT_PATHS.values():
+            target = root / relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"fixture for {relative_path}\n", encoding="utf-8")
+
     def test_autoresearch_advance_persists_state(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
@@ -470,6 +480,71 @@ class TestAutoresearchCliCommands:
         assert next_state["phase"] == "setup_context"
         assert next_state["iteration"] == 4
         assert next_state["setup"]["metric_name"] == "OOS Sharpe net"
+
+    def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+
+        with (
+            patch("gateway.cli._git_status_short", return_value=()),
+            patch(
+                "gateway.cli._active_target_writer_processes",
+                return_value=("123 uv run python notebooks/experiments/t999.py",),
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "autoresearch-next",
+                    str(state_path),
+                    "--quantipy-root",
+                    str(quantipy_root),
+                    "--openclaw-config",
+                    str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                ],
+            )
+
+        assert result.exit_code == 1
+        assert "active experiment/test writer" in result.output
+        assert "processes" in result.output
+
+    @pytest.mark.parametrize(
+        ("cmdline", "touches_root", "expected_count"),
+        [
+            ("uv run python -m quantipy.api --port 8000", True, 0),
+            ("uv run pytest tests/test_alpha.py", True, 1),
+            ("jupyter nbconvert --execute notebooks/experiments/t999.ipynb", True, 1),
+            ("uv run python scripts/experiments/generate_t999.py", True, 1),
+            ("uv run pytest tests/test_alpha.py", False, 0),
+        ],
+    )
+    def test_target_writer_detection_scopes_writers(
+        self,
+        tmp_path: Path,
+        cmdline: str,
+        touches_root: bool,
+        expected_count: int,
+    ) -> None:
+        proc_dir = tmp_path / "101"
+        proc_dir.mkdir()
+
+        def _fake_read_bytes(path: Path) -> bytes:
+            if path == proc_dir / "cmdline":
+                return cmdline.replace(" ", "\x00").encode()
+            raise FileNotFoundError
+
+        with (
+            patch("gateway.cli.Path.glob", return_value=[proc_dir]),
+            patch("gateway.cli.Path.read_bytes", autospec=True, side_effect=_fake_read_bytes),
+            patch("gateway.cli.os.getpid", return_value=999),
+            patch("gateway.cli.os.getppid", return_value=998),
+            patch("gateway.cli._process_touches_path", return_value=touches_root),
+        ):
+            offenders = _active_target_writer_processes(Path("/home/dev/repos/quantipy"))
+
+        assert len(offenders) == expected_count
 
 
 # ---------------------------------------------------------------------------
@@ -767,3 +842,24 @@ class TestStop:
         assert result.exit_code == 0
         assert own_pid not in killed_pids
         assert 3001 in killed_pids
+
+    def test_signal_process_group_does_not_signal_callers_group(self) -> None:
+        killed_pids: list[tuple[int, int]] = []
+        killed_groups: list[tuple[int, int]] = []
+
+        with (
+            patch("gateway.cli.os.getpgid", return_value=777),
+            patch("gateway.cli.os.getpgrp", return_value=777),
+            patch(
+                "gateway.cli.os.kill",
+                side_effect=lambda pid, sig: killed_pids.append((pid, sig)),
+            ),
+            patch(
+                "gateway.cli.os.killpg",
+                side_effect=lambda pgid, sig: killed_groups.append((pgid, sig)),
+            ),
+        ):
+            _signal_process_group(3001, signal.SIGTERM)
+
+        assert killed_pids == [(3001, signal.SIGTERM)]
+        assert killed_groups == []

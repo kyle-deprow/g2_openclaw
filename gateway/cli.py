@@ -39,6 +39,11 @@ _MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
 _MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
 _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
+_TARGET_WRITER_COMMAND_RE = re.compile(
+    r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
+    r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
+    r"src/quantipy/alpha|scripts/experiments|tools/experiments)"
+)
 
 
 def _write_pid_file(pids: dict[str, int]) -> None:
@@ -518,18 +523,87 @@ def autoresearch_next(
         load_autoresearch_policy,
         load_state_file,
         next_action,
+        validate_target_worktree_clean,
     )
 
     try:
         state = load_state_file(state_path)
         policy = load_autoresearch_policy(openclaw_config)
         receipts = build_receipt_catalog(quantipy_root)
+        status_lines = _git_status_short(quantipy_root)
+        if status_lines is not None:
+            validate_target_worktree_clean(status_lines)
+        active_writers = _active_target_writer_processes(quantipy_root)
+        if active_writers:
+            details = "\n".join(f"- {line}" for line in active_writers)
+            raise ValueError(
+                "target repo has active experiment/test writer processes:\n"
+                f"{details}\n"
+                "Stop them before launching the next autoresearch stage."
+            )
         action = next_action(state, policy, receipts)
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print_json(json.dumps(action.to_dict(), indent=2, sort_keys=True))
+
+
+def _git_status_short(repo_root: Path) -> tuple[str, ...] | None:
+    """Return porcelain status for a Git repo, or None when not a worktree."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0 or result.stdout.strip() != "true":
+        return None
+    status = subprocess.run(
+        ["git", "-C", str(repo_root), "status", "--short"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if status.returncode != 0:
+        raise ValueError(f"could not read git status for target repo: {repo_root}")
+    return tuple(line for line in status.stdout.splitlines() if line.strip())
+
+
+def _active_target_writer_processes(repo_root: Path) -> tuple[str, ...]:
+    """Return active experiment/test processes tied to the target repo."""
+    root = repo_root.expanduser().resolve()
+    exclude_pids = {os.getpid(), os.getppid()}
+    offenders: list[str] = []
+    for proc_dir in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(proc_dir.name)
+        except ValueError:
+            continue
+        if pid in exclude_pids:
+            continue
+        try:
+            raw = (proc_dir / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+        if not cmdline or _TARGET_WRITER_COMMAND_RE.search(cmdline) is None:
+            continue
+        if _process_touches_path(proc_dir, root, cmdline):
+            offenders.append(f"{pid} {cmdline}")
+    return tuple(offenders)
+
+
+def _process_touches_path(proc_dir: Path, root: Path, cmdline: str) -> bool:
+    if str(root) in cmdline:
+        return True
+    try:
+        cwd = (proc_dir / "cwd").resolve()
+    except OSError:
+        return False
+    return cwd == root or root in cwd.parents
 
 
 @app.command("autoresearch-advance")
@@ -735,17 +809,36 @@ def _wait_for_port(
 
 
 def _terminate_procs(procs: list[subprocess.Popen[str]]) -> None:
-    """SIGTERM all processes, then SIGKILL after 5 s."""
+    """SIGTERM all spawned process groups, then SIGKILL after 5 s."""
     for p in procs:
         if p.poll() is None:
-            p.terminate()
+            _signal_process_group(p.pid, signal.SIGTERM)
     deadline = time.monotonic() + 5
     for p in procs:
         remaining = max(0, deadline - time.monotonic())
         try:
             p.wait(timeout=remaining)
         except subprocess.TimeoutExpired:
-            p.kill()
+            _signal_process_group(p.pid, signal.SIGKILL)
+
+
+def _signal_process_group(pid: int, sig: signal.Signals) -> None:
+    """Signal pid's process group, falling back to the process itself."""
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        return
+    if pgid == os.getpgrp():
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        return
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
 
 
 def _drain_pipe(pipe: IO[Any], log_path: Path | None = None) -> None:
@@ -821,8 +914,8 @@ def stop() -> None:
     """Stop all G2 OpenClaw processes (agents, MCP servers, gateway, Vite, simulator)."""
 
     targets = [
-        ("OpenClaw daemon", ["openclaw.*daemon"]),
-        ("OpenClaw agent", ["openclaw-agent"]),
+        ("OpenClaw daemon", ["openclaw.*daemon", "openclaw.*gateway"]),
+        ("OpenClaw agent", ["openclaw-agent", "openclaw.*agent", "codex app-server"]),
         ("MemPalace MCP server", ["python.*mempalace"]),
         ("Gateway", ["python.*-m.*gateway"]),
         ("Vite dev server", ["node.*vite"]),
@@ -857,7 +950,7 @@ def stop() -> None:
         # SIGTERM first
         for pid in list(pids):
             try:
-                os.kill(pid, signal.SIGTERM)
+                _signal_process_group(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pids.discard(pid)
 
@@ -875,7 +968,7 @@ def stop() -> None:
         # SIGKILL survivors
         for pid in remaining:
             with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
+                _signal_process_group(pid, signal.SIGKILL)
 
         pid_str = ", ".join(str(p) for p in sorted(pids))
         console.print(f"  [green]✓[/green] {name}: stopped (PID {pid_str})")
@@ -1192,6 +1285,7 @@ def launch(
                 stdout=_gw_log,
                 stderr=_gw_log,
                 env=gw_env,
+                start_new_session=True,
             )
             spawned.append(gw_proc)
             gateway_started_by_us = True
@@ -1228,6 +1322,7 @@ def launch(
                     stderr=subprocess.STDOUT,
                     text=True,
                     env={**os.environ},
+                    start_new_session=True,
                 )
                 spawned.append(vite_proc)
                 vite_started_by_us = True
@@ -1248,6 +1343,7 @@ def launch(
                     stderr=subprocess.STDOUT,
                     text=True,
                     env={**os.environ},
+                    start_new_session=True,
                 )
                 spawned.append(vite_proc)
                 vite_started_by_us = True
@@ -1285,6 +1381,7 @@ def launch(
                     stdout=_sim_log,
                     stderr=_sim_log,
                     env=sim_env,
+                    start_new_session=True,
                 )
                 spawned.append(sim_proc)
                 simulator_started = True
