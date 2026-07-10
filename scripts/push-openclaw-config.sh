@@ -22,6 +22,7 @@ SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
@@ -584,7 +585,8 @@ if command -v openclaw &>/dev/null; then
   fi
   if [[ "${PROVIDER}" == "codex" ]]; then
     echo "Running: openclaw plugins inspect codex --json"
-    if ! openclaw plugins inspect codex --json | jq -e '
+    CODEX_PLUGIN_INSPECT_JSON="$(openclaw plugins inspect codex --json)"
+    if ! echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -e '
       .plugin.id == "codex"
       and .plugin.enabled == true
       and .plugin.status == "loaded"
@@ -594,6 +596,27 @@ if command -v openclaw &>/dev/null; then
       echo "       Run: openclaw plugins install @openclaw/codex" >&2
       exit 1
     fi
+    CODEX_APP_SERVER_VERSION="$(echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -r '
+      .. | objects
+      | select(has("dependencyStatus"))
+      | .dependencyStatus.dependencies[]?
+      | select(.name == "@openai/codex")
+      | .spec
+    ' | head -n1)"
+    if [[ -z "${CODEX_APP_SERVER_VERSION}" || "${CODEX_APP_SERVER_VERSION}" == "null" ]]; then
+      cp "${BACKUP}" "${LOCAL_CONFIG}"
+      echo "ERROR: Could not determine embedded @openai/codex version. Restored backup ${BACKUP}." >&2
+      exit 1
+    fi
+    if [[ "$(printf '%s\n%s\n' "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${CODEX_APP_SERVER_VERSION}" | sort -V | head -n1)" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
+      cp "${BACKUP}" "${LOCAL_CONFIG}"
+      echo "ERROR: Embedded @openai/codex ${CODEX_APP_SERVER_VERSION} is too old for GPT-5.6. Restored backup ${BACKUP}." >&2
+      echo "       Need @openai/codex >= ${REQUIRED_CODEX_APP_SERVER_VERSION} in the @openclaw/codex plugin project." >&2
+      echo "       First try: openclaw plugins install @openclaw/codex --force" >&2
+      echo "       If @openclaw/codex still pins an older Codex package, update the plugin project's nested @openai/codex dependency." >&2
+      exit 1
+    fi
+    echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
   fi
 else
   cp "${BACKUP}" "${LOCAL_CONFIG}"
