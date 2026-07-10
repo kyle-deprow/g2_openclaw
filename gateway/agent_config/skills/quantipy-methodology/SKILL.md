@@ -62,3 +62,19 @@ clearly needs them.
   target-repo instructions.
 - If Quantipy methodology conflicts with this repo's autoresearch orchestration,
   report the conflict to the PM instead of silently choosing one.
+- Read the context packet's explicit mode before acting. `DATA_INFRA_G0` work
+  repairs data/provenance/folds and emits a gate outcome; it does not validate
+  alpha performance. `ALPHA_RESEARCH` work requires coverage receipts before
+  any performance conclusion.
+- For every verification, preserve per-symbol and aggregate coverage receipts:
+  intended and actual ranges, OOS range, expected/actual days, percent, missing
+  reason, default/fallback folds, cap provenance, and fixed-local-sleeve flag.
+  A fixed sleeve must be declared and cannot claim cap-verified compliance.
+- Treat coverage as one common-calendar analysis: all receipts share the
+  declared range; aggregate actual/OOS windows are the per-symbol
+  intersections; day counts, coverage percent, and missing reason are shared
+  common-calendar values rather than symbol sums; aggregate fold counts are
+  the fewest per-symbol folds. Reject contradictory receipts.
+- In alpha mode, reject a normalized burned theory family unless the submission
+  provides materially new evidence. A reviewer methodology PASS is distinct
+  from a final alpha KEEP decision.

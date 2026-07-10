@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import signal
+import sqlite3
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -14,13 +15,26 @@ from dotenv import dotenv_values
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     QUANTIPY_RECEIPT_PATHS,
+    AggregateCoverageReceipt,
     AutoresearchState,
+    ConsensusResultArtifact,
+    ConsensusStatus,
+    ContextPacketArtifact,
+    CoverageReceipt,
+    DebateResultArtifact,
+    DebateSubmission,
     FinalDecision,
     FinalDecisionArtifact,
+    FinalReviewerVerdict,
+    ImplementationResultArtifact,
     MetricDirection,
     Phase,
+    ResearchMode,
+    ReviewResultArtifact,
     ReviewVerdict,
     SetupContextArtifact,
+    VerificationResultArtifact,
+    VerificationStatus,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -420,6 +434,102 @@ class TestAutoresearchCliCommands:
         self,
         tmp_path: Path,
     ) -> None:
+        debate_agent_ids = (
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation",
+        )
+        debate = DebateResultArtifact(
+            round_number=1,
+            submissions=tuple(
+                DebateSubmission(
+                    agent_id=agent_id,
+                    theory_id=f"theory-{index}",
+                    theory_family="vwap-obv",
+                    vote_family="vwap-obv",
+                    hypothesis="VWAP and OBV capture intraday accumulation.",
+                    universe="Small-cap semiconductors",
+                    traded_tickers=("AMD", "SMCI"),
+                    feature_pipeline="OHLCV to VWAP and OBV features",
+                    model_plan="Time-series classifier",
+                    walk_forward_plan="Expanding windows",
+                    transaction_cost_model="0.7 bps",
+                    data_coverage_plan="Use the common 2021-2026 calendar.",
+                    rejection_criteria="Discard below baseline.",
+                    objections=(),
+                )
+                for index, agent_id in enumerate(debate_agent_ids, start=1)
+            ),
+        )
+        consensus = ConsensusResultArtifact(
+            round_number=1,
+            status=ConsensusStatus.MAJORITY,
+            winner_theory_id="theory-1",
+            winner_theory_family="vwap-obv",
+            majority_count=5,
+            majority_agent_ids=debate_agent_ids,
+            dissenting_positions=(),
+            novelty_score=0.6,
+            theory_score=0.7,
+            implementation_risk_score=0.3,
+            data_adequacy_score=0.9,
+            overfit_risk_score=0.2,
+            expected_net_sharpe=0.5,
+            rejection_reasons=(),
+            implementation_brief="Implement the narrow VWAP and OBV experiment.",
+            dissent_summary="The panel reached consensus.",
+        )
+        coverage_symbol = CoverageReceipt(
+            symbol="AMD",
+            declared_intended_start="2021-01-04",
+            declared_intended_end="2021-12-31",
+            actual_common_start="2021-01-04",
+            actual_common_end="2021-12-31",
+            oos_start="2021-10-01",
+            oos_end="2021-12-31",
+            expected_trading_days=252,
+            actual_trading_days=252,
+            coverage_percent=100.0,
+            missing_reason=None,
+            default_fold_count=0,
+            fallback_fold_count=0,
+            cap_provenance_available=True,
+            fixed_sleeve_local_data=False,
+        )
+        verification = VerificationResultArtifact(
+            status=VerificationStatus.PASS,
+            is_walk_forward_sharpe_net=0.41,
+            oos_sharpe_net=0.38,
+            max_drawdown_pct=12.4,
+            win_rate=0.54,
+            trade_count=211,
+            trades_per_day=1.9,
+            oos_trading_days=128,
+            feature_importances_summary="VWAP distance and OBV slope dominate.",
+            null_test_summary="Null shuffle drops Sharpe near zero.",
+            bug_signals=(),
+            tests_passed=True,
+            commands_run=("uv run pytest",),
+            data_coverage=AggregateCoverageReceipt(
+                declared_intended_start=coverage_symbol.declared_intended_start,
+                declared_intended_end=coverage_symbol.declared_intended_end,
+                actual_common_start=coverage_symbol.actual_common_start,
+                actual_common_end=coverage_symbol.actual_common_end,
+                oos_start=coverage_symbol.oos_start,
+                oos_end=coverage_symbol.oos_end,
+                expected_trading_days=coverage_symbol.expected_trading_days,
+                actual_trading_days=coverage_symbol.actual_trading_days,
+                coverage_percent=coverage_symbol.coverage_percent,
+                missing_reason=None,
+                default_fold_count=0,
+                fallback_fold_count=0,
+                cap_provenance_available=True,
+                fixed_sleeve_local_data=False,
+                per_symbol=(coverage_symbol,),
+            ),
+        )
         repeat_state = AutoresearchState(
             phase=Phase.REPEAT,
             iteration=3,
@@ -433,20 +543,95 @@ class TestAutoresearchCliCommands:
                 hard_constraints=("No overnight holds",),
                 data_sources=("qp.prices()",),
             ),
+            context_packet=ContextPacketArtifact(
+                baseline_metric="0.18 OOS Sharpe net",
+                current_best_metric="0.22 OOS Sharpe net",
+                recent_experiment_outcomes=(),
+                prior_findings=(),
+                open_proposals=(),
+                hard_constraints=("No overnight holds",),
+                available_data_sources=("qp.prices()",),
+                loaded_quantipy_sources=("AGENTS.md",),
+                research_mode=ResearchMode.ALPHA_RESEARCH,
+                mode_rationale="Coverage supports an alpha experiment.",
+                burned_theory_families=(),
+            ),
+            debate_rounds=(debate,),
+            consensus_history=(consensus,),
+            implementation_result=ImplementationResultArtifact(
+                summary="Implemented the narrow VWAP and OBV experiment.",
+                workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-3",
+                commit_sha="abc1234",
+                module_path="src/quantipy/alpha/vwap_obv/",
+                notebook_path="notebooks/experiments/vwap_obv.ipynb",
+                tests_added_or_updated=("tests/test_vwap_obv.py",),
+                commands_run=("uv run pytest tests/test_vwap_obv.py",),
+            ),
+            verification_history=(verification,),
+            review_history=(
+                ReviewResultArtifact(
+                    reviewer_agent_id="reviewer",
+                    verdict=ReviewVerdict.PASS,
+                    recommended_metric_name="OOS Sharpe net",
+                    recommended_metric_value=0.38,
+                    critical_issues=(),
+                    noncritical_issues=(),
+                    fix_requests=(),
+                    summary="Methodology review passed.",
+                ),
+            ),
             final_decision=FinalDecisionArtifact(
+                experiment_id="iteration-3",
                 decision=FinalDecision.KEEP,
                 recommended_metric_name="OOS Sharpe net",
                 recommended_metric_value=0.38,
-                reviewer_verdict=ReviewVerdict.PASS.value,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
                 rationale="Improves baseline without review blockers.",
                 log_summary="KEEP vwap_obv_intraday with updated baseline review.",
                 continue_loop=True,
                 memory_write_required=True,
             ),
+            mode=ResearchMode.ALPHA_RESEARCH,
         )
         state_path = tmp_path / "repeat-state.json"
         memory_state_path = tmp_path / "memory-state.json"
         next_state_path = tmp_path / "next-state.json"
+        kg_path = tmp_path / "knowledge_graph.sqlite3"
+        connection = sqlite3.connect(kg_path)
+        connection.executescript(
+            """
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
+                source_file TEXT, source_drawer_id TEXT
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+            [
+                ("1", "iteration-3", "decision", "keep", "result.json"),
+                ("2", "iteration-3", "research_mode", "alpha_research", "result.json"),
+                ("3", "iteration-3", "alpha_decision_metric", "oos_sharpe_net_0_38", "result.json"),
+                (
+                    "4",
+                    "iteration-3",
+                    "data_window",
+                    "2021_01_04_to_2021_12_31_oos_2021_10_01_to_2021_12_31",
+                    "result.json",
+                ),
+                ("5", "iteration-3", "reviewer_verdict", "pass", "result.json"),
+                (
+                    "6",
+                    "iteration-3",
+                    "keeper_rationale",
+                    "improves_baseline_without_review_blockers",
+                    "result.json",
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
         state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
 
         mark_result = runner.invoke(
@@ -458,11 +643,14 @@ class TestAutoresearchCliCommands:
                 str(memory_state_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--mempalace-kg-path",
+                str(kg_path),
             ],
         )
-        assert mark_result.exit_code == 0
+        assert mark_result.exit_code == 0, mark_result.output
         marked = json.loads(memory_state_path.read_text(encoding="utf-8"))
         assert marked["memory_written"] is True
+        assert marked["memory_verification_receipt"]["experiment_id"] == "iteration-3"
 
         next_result = runner.invoke(
             app,

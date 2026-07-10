@@ -11,6 +11,8 @@ import pytest
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     QUANTIPY_RECEIPT_PATHS,
+    AggregateCoverageReceipt,
+    ArtifactType,
     AutoresearchConfigError,
     AutoresearchPolicy,
     AutoresearchReceiptError,
@@ -19,16 +21,21 @@ from gateway.autoresearch_runner import (
     ConsensusResultArtifact,
     ConsensusStatus,
     ContextPacketArtifact,
+    CoverageReceipt,
     DebateResultArtifact,
     DebateSubmission,
     FinalDecision,
     FinalDecisionArtifact,
+    FinalReviewerVerdict,
     FixResultArtifact,
     FixTriggerPhase,
     ImplementationResultArtifact,
+    InfraGateOutcome,
+    MemoryVerificationReceipt,
     MetricDirection,
     Phase,
     ReceiptCatalog,
+    ResearchMode,
     ReviewResultArtifact,
     ReviewVerdict,
     SetupContextArtifact,
@@ -87,6 +94,46 @@ def _context_artifact() -> ContextPacketArtifact:
         hard_constraints=("2021-2026 coverage", "95% trading days minimum"),
         available_data_sources=("qp.prices()", "Reddit sentiment", "news sentiment"),
         loaded_quantipy_sources=("AGENTS.md", "experiment-data", "data-querying"),
+        research_mode=ResearchMode.ALPHA_RESEARCH,
+        mode_rationale="Coverage and provenance evidence permit an alpha experiment.",
+        burned_theory_families=(),
+    )
+
+
+def _coverage_receipt() -> AggregateCoverageReceipt:
+    per_symbol = CoverageReceipt(
+        symbol="AMD",
+        declared_intended_start="2021-01-04",
+        declared_intended_end="2021-12-31",
+        actual_common_start="2021-01-04",
+        actual_common_end="2021-12-31",
+        oos_start="2021-10-01",
+        oos_end="2021-12-31",
+        expected_trading_days=252,
+        actual_trading_days=252,
+        coverage_percent=100.0,
+        missing_reason=None,
+        default_fold_count=0,
+        fallback_fold_count=0,
+        cap_provenance_available=True,
+        fixed_sleeve_local_data=False,
+    )
+    return AggregateCoverageReceipt(
+        declared_intended_start=per_symbol.declared_intended_start,
+        declared_intended_end=per_symbol.declared_intended_end,
+        actual_common_start=per_symbol.actual_common_start,
+        actual_common_end=per_symbol.actual_common_end,
+        oos_start=per_symbol.oos_start,
+        oos_end=per_symbol.oos_end,
+        expected_trading_days=per_symbol.expected_trading_days,
+        actual_trading_days=per_symbol.actual_trading_days,
+        coverage_percent=per_symbol.coverage_percent,
+        missing_reason=None,
+        default_fold_count=0,
+        fallback_fold_count=0,
+        cap_provenance_available=True,
+        fixed_sleeve_local_data=False,
+        per_symbol=(per_symbol,),
     )
 
 
@@ -187,6 +234,7 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
         bug_signals=bug_signals,
         tests_passed=status is not VerificationStatus.TEST_FAILURE,
         commands_run=("uv run pytest", "uv run jupyter execute notebook.ipynb"),
+        data_coverage=_coverage_receipt(),
     )
 
 
@@ -219,10 +267,11 @@ def _fix_result(trigger_phase: FixTriggerPhase) -> FixResultArtifact:
 
 def _final_decision() -> FinalDecisionArtifact:
     return FinalDecisionArtifact(
+        experiment_id="iteration-1",
         decision=FinalDecision.KEEP,
         recommended_metric_name="OOS Sharpe net",
         recommended_metric_value=0.38,
-        reviewer_verdict=ReviewVerdict.PASS.value,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
         rationale="Improves baseline without review blockers.",
         log_summary="KEEP vwap_obv_intraday with updated baseline review.",
         continue_loop=True,
@@ -234,7 +283,7 @@ def _final_decision_with(
     *,
     decision: FinalDecision,
     metric_value: float | None,
-    reviewer_verdict: str | None,
+    reviewer_verdict: FinalReviewerVerdict,
 ) -> FinalDecisionArtifact:
     artifact = _final_decision()
     return replace(
@@ -328,6 +377,127 @@ def test_no_majority_allows_one_retry_then_routes_to_decision(
     assert state.phase is Phase.DECISION_LOG
 
 
+def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="The data gate must be repaired before alpha work.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _no_consensus(round_number=1), policy)
+    state = advance_state(state, _debate_result(policy, round_number=2), policy)
+    state = advance_state(state, _no_consensus(round_number=2), policy)
+    decision = FinalDecisionArtifact(
+        experiment_id="g0-no-consensus-1",
+        decision=FinalDecision.NO_CONSENSUS,
+        recommended_metric_name="consensus outcome",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="The retry produced no majority and no implementation was created.",
+        log_summary="No consensus after the allowed retry.",
+        continue_loop=True,
+        memory_write_required=False,
+    )
+
+    state = advance_state(state, decision, policy)
+
+    assert can_write_memory(state) is False
+    assert (
+        next_action(state, policy, receipts).expected_artifact_type is ArtifactType.NEXT_ITERATION
+    )
+    assert start_next_iteration(state).iteration == 2
+
+
+def test_no_consensus_rejects_a_memory_write_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _no_consensus(round_number=1), policy)
+    state = advance_state(state, _debate_result(policy, round_number=2), policy)
+    state = advance_state(state, _no_consensus(round_number=2), policy)
+    decision = FinalDecisionArtifact(
+        experiment_id="no-consensus-1",
+        decision=FinalDecision.NO_CONSENSUS,
+        recommended_metric_name="consensus outcome",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="The retry produced no majority and no implementation was created.",
+        log_summary="No consensus after the allowed retry.",
+        continue_loop=True,
+        memory_write_required=True,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=false"):
+        advance_state(state, decision, policy)
+
+
+def test_alpha_debate_rejects_a_burned_theory_family_without_new_evidence(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    context = replace(_context_artifact(), burned_theory_families=("vwap-obv",))
+    state = advance_state(state, context, policy)
+
+    with pytest.raises(AutoresearchValidationError, match="materially_new_evidence"):
+        advance_state(state, _debate_result(policy, round_number=1), policy)
+
+
+def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="Every source and cap record has auditable provenance.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
+
+    result = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_REPAIRED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data repair completed.",
+            log_summary="G0 gate passed.",
+            continue_loop=True,
+            memory_write_required=True,
+            infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+        ),
+        policy,
+    )
+
+    assert result.final_decision is not None
+    assert result.final_decision.decision is FinalDecision.INFRA_REPAIRED
+
+
 def test_no_implementation_without_majority(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -393,12 +563,28 @@ def test_memory_write_gated_until_final_decision(policy: AutoresearchPolicy) -> 
 
     assert can_write_memory(state) is False
     with pytest.raises(AutoresearchValidationError, match="only after final decision"):
-        mark_memory_written(state)
+        mark_memory_written(
+            state,
+            MemoryVerificationReceipt(
+                experiment_id="iteration-1",
+                kg_path="/tmp/knowledge_graph.sqlite3",
+                predicates=("decision",),
+                verified_rows_digest="0" * 64,
+            ),
+        )
 
     state = advance_state(state, _final_decision(), policy)
     assert can_write_memory(state) is True
 
-    state = mark_memory_written(state)
+    state = mark_memory_written(
+        state,
+        MemoryVerificationReceipt(
+            experiment_id="iteration-1",
+            kg_path="/tmp/knowledge_graph.sqlite3",
+            predicates=("decision",),
+            verified_rows_digest="0" * 64,
+        ),
+    )
     assert state.memory_written is True
 
     next_iteration = start_next_iteration(state)
@@ -531,25 +717,25 @@ def test_verification_failure_routes_fix_test_with_pending_trigger(
         (
             FinalDecision.DISCARD,
             0.38,
-            ReviewVerdict.PASS.value,
+            FinalReviewerVerdict.PASS,
             "decision Sharpe above baseline requires a KEEP-family final_decision",
         ),
         (
             FinalDecision.KEEP,
             0.7,
-            ReviewVerdict.PASS.value,
+            FinalReviewerVerdict.PASS,
             "decision Sharpe > 0.5 requires SIGNIFICANT KEEP or STRONG KEEP",
         ),
         (
             FinalDecision.SIGNIFICANT_KEEP,
             1.2,
-            ReviewVerdict.PASS.value,
+            FinalReviewerVerdict.PASS,
             "decision Sharpe > 1.0 with reviewer PASS requires final_decision=STRONG KEEP",
         ),
         (
             FinalDecision.KEEP,
             -0.6,
-            ReviewVerdict.PASS.value,
+            FinalReviewerVerdict.PASS,
             "decision Sharpe <= -0.5 requires final_decision=DISCARD",
         ),
     ],
@@ -558,7 +744,7 @@ def test_final_decision_rules_reject_incorrect_decisions(
     policy: AutoresearchPolicy,
     decision: FinalDecision,
     metric_value: float,
-    reviewer_verdict: str,
+    reviewer_verdict: FinalReviewerVerdict,
     match: str,
 ) -> None:
     state = _state_to_decision(policy)
@@ -599,7 +785,7 @@ def test_final_decision_rules_enforce_drawdown_discard(
             _final_decision_with(
                 decision=FinalDecision.SIGNIFICANT_KEEP,
                 metric_value=0.92,
-                reviewer_verdict=ReviewVerdict.PASS.value,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
             ),
             policy,
         )
@@ -627,7 +813,46 @@ def test_final_decision_rules_enforce_crash_after_test_failures(
             _final_decision_with(
                 decision=FinalDecision.DISCARD,
                 metric_value=None,
-                reviewer_verdict=None,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            ),
+            policy,
+        )
+
+
+def test_crash_without_review_accepts_the_canonical_not_run_verdict(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    for _ in range(2):
+        state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
+    decision = _final_decision_with(
+        decision=FinalDecision.CRASH,
+        metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+    )
+
+    result = advance_state(state, decision, policy)
+
+    assert result.final_decision is not None
+    assert result.final_decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
+
+
+def test_reviewed_final_decision_rejects_not_run_verdict(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_decision(policy)
+
+    with pytest.raises(AutoresearchValidationError, match="reviewer_verdict must match"):
+        advance_state(
+            state,
+            _final_decision_with(
+                decision=FinalDecision.KEEP,
+                metric_value=0.38,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
             ),
             policy,
         )
@@ -649,7 +874,7 @@ def test_final_decision_rules_enforce_discard_for_remaining_review_issue(
             _final_decision_with(
                 decision=FinalDecision.KEEP,
                 metric_value=0.38,
-                reviewer_verdict=ReviewVerdict.FAIL.value,
+                reviewer_verdict=FinalReviewerVerdict.FAIL,
             ),
             policy,
         )
@@ -680,7 +905,7 @@ def test_final_decision_plain_keep_requires_numeric_baseline(
             _final_decision_with(
                 decision=FinalDecision.KEEP,
                 metric_value=0.38,
-                reviewer_verdict=ReviewVerdict.PASS.value,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
             ),
             policy,
         )
@@ -704,7 +929,7 @@ def test_final_decision_no_consensus_requires_no_consensus_artifact(
             _final_decision_with(
                 decision=FinalDecision.DISCARD,
                 metric_value=None,
-                reviewer_verdict=None,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
             ),
             policy,
         )

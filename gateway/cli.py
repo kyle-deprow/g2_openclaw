@@ -39,6 +39,12 @@ _MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
 _MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
 _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
+_mempalace_kg_path_option = typer.Option(
+    None,
+    "--mempalace-kg-path",
+    hidden=True,
+    help="Override the MemPalace KG path for deterministic tests.",
+)
 _TARGET_WRITER_COMMAND_RE = re.compile(
     r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
@@ -640,21 +646,24 @@ def autoresearch_mark_memory(
     state_path: Path = _state_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    mempalace_kg_path: Path | None = _mempalace_kg_path_option,
 ) -> None:
-    """Mark MemPalace logging complete for a finished autoresearch iteration."""
+    """Verify MemPalace facts and persist its receipt for a finished iteration."""
     from gateway.autoresearch_runner import (
         load_autoresearch_policy,
         load_state_file,
         mark_memory_written,
         save_state_file,
         validate_state,
+        verify_mempalace_final_decision,
     )
 
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
         validate_state(state, policy)
-        next_state = mark_memory_written(state)
+        receipt = verify_mempalace_final_decision(state, mempalace_kg_path)
+        next_state = mark_memory_written(state, receipt)
         save_state_file(output_path, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")

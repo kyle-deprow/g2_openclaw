@@ -17,6 +17,24 @@ Durable research memory is MemPalace only. Do not use `memory_search`,
 loop memory for research continuity. Only the PM loads the write-capable
 `mempalace` skill; all stage agents load `mempalace-readonly`.
 
+## Explicit Research Modes
+
+The context packet must select exactly one mode and give a nonempty
+`mode_rationale`; the deterministic state persists that choice.
+
+- `ALPHA_RESEARCH` is for a strategy experiment. It may produce performance
+  metrics and a KEEP/DISCARD-family decision only after coverage verification.
+- `DATA_INFRA_G0` is for repairing data range, provenance, universe, or fold
+  construction. It is not an alpha experiment and must never be presented as
+  Sharpe/performance validation. Its verification returns an explicit
+  infrastructure gate outcome and its final decision is `INFRA_REPAIRED` or
+  `INFRA_BLOCKED`.
+
+The context packet also records normalized `burned_theory_families`. In alpha
+mode, a debate submission in a burned family is rejected unless it contains a
+nonempty `materially_new_evidence` explanation. Do not evade this gate by
+renaming the family.
+
 ## Loop
 
 ```text
@@ -110,6 +128,8 @@ packet for the debate:
   data coverage issues, and reviewer objections.
 - Open proposals from `RESEARCH_LOG.md`, marked as prior context only.
 - Hard constraints and available data sources.
+- Selected `research_mode`, a concrete mode rationale, and burned theory
+  families from completed failures.
 
 Do not skip debate because a prior proposal exists. The debate must consider
 prior proposals, current metrics, and MemPalace history before selecting the
@@ -134,6 +154,10 @@ Every proposal must include:
   days.
 - Rejection criteria.
 
+For alpha mode, a burned theory family requires materially new evidence, not a
+restatement of the old hypothesis. G0 work should debate the smallest data or
+provenance repair needed to restore a valid alpha gate, not a new strategy.
+
 Quantipy constraints:
 
 - Intraday small/mid cap equities only, $500M-$20B market cap.
@@ -157,7 +181,10 @@ majority. Required output:
 If there is no 3-of-5 majority, run one concise debate retry with the same
 context plus the dissent summary. If there is still no majority, log
 `NO_CONSENSUS` to `RESEARCH_LOG.md`, then start a fresh context pass. Do not
-implement without a majority.
+implement without a majority. The final decision must explicitly set
+`reviewer_verdict=NOT_RUN` and `memory_write_required=false`; this is the only
+auditable no-memory transition. Do not write MemPalace facts or fabricate a
+memory receipt for `NO_CONSENSUS`.
 
 The PM writes the winning theory and dissent summary to `RESEARCH_LOG.md`
 before implementation. Do not write theories, debate notes, or consensus drafts
@@ -193,6 +220,27 @@ Required metrics:
 - OOS trading days.
 - Feature importances.
 - Null test results.
+
+Every verification artifact also contains a structured coverage receipt for
+each symbol plus one aggregate receipt: declared intended start/end, actual
+common start/end, OOS start/end, expected/actual trading days, coverage percent,
+missing reason, default/fallback fold counts, cap-provenance availability, and
+an explicit `fixed_sleeve_local_data` flag. Date ranges and counts must agree.
+A fixed local sleeve is permitted only when explicitly declared and may not
+claim cap-verified universe compliance.
+
+Coverage is a common-calendar analysis. Every per-symbol receipt must use the
+aggregate declared range; aggregate actual start is the latest per-symbol
+actual start and aggregate actual end is the earliest per-symbol actual end.
+Aggregate OOS is the intersection of per-symbol OOS windows. Expected/actual
+trading-day counts, coverage percent, and missing reason must be identical
+across all receipts after common-calendar filtering; never sum symbol day
+counts. Aggregate default/fallback folds equal the fewest corresponding
+per-symbol folds.
+
+In `DATA_INFRA_G0`, record `infra_gate_outcome` (`GATE_PASSED` or
+`REMEDIATION_REQUIRED`) plus `infra_rationale`; do not use Sharpe to decide
+whether the infrastructure repair succeeded.
 
 Bug signals:
 
@@ -233,7 +281,7 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 
 ## 8. Decide And Log
 
-Use the reviewer's recommended metric.
+Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
 
 - Tests fail after retries: CRASH.
 - Critical review issue remains: DISCARD.
@@ -243,14 +291,22 @@ Use the reviewer's recommended metric.
 - Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP.
 - Max drawdown >= 30%: DISCARD regardless of Sharpe.
 
+For `DATA_INFRA_G0`, decide `INFRA_REPAIRED` only when its explicit
+infrastructure gate passed; otherwise decide `INFRA_BLOCKED`. A methodology
+`PASS` means the data/process gate was assessed correctly, not that an alpha
+strategy has passed.
+
 Actions:
 
 - KEEP: keep the commit, update baseline if appropriate, and log the metrics.
 - DISCARD/CRASH: revert the experiment commit, log why, and move to the next
   proposal.
+- NO_CONSENSUS: log the split to `RESEARCH_LOG.md`; set `NOT_RUN` and the
+  explicit no-memory flag, then begin the next context pass.
 - Always append to the target repo's experiment log and `RESEARCH_LOG.md`.
-- After the final decision, the PM writes MemPalace drawers and KG facts for
-  experiment, feature, model, metric, decision, and failure mode.
+- After every memory-required final decision, the PM writes MemPalace drawers
+  and KG facts for experiment, feature, model, metric, decision, and failure
+  mode. `NO_CONSENSUS` never enters MemPalace.
 - Write a MemPalace diary entry only as part of final experiment logging.
 
 ## Recovery And Status

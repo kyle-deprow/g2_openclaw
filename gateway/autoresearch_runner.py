@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -67,6 +69,13 @@ class MetricDirection(StrEnum):
     MINIMIZE = "minimize"
 
 
+class ResearchMode(StrEnum):
+    """The only two mutually exclusive purposes for an iteration."""
+
+    ALPHA_RESEARCH = "alpha_research"
+    DATA_INFRA_G0 = "data_infra_g0"
+
+
 class ConsensusStatus(StrEnum):
     MAJORITY = "MAJORITY"
     NO_CONSENSUS = "NO_CONSENSUS"
@@ -78,10 +87,24 @@ class VerificationStatus(StrEnum):
     TEST_FAILURE = "TEST_FAILURE"
 
 
+class InfraGateOutcome(StrEnum):
+    GATE_PASSED = "GATE_PASSED"
+    REMEDIATION_REQUIRED = "REMEDIATION_REQUIRED"
+
+
 class ReviewVerdict(StrEnum):
     PASS = "PASS"
     CONDITIONAL_PASS = "CONDITIONAL PASS"
     FAIL = "FAIL"
+
+
+class FinalReviewerVerdict(StrEnum):
+    """The reviewer outcome persisted with a final decision."""
+
+    PASS = "PASS"
+    CONDITIONAL_PASS = "CONDITIONAL PASS"
+    FAIL = "FAIL"
+    NOT_RUN = "NOT_RUN"
 
 
 class FinalDecision(StrEnum):
@@ -91,6 +114,8 @@ class FinalDecision(StrEnum):
     DISCARD = "DISCARD"
     CRASH = "CRASH"
     NO_CONSENSUS = "NO_CONSENSUS"
+    INFRA_REPAIRED = "INFRA_REPAIRED"
+    INFRA_BLOCKED = "INFRA_BLOCKED"
 
 
 class FixTriggerPhase(StrEnum):
@@ -176,6 +201,31 @@ def _optional_string_list(raw: Mapping[str, object], field_name: str) -> tuple[s
 
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _normalise_identifier(value: str) -> str:
+    """Return the sole documented identifier form: lowercase kebab-case."""
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", normalized):
+        raise AutoresearchValidationError(
+            "identifier must normalize to lowercase kebab-case beginning with a letter"
+        )
+    return normalized
+
+
+def _require_canonical_identifier(raw: Mapping[str, object], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise AutoresearchValidationError(f"{field_name} must be a non-empty string")
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value):
+        raise AutoresearchValidationError(
+            f"{field_name} must be canonical lowercase kebab-case beginning with a letter"
+        )
+    return value
+
+
+def _normalise_predicate(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
 
 
 def validate_target_worktree_clean(
@@ -332,6 +382,9 @@ class ContextPacketArtifact:
     hard_constraints: tuple[str, ...]
     available_data_sources: tuple[str, ...]
     loaded_quantipy_sources: tuple[str, ...]
+    research_mode: ResearchMode
+    mode_rationale: str
+    burned_theory_families: tuple[str, ...]
 
     @classmethod
     def from_dict(cls, raw: object) -> ContextPacketArtifact:
@@ -345,6 +398,12 @@ class ContextPacketArtifact:
             hard_constraints=_require_string_list(data, "hard_constraints"),
             available_data_sources=_require_string_list(data, "available_data_sources"),
             loaded_quantipy_sources=_require_string_list(data, "loaded_quantipy_sources"),
+            research_mode=ResearchMode(_require_str(data, "research_mode")),
+            mode_rationale=_require_str(data, "mode_rationale"),
+            burned_theory_families=tuple(
+                _normalise_identifier(family)
+                for family in _require_string_list(data, "burned_theory_families")
+            ),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -357,6 +416,9 @@ class ContextPacketArtifact:
             "hard_constraints": list(self.hard_constraints),
             "available_data_sources": list(self.available_data_sources),
             "loaded_quantipy_sources": list(self.loaded_quantipy_sources),
+            "research_mode": self.research_mode.value,
+            "mode_rationale": self.mode_rationale,
+            "burned_theory_families": list(self.burned_theory_families),
         }
 
 
@@ -376,10 +438,14 @@ class DebateSubmission:
     data_coverage_plan: str
     rejection_criteria: str
     objections: tuple[str, ...]
+    materially_new_evidence: str | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> DebateSubmission:
         data = _ensure_mapping(raw, label="debate_submission")
+        exemption = data.get("materially_new_evidence")
+        if exemption is not None and not isinstance(exemption, str):
+            raise AutoresearchValidationError("materially_new_evidence must be a string or null")
         return cls(
             agent_id=_require_str(data, "agent_id"),
             theory_id=_require_str(data, "theory_id"),
@@ -395,6 +461,7 @@ class DebateSubmission:
             data_coverage_plan=_require_str(data, "data_coverage_plan"),
             rejection_criteria=_require_str(data, "rejection_criteria"),
             objections=_require_string_list(data, "objections"),
+            materially_new_evidence=exemption.strip() if isinstance(exemption, str) else None,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -413,6 +480,7 @@ class DebateSubmission:
             "data_coverage_plan": self.data_coverage_plan,
             "rejection_criteria": self.rejection_criteria,
             "objections": list(self.objections),
+            "materially_new_evidence": self.materially_new_evidence,
         }
 
 
@@ -580,6 +648,281 @@ class ImplementationResultArtifact:
         }
 
 
+def _require_iso_date(raw: Mapping[str, object], field_name: str) -> str:
+    value = _require_str(raw, field_name)
+    try:
+        # ISO date lexical ordering is also chronological ordering.
+        from datetime import date
+
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{field_name} must be an ISO-8601 date") from exc
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageReceipt:
+    symbol: str
+    declared_intended_start: str
+    declared_intended_end: str
+    actual_common_start: str
+    actual_common_end: str
+    oos_start: str
+    oos_end: str
+    expected_trading_days: int
+    actual_trading_days: int
+    coverage_percent: float
+    missing_reason: str | None
+    default_fold_count: int
+    fallback_fold_count: int
+    cap_provenance_available: bool
+    fixed_sleeve_local_data: bool
+
+    @classmethod
+    def from_dict(cls, raw: object) -> CoverageReceipt:
+        data = _ensure_mapping(raw, label="coverage_receipt")
+        missing_reason = data.get("missing_reason")
+        if missing_reason is not None and not isinstance(missing_reason, str):
+            raise AutoresearchValidationError("missing_reason must be a string or null")
+        receipt = cls(
+            symbol=_require_str(data, "symbol"),
+            declared_intended_start=_require_iso_date(data, "declared_intended_start"),
+            declared_intended_end=_require_iso_date(data, "declared_intended_end"),
+            actual_common_start=_require_iso_date(data, "actual_common_start"),
+            actual_common_end=_require_iso_date(data, "actual_common_end"),
+            oos_start=_require_iso_date(data, "oos_start"),
+            oos_end=_require_iso_date(data, "oos_end"),
+            expected_trading_days=_require_int(data, "expected_trading_days"),
+            actual_trading_days=_require_int(data, "actual_trading_days"),
+            coverage_percent=_require_float(data, "coverage_percent"),
+            missing_reason=missing_reason.strip() if isinstance(missing_reason, str) else None,
+            default_fold_count=_require_int(data, "default_fold_count"),
+            fallback_fold_count=_require_int(data, "fallback_fold_count"),
+            cap_provenance_available=_require_bool(data, "cap_provenance_available"),
+            fixed_sleeve_local_data=_require_bool(data, "fixed_sleeve_local_data"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_coverage_values(self, label=f"coverage receipt for {self.symbol}")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "declared_intended_start": self.declared_intended_start,
+            "declared_intended_end": self.declared_intended_end,
+            "actual_common_start": self.actual_common_start,
+            "actual_common_end": self.actual_common_end,
+            "oos_start": self.oos_start,
+            "oos_end": self.oos_end,
+            "expected_trading_days": self.expected_trading_days,
+            "actual_trading_days": self.actual_trading_days,
+            "coverage_percent": self.coverage_percent,
+            "missing_reason": self.missing_reason,
+            "default_fold_count": self.default_fold_count,
+            "fallback_fold_count": self.fallback_fold_count,
+            "cap_provenance_available": self.cap_provenance_available,
+            "fixed_sleeve_local_data": self.fixed_sleeve_local_data,
+        }
+
+
+def _validate_coverage_values(receipt: CoverageReceipt, *, label: str) -> None:
+    if not (
+        receipt.declared_intended_start
+        <= receipt.actual_common_start
+        <= receipt.actual_common_end
+        <= receipt.declared_intended_end
+    ):
+        raise AutoresearchValidationError(f"{label} actual common range must fit intended range")
+    if not (
+        receipt.actual_common_start
+        <= receipt.oos_start
+        <= receipt.oos_end
+        <= receipt.actual_common_end
+    ):
+        raise AutoresearchValidationError(f"{label} OOS range must fit actual common range")
+    if (
+        receipt.expected_trading_days <= 0
+        or not 0 <= receipt.actual_trading_days <= receipt.expected_trading_days
+    ):
+        raise AutoresearchValidationError(f"{label} trading day counts are invalid")
+    if not 0.0 <= receipt.coverage_percent <= 100.0:
+        raise AutoresearchValidationError(f"{label} coverage_percent must be between 0 and 100")
+    expected_percent = receipt.actual_trading_days / receipt.expected_trading_days * 100.0
+    if abs(receipt.coverage_percent - expected_percent) > 0.01:
+        raise AutoresearchValidationError(f"{label} coverage_percent must match trading day counts")
+    if receipt.actual_trading_days < receipt.expected_trading_days and not receipt.missing_reason:
+        raise AutoresearchValidationError(
+            f"{label} missing_reason is required for missing trading days"
+        )
+    if receipt.actual_trading_days == receipt.expected_trading_days and receipt.missing_reason:
+        raise AutoresearchValidationError(
+            f"{label} missing_reason is only valid for missing trading days"
+        )
+    if receipt.default_fold_count < 0 or receipt.fallback_fold_count < 0:
+        raise AutoresearchValidationError(f"{label} fold counts must be non-negative")
+    if receipt.fixed_sleeve_local_data and receipt.cap_provenance_available:
+        raise AutoresearchValidationError(
+            f"{label} fixed_sleeve_local_data cannot claim cap_provenance_available"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateCoverageReceipt:
+    declared_intended_start: str
+    declared_intended_end: str
+    actual_common_start: str
+    actual_common_end: str
+    oos_start: str
+    oos_end: str
+    expected_trading_days: int
+    actual_trading_days: int
+    coverage_percent: float
+    missing_reason: str | None
+    default_fold_count: int
+    fallback_fold_count: int
+    cap_provenance_available: bool
+    fixed_sleeve_local_data: bool
+    per_symbol: tuple[CoverageReceipt, ...]
+
+    @classmethod
+    def from_dict(cls, raw: object) -> AggregateCoverageReceipt:
+        data = _ensure_mapping(raw, label="aggregate_coverage_receipt")
+        symbols_raw = data.get("per_symbol")
+        if not isinstance(symbols_raw, Sequence) or isinstance(symbols_raw, str | bytes):
+            raise AutoresearchValidationError("per_symbol must be a list")
+        missing_reason = data.get("missing_reason")
+        if missing_reason is not None and not isinstance(missing_reason, str):
+            raise AutoresearchValidationError("missing_reason must be a string or null")
+        receipt = cls(
+            declared_intended_start=_require_iso_date(data, "declared_intended_start"),
+            declared_intended_end=_require_iso_date(data, "declared_intended_end"),
+            actual_common_start=_require_iso_date(data, "actual_common_start"),
+            actual_common_end=_require_iso_date(data, "actual_common_end"),
+            oos_start=_require_iso_date(data, "oos_start"),
+            oos_end=_require_iso_date(data, "oos_end"),
+            expected_trading_days=_require_int(data, "expected_trading_days"),
+            actual_trading_days=_require_int(data, "actual_trading_days"),
+            coverage_percent=_require_float(data, "coverage_percent"),
+            missing_reason=missing_reason.strip() if isinstance(missing_reason, str) else None,
+            default_fold_count=_require_int(data, "default_fold_count"),
+            fallback_fold_count=_require_int(data, "fallback_fold_count"),
+            cap_provenance_available=_require_bool(data, "cap_provenance_available"),
+            fixed_sleeve_local_data=_require_bool(data, "fixed_sleeve_local_data"),
+            per_symbol=tuple(CoverageReceipt.from_dict(item) for item in symbols_raw),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        if not self.per_symbol:
+            raise AutoresearchValidationError(
+                "aggregate coverage requires at least one per-symbol receipt"
+            )
+        synthetic = CoverageReceipt(
+            symbol="aggregate",
+            declared_intended_start=self.declared_intended_start,
+            declared_intended_end=self.declared_intended_end,
+            actual_common_start=self.actual_common_start,
+            actual_common_end=self.actual_common_end,
+            oos_start=self.oos_start,
+            oos_end=self.oos_end,
+            expected_trading_days=self.expected_trading_days,
+            actual_trading_days=self.actual_trading_days,
+            coverage_percent=self.coverage_percent,
+            missing_reason=self.missing_reason,
+            default_fold_count=self.default_fold_count,
+            fallback_fold_count=self.fallback_fold_count,
+            cap_provenance_available=self.cap_provenance_available,
+            fixed_sleeve_local_data=self.fixed_sleeve_local_data,
+        )
+        _validate_coverage_values(synthetic, label="aggregate coverage")
+        if len({receipt.symbol for receipt in self.per_symbol}) != len(self.per_symbol):
+            raise AutoresearchValidationError("aggregate coverage cannot contain duplicate symbols")
+        for receipt in self.per_symbol:
+            receipt.validate()
+            if (
+                receipt.declared_intended_start != self.declared_intended_start
+                or receipt.declared_intended_end != self.declared_intended_end
+            ):
+                raise AutoresearchValidationError(
+                    "aggregate declared intended range must match every per-symbol receipt"
+                )
+            if receipt.fixed_sleeve_local_data != self.fixed_sleeve_local_data:
+                raise AutoresearchValidationError(
+                    "per-symbol fixed_sleeve_local_data must match aggregate"
+                )
+            if receipt.cap_provenance_available != self.cap_provenance_available:
+                raise AutoresearchValidationError("per-symbol cap provenance must match aggregate")
+        expected_common_start = max(receipt.actual_common_start for receipt in self.per_symbol)
+        expected_common_end = min(receipt.actual_common_end for receipt in self.per_symbol)
+        if self.actual_common_start != expected_common_start:
+            raise AutoresearchValidationError(
+                "aggregate actual_common_start must equal the latest per-symbol actual start"
+            )
+        if self.actual_common_end != expected_common_end:
+            raise AutoresearchValidationError(
+                "aggregate actual_common_end must equal the earliest per-symbol actual end"
+            )
+        expected_oos_start = max(receipt.oos_start for receipt in self.per_symbol)
+        expected_oos_end = min(receipt.oos_end for receipt in self.per_symbol)
+        if self.oos_start != expected_oos_start or self.oos_end != expected_oos_end:
+            raise AutoresearchValidationError(
+                "aggregate OOS range must equal the common per-symbol OOS intersection"
+            )
+        if any(
+            receipt.expected_trading_days != self.expected_trading_days
+            for receipt in self.per_symbol
+        ):
+            raise AutoresearchValidationError(
+                "aggregate expected_trading_days must match every per-symbol common calendar"
+            )
+        if any(
+            receipt.actual_trading_days != self.actual_trading_days for receipt in self.per_symbol
+        ):
+            raise AutoresearchValidationError(
+                "aggregate actual_trading_days must match every per-symbol common calendar"
+            )
+        if any(receipt.coverage_percent != self.coverage_percent for receipt in self.per_symbol):
+            raise AutoresearchValidationError(
+                "aggregate coverage_percent must match every per-symbol common calendar"
+            )
+        if any(receipt.missing_reason != self.missing_reason for receipt in self.per_symbol):
+            raise AutoresearchValidationError(
+                "aggregate missing_reason must match every per-symbol common calendar"
+            )
+        expected_default_folds = min(receipt.default_fold_count for receipt in self.per_symbol)
+        expected_fallback_folds = min(receipt.fallback_fold_count for receipt in self.per_symbol)
+        if self.default_fold_count != expected_default_folds:
+            raise AutoresearchValidationError(
+                "aggregate default_fold_count must equal the fewest per-symbol default folds"
+            )
+        if self.fallback_fold_count != expected_fallback_folds:
+            raise AutoresearchValidationError(
+                "aggregate fallback_fold_count must equal the fewest per-symbol fallback folds"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "declared_intended_start": self.declared_intended_start,
+            "declared_intended_end": self.declared_intended_end,
+            "actual_common_start": self.actual_common_start,
+            "actual_common_end": self.actual_common_end,
+            "oos_start": self.oos_start,
+            "oos_end": self.oos_end,
+            "expected_trading_days": self.expected_trading_days,
+            "actual_trading_days": self.actual_trading_days,
+            "coverage_percent": self.coverage_percent,
+            "missing_reason": self.missing_reason,
+            "default_fold_count": self.default_fold_count,
+            "fallback_fold_count": self.fallback_fold_count,
+            "cap_provenance_available": self.cap_provenance_available,
+            "fixed_sleeve_local_data": self.fixed_sleeve_local_data,
+            "per_symbol": [receipt.to_dict() for receipt in self.per_symbol],
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class VerificationResultArtifact:
     status: VerificationStatus
@@ -595,10 +938,21 @@ class VerificationResultArtifact:
     bug_signals: tuple[str, ...]
     tests_passed: bool
     commands_run: tuple[str, ...]
+    data_coverage: AggregateCoverageReceipt
+    infra_gate_outcome: InfraGateOutcome | None = None
+    infra_rationale: str | None = None
 
     @classmethod
-    def from_dict(cls, raw: object) -> VerificationResultArtifact:
+    def from_dict(
+        cls, raw: object, *, mode: ResearchMode | None = None
+    ) -> VerificationResultArtifact:
         data = _ensure_mapping(raw, label="verification_result")
+        infra_gate_raw = data.get("infra_gate_outcome")
+        infra_rationale = data.get("infra_rationale")
+        if infra_gate_raw is not None and not isinstance(infra_gate_raw, str):
+            raise AutoresearchValidationError("infra_gate_outcome must be a string or null")
+        if infra_rationale is not None and not isinstance(infra_rationale, str):
+            raise AutoresearchValidationError("infra_rationale must be a string or null")
         artifact = cls(
             status=VerificationStatus(_require_str(data, "status")),
             is_walk_forward_sharpe_net=_require_float(data, "is_walk_forward_sharpe_net"),
@@ -613,11 +967,21 @@ class VerificationResultArtifact:
             bug_signals=_require_string_list(data, "bug_signals"),
             tests_passed=_require_bool(data, "tests_passed"),
             commands_run=_require_string_list(data, "commands_run"),
+            data_coverage=AggregateCoverageReceipt.from_dict(data.get("data_coverage")),
+            infra_gate_outcome=InfraGateOutcome(infra_gate_raw)
+            if infra_gate_raw is not None
+            else None,
+            infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
         )
-        artifact.validate()
+        artifact.validate(mode=mode)
         return artifact
 
-    def validate(self) -> None:
+    def validate(
+        self,
+        *,
+        mode: ResearchMode | None = None,
+        infra_gate_outcome: InfraGateOutcome | None = None,
+    ) -> None:
         if self.status is VerificationStatus.PASS and (self.bug_signals or not self.tests_passed):
             raise AutoresearchValidationError(
                 "PASS verification cannot include bug signals or failing tests"
@@ -629,6 +993,24 @@ class VerificationResultArtifact:
         if self.status is VerificationStatus.TEST_FAILURE and self.tests_passed:
             raise AutoresearchValidationError(
                 "TEST_FAILURE verification cannot mark tests_passed=true"
+            )
+        self.data_coverage.validate()
+        outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
+        if mode is ResearchMode.DATA_INFRA_G0 and (outcome is None or not self.infra_rationale):
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale"
+            )
+        if mode is ResearchMode.ALPHA_RESEARCH and (outcome is not None or self.infra_rationale):
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH verification cannot contain infrastructure gate outcomes"
+            )
+        if (
+            mode is ResearchMode.ALPHA_RESEARCH
+            and self.data_coverage.fixed_sleeve_local_data
+            and self.data_coverage.cap_provenance_available
+        ):
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH fixed local sleeve cannot claim cap-verified universe compliance"
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -646,6 +1028,11 @@ class VerificationResultArtifact:
             "bug_signals": list(self.bug_signals),
             "tests_passed": self.tests_passed,
             "commands_run": list(self.commands_run),
+            "data_coverage": self.data_coverage.to_dict(),
+            "infra_gate_outcome": self.infra_gate_outcome.value
+            if self.infra_gate_outcome is not None
+            else None,
+            "infra_rationale": self.infra_rationale,
         }
 
 
@@ -742,14 +1129,16 @@ class FixResultArtifact:
 
 @dataclass(frozen=True, slots=True)
 class FinalDecisionArtifact:
+    experiment_id: str
     decision: FinalDecision
     recommended_metric_name: str
     recommended_metric_value: float | None
-    reviewer_verdict: str | None
+    reviewer_verdict: FinalReviewerVerdict
     rationale: str
     log_summary: str
     continue_loop: bool
     memory_write_required: bool
+    infra_rationale: str | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> FinalDecisionArtifact:
@@ -759,31 +1148,68 @@ class FinalDecisionArtifact:
             isinstance(metric_value, bool) or not isinstance(metric_value, int | float)
         ):
             raise AutoresearchValidationError("recommended_metric_value must be numeric or null")
-        reviewer_verdict = data.get("reviewer_verdict")
-        if reviewer_verdict is not None and not isinstance(reviewer_verdict, str):
-            raise AutoresearchValidationError("reviewer_verdict must be a string or null")
+        infra_rationale = data.get("infra_rationale")
+        if infra_rationale is not None and not isinstance(infra_rationale, str):
+            raise AutoresearchValidationError("infra_rationale must be a string or null")
         return cls(
+            experiment_id=_require_canonical_identifier(data, "experiment_id"),
             decision=FinalDecision(_require_str(data, "decision")),
             recommended_metric_name=_require_str(data, "recommended_metric_name"),
             recommended_metric_value=float(metric_value) if metric_value is not None else None,
-            reviewer_verdict=reviewer_verdict,
+            reviewer_verdict=FinalReviewerVerdict(_require_str(data, "reviewer_verdict")),
             rationale=_require_str(data, "rationale"),
             log_summary=_require_str(data, "log_summary"),
             continue_loop=_require_bool(data, "continue_loop"),
             memory_write_required=_require_bool(data, "memory_write_required"),
+            infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
         )
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "experiment_id": self.experiment_id,
             "decision": self.decision.value,
             "recommended_metric_name": self.recommended_metric_name,
             "recommended_metric_value": self.recommended_metric_value,
-            "reviewer_verdict": self.reviewer_verdict,
+            "reviewer_verdict": self.reviewer_verdict.value,
             "rationale": self.rationale,
             "log_summary": self.log_summary,
             "continue_loop": self.continue_loop,
             "memory_write_required": self.memory_write_required,
+            "infra_rationale": self.infra_rationale,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryVerificationReceipt:
+    experiment_id: str
+    kg_path: str
+    predicates: tuple[str, ...]
+    verified_rows_digest: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "experiment_id": self.experiment_id,
+            "kg_path": self.kg_path,
+            "predicates": list(self.predicates),
+            "verified_rows_digest": self.verified_rows_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> MemoryVerificationReceipt:
+        data = _ensure_mapping(raw, label="memory_verification_receipt")
+        digest = _require_str(data, "verified_rows_digest")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AutoresearchValidationError("verified_rows_digest must be a SHA-256 hex digest")
+        return cls(
+            experiment_id=_require_canonical_identifier(data, "experiment_id"),
+            kg_path=_require_str(data, "kg_path"),
+            predicates=tuple(
+                sorted(
+                    _normalise_predicate(item) for item in _require_string_list(data, "predicates")
+                )
+            ),
+            verified_rows_digest=digest,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -827,6 +1253,8 @@ class AutoresearchState:
     pending_fix_trigger: FixTriggerPhase | None = None
     final_decision: FinalDecisionArtifact | None = None
     memory_written: bool = False
+    mode: ResearchMode | None = None
+    memory_verification_receipt: MemoryVerificationReceipt | None = None
 
     @property
     def latest_debate(self) -> DebateResultArtifact | None:
@@ -865,9 +1293,17 @@ class AutoresearchState:
         context_raw = data.get("context_packet")
         implementation_raw = data.get("implementation_result")
         decision_raw = data.get("final_decision")
+        receipt_raw = data.get("memory_verification_receipt")
         pending_fix_trigger_raw = data.get("pending_fix_trigger")
         if pending_fix_trigger_raw is not None and not isinstance(pending_fix_trigger_raw, str):
             raise AutoresearchValidationError("pending_fix_trigger must be a string or null")
+        if "mode" not in data:
+            raise AutoresearchValidationError(
+                "mode must be explicit in persisted autoresearch state"
+            )
+        mode_raw = data.get("mode")
+        if mode_raw is not None and not isinstance(mode_raw, str):
+            raise AutoresearchValidationError("mode must be a string or null")
 
         state = cls(
             phase=Phase(_require_str(data, "phase")) if "phase" in data else Phase.SETUP_CONTEXT,
@@ -888,7 +1324,10 @@ class AutoresearchState:
             if implementation_raw is not None
             else None,
             verification_history=_parse_tuple(
-                "verification_history", VerificationResultArtifact.from_dict
+                "verification_history",
+                lambda item: VerificationResultArtifact.from_dict(
+                    item, mode=ResearchMode(mode_raw) if mode_raw is not None else None
+                ),
             ),
             review_history=_parse_tuple("review_history", ReviewResultArtifact.from_dict),
             fix_history=_parse_tuple("fix_history", FixResultArtifact.from_dict),
@@ -901,6 +1340,10 @@ class AutoresearchState:
             memory_written=_require_bool(data, "memory_written")
             if "memory_written" in data
             else False,
+            mode=ResearchMode(mode_raw) if mode_raw is not None else None,
+            memory_verification_receipt=MemoryVerificationReceipt.from_dict(receipt_raw)
+            if receipt_raw is not None
+            else None,
         )
         return state
 
@@ -925,6 +1368,10 @@ class AutoresearchState:
             else None,
             "final_decision": self.final_decision.to_dict() if self.final_decision else None,
             "memory_written": self.memory_written,
+            "mode": self.mode.value if self.mode is not None else None,
+            "memory_verification_receipt": self.memory_verification_receipt.to_dict()
+            if self.memory_verification_receipt is not None
+            else None,
         }
 
 
@@ -1064,6 +1511,9 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "hard_constraints",
             "available_data_sources",
             "loaded_quantipy_sources",
+            "research_mode",
+            "mode_rationale",
+            "burned_theory_families",
         ]
     },
     ArtifactType.DEBATE_RESULT: {
@@ -1114,7 +1564,20 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "bug_signals",
             "tests_passed",
             "commands_run",
-        ]
+            "data_coverage",
+            "infra_gate_outcome",
+            "infra_rationale",
+        ],
+        "mode_requirements": {
+            ResearchMode.ALPHA_RESEARCH.value: {
+                "infra_gate_outcome": None,
+                "infra_rationale": None,
+            },
+            ResearchMode.DATA_INFRA_G0.value: {
+                "infra_gate_outcome": "required",
+                "infra_rationale": "required",
+            },
+        },
     },
     ArtifactType.REVIEW_RESULT: {
         "required_fields": [
@@ -1141,17 +1604,30 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
     },
     ArtifactType.FINAL_DECISION: {
         "required_fields": [
+            "experiment_id",
             "decision",
             "recommended_metric_name",
-            "recommended_metric_value|null",
-            "reviewer_verdict|null",
+            "recommended_metric_value",
+            "reviewer_verdict",
             "rationale",
             "log_summary",
             "continue_loop",
             "memory_write_required",
-        ]
+            "infra_rationale",
+        ],
+        "mode_requirements": {
+            ResearchMode.ALPHA_RESEARCH.value: {"infra_rationale": None},
+            ResearchMode.DATA_INFRA_G0.value: {"infra_rationale": "required"},
+            "no_consensus": {
+                "memory_write_required": False,
+                "infra_rationale": None,
+            },
+        },
     },
-    ArtifactType.MEMORY_WRITE: {"required_fields": ["memory_written=true"]},
+    ArtifactType.MEMORY_WRITE: {
+        "required_fields": ["memory_verification_receipt"],
+        "receipt_type": "memory_verification_receipt",
+    },
     ArtifactType.NEXT_ITERATION: {"required_fields": ["start_next_iteration"]},
 }
 
@@ -1347,12 +1823,51 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("consensus_retry_count must be 0 or 1")
     if state.context_packet is not None and state.setup is None:
         raise AutoresearchValidationError("context_packet requires setup first")
+    if state.context_packet is not None and state.mode is None:
+        raise AutoresearchValidationError("mode must be explicit after a context_packet exists")
+    if state.context_packet is not None and state.mode is not state.context_packet.research_mode:
+        raise AutoresearchValidationError("state mode must match context_packet research_mode")
     if state.debate_rounds and state.context_packet is None:
         raise AutoresearchValidationError("debate history requires a context_packet")
     if state.consensus_history and state.latest_debate is None:
         raise AutoresearchValidationError("consensus history requires a debate_result")
     if state.memory_written and state.final_decision is None:
         raise AutoresearchValidationError("memory_written cannot be true before final_decision")
+    if (
+        state.memory_written
+        and state.final_decision is not None
+        and not state.final_decision.memory_write_required
+    ):
+        raise AutoresearchValidationError(
+            "memory_written is invalid when final_decision.memory_write_required=false"
+        )
+    if state.memory_written and state.memory_verification_receipt is None:
+        raise AutoresearchValidationError("memory_written requires a memory_verification_receipt")
+    if not state.memory_written and state.memory_verification_receipt is not None:
+        raise AutoresearchValidationError(
+            "memory_verification_receipt requires memory_written=true"
+        )
+    if (
+        state.memory_verification_receipt is not None
+        and state.final_decision is not None
+        and state.memory_verification_receipt.experiment_id != state.final_decision.experiment_id
+    ):
+        raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
+    if state.final_decision is not None:
+        decision = state.final_decision
+        if decision.decision is FinalDecision.NO_CONSENSUS:
+            if decision.memory_write_required:
+                raise AutoresearchValidationError(
+                    "NO_CONSENSUS requires final_decision.memory_write_required=false"
+                )
+            if state.memory_verification_receipt is not None:
+                raise AutoresearchValidationError(
+                    "NO_CONSENSUS must not have a memory_verification_receipt"
+                )
+        elif not decision.memory_write_required:
+            raise AutoresearchValidationError(
+                "completed final decisions require memory_write_required=true"
+            )
     if state.implementation_result and (
         state.latest_consensus is None
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
@@ -1369,7 +1884,9 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
     if state.final_decision is not None and state.phase is not Phase.REPEAT:
         raise AutoresearchValidationError("final_decision requires repeat phase")
     for debate in state.debate_rounds:
-        _validate_debate_result(debate, policy)
+        _validate_debate_result(debate, policy, mode=state.mode, context=state.context_packet)
+    for verification in state.verification_history:
+        verification.validate(mode=state.mode)
     for review in state.review_history:
         _validate_review_result(review, policy)
     if state.phase is Phase.DEBATE and state.context_packet is None:
@@ -1424,13 +1941,27 @@ def validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None
     _validate_state(state, policy)
 
 
-def _validate_debate_result(debate: DebateResultArtifact, policy: AutoresearchPolicy) -> None:
+def _validate_debate_result(
+    debate: DebateResultArtifact,
+    policy: AutoresearchPolicy,
+    *,
+    mode: ResearchMode | None = None,
+    context: ContextPacketArtifact | None = None,
+) -> None:
     expected_ids = set(policy.debate_agent_ids)
     actual_ids = {submission.agent_id for submission in debate.submissions}
     if actual_ids != expected_ids:
         raise AutoresearchValidationError(
             "debate_result must contain exactly the configured five debate agents"
         )
+    if mode is ResearchMode.ALPHA_RESEARCH and context is not None:
+        burned = set(context.burned_theory_families)
+        for submission in debate.submissions:
+            family = _normalise_identifier(submission.theory_family)
+            if family in burned and not submission.materially_new_evidence:
+                raise AutoresearchValidationError(
+                    "alpha debate theory_family is burned and requires materially_new_evidence"
+                )
 
 
 def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPolicy) -> None:
@@ -1536,9 +2067,13 @@ def _select_phase_target(
         return PhaseTarget((policy.fixer.agent_id,), ArtifactType.FIX_RESULT)
     if state.phase is Phase.DECISION_LOG:
         return PhaseTarget((policy.main.agent_id,), ArtifactType.FINAL_DECISION)
-    if not state.memory_written:
+    if state.final_decision is not None and state.final_decision.memory_write_required:
+        if state.memory_written:
+            return PhaseTarget((), ArtifactType.NEXT_ITERATION)
         return PhaseTarget((), ArtifactType.MEMORY_WRITE)
-    return PhaseTarget((), ArtifactType.NEXT_ITERATION)
+    if _is_explicit_no_memory_transition(state):
+        return PhaseTarget((), ArtifactType.NEXT_ITERATION)
+    raise AutoresearchValidationError("repeat phase has no valid memory transition")
 
 
 def _extract_first_float(text: str) -> float | None:
@@ -1565,7 +2100,11 @@ def _validate_final_decision_artifact(
     latest_review = state.latest_review
     latest_verification = state.latest_verification
     latest_consensus = state.latest_consensus
-    expected_reviewer_verdict = latest_review.verdict.value if latest_review is not None else None
+    expected_reviewer_verdict = (
+        FinalReviewerVerdict(latest_review.verdict.value)
+        if latest_review is not None
+        else FinalReviewerVerdict.NOT_RUN
+    )
     if artifact.reviewer_verdict != expected_reviewer_verdict:
         raise AutoresearchValidationError(
             "final_decision reviewer_verdict must match latest review"
@@ -1580,7 +2119,44 @@ def _validate_final_decision_artifact(
             raise AutoresearchValidationError(
                 "final_decision must be NO_CONSENSUS when consensus never reached a majority"
             )
+        if artifact.memory_write_required:
+            raise AutoresearchValidationError(
+                "NO_CONSENSUS requires final_decision.memory_write_required=false"
+            )
+        if artifact.infra_rationale is not None:
+            raise AutoresearchValidationError(
+                "NO_CONSENSUS final_decision cannot contain infra_rationale"
+            )
         return
+
+    if state.mode is ResearchMode.DATA_INFRA_G0:
+        if artifact.decision not in (FinalDecision.INFRA_REPAIRED, FinalDecision.INFRA_BLOCKED):
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision must be INFRA_REPAIRED or INFRA_BLOCKED"
+            )
+        if not artifact.infra_rationale:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision requires infra_rationale"
+            )
+        if latest_verification is None or latest_verification.infra_gate_outcome is None:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision requires an infrastructure verification gate"
+            )
+        expected = (
+            FinalDecision.INFRA_REPAIRED
+            if latest_verification.infra_gate_outcome is InfraGateOutcome.GATE_PASSED
+            else FinalDecision.INFRA_BLOCKED
+        )
+        if artifact.decision is not expected:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision must match infra_gate_outcome"
+            )
+        return
+
+    if artifact.infra_rationale:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH final_decision cannot contain infra_rationale"
+        )
 
     if (
         latest_verification is not None
@@ -1727,14 +2303,37 @@ def _phase_instruction(
     state_json = _json_block(_artifact_context(state))
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(phase)
+    mode_contract = _mode_contract(state)
     return (
         f"Autoresearch phase: {phase.value}\n"
         f"Target agents: {agent_text}\n"
         f"Expected artifact type: {expected_artifact_type.value}\n"
         f"Phase instruction:\n{instructions[phase]}\n\n"
+        f"{mode_contract}"
         f"{workspace_contract}"
         f"Artifact contract:\n{contract}\n\n"
         f"Current state snapshot:\n{state_json}"
+    )
+
+
+def _mode_contract(state: AutoresearchState) -> str:
+    if state.mode is None:
+        return (
+            "Mode contract:\n"
+            "- The context packet must choose ALPHA_RESEARCH or DATA_INFRA_G0 and give "
+            "a nonempty rationale plus burned theory families.\n\n"
+        )
+    if state.mode is ResearchMode.DATA_INFRA_G0:
+        return (
+            "Mode contract: DATA_INFRA_G0\n"
+            "- Repair data/provenance/folds only. Verification must emit an explicit "
+            "infrastructure gate outcome; do not claim alpha performance validation.\n\n"
+        )
+    return (
+        "Mode contract: ALPHA_RESEARCH\n"
+        "- This is a strategy experiment. Burned theory families require materially "
+        "new evidence. A fixed local sleeve must be disclosed and cannot claim "
+        "cap-verified compliance.\n\n"
     )
 
 
@@ -1823,7 +2422,12 @@ def advance_state(
         if isinstance(artifact, ContextPacketArtifact):
             if state.setup is None:
                 raise AutoresearchValidationError("context packet requires setup first")
-            return replace(state, context_packet=artifact, phase=Phase.DEBATE)
+            return replace(
+                state,
+                context_packet=artifact,
+                mode=artifact.research_mode,
+                phase=Phase.DEBATE,
+            )
         raise AutoresearchValidationError(
             "setup_context phase accepts setup or context_packet artifacts only"
         )
@@ -1831,7 +2435,12 @@ def advance_state(
     if state.phase is Phase.DEBATE:
         if not isinstance(artifact, DebateResultArtifact):
             raise AutoresearchValidationError("debate phase accepts debate_result only")
-        _validate_debate_result(artifact, policy)
+        _validate_debate_result(
+            artifact,
+            policy,
+            mode=state.mode,
+            context=state.context_packet,
+        )
         expected_round = len(state.debate_rounds) + 1
         if artifact.round_number != expected_round:
             raise AutoresearchValidationError(
@@ -1893,6 +2502,7 @@ def advance_state(
             raise AutoresearchValidationError("verification phase accepts verification_result only")
         if state.implementation_result is None:
             raise AutoresearchValidationError("verification requires implementation_result")
+        artifact.validate(mode=state.mode)
         next_verification_history = (*state.verification_history, artifact)
         if artifact.status is VerificationStatus.PASS:
             return replace(
@@ -1983,20 +2593,196 @@ def advance_state(
 
 
 def can_write_memory(state: AutoresearchState) -> bool:
-    return state.phase is Phase.REPEAT and state.final_decision is not None
+    return (
+        state.phase is Phase.REPEAT
+        and state.final_decision is not None
+        and state.final_decision.memory_write_required
+    )
 
 
-def mark_memory_written(state: AutoresearchState) -> AutoresearchState:
+def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    return (
+        state.phase is Phase.REPEAT
+        and decision is not None
+        and decision.decision is FinalDecision.NO_CONSENSUS
+        and not decision.memory_write_required
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+    )
+
+
+def _default_mempalace_kg_path() -> Path:
+    palace_root = Path(
+        os.environ.get("MEMPALACE_PALACE", str(Path.home() / ".mempalace/palace"))
+    ).expanduser()
+    return palace_root / "knowledge_graph.sqlite3"
+
+
+def _standard_metric_object(decision: FinalDecisionArtifact) -> str:
+    if decision.recommended_metric_value is None:
+        return _normalise_predicate(decision.recommended_metric_name)
+    metric = f"{decision.recommended_metric_name}_{decision.recommended_metric_value:g}"
+    return _normalise_predicate(metric)
+
+
+def _standard_data_window_object(coverage: AggregateCoverageReceipt) -> str:
+    """Return the normalized common data/OOS window token required in MemPalace."""
+    return _normalise_predicate(
+        f"{coverage.actual_common_start}_to_{coverage.actual_common_end}_oos_"
+        f"{coverage.oos_start}_to_{coverage.oos_end}"
+    )
+
+
+def verify_mempalace_final_decision(
+    state: AutoresearchState,
+    kg_path: Path | None = None,
+) -> MemoryVerificationReceipt:
+    """Read and attest KG facts; this function never mutates MemPalace."""
+    if state.final_decision is None or state.mode is None:
+        raise AutoresearchValidationError("MemPalace verification requires final_decision and mode")
+    if not state.final_decision.memory_write_required:
+        raise AutoresearchValidationError(
+            "MemPalace verification is not required for this final decision"
+        )
+    path = (kg_path if kg_path is not None else _default_mempalace_kg_path()).expanduser()
+    if not path.is_file():
+        raise AutoresearchValidationError(f"MemPalace KG does not exist: {path}")
+    decision = state.final_decision
+    required = {
+        "decision",
+        "research_mode",
+        "data_window",
+        "reviewer_verdict",
+    }
+    if state.mode is ResearchMode.ALPHA_RESEARCH:
+        required.add("alpha_decision_metric")
+        required.add("keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to")
+    else:
+        required.update({"infra_gate_outcome", "infra_rationale"})
+    verification = state.latest_verification
+    if verification is None:
+        raise AutoresearchValidationError(
+            "MemPalace verification requires the final decision's verification_result"
+        )
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(triples)").fetchall()}
+        required_columns = {
+            "id",
+            "subject",
+            "predicate",
+            "object",
+            "valid_from",
+            "valid_to",
+            "source_file",
+            "source_drawer_id",
+        }
+        if not required_columns <= columns:
+            raise AutoresearchValidationError("MemPalace KG triples schema is incomplete")
+        rows = connection.execute(
+            """
+            SELECT id, subject, predicate, object, valid_from, valid_to,
+                   source_file, source_drawer_id
+            FROM triples WHERE subject = ?
+            """,
+            (decision.experiment_id,),
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise AutoresearchValidationError(f"cannot read MemPalace KG: {exc}") from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+    facts: dict[str, list[tuple[str, str, str, str, str, str, str, str]]] = {}
+    for row in rows:
+        normalized_predicate = _normalise_predicate(str(row[2]))
+        if normalized_predicate not in required:
+            continue
+        source_file = str(row[6] or "").strip()
+        source_drawer_id = str(row[7] or "").strip()
+        if not source_file and not source_drawer_id:
+            raise AutoresearchValidationError(
+                "MemPalace standardized facts require source_file or source_drawer_id"
+            )
+        if not str(row[3]).strip():
+            raise AutoresearchValidationError(
+                "MemPalace standardized facts require non-empty objects"
+            )
+        normalized_row = (
+            "" if row[0] is None else str(row[0]),
+            "" if row[1] is None else str(row[1]),
+            "" if row[2] is None else str(row[2]),
+            "" if row[3] is None else str(row[3]),
+            "" if row[4] is None else str(row[4]),
+            "" if row[5] is None else str(row[5]),
+            "" if row[6] is None else str(row[6]),
+            "" if row[7] is None else str(row[7]),
+        )
+        facts.setdefault(normalized_predicate, []).append(normalized_row)
+    missing = sorted(required - facts.keys())
+    if missing:
+        raise AutoresearchValidationError(
+            "MemPalace required standardized facts are missing: " + ", ".join(missing)
+        )
+
+    expected_objects = {
+        "decision": _normalise_predicate(decision.decision.value),
+        "research_mode": state.mode.value,
+        "data_window": _standard_data_window_object(verification.data_coverage),
+        "reviewer_verdict": _normalise_predicate(decision.reviewer_verdict.value),
+    }
+    if state.mode is ResearchMode.ALPHA_RESEARCH:
+        expected_objects["alpha_decision_metric"] = _standard_metric_object(decision)
+        expected_objects[
+            "keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to"
+        ] = _normalise_predicate(decision.rationale)
+    elif verification.infra_gate_outcome is not None:
+        expected_objects["infra_gate_outcome"] = _normalise_predicate(
+            verification.infra_gate_outcome.value
+        )
+        if decision.infra_rationale is None:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 MemPalace verification requires final infra_rationale"
+            )
+        expected_objects["infra_rationale"] = _normalise_predicate(decision.infra_rationale)
+    for predicate, expected_object in expected_objects.items():
+        if any(_normalise_predicate(row[3]) != expected_object for row in facts[predicate]):
+            raise AutoresearchValidationError(
+                f"MemPalace {predicate} fact does not match final decision artifact"
+            )
+    stable_rows = sorted(row for predicate_rows in facts.values() for row in predicate_rows)
+    digest = _sha256_text(json.dumps(stable_rows, separators=(",", ":"), ensure_ascii=True))
+    return MemoryVerificationReceipt(
+        experiment_id=decision.experiment_id,
+        kg_path=str(path),
+        predicates=tuple(sorted(facts)),
+        verified_rows_digest=digest,
+    )
+
+
+def mark_memory_written(
+    state: AutoresearchState,
+    receipt: MemoryVerificationReceipt,
+) -> AutoresearchState:
     if not can_write_memory(state):
-        raise AutoresearchValidationError("memory write is allowed only after final decision")
-    return replace(state, memory_written=True)
+        raise AutoresearchValidationError(
+            "memory write is allowed only after final decision that requires memory"
+        )
+    if state.final_decision is None or receipt.experiment_id != state.final_decision.experiment_id:
+        raise AutoresearchValidationError("memory receipt must match final decision experiment_id")
+    return replace(state, memory_written=True, memory_verification_receipt=receipt)
 
 
 def start_next_iteration(state: AutoresearchState) -> AutoresearchState:
-    if not state.memory_written:
-        raise AutoresearchValidationError("cannot start next iteration before memory is written")
     if state.setup is None or state.final_decision is None:
         raise AutoresearchValidationError("next iteration requires completed current iteration")
+    if not state.memory_written and not _is_explicit_no_memory_transition(state):
+        raise AutoresearchValidationError(
+            "cannot start next iteration before memory is written or an explicit "
+            "NO_CONSENSUS no-memory transition"
+        )
     return AutoresearchState(
         phase=Phase.SETUP_CONTEXT,
         iteration=state.iteration + 1,
@@ -2039,7 +2825,7 @@ def load_artifact_file(
     if target.artifact_type is ArtifactType.IMPLEMENTATION_RESULT:
         return ImplementationResultArtifact.from_dict(raw)
     if target.artifact_type is ArtifactType.VERIFICATION_RESULT:
-        return VerificationResultArtifact.from_dict(raw)
+        return VerificationResultArtifact.from_dict(raw, mode=state.mode)
     if target.artifact_type is ArtifactType.REVIEW_RESULT:
         return ReviewResultArtifact.from_dict(raw)
     if target.artifact_type is ArtifactType.FIX_RESULT:

@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-07-04
+**Last Updated:** 2026-07-09
 
 ## Goal
 
@@ -74,6 +74,8 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | Loop never stops | "GOAL MET" was premature at OOS 5.9; continuous exploration builds a portfolio |
 | Real data only, no synthetic | Early experiments used synthetic data — all were meaningless |
 | 95% data range coverage | Experiments limited to 6mo caused useless OOS; use full 2021-2026 range |
+| Explicit mode gate | Data/provenance repair runs as DATA_INFRA_G0, never as alpha performance validation |
+| Coverage receipts | Per-symbol and aggregate intended/actual/OOS windows, days, folds, provenance, and fixed-sleeve disclosure are required |
 | Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
 | Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
 | 5-agent research debate | Mixed 5.6/5.5/5.4 high-reasoning panel spends frontier intelligence on data/skeptic pressure while keeping bounded theory and implementation-feasibility work cheaper |
@@ -116,6 +118,14 @@ read the live target-repo files at stage time. The PM must use the
 deterministic runner in `gateway.autoresearch_runner` or
 `gateway-cli autoresearch-next` for phase selection, retry gates, and receipt
 validation instead of prompt-only loop memory.
+
+Each context packet chooses `ALPHA_RESEARCH` (strategy performance work) or
+`DATA_INFRA_G0` (data/provenance repair) with a rationale. G0 has its own
+explicit infrastructure gate outcome and cannot produce an alpha KEEP claim.
+The runner also blocks burned alpha theory families unless a debate submission
+documents materially new evidence. Final MemPalace logging is complete only
+after `autoresearch-mark-memory` verifies standardized, provenanced KG facts
+against the final artifact and persists its read-only verification receipt.
 
 ## Success Criteria
 

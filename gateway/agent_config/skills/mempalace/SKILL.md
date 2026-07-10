@@ -32,10 +32,11 @@ structured, auditable, and queryable through MemPalace.
 2. **Debate/review/implementation/fix stages** — non-PM agents use only `mempalace-readonly` plus denied mutation tools in config
 3. **Final log stage only** — after implementation, verification, review, fixes, and decision, the PM writes experiment results with `mempalace_add_drawer`, `mempalace_kg_add`, and `mempalace_diary_write`
 
-Only the PM may write to MemPalace, and only after an experiment has a final
-decision (`KEEP`, `DISCARD`, or `CRASH`). Debate notes, consensus drafts,
-winning theories, `NO_CONSENSUS` outcomes, implementation plans, and in-progress
-review findings are not MemPalace writes.
+Only the PM may write to MemPalace, and only after a memory-required final
+decision (`KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, `DISCARD`, `CRASH`,
+`INFRA_REPAIRED`, or `INFRA_BLOCKED`). Debate notes, consensus drafts, winning
+theories, `NO_CONSENSUS` outcomes, implementation plans, and in-progress review
+findings are not MemPalace writes.
 
 Non-PM stage agents are structurally read-only: they should not receive this
 skill and should deny every MemPalace mutation/operation tool in config.
@@ -53,6 +54,54 @@ skill and should deny every MemPalace mutation/operation tool in config.
 - Experiment → failed_due_to → FailureMode (e.g., "T9-HRA" → "failed_due_to" → "data leakage")
 - Feature → applied_to → Ticker (e.g., "VWAP deviation" → "applied_to" → "NVDA")
 - Experiment → used_model → Model (e.g., "T15-AMA" → "used_model" → "HistGradientBoosting")
+
+### Autoresearch Verification Schema (Required)
+
+Use one lowercase kebab-case `experiment_id` everywhere (for example
+`t15-ama` or `iteration-42`): it must start with a letter and is rejected if
+uppercase or surrounding whitespace is supplied. Predicates are lowercase
+snake_case. Every required triple must include either `source_file` or
+`source_drawer_id`, and every object must be nonempty; the runner rejects
+unprovenanced or empty facts.
+
+Normalize free-text KG objects once by lowercasing, trimming, and replacing
+each run of non-alphanumeric characters with one underscore. The required
+`data_window` token is exactly
+`<actual_common_start>_to_<actual_common_end>_oos_<oos_start>_to_<oos_end>`
+after that normalization, using the aggregate verification receipt dates.
+
+For every memory-required final decision, write these facts with the experiment
+ID as subject:
+
+| Predicate | Required object |
+|---|---|
+| `decision` | exact final decision, normalized (for example `keep`) |
+| `research_mode` | `alpha_research` or `data_infra_g0` |
+| `data_window` | normalized aggregate common/OOS token defined above |
+| `reviewer_verdict` | exact reviewer verdict, normalized; `not_run` only when no review ran |
+| `alpha_decision_metric` | alpha mode only: normalized `<metric_name>_<value>` |
+| `keeper_rationale` | alpha KEEP-family decision only; exact normalized final rationale |
+| `failed_due_to` | alpha non-KEEP decision only; exact normalized final rationale |
+| `infra_gate_outcome` | G0 only: `gate_passed` or `remediation_required` |
+| `infra_rationale` | G0 only; exact normalized final infra rationale |
+
+`NO_CONSENSUS` has `memory_write_required=false`, `reviewer_verdict=NOT_RUN`,
+and is not written or verified in MemPalace. Do not invoke
+`autoresearch-mark-memory` for it.
+
+Write sequence is mandatory:
+
+1. Write the final drawer with a stable `source_drawer_id` (or prepare a
+   stable `source_file`).
+2. Write every standardized KG fact above with that provenance.
+3. Run `gateway-cli autoresearch-mark-memory`; it opens the KG read-only,
+   verifies the facts against the final artifact, and persists a digest receipt.
+4. Only after that receipt is persisted may `autoresearch-start-next` run.
+   The sole exception is the explicit `NO_CONSENSUS` no-memory transition
+   above, which has no receipt.
+
+`autoresearch-mark-memory` never writes or repairs MemPalace. Missing facts,
+noncanonical IDs, source-less facts, and mismatched final decisions fail closed.
 
 ### Do NOT Store
 - Ephemeral status updates (use `[TASK:status]` conventions)
@@ -92,10 +141,12 @@ Add a structured temporal fact to the knowledge graph.
 triple per key relationship.
 **Examples:**
 ```
-mempalace_kg_add(subject: "T15-AMA", predicate: "achieved_is_sharpe", object: "0.73", valid_from: "2026-04-01")
-mempalace_kg_add(subject: "T15-AMA", predicate: "used_feature", object: "EMA spread × mention zscore", valid_from: "2026-04-01")
-mempalace_kg_add(subject: "T15-AMA", predicate: "used_model", object: "HistGradientBoosting", valid_from: "2026-04-01")
-mempalace_kg_add(subject: "T15-AMA", predicate: "decision", object: "KEEP", valid_from: "2026-04-01")
+mempalace_kg_add(subject: "t15-ama", predicate: "research_mode", object: "alpha_research", source_drawer_id: "room_t15_ama")
+mempalace_kg_add(subject: "t15-ama", predicate: "alpha_decision_metric", object: "oos_sharpe_net_0_41", source_drawer_id: "room_t15_ama")
+mempalace_kg_add(subject: "t15-ama", predicate: "data_window", object: "2021_01_04_to_2021_12_31_oos_2021_10_01_to_2021_12_31", source_drawer_id: "room_t15_ama")
+mempalace_kg_add(subject: "t15-ama", predicate: "reviewer_verdict", object: "pass", source_drawer_id: "room_t15_ama")
+mempalace_kg_add(subject: "t15-ama", predicate: "keeper_rationale", object: "improves_baseline_without_review_blockers", source_drawer_id: "room_t15_ama")
+mempalace_kg_add(subject: "t15-ama", predicate: "decision", object: "keep", source_drawer_id: "room_t15_ama")
 ```
 
 ### mempalace_kg_query
