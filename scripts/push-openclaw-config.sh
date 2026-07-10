@@ -19,10 +19,27 @@ REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 ENV_FILE="${REPO_ROOT}/gateway/openclaw_config/.env"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
+MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
+MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
+MEMPALACE_FULL_AGENT_IDS=(
+  "main"
+)
+MEMPALACE_READONLY_AGENT_IDS=(
+  "context-curator"
+  "debater-microstructure"
+  "debater-data"
+  "debater-skeptic"
+  "debater-theory"
+  "debater-implementation"
+  "consensus-arbiter"
+  "implementer"
+  "reviewer"
+  "fixer"
+)
 MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_add_drawer"
   "mempalace_check_duplicate"
@@ -57,7 +74,13 @@ build_mempalace_mutation_deny_ids_json() {
   '
 }
 
+build_string_array_json() {
+  printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
+}
+
 MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_deny_ids_json)"
+MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
+MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
@@ -104,6 +127,11 @@ echo "Verified Quantipy methodology source files in ${QUANTIPY_ROOT}"
 
 if [[ ! -d "${SKILLS_SRC}" ]]; then
   echo "ERROR: Repo-managed skills directory not found at ${SKILLS_SRC}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${MEMPALACE_READONLY_WRAPPER_SRC}" ]]; then
+  echo "ERROR: Repo-managed MemPalace read-only wrapper not found at ${MEMPALACE_READONLY_WRAPPER_SRC}" >&2
   exit 1
 fi
 
@@ -206,6 +234,7 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
 MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
 MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
 MEMPALACE_PALACE="${HOME}/.mempalace/palace"
+MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
 MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
 MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
 MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
@@ -239,15 +268,37 @@ if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; the
   exit 1
 fi
 
+mkdir -p "${OPENCLAW_HOME}"
+cp "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}"
+echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
+
 MERGED=$(echo "${MERGED}" | jq \
   --arg cmd "${MEMPALACE_PYTHON}" \
   --arg palace "${MEMPALACE_PALACE}" \
+  --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
   --arg cache "${FASTEMBED_CACHE_PATH}" \
   --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
-  --arg offline "${HF_HUB_OFFLINE}" '
+  --arg offline "${HF_HUB_OFFLINE}" \
+  --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
+  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
   .mcp.servers.mempalace = {
     "command": $cmd,
     "args": ["-m", "mempalace.mcp_server", "--palace", $palace],
+    "codex": {
+      "agents": $full_agents
+    },
+    "env": {
+      "FASTEMBED_CACHE_PATH": $cache,
+      "MEMPALACE_EMBEDDING_MODEL": $model,
+      "HF_HUB_OFFLINE": $offline
+    }
+  }
+  | .mcp.servers."mempalace-readonly" = {
+    "command": $cmd,
+    "args": [$wrapper, "--palace", $palace],
+    "codex": {
+      "agents": $readonly_agents
+    },
     "env": {
       "FASTEMBED_CACHE_PATH": $cache,
       "MEMPALACE_EMBEDDING_MODEL": $model,
@@ -256,6 +307,7 @@ MERGED=$(echo "${MERGED}" | jq \
   }
 ')
 echo "Resolved required MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
+echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
 echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
 
 # ── Force-set tools section from repo config ─────────────────────────────────
@@ -419,6 +471,14 @@ fi
 # repo-managed autoresearch target shape.
 if ! echo "${MERGED}" | jq -e \
   --arg pm "${PM_MODEL_PRIMARY}" \
+  --arg cmd "${MEMPALACE_PYTHON}" \
+  --arg palace "${MEMPALACE_PALACE}" \
+  --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
+  --arg cache "${FASTEMBED_CACHE_PATH}" \
+  --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
+  --arg offline "${HF_HUB_OFFLINE}" \
+  --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
+  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" '
   def expected_models: {
     "main": $pm,
@@ -438,6 +498,22 @@ if ! echo "${MERGED}" | jq -e \
   and (.agents.defaults.memorySearch.enabled == false)
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
+  and (.mcp.servers.mempalace.command == $cmd)
+  and (.mcp.servers.mempalace.args == ["-m", "mempalace.mcp_server", "--palace", $palace])
+  and ((.mcp.servers.mempalace.codex.agents // []) == $full_agents)
+  and (.mcp.servers.mempalace.env == {
+    "FASTEMBED_CACHE_PATH": $cache,
+    "MEMPALACE_EMBEDDING_MODEL": $model,
+    "HF_HUB_OFFLINE": $offline
+  })
+  and (.mcp.servers."mempalace-readonly".command == $cmd)
+  and (.mcp.servers."mempalace-readonly".args == [$wrapper, "--palace", $palace])
+  and ((.mcp.servers."mempalace-readonly".codex.agents // []) == $readonly_agents)
+  and (.mcp.servers."mempalace-readonly".env == {
+    "FASTEMBED_CACHE_PATH": $cache,
+    "MEMPALACE_EMBEDDING_MODEL": $model,
+    "HF_HUB_OFFLINE": $offline
+  })
   and (([.agents.list[].id] | sort) == (expected_models | keys | sort))
   and all(.agents.list[]; .model.primary == expected_models[.id])
   and all(.agents.list[]; .thinkingDefault == "high")
@@ -456,7 +532,7 @@ if ! echo "${MERGED}" | jq -e \
   ] | map(select(. as $tool | $mempalace_mutation_denies | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, main PM model/skills, MemPalace read-only stage agents, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, PM model/skills, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
 echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."

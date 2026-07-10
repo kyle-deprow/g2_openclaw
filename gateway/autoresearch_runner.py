@@ -126,6 +126,10 @@ class FixTriggerPhase(StrEnum):
 KEEP_DECISIONS = frozenset(
     {FinalDecision.KEEP, FinalDecision.SIGNIFICANT_KEEP, FinalDecision.STRONG_KEEP}
 )
+MEMPALACE_CONFIG_PLACEHOLDER = "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
+MEMPALACE_FULL_SERVER_ID = "mempalace"
+MEMPALACE_READONLY_SERVER_ID = "mempalace-readonly"
+MEMPALACE_READONLY_WRAPPER_BASENAME = "mempalace-readonly-server.py"
 MEMPALACE_MUTATION_TOOLS = (
     "mempalace_add_drawer",
     "mempalace_check_duplicate",
@@ -149,6 +153,27 @@ MEMPALACE_MUTATION_TOOL_RUNTIME_PREFIXES = (
     "mempalace__",
     "mcp__mempalace__",
     "mempalace.",
+)
+MEMPALACE_READONLY_TOOL_NAMES = (
+    "mempalace_status",
+    "mempalace_search",
+    "mempalace_get_drawer",
+    "mempalace_list_drawers",
+    "mempalace_list_wings",
+    "mempalace_list_rooms",
+    "mempalace_get_taxonomy",
+    "mempalace_get_aaak_spec",
+    "mempalace_diary_read",
+    "mempalace_kg_query",
+    "mempalace_kg_timeline",
+    "mempalace_kg_stats",
+    "mempalace_traverse",
+    "mempalace_find_tunnels",
+    "mempalace_follow_tunnels",
+    "mempalace_graph_stats",
+    "mempalace_list_tunnels",
+    "mempalace_list_hallways",
+    "mempalace_memories_filed_away",
 )
 
 
@@ -209,6 +234,17 @@ def _require_string_list(raw: Mapping[str, object], field_name: str) -> tuple[st
     for item in value:
         if not isinstance(item, str):
             raise AutoresearchValidationError(f"{field_name} must be a list of strings")
+        items.append(item)
+    return tuple(items)
+
+
+def _require_string_sequence(raw: object, *, label: str) -> tuple[str, ...]:
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        raise AutoresearchValidationError(f"{label} must be a list of strings")
+    items: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise AutoresearchValidationError(f"{label} must be a list of strings")
         items.append(item)
     return tuple(items)
 
@@ -1756,12 +1792,14 @@ def load_autoresearch_policy(
         reviewer=_agent_policy_from_json(agent_map, "reviewer"),
         fixer=_agent_policy_from_json(agent_map, "fixer"),
     )
-    _validate_policy(policy, agent_map)
+    _validate_policy(policy, agent_map, config)
     return policy
 
 
 def _validate_policy(
-    policy: AutoresearchPolicy, agent_map: Mapping[str, Mapping[str, object]]
+    policy: AutoresearchPolicy,
+    agent_map: Mapping[str, Mapping[str, object]],
+    config: Mapping[str, object],
 ) -> None:
     if policy.main.model != "openai/gpt-5.6-sol" or policy.main.reasoning != "high":
         raise AutoresearchConfigError("main must be openai/gpt-5.6-sol with high reasoning")
@@ -1810,6 +1848,7 @@ def _validate_policy(
         raise AutoresearchConfigError(
             "main allowAgents must exactly match the autoresearch stage roster"
         )
+    _validate_mempalace_server_split(config, policy)
     for agent in (
         policy.context_curator,
         *policy.debate_agents,
@@ -1834,6 +1873,84 @@ def _validate_policy(
             raise AutoresearchConfigError(
                 f"{agent.agent_id} must deny MemPalace mutation tools: {', '.join(missing_deny)}"
             )
+
+
+def _validate_mempalace_server_split(
+    config: Mapping[str, object],
+    policy: AutoresearchPolicy,
+) -> None:
+    try:
+        mcp = _ensure_mapping(config.get("mcp"), label="mcp")
+        servers = _ensure_mapping(mcp.get("servers"), label="mcp.servers")
+        full_server = _ensure_mapping(
+            servers.get(MEMPALACE_FULL_SERVER_ID),
+            label=f"mcp.servers.{MEMPALACE_FULL_SERVER_ID}",
+        )
+        readonly_server = _ensure_mapping(
+            servers.get(MEMPALACE_READONLY_SERVER_ID),
+            label=f"mcp.servers.{MEMPALACE_READONLY_SERVER_ID}",
+        )
+        _validate_mempalace_server(
+            full_server,
+            server_id=MEMPALACE_FULL_SERVER_ID,
+            expected_agents=("main",),
+            expected_args_prefix=("-m", "mempalace.mcp_server", "--palace"),
+        )
+        _validate_mempalace_server(
+            readonly_server,
+            server_id=MEMPALACE_READONLY_SERVER_ID,
+            expected_agents=policy.all_stage_agent_ids,
+            expected_args_prefix=(MEMPALACE_READONLY_WRAPPER_BASENAME, "--palace"),
+        )
+    except AutoresearchValidationError as exc:
+        raise AutoresearchConfigError(str(exc)) from exc
+
+
+def _validate_mempalace_server(
+    server: Mapping[str, object],
+    *,
+    server_id: str,
+    expected_agents: tuple[str, ...],
+    expected_args_prefix: tuple[str, ...],
+) -> None:
+    _require_str(server, "command")
+    args = _require_string_sequence(server.get("args"), label=f"mcp.servers.{server_id}.args")
+    codex = _ensure_mapping(server.get("codex"), label=f"mcp.servers.{server_id}.codex")
+    agents = _require_string_list(codex, "agents")
+    if tuple(agents) != expected_agents:
+        raise AutoresearchConfigError(
+            f"mcp.servers.{server_id}.codex.agents must exactly match {expected_agents}"
+        )
+    if server_id == MEMPALACE_FULL_SERVER_ID:
+        if len(args) != 4 or args[:3] != expected_args_prefix:
+            raise AutoresearchConfigError(
+                "mcp.servers.mempalace.args must be "
+                "['-m', 'mempalace.mcp_server', '--palace', '<path>']"
+            )
+        if not args[3].strip():
+            raise AutoresearchConfigError("mcp.servers.mempalace.args[3] must be a palace path")
+        return
+
+    if len(args) != 3 or args[1] != "--palace":
+        raise AutoresearchConfigError(
+            "mcp.servers.mempalace-readonly.args must be ['<wrapper>', '--palace', '<path>']"
+        )
+    readonly_entrypoint = args[0].strip()
+    if not readonly_entrypoint:
+        raise AutoresearchConfigError(
+            "mcp.servers.mempalace-readonly.args[0] must be a wrapper path"
+        )
+    if readonly_entrypoint != MEMPALACE_CONFIG_PLACEHOLDER and (
+        Path(readonly_entrypoint).name != MEMPALACE_READONLY_WRAPPER_BASENAME
+    ):
+        raise AutoresearchConfigError(
+            "mcp.servers.mempalace-readonly.args[0] must point to "
+            f"{MEMPALACE_READONLY_WRAPPER_BASENAME}"
+        )
+    if not args[2].strip():
+        raise AutoresearchConfigError(
+            "mcp.servers.mempalace-readonly.args[2] must be a palace path"
+        )
 
 
 def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:

@@ -991,7 +991,34 @@
           "mempalace.mcp_server",
           "--palace",
           "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
-        ]
+        ],
+        "codex": {
+          "agents": [
+            "main"
+          ]
+        }
+      },
+      "mempalace-readonly": {
+        "command": "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
+        "args": [
+          "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
+          "--palace",
+          "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
+        ],
+        "codex": {
+          "agents": [
+            "context-curator",
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation",
+            "consensus-arbiter",
+            "implementer",
+            "reviewer",
+            "fixer"
+          ]
+        }
       }
     }
   },

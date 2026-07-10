@@ -10,6 +10,7 @@ configuration used by the G2 Gateway.
 | `openclaw.json` | Model providers (OpenAI/Codex + Azure + OpenRouter), agent defaults, session settings |
 | `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
+| `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for non-PM agents |
 | `README.md` | This file |
 
 ## Cold-Start Install (Fresh Machine)
@@ -66,7 +67,8 @@ these settings into the local config with `jq`, preserving everything else.
   use.
 - **MemPalace-only research memory** — disables built-in OpenClaw memory search
   and memory flush, denies `memory_search`/`memory_get`, and requires the
-  MemPalace MCP server.
+  MemPalace MCP server split: full `mempalace` for `main`, filtered
+  `mempalace-readonly` for every non-PM stage agent.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent roster** — exact autoresearch stage-agent IDs, model assignments,
@@ -152,10 +154,11 @@ The script will:
 2. Deep-merge the repo config into the local config (local-only keys preserved)
 3. Set the selected default model, force the repo-managed agent roster, and
    fail if any pinned agent model is not declared
-4. Resolve the required MemPalace MCP command and palace path
+4. Install the repo-managed MemPalace read-only wrapper, then resolve the full
+   and read-only MemPalace MCP commands plus palace path
 5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
 6. Validate repo-managed invariants for exact stage-agent models, high
-   reasoning, memory policy, and MemPalace skill/tool split
+   reasoning, memory policy, and the full/read-only MemPalace MCP server split
 7. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`

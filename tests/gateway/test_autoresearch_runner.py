@@ -10,8 +10,11 @@ from typing import cast
 import pytest
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMPALACE_FULL_SERVER_ID,
     MEMPALACE_MUTATION_DENY_TOOL_IDS,
     MEMPALACE_MUTATION_TOOLS,
+    MEMPALACE_READONLY_SERVER_ID,
+    MEMPALACE_READONLY_TOOL_NAMES,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
@@ -1029,6 +1032,27 @@ def _remove_stage_agent_mempalace_denies(config: dict[str, object]) -> None:
     tools["deny"] = ["mempalace_add_drawer"]
 
 
+def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    del servers[MEMPALACE_READONLY_SERVER_ID]
+
+
+def _expand_full_server_scope(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    mempalace = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
+    codex = cast(dict[str, object], mempalace["codex"])
+    codex["agents"] = ["main", "context-curator"]
+
+
+def _break_readonly_server_args(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    readonly = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
+    readonly["args"] = ["-m", "mempalace.mcp_server", "--palace", "/tmp/palace"]
+
+
 @pytest.mark.parametrize(
     ("mutator", "match"),
     [
@@ -1039,6 +1063,19 @@ def _remove_stage_agent_mempalace_denies(config: dict[str, object]) -> None:
         (
             _give_stage_agent_write_skill,
             "must load exactly mempalace-readonly and quantipy-methodology",
+        ),
+        (
+            _drop_mempalace_readonly_server,
+            "mcp\\.servers\\.mempalace-readonly must be an object",
+        ),
+        (
+            _expand_full_server_scope,
+            "mcp\\.servers\\.mempalace\\.codex\\.agents must exactly match \\('main',\\)",
+        ),
+        (
+            _break_readonly_server_args,
+            "mcp\\.servers\\.mempalace-readonly\\.args must be "
+            "\\['<wrapper>', '--palace', '<path>'\\]",
         ),
         (_remove_stage_agent_mempalace_denies, "must deny MemPalace mutation tools"),
     ],
@@ -1065,6 +1102,40 @@ def test_mempalace_mutation_deny_ids_cover_all_runtime_forms() -> None:
     assert "mempalace.mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
     assert "mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
     assert "mcp__mempalace__mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+
+
+def test_mempalace_readonly_tool_registry_matches_expected_split() -> None:
+    assert len(MEMPALACE_READONLY_TOOL_NAMES) == 19
+    assert set(MEMPALACE_READONLY_TOOL_NAMES).isdisjoint(MEMPALACE_MUTATION_TOOLS)
+    assert "mempalace_status" in MEMPALACE_READONLY_TOOL_NAMES
+    assert "mempalace_diary_write" not in MEMPALACE_READONLY_TOOL_NAMES
+
+
+def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None:
+    config = _load_config()
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    full_server = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
+    readonly_server = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
+
+    assert cast(dict[str, object], full_server["codex"])["agents"] == ["main"]
+    assert cast(dict[str, object], readonly_server["codex"])["agents"] == [
+        "context-curator",
+        "debater-microstructure",
+        "debater-data",
+        "debater-skeptic",
+        "debater-theory",
+        "debater-implementation",
+        "consensus-arbiter",
+        "implementer",
+        "reviewer",
+        "fixer",
+    ]
+    assert cast(list[str], full_server["args"])[:3] == ["-m", "mempalace.mcp_server", "--palace"]
+    assert cast(list[str], readonly_server["args"])[1:] == [
+        "--palace",
+        "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
+    ]
 
 
 def test_default_openclaw_config_denies_all_mempalace_runtime_mutator_ids() -> None:
