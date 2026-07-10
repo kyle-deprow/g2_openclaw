@@ -1017,6 +1017,10 @@ class AutoresearchSupervisor:
                 reason="active_expected_stage_task",
             )
 
+        expected_main_session_result = self._expected_main_session_guard(state)
+        if expected_main_session_result is not None:
+            return expected_main_session_result
+
         fresh_tasks = self._fresh_relevant_tasks(running_tasks, grace_seconds)
         if fresh_tasks:
             _structured_log(
@@ -1030,6 +1034,146 @@ class AutoresearchSupervisor:
             return SupervisorResult(
                 outcome=SupervisorOutcome.NO_ACTION,
                 reason="fresh_relevant_task",
+            )
+        return None
+
+    def _expected_main_session_guard(
+        self,
+        state: AutoresearchState,
+    ) -> SupervisorResult | None:
+        if self._expected_stage_agent_ids(state) != ("main",):
+            return None
+        store = self._load_main_session_store_payload()
+
+        fresh_running_session_keys: list[str] = []
+        stale_running_session_keys: list[str] = []
+        now_ms = int(self._now() * 1000)
+        stale_ms = int(self.config.expected_stage_task_stale_seconds * 1000)
+        for key, value in store.items():
+            if not isinstance(key, str) or not key.startswith("agent:main:g2:"):
+                continue
+            if not isinstance(value, Mapping):
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="invalid_expected_main_session_store",
+                    session_key=key,
+                    detail="main lifecycle entry must be an object",
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="invalid_expected_main_session_store",
+                )
+            status = value.get("status")
+            if not isinstance(status, str):
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="invalid_expected_main_session_store",
+                    session_key=key,
+                    detail="main lifecycle entry is missing a string status",
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="invalid_expected_main_session_store",
+                )
+            if status != "running":
+                continue
+            if value.get("endedAt") is not None or value.get("abortedLastRun") is True:
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="contradictory_running_expected_main_session",
+                    session_key=key,
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="contradictory_running_expected_main_session",
+                )
+            try:
+                last_event_at = _running_expected_main_session_last_event_ms(value)
+            except SupervisorError as exc:
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="invalid_expected_main_session_store",
+                    session_key=key,
+                    detail=str(exc),
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="invalid_expected_main_session_store",
+                )
+            if last_event_at > now_ms:
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="contradictory_running_expected_main_session",
+                    session_key=key,
+                    detail="running main lifecycle timestamp is in the future",
+                    last_event_at=last_event_at,
+                    now_ms=now_ms,
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="contradictory_running_expected_main_session",
+                )
+            if now_ms - last_event_at > stale_ms:
+                stale_running_session_keys.append(key)
+            else:
+                fresh_running_session_keys.append(key)
+
+        if stale_running_session_keys:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.alert",
+                reason="stale_running_expected_main_session",
+                count=len(stale_running_session_keys),
+                session_keys=stale_running_session_keys,
+                lease_seconds=self.config.expected_stage_task_stale_seconds,
+                phase=state.phase.value,
+                iteration=state.iteration,
+            )
+            return SupervisorResult(
+                outcome=SupervisorOutcome.ALERT,
+                reason="stale_running_expected_main_session",
+            )
+        if len(fresh_running_session_keys) > 1:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.alert",
+                reason="multiple_running_expected_main_sessions",
+                count=len(fresh_running_session_keys),
+                session_keys=fresh_running_session_keys,
+                phase=state.phase.value,
+                iteration=state.iteration,
+            )
+            return SupervisorResult(
+                outcome=SupervisorOutcome.ALERT,
+                reason="multiple_running_expected_main_sessions",
+            )
+        if fresh_running_session_keys:
+            _structured_log(
+                logging.INFO,
+                "supervisor.no_action",
+                reason="active_expected_main_session",
+                session_key=fresh_running_session_keys[0],
+                phase=state.phase.value,
+                iteration=state.iteration,
+            )
+            return SupervisorResult(
+                outcome=SupervisorOutcome.NO_ACTION,
+                reason="active_expected_main_session",
             )
         return None
 
@@ -1272,7 +1416,7 @@ class AutoresearchSupervisor:
                         return pattern
         return None
 
-    def _load_main_session_store(self) -> dict[str, Mapping[str, object]]:
+    def _load_main_session_store_payload(self) -> Mapping[str, object]:
         try:
             raw = json.loads(self.config.main_sessions_path.read_text(encoding="utf-8"))
         except FileNotFoundError as exc:
@@ -1287,6 +1431,10 @@ class AutoresearchSupervisor:
             raise SupervisorError(
                 f"invalid OpenClaw main sessions payload: {self.config.main_sessions_path}"
             )
+        return raw
+
+    def _load_main_session_store(self) -> dict[str, Mapping[str, object]]:
+        raw = self._load_main_session_store_payload()
         result: dict[str, Mapping[str, object]] = {}
         for key, value in raw.items():
             if isinstance(key, str) and isinstance(value, Mapping):
@@ -1445,6 +1593,18 @@ def _expected_task_last_event_ms(task: Mapping[str, object]) -> int | None:
             return None
         return int(parsed)
     return None
+
+
+def _running_expected_main_session_last_event_ms(session: Mapping[str, object]) -> int:
+    timestamps: list[int] = []
+    for field_name in ("updatedAt", "lastInteractionAt", "startedAt"):
+        if field_name not in session:
+            raise SupervisorError(f"running main lifecycle entry is missing integer {field_name}")
+        value = session.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SupervisorError(f"running main lifecycle entry has non-integer {field_name}")
+        timestamps.append(value)
+    return max(timestamps)
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

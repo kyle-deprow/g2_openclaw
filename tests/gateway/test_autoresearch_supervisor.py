@@ -17,6 +17,7 @@ from gateway.autoresearch_supervisor import (
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
+    SupervisorResult,
     _build_arg_parser,
 )
 
@@ -61,6 +62,24 @@ def _touch_old(paths: list[Path], *, now_seconds: float, age_seconds: float) -> 
 def _write_main_sessions_store(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _running_main_session_row(
+    now_ms: int,
+    *,
+    updated_age_ms: int,
+    last_interaction_age_ms: int,
+    started_age_ms: int,
+    **extra: object,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "status": "running",
+        "updatedAt": now_ms - updated_age_ms,
+        "lastInteractionAt": now_ms - last_interaction_age_ms,
+        "startedAt": now_ms - started_age_ms,
+    }
+    row.update(extra)
+    return row
 
 
 def _forbid_live_http(*args: object, **kwargs: object) -> Any:
@@ -162,6 +181,30 @@ def _make_supervisor(
         run_command=runner,
         urlopen=_forbid_live_http,
     )
+
+
+def _run_running_main_session_row_case(
+    env: dict[str, Any],
+    row: dict[str, object],
+) -> SupervisorResult:
+    _write_state(env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            env["state_path"],
+            env["repo_root"] / ".git" / "HEAD",
+            env["repo_root"] / ".git" / "index",
+            env["repo_root"] / ".git" / "logs" / "HEAD",
+            env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        env["sessions_path"],
+        {"agent:main:g2:timestamp-schema-pm": row},
+    )
+    runner = FakeRunCommand(now_ms=env["now_ms"], tasks=[], sessions=[])
+    return _make_supervisor(env, runner=runner).run_once()
 
 
 def test_active_expected_stage_task_suppresses_nudge(
@@ -426,6 +469,605 @@ def test_fresh_main_g2_session_activity_suppresses_nudge(
     assert result.reason == "fresh_main_g2_session"
 
 
+@pytest.mark.parametrize(
+    "phase",
+    [Phase.SETUP_CONTEXT, Phase.VERIFICATION, Phase.DECISION_LOG],
+)
+def test_running_main_session_store_row_suppresses_recovery_for_main_owned_phases(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    phase: Phase,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=phase, iteration=19)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:live-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=240_000,
+                last_interaction_age_ms=5_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_session"
+
+
+def test_running_main_session_store_row_at_lease_boundary_remains_active(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:boundary-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=300_000,
+                last_interaction_age_ms=300_000,
+                started_age_ms=300_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_session"
+
+
+def test_running_main_session_store_row_at_exact_now_remains_active(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:exact-now-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=0,
+                last_interaction_age_ms=0,
+                started_age_ms=0,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_session"
+
+
+def test_running_main_session_store_row_rejects_fractional_future_timestamp(
+    supervisor_env: dict[str, Any],
+) -> None:
+    result = _run_running_main_session_row_case(
+        supervisor_env,
+        {
+            "status": "running",
+            "updatedAt": supervisor_env["now_ms"] + 0.5,
+            "lastInteractionAt": supervisor_env["now_ms"] - 1_000,
+            "startedAt": supervisor_env["now_ms"] - 2_000,
+        },
+    )
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "invalid_expected_main_session_store"
+
+
+def test_running_main_session_store_row_rejects_fractional_past_timestamp(
+    supervisor_env: dict[str, Any],
+) -> None:
+    result = _run_running_main_session_row_case(
+        supervisor_env,
+        {
+            "status": "running",
+            "updatedAt": supervisor_env["now_ms"] - 0.5,
+            "lastInteractionAt": supervisor_env["now_ms"] - 1_000,
+            "startedAt": supervisor_env["now_ms"] - 2_000,
+        },
+    )
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "invalid_expected_main_session_store"
+
+
+def test_running_main_session_store_row_rejects_integral_float_timestamp(
+    supervisor_env: dict[str, Any],
+) -> None:
+    result = _run_running_main_session_row_case(
+        supervisor_env,
+        {
+            "status": "running",
+            "updatedAt": float(supervisor_env["now_ms"]),
+            "lastInteractionAt": supervisor_env["now_ms"] - 1_000,
+            "startedAt": supervisor_env["now_ms"] - 2_000,
+        },
+    )
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "invalid_expected_main_session_store"
+
+
+def test_running_main_session_store_row_with_one_future_timestamp_alerts(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:future-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=-1,
+                started_age_ms=10_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "contradictory_running_expected_main_session"
+
+
+def test_running_main_session_store_row_with_all_future_timestamps_alerts(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:future-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=-1,
+                last_interaction_age_ms=-2,
+                started_age_ms=-3,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "contradictory_running_expected_main_session"
+
+
+def test_running_main_session_store_row_with_huge_integer_alerts(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=20)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:huge-timestamp-pm": {
+                "status": "running",
+                "updatedAt": 10**400,
+                "lastInteractionAt": supervisor_env["now_ms"] - 1_000,
+                "startedAt": supervisor_env["now_ms"] - 2_000,
+            },
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "contradictory_running_expected_main_session"
+
+
+def test_non_running_main_session_store_row_does_not_suppress_recovery(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=21)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:finished-pm": {
+                "status": "done",
+                "endedAt": supervisor_env["now_ms"] - 10_000,
+            }
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send"]
+
+
+def test_multiple_running_main_session_store_rows_alert_fail_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.DECISION_LOG, iteration=22)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:pm-a": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=10_000,
+                last_interaction_age_ms=12_000,
+                started_age_ms=20_000,
+            ),
+            "agent:main:g2:pm-b": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=7_000,
+                started_age_ms=15_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "multiple_running_expected_main_sessions"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+def test_stale_running_main_session_store_row_alerts_fail_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=23)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_running_expected_main_session"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+def test_stale_running_main_session_store_row_takes_precedence_over_fresh_row(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=24)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+            "agent:main:g2:fresh-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=5_000,
+                started_age_ms=30_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_running_expected_main_session"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_reason"),
+    [
+        (
+            {
+                "agent:main:g2:live-pm": {
+                    "status": "running",
+                    "endedAt": 999_000_000,
+                }
+            },
+            "contradictory_running_expected_main_session",
+        ),
+        (
+            {
+                "agent:main:g2:live-pm": {
+                    "status": "running",
+                    "abortedLastRun": True,
+                }
+            },
+            "contradictory_running_expected_main_session",
+        ),
+        (
+            {
+                "agent:main:g2:live-pm": {
+                    "status": 123,
+                }
+            },
+            "invalid_expected_main_session_store",
+        ),
+        (
+            {
+                "agent:main:g2:live-pm": "not-an-object",
+            },
+            "invalid_expected_main_session_store",
+        ),
+    ],
+)
+def test_invalid_or_contradictory_running_main_session_store_rows_alert(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+    expected_reason: str,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=25)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(supervisor_env["sessions_path"], payload)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == expected_reason
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+def test_running_main_session_store_row_missing_timestamp_alerts_fail_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=26)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:live-pm": {
+                "status": "running",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+                "startedAt": supervisor_env["now_ms"] - 10_000,
+            }
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "invalid_expected_main_session_store"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+def test_invalid_main_session_store_json_propagates_supervisor_error(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=27)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    supervisor_env["sessions_path"].write_text("{not valid json", encoding="utf-8")
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    with pytest.raises(SupervisorError, match="invalid OpenClaw main sessions JSON"):
+        supervisor.run_once()
+
+
 def test_multiple_fresh_main_g2_sessions_alert_without_nudge(
     supervisor_env: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -458,6 +1100,45 @@ def test_multiple_fresh_main_g2_sessions_alert_without_nudge(
     assert result.reason == "multiple_fresh_main_g2_sessions"
     assert result.rotated_session is False
     assert result.sent_nudge is False
+
+
+def test_running_main_session_store_row_does_not_affect_subagent_owned_phase(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=28)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:live-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=5_000,
+                started_age_ms=20_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send"]
 
 
 def test_target_repo_writer_suppresses_nudge(
