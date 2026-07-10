@@ -1542,6 +1542,7 @@ class AutoresearchSupervisor:
             self._sleep(0.25)
         if not isinstance(session_list, list):
             raise DevAPIError("session menu did not become ready for fresh-session creation")
+        old_session_key = self._active_g2_session_key(session_list)
 
         self._dev_command("selectSession", [0])
 
@@ -1549,9 +1550,70 @@ class AutoresearchSupervisor:
         while self._now() < ready_deadline:
             current_state = self._dev_get_state()
             if current_state == "idle":
-                return
+                break
             self._sleep(0.25)
-        raise DevAPIError("fresh G2 session did not return to idle in time")
+        else:
+            raise DevAPIError("fresh G2 session did not return to idle in time")
+
+        if old_session_key is not None:
+            self._retire_g2_session(old_session_key)
+
+    def _active_g2_session_key(self, session_list: Sequence[object]) -> str | None:
+        active_keys: list[str] = []
+        for index, entry in enumerate(session_list):
+            if not isinstance(entry, Mapping):
+                raise DevAPIError(f"G2 session menu entry {index} must be an object")
+            session_key = entry.get("sessionKey")
+            if not isinstance(session_key, str) or not session_key:
+                raise DevAPIError(f"G2 session menu entry {index} has an invalid sessionKey")
+            is_active = entry.get("isActive")
+            if not isinstance(is_active, bool):
+                raise DevAPIError(f"G2 session menu entry {index} has an invalid isActive flag")
+            if is_active:
+                if not _is_main_g2_session_key(session_key):
+                    raise DevAPIError(
+                        f"G2 session menu active key is not a main G2 session: {session_key}"
+                    )
+                active_keys.append(session_key)
+
+        if len(active_keys) > 1:
+            raise DevAPIError("G2 session menu has multiple active sessions")
+        return active_keys[0] if active_keys else None
+
+    def _retire_g2_session(self, old_session_key: str) -> None:
+        if not _is_main_g2_session_key(old_session_key):
+            raise SupervisorError(f"refusing to retire a non-main G2 session: {old_session_key}")
+        openclaw_bin = self._require_openclaw_binary()
+        params = json.dumps(
+            {
+                "key": old_session_key,
+                "agentId": "main",
+                "deleteTranscript": False,
+            },
+            separators=(",", ":"),
+        )
+        payload = self._run_openclaw_json(
+            openclaw_bin,
+            [
+                "gateway",
+                "call",
+                "sessions.delete",
+                "--json",
+                "--params",
+                params,
+                "--timeout",
+                "30000",
+            ],
+        )
+        if (
+            payload.get("ok") is not True
+            or payload.get("deleted") is not True
+            or payload.get("key") != old_session_key
+        ):
+            raise SupervisorError(
+                "OpenClaw session retirement response did not confirm deletion of "
+                f"{old_session_key}"
+            )
 
     def _send_recovery_message(self) -> None:
         payload = self._dev_http_json("POST", "/_dev/sendText", {"text": RECOVERY_MESSAGE})

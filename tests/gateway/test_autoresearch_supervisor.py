@@ -96,11 +96,17 @@ class FakeRunCommand:
         tasks: list[dict[str, object]],
         sessions: list[dict[str, object]],
         version: str = "OpenClaw 2026.6.11 (e085fa1)",
+        delete_payload: dict[str, object] | None = None,
+        delete_returncode: int = 0,
+        events: list[str] | None = None,
     ) -> None:
         self.now_ms = now_ms
         self.tasks = tasks
         self.sessions = sessions
         self.version = version
+        self.delete_payload = delete_payload
+        self.delete_returncode = delete_returncode
+        self.events = events
         self.calls: list[list[str]] = []
 
     def __call__(
@@ -113,6 +119,8 @@ class FakeRunCommand:
     ) -> subprocess.CompletedProcess[str]:
         del check, capture_output, text
         self.calls.append(command)
+        if self.events is not None:
+            self.events.append(f"cli:{' '.join(command[1:4])}")
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, stdout=self.version, stderr="")
         if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
@@ -123,6 +131,21 @@ class FakeRunCommand:
                 "count": len(self.sessions),
                 "activeMinutes": 120,
                 "sessions": self.sessions,
+            }
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+        if command[1:4] == ["gateway", "call", "sessions.delete"]:
+            if self.delete_returncode != 0:
+                return subprocess.CompletedProcess(
+                    command,
+                    self.delete_returncode,
+                    stdout="",
+                    stderr="session deletion failed",
+                )
+            params = json.loads(command[6])
+            payload = self.delete_payload or {
+                "ok": True,
+                "deleted": True,
+                "key": params["key"],
             }
             return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
         raise AssertionError(f"unexpected command: {command}")
@@ -182,6 +205,201 @@ def _make_supervisor(
         run_command=runner,
         urlopen=_forbid_live_http,
     )
+
+
+def _install_rotation_dev_api(
+    monkeypatch: pytest.MonkeyPatch,
+    supervisor: AutoresearchSupervisor,
+    *,
+    session_list: list[object],
+    events: list[str],
+) -> None:
+    states = iter(("menu", "idle"))
+
+    monkeypatch.setattr(supervisor, "_dev_get_state", lambda: next(states))
+
+    def fake_dev_command(command: str, args: object = None) -> object:
+        del args
+        events.append(f"dev:{command}")
+        if command == "getSessionList":
+            return session_list
+        return None
+
+    monkeypatch.setattr(supervisor, "_dev_command", fake_dev_command)
+
+
+def test_rotation_retires_the_prior_active_g2_session_after_creating_the_new_one(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[],
+        events=events,
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    old_key = "agent:main:g2:old-parent"
+    _install_rotation_dev_api(
+        monkeypatch,
+        supervisor,
+        session_list=[{"sessionKey": old_key, "isActive": True}],
+        events=events,
+    )
+
+    supervisor._rotate_g2_session("idle")
+
+    assert events == [
+        "dev:openSessionMenu",
+        "dev:getSessionList",
+        "dev:selectSession",
+        "cli:--version",
+        "cli:gateway call sessions.delete",
+    ]
+    assert runner.calls[-1] == [
+        str(supervisor_env["openclaw_bin"]),
+        "gateway",
+        "call",
+        "sessions.delete",
+        "--json",
+        "--params",
+        json.dumps(
+            {"key": old_key, "agentId": "main", "deleteTranscript": False},
+            separators=(",", ":"),
+        ),
+        "--timeout",
+        "30000",
+    ]
+
+
+def test_rotation_allows_an_unused_g2_session_menu_without_retiring_a_session(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[],
+        events=events,
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    _install_rotation_dev_api(monkeypatch, supervisor, session_list=[], events=events)
+
+    supervisor._rotate_g2_session("idle")
+
+    assert events == ["dev:openSessionMenu", "dev:getSessionList", "dev:selectSession"]
+
+
+@pytest.mark.parametrize(
+    "session_list",
+    [
+        ["not-an-entry"],
+        [{"isActive": True}],
+        [
+            {"sessionKey": "agent:main:g2:first", "isActive": True},
+            {"sessionKey": "agent:main:g2:second", "isActive": True},
+        ],
+        [{"sessionKey": "agent:main:other", "isActive": True}],
+    ],
+)
+def test_rotation_fails_closed_for_an_invalid_active_menu_entry(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    session_list: list[object],
+) -> None:
+    events: list[str] = []
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[], events=events)
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    _install_rotation_dev_api(monkeypatch, supervisor, session_list=session_list, events=events)
+
+    with pytest.raises(DevAPIError):
+        supervisor._rotate_g2_session("idle")
+
+    assert events == ["dev:openSessionMenu", "dev:getSessionList"]
+
+
+@pytest.mark.parametrize(
+    ("delete_payload", "delete_returncode"),
+    [
+        ({"ok": False, "deleted": True, "key": "agent:main:g2:old-parent"}, 0),
+        ({"ok": True, "deleted": False, "key": "agent:main:g2:old-parent"}, 0),
+        ({"ok": True, "deleted": True, "key": "agent:main:g2:wrong-parent"}, 0),
+        (None, 1),
+    ],
+)
+def test_rotation_rejects_an_unsuccessful_or_mismatched_session_retirement(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    delete_payload: dict[str, object] | None,
+    delete_returncode: int,
+) -> None:
+    events: list[str] = []
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[],
+        delete_payload=delete_payload,
+        delete_returncode=delete_returncode,
+        events=events,
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    _install_rotation_dev_api(
+        monkeypatch,
+        supervisor,
+        session_list=[{"sessionKey": "agent:main:g2:old-parent", "isActive": True}],
+        events=events,
+    )
+
+    with pytest.raises(SupervisorError):
+        supervisor._rotate_g2_session("idle")
+
+    assert events[-1] == "cli:gateway call sessions.delete"
+
+
+def test_retirement_failure_prevents_the_recovery_nudge(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.SETUP_CONTEXT, iteration=31)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    events: list[str] = []
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[],
+        delete_payload={"ok": True, "deleted": False, "key": "agent:main:g2:old-parent"},
+        events=events,
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    _install_rotation_dev_api(
+        monkeypatch,
+        supervisor,
+        session_list=[{"sessionKey": "agent:main:g2:old-parent", "isActive": True}],
+        events=events,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_send_recovery_message",
+        lambda: (_ for _ in ()).throw(AssertionError("nudge must not follow failed retirement")),
+    )
+
+    with pytest.raises(SupervisorError):
+        supervisor.run_once()
+
+    assert events[-1] == "cli:gateway call sessions.delete"
 
 
 def _run_running_main_session_row_case(
