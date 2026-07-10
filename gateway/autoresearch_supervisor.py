@@ -69,6 +69,7 @@ RECOVERY_ERROR_PATTERNS = (
     "maximum context size",
     "too many tokens",
 )
+MAIN_G2_SESSION_KEY = "agent:main:g2"
 EXPECTED_STAGE_AGENT_IDS: dict[Phase, tuple[str, ...]] = {
     Phase.DEBATE: (
         "debater-microstructure",
@@ -90,6 +91,12 @@ TARGET_WRITER_COMMAND_RE = re.compile(
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
     r"src/quantipy/alpha|scripts/experiments|tools/experiments)"
 )
+
+
+def _is_main_g2_session_key(key: object) -> bool:
+    return isinstance(key, str) and (
+        key == MAIN_G2_SESSION_KEY or key.startswith(f"{MAIN_G2_SESSION_KEY}:")
+    )
 
 
 class SupervisorError(RuntimeError):
@@ -410,11 +417,10 @@ class AutoresearchSupervisor:
 
         grace_seconds = self.config.grace_period_seconds
         running_tasks = self._running_tasks(openclaw_bin)
-        fresh_sessions = self._fresh_main_g2_sessions(openclaw_bin, grace_seconds)
         activity_result = self._activity_guard(
             state,
             running_tasks,
-            fresh_sessions,
+            openclaw_bin,
             grace_seconds,
         )
         if activity_result is not None:
@@ -662,11 +668,10 @@ class AutoresearchSupervisor:
         grace_seconds: float,
     ) -> SupervisorResult | None:
         running_tasks = self._running_tasks(openclaw_bin)
-        fresh_sessions = self._fresh_main_g2_sessions(openclaw_bin, grace_seconds)
         activity_result = self._activity_guard(
             state,
             running_tasks,
-            fresh_sessions,
+            openclaw_bin,
             grace_seconds,
         )
         if activity_result is not None:
@@ -947,38 +952,9 @@ class AutoresearchSupervisor:
         self,
         state: AutoresearchState,
         running_tasks: Sequence[Mapping[str, object]],
-        fresh_sessions: Sequence[Mapping[str, object]],
+        openclaw_bin: Path,
         grace_seconds: float,
     ) -> SupervisorResult | None:
-        if len(fresh_sessions) > 1:
-            session_keys = [session.get("key") for session in fresh_sessions]
-            _structured_log(
-                logging.ERROR,
-                "supervisor.alert",
-                reason="multiple_fresh_main_g2_sessions",
-                count=len(fresh_sessions),
-                session_keys=session_keys,
-                phase=state.phase.value,
-                iteration=state.iteration,
-            )
-            return SupervisorResult(
-                outcome=SupervisorOutcome.ALERT,
-                reason="multiple_fresh_main_g2_sessions",
-            )
-        if fresh_sessions:
-            _structured_log(
-                logging.INFO,
-                "supervisor.no_action",
-                reason="fresh_main_g2_session",
-                count=1,
-                phase=state.phase.value,
-                iteration=state.iteration,
-            )
-            return SupervisorResult(
-                outcome=SupervisorOutcome.NO_ACTION,
-                reason="fresh_main_g2_session",
-            )
-
         expected_tasks = self._active_expected_stage_tasks(state, running_tasks)
         if expected_tasks:
             now_ms = int(self._now() * 1000)
@@ -1021,6 +997,36 @@ class AutoresearchSupervisor:
         if expected_main_session_result is not None:
             return expected_main_session_result
 
+        fresh_sessions = self._fresh_main_g2_sessions(openclaw_bin, grace_seconds)
+        if len(fresh_sessions) > 1:
+            session_keys = [session.get("key") for session in fresh_sessions]
+            _structured_log(
+                logging.ERROR,
+                "supervisor.alert",
+                reason="multiple_fresh_main_g2_sessions",
+                count=len(fresh_sessions),
+                session_keys=session_keys,
+                phase=state.phase.value,
+                iteration=state.iteration,
+            )
+            return SupervisorResult(
+                outcome=SupervisorOutcome.ALERT,
+                reason="multiple_fresh_main_g2_sessions",
+            )
+        if fresh_sessions:
+            _structured_log(
+                logging.INFO,
+                "supervisor.no_action",
+                reason="fresh_main_g2_session",
+                count=1,
+                phase=state.phase.value,
+                iteration=state.iteration,
+            )
+            return SupervisorResult(
+                outcome=SupervisorOutcome.NO_ACTION,
+                reason="fresh_main_g2_session",
+            )
+
         fresh_tasks = self._fresh_relevant_tasks(running_tasks, grace_seconds)
         if fresh_tasks:
             _structured_log(
@@ -1050,7 +1056,7 @@ class AutoresearchSupervisor:
         now_ms = int(self._now() * 1000)
         stale_ms = int(self.config.expected_stage_task_stale_seconds * 1000)
         for key, value in store.items():
-            if not isinstance(key, str) or not key.startswith("agent:main:g2:"):
+            if not _is_main_g2_session_key(key):
                 continue
             if not isinstance(value, Mapping):
                 _structured_log(
@@ -1190,7 +1196,7 @@ class AutoresearchSupervisor:
         sessions_raw = payload.get("sessions")
         if not isinstance(sessions_raw, Sequence) or isinstance(sessions_raw, str | bytes):
             raise SupervisorError("OpenClaw sessions JSON missing sessions array")
-        fresh: list[dict[str, object]] = []
+        fresh_cli_sessions: list[Mapping[str, object]] = []
         now_ms = int(self._now() * 1000)
         grace_ms = int(grace_seconds * 1000)
         for session in sessions_raw:
@@ -1198,11 +1204,54 @@ class AutoresearchSupervisor:
                 continue
             key = session.get("key")
             updated_at = session.get("updatedAt")
-            if not isinstance(key, str) or not key.startswith("agent:main:g2"):
+            if not _is_main_g2_session_key(key):
                 continue
             if isinstance(updated_at, bool) or not isinstance(updated_at, int | float):
+                raise SupervisorError(f"invalid fresh main G2 CLI session updatedAt: {key}")
+            parsed_updated_at = float(updated_at)
+            if not math.isfinite(parsed_updated_at):
+                raise SupervisorError(f"invalid fresh main G2 CLI session updatedAt: {key}")
+            if now_ms - int(parsed_updated_at) <= grace_ms:
+                fresh_cli_sessions.append(session)
+
+        if not fresh_cli_sessions:
+            return []
+
+        lifecycle_store = self._load_main_session_store_payload()
+        fresh: list[dict[str, object]] = []
+        for session in fresh_cli_sessions:
+            key = session["key"]
+            assert isinstance(key, str)
+            lifecycle = lifecycle_store.get(key)
+            if lifecycle is None:
+                raise SupervisorError(
+                    f"missing authoritative lifecycle entry for fresh main G2 session: {key}"
+                )
+            if not isinstance(lifecycle, Mapping):
+                raise SupervisorError(
+                    "authoritative lifecycle entry must be an object for fresh main G2 "
+                    f"session: {key}"
+                )
+            status = lifecycle.get("status")
+            if not isinstance(status, str):
+                raise SupervisorError(
+                    "authoritative lifecycle entry is missing string status for fresh main G2 "
+                    f"session: {key}"
+                )
+            if status != "running":
                 continue
-            if now_ms - int(updated_at) <= grace_ms:
+            if lifecycle.get("endedAt") is not None or lifecycle.get("abortedLastRun") is True:
+                raise SupervisorError(
+                    "contradictory running authoritative lifecycle entry for fresh main "
+                    f"G2 session: {key}"
+                )
+            last_event_at = _running_expected_main_session_last_event_ms(lifecycle)
+            if last_event_at > now_ms:
+                raise SupervisorError(
+                    "authoritative lifecycle timestamp is in the future for fresh main "
+                    f"G2 session: {key}"
+                )
+            if now_ms - last_event_at <= grace_ms:
                 fresh.append(dict(session))
         return fresh
 
@@ -1244,9 +1293,7 @@ class AutoresearchSupervisor:
             task.get("ownerKey"),
             task.get("childSessionKey"),
         ]
-        session_match = any(
-            isinstance(key, str) and key.startswith("agent:main:g2") for key in keys
-        )
+        session_match = any(_is_main_g2_session_key(key) for key in keys)
         text = str(task.get("task", "")).lower()
         keyword_match = "autoresearch" in text or "quantipy" in text
         return session_match or keyword_match
@@ -1393,7 +1440,7 @@ class AutoresearchSupervisor:
             (
                 (key, value)
                 for key, value in sessions.items()
-                if key.startswith("agent:main:g2") and isinstance(value, Mapping)
+                if _is_main_g2_session_key(key) and isinstance(value, Mapping)
             ),
             key=lambda item: _mapping_timestamp_ms(item[1]),
             reverse=True,
@@ -1418,7 +1465,10 @@ class AutoresearchSupervisor:
 
     def _load_main_session_store_payload(self) -> Mapping[str, object]:
         try:
-            raw = json.loads(self.config.main_sessions_path.read_text(encoding="utf-8"))
+            raw = json.loads(
+                self.config.main_sessions_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_strict_json_object,
+            )
         except FileNotFoundError as exc:
             raise SupervisorError(
                 f"missing OpenClaw main sessions store: {self.config.main_sessions_path}"
@@ -1593,6 +1643,15 @@ def _expected_task_last_event_ms(task: Mapping[str, object]) -> int | None:
             return None
         return int(parsed)
     return None
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise SupervisorError(f"duplicate OpenClaw main sessions key: {key}")
+        result[key] = value
+    return result
 
 
 def _running_expected_main_session_last_event_ms(session: Mapping[str, object]) -> int:

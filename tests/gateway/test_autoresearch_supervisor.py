@@ -19,6 +19,7 @@ from gateway.autoresearch_supervisor import (
     SupervisorOutcome,
     SupervisorResult,
     _build_arg_parser,
+    _is_main_g2_session_key,
 )
 
 
@@ -205,6 +206,23 @@ def _run_running_main_session_row_case(
     )
     runner = FakeRunCommand(now_ms=env["now_ms"], tasks=[], sessions=[])
     return _make_supervisor(env, runner=runner).run_once()
+
+
+@pytest.mark.parametrize(
+    ("key", "matches"),
+    [
+        ("agent:main:g2", True),
+        ("agent:main:g2:child", True),
+        ("agent:main:g2backup", False),
+    ],
+)
+def test_main_g2_session_key_matcher_accepts_only_base_key_or_children(
+    key: str,
+    matches: bool,
+) -> None:
+    result = _is_main_g2_session_key(key)
+
+    assert result is matches
 
 
 def test_active_expected_stage_task_suppresses_nudge(
@@ -446,6 +464,17 @@ def test_fresh_main_g2_session_activity_suppresses_nudge(
         now_seconds=supervisor_env["now_seconds"],
         age_seconds=600.0,
     )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:abc": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=5_000,
+                started_age_ms=10_000,
+            ),
+        },
+    )
     runner = FakeRunCommand(
         now_ms=supervisor_env["now_ms"],
         tasks=[],
@@ -467,6 +496,303 @@ def test_fresh_main_g2_session_activity_suppresses_nudge(
 
     assert result.outcome is SupervisorOutcome.NO_ACTION
     assert result.reason == "fresh_main_g2_session"
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        {"key": "agent:main:g2:compaction"},
+        {"key": "agent:main:g2:compaction", "updatedAt": True},
+        {"key": "agent:main:g2:compaction", "updatedAt": "invalid"},
+    ],
+)
+def test_main_g2_cli_session_with_invalid_freshness_evidence_fails_closed(
+    supervisor_env: dict[str, Any],
+    session: dict[str, object],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[session],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    with pytest.raises(SupervisorError, match="invalid fresh main G2 CLI session updatedAt"):
+        supervisor.run_once()
+
+
+def test_main_g2_cli_prefix_collision_is_ignored(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2backup",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send"]
+
+
+@pytest.mark.parametrize("status", ["failed", "completed"])
+def test_non_running_authoritative_lifecycle_does_not_count_fresh_cli_session(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {"agent:main:g2:compaction": {"status": status}},
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send"]
+
+
+def test_fresh_cli_session_requires_fresh_authoritative_lifecycle_lease(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:compaction": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=121_000,
+                last_interaction_age_ms=121_000,
+                started_age_ms=121_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({}, "missing authoritative lifecycle entry"),
+        ({"agent:main:g2:compaction": {"status": 1}}, "missing string status"),
+    ],
+)
+def test_fresh_cli_session_requires_valid_authoritative_lifecycle(
+    supervisor_env: dict[str, Any],
+    payload: dict[str, object],
+    error: str,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _write_main_sessions_store(supervisor_env["sessions_path"], payload)
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    with pytest.raises(SupervisorError, match=error):
+        supervisor.run_once()
+
+
+def test_fresh_cli_session_rejects_duplicate_authoritative_lifecycle_entry(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    supervisor_env["sessions_path"].write_text(
+        (
+            '{"agent:main:g2:compaction":{"status":"running"},'
+            '"agent:main:g2:compaction":{"status":"failed"}}'
+        ),
+        encoding="utf-8",
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    with pytest.raises(SupervisorError, match="duplicate OpenClaw main sessions key"):
+        supervisor.run_once()
+
+
+@pytest.mark.parametrize(
+    ("lifecycle", "error"),
+    [
+        (
+            {
+                "status": "running",
+                "updatedAt": 999_995_000,
+                "lastInteractionAt": 999_995_000,
+            },
+            "missing integer startedAt",
+        ),
+        (
+            {
+                "status": "running",
+                "updatedAt": 1_000_000_001,
+                "lastInteractionAt": 999_995_000,
+                "startedAt": 999_990_000,
+            },
+            "timestamp is in the future",
+        ),
+    ],
+)
+def test_fresh_cli_session_rejects_invalid_running_authoritative_lifecycle(
+    supervisor_env: dict[str, Any],
+    lifecycle: dict[str, object],
+    error: str,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {"agent:main:g2:compaction": lifecycle},
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    with pytest.raises(SupervisorError, match=error):
+        supervisor.run_once()
+
+
+def test_active_reviewer_task_precedes_failed_main_lifecycle_reconciliation(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.REVIEW, iteration=19)
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {"agent:main:g2:compaction": {"status": "failed"}},
+    )
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[
+            {
+                "agentId": "reviewer",
+                "requesterAgentId": "main",
+                "requesterSessionKey": "agent:main:g2:compaction",
+                "task": "Review the Quantipy autoresearch change.",
+                "startedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_stage_task"
 
 
 @pytest.mark.parametrize(
@@ -1073,6 +1399,23 @@ def test_multiple_fresh_main_g2_sessions_alert_without_nudge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_state(supervisor_env["state_path"], phase=Phase.FIX_TEST, iteration=19)
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:old-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=5_000,
+                last_interaction_age_ms=5_000,
+                started_age_ms=10_000,
+            ),
+            "agent:main:g2:new-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=1_000,
+                last_interaction_age_ms=1_000,
+                started_age_ms=10_000,
+            ),
+        },
+    )
     runner = FakeRunCommand(
         now_ms=supervisor_env["now_ms"],
         tasks=[],
@@ -1633,12 +1976,22 @@ def test_compaction_error_text_rotates_then_nudges(
         supervisor_env["sessions_path"],
         {
             "agent:main:g2:compaction": {
+                "status": "failed",
                 "updatedAt": supervisor_env["now_ms"] - 500_000,
                 "sessionFile": str(transcript),
             }
         },
     )
-    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[],
+        sessions=[
+            {
+                "key": "agent:main:g2:compaction",
+                "updatedAt": supervisor_env["now_ms"] - 5_000,
+            }
+        ],
+    )
     supervisor = _make_supervisor(supervisor_env, runner=runner)
     actions: list[str] = []
 
