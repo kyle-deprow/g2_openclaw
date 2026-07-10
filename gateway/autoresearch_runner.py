@@ -132,9 +132,11 @@ MEMPALACE_READONLY_SERVER_ID = "mempalace-readonly"
 MEMPALACE_READONLY_WRAPPER_BASENAME = "mempalace-readonly-server.py"
 # OpenClaw policy checks compare internal MCP tool.name ids such as
 # "mempalace__mempalace_search". Codex-facing docs and traces show dotted
-# display ids such as "mempalace.mempalace_search" after adaptation.
+# display ids such as "mempalace.mempalace_add_drawer" or
+# "mempalace-readonly.mempalace_search" after adaptation.
 MEMPALACE_POLICY_TOOL_PREFIX = "mempalace__"
-MEMPALACE_CODEX_DISPLAY_NAMESPACE = "mempalace"
+MEMPALACE_FULL_SERVER_DISPLAY_NAMESPACE = MEMPALACE_FULL_SERVER_ID
+MEMPALACE_READONLY_DISPLAY_NAMESPACE = MEMPALACE_READONLY_SERVER_ID
 MEMPALACE_MUTATION_TOOLS = (
     "mempalace_add_drawer",
     "mempalace_check_duplicate",
@@ -156,7 +158,7 @@ MEMPALACE_MUTATION_TOOLS = (
 MEMPALACE_OBSOLETE_MUTATION_TOOL_ID_PREFIXES = (
     "",
     "mcp__mempalace__",
-    f"{MEMPALACE_CODEX_DISPLAY_NAMESPACE}.",
+    f"{MEMPALACE_FULL_SERVER_DISPLAY_NAMESPACE}.",
 )
 MEMPALACE_READONLY_TOOL_NAMES = (
     "mempalace_status",
@@ -189,8 +191,10 @@ def _compile_mempalace_policy_tool_ids(
 
 def _compile_mempalace_codex_display_tool_ids(
     tool_names: Sequence[str],
+    *,
+    namespace: str,
 ) -> tuple[str, ...]:
-    return tuple(f"{MEMPALACE_CODEX_DISPLAY_NAMESPACE}.{tool_name}" for tool_name in tool_names)
+    return tuple(f"{namespace}.{tool_name}" for tool_name in tool_names)
 
 
 def _compile_mempalace_alias_tool_ids(
@@ -209,7 +213,8 @@ MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
     MEMPALACE_MUTATION_TOOLS
 )
 MEMPALACE_READONLY_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
-    MEMPALACE_READONLY_TOOL_NAMES
+    MEMPALACE_READONLY_TOOL_NAMES,
+    namespace=MEMPALACE_READONLY_DISPLAY_NAMESPACE,
 )
 MEMPALACE_MUTATION_DENY_TOOL_ID_SET = frozenset(MEMPALACE_MUTATION_DENY_TOOL_IDS)
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_ID_SET = frozenset(

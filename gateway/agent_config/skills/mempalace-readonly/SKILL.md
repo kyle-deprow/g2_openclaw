@@ -23,25 +23,25 @@ continuity. MemPalace is the only durable research memory layer.
 
 Use only read-only MemPalace tools:
 
-- `mempalace.mempalace_status`
-- `mempalace.mempalace_search`
-- `mempalace.mempalace_get_drawer`
-- `mempalace.mempalace_list_drawers`
-- `mempalace.mempalace_list_wings`
-- `mempalace.mempalace_list_rooms`
-- `mempalace.mempalace_get_taxonomy`
-- `mempalace.mempalace_get_aaak_spec`
-- `mempalace.mempalace_diary_read`
-- `mempalace.mempalace_kg_query`
-- `mempalace.mempalace_kg_timeline`
-- `mempalace.mempalace_kg_stats`
-- `mempalace.mempalace_traverse`
-- `mempalace.mempalace_find_tunnels`
-- `mempalace.mempalace_follow_tunnels`
-- `mempalace.mempalace_graph_stats`
-- `mempalace.mempalace_list_tunnels`
-- `mempalace.mempalace_list_hallways`
-- `mempalace.mempalace_memories_filed_away`
+- `mempalace-readonly.mempalace_status`
+- `mempalace-readonly.mempalace_search`
+- `mempalace-readonly.mempalace_get_drawer`
+- `mempalace-readonly.mempalace_list_drawers`
+- `mempalace-readonly.mempalace_list_wings`
+- `mempalace-readonly.mempalace_list_rooms`
+- `mempalace-readonly.mempalace_get_taxonomy`
+- `mempalace-readonly.mempalace_get_aaak_spec`
+- `mempalace-readonly.mempalace_diary_read`
+- `mempalace-readonly.mempalace_kg_query`
+- `mempalace-readonly.mempalace_kg_timeline`
+- `mempalace-readonly.mempalace_kg_stats`
+- `mempalace-readonly.mempalace_traverse`
+- `mempalace-readonly.mempalace_find_tunnels`
+- `mempalace-readonly.mempalace_follow_tunnels`
+- `mempalace-readonly.mempalace_graph_stats`
+- `mempalace-readonly.mempalace_list_tunnels`
+- `mempalace-readonly.mempalace_list_hallways`
+- `mempalace-readonly.mempalace_memories_filed_away`
 
 Non-PM agents should not receive write-capable MemPalace tools in config. If
 one appears available, treat that as a configuration error and stop instead of

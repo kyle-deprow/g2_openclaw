@@ -58,25 +58,25 @@ the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
 
 | Tool | Use |
 |------|-----|
-| `mempalace.mempalace_status` | Palace health and drawer overview |
-| `mempalace.mempalace_search` | Semantic search across stored experiment content |
-| `mempalace.mempalace_get_drawer` | Read a stored drawer |
-| `mempalace.mempalace_list_drawers` | List drawers |
-| `mempalace.mempalace_list_wings` | List all wings with drawer counts |
-| `mempalace.mempalace_list_rooms` | List rooms within a wing |
-| `mempalace.mempalace_get_taxonomy` | Read the taxonomy |
-| `mempalace.mempalace_get_aaak_spec` | Read the AAAK specification |
-| `mempalace.mempalace_diary_read` | Browse past session notes |
-| `mempalace.mempalace_kg_query` | Query entity relationships from the knowledge graph |
-| `mempalace.mempalace_kg_timeline` | Chronological story of an entity |
-| `mempalace.mempalace_kg_stats` | Knowledge graph overview |
-| `mempalace.mempalace_traverse` | Traverse related memory context |
-| `mempalace.mempalace_find_tunnels` | Find linked context paths |
-| `mempalace.mempalace_follow_tunnels` | Follow linked context paths |
-| `mempalace.mempalace_graph_stats` | Graph storage overview |
-| `mempalace.mempalace_list_tunnels` | List tunnels |
-| `mempalace.mempalace_list_hallways` | List hallways |
-| `mempalace.mempalace_memories_filed_away` | Inspect filed memory summaries |
+| `mempalace-readonly.mempalace_status` | Palace health and drawer overview |
+| `mempalace-readonly.mempalace_search` | Semantic search across stored experiment content |
+| `mempalace-readonly.mempalace_get_drawer` | Read a stored drawer |
+| `mempalace-readonly.mempalace_list_drawers` | List drawers |
+| `mempalace-readonly.mempalace_list_wings` | List all wings with drawer counts |
+| `mempalace-readonly.mempalace_list_rooms` | List rooms within a wing |
+| `mempalace-readonly.mempalace_get_taxonomy` | Read the taxonomy |
+| `mempalace-readonly.mempalace_get_aaak_spec` | Read the AAAK specification |
+| `mempalace-readonly.mempalace_diary_read` | Browse past session notes |
+| `mempalace-readonly.mempalace_kg_query` | Query entity relationships from the knowledge graph |
+| `mempalace-readonly.mempalace_kg_timeline` | Chronological story of an entity |
+| `mempalace-readonly.mempalace_kg_stats` | Knowledge graph overview |
+| `mempalace-readonly.mempalace_traverse` | Traverse related memory context |
+| `mempalace-readonly.mempalace_find_tunnels` | Find linked context paths |
+| `mempalace-readonly.mempalace_follow_tunnels` | Follow linked context paths |
+| `mempalace-readonly.mempalace_graph_stats` | Graph storage overview |
+| `mempalace-readonly.mempalace_list_tunnels` | List tunnels |
+| `mempalace-readonly.mempalace_list_hallways` | List hallways |
+| `mempalace-readonly.mempalace_memories_filed_away` | Inspect filed memory summaries |
 
 Read `mempalace` only when acting as the PM. Read `mempalace-readonly` when
 acting as any context, debate, implementation, review, or fix stage agent. If

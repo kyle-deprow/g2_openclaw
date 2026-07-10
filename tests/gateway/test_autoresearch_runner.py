@@ -1051,7 +1051,7 @@ def _add_stage_agent_extra_noncanonical_mempalace_deny(config: dict[str, object]
     agents = cast(list[dict[str, object]], agents_root["list"])
     tools = cast(dict[str, object], agents[1]["tools"])
     deny = cast(list[str], tools["deny"])
-    tools["deny"] = [*deny, "mempalace.mempalace_search"]
+    tools["deny"] = [*deny, "mempalace-readonly.mempalace_search"]
 
 
 def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
@@ -1171,9 +1171,9 @@ def test_mempalace_obsolete_mutation_alias_ids_cover_bare_dotted_and_mcp_forms()
 
 
 def test_mempalace_policy_and_codex_display_names_are_intentionally_distinct() -> None:
-    assert "mempalace.mempalace_search" in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
+    assert "mempalace-readonly.mempalace_search" in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
     assert "mempalace__mempalace_search" not in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
-    assert "mempalace.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace-readonly.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
 
 
 def test_mempalace_readonly_tool_registry_matches_expected_split() -> None:
