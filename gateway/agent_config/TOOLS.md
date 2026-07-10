@@ -19,7 +19,7 @@ Key rules:
 
 - Use OpenClaw subagents for target-repo coding and review work.
 - The `main` agent is the autoresearch PM and loop controller on
-  `openai/gpt-5.5` high.
+  `openai/gpt-5.6-sol` high.
 - Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
   `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
   in the autoresearch skill.
@@ -52,27 +52,31 @@ has a plan, verification, commits, and recoverable history.
 
 OpenClaw built-in memory tools (`memory_search`, `memory_get`) are denied by
 policy. Use MemPalace read tools for research context. Only the PM agent loads
-the write-capable `mempalace` skill and MemPalace write tools; non-PM agents
-load `mempalace-readonly`.
+the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
 
 ## Memory (via MemPalace MCP)
 
 | Tool | Use |
 |------|-----|
-| `mempalace_status` | Palace health and drawer overview |
-| `mempalace_search` | Semantic search across stored experiment content |
-| `mempalace_add_drawer` | PM-only final experiment logging |
-| `mempalace_delete_drawer` | PM-only correction of completed records |
-| `mempalace_kg_query` | Query entity relationships from the knowledge graph |
-| `mempalace_kg_add` | PM-only final experiment fact logging |
-| `mempalace_kg_invalidate` | PM-only correction of completed records |
-| `mempalace_kg_timeline` | Chronological story of an entity |
-| `mempalace_kg_stats` | Knowledge graph overview |
-| `mempalace_diary_write` | PM-only summary after completed experiment decisions |
-| `mempalace_diary_read` | Browse past session notes |
-| `mempalace_list_wings` | List all wings with drawer counts |
-| `mempalace_list_rooms` | List rooms within a wing |
-| `mempalace_check_duplicate` | PM-only pre-write duplicate detection |
+| `mempalace.mempalace_status` | Palace health and drawer overview |
+| `mempalace.mempalace_search` | Semantic search across stored experiment content |
+| `mempalace.mempalace_get_drawer` | Read a stored drawer |
+| `mempalace.mempalace_list_drawers` | List drawers |
+| `mempalace.mempalace_list_wings` | List all wings with drawer counts |
+| `mempalace.mempalace_list_rooms` | List rooms within a wing |
+| `mempalace.mempalace_get_taxonomy` | Read the taxonomy |
+| `mempalace.mempalace_get_aaak_spec` | Read the AAAK specification |
+| `mempalace.mempalace_diary_read` | Browse past session notes |
+| `mempalace.mempalace_kg_query` | Query entity relationships from the knowledge graph |
+| `mempalace.mempalace_kg_timeline` | Chronological story of an entity |
+| `mempalace.mempalace_kg_stats` | Knowledge graph overview |
+| `mempalace.mempalace_traverse` | Traverse related memory context |
+| `mempalace.mempalace_find_tunnels` | Find linked context paths |
+| `mempalace.mempalace_follow_tunnels` | Follow linked context paths |
+| `mempalace.mempalace_graph_stats` | Graph storage overview |
+| `mempalace.mempalace_list_tunnels` | List tunnels |
+| `mempalace.mempalace_list_hallways` | List hallways |
+| `mempalace.mempalace_memories_filed_away` | Inspect filed memory summaries |
 
 Read `mempalace` only when acting as the PM. Read `mempalace-readonly` when
 acting as any context, debate, implementation, review, or fix stage agent. If
@@ -81,8 +85,8 @@ with hidden or unstructured state.
 
 Non-PM stage agents both deny every MemPalace mutation/operation tool in config
 and avoid the write-capable `mempalace` skill. They may read context, but they
-cannot write or alter drawers, KG facts, diaries, tunnels, hallways, hook
-settings, mined content, checkpoints, sync state, or source-linked records.
+cannot alter durable MemPalace state. The PM performs final experiment logging
+through the write-capable skill after review and decision gates pass.
 
 ## Long-Running Tasks
 

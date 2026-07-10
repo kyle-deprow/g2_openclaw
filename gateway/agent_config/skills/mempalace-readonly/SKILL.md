@@ -23,47 +23,29 @@ continuity. MemPalace is the only durable research memory layer.
 
 Use only read-only MemPalace tools:
 
-- `mempalace_status`
-- `mempalace_search`
-- `mempalace_get_drawer`
-- `mempalace_list_drawers`
-- `mempalace_list_wings`
-- `mempalace_list_rooms`
-- `mempalace_get_taxonomy`
-- `mempalace_get_aaak_spec`
-- `mempalace_diary_read`
-- `mempalace_kg_query`
-- `mempalace_kg_timeline`
-- `mempalace_kg_stats`
-- `mempalace_traverse`
-- `mempalace_find_tunnels`
-- `mempalace_follow_tunnels`
-- `mempalace_graph_stats`
-- `mempalace_list_tunnels`
-- `mempalace_list_hallways`
-- `mempalace_memories_filed_away`
+- `mempalace.mempalace_status`
+- `mempalace.mempalace_search`
+- `mempalace.mempalace_get_drawer`
+- `mempalace.mempalace_list_drawers`
+- `mempalace.mempalace_list_wings`
+- `mempalace.mempalace_list_rooms`
+- `mempalace.mempalace_get_taxonomy`
+- `mempalace.mempalace_get_aaak_spec`
+- `mempalace.mempalace_diary_read`
+- `mempalace.mempalace_kg_query`
+- `mempalace.mempalace_kg_timeline`
+- `mempalace.mempalace_kg_stats`
+- `mempalace.mempalace_traverse`
+- `mempalace.mempalace_find_tunnels`
+- `mempalace.mempalace_follow_tunnels`
+- `mempalace.mempalace_graph_stats`
+- `mempalace.mempalace_list_tunnels`
+- `mempalace.mempalace_list_hallways`
+- `mempalace.mempalace_memories_filed_away`
 
-## Denied Write And Operation Tools
-
-Non-PM agents should not receive these tools in config. If one appears
-available, treat that as a configuration error and stop instead of calling it.
-
-- `mempalace_add_drawer`
-- `mempalace_update_drawer`
-- `mempalace_delete_drawer`
-- `mempalace_delete_by_source`
-- `mempalace_check_duplicate`
-- `mempalace_checkpoint`
-- `mempalace_mine`
-- `mempalace_sync`
-- `mempalace_create_tunnel`
-- `mempalace_delete_tunnel`
-- `mempalace_delete_hallway`
-- `mempalace_hook_settings`
-- `mempalace_reconnect`
-- `mempalace_kg_add`
-- `mempalace_kg_invalidate`
-- `mempalace_diary_write`
+Non-PM agents should not receive write-capable MemPalace tools in config. If
+one appears available, treat that as a configuration error and stop instead of
+calling it.
 
 ## Stage Usage
 

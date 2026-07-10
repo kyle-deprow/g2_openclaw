@@ -130,6 +130,11 @@ MEMPALACE_CONFIG_PLACEHOLDER = "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
 MEMPALACE_FULL_SERVER_ID = "mempalace"
 MEMPALACE_READONLY_SERVER_ID = "mempalace-readonly"
 MEMPALACE_READONLY_WRAPPER_BASENAME = "mempalace-readonly-server.py"
+# OpenClaw policy checks compare internal MCP tool.name ids such as
+# "mempalace__mempalace_search". Codex-facing docs and traces show dotted
+# display ids such as "mempalace.mempalace_search" after adaptation.
+MEMPALACE_POLICY_TOOL_PREFIX = "mempalace__"
+MEMPALACE_CODEX_DISPLAY_NAMESPACE = "mempalace"
 MEMPALACE_MUTATION_TOOLS = (
     "mempalace_add_drawer",
     "mempalace_check_duplicate",
@@ -148,11 +153,10 @@ MEMPALACE_MUTATION_TOOLS = (
     "mempalace_sync",
     "mempalace_update_drawer",
 )
-MEMPALACE_MUTATION_TOOL_RUNTIME_PREFIXES = (
+MEMPALACE_OBSOLETE_MUTATION_TOOL_ID_PREFIXES = (
     "",
-    "mempalace__",
     "mcp__mempalace__",
-    "mempalace.",
+    f"{MEMPALACE_CODEX_DISPLAY_NAMESPACE}.",
 )
 MEMPALACE_READONLY_TOOL_NAMES = (
     "mempalace_status",
@@ -177,10 +181,22 @@ MEMPALACE_READONLY_TOOL_NAMES = (
 )
 
 
-def _expand_mempalace_mutation_tool_ids(
+def _compile_mempalace_policy_tool_ids(
+    tool_names: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(f"{MEMPALACE_POLICY_TOOL_PREFIX}{tool_name}" for tool_name in tool_names)
+
+
+def _compile_mempalace_codex_display_tool_ids(
+    tool_names: Sequence[str],
+) -> tuple[str, ...]:
+    return tuple(f"{MEMPALACE_CODEX_DISPLAY_NAMESPACE}.{tool_name}" for tool_name in tool_names)
+
+
+def _compile_mempalace_alias_tool_ids(
     tool_names: Sequence[str],
     *,
-    prefixes: Sequence[str] = MEMPALACE_MUTATION_TOOL_RUNTIME_PREFIXES,
+    prefixes: Sequence[str] = MEMPALACE_OBSOLETE_MUTATION_TOOL_ID_PREFIXES,
 ) -> tuple[str, ...]:
     expanded: list[str] = []
     for prefix in prefixes:
@@ -188,7 +204,17 @@ def _expand_mempalace_mutation_tool_ids(
     return tuple(expanded)
 
 
-MEMPALACE_MUTATION_DENY_TOOL_IDS = _expand_mempalace_mutation_tool_ids(MEMPALACE_MUTATION_TOOLS)
+MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
+MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
+    MEMPALACE_MUTATION_TOOLS
+)
+MEMPALACE_READONLY_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
+    MEMPALACE_READONLY_TOOL_NAMES
+)
+MEMPALACE_MUTATION_DENY_TOOL_ID_SET = frozenset(MEMPALACE_MUTATION_DENY_TOOL_IDS)
+MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_ID_SET = frozenset(
+    MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
+)
 DEFAULT_ALLOWED_TARGET_STATUS_LINES = ("?? docs/quantipy_experiment_mempalace_preload.md",)
 
 
@@ -1867,11 +1893,31 @@ def _validate_policy(
             agent_map[agent.agent_id].get("tools"),
             label=f"{agent.agent_id}.tools",
         )
-        denied_tools = set(_require_string_list(tools, "deny"))
-        missing_deny = sorted(set(MEMPALACE_MUTATION_DENY_TOOL_IDS) - denied_tools)
+        # These denies must use internal OpenClaw policy ids, not the dotted
+        # display ids that Codex shows in traces and docs.
+        denied_tool_list = _require_string_list(tools, "deny")
+        denied_tools = set(denied_tool_list)
+        missing_deny = sorted(MEMPALACE_MUTATION_DENY_TOOL_ID_SET - denied_tools)
         if missing_deny:
             raise AutoresearchConfigError(
-                f"{agent.agent_id} must deny MemPalace mutation tools: {', '.join(missing_deny)}"
+                f"{agent.agent_id} must deny exact MemPalace mutation policy IDs: "
+                f"{', '.join(missing_deny)}"
+            )
+        obsolete_aliases = sorted(MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_ID_SET & denied_tools)
+        if obsolete_aliases:
+            raise AutoresearchConfigError(
+                f"{agent.agent_id} must not deny obsolete MemPalace mutation aliases: "
+                f"{', '.join(obsolete_aliases)}"
+            )
+        unexpected_deny = sorted(denied_tools - MEMPALACE_MUTATION_DENY_TOOL_ID_SET)
+        if unexpected_deny:
+            raise AutoresearchConfigError(
+                f"{agent.agent_id} must deny only canonical MemPalace mutation policy IDs: "
+                f"{', '.join(unexpected_deny)}"
+            )
+        if tuple(denied_tool_list) != MEMPALACE_MUTATION_DENY_TOOL_IDS:
+            raise AutoresearchConfigError(
+                f"{agent.agent_id} must deny exactly the canonical MemPalace mutation policy IDs"
             )
 
 

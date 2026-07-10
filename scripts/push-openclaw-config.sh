@@ -59,18 +59,25 @@ MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_update_drawer"
 )
 
-build_mempalace_mutation_deny_ids_json() {
+build_mempalace_mutation_policy_ids_json() {
   local tool_names_json
   tool_names_json="$(printf '%s\n' "${MEMPALACE_MUTATION_TOOL_NAMES[@]}" | jq -Rsc 'split("\n")[:-1]')"
   jq -cn --argjson tool_names "${tool_names_json}" '
-    def runtime_forms($tool_name):
+    [$tool_names[] | "mempalace__\(.)"]
+  '
+}
+
+build_mempalace_obsolete_mutation_alias_ids_json() {
+  local tool_names_json
+  tool_names_json="$(printf '%s\n' "${MEMPALACE_MUTATION_TOOL_NAMES[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  jq -cn --argjson tool_names "${tool_names_json}" '
+    def obsolete_aliases($tool_name):
       [
         $tool_name,
-        "mempalace__\($tool_name)",
-        "mcp__mempalace__\($tool_name)",
-        "mempalace.\($tool_name)"
+        "mempalace.\($tool_name)",
+        "mcp__mempalace__\($tool_name)"
       ];
-    [$tool_names[] | runtime_forms(.)[]]
+    [$tool_names[] | obsolete_aliases(.)[]]
   '
 }
 
@@ -78,15 +85,29 @@ build_string_array_json() {
   printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
 }
 
-MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_deny_ids_json)"
-MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
-MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
+ROLLBACK_ARMED=0
+
+rollback_local_config_on_exit() {
+  local exit_status=$?
+  trap - EXIT
+  if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
+    if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
+      echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
+    fi
+  fi
+  exit "${exit_status}"
+}
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
   echo "ERROR: jq is required but not found. Install it: https://jqlang.github.io/jq/" >&2
   exit 1
 fi
+
+MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_policy_ids_json)"
+MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON="$(build_mempalace_obsolete_mutation_alias_ids_json)"
+MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
+MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
 
 if [[ ! -f "${REPO_CONFIG}" ]]; then
   echo "ERROR: Repo config not found at ${REPO_CONFIG}" >&2
@@ -218,6 +239,8 @@ fi
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="${LOCAL_CONFIG}.bak.${TIMESTAMP}"
 cp "${LOCAL_CONFIG}" "${BACKUP}"
+ROLLBACK_ARMED=1
+trap 'rollback_local_config_on_exit' EXIT
 echo "Backed up local config → ${BACKUP}"
 
 # ── Deep merge ───────────────────────────────────────────────────────────────
@@ -247,14 +270,12 @@ export HF_HUB_OFFLINE
 if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
   echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
   echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
-  cp "${BACKUP}" "${LOCAL_CONFIG}"
   exit 1
 fi
 
 if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
   echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
   echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
-  cp "${BACKUP}" "${LOCAL_CONFIG}"
   exit 1
 fi
 
@@ -264,7 +285,6 @@ mkdir -p "${FASTEMBED_CACHE_PATH}"
 if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
   echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
   echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
-  cp "${BACKUP}" "${LOCAL_CONFIG}"
   exit 1
 fi
 
@@ -451,17 +471,24 @@ MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
 
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 
-# Non-main agents must deny every runtime-visible MemPalace mutator form. The
-# matcher currently sees the bare tool id plus bundled, mcp__, and dotted names.
+# Non-main agents must deny exactly the internal OpenClaw MCP tool.name ids.
+# Dotted names are Codex-facing display/docs ids only, and historical bare/mcp__
+# aliases are rejected instead of accepted as compatibility forms.
 if ! echo "${MERGED}" | jq -e \
-  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" '
-  ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains($mempalace_mutation_denies)) | not))] | length) == 0
+  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
+  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
+  def denies: (.tools.deny // []);
+  ([.agents.list[] | select(.id != "main") | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
-    .agents.list[] | select(.id == "main") | (.tools.deny // [])[]?
-  ] | map(select(. as $tool | $mempalace_mutation_denies | index($tool))) | length) == 0)
+    .agents.list[] | denies[]?
+  ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
+  and (([
+    .agents.list[] | select(.id == "main") | denies[]?
+  ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
-  echo "ERROR: Every non-main autoresearch agent must deny all MemPalace mutator runtime IDs" >&2
-  echo "       (bare, bundled mempalace__, MCP mcp__, and dotted mempalace.* forms)." >&2
+  echo "ERROR: Every non-main autoresearch agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
+  echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
+  echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
   echo "       Main must retain MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
@@ -479,7 +506,9 @@ if ! echo "${MERGED}" | jq -e \
   --arg offline "${HF_HUB_OFFLINE}" \
   --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
   --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" \
-  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" '
+  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
+  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
+  def denies: (.tools.deny // []);
   def expected_models: {
     "main": $pm,
     "context-curator": "openai/gpt-5.4",
@@ -526,10 +555,13 @@ if ! echo "${MERGED}" | jq -e \
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains($mempalace_mutation_denies)) | not))] | length) == 0
+  and ([.agents.list[] | select(.id != "main") | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
-    .agents.list[] | select(.id == "main") | (.tools.deny // [])[]?
-  ] | map(select(. as $tool | $mempalace_mutation_denies | index($tool))) | length) == 0)
+    .agents.list[] | denies[]?
+  ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
+  and (([
+    .agents.list[] | select(.id == "main") | denies[]?
+  ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
   echo "       Check plugins.allow, PM model/skills, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
@@ -691,7 +723,6 @@ echo "── Validating config ──"
 if command -v openclaw &>/dev/null; then
   echo "Running: openclaw config validate"
   if ! openclaw config validate; then
-    cp "${BACKUP}" "${LOCAL_CONFIG}"
     echo "ERROR: 'openclaw config validate' failed. Restored backup ${BACKUP}." >&2
     exit 1
   fi
@@ -703,7 +734,6 @@ if command -v openclaw &>/dev/null; then
       and .plugin.enabled == true
       and .plugin.status == "loaded"
     ' >/dev/null; then
-      cp "${BACKUP}" "${LOCAL_CONFIG}"
       echo "ERROR: Required Codex plugin is not installed, enabled, and loaded. Restored backup ${BACKUP}." >&2
       echo "       Run: openclaw plugins install @openclaw/codex" >&2
       exit 1
@@ -716,12 +746,10 @@ if command -v openclaw &>/dev/null; then
       | .spec
     ' | head -n1)"
     if [[ -z "${CODEX_APP_SERVER_VERSION}" || "${CODEX_APP_SERVER_VERSION}" == "null" ]]; then
-      cp "${BACKUP}" "${LOCAL_CONFIG}"
       echo "ERROR: Could not determine embedded @openai/codex version. Restored backup ${BACKUP}." >&2
       exit 1
     fi
     if [[ "$(printf '%s\n%s\n' "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${CODEX_APP_SERVER_VERSION}" | sort -V | head -n1)" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
-      cp "${BACKUP}" "${LOCAL_CONFIG}"
       echo "ERROR: Embedded @openai/codex ${CODEX_APP_SERVER_VERSION} is too old for GPT-5.6. Restored backup ${BACKUP}." >&2
       echo "       Need @openai/codex >= ${REQUIRED_CODEX_APP_SERVER_VERSION} in the @openclaw/codex plugin project." >&2
       echo "       First try: openclaw plugins install @openclaw/codex --force" >&2
@@ -731,11 +759,13 @@ if command -v openclaw &>/dev/null; then
     echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
   fi
 else
-  cp "${BACKUP}" "${LOCAL_CONFIG}"
   echo "ERROR: openclaw CLI not found on PATH. Restored backup ${BACKUP}." >&2
   echo "       Install OpenClaw and rerun validation." >&2
   exit 1
 fi
+
+ROLLBACK_ARMED=0
+trap - EXIT
 
 echo ""
 echo "Done. Config pushed successfully."

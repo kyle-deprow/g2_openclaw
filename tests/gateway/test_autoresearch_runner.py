@@ -13,6 +13,8 @@ from gateway.autoresearch_runner import (
     MEMPALACE_FULL_SERVER_ID,
     MEMPALACE_MUTATION_DENY_TOOL_IDS,
     MEMPALACE_MUTATION_TOOLS,
+    MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS,
+    MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
     MEMPALACE_READONLY_SERVER_ID,
     MEMPALACE_READONLY_TOOL_NAMES,
     QUANTIPY_RECEIPT_PATHS,
@@ -1025,11 +1027,31 @@ def _give_stage_agent_write_skill(config: dict[str, object]) -> None:
     agents[1]["skills"] = ["mempalace", "quantipy-methodology"]
 
 
-def _remove_stage_agent_mempalace_denies(config: dict[str, object]) -> None:
+def _remove_stage_agent_mempalace_deny(config: dict[str, object]) -> None:
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
     tools = cast(dict[str, object], agents[1]["tools"])
-    tools["deny"] = ["mempalace_add_drawer"]
+    deny = cast(list[str], tools["deny"])
+    tools["deny"] = deny[1:]
+
+
+def _add_stage_agent_obsolete_mempalace_deny_alias(
+    config: dict[str, object],
+    alias: str = "mcp__mempalace__mempalace_add_drawer",
+) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    agents = cast(list[dict[str, object]], agents_root["list"])
+    tools = cast(dict[str, object], agents[1]["tools"])
+    deny = cast(list[str], tools["deny"])
+    tools["deny"] = [*deny, alias]
+
+
+def _add_stage_agent_extra_noncanonical_mempalace_deny(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    agents = cast(list[dict[str, object]], agents_root["list"])
+    tools = cast(dict[str, object], agents[1]["tools"])
+    deny = cast(list[str], tools["deny"])
+    tools["deny"] = [*deny, "mempalace.mempalace_search"]
 
 
 def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
@@ -1077,7 +1099,15 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
             "mcp\\.servers\\.mempalace-readonly\\.args must be "
             "\\['<wrapper>', '--palace', '<path>'\\]",
         ),
-        (_remove_stage_agent_mempalace_denies, "must deny MemPalace mutation tools"),
+        (_remove_stage_agent_mempalace_deny, "must deny exact MemPalace mutation policy IDs"),
+        (
+            _add_stage_agent_obsolete_mempalace_deny_alias,
+            "must not deny obsolete MemPalace mutation aliases",
+        ),
+        (
+            _add_stage_agent_extra_noncanonical_mempalace_deny,
+            "must deny only canonical MemPalace mutation policy IDs",
+        ),
     ],
 )
 def test_load_autoresearch_policy_validates_route_skills_and_mempalace_denies(
@@ -1094,14 +1124,56 @@ def test_load_autoresearch_policy_validates_route_skills_and_mempalace_denies(
         load_autoresearch_policy(config_path)
 
 
-def test_mempalace_mutation_deny_ids_cover_all_runtime_forms() -> None:
-    assert len(MEMPALACE_MUTATION_DENY_TOOL_IDS) == len(MEMPALACE_MUTATION_TOOLS) * 4
-    assert "mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+@pytest.mark.parametrize(
+    "alias",
+    [
+        "mempalace_add_drawer",
+        "mempalace.mempalace_add_drawer",
+        "mcp__mempalace__mempalace_add_drawer",
+    ],
+)
+def test_load_autoresearch_policy_rejects_each_obsolete_mempalace_alias(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    config = deepcopy(_load_config())
+    _add_stage_agent_obsolete_mempalace_deny_alias(config, alias)
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(
+        AutoresearchConfigError,
+        match="must not deny obsolete MemPalace mutation aliases",
+    ):
+        load_autoresearch_policy(config_path)
+
+
+def test_mempalace_mutation_policy_ids_use_internal_tool_names_only() -> None:
+    expected_ids = tuple(f"mempalace__{tool_name}" for tool_name in MEMPALACE_MUTATION_TOOLS)
+
+    assert expected_ids == MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert all(tool_id.startswith("mempalace__mempalace_") for tool_id in expected_ids)
     assert "mempalace__mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mcp__mempalace__mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mempalace.mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace.mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mcp__mempalace__mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
     assert "mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
     assert "mcp__mempalace__mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+
+
+def test_mempalace_obsolete_mutation_alias_ids_cover_bare_dotted_and_mcp_forms() -> None:
+    assert len(MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS) == len(MEMPALACE_MUTATION_TOOLS) * 3
+    assert "mempalace_add_drawer" in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
+    assert "mempalace.mempalace_add_drawer" in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
+    assert "mcp__mempalace__mempalace_add_drawer" in (MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS)
+    assert "mempalace__mempalace_add_drawer" not in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
+
+
+def test_mempalace_policy_and_codex_display_names_are_intentionally_distinct() -> None:
+    assert "mempalace.mempalace_search" in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
+    assert "mempalace__mempalace_search" not in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
+    assert "mempalace.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
 
 
 def test_mempalace_readonly_tool_registry_matches_expected_split() -> None:
@@ -1138,16 +1210,23 @@ def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None
     ]
 
 
-def test_default_openclaw_config_denies_all_mempalace_runtime_mutator_ids() -> None:
+def test_default_openclaw_config_denies_exact_canonical_mempalace_policy_ids() -> None:
     config = _load_config()
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
-    expected_denies = set(MEMPALACE_MUTATION_DENY_TOOL_IDS)
+    expected_denies = list(MEMPALACE_MUTATION_DENY_TOOL_IDS)
 
     for agent in agents:
         agent_id = cast(str, agent["id"])
         if agent_id == "main":
+            assert "tools" not in agent or "deny" not in cast(dict[str, object], agent["tools"])
             continue
         tools = cast(dict[str, object], agent["tools"])
-        denied_tools = set(cast(list[str], tools["deny"]))
-        assert expected_denies.issubset(denied_tools), agent_id
+        denied_tools = cast(list[str], tools["deny"])
+        assert denied_tools == expected_denies, agent_id
+        assert all(tool_id.startswith("mempalace__mempalace_") for tool_id in denied_tools), (
+            agent_id
+        )
+        assert not any("." in tool_id or tool_id.startswith("mcp__") for tool_id in denied_tools), (
+            agent_id
+        )
