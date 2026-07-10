@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ── Resolve repo root ────────────────────────────────────────────────────────
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # ── Flags ─────────────────────────────────────────────────────────────────────
@@ -21,6 +21,10 @@ SKIP_OPTIONAL=false
 HAS_GPU=false
 GPU_NAME=""
 SUMMARY_ITEMS=()
+REQUIRED_OPENCLAW_VERSION="2026.6.11"
+OPENCLAW_BIN_RESOLVED=""
+OPENCLAW_VERSION_RESOLVED=""
+OPENCLAW_INSTALLED_PATH=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -93,16 +97,148 @@ prompt_yn() {
 }
 
 version_gte() {
-  # Returns 0 if $1 >= $2 (semver-ish, compares major.minor)
   local have="$1" need="$2"
-  local have_major have_minor need_major need_minor
-  have_major="${have%%.*}"
-  have_minor="${have#*.}"; have_minor="${have_minor%%.*}"
-  need_major="${need%%.*}"
-  need_minor="${need#*.}"; need_minor="${need_minor%%.*}"
-  if (( have_major > need_major )); then return 0; fi
-  if (( have_major == need_major && have_minor >= need_minor )); then return 0; fi
+  [[ "$(printf '%s\n%s\n' "${need}" "${have}" | sort -V | head -n1)" == "${need}" ]]
+}
+
+expand_user_path() {
+  local path="$1"
+  case "${path}" in
+    "~") printf '%s\n' "${HOME}" ;;
+    "~/"*) printf '%s/%s\n' "${HOME}" "${path:2}" ;;
+    *) printf '%s\n' "${path}" ;;
+  esac
+}
+
+resolve_openclaw_bin() {
+  local -a candidates=()
+  local candidate path_entry
+  declare -A seen=()
+
+  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
+    candidates+=("$(expand_user_path "${OPENCLAW_BIN}")")
+  else
+    candidates+=(
+      "${HOME}/.local/share/pnpm/openclaw"
+      "${HOME}/.local/bin/openclaw"
+    )
+    IFS=':' read -r -a path_entries <<< "${PATH:-}"
+    for path_entry in "${path_entries[@]}"; do
+      [[ -n "${path_entry}" ]] || continue
+      candidates+=("${path_entry}/openclaw")
+    done
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    if [[ -n "${seen[${candidate}]+x}" ]]; then
+      continue
+    fi
+    seen["${candidate}"]=1
+    if [[ -f "${candidate}" && -x "${candidate}" ]]; then
+      OPENCLAW_BIN_RESOLVED="${candidate}"
+      return 0
+    fi
+  done
+  OPENCLAW_BIN_RESOLVED=""
   return 1
+}
+
+read_openclaw_version() {
+  local version_line
+  [[ -n "${OPENCLAW_BIN_RESOLVED}" ]] || return 1
+  if ! version_line="$("${OPENCLAW_BIN_RESOLVED}" --version 2>&1)"; then
+    OPENCLAW_VERSION_RESOLVED=""
+    return 1
+  fi
+  version_line="${version_line%%$'\n'*}"
+  if [[ "${version_line}" =~ (^|[[:space:]])([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)($|[[:space:]]) ]]; then
+    OPENCLAW_VERSION_RESOLVED="${BASH_REMATCH[2]}"
+    return 0
+  fi
+  OPENCLAW_VERSION_RESOLVED=""
+  return 1
+}
+
+require_openclaw_exact_path() {
+  local executable="$1"
+  OPENCLAW_BIN_RESOLVED="${executable}"
+  if [[ ! -f "${OPENCLAW_BIN_RESOLVED}" || ! -x "${OPENCLAW_BIN_RESOLVED}" ]]; then
+    fail "OpenClaw executable is missing or non-executable: ${OPENCLAW_BIN_RESOLVED}"
+    return 1
+  fi
+  if ! read_openclaw_version; then
+    fail "Could not parse OpenClaw version from ${OPENCLAW_BIN_RESOLVED}"
+    return 1
+  fi
+  if [[ "${OPENCLAW_VERSION_RESOLVED}" != "${REQUIRED_OPENCLAW_VERSION}" ]]; then
+    fail "OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} is unsupported — need exactly ${REQUIRED_OPENCLAW_VERSION}"
+    return 1
+  fi
+  export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
+  ok "OpenClaw CLI ${OPENCLAW_VERSION_RESOLVED} (${OPENCLAW_BIN_RESOLVED})"
+}
+
+install_openclaw_exact() {
+  local package="openclaw@${REQUIRED_OPENCLAW_VERSION}"
+  OPENCLAW_INSTALLED_PATH=""
+  if command -v pnpm &>/dev/null; then
+    local pnpm_home
+    pnpm_home="$(expand_user_path "${PNPM_HOME:-$HOME/.local/share/pnpm}")"
+    mkdir -p "${pnpm_home}"
+    export PNPM_HOME="${pnpm_home}"
+    export PATH="${PNPM_HOME}:${PATH}"
+    info "Installing ${package} via pnpm (${PNPM_HOME})"
+    if ! pnpm add -g "${package}"; then
+      return 1
+    fi
+    OPENCLAW_INSTALLED_PATH="${PNPM_HOME}/openclaw"
+  else
+    local npm_prefix
+    npm_prefix="${NPM_CONFIG_PREFIX:-$HOME/.local}"
+    npm_prefix="$(expand_user_path "${npm_prefix}")"
+    mkdir -p "${npm_prefix}/bin"
+    export PATH="${npm_prefix}/bin:${PATH}"
+    info "Installing ${package} via npm (${npm_prefix})"
+    if ! npm install -g --prefix "${npm_prefix}" "${package}"; then
+      return 1
+    fi
+    OPENCLAW_INSTALLED_PATH="${npm_prefix}/bin/openclaw"
+  fi
+  hash -r
+}
+
+ensure_openclaw_exact_version() {
+  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
+    preflight_openclaw_override
+    return
+  fi
+
+  if resolve_openclaw_bin && read_openclaw_version; then
+    if [[ "${OPENCLAW_VERSION_RESOLVED}" == "${REQUIRED_OPENCLAW_VERSION}" ]]; then
+      export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
+      ok "OpenClaw CLI ${OPENCLAW_VERSION_RESOLVED} (${OPENCLAW_BIN_RESOLVED})"
+      return 0
+    fi
+    info "OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} — installing ${REQUIRED_OPENCLAW_VERSION}"
+  else
+    info "OpenClaw CLI not found — installing ${REQUIRED_OPENCLAW_VERSION}"
+  fi
+
+  if ! install_openclaw_exact; then
+    return 1
+  fi
+  require_openclaw_exact_path "${OPENCLAW_INSTALLED_PATH}"
+}
+
+preflight_openclaw_override() {
+  local override
+  [[ -n "${OPENCLAW_BIN:-}" ]] || return 0
+  override="$(expand_user_path "${OPENCLAW_BIN}")"
+  if ! require_openclaw_exact_path "${override}"; then
+    fail "OPENCLAW_BIN must name an executable at exactly version ${REQUIRED_OPENCLAW_VERSION}; bootstrap did not install or upgrade anything"
+    return 1
+  fi
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -242,28 +378,16 @@ install_ts_deps() {
 setup_openclaw() {
   section "4/9  OpenClaw setup"
 
-  # --- Check if OpenClaw CLI is installed ---
-  if command -v openclaw &>/dev/null; then
-    local oc_ver
-    oc_ver="$(openclaw --version 2>&1 | head -1 || echo 'unknown')"
-    ok "OpenClaw CLI: $oc_ver"
-  else
-    info "OpenClaw CLI not found"
-    sudo npm install -g openclaw@latest
-    if command -v openclaw &>/dev/null; then
-      ok "OpenClaw installed: $(openclaw --version 2>&1 | head -1)"
-      summary_add "Installed OpenClaw globally"
-    else
-      fail "OpenClaw installation failed — required for gateway startup"
-      exit 1
-    fi
+  if ! ensure_openclaw_exact_version; then
+    exit 1
   fi
+  summary_add "OpenClaw: ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
 
   # --- Check if onboarded ---
   local oc_config="$HOME/.openclaw/openclaw.json"
   if [[ ! -f "$oc_config" ]]; then
     info "OpenClaw not onboarded yet (~/.openclaw/openclaw.json not found)"
-    openclaw onboard --local
+    "${OPENCLAW_BIN_RESOLVED}" onboard --local
     if [[ -f "$oc_config" ]]; then
       ok "OpenClaw onboarded"
       summary_add "OpenClaw: onboarded"
@@ -276,16 +400,17 @@ setup_openclaw() {
   fi
 
   # --- Install/enable required Codex plugin and remove Copilot routes ---
-  if openclaw plugins install @openclaw/codex; then
+  info "Using OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
+  if "${OPENCLAW_BIN_RESOLVED}" plugins install @openclaw/codex; then
     ok "Codex plugin installed/upgraded"
     summary_add "OpenClaw: Codex plugin installed/upgraded"
   else
     fail "Codex plugin install failed — required for OpenAI/Codex routing"
     exit 1
   fi
-  openclaw plugins enable codex
-  openclaw plugins disable github-copilot || true
-  openclaw plugins disable copilot-proxy || true
+  "${OPENCLAW_BIN_RESOLVED}" plugins enable codex
+  "${OPENCLAW_BIN_RESOLVED}" plugins disable github-copilot || true
+  "${OPENCLAW_BIN_RESOLVED}" plugins disable copilot-proxy || true
 
   # --- Install required MemPalace MCP server ---
   if make -C "$REPO_ROOT" mempalace-install; then
@@ -312,7 +437,7 @@ setup_openclaw() {
   # --- Push repo config ---
   local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"
   if [[ -f "$push_script" ]]; then
-    if bash "$push_script"; then
+    if OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}" bash "$push_script"; then
       ok "OpenClaw config pushed"
       summary_add "OpenClaw: config pushed"
     else
@@ -497,7 +622,7 @@ print_summary() {
   echo -e "${BOLD}  Next steps:${RESET}"
   echo -e "    ${BLUE}1.${RESET} Edit ${BOLD}.env${RESET} — ensure GATEWAY_TOKEN is 32+ chars and review Whisper settings"
   echo -e "    ${BLUE}2.${RESET} Verify security:  ${DIM}re-run this script to check file permissions & token strength${RESET}"
-    echo -e "    ${BLUE}3.${RESET} Start OpenClaw daemon:  ${DIM}openclaw${RESET}"
+  echo -e "    ${BLUE}3.${RESET} Start OpenClaw daemon:  ${DIM}${OPENCLAW_BIN_RESOLVED:-openclaw}${RESET}"
   echo -e "    ${BLUE}4.${RESET} Launch gateway:  ${DIM}uv run python -m gateway launch${RESET}"
   echo -e "    ${BLUE}5.${RESET} Start G2 app:    ${DIM}cd g2_app && npm run dev${RESET}"
   echo -e "    ${BLUE}6.${RESET} ${DIM}(Optional)${RESET} Install Tailscale for remote access: ${DIM}https://tailscale.com/download${RESET}"
@@ -511,6 +636,10 @@ print_summary() {
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 main() {
+  if ! preflight_openclaw_override; then
+    return 1
+  fi
+
   echo ""
   echo -e "${BOLD}🦀 G2 OpenClaw Bootstrap${RESET}"
   echo -e "${DIM}   Repo: $REPO_ROOT${RESET}"
@@ -528,4 +657,6 @@ main() {
   print_summary
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main
+fi

@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
-#   - openclaw CLI on PATH
+#   - OpenClaw CLI exactly 2026.6.11
 #   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai'
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
@@ -23,7 +23,10 @@ MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.p
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
+REQUIRED_OPENCLAW_VERSION="2026.6.11"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
+OPENCLAW_BIN_RESOLVED=""
+OPENCLAW_VERSION_RESOLVED=""
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 MEMPALACE_FULL_AGENT_IDS=(
   "main"
@@ -85,6 +88,78 @@ build_string_array_json() {
   printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
 }
 
+expand_user_path() {
+  local path="$1"
+  case "${path}" in
+    "~") printf '%s\n' "${HOME}" ;;
+    "~/"*) printf '%s/%s\n' "${HOME}" "${path:2}" ;;
+    *) printf '%s\n' "${path}" ;;
+  esac
+}
+
+resolve_openclaw_bin() {
+  local -a candidates=()
+  local candidate path_entry
+  declare -A seen=()
+
+  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
+    candidates+=("$(expand_user_path "${OPENCLAW_BIN}")")
+  else
+    candidates+=(
+      "${HOME}/.local/share/pnpm/openclaw"
+      "${HOME}/.local/bin/openclaw"
+    )
+    IFS=':' read -r -a path_entries <<< "${PATH:-}"
+    for path_entry in "${path_entries[@]}"; do
+      [[ -n "${path_entry}" ]] || continue
+      candidates+=("${path_entry}/openclaw")
+    done
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "${candidate}" ]] || continue
+    if [[ -n "${seen[${candidate}]+x}" ]]; then
+      continue
+    fi
+    seen["${candidate}"]=1
+    if [[ -f "${candidate}" && -x "${candidate}" ]]; then
+      OPENCLAW_BIN_RESOLVED="${candidate}"
+      return 0
+    fi
+  done
+
+  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
+    echo "ERROR: OPENCLAW_BIN points to a missing or non-executable path: $(expand_user_path "${OPENCLAW_BIN}")" >&2
+  else
+    echo "ERROR: OpenClaw executable not found. Checked ${HOME}/.local/share/pnpm/openclaw, ${HOME}/.local/bin/openclaw, and PATH entries." >&2
+  fi
+  return 1
+}
+
+require_openclaw_supported() {
+  local version_line
+  if ! resolve_openclaw_bin; then
+    return 1
+  fi
+  if ! version_line="$("${OPENCLAW_BIN_RESOLVED}" --version 2>&1)"; then
+    echo "ERROR: OpenClaw version check failed for ${OPENCLAW_BIN_RESOLVED}" >&2
+    return 1
+  fi
+  version_line="${version_line%%$'\n'*}"
+  if [[ "${version_line}" =~ (^|[[:space:]])([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)($|[[:space:]]) ]]; then
+    OPENCLAW_VERSION_RESOLVED="${BASH_REMATCH[2]}"
+  else
+    echo "ERROR: Could not parse OpenClaw version from ${OPENCLAW_BIN_RESOLVED}: ${version_line:-<empty>}" >&2
+    return 1
+  fi
+  if [[ "${OPENCLAW_VERSION_RESOLVED}" != "${REQUIRED_OPENCLAW_VERSION}" ]]; then
+    echo "ERROR: OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} is unsupported; need exactly ${REQUIRED_OPENCLAW_VERSION}." >&2
+    return 1
+  fi
+  export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
+  return 0
+}
+
 ROLLBACK_ARMED=0
 
 rollback_local_config_on_exit() {
@@ -99,6 +174,11 @@ rollback_local_config_on_exit() {
 }
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
+if ! require_openclaw_supported; then
+  exit 1
+fi
+echo "Using OpenClaw: ${OPENCLAW_BIN_RESOLVED} (version ${OPENCLAW_VERSION_RESOLVED})"
+
 if ! command -v jq &>/dev/null; then
   echo "ERROR: jq is required but not found. Install it: https://jqlang.github.io/jq/" >&2
   exit 1
@@ -227,11 +307,6 @@ done
 if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
   echo "       Set it in ${ENV_FILE} or export it before running this script." >&2
-  exit 1
-fi
-
-if [[ "${OPENCLAW_PROVIDER:-codex}" == "codex" ]] && ! command -v openclaw &>/dev/null; then
-  echo "ERROR: openclaw CLI is required for OPENCLAW_PROVIDER=codex." >&2
   exit 1
 fi
 
@@ -720,48 +795,42 @@ fi
 # ── Validate ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Validating config ──"
-if command -v openclaw &>/dev/null; then
-  echo "Running: openclaw config validate"
-  if ! openclaw config validate; then
-    echo "ERROR: 'openclaw config validate' failed. Restored backup ${BACKUP}." >&2
+echo "Running: ${OPENCLAW_BIN_RESOLVED} config validate"
+if ! "${OPENCLAW_BIN_RESOLVED}" config validate; then
+  echo "ERROR: '${OPENCLAW_BIN_RESOLVED} config validate' failed. Restored backup ${BACKUP}." >&2
+  exit 1
+fi
+if [[ "${PROVIDER}" == "codex" ]]; then
+  echo "Running: ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
+  CODEX_PLUGIN_INSPECT_JSON="$("${OPENCLAW_BIN_RESOLVED}" plugins inspect codex --json)"
+  if ! echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -e '
+    .plugin.id == "codex"
+    and .plugin.enabled == true
+    and .plugin.status == "loaded"
+  ' >/dev/null; then
+    echo "ERROR: Required Codex plugin is not installed, enabled, and loaded. Restored backup ${BACKUP}." >&2
+    echo "       Run: ${OPENCLAW_BIN_RESOLVED} plugins install @openclaw/codex" >&2
     exit 1
   fi
-  if [[ "${PROVIDER}" == "codex" ]]; then
-    echo "Running: openclaw plugins inspect codex --json"
-    CODEX_PLUGIN_INSPECT_JSON="$(openclaw plugins inspect codex --json)"
-    if ! echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -e '
-      .plugin.id == "codex"
-      and .plugin.enabled == true
-      and .plugin.status == "loaded"
-    ' >/dev/null; then
-      echo "ERROR: Required Codex plugin is not installed, enabled, and loaded. Restored backup ${BACKUP}." >&2
-      echo "       Run: openclaw plugins install @openclaw/codex" >&2
-      exit 1
-    fi
-    CODEX_APP_SERVER_VERSION="$(echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -r '
-      .. | objects
-      | select(has("dependencyStatus"))
-      | .dependencyStatus.dependencies[]?
-      | select(.name == "@openai/codex")
-      | .spec
-    ' | head -n1)"
-    if [[ -z "${CODEX_APP_SERVER_VERSION}" || "${CODEX_APP_SERVER_VERSION}" == "null" ]]; then
-      echo "ERROR: Could not determine embedded @openai/codex version. Restored backup ${BACKUP}." >&2
-      exit 1
-    fi
-    if [[ "$(printf '%s\n%s\n' "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${CODEX_APP_SERVER_VERSION}" | sort -V | head -n1)" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
-      echo "ERROR: Embedded @openai/codex ${CODEX_APP_SERVER_VERSION} is too old for GPT-5.6. Restored backup ${BACKUP}." >&2
-      echo "       Need @openai/codex >= ${REQUIRED_CODEX_APP_SERVER_VERSION} in the @openclaw/codex plugin project." >&2
-      echo "       First try: openclaw plugins install @openclaw/codex --force" >&2
-      echo "       If @openclaw/codex still pins an older Codex package, update the plugin project's nested @openai/codex dependency." >&2
-      exit 1
-    fi
-    echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
+  CODEX_APP_SERVER_VERSION="$(echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -r '
+    .. | objects
+    | select(has("dependencyStatus"))
+    | .dependencyStatus.dependencies[]?
+    | select(.name == "@openai/codex")
+    | .spec
+  ' | head -n1)"
+  if [[ -z "${CODEX_APP_SERVER_VERSION}" || "${CODEX_APP_SERVER_VERSION}" == "null" ]]; then
+    echo "ERROR: Could not determine embedded @openai/codex version. Restored backup ${BACKUP}." >&2
+    exit 1
   fi
-else
-  echo "ERROR: openclaw CLI not found on PATH. Restored backup ${BACKUP}." >&2
-  echo "       Install OpenClaw and rerun validation." >&2
-  exit 1
+  if [[ "$(printf '%s\n%s\n' "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${CODEX_APP_SERVER_VERSION}" | sort -V | head -n1)" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
+    echo "ERROR: Embedded @openai/codex ${CODEX_APP_SERVER_VERSION} is too old for GPT-5.6. Restored backup ${BACKUP}." >&2
+    echo "       Need @openai/codex >= ${REQUIRED_CODEX_APP_SERVER_VERSION} in the @openclaw/codex plugin project." >&2
+    echo "       First try: ${OPENCLAW_BIN_RESOLVED} plugins install @openclaw/codex --force" >&2
+    echo "       If @openclaw/codex still pins an older Codex package, update the plugin project's nested @openai/codex dependency." >&2
+    exit 1
+  fi
+  echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
 fi
 
 ROLLBACK_ARMED=0

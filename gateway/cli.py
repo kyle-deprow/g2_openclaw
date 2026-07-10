@@ -39,6 +39,8 @@ _MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
 _MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
 _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
+_REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
+_REQUIRED_OPENCLAW_VERSION_TEXT = ".".join(str(part) for part in _REQUIRED_OPENCLAW_VERSION)
 _mempalace_kg_path_option = typer.Option(
     None,
     "--mempalace-kg-path",
@@ -50,6 +52,121 @@ _TARGET_WRITER_COMMAND_RE = re.compile(
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
     r"src/quantipy/alpha|scripts/experiments|tools/experiments)"
 )
+_OPENCLAW_VERSION_TOKEN_RE = re.compile(r"(?<!\S)(\d+\.\d+\.\d+\S*)(?!\S)")
+_OPENCLAW_STABLE_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+class _OpenClawResolutionError(RuntimeError):
+    """Raised when the OpenClaw executable cannot be resolved safely."""
+
+
+class _OpenClawVersionError(RuntimeError):
+    """Raised when the resolved OpenClaw executable does not meet requirements."""
+
+
+class _ResolvedOpenClaw:
+    """Resolved OpenClaw executable path and parsed version."""
+
+    def __init__(self, path: Path, version_text: str, version: tuple[int, int, int]) -> None:
+        self.path = path
+        self.version_text = version_text
+        self.version = version
+
+
+def _iter_openclaw_candidates() -> tuple[Path, ...]:
+    """Return ordered OpenClaw executable candidates without following wrappers."""
+    override = os.environ.get("OPENCLAW_BIN")
+    if override:
+        return (Path(override).expanduser(),)
+
+    candidates: list[Path] = [
+        Path.home() / ".local/share/pnpm/openclaw",
+        Path.home() / ".local/bin/openclaw",
+    ]
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if entry:
+            candidates.append(Path(entry).expanduser() / "openclaw")
+
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
+    return tuple(ordered)
+
+
+def _resolve_openclaw_executable() -> Path:
+    """Resolve OpenClaw deterministically, preferring the user-level install."""
+    for candidate in _iter_openclaw_candidates():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+
+    override = os.environ.get("OPENCLAW_BIN")
+    if override:
+        override_path = Path(override).expanduser()
+        raise _OpenClawResolutionError(
+            f"OPENCLAW_BIN points to a missing or non-executable path: {override_path}"
+        )
+
+    preferred = ", ".join(str(path) for path in _iter_openclaw_candidates()[:2])
+    raise _OpenClawResolutionError(
+        "OpenClaw executable not found. Checked preferred locations "
+        f"({preferred}) and PATH entries."
+    )
+
+
+def _parse_openclaw_version_token(output: str) -> str | None:
+    """Extract the complete version token from OpenClaw version output."""
+    match = _OPENCLAW_VERSION_TOKEN_RE.search(output)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+def _require_openclaw_binary() -> _ResolvedOpenClaw:
+    """Resolve OpenClaw and require the exact repo-supported version."""
+    executable = _resolve_openclaw_executable()
+    try:
+        result = subprocess.run(
+            [str(executable), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise _OpenClawResolutionError(
+            f"Failed to execute OpenClaw at {executable}: {exc}"
+        ) from exc
+
+    output = (result.stdout or result.stderr).strip()
+    if result.returncode != 0:
+        raise _OpenClawVersionError(
+            f"OpenClaw version check failed for {executable}: {output or 'no output'}"
+        )
+
+    version_token = _parse_openclaw_version_token(output)
+    if version_token is None:
+        raise _OpenClawVersionError(
+            f"Could not parse OpenClaw version from {executable}: {output or 'no output'}"
+        )
+    if version_token != _REQUIRED_OPENCLAW_VERSION_TEXT:
+        relation = "unsupported"
+        stable_match = _OPENCLAW_STABLE_VERSION_RE.fullmatch(version_token)
+        if stable_match is not None:
+            version = tuple(int(part) for part in stable_match.groups())
+            relation = "too old" if version < _REQUIRED_OPENCLAW_VERSION else "too new"
+        raise _OpenClawVersionError(
+            f"OpenClaw {version_token} at {executable} is {relation}; "
+            f"need exactly {_REQUIRED_OPENCLAW_VERSION_TEXT}."
+        )
+
+    return _ResolvedOpenClaw(
+        path=executable,
+        version_text=version_token,
+        version=_REQUIRED_OPENCLAW_VERSION,
+    )
 
 
 def _write_pid_file(pids: dict[str, int]) -> None:
@@ -1019,11 +1136,19 @@ def push_config(
         console.print(f"[red]✗[/red] Push script not found: {push_script}")
         raise typer.Exit(code=1)
 
+    try:
+        openclaw = _require_openclaw_binary()
+    except (_OpenClawResolutionError, _OpenClawVersionError) as exc:
+        console.print(f"[red]✗[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
     # -- 1. Run the push script ------------------------------------------------
     console.print("[bold]1/2 Pushing OpenClaw config…[/bold]")
+    console.print(f"  [dim]OpenClaw: {openclaw.path} (version {openclaw.version_text})[/dim]")
     result = subprocess.run(
         ["bash", str(push_script)],
         cwd=str(_PROJECT_ROOT),
+        env={**os.environ, "OPENCLAW_BIN": str(openclaw.path)},
     )
     if result.returncode != 0:
         console.print(f"[red]✗[/red] Push script failed (exit code {result.returncode})")
@@ -1066,9 +1191,12 @@ def push_config(
             )
 
         # Restart via openclaw CLI
-        console.print(f"  Restarting OpenClaw daemon on port {openclaw_port}…")
+        console.print(
+            "  Restarting OpenClaw daemon on port "
+            f"{openclaw_port} via {openclaw.path} (version {openclaw.version_text})…"
+        )
         subprocess.run(
-            ["openclaw", "daemon", "restart"],
+            [str(openclaw.path), "daemon", "restart"],
             check=False,
             capture_output=True,
             env=_mempalace_env(),
@@ -1166,6 +1294,13 @@ def launch(
         console.print("[bold]MemPalace health[/bold]")
         if not _check_mempalace_health():
             raise typer.Exit(code=1)
+    openclaw: _ResolvedOpenClaw | None = None
+    if not no_openclaw:
+        try:
+            openclaw = _require_openclaw_binary()
+        except (_OpenClawResolutionError, _OpenClawVersionError) as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(code=1) from exc
 
     # -- OTel init (before any server import) ---------------------------------
     from gateway.otel_setup import init_otel
@@ -1207,24 +1342,28 @@ def launch(
         _needs_openclaw_start = False
         if no_openclaw:
             console.print("  [dim]Skipped (--no-openclaw)[/dim]")
-        elif _is_port_open(openclaw_port):
-            # Check whether the running daemon has NODE_OPTIONS set
-            preload_path = Path.home() / ".openclaw" / "azure-api-version-preload.cjs"
-            _oc_pid = _find_pid_on_port(openclaw_port)
-            if (
-                preload_path.is_file()
-                and _oc_pid is not None
-                and not _proc_has_env(_oc_pid, "NODE_OPTIONS")
-            ):
-                console.print(
-                    f"  [yellow]⚠[/yellow] OpenClaw (PID {_oc_pid}) running "
-                    "without Azure api-version preload — restarting…"
-                )
-                _needs_openclaw_restart = True
-            else:
-                console.print(f"  [green]✓[/green] Already running on port {openclaw_port}")
         else:
-            _needs_openclaw_start = True
+            if openclaw is None:
+                raise typer.Exit(code=1)
+            console.print(f"  [dim]Using {openclaw.path} (version {openclaw.version_text})[/dim]")
+            if _is_port_open(openclaw_port):
+                # Check whether the running daemon has NODE_OPTIONS set
+                preload_path = Path.home() / ".openclaw" / "azure-api-version-preload.cjs"
+                _oc_pid = _find_pid_on_port(openclaw_port)
+                if (
+                    preload_path.is_file()
+                    and _oc_pid is not None
+                    and not _proc_has_env(_oc_pid, "NODE_OPTIONS")
+                ):
+                    console.print(
+                        f"  [yellow]⚠[/yellow] OpenClaw (PID {_oc_pid}) running "
+                        "without Azure api-version preload — restarting…"
+                    )
+                    _needs_openclaw_restart = True
+                else:
+                    console.print(f"  [green]✓[/green] Already running on port {openclaw_port}")
+            else:
+                _needs_openclaw_start = True
 
         if (_needs_openclaw_start or _needs_openclaw_restart) and not no_openclaw:
             # Step 1: Ensure NODE_OPTIONS is in the systemd service file
@@ -1255,18 +1394,26 @@ def launch(
                 )
 
             # Step 2: Start or restart via systemd
+            if openclaw is None:
+                raise typer.Exit(code=1)
             if _needs_openclaw_restart:
-                console.print(f"  Restarting OpenClaw daemon on port {openclaw_port}…")
+                console.print(
+                    "  Restarting OpenClaw daemon on port "
+                    f"{openclaw_port} via {openclaw.path} (version {openclaw.version_text})…"
+                )
                 subprocess.run(
-                    ["openclaw", "daemon", "restart"],
+                    [str(openclaw.path), "daemon", "restart"],
                     check=False,
                     capture_output=True,
                     env=_mempalace_env(),
                 )
             else:
-                console.print(f"  Starting OpenClaw daemon on port {openclaw_port}…")
+                console.print(
+                    "  Starting OpenClaw daemon on port "
+                    f"{openclaw_port} via {openclaw.path} (version {openclaw.version_text})…"
+                )
                 subprocess.run(
-                    ["openclaw", "daemon", "start"],
+                    [str(openclaw.path), "daemon", "start"],
                     check=False,
                     capture_output=True,
                     env=_mempalace_env(),

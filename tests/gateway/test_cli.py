@@ -44,6 +44,7 @@ from gateway.cli import (
     _parse_gpu_output,
     _read_openclaw_config,
     _render_env,
+    _ResolvedOpenClaw,
     _signal_process_group,
     app,
 )
@@ -845,6 +846,10 @@ class TestGetLocalIp:
 class TestPushConfig:
     """Tests for the push-config command."""
 
+    @staticmethod
+    def _resolved_openclaw(path: str = "/resolved/openclaw") -> _ResolvedOpenClaw:
+        return _ResolvedOpenClaw(Path(path), "2026.6.11", (2026, 6, 11))
+
     def test_push_script_not_found(self, tmp_path: Path) -> None:
         """Error when the push script does not exist."""
         fake_root = tmp_path / "repo"
@@ -863,6 +868,10 @@ class TestPushConfig:
                 "gateway.cli.Path.is_file",
                 side_effect=lambda self=None: True,
             ),
+            patch(
+                "gateway.cli._require_openclaw_binary",
+                return_value=self._resolved_openclaw(),
+            ),
             patch("gateway.cli.subprocess.run", return_value=fake_result),
         ):
             result = runner.invoke(app, ["push-config"])
@@ -878,14 +887,18 @@ class TestPushConfig:
         push_script.write_text("#!/bin/bash\nexit 0\n")
         push_script.chmod(0o755)
 
-        calls: list[list[str]] = []
+        calls: list[tuple[list[str], dict[str, object]]] = []
 
         def _fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
-            calls.append(cmd)
+            calls.append((cmd, kwargs))
             return MagicMock(returncode=0)
 
         with (
             patch("gateway.cli._PROJECT_ROOT", tmp_path),
+            patch(
+                "gateway.cli._require_openclaw_binary",
+                return_value=self._resolved_openclaw(),
+            ),
             patch("gateway.cli.subprocess.run", side_effect=_fake_run),
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._is_port_open", return_value=False),
@@ -894,8 +907,12 @@ class TestPushConfig:
 
         assert result.exit_code == 0
         assert "Skipped (--no-restart)" in result.output
+        assert calls[0][0] == ["bash", str(push_script)]
+        env = calls[0][1].get("env")
+        assert isinstance(env, dict)
+        assert env["OPENCLAW_BIN"] == "/resolved/openclaw"
         # Should NOT have called openclaw daemon restart
-        for call in calls:
+        for call, _kwargs in calls:
             assert "restart" not in call, f"Unexpected restart call: {call}"
 
     def test_push_and_restart(self, tmp_path: Path) -> None:
@@ -914,6 +931,10 @@ class TestPushConfig:
 
         with (
             patch("gateway.cli._PROJECT_ROOT", tmp_path),
+            patch(
+                "gateway.cli._require_openclaw_binary",
+                return_value=self._resolved_openclaw(),
+            ),
             patch("gateway.cli.subprocess.run", side_effect=_fake_run),
             patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
             patch("gateway.cli._wait_for_port", return_value=True),
@@ -925,7 +946,7 @@ class TestPushConfig:
         # Should have called openclaw daemon restart
         restart_calls = [c for c in calls if "restart" in c]
         assert len(restart_calls) == 1
-        assert restart_calls[0] == ["openclaw", "daemon", "restart"]
+        assert restart_calls[0] == ["/resolved/openclaw", "daemon", "restart"]
 
 
 # ---------------------------------------------------------------------------
