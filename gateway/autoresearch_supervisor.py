@@ -23,7 +23,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from gateway.autoresearch_runner import DEFAULT_QUANTIPY_ROOT, AutoresearchState, Phase
+from gateway.autoresearch_runner import (
+    DEFAULT_QUANTIPY_ROOT,
+    AutoresearchState,
+    AutoresearchValidationError,
+    Phase,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +118,10 @@ class OpenClawVersionError(SupervisorError):
 
 class DevAPIError(SupervisorError):
     """Raised when the G2 Dev API is unavailable or returns an error."""
+
+
+class WorkspaceEvidenceError(SupervisorError):
+    """Raised when implementation workspace evidence cannot be trusted."""
 
 
 def _require_finite_positive(value: object, *, field_name: str) -> float:
@@ -597,7 +606,10 @@ class AutoresearchSupervisor:
             raise SupervisorError(
                 f"invalid autoresearch state JSON: {self.config.state_path}"
             ) from exc
-        return AutoresearchState.from_dict(raw)
+        try:
+            return AutoresearchState.from_dict(raw)
+        except AutoresearchValidationError as exc:
+            raise SupervisorError(f"invalid autoresearch state: {exc}") from exc
 
     def _is_terminal_state(self, state: AutoresearchState) -> bool:
         decision = state.final_decision
@@ -1139,6 +1151,39 @@ class AutoresearchSupervisor:
             else:
                 fresh_running_session_keys.append(key)
 
+        if len(stale_running_session_keys) == 1 and not fresh_running_session_keys:
+            try:
+                writers = self._active_target_repo_writer_processes(state)
+            except WorkspaceEvidenceError as exc:
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="invalid_expected_main_workspace",
+                    detail=str(exc),
+                    session_key=stale_running_session_keys[0],
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="invalid_expected_main_workspace",
+                )
+            if writers:
+                _structured_log(
+                    logging.INFO,
+                    "supervisor.no_action",
+                    reason="active_expected_main_process",
+                    session_key=stale_running_session_keys[0],
+                    count=len(writers),
+                    processes=writers,
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.NO_ACTION,
+                    reason="active_expected_main_process",
+                )
+
         if stale_running_session_keys:
             _structured_log(
                 logging.ERROR,
@@ -1302,7 +1347,7 @@ class AutoresearchSupervisor:
         self,
         state: AutoresearchState,
     ) -> tuple[str, ...]:
-        repo_root = self._target_repo_root(state)
+        target_roots = self._target_writer_roots(state)
         proc_root = self.config.proc_root
         if not proc_root.is_dir():
             raise SupervisorError(f"process filesystem is unavailable: {proc_root}")
@@ -1325,30 +1370,100 @@ class AutoresearchSupervisor:
                 ) from exc
             if not raw:
                 continue
-            cmdline = raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            argv = tuple(
+                argument.decode("utf-8", errors="replace")
+                for argument in raw.split(b"\x00")
+                if argument
+            )
+            cmdline = " ".join(argv).strip()
             if not cmdline or TARGET_WRITER_COMMAND_RE.search(cmdline) is None:
                 continue
-            if self._process_touches_target_repo(proc_dir, repo_root, cmdline):
+            if self._process_touches_target_repos(proc_dir, target_roots, argv):
                 offenders.append(f"{pid} {cmdline}")
         return tuple(offenders)
 
-    def _process_touches_target_repo(
+    def _process_touches_target_repos(
         self,
         proc_dir: Path,
-        repo_root: Path,
-        cmdline: str,
+        target_roots: Sequence[Path],
+        argv: Sequence[str],
     ) -> bool:
-        if str(repo_root) in cmdline:
-            return True
         try:
             cwd = (proc_dir / "cwd").resolve(strict=True)
         except FileNotFoundError:
-            return False
+            cwd = None
         except OSError as exc:
             raise SupervisorError(
                 f"failed to inspect process {proc_dir.name} working directory: {exc}"
             ) from exc
-        return cwd == repo_root or repo_root in cwd.parents
+        if cwd is not None and self._path_is_within_target_roots(cwd, target_roots):
+            return True
+        return any(
+            argument_path is not None
+            and self._path_is_within_target_roots(argument_path, target_roots)
+            for argument in argv
+            if (argument_path := self._resolved_process_argument_path(argument, cwd)) is not None
+        )
+
+    def _resolved_process_argument_path(
+        self,
+        argument: str,
+        cwd: Path | None,
+    ) -> Path | None:
+        try:
+            candidate = Path(argument).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not candidate.is_absolute():
+            if cwd is None:
+                return None
+            candidate = cwd / candidate
+        try:
+            return candidate.resolve(strict=True)
+        except FileNotFoundError:
+            return None
+        except (OSError, RuntimeError) as exc:
+            raise SupervisorError(
+                f"failed to resolve process filesystem argument {argument!r}: {exc}"
+            ) from exc
+
+    def _path_is_within_target_roots(
+        self,
+        path: Path,
+        target_roots: Sequence[Path],
+    ) -> bool:
+        return any(
+            path == target_root or target_root in path.parents for target_root in target_roots
+        )
+
+    def _target_writer_roots(self, state: AutoresearchState) -> tuple[Path, ...]:
+        repo_root = self._target_repo_root(state)
+        implementation_result = state.implementation_result
+        if implementation_result is None:
+            return (repo_root,)
+        workspace_path = implementation_result.workspace_path
+        if not isinstance(workspace_path, str) or not workspace_path.strip():
+            raise WorkspaceEvidenceError(
+                "implementation_result workspace_path must be a non-empty string"
+            )
+        try:
+            workspace_candidate = Path(workspace_path).expanduser()
+        except (OSError, ValueError) as exc:
+            raise WorkspaceEvidenceError(
+                "implementation_result workspace_path is not a valid filesystem path"
+            ) from exc
+        if not workspace_candidate.is_absolute():
+            raise WorkspaceEvidenceError("implementation_result workspace_path must be absolute")
+        try:
+            workspace_root = workspace_candidate.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise WorkspaceEvidenceError(
+                "implementation_result workspace_path cannot be resolved strictly: "
+                f"{workspace_candidate}"
+            ) from exc
+        if workspace_root == repo_root:
+            return (repo_root,)
+        return repo_root, workspace_root
 
     def _target_repo_root(self, state: AutoresearchState) -> Path:
         if state.setup is not None:

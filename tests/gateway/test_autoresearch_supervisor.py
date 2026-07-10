@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import multiprocessing
 import os
 import subprocess
@@ -8,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from gateway.autoresearch_runner import AutoresearchState, Phase, ResearchMode
+from gateway.autoresearch_runner import (
+    AutoresearchState,
+    ImplementationResultArtifact,
+    Phase,
+    ResearchMode,
+)
 from gateway.autoresearch_supervisor import (
     AutoresearchSupervisor,
     DevAPIError,
@@ -28,11 +34,13 @@ def _write_state(
     *,
     phase: Phase,
     iteration: int,
+    implementation_result: ImplementationResultArtifact | None = None,
 ) -> None:
     state = AutoresearchState(
         phase=phase,
         iteration=iteration,
         mode=ResearchMode.ALPHA_RESEARCH,
+        implementation_result=implementation_result,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
@@ -63,6 +71,31 @@ def _touch_old(paths: list[Path], *, now_seconds: float, age_seconds: float) -> 
 def _write_main_sessions_store(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _implementation_result(workspace_path: Path) -> ImplementationResultArtifact:
+    return ImplementationResultArtifact(
+        summary="implementation complete",
+        workspace_path=str(workspace_path),
+        commit_sha="deadbeef",
+        module_path="src/quantipy/alpha/example.py",
+        notebook_path="notebooks/example.ipynb",
+        tests_added_or_updated=(),
+        commands_run=(),
+    )
+
+
+def _write_proc_process(
+    proc_root: Path,
+    *,
+    pid: int,
+    command: tuple[str, ...],
+    cwd: Path,
+) -> None:
+    proc_dir = proc_root / str(pid)
+    proc_dir.mkdir()
+    (proc_dir / "cmdline").write_bytes(b"\x00".join(part.encode() for part in command) + b"\x00")
+    (proc_dir / "cwd").symlink_to(cwd, target_is_directory=True)
 
 
 def _running_main_session_row(
@@ -1420,6 +1453,295 @@ def test_stale_running_main_session_store_row_alerts_fail_closed(
     assert result.sent_nudge is False
 
 
+def test_stale_running_main_session_with_current_workspace_pytest_stays_active(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workspace = supervisor_env["state_dir"] / "quantipy-i21-base"
+    workspace.mkdir(parents=True)
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+    _write_state(
+        supervisor_env["state_path"],
+        phase=Phase.VERIFICATION,
+        iteration=21,
+        implementation_result=_implementation_result(workspace),
+    )
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("uv", "run", "pytest", "--tb=short", "-q"),
+        cwd=workspace,
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_process"
+    assert any("424242 uv run pytest --tb=short -q" in record.message for record in caplog.records)
+
+
+def test_stale_running_main_session_with_unrelated_pytest_alerts(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = supervisor_env["state_dir"] / "quantipy-workspace"
+    workspace.mkdir(parents=True)
+    unrelated_workspace = supervisor_env["state_dir"] / "quantipy-workspace-copy"
+    unrelated_workspace.mkdir()
+    _write_state(
+        supervisor_env["state_path"],
+        phase=Phase.VERIFICATION,
+        iteration=21,
+        implementation_result=_implementation_result(workspace),
+    )
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("uv", "run", "pytest", "--tb=short", "-q", str(unrelated_workspace)),
+        cwd=unrelated_workspace,
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_running_expected_main_session"
+
+
+def test_malformed_persisted_workspace_state_raises_supervisor_error(
+    supervisor_env: dict[str, Any],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=21)
+    raw_state = json.loads(supervisor_env["state_path"].read_text(encoding="utf-8"))
+    assert isinstance(raw_state, dict)
+    raw_state["implementation_result"] = {
+        "summary": "implementation complete",
+        "workspace_path": "",
+        "commit_sha": "deadbeef",
+        "module_path": "src/quantipy/alpha/example.py",
+        "notebook_path": "notebooks/example.ipynb",
+        "tests_added_or_updated": [],
+        "commands_run": [],
+    }
+    supervisor_env["state_path"].write_text(json.dumps(raw_state), encoding="utf-8")
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+
+    with pytest.raises(SupervisorError, match="invalid autoresearch state"):
+        supervisor.run_once()
+
+
+def test_stale_running_main_session_with_missing_workspace_alerts_fail_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_workspace = supervisor_env["state_dir"] / "missing-workspace"
+    _write_state(
+        supervisor_env["state_path"],
+        phase=Phase.VERIFICATION,
+        iteration=21,
+        implementation_result=_implementation_result(missing_workspace),
+    )
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "invalid_expected_main_workspace"
+
+
+@pytest.mark.parametrize("workspace_argument", (".", "tests"))
+def test_stale_running_main_session_with_workspace_path_argument_stays_active(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_argument: str,
+) -> None:
+    workspace = supervisor_env["state_dir"] / "quantipy-workspace"
+    workspace.mkdir(parents=True)
+    (workspace / "tests").mkdir()
+    unrelated_workspace = supervisor_env["state_dir"] / "unrelated"
+    unrelated_workspace.mkdir()
+    _write_state(
+        supervisor_env["state_path"],
+        phase=Phase.VERIFICATION,
+        iteration=21,
+        implementation_result=_implementation_result(workspace),
+    )
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("uv", "run", "pytest", str(workspace / workspace_argument)),
+        cwd=unrelated_workspace,
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_process"
+
+
+def test_stale_running_main_session_with_base_repo_pytest_stays_active(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=21)
+    _touch_old(
+        [
+            supervisor_env["state_path"],
+            supervisor_env["repo_root"] / ".git" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "index",
+            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
+            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=supervisor_env["now_seconds"],
+        age_seconds=600.0,
+    )
+    _write_main_sessions_store(
+        supervisor_env["sessions_path"],
+        {
+            "agent:main:g2:stale-pm": _running_main_session_row(
+                supervisor_env["now_ms"],
+                updated_age_ms=301_000,
+                last_interaction_age_ms=301_000,
+                started_age_ms=301_000,
+            ),
+        },
+    )
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("python", "-m", "pytest"),
+        cwd=supervisor_env["repo_root"],
+    )
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "active_expected_main_process"
+
+
 def test_stale_running_main_session_store_row_takes_precedence_over_fresh_row(
     supervisor_env: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -1452,6 +1774,12 @@ def test_stale_running_main_session_store_row_takes_precedence_over_fresh_row(
                 started_age_ms=30_000,
             ),
         },
+    )
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("python", "-m", "pytest"),
+        cwd=supervisor_env["repo_root"],
     )
     runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
     supervisor = _make_supervisor(supervisor_env, runner=runner)
@@ -1525,6 +1853,12 @@ def test_invalid_or_contradictory_running_main_session_store_rows_alert(
         age_seconds=600.0,
     )
     _write_main_sessions_store(supervisor_env["sessions_path"], payload)
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("python", "-m", "pytest"),
+        cwd=supervisor_env["repo_root"],
+    )
     runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
     supervisor = _make_supervisor(supervisor_env, runner=runner)
     monkeypatch.setattr(
@@ -1718,10 +2052,12 @@ def test_target_repo_writer_suppresses_nudge(
         now_seconds=supervisor_env["now_seconds"],
         age_seconds=600.0,
     )
-    proc_dir = supervisor_env["proc_root"] / "424242"
-    proc_dir.mkdir()
-    (proc_dir / "cmdline").write_bytes(b"python\x00-m\x00pytest\x00")
-    (proc_dir / "cwd").symlink_to(supervisor_env["repo_root"], target_is_directory=True)
+    _write_proc_process(
+        supervisor_env["proc_root"],
+        pid=424242,
+        command=("python", "-m", "pytest"),
+        cwd=supervisor_env["repo_root"],
+    )
     runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
     supervisor = _make_supervisor(supervisor_env, runner=runner)
     monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
