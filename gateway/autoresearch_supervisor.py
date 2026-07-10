@@ -38,6 +38,7 @@ DEFAULT_DEV_API_BASE = "http://127.0.0.1:5173"
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
+DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
 RECOVERY_MESSAGE = (
@@ -107,6 +108,25 @@ class DevAPIError(SupervisorError):
     """Raised when the G2 Dev API is unavailable or returns an error."""
 
 
+def _require_finite_positive(value: object, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SupervisorError(f"{field_name} must be a finite positive number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise SupervisorError(f"{field_name} must be a finite positive number")
+    return parsed
+
+
+def _finite_positive_cli_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a finite positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return value
+
+
 class SupervisorOutcome(StrEnum):
     NO_ACTION = "no_action"
     NUDGED = "nudged"
@@ -135,10 +155,17 @@ class SupervisorConfig:
     target_repo: Path = DEFAULT_QUANTIPY_ROOT
     proc_root: Path = Path("/proc")
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
+    expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     dev_api_timeout_seconds: float = 10.0
     menu_wait_seconds: float = 5.0
     session_ready_wait_seconds: float = 10.0
+
+    def __post_init__(self) -> None:
+        _require_finite_positive(
+            self.expected_stage_task_stale_seconds,
+            field_name="expected_stage_task_stale_seconds",
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -954,6 +981,28 @@ class AutoresearchSupervisor:
 
         expected_tasks = self._active_expected_stage_tasks(state, running_tasks)
         if expected_tasks:
+            now_ms = int(self._now() * 1000)
+            stale_ms = int(self.config.expected_stage_task_stale_seconds * 1000)
+            stale_tasks = [
+                task
+                for task in expected_tasks
+                if (last_event_at := _expected_task_last_event_ms(task)) is None
+                or now_ms - last_event_at > stale_ms
+            ]
+            if stale_tasks:
+                _structured_log(
+                    logging.ERROR,
+                    "supervisor.alert",
+                    reason="stale_expected_stage_task",
+                    count=len(stale_tasks),
+                    expected_agent_ids=self._expected_stage_agent_ids(state),
+                    phase=state.phase.value,
+                    iteration=state.iteration,
+                )
+                return SupervisorResult(
+                    outcome=SupervisorOutcome.ALERT,
+                    reason="stale_expected_stage_task",
+                )
             _structured_log(
                 logging.INFO,
                 "supervisor.no_action",
@@ -1384,6 +1433,20 @@ def _task_last_event_ms(task: Mapping[str, object]) -> int | None:
     return None
 
 
+def _expected_task_last_event_ms(task: Mapping[str, object]) -> int | None:
+    for field_name in ("lastEventAt", "updatedAt", "startedAt", "createdAt"):
+        if field_name not in task:
+            continue
+        value = task.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            return None
+        return int(parsed)
+    return None
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1402,6 +1465,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_GRACE_PERIOD_SECONDS,
         help=f"Idle grace period in seconds (default: {DEFAULT_GRACE_PERIOD_SECONDS}).",
+    )
+    parser.add_argument(
+        "--expected-stage-task-stale",
+        type=_finite_positive_cli_float,
+        default=DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
+        help=(
+            "Expected-stage task stale threshold in seconds "
+            f"(default: {DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS})."
+        ),
     )
     parser.add_argument(
         "--state-path",
@@ -1439,6 +1511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dev_api_base=args.dev_api_base,
         poll_interval_seconds=float(args.interval),
         grace_period_seconds=float(args.grace),
+        expected_stage_task_stale_seconds=float(args.expected_stage_task_stale),
     )
     supervisor = AutoresearchSupervisor(config)
     try:

@@ -17,6 +17,7 @@ from gateway.autoresearch_supervisor import (
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
+    _build_arg_parser,
 )
 
 
@@ -108,7 +109,8 @@ class FakeRunCommand:
 
 
 @pytest.fixture()
-def supervisor_env(tmp_path: Path) -> dict[str, Any]:
+def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    monkeypatch.delenv("OPENCLAW_BIN", raising=False)
     now_seconds = 1_000_000.0
     now_ms = int(now_seconds * 1000)
     state_dir = tmp_path / "autoresearch"
@@ -140,6 +142,7 @@ def _make_supervisor(
     env: dict[str, Any],
     *,
     runner: FakeRunCommand,
+    expected_stage_task_stale_seconds: float = 300.0,
 ) -> AutoresearchSupervisor:
     config = SupervisorConfig(
         state_path=env["state_path"],
@@ -150,6 +153,7 @@ def _make_supervisor(
         proc_root=env["proc_root"],
         default_openclaw_bin=env["openclaw_bin"],
         grace_period_seconds=120.0,
+        expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
     )
     return AutoresearchSupervisor(
         config,
@@ -186,7 +190,7 @@ def test_active_expected_stage_task_suppresses_nudge(
                 "ownerKey": "agent:main:g2:abc",
                 "childSessionKey": "agent:main:g2:abc",
                 "task": "Continue Quantipy autoresearch from the authoritative state.",
-                "startedAt": supervisor_env["now_ms"] - 500_000,
+                "startedAt": supervisor_env["now_ms"] - 5_000,
             }
         ],
         sessions=[],
@@ -202,6 +206,145 @@ def test_active_expected_stage_task_suppresses_nudge(
 
     assert result.outcome is SupervisorOutcome.NO_ACTION
     assert result.reason == "active_expected_stage_task"
+
+
+def test_stale_duplicate_expected_stage_rows_alert_without_recovery(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=19)
+    original_state = supervisor_env["state_path"].read_text(encoding="utf-8")
+    stale_task = {
+        "agentId": "main",
+        "requesterAgentId": "main",
+        "task": "Continue Quantipy autoresearch.",
+        "startedAt": supervisor_env["now_ms"] - 301_000,
+    }
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[stale_task, dict(stale_task)],
+        sessions=[],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_expected_stage_task"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+    assert supervisor_env["state_path"].read_text(encoding="utf-8") == original_state
+    assert not supervisor_env["checkpoint_path"].exists()
+
+
+@pytest.mark.parametrize(
+    "timestamp_fields",
+    [
+        {},
+        {"startedAt": "invalid"},
+        {"startedAt": float("nan")},
+        {"startedAt": True},
+    ],
+)
+def test_expected_stage_task_with_missing_or_malformed_timestamp_alerts_fail_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    timestamp_fields: dict[str, object],
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=19)
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[
+            {
+                "agentId": "main",
+                "requesterAgentId": "main",
+                "task": "Continue Quantipy autoresearch.",
+                **timestamp_fields,
+            }
+        ],
+        sessions=[],
+    )
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_expected_stage_task"
+    assert result.rotated_session is False
+    assert result.sent_nudge is False
+
+
+def test_configurable_stale_threshold_detects_expected_stage_task(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=19)
+    runner = FakeRunCommand(
+        now_ms=supervisor_env["now_ms"],
+        tasks=[
+            {
+                "agentId": "main",
+                "requesterAgentId": "main",
+                "task": "Continue Quantipy autoresearch.",
+                "startedAt": supervisor_env["now_ms"] - 61_000,
+            }
+        ],
+        sessions=[],
+    )
+    supervisor = _make_supervisor(
+        supervisor_env,
+        runner=runner,
+        expected_stage_task_stale_seconds=60.0,
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_read_g2_snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("G2 should not be queried")),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "stale_expected_stage_task"
+
+
+@pytest.mark.parametrize("threshold", [0.0, -1.0, float("nan"), float("inf")])
+def test_stale_threshold_must_be_finite_and_positive(
+    supervisor_env: dict[str, Any],
+    threshold: float,
+) -> None:
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+
+    with pytest.raises(SupervisorError, match="expected_stage_task_stale_seconds"):
+        _make_supervisor(
+            supervisor_env,
+            runner=runner,
+            expected_stage_task_stale_seconds=threshold,
+        )
+
+
+@pytest.mark.parametrize("threshold", ["0", "nan", "inf"])
+def test_cli_rejects_invalid_stale_threshold(threshold: str) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _build_arg_parser().parse_args(["--expected-stage-task-stale", threshold])
+
+    assert raised.value.code == 2
+
+
+def test_cli_accepts_valid_stale_threshold() -> None:
+    args = _build_arg_parser().parse_args(["--expected-stage-task-stale", "45.5"])
+
+    assert args.expected_stage_task_stale == 45.5
 
 
 def test_unrelated_expected_agent_task_does_not_suppress_recovery(
