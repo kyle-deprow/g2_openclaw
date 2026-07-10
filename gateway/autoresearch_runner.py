@@ -130,6 +130,8 @@ MEMPALACE_CONFIG_PLACEHOLDER = "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
 MEMPALACE_FULL_SERVER_ID = "mempalace"
 MEMPALACE_READONLY_SERVER_ID = "mempalace-readonly"
 MEMPALACE_READONLY_WRAPPER_BASENAME = "mempalace-readonly-server.py"
+MEMPALACE_KG_OBJECT_MAX_LENGTH = 128
+MEMPALACE_KG_OBJECT_SHA256_LENGTH = 64
 # OpenClaw policy checks compare internal MCP tool.name ids such as
 # "mempalace__mempalace_search". Codex-facing docs and traces show dotted
 # display ids such as "mempalace.mempalace_add_drawer" or
@@ -313,6 +315,15 @@ def _require_canonical_identifier(raw: Mapping[str, object], field_name: str) ->
 
 def _normalise_predicate(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def standardize_mempalace_kg_object(value: str) -> str:
+    """Normalize a KG object and compact it to MemPalace's 128-character limit."""
+    normalized = _normalise_predicate(value)
+    if len(normalized) <= MEMPALACE_KG_OBJECT_MAX_LENGTH:
+        return normalized
+    prefix_length = MEMPALACE_KG_OBJECT_MAX_LENGTH - MEMPALACE_KG_OBJECT_SHA256_LENGTH - 1
+    return f"{normalized[:prefix_length]}_{_sha256_text(normalized)}"
 
 
 def validate_target_worktree_clean(
@@ -2492,6 +2503,7 @@ def _phase_instruction(
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(phase)
     mode_contract = _mode_contract(state)
+    mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
     return (
         f"Autoresearch phase: {phase.value}\n"
         f"Target agents: {agent_text}\n"
@@ -2499,6 +2511,7 @@ def _phase_instruction(
         f"Phase instruction:\n{instructions[phase]}\n\n"
         f"{mode_contract}"
         f"{workspace_contract}"
+        f"{mempalace_fact_instruction}"
         f"Artifact contract:\n{contract}\n\n"
         f"Current state snapshot:\n{state_json}"
     )
@@ -2540,6 +2553,24 @@ def _workspace_isolation_contract(phase: Phase) -> str:
         "commit SHA in commit_sha.\n"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
+    )
+
+
+def _mempalace_kg_fact_instruction(
+    state: AutoresearchState,
+    expected_artifact_type: ArtifactType,
+) -> str:
+    if expected_artifact_type is not ArtifactType.MEMORY_WRITE:
+        return ""
+    if state.final_decision is None:
+        raise AutoresearchValidationError("MemPalace memory write requires final_decision")
+    facts = standardized_mempalace_kg_facts(state)
+    return (
+        "Required standardized MemPalace KG facts:\n"
+        "- Use the exact predicate/object pairs below with mempalace_kg_add. "
+        "Do not re-normalize, shorten, or regenerate their objects.\n"
+        f"- Use subject: {state.final_decision.experiment_id}\n"
+        f"{_json_block(facts)}\n\n"
     )
 
 
@@ -2809,17 +2840,52 @@ def _default_mempalace_kg_path() -> Path:
 
 def _standard_metric_object(decision: FinalDecisionArtifact) -> str:
     if decision.recommended_metric_value is None:
-        return _normalise_predicate(decision.recommended_metric_name)
+        return standardize_mempalace_kg_object(decision.recommended_metric_name)
     metric = f"{decision.recommended_metric_name}_{decision.recommended_metric_value:g}"
-    return _normalise_predicate(metric)
+    return standardize_mempalace_kg_object(metric)
 
 
 def _standard_data_window_object(coverage: AggregateCoverageReceipt) -> str:
     """Return the normalized common data/OOS window token required in MemPalace."""
-    return _normalise_predicate(
+    return standardize_mempalace_kg_object(
         f"{coverage.actual_common_start}_to_{coverage.actual_common_end}_oos_"
         f"{coverage.oos_start}_to_{coverage.oos_end}"
     )
+
+
+def standardized_mempalace_kg_facts(state: AutoresearchState) -> dict[str, str]:
+    """Return the exact standardized KG facts required for a final decision."""
+    if state.final_decision is None or state.mode is None:
+        raise AutoresearchValidationError(
+            "standardized MemPalace facts require final_decision and mode"
+        )
+    verification = state.latest_verification
+    if verification is None:
+        raise AutoresearchValidationError(
+            "standardized MemPalace facts require the final decision's verification_result"
+        )
+    decision = state.final_decision
+    facts = {
+        "decision": standardize_mempalace_kg_object(decision.decision.value),
+        "research_mode": standardize_mempalace_kg_object(state.mode.value),
+        "data_window": _standard_data_window_object(verification.data_coverage),
+        "reviewer_verdict": standardize_mempalace_kg_object(decision.reviewer_verdict.value),
+    }
+    if state.mode is ResearchMode.ALPHA_RESEARCH:
+        facts["alpha_decision_metric"] = _standard_metric_object(decision)
+        facts["keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to"] = (
+            standardize_mempalace_kg_object(decision.rationale)
+        )
+        return facts
+    if verification.infra_gate_outcome is None or decision.infra_rationale is None:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 standardized MemPalace facts require gate outcome and infra_rationale"
+        )
+    facts["infra_gate_outcome"] = standardize_mempalace_kg_object(
+        verification.infra_gate_outcome.value
+    )
+    facts["infra_rationale"] = standardize_mempalace_kg_object(decision.infra_rationale)
+    return facts
 
 
 def verify_mempalace_final_decision(
@@ -2837,22 +2903,8 @@ def verify_mempalace_final_decision(
     if not path.is_file():
         raise AutoresearchValidationError(f"MemPalace KG does not exist: {path}")
     decision = state.final_decision
-    required = {
-        "decision",
-        "research_mode",
-        "data_window",
-        "reviewer_verdict",
-    }
-    if state.mode is ResearchMode.ALPHA_RESEARCH:
-        required.add("alpha_decision_metric")
-        required.add("keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to")
-    else:
-        required.update({"infra_gate_outcome", "infra_rationale"})
-    verification = state.latest_verification
-    if verification is None:
-        raise AutoresearchValidationError(
-            "MemPalace verification requires the final decision's verification_result"
-        )
+    expected_objects = standardized_mempalace_kg_facts(state)
+    required = set(expected_objects)
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -2873,7 +2925,7 @@ def verify_mempalace_final_decision(
             """
             SELECT id, subject, predicate, object, valid_from, valid_to,
                    source_file, source_drawer_id
-            FROM triples WHERE subject = ?
+            FROM triples WHERE subject = ? AND valid_to IS NULL
             """,
             (decision.experiment_id,),
         ).fetchall()
@@ -2915,28 +2967,8 @@ def verify_mempalace_final_decision(
             "MemPalace required standardized facts are missing: " + ", ".join(missing)
         )
 
-    expected_objects = {
-        "decision": _normalise_predicate(decision.decision.value),
-        "research_mode": state.mode.value,
-        "data_window": _standard_data_window_object(verification.data_coverage),
-        "reviewer_verdict": _normalise_predicate(decision.reviewer_verdict.value),
-    }
-    if state.mode is ResearchMode.ALPHA_RESEARCH:
-        expected_objects["alpha_decision_metric"] = _standard_metric_object(decision)
-        expected_objects[
-            "keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to"
-        ] = _normalise_predicate(decision.rationale)
-    elif verification.infra_gate_outcome is not None:
-        expected_objects["infra_gate_outcome"] = _normalise_predicate(
-            verification.infra_gate_outcome.value
-        )
-        if decision.infra_rationale is None:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 MemPalace verification requires final infra_rationale"
-            )
-        expected_objects["infra_rationale"] = _normalise_predicate(decision.infra_rationale)
     for predicate, expected_object in expected_objects.items():
-        if any(_normalise_predicate(row[3]) != expected_object for row in facts[predicate]):
+        if any(row[3] != expected_object for row in facts[predicate]):
             raise AutoresearchValidationError(
                 f"MemPalace {predicate} fact does not match final decision artifact"
             )

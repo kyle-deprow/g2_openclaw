@@ -70,6 +70,14 @@ each run of non-alphanumeric characters with one underscore. The required
 `<actual_common_start>_to_<actual_common_end>_oos_<oos_start>_to_<oos_end>`
 after that normalization, using the aggregate verification receipt dates.
 
+MemPalace KG objects have a hard 128-character limit. After normalization,
+objects of 128 characters or fewer are unchanged. Longer objects are compacted
+deterministically to their readable 63-character prefix, an underscore, and
+the 64-character SHA-256 hex digest of the complete normalized object. During
+the repeat-phase memory write, `autoresearch-next` emits the exact standardized
+predicate/object facts. Copy those emitted objects verbatim into
+`mempalace_kg_add`; never re-normalize, shorten, or reconstruct them.
+
 For every memory-required final decision, write these facts with the experiment
 ID as subject:
 
@@ -102,6 +110,9 @@ Write sequence is mandatory:
 
 `autoresearch-mark-memory` never writes or repairs MemPalace. Missing facts,
 noncanonical IDs, source-less facts, and mismatched final decisions fail closed.
+It verifies active facts only (`valid_to IS NULL`) and fails if an active fact
+conflicts with an emitted exact object. If a failed write must be superseded,
+invalidate that old fact before retrying; do not leave conflicting active facts.
 
 ### Do NOT Store
 - Ephemeral status updates (use `[TASK:status]` conventions)

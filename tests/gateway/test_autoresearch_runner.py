@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+import sqlite3
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
@@ -54,8 +56,11 @@ from gateway.autoresearch_runner import (
     load_autoresearch_policy,
     mark_memory_written,
     next_action,
+    standardize_mempalace_kg_object,
+    standardized_mempalace_kg_facts,
     start_next_iteration,
     validate_target_worktree_clean,
+    verify_mempalace_final_decision,
 )
 
 
@@ -76,6 +81,49 @@ def quantipy_root(tmp_path: Path) -> Path:
 @pytest.fixture()
 def receipts(quantipy_root: Path) -> ReceiptCatalog:
     return build_receipt_catalog(quantipy_root)
+
+
+@pytest.fixture()
+def mempalace_kg_path(tmp_path: Path) -> Path:
+    kg_path = tmp_path / "knowledge_graph.sqlite3"
+    connection = sqlite3.connect(kg_path)
+    connection.execute(
+        """
+        CREATE TABLE triples (
+            id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+            object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
+            source_file TEXT, source_drawer_id TEXT
+        )
+        """
+    )
+    connection.close()
+    return kg_path
+
+
+def _write_active_mempalace_facts(
+    kg_path: Path,
+    *,
+    subject: str,
+    facts: Mapping[str, str],
+    object_overrides: Mapping[str, str] | None = None,
+) -> None:
+    overrides = object_overrides if object_overrides is not None else {}
+    connection = sqlite3.connect(kg_path)
+    connection.executemany(
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        [
+            (
+                str(index),
+                subject,
+                predicate,
+                overrides.get(predicate, object_value),
+                "result.json",
+            )
+            for index, (predicate, object_value) in enumerate(facts.items(), start=1)
+        ],
+    )
+    connection.commit()
+    connection.close()
 
 
 def _setup_artifact() -> SetupContextArtifact:
@@ -323,6 +371,50 @@ def _state_to_decision(policy: AutoresearchPolicy) -> AutoresearchState:
     return state
 
 
+@pytest.fixture()
+def g0_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
+    long_rationale = (
+        "Auditable cap and source provenance is present for every declared sleeve. " * 5
+    )
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale=long_rationale,
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
+    return advance_state(
+        state,
+        replace(
+            _final_decision(),
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_REPAIRED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            rationale="Data repair completed.",
+            log_summary="G0 gate passed.",
+            infra_rationale=long_rationale,
+        ),
+        policy,
+    )
+
+
 def test_phase_progression(policy: AutoresearchPolicy, receipts: ReceiptCatalog) -> None:
     state = AutoresearchState()
 
@@ -503,6 +595,167 @@ def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
 
     assert result.final_decision is not None
     assert result.final_decision.decision is FinalDecision.INFRA_REPAIRED
+
+
+def test_standardize_mempalace_kg_object_preserves_short_normalized_objects() -> None:
+    serialized = standardize_mempalace_kg_object("  Provenance: Verified!  ")
+
+    assert serialized == "provenance_verified"
+
+
+def test_standardize_mempalace_kg_object_compacts_long_objects_to_a_stable_exact_bound() -> None:
+    long_object = "auditable provenance " * 20
+    normalized = "auditable_provenance_" * 19 + "auditable_provenance"
+
+    serialized = standardize_mempalace_kg_object(long_object)
+
+    assert len(serialized) == 128
+    assert serialized == f"{normalized[:63]}_{sha256(normalized.encode()).hexdigest()}"
+
+
+def test_standardize_mempalace_kg_object_distinguishes_long_objects_with_same_prefix() -> None:
+    first = standardize_mempalace_kg_object("a" * 200 + "first")
+    second = standardize_mempalace_kg_object("a" * 200 + "second")
+
+    assert first != second
+
+
+def test_repeat_prompt_exposes_exact_standardized_mempalace_kg_facts(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_decision(policy)
+    state = advance_state(state, _final_decision(), policy)
+    expected_facts = standardized_mempalace_kg_facts(state)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert json.dumps(expected_facts, indent=2, sort_keys=True) in prompt
+
+
+def test_verify_mempalace_final_decision_accepts_compacted_long_g0_infra_rationale(
+    g0_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+) -> None:
+    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    _write_active_mempalace_facts(
+        mempalace_kg_path,
+        subject="g0-iteration-1",
+        facts=facts,
+    )
+    connection = sqlite3.connect(mempalace_kg_path)
+    connection.execute(
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)",
+        (
+            "inactive-rationale",
+            "g0-iteration-1",
+            "infra_rationale",
+            "shortened_retry_rationale",
+            "2026-07-10T00:00:00Z",
+            "result.json",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    receipt = verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+
+    assert receipt.predicates == tuple(sorted(facts))
+
+
+def test_verify_mempalace_final_decision_rejects_conflicting_active_g0_fact(
+    g0_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+) -> None:
+    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    _write_active_mempalace_facts(
+        mempalace_kg_path,
+        subject="g0-iteration-1",
+        facts=facts,
+    )
+    connection = sqlite3.connect(mempalace_kg_path)
+    connection.execute(
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        (
+            "conflicting-rationale",
+            "g0-iteration-1",
+            "infra_rationale",
+            "shortened_retry_rationale",
+            "result.json",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="MemPalace infra_rationale fact does not match final decision artifact",
+    ):
+        verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+
+
+def test_verify_mempalace_final_decision_rejects_normalized_but_not_exact_active_object(
+    g0_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+) -> None:
+    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    _write_active_mempalace_facts(
+        mempalace_kg_path,
+        subject="g0-iteration-1",
+        facts=facts,
+        object_overrides={"decision": " INFRA---REPAIRED "},
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="MemPalace decision fact does not match final decision artifact",
+    ):
+        verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+
+
+def test_mempalace_incident_replay_accepts_emitted_compacted_g0_infra_rationale(
+    g0_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+) -> None:
+    final_decision = g0_memory_state.final_decision
+    assert final_decision is not None
+    incident_state = replace(
+        g0_memory_state,
+        final_decision=replace(
+            final_decision,
+            infra_rationale="r" * 268,
+        ),
+    )
+    facts = standardized_mempalace_kg_facts(incident_state)
+    emitted_rationale = facts["infra_rationale"]
+    partial_facts = {
+        predicate: object_value
+        for predicate, object_value in facts.items()
+        if predicate != "infra_rationale"
+    }
+    _write_active_mempalace_facts(
+        mempalace_kg_path,
+        subject="g0-iteration-1",
+        facts=partial_facts,
+    )
+    connection = sqlite3.connect(mempalace_kg_path)
+    connection.execute(
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        (
+            "emitted-infra-rationale",
+            "g0-iteration-1",
+            "infra_rationale",
+            emitted_rationale,
+            "result.json",
+        ),
+    )
+    connection.commit()
+    connection.close()
+
+    receipt = verify_mempalace_final_decision(incident_state, mempalace_kg_path)
+
+    assert len(emitted_rationale) == 128
+    assert receipt.predicates == tuple(sorted(facts))
 
 
 def test_no_implementation_without_majority(
