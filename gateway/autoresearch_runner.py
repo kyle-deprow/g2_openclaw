@@ -144,6 +144,26 @@ MEMPALACE_MUTATION_TOOLS = (
     "mempalace_sync",
     "mempalace_update_drawer",
 )
+MEMPALACE_MUTATION_TOOL_RUNTIME_PREFIXES = (
+    "",
+    "mempalace__",
+    "mcp__mempalace__",
+    "mempalace.",
+)
+
+
+def _expand_mempalace_mutation_tool_ids(
+    tool_names: Sequence[str],
+    *,
+    prefixes: Sequence[str] = MEMPALACE_MUTATION_TOOL_RUNTIME_PREFIXES,
+) -> tuple[str, ...]:
+    expanded: list[str] = []
+    for prefix in prefixes:
+        expanded.extend(f"{prefix}{tool_name}" for tool_name in tool_names)
+    return tuple(expanded)
+
+
+MEMPALACE_MUTATION_DENY_TOOL_IDS = _expand_mempalace_mutation_tool_ids(MEMPALACE_MUTATION_TOOLS)
 DEFAULT_ALLOWED_TARGET_STATUS_LINES = ("?? docs/quantipy_experiment_mempalace_preload.md",)
 
 
@@ -1809,7 +1829,7 @@ def _validate_policy(
             label=f"{agent.agent_id}.tools",
         )
         denied_tools = set(_require_string_list(tools, "deny"))
-        missing_deny = sorted(set(MEMPALACE_MUTATION_TOOLS) - denied_tools)
+        missing_deny = sorted(set(MEMPALACE_MUTATION_DENY_TOOL_IDS) - denied_tools)
         if missing_deny:
             raise AutoresearchConfigError(
                 f"{agent.agent_id} must deny MemPalace mutation tools: {', '.join(missing_deny)}"

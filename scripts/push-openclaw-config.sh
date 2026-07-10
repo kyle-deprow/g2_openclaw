@@ -23,6 +23,41 @@ SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
+MEMPALACE_MUTATION_TOOL_NAMES=(
+  "mempalace_add_drawer"
+  "mempalace_check_duplicate"
+  "mempalace_checkpoint"
+  "mempalace_create_tunnel"
+  "mempalace_delete_by_source"
+  "mempalace_delete_drawer"
+  "mempalace_delete_hallway"
+  "mempalace_delete_tunnel"
+  "mempalace_diary_write"
+  "mempalace_hook_settings"
+  "mempalace_kg_add"
+  "mempalace_kg_invalidate"
+  "mempalace_mine"
+  "mempalace_reconnect"
+  "mempalace_sync"
+  "mempalace_update_drawer"
+)
+
+build_mempalace_mutation_deny_ids_json() {
+  local tool_names_json
+  tool_names_json="$(printf '%s\n' "${MEMPALACE_MUTATION_TOOL_NAMES[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  jq -cn --argjson tool_names "${tool_names_json}" '
+    def runtime_forms($tool_name):
+      [
+        $tool_name,
+        "mempalace__\($tool_name)",
+        "mcp__mempalace__\($tool_name)",
+        "mempalace.\($tool_name)"
+      ];
+    [$tool_names[] | runtime_forms(.)[]]
+  '
+}
+
+MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_deny_ids_json)"
 
 # ── Pre-flight checks ───────────────────────────────────────────────────────
 if ! command -v jq &>/dev/null; then
@@ -364,28 +399,27 @@ MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
 
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 
+# Non-main agents must deny every runtime-visible MemPalace mutator form. The
+# matcher currently sees the bare tool id plus bundled, mcp__, and dotted names.
+if ! echo "${MERGED}" | jq -e \
+  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" '
+  ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains($mempalace_mutation_denies)) | not))] | length) == 0
+  and (([
+    .agents.list[] | select(.id == "main") | (.tools.deny // [])[]?
+  ] | map(select(. as $tool | $mempalace_mutation_denies | index($tool))) | length) == 0)
+' >/dev/null; then
+  echo "ERROR: Every non-main autoresearch agent must deny all MemPalace mutator runtime IDs" >&2
+  echo "       (bare, bundled mempalace__, MCP mcp__, and dotted mempalace.* forms)." >&2
+  echo "       Main must retain MemPalace mutator access for final experiment logging." >&2
+  exit 1
+fi
+
 # ── Managed invariant validation ─────────────────────────────────────────────
 # Fail before writing if a local merge or env selection would violate the
 # repo-managed autoresearch target shape.
-if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
-  def mutators: [
-    "mempalace_add_drawer",
-    "mempalace_check_duplicate",
-    "mempalace_checkpoint",
-    "mempalace_create_tunnel",
-    "mempalace_delete_by_source",
-    "mempalace_delete_drawer",
-    "mempalace_delete_hallway",
-    "mempalace_delete_tunnel",
-    "mempalace_diary_write",
-    "mempalace_hook_settings",
-    "mempalace_kg_add",
-    "mempalace_kg_invalidate",
-    "mempalace_mine",
-    "mempalace_reconnect",
-    "mempalace_sync",
-    "mempalace_update_drawer"
-  ];
+if ! echo "${MERGED}" | jq -e \
+  --arg pm "${PM_MODEL_PRIMARY}" \
+  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" '
   def expected_models: {
     "main": $pm,
     "context-curator": "openai/gpt-5.4",
@@ -416,8 +450,10 @@ if ! echo "${MERGED}" | jq -e --arg pm "${PM_MODEL_PRIMARY}" '
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
   and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains(mutators)) | not))] | length) == 0
-  and (((.agents.list[] | select(.id == "main") | .tools.deny // []) | index("mempalace_add_drawer")) | not)
+  and ([.agents.list[] | select(.id != "main") | select((((.tools.deny // []) | contains($mempalace_mutation_denies)) | not))] | length) == 0
+  and (([
+    .agents.list[] | select(.id == "main") | (.tools.deny // [])[]?
+  ] | map(select(. as $tool | $mempalace_mutation_denies | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
   echo "       Check plugins.allow, main PM model/skills, MemPalace read-only stage agents, Quantipy methodology skill, and memory tool denies." >&2

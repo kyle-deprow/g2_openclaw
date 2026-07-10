@@ -10,6 +10,8 @@ from typing import cast
 import pytest
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMPALACE_MUTATION_DENY_TOOL_IDS,
+    MEMPALACE_MUTATION_TOOLS,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
@@ -1053,3 +1055,28 @@ def test_load_autoresearch_policy_validates_route_skills_and_mempalace_denies(
 
     with pytest.raises(AutoresearchConfigError, match=match):
         load_autoresearch_policy(config_path)
+
+
+def test_mempalace_mutation_deny_ids_cover_all_runtime_forms() -> None:
+    assert len(MEMPALACE_MUTATION_DENY_TOOL_IDS) == len(MEMPALACE_MUTATION_TOOLS) * 4
+    assert "mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace__mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mcp__mempalace__mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace.mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+    assert "mcp__mempalace__mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
+
+
+def test_default_openclaw_config_denies_all_mempalace_runtime_mutator_ids() -> None:
+    config = _load_config()
+    agents_root = cast(dict[str, object], config["agents"])
+    agents = cast(list[dict[str, object]], agents_root["list"])
+    expected_denies = set(MEMPALACE_MUTATION_DENY_TOOL_IDS)
+
+    for agent in agents:
+        agent_id = cast(str, agent["id"])
+        if agent_id == "main":
+            continue
+        tools = cast(dict[str, object], agent["tools"])
+        denied_tools = set(cast(list[str], tools["deny"]))
+        assert expected_denies.issubset(denied_tools), agent_id
