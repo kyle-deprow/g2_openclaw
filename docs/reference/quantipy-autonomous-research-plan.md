@@ -22,14 +22,14 @@ infrastructure in this repo.
 ```
 Human (G2 glasses — connect/steer/disconnect)
   ↓
-OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.5 high via Codex runtime)
+OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.6-sol high via Codex runtime)
   ├─ MemPalace MCP (stdio) → local palace
   ├─ Phase 1: Context — PM + context-curator read RESEARCH_LOG.md and MemPalace
   ├─ Phase 2: Debate — five OpenClaw agents, require 3-of-5 majority
   ├─ Phase 3: Consensus — consensus-arbiter emits one implementation brief
   ├─ Phase 4: Implement — implementer subagent (code + test + notebook)
   ├─ Phase 5: Verify — sanity checks (Sharpe >10 = BUG, OOS >2x IS = unreliable)
-  ├─ Phase 6: Review — single openai/gpt-5.5 high reviewer
+  ├─ Phase 6: Review — single openai/gpt-5.6-sol high reviewer
   ├─ Phase 7: Fix/test — fixer handles concrete defects only
   ├─ Phase 8: Decide/log — PM writes final experiment outcome to MemPalace
   └─ Continue — loop NEVER self-terminates, seek orthogonal strategies
@@ -76,24 +76,24 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | 95% data range coverage | Experiments limited to 6mo caused useless OOS; use full 2021-2026 range |
 | Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
 | Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
-| 5-agent research debate | Three gpt-5.5 high and two gpt-5.4 high debaters prevent tunnel vision |
+| 5-agent research debate | Mixed 5.6/5.5/5.4 high-reasoning panel spends frontier intelligence on data/skeptic pressure while keeping bounded theory and implementation-feasibility work cheaper |
 | Deterministic methodology loading | Stage agents read Quantipy's current `AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents` before context/debate/implementation/review/fix |
 
 ## OpenClaw Stage Roster
 
 | Agent | Role |
 |-------|------|
-| main | PM; openai/gpt-5.5 high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
+| main | PM; openai/gpt-5.6-sol high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
 | context-curator | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
-| debater-microstructure | Market mechanics theory |
-| debater-data | Data availability, coverage, and target construction |
-| debater-skeptic | Leakage, overfit, and cherry-picking pressure |
-| debater-theory | Statistical and finance rationale |
-| debater-implementation | Buildability and verification cost |
-| consensus-arbiter | 3-of-5 majority decision and implementation brief |
-| implementer | End-to-end implementation |
-| reviewer | Single openai/gpt-5.5 high methodology review |
-| fixer | Concrete fixes only |
+| debater-microstructure | Market mechanics theory; openai/gpt-5.5 high |
+| debater-data | Data availability, coverage, and target construction; openai/gpt-5.6-terra high |
+| debater-skeptic | Leakage, overfit, and cherry-picking pressure; openai/gpt-5.6-sol high |
+| debater-theory | Statistical and finance rationale; openai/gpt-5.4 high |
+| debater-implementation | Buildability and verification cost; openai/gpt-5.4 high |
+| consensus-arbiter | 3-of-5 majority decision and implementation brief; openai/gpt-5.6-sol high |
+| implementer | End-to-end implementation; openai/gpt-5.4 high |
+| reviewer | Single openai/gpt-5.6-sol high methodology review |
+| fixer | Concrete fixes only; openai/gpt-5.4 high |
 
 ## Config Files
 

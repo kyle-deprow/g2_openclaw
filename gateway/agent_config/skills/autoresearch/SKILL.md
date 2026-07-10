@@ -33,11 +33,13 @@ context-curator
 
 ## Model Policy
 
-- Every gpt-5.4 stage must run with high reasoning.
-- The PM agent `main` must run on `openai/gpt-5.5` with high reasoning.
-- At least half of the five debate agents must be `openai/gpt-5.5` with high
-  reasoning. The configured panel uses three.
-- The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.5` with high
+- Every stage must run with high reasoning.
+- The PM agent `main` must run on `openai/gpt-5.6-sol` with high reasoning.
+- The five debate agents use the configured mixed-intelligence panel: strongest
+  reasoning for data/skeptic pressure, lower-cost models for bounded theory and
+  implementation feasibility.
+- The consensus arbiter must run on `openai/gpt-5.6-sol` with high reasoning.
+- The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.6-sol` with high
   reasoning. Do not run a reviewer panel.
 - Spawn by configured agent ID only. Do not use generic/default agents,
   inherited parent models, or per-spawn model overrides for autoresearch stages.
@@ -54,13 +56,13 @@ inform prompt content, but they are not OpenClaw stage names.
 |-------|-------|--------------|
 | Context | `context-curator` | `openai/gpt-5.4`, high |
 | Debate 1 | `debater-microstructure` | `openai/gpt-5.5`, high |
-| Debate 2 | `debater-data` | `openai/gpt-5.5`, high |
-| Debate 3 | `debater-skeptic` | `openai/gpt-5.5`, high |
+| Debate 2 | `debater-data` | `openai/gpt-5.6-terra`, high |
+| Debate 3 | `debater-skeptic` | `openai/gpt-5.6-sol`, high |
 | Debate 4 | `debater-theory` | `openai/gpt-5.4`, high |
 | Debate 5 | `debater-implementation` | `openai/gpt-5.4`, high |
-| Consensus | `consensus-arbiter` | `openai/gpt-5.4`, high |
+| Consensus | `consensus-arbiter` | `openai/gpt-5.6-sol`, high |
 | Implement | `implementer` | `openai/gpt-5.4`, high |
-| Review | `reviewer` | `openai/gpt-5.5`, high |
+| Review | `reviewer` | `openai/gpt-5.6-sol`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
 
 Every stage agent except `main` loads `mempalace-readonly` and
@@ -205,7 +207,7 @@ If a bug signal appears, send a targeted fix to `fixer`, then rerun verification
 
 ## 6. Single Reviewer
 
-Spawn exactly one `reviewer` on its configured `openai/gpt-5.5` high-reasoning
+Spawn exactly one `reviewer` on its configured `openai/gpt-5.6-sol` high-reasoning
 binding.
 
 Reviewer focus:

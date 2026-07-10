@@ -1229,7 +1229,7 @@ def load_autoresearch_policy(
     for item in openai_models_raw:
         data = _ensure_mapping(item, label="provider_model")
         model_caps[_require_str(data, "id")] = _require_bool(data, "reasoning")
-    for required_model in ("gpt-5.4", "gpt-5.5"):
+    for required_model in ("gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"):
         if model_caps.get(required_model) is not True:
             raise AutoresearchConfigError(f"openai/{required_model} must exist with reasoning=true")
 
@@ -1267,39 +1267,41 @@ def load_autoresearch_policy(
 def _validate_policy(
     policy: AutoresearchPolicy, agent_map: Mapping[str, Mapping[str, object]]
 ) -> None:
-    if policy.main.model != "openai/gpt-5.5" or policy.main.reasoning != "high":
-        raise AutoresearchConfigError("main must be openai/gpt-5.5 with high reasoning")
+    if policy.main.model != "openai/gpt-5.6-sol" or policy.main.reasoning != "high":
+        raise AutoresearchConfigError("main must be openai/gpt-5.6-sol with high reasoning")
     if (
         policy.context_curator.model != "openai/gpt-5.4"
         or policy.context_curator.reasoning != "high"
     ):
         raise AutoresearchConfigError("context-curator must be openai/gpt-5.4 with high reasoning")
 
-    high_55 = 0
-    high_54 = 0
+    expected_debate_models = {
+        "debater-microstructure": "openai/gpt-5.5",
+        "debater-data": "openai/gpt-5.6-terra",
+        "debater-skeptic": "openai/gpt-5.6-sol",
+        "debater-theory": "openai/gpt-5.4",
+        "debater-implementation": "openai/gpt-5.4",
+    }
     for agent in policy.debate_agents:
         if agent.reasoning != "high":
             raise AutoresearchConfigError(f"{agent.agent_id} must use high reasoning")
-        if agent.model == "openai/gpt-5.5":
-            high_55 += 1
-        elif agent.model == "openai/gpt-5.4":
-            high_54 += 1
-        else:
+        if agent.model != expected_debate_models[agent.agent_id]:
             raise AutoresearchConfigError(
-                f"{agent.agent_id} must be openai/gpt-5.5 or openai/gpt-5.4"
+                f"{agent.agent_id} must be {expected_debate_models[agent.agent_id]} "
+                "with high reasoning"
             )
-    if high_55 != 3 or high_54 != 2:
-        raise AutoresearchConfigError(
-            "debate panel must be exactly three gpt-5.5 high agents and two gpt-5.4 high agents"
-        )
 
-    for agent in (policy.consensus, policy.implementer, policy.fixer):
+    if policy.consensus.model != "openai/gpt-5.6-sol" or policy.consensus.reasoning != "high":
+        raise AutoresearchConfigError(
+            "consensus-arbiter must be openai/gpt-5.6-sol with high reasoning"
+        )
+    for agent in (policy.implementer, policy.fixer):
         if agent.model != "openai/gpt-5.4" or agent.reasoning != "high":
             raise AutoresearchConfigError(
                 f"{agent.agent_id} must be openai/gpt-5.4 with high reasoning"
             )
-    if policy.reviewer.model != "openai/gpt-5.5" or policy.reviewer.reasoning != "high":
-        raise AutoresearchConfigError("reviewer must be exactly one openai/gpt-5.5 high agent")
+    if policy.reviewer.model != "openai/gpt-5.6-sol" or policy.reviewer.reasoning != "high":
+        raise AutoresearchConfigError("reviewer must be exactly one openai/gpt-5.6-sol high agent")
     if policy.reviewer.agent_id != "reviewer":
         raise AutoresearchConfigError("reviewer stage must be configured as agent id 'reviewer'")
 

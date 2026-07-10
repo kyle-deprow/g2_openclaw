@@ -58,10 +58,12 @@ these settings into the local config with `jq`, preserving everything else.
 ### What is managed here
 
 - **Codex runtime** — enables the `codex` plugin, sets the OpenAI provider
-  `agentRuntime.id` to `codex`, defaults stage agents to `openai/gpt-5.4`,
-  and pins the `main` PM agent to `openai/gpt-5.5` high.
-- **OpenAI provider** — declares `gpt-5.4`, `gpt-5.5`, and `gpt-5-mini` model
-  refs for authenticated OpenAI/Codex use.
+  `agentRuntime.id` to `codex`, defaults bounded execution stages to
+  `openai/gpt-5.4`, and pins high-judgment PM/review/consensus stages to
+  `openai/gpt-5.6-sol` high.
+- **OpenAI provider** — declares `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`,
+  `gpt-5.6-terra`, and `gpt-5-mini` model refs for authenticated OpenAI/Codex
+  use.
 - **MemPalace-only research memory** — disables built-in OpenClaw memory search
   and memory flush, denies `memory_search`/`memory_get`, and requires the
   MemPalace MCP server.
@@ -205,8 +207,10 @@ config.
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
 | Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
 | Default stage model | `openai/gpt-5.4` |
-| Main PM model | `openai/gpt-5.5` |
-| Debate/review model | `openai/gpt-5.5` |
+| Main PM model | `openai/gpt-5.6-sol` |
+| Frontier judgment model | `openai/gpt-5.6-sol` for PM, skeptic, consensus, and review |
+| Data debate model | `openai/gpt-5.6-terra` |
+| Microstructure debate model | `openai/gpt-5.5` |
 | Alternate model | `openai/gpt-5-mini` |
 
 ## Azure OpenAI Provider Details
