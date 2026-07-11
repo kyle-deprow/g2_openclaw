@@ -8,9 +8,12 @@ version: 7.0.0
 
 Autoresearch is a PM-owned loop, but the loop state and next-stage selection
 must come from the deterministic runner in `gateway.autoresearch_runner` (or
-`gateway-cli autoresearch-next`), not from prompt memory. The PM uses that
-control-plane output to choose the next stage, verify metrics, log to
-MemPalace, and repeat until the human says `stop`.
+`gateway-cli autoresearch-next`), not from prompt memory. Because the PM
+workspace is outside this repo, invoke it exactly as `cd
+/home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next
+/home/dev/.openclaw/autoresearch/quantipy-state.json`. The PM uses that
+control-plane output to choose the next stage, verify metrics, log to MemPalace,
+and repeat until the human says `stop`.
 
 Durable research memory is MemPalace only. Do not use `memory_search`,
 `memory_get`, flat daily memory files, OpenClaw memory flush, or prompt-only

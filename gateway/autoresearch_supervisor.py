@@ -49,7 +49,11 @@ DEFAULT_CLAIM_STALE_SECONDS = 300.0
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
-WAKE_MESSAGE = "Continue Quantipy autoresearch from the authoritative state."
+WAKE_MESSAGE = (
+    "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
+    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json"
+)
 RECOVERY_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state; run the "
     "deterministic runner; infrastructure recovery only; no research steering."

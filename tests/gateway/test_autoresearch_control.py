@@ -214,7 +214,12 @@ def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
 
     command = fake.calls[-1]
     assert command[:6] == [str(executable), "gateway", "call", "agent", "--json", "--params"]
-    assert json.loads(command[6])["sessionKey"] == AUTORESEARCH_OWNER_SESSION_KEY
+    params = json.loads(command[6])
+    assert params["sessionKey"] == AUTORESEARCH_OWNER_SESSION_KEY
+    assert (
+        "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+        "/home/dev/.openclaw/autoresearch/quantipy-state.json"
+    ) in params["message"]
     assert "--expect-final" not in command
     assert events == ["rpc:version", "rpc:wake", "service:start"]
 

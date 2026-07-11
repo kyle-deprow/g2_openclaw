@@ -24,7 +24,8 @@ Key rules:
 - The `autoresearch-pm` agent is the autoresearch PM and loop controller on
   `openai/gpt-5.6-sol` high.
 - `main` handles human G2 requests only by running:
-  `uv run python -m gateway.autoresearch_control wake`, `status`, or `stop`.
+  `cd /home/dev/repos/g2_openclaw && uv run python -m
+  gateway.autoresearch_control wake`, `status`, or `stop`.
 - Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
   `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
   in the autoresearch skill.

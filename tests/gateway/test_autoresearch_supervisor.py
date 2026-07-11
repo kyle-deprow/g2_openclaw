@@ -417,4 +417,3 @@ def test_supervisor_source_contains_no_g2_dev_surface() -> None:
     assert "/_dev" not in source
     assert "localhost:5173" not in source
     assert "agent:main:g2" not in source
-    assert "g2" not in source

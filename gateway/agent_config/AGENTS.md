@@ -21,11 +21,11 @@ Only a human or Codex operator interacts with G2. If you are `main`, you are a
 thin interface:
 
 - Start or continue request: run
-  `uv run python -m gateway.autoresearch_control wake`.
+  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control wake`.
 - Status request: run
-  `uv run python -m gateway.autoresearch_control status`.
+  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control status`.
 - Stop request: run
-  `uv run python -m gateway.autoresearch_control stop`.
+  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control stop`.
 - Report the command result to that same human turn in 1-2 short sentences.
 - Do not spawn stage agents, read/write MemPalace, write research state or
   memory, evaluate experiments, or receive autonomous completion announcements.
@@ -37,8 +37,11 @@ behavior inside the G2 session.
 
 If you are `autoresearch-pm`, use the deterministic runner in
 `gateway.autoresearch_runner` or `gateway-cli autoresearch-next` for phase and
-state control. Do not maintain the loop in prompt memory. The PM may spawn only
-the configured stage agents and must not hand-edit target-repo code.
+state control. Run it from the repo root with the absolute state path:
+`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next
+/home/dev/.openclaw/autoresearch/quantipy-state.json`. Do not maintain the loop
+in prompt memory. The PM may spawn only the configured stage agents and must
+not hand-edit target-repo code.
 
 Autoresearch planning is the five-agent debate plus consensus artifact. Outside
 autoresearch, target-repo work needs an explicit human-approved plan before
