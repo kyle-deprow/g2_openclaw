@@ -7,7 +7,9 @@ import signal
 import sqlite3
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,6 +28,8 @@ from gateway.autoresearch_runner import (
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
+    FixResultArtifact,
+    FixTriggerPhase,
     ImplementationResultArtifact,
     MetricDirection,
     Phase,
@@ -35,6 +39,8 @@ from gateway.autoresearch_runner import (
     SetupContextArtifact,
     VerificationResultArtifact,
     VerificationStatus,
+    advance_state,
+    load_autoresearch_policy,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -51,6 +57,57 @@ from gateway.cli import (
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+class CliInvocationResult(Protocol):
+    @property
+    def exit_code(self) -> int: ...
+
+    @property
+    def output(self) -> str: ...
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        check=False,
+        capture_output=True,
+        cwd=cwd,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr)
+    return result.stdout.strip()
+
+
+@dataclass(frozen=True, slots=True)
+class GitWorktree:
+    target_checkout: Path
+    workspace: Path
+    implementation_commit: str
+    final_commit: str
+
+
+@pytest.fixture()
+def git_worktree(tmp_path: Path) -> GitWorktree:
+    target_checkout = tmp_path / "target"
+    workspace = tmp_path / "workspace"
+    _git(tmp_path, "init", "--initial-branch=main", str(target_checkout))
+    _git(target_checkout, "config", "user.email", "autoresearch@example.test")
+    _git(target_checkout, "config", "user.name", "Autoresearch Test")
+    (target_checkout / "README.md").write_text("baseline\n", encoding="utf-8")
+    _git(target_checkout, "add", "README.md")
+    _git(target_checkout, "commit", "-m", "baseline")
+    _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    (workspace / "experiment.txt").write_text("implementation\n", encoding="utf-8")
+    _git(workspace, "add", "experiment.txt")
+    _git(workspace, "commit", "-m", "implementation")
+    implementation_commit = _git(workspace, "rev-parse", "HEAD")
+    (workspace / "experiment.txt").write_text("fixed\n", encoding="utf-8")
+    _git(workspace, "add", "experiment.txt")
+    _git(workspace, "commit", "-m", "fix")
+    final_commit = _git(workspace, "rev-parse", "HEAD")
+    return GitWorktree(target_checkout, workspace, implementation_commit, final_commit)
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +448,286 @@ class TestAutoresearchCliCommands:
             target = root / relative_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(f"fixture for {relative_path}\n", encoding="utf-8")
+
+    @staticmethod
+    def _state_for_implementation(target_checkout: Path) -> AutoresearchState:
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        state = advance_state(
+            AutoresearchState(),
+            SetupContextArtifact(
+                goal="Find a profitable intraday alpha",
+                metric_name="OOS Sharpe net",
+                metric_direction=MetricDirection.MAXIMIZE,
+                target_repo=str(target_checkout),
+                writable_scope="src/quantipy/alpha",
+                baseline_summary="Baseline OOS Sharpe net is 0.18.",
+                hard_constraints=("No overnight holds",),
+                data_sources=("qp.prices()",),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ContextPacketArtifact(
+                baseline_metric="0.18 OOS Sharpe net",
+                current_best_metric="0.22 OOS Sharpe net",
+                recent_experiment_outcomes=(),
+                prior_findings=(),
+                open_proposals=(),
+                hard_constraints=("No overnight holds",),
+                available_data_sources=("qp.prices()",),
+                loaded_quantipy_sources=("AGENTS.md",),
+                research_mode=ResearchMode.ALPHA_RESEARCH,
+                mode_rationale="Coverage supports an alpha experiment.",
+                burned_theory_families=(),
+            ),
+            policy,
+        )
+        debate = DebateResultArtifact(
+            round_number=1,
+            submissions=tuple(
+                DebateSubmission(
+                    agent_id=agent_id,
+                    theory_id=f"theory-{index}",
+                    theory_family="vwap-obv",
+                    vote_family="vwap-obv",
+                    hypothesis="VWAP and OBV capture intraday accumulation.",
+                    universe="Small-cap semiconductors",
+                    traded_tickers=("AMD", "SMCI"),
+                    feature_pipeline="OHLCV to VWAP and OBV features",
+                    model_plan="Time-series classifier",
+                    walk_forward_plan="Expanding windows",
+                    transaction_cost_model="0.7 bps",
+                    data_coverage_plan="Use the common 2021-2026 calendar.",
+                    rejection_criteria="Discard below baseline.",
+                    objections=(),
+                )
+                for index, agent_id in enumerate(policy.debate_agent_ids, start=1)
+            ),
+        )
+        state = advance_state(state, debate, policy)
+        return advance_state(
+            state,
+            ConsensusResultArtifact(
+                round_number=1,
+                status=ConsensusStatus.MAJORITY,
+                winner_theory_id="theory-1",
+                winner_theory_family="vwap-obv",
+                majority_count=5,
+                majority_agent_ids=policy.debate_agent_ids,
+                dissenting_positions=(),
+                novelty_score=0.6,
+                theory_score=0.7,
+                implementation_risk_score=0.3,
+                data_adequacy_score=0.9,
+                overfit_risk_score=0.2,
+                expected_net_sharpe=0.5,
+                rejection_reasons=(),
+                implementation_brief="Implement the narrow VWAP and OBV experiment.",
+                dissent_summary="The panel reached consensus.",
+            ),
+            policy,
+        )
+
+    @staticmethod
+    def _implementation_artifact(
+        worktree: GitWorktree,
+        *,
+        commit_sha: str,
+        workspace_path: str | None = None,
+    ) -> ImplementationResultArtifact:
+        return ImplementationResultArtifact(
+            summary="Implemented the narrow VWAP and OBV experiment.",
+            workspace_path=workspace_path
+            if workspace_path is not None
+            else str(worktree.workspace),
+            commit_sha=commit_sha,
+            module_path="src/quantipy/alpha/vwap_obv/",
+            notebook_path="notebooks/experiments/vwap_obv.ipynb",
+            tests_added_or_updated=("tests/test_vwap_obv.py",),
+            commands_run=("uv run pytest tests/test_vwap_obv.py",),
+        )
+
+    @staticmethod
+    def _verification_failure() -> VerificationResultArtifact:
+        coverage = CoverageReceipt(
+            symbol="AMD",
+            declared_intended_start="2021-01-04",
+            declared_intended_end="2021-12-31",
+            actual_common_start="2021-01-04",
+            actual_common_end="2021-12-31",
+            oos_start="2021-10-01",
+            oos_end="2021-12-31",
+            expected_trading_days=252,
+            actual_trading_days=252,
+            coverage_percent=100.0,
+            missing_reason=None,
+            default_fold_count=0,
+            fallback_fold_count=0,
+            cap_provenance_available=True,
+            fixed_sleeve_local_data=False,
+        )
+        return VerificationResultArtifact(
+            status=VerificationStatus.TEST_FAILURE,
+            is_walk_forward_sharpe_net=0.41,
+            oos_sharpe_net=0.38,
+            max_drawdown_pct=12.4,
+            win_rate=0.54,
+            trade_count=211,
+            trades_per_day=1.9,
+            oos_trading_days=128,
+            feature_importances_summary="VWAP distance and OBV slope dominate.",
+            null_test_summary="Null shuffle drops Sharpe near zero.",
+            bug_signals=(),
+            tests_passed=False,
+            commands_run=("uv run pytest",),
+            data_coverage=AggregateCoverageReceipt(
+                declared_intended_start=coverage.declared_intended_start,
+                declared_intended_end=coverage.declared_intended_end,
+                actual_common_start=coverage.actual_common_start,
+                actual_common_end=coverage.actual_common_end,
+                oos_start=coverage.oos_start,
+                oos_end=coverage.oos_end,
+                expected_trading_days=coverage.expected_trading_days,
+                actual_trading_days=coverage.actual_trading_days,
+                coverage_percent=coverage.coverage_percent,
+                missing_reason=None,
+                default_fold_count=0,
+                fallback_fold_count=0,
+                cap_provenance_available=True,
+                fixed_sleeve_local_data=False,
+                per_symbol=(coverage,),
+            ),
+        )
+
+    @staticmethod
+    def _fix_artifact(
+        worktree: GitWorktree,
+        *,
+        workspace_path: str | None = None,
+    ) -> FixResultArtifact:
+        return FixResultArtifact(
+            trigger_phase=FixTriggerPhase.VERIFICATION,
+            summary="Applied the requested narrow fix.",
+            workspace_path=workspace_path
+            if workspace_path is not None
+            else str(worktree.workspace),
+            commit_sha=worktree.final_commit,
+            fixes_applied=("Expanded ticker coverage to 5 names",),
+            tests_rerun=("uv run pytest",),
+            remaining_issues=(),
+        )
+
+    @staticmethod
+    def _invoke_autoresearch_advance(
+        tmp_path: Path,
+        state: AutoresearchState,
+        artifact: ImplementationResultArtifact | FixResultArtifact,
+    ) -> tuple[CliInvocationResult, Path]:
+        state_path = tmp_path / "state.json"
+        artifact_path = tmp_path / "artifact.json"
+        output_path = tmp_path / "state-out.json"
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        artifact_path.write_text(json.dumps(artifact.to_dict()), encoding="utf-8")
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-advance",
+                str(state_path),
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+            ],
+        )
+        return result, output_path
+
+    def test_autoresearch_advance_validates_and_accepts_implementation_worktree(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        state = self._state_for_implementation(git_worktree.target_checkout)
+        artifact = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.final_commit,
+        )
+
+        result, output_path = self._invoke_autoresearch_advance(tmp_path, state, artifact)
+
+        assert result.exit_code == 0
+        assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
+
+    def test_autoresearch_advance_rejects_noncanonical_implementation_worktree(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        state = self._state_for_implementation(git_worktree.target_checkout)
+        artifact = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.final_commit,
+            workspace_path=str(git_worktree.workspace / ".." / git_worktree.workspace.name),
+        )
+
+        result, _ = self._invoke_autoresearch_advance(tmp_path, state, artifact)
+
+        assert result.exit_code == 1
+        assert "canonical resolved path" in result.output
+
+    def test_autoresearch_advance_validates_and_accepts_fix_worktree(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        implementation = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.implementation_commit,
+        )
+        state = advance_state(
+            self._state_for_implementation(git_worktree.target_checkout),
+            implementation,
+            policy,
+        )
+        state = advance_state(state, self._verification_failure(), policy)
+
+        result, output_path = self._invoke_autoresearch_advance(
+            tmp_path,
+            state,
+            self._fix_artifact(git_worktree),
+        )
+
+        assert result.exit_code == 0
+        assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
+
+    def test_autoresearch_advance_rejects_noncanonical_fix_worktree(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        implementation = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.implementation_commit,
+        )
+        state = advance_state(
+            self._state_for_implementation(git_worktree.target_checkout),
+            implementation,
+            policy,
+        )
+        state = advance_state(state, self._verification_failure(), policy)
+        alias = str(git_worktree.workspace / ".." / git_worktree.workspace.name)
+
+        result, _ = self._invoke_autoresearch_advance(
+            tmp_path,
+            state,
+            self._fix_artifact(git_worktree, workspace_path=alias),
+        )
+
+        assert result.exit_code == 1
+        assert "canonical resolved path" in result.output
 
     def test_autoresearch_advance_persists_state(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"

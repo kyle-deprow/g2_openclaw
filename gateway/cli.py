@@ -738,17 +738,22 @@ def autoresearch_advance(
 ) -> None:
     """Advance autoresearch state with a validated artifact and persist the result."""
     from gateway.autoresearch_runner import (
+        FixResultArtifact,
+        ImplementationResultArtifact,
         advance_state,
         load_artifact_file,
         load_autoresearch_policy,
         load_state_file,
         save_state_file,
+        validate_artifact_workspace,
     )
 
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
         artifact = load_artifact_file(artifact_path, state, policy)
+        if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
+            validate_artifact_workspace(state, artifact)
         next_state = advance_state(state, artifact, policy)
         save_state_file(output_path, next_state)
     except ValueError as exc:

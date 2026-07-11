@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -236,6 +237,26 @@ def _require_str(raw: Mapping[str, object], field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AutoresearchValidationError(f"{field_name} must be a non-empty string")
     return value.strip()
+
+
+def _require_workspace_path(raw: Mapping[str, object], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise AutoresearchValidationError(f"{field_name} must be a non-empty string")
+    _validate_workspace_path(value, label=field_name)
+    return value
+
+
+def _validate_workspace_path(value: str, *, label: str) -> None:
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise AutoresearchValidationError(f"{label} must not contain ASCII control characters")
+    if not Path(value).expanduser().is_absolute():
+        raise AutoresearchValidationError(f"{label} must be absolute")
+
+
+def _render_literal(value: str) -> str:
+    """Render untrusted prompt/error values as a single JSON string literal."""
+    return json.dumps(value, ensure_ascii=True)
 
 
 def _require_bool(raw: Mapping[str, object], field_name: str) -> bool:
@@ -715,7 +736,7 @@ class ImplementationResultArtifact:
         data = _ensure_mapping(raw, label="implementation_result")
         artifact = cls(
             summary=_require_str(data, "summary"),
-            workspace_path=_require_str(data, "workspace_path"),
+            workspace_path=_require_workspace_path(data, "workspace_path"),
             commit_sha=_require_str(data, "commit_sha"),
             module_path=_require_str(data, "module_path"),
             notebook_path=_require_str(data, "notebook_path"),
@@ -726,11 +747,10 @@ class ImplementationResultArtifact:
         return artifact
 
     def validate(self) -> None:
-        path = Path(self.workspace_path).expanduser()
-        if not path.is_absolute():
-            raise AutoresearchValidationError(
-                "implementation_result workspace_path must be absolute"
-            )
+        _validate_workspace_path(
+            self.workspace_path,
+            label="implementation_result workspace_path",
+        )
         if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
             raise AutoresearchValidationError(
                 "implementation_result commit_sha must be a Git commit SHA"
@@ -1199,7 +1219,7 @@ class FixResultArtifact:
         artifact = cls(
             trigger_phase=FixTriggerPhase(_require_str(data, "trigger_phase")),
             summary=_require_str(data, "summary"),
-            workspace_path=_require_str(data, "workspace_path"),
+            workspace_path=_require_workspace_path(data, "workspace_path"),
             commit_sha=_require_str(data, "commit_sha"),
             fixes_applied=_require_string_list(data, "fixes_applied"),
             tests_rerun=_require_string_list(data, "tests_rerun"),
@@ -1209,9 +1229,7 @@ class FixResultArtifact:
         return artifact
 
     def validate(self) -> None:
-        path = Path(self.workspace_path).expanduser()
-        if not path.is_absolute():
-            raise AutoresearchValidationError("fix_result workspace_path must be absolute")
+        _validate_workspace_path(self.workspace_path, label="fix_result workspace_path")
         if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
             raise AutoresearchValidationError("fix_result commit_sha must be a Git commit SHA")
 
@@ -2213,6 +2231,216 @@ def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifac
     )
 
 
+def _run_git(
+    working_directory: Path,
+    arguments: Sequence[str],
+    *,
+    operation: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["git", *arguments],
+            check=False,
+            capture_output=True,
+            cwd=working_directory,
+            text=True,
+        )
+    except (OSError, RuntimeError) as exc:
+        raise AutoresearchValidationError(
+            f"Git {operation} could not run in {_render_literal(str(working_directory))}"
+        ) from exc
+    return result
+
+
+def _require_git_output(
+    working_directory: Path,
+    arguments: Sequence[str],
+    *,
+    operation: str,
+) -> str:
+    result = _run_git(working_directory, arguments, operation=operation)
+    if result.returncode != 0:
+        raise AutoresearchValidationError(
+            f"Git {operation} failed in {_render_literal(str(working_directory))}"
+        )
+    return result.stdout.strip()
+
+
+def _require_git_worktree_root(path: Path, *, label: str) -> Path:
+    if not path.is_dir():
+        raise AutoresearchValidationError(f"{label} {_render_literal(str(path))} does not exist")
+    resolved_path = path.resolve()
+    top_level = Path(
+        _require_git_output(
+            resolved_path,
+            ("rev-parse", "--show-toplevel"),
+            operation=f"worktree check for {label}",
+        )
+    ).resolve()
+    if top_level != resolved_path:
+        raise AutoresearchValidationError(
+            f"{label} {_render_literal(str(path))} must be the root of a Git worktree"
+        )
+    return resolved_path
+
+
+def _require_strict_canonical_workspace_path(value: str, *, label: str) -> Path:
+    declared_path = Path(value).expanduser()
+    try:
+        resolved_path = declared_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise AutoresearchValidationError(
+            f"{label} {_render_literal(value)} does not exist or is not a directory"
+        ) from exc
+    if not resolved_path.is_dir():
+        raise AutoresearchValidationError(
+            f"{label} {_render_literal(value)} does not exist or is not a directory"
+        )
+    if value != str(resolved_path):
+        raise AutoresearchValidationError(f"{label} must be its strict canonical resolved path")
+    return resolved_path
+
+
+def _resolve_git_commit(worktree: Path, commit_sha: str, *, label: str) -> str:
+    result = _run_git(
+        worktree,
+        ("rev-parse", "--verify", f"{commit_sha}^{{commit}}"),
+        operation=f"commit lookup for {label}",
+    )
+    if result.returncode != 0:
+        raise AutoresearchValidationError(
+            f"{label} {_render_literal(commit_sha)} does not exist in the artifact worktree"
+        )
+    return result.stdout.strip()
+
+
+def _require_clean_git_worktree(worktree: Path) -> None:
+    status = _require_git_output(
+        worktree,
+        ("status", "--porcelain=v1", "--untracked-files=all"),
+        operation="status check",
+    )
+    if status:
+        raise AutoresearchValidationError(
+            f"artifact worktree {_render_literal(str(worktree))} must be clean"
+        )
+
+
+def _require_ancestor(
+    worktree: Path,
+    ancestor: str,
+    descendant: str,
+    *,
+    error_message: str,
+) -> None:
+    result = _run_git(
+        worktree,
+        ("merge-base", "--is-ancestor", ancestor, descendant),
+        operation="ancestry check",
+    )
+    if result.returncode == 1:
+        raise AutoresearchValidationError(error_message)
+    if result.returncode != 0:
+        raise AutoresearchValidationError(
+            f"Git ancestry check failed in {_render_literal(str(worktree))}"
+        )
+
+
+def validate_artifact_workspace(
+    state: AutoresearchState,
+    artifact: ImplementationResultArtifact | FixResultArtifact,
+) -> None:
+    """Mechanically validate a committed artifact at the CLI advancement boundary.
+
+    This intentionally performs filesystem and Git checks only at artifact
+    advancement; deserializing persisted state remains pure and portable.
+    """
+    artifact.validate()
+    if state.setup is None:
+        raise AutoresearchValidationError("artifact workspace validation requires setup")
+    workspace = _require_strict_canonical_workspace_path(
+        artifact.workspace_path,
+        label="artifact workspace_path",
+    )
+    if isinstance(artifact, FixResultArtifact):
+        if state.implementation_result is None:
+            raise AutoresearchValidationError("fix_result requires implementation_result")
+        state.implementation_result.validate()
+        implementation_workspace = _require_strict_canonical_workspace_path(
+            state.implementation_result.workspace_path,
+            label="persisted implementation_result workspace_path",
+        )
+        if artifact.workspace_path != state.implementation_result.workspace_path:
+            raise AutoresearchValidationError(
+                "fix_result workspace_path must exactly match implementation_result workspace_path"
+            )
+        if workspace != implementation_workspace:
+            raise AutoresearchValidationError(
+                "fix_result workspace_path must identify the persisted implementation worktree"
+            )
+        _validate_fix_workspace(state, artifact)
+    else:
+        _validate_implementation_workspace(state, artifact)
+
+    workspace = _require_git_worktree_root(workspace, label="artifact workspace_path")
+    target_checkout = _require_git_worktree_root(
+        Path(state.setup.target_repo).expanduser(),
+        label="authoritative target_repo",
+    )
+    if workspace == target_checkout:
+        raise AutoresearchValidationError(
+            "artifact workspace_path must be distinct from authoritative target_repo"
+        )
+    registered_worktrees = {
+        Path(line.removeprefix("worktree ")).resolve()
+        for line in _require_git_output(
+            target_checkout,
+            ("worktree", "list", "--porcelain"),
+            operation="worktree registration check",
+        ).splitlines()
+        if line.startswith("worktree ")
+    }
+    if workspace not in registered_worktrees:
+        raise AutoresearchValidationError(
+            "artifact workspace_path is not a Git worktree registered to authoritative target_repo"
+        )
+
+    artifact_commit = _resolve_git_commit(
+        workspace,
+        artifact.commit_sha,
+        label="artifact commit_sha",
+    )
+    worktree_head = _resolve_git_commit(workspace, "HEAD", label="worktree HEAD")
+    if artifact_commit != worktree_head:
+        raise AutoresearchValidationError("artifact commit_sha must equal worktree HEAD")
+    _require_clean_git_worktree(workspace)
+
+    if isinstance(artifact, FixResultArtifact):
+        assert state.implementation_result is not None
+        implementation_commit = _resolve_git_commit(
+            workspace,
+            state.implementation_result.commit_sha,
+            label="prior implementation commit_sha",
+        )
+        _require_ancestor(
+            workspace,
+            implementation_commit,
+            artifact_commit,
+            error_message="prior implementation commit_sha is not an ancestor of final fix commit",
+        )
+        authoritative_head = _resolve_git_commit(
+            target_checkout,
+            "HEAD",
+            label="authoritative target_repo HEAD",
+        )
+        _require_ancestor(
+            workspace,
+            authoritative_head,
+            artifact_commit,
+            error_message=("authoritative target_repo HEAD is not an ancestor of final fix commit"),
+        )
+
+
 def _json_block(payload: Mapping[str, object]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
@@ -2511,7 +2739,7 @@ def _phase_instruction(
     contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type])
     state_json = _json_block(_artifact_context(state))
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
-    workspace_contract = _workspace_isolation_contract(phase)
+    workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
     mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
     return (
@@ -2548,19 +2776,49 @@ def _mode_contract(state: AutoresearchState) -> str:
     )
 
 
-def _workspace_isolation_contract(phase: Phase) -> str:
-    if phase not in (Phase.IMPLEMENTATION, Phase.FIX_TEST):
+def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str:
+    if phase is Phase.IMPLEMENTATION:
+        return (
+            "Workspace isolation contract:\n"
+            "- Create and use a disposable git worktree for this iteration before editing "
+            "Quantipy; do not implement directly in the main target repo checkout.\n"
+            "- Do not leave background experiment, notebook, pytest, or data-generation "
+            "processes running after the stage exits.\n"
+            "- Commit all accepted implementation changes before emitting the artifact; if "
+            "the worktree cannot be made clean, fail closed and report that blocker.\n"
+            "- Include the disposable worktree path in workspace_path and the accepted "
+            "commit SHA in commit_sha.\n"
+            "- Preserve unrelated user files such as "
+            "docs/quantipy_experiment_mempalace_preload.md.\n\n"
+        )
+    if phase is not Phase.FIX_TEST:
         return ""
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "fix_test workspace contract requires implementation_result"
+        )
+    implementation = state.implementation_result
+    workspace_path = _render_literal(implementation.workspace_path)
+    implementation_commit = _render_literal(implementation.commit_sha)
     return (
-        "Workspace isolation contract:\n"
-        "- Create and use a disposable git worktree for this iteration before editing "
-        "Quantipy; do not implement directly in the main target repo checkout.\n"
+        "Fix/Test workspace continuity contract:\n"
+        "- Reuse the exact persisted implementation worktree "
+        f"{workspace_path}. Never create another worktree or edit the "
+        "main target checkout.\n"
+        "- Start from and preserve the accepted experiment commit "
+        f"{implementation_commit} in that worktree's history.\n"
+        "- Before editing, require a clean or recoverable Git state. Do not discard or "
+        "overwrite unrelated changes; if reconciliation is ambiguous or would lose "
+        "unrelated work, fail closed and report the blocker.\n"
+        "- If the authoritative target checkout advanced because human/Codex promoted "
+        "shared infrastructure, incorporate that already-authoritative history into this "
+        "same experiment worktree while preserving the accepted experiment commit. Never "
+        "independently edit shared infrastructure.\n"
         "- Do not leave background experiment, notebook, pytest, or data-generation "
         "processes running after the stage exits.\n"
-        "- Commit all accepted implementation changes before emitting the artifact; if "
-        "the worktree cannot be made clean, fail closed and report that blocker.\n"
-        "- Include the disposable worktree path in workspace_path and the accepted "
-        "commit SHA in commit_sha.\n"
+        "- Finish with a clean, committed result. The fix_result artifact must use the "
+        f"same workspace_path exactly ({workspace_path}) and report its "
+        "accepted final commit SHA in commit_sha.\n"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
     )

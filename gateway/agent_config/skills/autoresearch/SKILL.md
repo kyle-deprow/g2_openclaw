@@ -129,9 +129,22 @@ guardrails exist only to keep execution clean:
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only
   default allowlisted local file.
-- Implementation and fix stages must work from an isolated branch or disposable
-  git worktree, stop their background jobs before exit, and commit accepted
-  changes before emitting their artifact.
+- Implementation creates a disposable git worktree. Fix/Test reuses the exact
+  persisted implementation worktree and accepted experiment commit; it never
+  creates another worktree.
+- `gateway-cli autoresearch-advance` mechanically verifies implementation and
+  fix artifacts: `workspace_path` is the strict canonical resolved worktree
+  path (no symlink, `..`, or other alias), the workspace exists, is a registered
+  Git worktree distinct from the authoritative target checkout, is clean, and
+  has the artifact commit at `HEAD`. For Fix/Test it additionally verifies the
+  persisted implementation and fix artifact use that same exact canonical path,
+  and that the implementation commit and authoritative target `HEAD` are
+  ancestors of the final fix commit.
+- Behavioral guardrails (not mechanically provable): before editing, preserve
+  unrelated work; only incorporate already-authoritative human/Codex shared
+  infrastructure; never independently edit shared infrastructure; and fail
+  closed if reconciliation is ambiguous or risks unrelated loss. No background
+  jobs may remain when the stage exits.
 - Never promote experiment changes from `INFRA_BLOCKED`, `DISCARD`, or `CRASH`
   disposable worktrees. Only the human operator or Codex may promote
   independently reviewed shared-infrastructure patches in the authoritative
@@ -316,6 +329,14 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
   then rerun the single reviewer.
 - Test failure: fix up to two times, then revert and log CRASH.
 - No methodology issue: proceed to decide/log.
+- Reuse the exact persisted implementation `workspace_path` and accepted commit;
+  never create another worktree. Before editing, preserve unrelated work and
+  use only already-authoritative human/Codex shared-infrastructure history;
+  never edit shared infrastructure, and fail closed if reconciliation is
+  ambiguous or risks unrelated loss. These are agent behavioral guardrails,
+  not mechanical proofs. The artifact-advance boundary mechanically requires a
+  clean committed result at that same worktree and verifies both prior
+  implementation and current authoritative-target ancestry.
 
 ## 8. Decide And Log
 
