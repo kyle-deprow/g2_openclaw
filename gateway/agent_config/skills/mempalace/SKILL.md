@@ -258,6 +258,8 @@ One drawer per experiment iteration. Wing: `wing_quantipy`. Room: `room_<experim
 ## Failure Policy
 
 If `mempalace_*` tools return errors:
-- Stop the autoresearch loop.
-- Report the MemPalace failure to the human.
+- Fail closed and report/block with exact evidence, including the tool name,
+  arguments, returned error, and timestamp.
+- Await human/Codex operator action.
+- The PM does not stop or relaunch the autoresearch loop.
 - Do not continue with hidden or unstructured state.

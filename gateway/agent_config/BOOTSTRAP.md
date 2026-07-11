@@ -116,9 +116,11 @@ All experiments produce Jupyter notebooks as primary output.
 
 - **Location:** `notebooks/experiments/<strategy_name>.ipynb`
 - **Existing:** `notebooks/llm_comparison_experiment.ipynb` (pre-existing)
-- **Deps:** `jupyter` and `nbformat` are NOT yet in pyproject.toml — the
-  implementation subagent must add them when creating the first experiment
-  notebook. Also add `matplotlib` for visualizations if not present.
+- **Dependency/runtime tooling:** If notebook execution requires missing
+  `jupyter`, `nbformat`, `matplotlib`, or any other dependency/runtime tooling,
+  fail closed: report/block with the exact missing-dependency evidence and
+  await human/Codex operator action. PM and stage agents do not modify
+  dependency or runtime tooling.
 - **Execution:** `uv run jupyter execute <notebook.ipynb> --timeout=300`
 - **Convention:** Notebook imports module code from `src/quantipy/alpha/<strategy_name>/` — it orchestrates the experiment, not duplicates the code.
 

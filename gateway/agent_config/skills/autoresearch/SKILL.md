@@ -99,6 +99,22 @@ those target-repo files into G2 OpenClaw.
 The loop has full authority to choose and test research strategies. Infra
 guardrails exist only to keep execution clean:
 
+- Ownership boundary: shared Quantipy platform infrastructure, shared test
+  harnesses/fixtures, dependency/runtime/tooling, G2/OpenClaw orchestration,
+  supervisor/recovery, and monitoring belong to the human operator or Codex.
+  Every alpha module, experiment notebook, experiment-specific unit test, and
+  research metric/methodology behavior belongs to autoresearch even when a
+  dependency upgrade exposed the bug.
+- Classification test: if a change alters strategy/features/folds/models/null
+  tests/metrics, do not operator-edit it; record the exact failure and let the
+  loop implement/review/fix it. If it only repairs shared execution substrate,
+  record the blocker with exact evidence and await human/Codex operator action
+  in the authoritative checkout.
+- On confirmed shared-infrastructure failure, the PM must report/block with
+  exact evidence, including the failing command or test, relevant path, process
+  or route status, timestamps, and any decisive log lines. Then wait for the
+  human operator or Codex. The PM never stops or relaunches the loop, repairs
+  shared infrastructure, promotes shared-infrastructure patches, or touches G2.
 - Every spawned stage must use a deterministic unique label derived from
   persisted state, never a generic reused stage name. Format:
   `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
@@ -116,6 +132,13 @@ guardrails exist only to keep execution clean:
 - Implementation and fix stages must work from an isolated branch or disposable
   git worktree, stop their background jobs before exit, and commit accepted
   changes before emitting their artifact.
+- Never promote experiment changes from `INFRA_BLOCKED`, `DISCARD`, or `CRASH`
+  disposable worktrees. Only the human operator or Codex may promote
+  independently reviewed shared-infrastructure patches in the authoritative
+  checkout. The PM never promotes.
+- Do not run concurrent `pytest` processes in the same checkout because
+  coverage state can corrupt. Serialize verification or use isolated
+  worktrees.
 - Crash residue from a prior iteration is not evidence and must not be reused
   as scaffolding unless a later committed experiment explicitly owns it.
 
@@ -129,8 +152,9 @@ Do once before the first iteration:
 3. As PM, read `RESEARCH_LOG.md`, recent git history, current in-scope files,
    and MemPalace prior experiments with `mempalace_status`,
    `mempalace_diary_read`, `mempalace_search`, and `mempalace_kg_query`.
-4. Confirm MemPalace tools are available. If unavailable, pause the loop and
-   report the infrastructure blocker.
+4. Confirm MemPalace tools are available. If unavailable, fail closed:
+   report/block with exact evidence and await human/Codex operator action. The
+   PM does not stop or relaunch the loop.
 
 ## 1. Context Curator
 
@@ -329,5 +353,9 @@ Actions:
   MemPalace. Re-enter the first incomplete stage.
 - Post `[TASK:running] autoresearch iteration N` after each launch.
 - Post progress every 10 iterations.
-- Do not stop after one experiment. Repeat until the human says `stop` or a
-  declared finite goal is reached.
+- Monitoring is read-only. On confirmed shared-infrastructure failure, report
+  the exact blocker evidence and await human/Codex operator action. The PM
+  never touches G2 directly.
+- Do not stop after one experiment. If a declared finite goal is satisfied, the
+  PM may report that status but must continue the loop until an explicit
+  human/Codex control-command `stop` halts it.

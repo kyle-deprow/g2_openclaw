@@ -86,8 +86,10 @@ the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
 
 Read `mempalace` only when acting as `autoresearch-pm`. Read
 `mempalace-readonly` when acting as any context, debate, implementation,
-review, or fix stage agent. If MemPalace tools error, stop the loop and report
-the blocker. Do not continue with hidden or unstructured state.
+review, or fix stage agent. If MemPalace tools error, fail closed: report/block
+with exact evidence, including the tool name, arguments, returned error, and
+timestamp, then await human/Codex operator action. The PM does not stop or
+relaunch the loop. Do not continue with hidden or unstructured state.
 
 Non-PM stage agents both deny every MemPalace mutation/operation tool in config
 and avoid the write-capable `mempalace` skill. They may read context, but they

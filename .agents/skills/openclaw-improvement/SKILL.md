@@ -72,6 +72,12 @@ wc -c gateway/agent_config/TOOLS.md
 
 The gateway's built-in process monitor polls every 30s for Codex PID exit, then notifies OpenClaw via WebSocket. This replaced the earlier cron-based sentinel approach.
 
+Monitoring is read-only unless you have confirmed an infrastructure issue that
+requires operator intervention. Only the human operator or Codex touches G2,
+OpenClaw orchestration, supervisor/recovery, shared monitoring, shared test
+harnesses/fixtures, or shared Quantipy platform/runtime/tooling. The autonomous
+PM never intervenes in those surfaces directly.
+
 | Issue | Root cause | Fix |
 |-------|-----------|-----|
 | OpenClaw not notified of Codex exit | Process monitor not running (gateway down) | Ensure gateway is running: `ss -tlnp \| grep 8765` |
@@ -132,11 +138,16 @@ this out of the default Codex path.
 
 ### OpenClaw forgets what it was doing
 **Cause:** New session started (previous context lost).
-**Fix:** Make the autoresearch skill self-contained — it reads RESEARCH_LOG.md and `memory_search` to rebuild context. Every iteration should be independently resumable.
+**Fix:** Make the autoresearch skill self-contained — it reads
+`RESEARCH_LOG.md` and rebuilds context from MemPalace readonly retrieval with
+`mempalace_status`, `mempalace_diary_read`, `mempalace_search`, and
+`mempalace_kg_query`. Every iteration should be independently resumable.
 
 ### OpenClaw repeats failed experiments
 **Cause:** Not checking memory before proposing.
-**Fix:** Enforce `memory_search` at start of every Phase 1 (REVIEW) in autoresearch. Add failed experiment details to memory immediately after DISCARD.
+**Fix:** Enforce MemPalace readonly retrieval at the start of each new context
+pass in autoresearch. Write failed experiment details to MemPalace only during
+final PM decision logging after DISCARD or CRASH.
 
 ### OpenClaw invents strategies from training data
 **Cause:** Violating "Research before invention" principle.
@@ -152,6 +163,32 @@ When you observe a failure or suboptimal behavior:
 4. **Deploy** — Push config → restart daemon
 5. **Test** — Run through the scenario again to verify the fix
 6. **Prune** — If the fix makes an older workaround obsolete, remove the workaround
+
+### Ownership boundary for Quantipy work
+
+Use this classification test before editing `/home/dev/repos/quantipy`: does the
+change alter strategy logic, features, folds, models, null tests, metrics, or
+research methodology behavior, or does it only repair the shared execution
+substrate?
+
+- Shared substrate only: stop the loop, repair it with an independent
+  implement/review/fix cycle, verify in isolation, commit the authoritative
+  shared-infrastructure patch in the authoritative checkout, then relaunch
+  autoresearch.
+- Strategy/methodology behavior: do not operator-edit it. Record the exact
+  failure and let the autoresearch loop implement, review, and fix its own
+  experiment artifacts.
+
+Treat every alpha module, experiment notebook, experiment-specific unit test,
+and research-metric/methodology behavior as autoresearch-owned even when a
+dependency or runtime upgrade exposed the bug. Do not promote experiment
+changes out of `INFRA_BLOCKED`, `DISCARD`, or `CRASH` disposable worktrees.
+Only the human operator or Codex may promote independently reviewed
+shared-infrastructure patches from the authoritative checkout. The PM never
+promotes.
+
+Do not run concurrent `pytest` processes in the same checkout; coverage state
+can corrupt. Serialize verification or use isolated worktrees.
 
 ### What makes a good skill
 - **Specific** — addresses concrete scenarios, not vague philosophy
