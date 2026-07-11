@@ -219,6 +219,27 @@ def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
     assert events == ["rpc:version", "rpc:wake", "service:start"]
 
 
+def test_each_manual_wake_is_a_new_logical_idempotency_request(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    first = FakeOpenClaw()
+    second = FakeOpenClaw()
+
+    AutoresearchControl(
+        config, run_command=first, service_controller=FakeSupervisorService([])
+    ).wake()
+    AutoresearchControl(
+        config, run_command=second, service_controller=FakeSupervisorService([])
+    ).wake()
+
+    first_key = json.loads(first.calls[-1][6])["idempotencyKey"]
+    second_key = json.loads(second.calls[-1][6])["idempotencyKey"]
+    assert first_key.startswith("autoresearch-manual-wake-")
+    assert second_key.startswith("autoresearch-manual-wake-")
+    assert first_key != second_key
+
+
 def test_control_uses_the_installed_quantipy_supervisor_unit() -> None:
     assert DEFAULT_SUPERVISOR_SERVICE_NAME == "quantipy-autoresearch-supervisor.service"
 

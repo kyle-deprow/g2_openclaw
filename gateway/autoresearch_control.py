@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -148,10 +149,14 @@ class AutoresearchControl:
     def wake(self) -> str:
         executable = self._rpc.require_binary()
         state_material = self._state_material()
+        invocation_nonce = uuid.uuid4().hex
         run_id = self._rpc.wake(
             executable,
             message=WAKE_MESSAGE,
-            idempotency_key=make_idempotency_key(purpose="manual-wake", material=state_material),
+            idempotency_key=make_idempotency_key(
+                purpose="manual-wake",
+                material=f"{state_material}\ninvocation={invocation_nonce}",
+            ),
         )
         try:
             self._service_controller.ensure_started()
