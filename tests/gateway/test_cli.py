@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Protocol
 from unittest.mock import MagicMock, patch
 
+import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
 from gateway.autoresearch_runner import (
+    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
@@ -89,9 +91,21 @@ class GitWorktree:
 
 
 @pytest.fixture()
-def git_worktree(tmp_path: Path) -> GitWorktree:
+def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    worktree_root = tmp_path / "operator-controlled" / "worktrees"
+    worktree_root.mkdir(parents=True)
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
+        worktree_root,
+    )
+    return worktree_root
+
+
+@pytest.fixture()
+def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktree:
     target_checkout = tmp_path / "target"
-    workspace = tmp_path / "workspace"
+    workspace = autoresearch_worktree_root / "workspace"
     _git(tmp_path, "init", "--initial-branch=main", str(target_checkout))
     _git(target_checkout, "config", "user.email", "autoresearch@example.test")
     _git(target_checkout, "config", "user.name", "Autoresearch Test")
@@ -898,7 +912,7 @@ class TestAutoresearchCliCommands:
             consensus_history=(consensus,),
             implementation_result=ImplementationResultArtifact(
                 summary="Implemented the narrow VWAP and OBV experiment.",
-                workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-3",
+                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "iteration-3"),
                 commit_sha="abc1234",
                 module_path="src/quantipy/alpha/vwap_obv/",
                 notebook_path="notebooks/experiments/vwap_obv.ipynb",

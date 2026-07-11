@@ -20,6 +20,7 @@ from typing import TypeVar
 
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
+DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
 _T = TypeVar("_T")
 
 
@@ -252,6 +253,24 @@ def _validate_workspace_path(value: str, *, label: str) -> None:
         raise AutoresearchValidationError(f"{label} must not contain ASCII control characters")
     if not Path(value).expanduser().is_absolute():
         raise AutoresearchValidationError(f"{label} must be absolute")
+
+
+def _validate_persisted_autoresearch_workspace_path(value: str, *, label: str) -> None:
+    """Apply a filesystem-free lexical policy to persisted workspace evidence."""
+    _validate_workspace_path(value, label=label)
+    workspace_path = Path(value)
+    if (
+        not workspace_path.is_absolute()
+        or value != str(workspace_path)
+        or any(part in {".", ".."} for part in workspace_path.parts)
+    ):
+        raise AutoresearchValidationError(f"{label} must be an absolute lexically canonical path")
+    try:
+        workspace_path.relative_to(DEFAULT_AUTORESEARCH_WORKTREE_ROOT)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be under the canonical autoresearch worktree root"
+        ) from exc
 
 
 def _render_literal(value: str) -> str:
@@ -2101,7 +2120,25 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
     ):
         raise AutoresearchValidationError("implementation_result requires a majority consensus")
     if state.implementation_result:
+        _validate_persisted_autoresearch_workspace_path(
+            state.implementation_result.workspace_path,
+            label="implementation_result workspace_path",
+        )
         _validate_implementation_workspace(state, state.implementation_result)
+    if state.fix_history and state.implementation_result is None:
+        raise AutoresearchValidationError("fix history requires an implementation_result")
+    for fix in state.fix_history:
+        fix.validate()
+        _validate_persisted_autoresearch_workspace_path(
+            fix.workspace_path,
+            label="fix_history workspace_path",
+        )
+        if state.implementation_result is not None and (
+            fix.workspace_path != state.implementation_result.workspace_path
+        ):
+            raise AutoresearchValidationError(
+                "fix_history workspace_path must exactly match implementation_result workspace_path"
+            )
     if state.verification_history and state.implementation_result is None:
         raise AutoresearchValidationError("verification history requires an implementation_result")
     if state.review_history and not state.verification_history:
@@ -2203,6 +2240,10 @@ def _validate_implementation_workspace(
     artifact: ImplementationResultArtifact,
 ) -> None:
     artifact.validate()
+    _validate_persisted_autoresearch_workspace_path(
+        artifact.workspace_path,
+        label="implementation_result workspace_path",
+    )
     if state.setup is None:
         return
     workspace_path = Path(artifact.workspace_path).expanduser().resolve()
@@ -2216,8 +2257,16 @@ def _validate_implementation_workspace(
 
 def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifact) -> None:
     artifact.validate()
+    _validate_persisted_autoresearch_workspace_path(
+        artifact.workspace_path,
+        label="fix_result workspace_path",
+    )
     if state.implementation_result is None:
         raise AutoresearchValidationError("fix_result requires implementation_result")
+    _validate_persisted_autoresearch_workspace_path(
+        state.implementation_result.workspace_path,
+        label="implementation_result workspace_path",
+    )
     if artifact.workspace_path != state.implementation_result.workspace_path:
         raise AutoresearchValidationError(
             "fix_result workspace_path must match implementation_result workspace_path"
@@ -2301,6 +2350,27 @@ def _require_strict_canonical_workspace_path(value: str, *, label: str) -> Path:
     return resolved_path
 
 
+def _require_autoresearch_worktree_root() -> Path:
+    return _require_strict_canonical_workspace_path(
+        str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT),
+        label="autoresearch worktree root",
+    )
+
+
+def _require_workspace_under_autoresearch_worktree_root(
+    workspace: Path,
+    *,
+    label: str,
+    worktree_root: Path,
+) -> None:
+    try:
+        workspace.relative_to(worktree_root)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be under the canonical autoresearch worktree root"
+        ) from exc
+
+
 def _resolve_git_commit(worktree: Path, commit_sha: str, *, label: str) -> str:
     result = _run_git(
         worktree,
@@ -2362,6 +2432,7 @@ def validate_artifact_workspace(
         artifact.workspace_path,
         label="artifact workspace_path",
     )
+    worktree_root = _require_autoresearch_worktree_root()
     if isinstance(artifact, FixResultArtifact):
         if state.implementation_result is None:
             raise AutoresearchValidationError("fix_result requires implementation_result")
@@ -2369,6 +2440,16 @@ def validate_artifact_workspace(
         implementation_workspace = _require_strict_canonical_workspace_path(
             state.implementation_result.workspace_path,
             label="persisted implementation_result workspace_path",
+        )
+        _require_workspace_under_autoresearch_worktree_root(
+            implementation_workspace,
+            label="persisted implementation_result workspace_path",
+            worktree_root=worktree_root,
+        )
+        _require_workspace_under_autoresearch_worktree_root(
+            workspace,
+            label="fix_result workspace_path",
+            worktree_root=worktree_root,
         )
         if artifact.workspace_path != state.implementation_result.workspace_path:
             raise AutoresearchValidationError(
@@ -2380,6 +2461,11 @@ def validate_artifact_workspace(
             )
         _validate_fix_workspace(state, artifact)
     else:
+        _require_workspace_under_autoresearch_worktree_root(
+            workspace,
+            label="implementation_result workspace_path",
+            worktree_root=worktree_root,
+        )
         _validate_implementation_workspace(state, artifact)
 
     workspace = _require_git_worktree_root(workspace, label="artifact workspace_path")
@@ -2778,10 +2864,16 @@ def _mode_contract(state: AutoresearchState) -> str:
 
 def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str:
     if phase is Phase.IMPLEMENTATION:
+        worktree_root = _render_literal(str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT))
         return (
             "Workspace isolation contract:\n"
-            "- Create and use a disposable git worktree for this iteration before editing "
-            "Quantipy; do not implement directly in the main target repo checkout.\n"
+            "- Create and use a disposable git worktree for this iteration under the "
+            f"canonical operator-controlled root {worktree_root}; "
+            "before git worktree add, run mkdir -p "
+            "/home/dev/.openclaw/autoresearch/worktrees. "
+            "never use /tmp. /tmp is a 31G tmpfs, and each Quantipy worktree virtualenv "
+            "is about 1.5G, so stale iteration worktrees exhaust it. Do not implement "
+            "directly in the main target repo checkout.\n"
             "- Do not leave background experiment, notebook, pytest, or data-generation "
             "processes running after the stage exits.\n"
             "- Commit all accepted implementation changes before emitting the artifact; if "

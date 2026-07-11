@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 7.0.0
+version: 7.2.0
 ---
 
 # Autoresearch
@@ -135,17 +135,24 @@ guardrails exist only to keep execution clean:
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only
   default allowlisted local file.
-- Implementation creates a disposable git worktree. Fix/Test reuses the exact
-  persisted implementation worktree and accepted experiment commit; it never
-  creates another worktree.
+- All implementation and Fix/Test workspaces must be under the exact canonical
+  operator-controlled root `/home/dev/.openclaw/autoresearch/worktrees`; never
+  use `/tmp` or another fallback. Create that parent with `mkdir -p` before
+  `git worktree add`. `/tmp` is a 31G tmpfs and each Quantipy worktree virtualenv
+  is about 1.5G, so stale iteration worktrees can exhaust it. Fix/Test reuses
+  the exact persisted implementation worktree and accepted experiment commit;
+  it never creates another worktree.
 - `gateway-cli autoresearch-advance` mechanically verifies implementation and
   fix artifacts: `workspace_path` is the strict canonical resolved worktree
   path (no symlink, `..`, or other alias), the workspace exists, is a registered
   Git worktree distinct from the authoritative target checkout, is clean, and
-  has the artifact commit at `HEAD`. For Fix/Test it additionally verifies the
-  persisted implementation and fix artifact use that same exact canonical path,
-  and that the implementation commit and authoritative target `HEAD` are
-  ancestors of the final fix commit.
+  has the artifact commit at `HEAD`. Implementation evidence, the persisted
+  implementation workspace, and the Fix/Test workspace must all be below
+  `/home/dev/.openclaw/autoresearch/worktrees`; every path outside that root
+  fails closed. For Fix/Test it additionally verifies the persisted
+  implementation and fix artifact use that same exact canonical path, and that
+  the implementation commit and authoritative target `HEAD` are ancestors of
+  the final fix commit.
 - Behavioral guardrails (not mechanically provable): before editing, preserve
   unrelated work; only incorporate already-authoritative human/Codex shared
   infrastructure; never independently edit shared infrastructure; and fail
@@ -253,6 +260,13 @@ Spawn `implementer` with the final implementation brief.
 
 Implementation requirements:
 
+- Create the disposable Git worktree under the exact canonical root
+  `/home/dev/.openclaw/autoresearch/worktrees` (for example,
+  `/home/dev/.openclaw/autoresearch/worktrees/quantipy-i{iteration}-implementation`).
+  First run `mkdir -p /home/dev/.openclaw/autoresearch/worktrees`; the root
+  itself must exist and be canonical before the artifact can be accepted.
+  Never use `/tmp`: it is a 31G tmpfs, while each Quantipy worktree virtualenv
+  is about 1.5G and stale iterations exhaust the filesystem.
 - Module path: `src/quantipy/alpha/<strategy_name>/`.
 - Notebook path: `notebooks/experiments/<strategy_name>.ipynb`.
 - Unit tests for feature generation, split logic, and metric extraction.
@@ -336,13 +350,15 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 - Test failure: fix up to two times, then revert and log CRASH.
 - No methodology issue: proceed to decide/log.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
-  never create another worktree. Before editing, preserve unrelated work and
-  use only already-authoritative human/Codex shared-infrastructure history;
-  never edit shared infrastructure, and fail closed if reconciliation is
-  ambiguous or risks unrelated loss. These are agent behavioral guardrails,
-  not mechanical proofs. The artifact-advance boundary mechanically requires a
-  clean committed result at that same worktree and verifies both prior
-  implementation and current authoritative-target ancestry.
+  it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
+  the Fix/Test artifact must report that same canonical path. There is no
+  legacy or `/tmp` fallback. Never create another worktree. Before editing,
+  preserve unrelated work and use only already-authoritative human/Codex shared
+  infrastructure history; never edit shared infrastructure, and fail closed if
+  reconciliation is ambiguous or risks unrelated loss. These are agent
+  behavioral guardrails, not mechanical proofs. The artifact-advance boundary
+  mechanically requires a clean committed result at that same worktree and
+  verifies both prior implementation and current authoritative-target ancestry.
 
 ## 8. Decide And Log
 

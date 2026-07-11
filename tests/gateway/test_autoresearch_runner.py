@@ -10,8 +10,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
+import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from gateway.autoresearch_runner import (
+    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     MEMPALACE_FULL_SERVER_ID,
     MEMPALACE_MUTATION_DENY_TOOL_IDS,
@@ -266,7 +268,7 @@ def _no_consensus(round_number: int) -> ConsensusResultArtifact:
 def _implementation_result() -> ImplementationResultArtifact:
     return ImplementationResultArtifact(
         summary="Added strategy module and experiment notebook.",
-        workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+        workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "iteration-1"),
         commit_sha="abc1234",
         module_path="src/quantipy/alpha/vwap_obv_intraday/",
         notebook_path="notebooks/experiments/vwap_obv_intraday.ipynb",
@@ -314,7 +316,7 @@ def _fix_result(trigger_phase: FixTriggerPhase) -> FixResultArtifact:
     return FixResultArtifact(
         trigger_phase=trigger_phase,
         summary="Applied the requested narrow fix.",
-        workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+        workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "iteration-1"),
         commit_sha="def5678",
         fixes_applied=("Expanded ticker coverage to 5 names",),
         tests_rerun=("uv run pytest",),
@@ -395,9 +397,21 @@ class GitWorktree:
 
 
 @pytest.fixture()
-def git_worktree(tmp_path: Path) -> GitWorktree:
+def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    worktree_root = tmp_path / "operator-controlled" / "worktrees"
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
+        worktree_root,
+    )
+    return worktree_root
+
+
+@pytest.fixture()
+def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktree:
     target_checkout = tmp_path / "target"
-    workspace = tmp_path / "workspace"
+    workspace = autoresearch_worktree_root / "workspace"
+    autoresearch_worktree_root.mkdir(parents=True)
     _git(tmp_path, "init", "--initial-branch=main", str(target_checkout))
     _git(target_checkout, "config", "user.email", "autoresearch@example.test")
     _git(target_checkout, "config", "user.name", "Autoresearch Test")
@@ -856,13 +870,17 @@ def test_implementation_result_rejects_main_target_checkout(
 ) -> None:
     state = _state_to_consensus(policy)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    implementation = replace(
-        _implementation_result(),
-        workspace_path="/home/dev/repos/quantipy",
+    assert state.setup is not None
+    state = replace(
+        state,
+        setup=replace(
+            state.setup,
+            target_repo=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "iteration-1"),
+        ),
     )
 
     with pytest.raises(AutoresearchValidationError, match="isolated worktree"):
-        advance_state(state, implementation, policy)
+        advance_state(state, _implementation_result(), policy)
 
 
 def test_review_fix_cycle_routes_back_through_verification(
@@ -969,7 +987,7 @@ def test_fix_result_requires_workspace_identity() -> None:
     ("workspace_path", "commit_sha", "match"),
     [
         ("relative/worktree", "def5678", "absolute"),
-        ("/tmp/worktree", "not-a-sha", "commit_sha"),
+        (str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "worktree"), "not-a-sha", "commit_sha"),
     ],
 )
 def test_fix_result_rejects_invalid_workspace_identity(
@@ -1016,7 +1034,10 @@ def test_fix_result_rejects_different_workspace(
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
     state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
-    fix_result = replace(_fix_result(FixTriggerPhase.VERIFICATION), workspace_path="/tmp/other")
+    fix_result = replace(
+        _fix_result(FixTriggerPhase.VERIFICATION),
+        workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "other"),
+    )
 
     with pytest.raises(AutoresearchValidationError, match="workspace_path must match"):
         advance_state(state, fix_result, policy)
@@ -1303,6 +1324,49 @@ def test_workspace_validation_rejects_missing_worktree(git_worktree: GitWorktree
         validate_artifact_workspace(state, artifact)
 
 
+def test_implementation_workspace_uses_stable_persistent_default_root() -> None:
+    assert Path("/home/dev/.openclaw/autoresearch/worktrees") == (
+        DEFAULT_AUTORESEARCH_WORKTREE_ROOT
+    )
+
+
+def test_workspace_validation_rejects_tmp_implementation_workspace(
+    git_worktree: GitWorktree,
+) -> None:
+    artifact = replace(
+        _implementation_artifact(git_worktree),
+        workspace_path="/tmp",
+        commit_sha=git_worktree.final_commit,
+    )
+    state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
+
+    with pytest.raises(AutoresearchValidationError, match="autoresearch worktree root"):
+        validate_artifact_workspace(state, artifact)
+
+
+def test_workspace_validation_rejects_missing_operator_worktree_root(
+    git_worktree: GitWorktree,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
+        tmp_path / "missing-worktree-root",
+    )
+    artifact = replace(
+        _implementation_artifact(git_worktree),
+        commit_sha=git_worktree.final_commit,
+    )
+    state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"autoresearch worktree root.*does not exist",
+    ):
+        validate_artifact_workspace(state, artifact)
+
+
 def test_workspace_validation_rejects_dot_dot_path_alias(git_worktree: GitWorktree) -> None:
     artifact = replace(
         _implementation_artifact(git_worktree),
@@ -1343,7 +1407,7 @@ def test_workspace_validation_rejects_unregistered_git_worktree(
     git_worktree: GitWorktree,
     tmp_path: Path,
 ) -> None:
-    unrelated_checkout = tmp_path / "unrelated"
+    unrelated_checkout = git_worktree.workspace.parent / "unrelated"
     _git(tmp_path, "init", "--initial-branch=main", str(unrelated_checkout))
     _git(unrelated_checkout, "config", "user.email", "autoresearch@example.test")
     _git(unrelated_checkout, "config", "user.name", "Autoresearch Test")
@@ -1429,7 +1493,7 @@ def test_fix_workspace_validation_rejects_missing_authoritative_head_ancestry(
         validate_artifact_workspace(state, _fix_artifact(git_worktree))
 
 
-def test_workspace_validation_accepts_valid_implementation_and_fix(
+def test_workspace_validation_accepts_implementation_and_fix_under_operator_root(
     git_worktree: GitWorktree,
 ) -> None:
     implementation = replace(
@@ -1446,6 +1510,27 @@ def test_workspace_validation_accepts_valid_implementation_and_fix(
     validate_artifact_workspace(fix_state, _fix_artifact(git_worktree))
 
 
+def test_fix_workspace_validation_rejects_exact_persisted_workspace_outside_root(
+    git_worktree: GitWorktree,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    replacement_root = tmp_path / "replacement-worktree-root"
+    replacement_root.mkdir()
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
+        replacement_root,
+    )
+    state = AutoresearchState(
+        setup=_workspace_setup(git_worktree.target_checkout),
+        implementation_result=_implementation_artifact(git_worktree),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="autoresearch worktree root"):
+        validate_artifact_workspace(state, _fix_artifact(git_worktree))
+
+
 def test_implementation_prompt_contains_workspace_isolation_contract(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -1457,9 +1542,54 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
 
     assert "Workspace isolation contract" in prompt
     assert "disposable git worktree" in prompt
+    assert json.dumps(str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT)) in prompt
+    assert "mkdir -p /home/dev/.openclaw/autoresearch/worktrees" in prompt
+    assert "never use /tmp" in prompt
+    assert "31G tmpfs" in prompt
     assert "Commit all accepted implementation changes" in prompt
     assert "workspace_path" in prompt
     assert "commit_sha" in prompt
+
+
+def test_next_action_rejects_legacy_tmp_persisted_implementation_workspace(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(
+        state,
+        phase=Phase.VERIFICATION,
+        implementation_result=replace(
+            _implementation_result(),
+            workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+        ),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="implementation_result workspace_path"):
+        next_action(state, policy, receipts)
+
+
+def test_next_action_rejects_legacy_tmp_fix_history_workspace(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(
+        state,
+        phase=Phase.VERIFICATION,
+        implementation_result=_implementation_result(),
+        fix_history=(
+            replace(
+                _fix_result(FixTriggerPhase.VERIFICATION),
+                workspace_path="/tmp/quantipy-autoresearch-worktrees/iteration-1",
+            ),
+        ),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="fix_history workspace_path"):
+        next_action(state, policy, receipts)
 
 
 def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(

@@ -190,6 +190,41 @@ promotes.
 Do not run concurrent `pytest` processes in the same checkout; coverage state
 can corrupt. Serialize verification or use isolated worktrees.
 
+### Autoresearch worktree storage exhaustion
+
+**Diagnosis:** `/tmp` is a 31G tmpfs. A Quantipy disposable worktree includes
+an approximately 1.5G virtual environment, so stale iteration worktrees can
+fill `/tmp` and block future implementation stages.
+
+**Prevention:** All implementation and Fix/Test worktrees belong only under
+the canonical operator-controlled root
+`/home/dev/.openclaw/autoresearch/worktrees`. The implementation agent creates
+the parent before `git worktree add`:
+
+```bash
+mkdir -p /home/dev/.openclaw/autoresearch/worktrees
+```
+
+The autoresearch advancement boundary rejects implementation evidence, persisted
+implementation evidence, and Fix/Test evidence outside that root. Fix/Test must
+use the exact persisted canonical workspace and must never create a replacement
+or use a legacy `/tmp` fallback.
+
+**Safe cleanup:** First reconcile persisted loop state and active stage
+processes. Do not remove an active iteration's workspace. List registered
+worktrees, then remove only a confirmed stale, clean disposable worktree using
+Git; do not use blind recursive deletion under `/tmp`.
+
+```bash
+git -C /home/dev/repos/quantipy worktree list --porcelain
+git -C /home/dev/repos/quantipy worktree remove <confirmed-stale-worktree>
+git -C /home/dev/repos/quantipy worktree prune
+```
+
+If `git worktree remove` refuses because a worktree is dirty, preserve and
+reconcile the changes instead of forcing removal. Check capacity before and
+after cleanup with `df -h /tmp /home/dev`.
+
 ### What makes a good skill
 - **Specific** — addresses concrete scenarios, not vague philosophy
 - **Actionable** — includes exact commands, templates, or decision trees
