@@ -104,6 +104,11 @@ guardrails exist only to keep execution clean:
   `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
   iteration/stage/round/attempt tuple must map to exactly one label, and any
   retry or recovery that changes round or attempt must change the label.
+- On recovery, reconcile every expected label against the task ledger and its
+  child-session transcript before waiting. Consume terminal outputs even if the
+  completion announcement was missed. Relaunch only a task with no recoverable
+  terminal output, using the next attempt label; never wait indefinitely for an
+  announcement from a terminal task.
 - `gateway-cli autoresearch-next` fails closed if the Quantipy worktree contains
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only

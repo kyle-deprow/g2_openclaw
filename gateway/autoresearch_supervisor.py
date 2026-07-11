@@ -55,8 +55,11 @@ WAKE_MESSAGE = (
     "/home/dev/.openclaw/autoresearch/quantipy-state.json"
 )
 RECOVERY_MESSAGE = (
-    "Continue Quantipy autoresearch from the authoritative state; run the "
-    "deterministic runner; infrastructure recovery only; no research steering."
+    "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
+    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile terminal stage "
+    "outputs from task and child-session records before waiting or relaunching; "
+    "infrastructure recovery only; no research steering."
 )
 RECOVERY_ERROR_PATTERNS = (
     "cli transcript compaction failed",
@@ -636,7 +639,10 @@ class AutoresearchSupervisor:
             self._rpc.wake(
                 executable,
                 message=RECOVERY_MESSAGE,
-                idempotency_key=make_idempotency_key(purpose="recovery", material=recovery_key),
+                idempotency_key=make_idempotency_key(
+                    purpose="recovery",
+                    material=f"{recovery_key}\nclaim={claim.token}",
+                ),
             )
         except BaseException as exc:
             self._fail_recovery_claim(claim, exc)

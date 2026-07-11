@@ -181,6 +181,39 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert "--expect-final" not in command
 
 
+def test_recovery_retries_use_distinct_idempotency_keys(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    clock = [supervisor_env.now]
+    supervisor = AutoresearchSupervisor(
+        SupervisorConfig(
+            state_path=supervisor_env.state_path,
+            checkpoint_path=supervisor_env.checkpoint_path,
+            autoresearch_dir=supervisor_env.state_path.parent,
+            owner_sessions_path=supervisor_env.sessions_path,
+            target_repo=supervisor_env.repo_root,
+            proc_root=supervisor_env.proc_root,
+            default_openclaw_bin=supervisor_env.executable,
+        ),
+        now=lambda: clock[0],
+        sleep=lambda _: None,
+        run_command=fake,
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 121.0
+    second = supervisor.run_once()
+
+    agent_calls = [call for call in fake.calls if call[1:4] == ["gateway", "call", "agent"]]
+    idempotency_keys = [json.loads(call[6])["idempotencyKey"] for call in agent_calls]
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert len(idempotency_keys) == 2
+    assert idempotency_keys[0] != idempotency_keys[1]
+
+
 @pytest.mark.parametrize(
     "response",
     [
