@@ -154,6 +154,14 @@
     "list": [
       {
         "id": "main",
+        "skills": [],
+        "model": {
+          "primary": "openai/gpt-5.4"
+        },
+        "thinkingDefault": "high"
+      },
+      {
+        "id": "autoresearch-pm",
         "skills": [
           "mempalace",
           "autoresearch"
@@ -514,7 +522,7 @@
         ],
         "codex": {
           "agents": [
-            "main"
+            "autoresearch-pm"
           ]
         }
       },

@@ -52,7 +52,8 @@ context-curator
 ## Model Policy
 
 - Every stage must run with high reasoning.
-- The PM agent `main` must run on `openai/gpt-5.6-sol` with high reasoning.
+- The PM agent `autoresearch-pm` must run on `openai/gpt-5.6-sol` with high
+  reasoning.
 - The five debate agents use the configured mixed-intelligence panel: strongest
   reasoning for data/skeptic pressure, lower-cost models for bounded theory and
   implementation feasibility.
@@ -83,7 +84,7 @@ inform prompt content, but they are not OpenClaw stage names.
 | Review | `reviewer` | `openai/gpt-5.6-sol`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
 
-Every stage agent except `main` loads `mempalace-readonly` and
+Every stage agent except `autoresearch-pm` loads `mempalace-readonly` and
 `quantipy-methodology`. The methodology skill requires stage agents to read the
 current Quantipy source-of-truth files from `/home/dev/repos/quantipy`
 (`AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents`) before
@@ -95,6 +96,11 @@ those target-repo files into G2 OpenClaw.
 The loop has full authority to choose and test research strategies. Infra
 guardrails exist only to keep execution clean:
 
+- Every spawned stage must use a deterministic unique label derived from
+  persisted state, never a generic reused stage name. Format:
+  `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
+  iteration/stage/round/attempt tuple must map to exactly one label, and any
+  retry or recovery that changes round or attempt must change the label.
 - `gateway-cli autoresearch-next` fails closed if the Quantipy worktree contains
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only

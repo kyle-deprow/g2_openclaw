@@ -18,8 +18,13 @@ Model references use configured OpenAI IDs such as `openai/gpt-5.4`,
 Key rules:
 
 - Use OpenClaw subagents for target-repo coding and review work.
-- The `main` agent is the autoresearch PM and loop controller on
+- The `main` agent is the G2 human interface only. It must not load
+  `mempalace` or `autoresearch`, spawn research stages, mutate MemPalace, or
+  receive autonomous completion announcements.
+- The `autoresearch-pm` agent is the autoresearch PM and loop controller on
   `openai/gpt-5.6-sol` high.
+- `main` handles human G2 requests only by running:
+  `uv run python -m gateway.autoresearch_control wake`, `status`, or `stop`.
 - Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
   `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
   in the autoresearch skill.
@@ -78,10 +83,10 @@ the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
 | `mempalace-readonly.mempalace_list_hallways` | List hallways |
 | `mempalace-readonly.mempalace_memories_filed_away` | Inspect filed memory summaries |
 
-Read `mempalace` only when acting as the PM. Read `mempalace-readonly` when
-acting as any context, debate, implementation, review, or fix stage agent. If
-MemPalace tools error, stop the loop and report the blocker. Do not continue
-with hidden or unstructured state.
+Read `mempalace` only when acting as `autoresearch-pm`. Read
+`mempalace-readonly` when acting as any context, debate, implementation,
+review, or fix stage agent. If MemPalace tools error, stop the loop and report
+the blocker. Do not continue with hidden or unstructured state.
 
 Non-PM stage agents both deny every MemPalace mutation/operation tool in config
 and avoid the write-capable `mempalace` skill. They may read context, but they
@@ -104,5 +109,5 @@ repo HEAD before delegating implementation so completion can be evaluated.
 | Failure | `[TASK:failed] <description> | error: <1-line reason>` |
 | Timeout | `[TASK:timeout] <description> | exceeded 2h TTL` |
 
-These markers allow the gateway to detect task status on reconnect and display
-it on G2 glasses.
+These markers are for the dedicated PM session. G2 receives status only when a
+human asks `main` to run the deterministic status control command.

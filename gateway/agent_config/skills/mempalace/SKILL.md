@@ -9,7 +9,7 @@ version: 1.0.0
 ## Activation
 
 This skill is PM-only and write-capable. It must be assigned only to the
-top-level autoresearch PM agent (`main`). Non-PM stage agents use
+top-level autoresearch PM agent (`autoresearch-pm`). Non-PM stage agents use
 `mempalace-readonly` instead and must not receive this skill.
 
 MemPalace is the only durable research memory layer for autoresearch. Use

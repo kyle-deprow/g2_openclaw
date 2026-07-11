@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,23 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts/bootstrap.sh"
 PUSH_SCRIPT = REPO_ROOT / "scripts/push-openclaw-config.sh"
+OPENCLAW_CONFIG = REPO_ROOT / "gateway/openclaw_config/openclaw.json"
+SUPERVISOR_UNIT_TEMPLATE = (
+    REPO_ROOT / "gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
+)
+
+STAGE_AGENT_IDS = [
+    "context-curator",
+    "debater-microstructure",
+    "debater-data",
+    "debater-skeptic",
+    "debater-theory",
+    "debater-implementation",
+    "consensus-arbiter",
+    "implementer",
+    "reviewer",
+    "fixer",
+]
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -49,6 +67,54 @@ fi
         text=True,
         env=test_env,
     )
+
+
+def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
+    config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+
+    main = agents["main"]
+    assert main["model"]["primary"] == "openai/gpt-5.4"
+    assert "mempalace" not in main.get("skills", [])
+    assert "autoresearch" not in main.get("skills", [])
+    assert "mempalace-readonly" not in main.get("skills", [])
+    assert main.get("subagents", {}).get("allowAgents", []) == []
+
+    pm = agents["autoresearch-pm"]
+    assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
+    assert pm["thinkingDefault"] == "high"
+    assert pm["skills"] == ["mempalace", "autoresearch"]
+    assert pm["subagents"]["allowAgents"] == STAGE_AGENT_IDS
+
+    servers = config["mcp"]["servers"]
+    assert servers["mempalace"]["codex"]["agents"] == ["autoresearch-pm"]
+    assert servers["mempalace-readonly"]["codex"]["agents"] == STAGE_AGENT_IDS
+
+
+def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    assert '  "autoresearch-pm"\n)' in script
+    assert 'select(.id == "autoresearch-pm") | .model.primary' in script
+    assert 'select(.id == "main") | .model.primary) = $pm' not in script
+    assert "main interface split, autoresearch-pm model" in script
+    assert "main interface restrictions" in script
+
+
+def test_push_script_installs_but_does_not_start_the_supervisor_service() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+    template = SUPERVISOR_UNIT_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "quantipy-autoresearch-supervisor.service" in script
+    assert "systemctl --user daemon-reload" in script
+    assert '"${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"' in script
+    assert "enable --now" not in script
+    assert "start quantipy-autoresearch-supervisor.service" not in script
+    assert "@REPO_ROOT@" in template
+    assert "@HOME@" in template
+    assert "@OPENCLAW_HOME@" in template
+    assert "@OPENCLAW_BIN@" in template
+    assert "-m gateway.autoresearch_supervisor" in template
 
 
 def test_bootstrap_npm_install_bypasses_stale_pnpm_candidate(tmp_path: Path) -> None:

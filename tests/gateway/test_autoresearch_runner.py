@@ -420,7 +420,7 @@ def test_phase_progression(policy: AutoresearchPolicy, receipts: ReceiptCatalog)
 
     action = next_action(state, policy, receipts)
     assert action.phase is Phase.SETUP_CONTEXT
-    assert action.next_agent_ids == ("main",)
+    assert action.next_agent_ids == ("autoresearch-pm",)
 
     state = advance_state(state, _setup_artifact(), policy)
     action = next_action(state, policy, receipts)
@@ -1268,22 +1268,26 @@ def _set_agent_runtime_id(config: dict[str, object]) -> None:
     runtime["id"] = "other"
 
 
-def _drop_main_mempalace_skill(config: dict[str, object]) -> None:
+def _agent(config: dict[str, object], agent_id: str) -> dict[str, object]:
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
-    agents[0]["skills"] = ["autoresearch"]
+    return next(agent for agent in agents if agent["id"] == agent_id)
+
+
+def _drop_pm_mempalace_skill(config: dict[str, object]) -> None:
+    _agent(config, "autoresearch-pm")["skills"] = ["autoresearch"]
+
+
+def _give_main_a_pm_skill(config: dict[str, object]) -> None:
+    _agent(config, "main")["skills"] = ["autoresearch"]
 
 
 def _give_stage_agent_write_skill(config: dict[str, object]) -> None:
-    agents_root = cast(dict[str, object], config["agents"])
-    agents = cast(list[dict[str, object]], agents_root["list"])
-    agents[1]["skills"] = ["mempalace", "quantipy-methodology"]
+    _agent(config, "context-curator")["skills"] = ["mempalace", "quantipy-methodology"]
 
 
 def _remove_stage_agent_mempalace_deny(config: dict[str, object]) -> None:
-    agents_root = cast(dict[str, object], config["agents"])
-    agents = cast(list[dict[str, object]], agents_root["list"])
-    tools = cast(dict[str, object], agents[1]["tools"])
+    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = deny[1:]
 
@@ -1292,17 +1296,13 @@ def _add_stage_agent_obsolete_mempalace_deny_alias(
     config: dict[str, object],
     alias: str = "mcp__mempalace__mempalace_add_drawer",
 ) -> None:
-    agents_root = cast(dict[str, object], config["agents"])
-    agents = cast(list[dict[str, object]], agents_root["list"])
-    tools = cast(dict[str, object], agents[1]["tools"])
+    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = [*deny, alias]
 
 
 def _add_stage_agent_extra_noncanonical_mempalace_deny(config: dict[str, object]) -> None:
-    agents_root = cast(dict[str, object], config["agents"])
-    agents = cast(list[dict[str, object]], agents_root["list"])
-    tools = cast(dict[str, object], agents[1]["tools"])
+    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = [*deny, "mempalace-readonly.mempalace_search"]
 
@@ -1318,7 +1318,7 @@ def _expand_full_server_scope(config: dict[str, object]) -> None:
     servers = cast(dict[str, object], mcp["servers"])
     mempalace = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
     codex = cast(dict[str, object], mempalace["codex"])
-    codex["agents"] = ["main", "context-curator"]
+    codex["agents"] = ["autoresearch-pm", "context-curator"]
 
 
 def _break_readonly_server_args(config: dict[str, object]) -> None:
@@ -1334,7 +1334,8 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_drop_codex_plugin_allow, "plugins.allow must explicitly include codex"),
         (_set_openai_api, "providers.openai.api must be openai-responses"),
         (_set_agent_runtime_id, "providers.openai.agentRuntime.id must be codex"),
-        (_drop_main_mempalace_skill, "main must load exactly mempalace and autoresearch"),
+        (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
+        (_give_main_a_pm_skill, "main must load no skills"),
         (
             _give_stage_agent_write_skill,
             "must load exactly mempalace-readonly and quantipy-methodology",
@@ -1345,7 +1346,8 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         ),
         (
             _expand_full_server_scope,
-            "mcp\\.servers\\.mempalace\\.codex\\.agents must exactly match \\('main',\\)",
+            "mcp\\.servers\\.mempalace\\.codex\\.agents must exactly match "
+            "\\('autoresearch-pm',\\)",
         ),
         (
             _break_readonly_server_args,
@@ -1443,7 +1445,7 @@ def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None
     full_server = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
     readonly_server = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
 
-    assert cast(dict[str, object], full_server["codex"])["agents"] == ["main"]
+    assert cast(dict[str, object], full_server["codex"])["agents"] == ["autoresearch-pm"]
     assert cast(dict[str, object], readonly_server["codex"])["agents"] == [
         "context-curator",
         "debater-microstructure",
@@ -1471,7 +1473,7 @@ def test_default_openclaw_config_denies_exact_canonical_mempalace_policy_ids() -
 
     for agent in agents:
         agent_id = cast(str, agent["id"])
-        if agent_id == "main":
+        if agent_id in {"main", "autoresearch-pm"}:
             assert "tools" not in agent or "deny" not in cast(dict[str, object], agent["tools"])
             continue
         tools = cast(dict[str, object], agent["tools"])

@@ -5,11 +5,12 @@
 
 ## Goal
 
-Run a fully autonomous quantitative research pipeline: OpenClaw (PM agent)
-ideates with Codex subagents, delegates implementation/review to Codex
-subagents, evaluates results, decides keep/discard, and continues. The human
-connects via G2 AR glasses for brief strategic steering; the loop runs 24/7
-without interaction.
+Run a fully autonomous quantitative research pipeline: OpenClaw
+`autoresearch-pm` ideates with Codex subagents, delegates implementation/review
+to Codex subagents, evaluates results, decides keep/discard, and continues.
+The human connects via G2 AR glasses only for explicit start/status/stop
+handoffs through `main`; the loop runs 24/7 without interaction in the
+dedicated PM session.
 
 ## Critical Rule
 
@@ -20,9 +21,15 @@ infrastructure in this repo.
 ## Architecture
 
 ```
-Human (G2 glasses — connect/steer/disconnect)
+Human (G2 glasses — start/status/stop)
   ↓
-OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.6-sol high via Codex runtime)
+Gateway (:8765) — G2 transport
+  ↓
+OpenClaw main (:18789 - G2 interface, openai/gpt-5.4 high)
+  ↓ explicit control handoff
+agent:autoresearch-pm:autoresearch:quantipy
+  ↓
+OpenClaw autoresearch-pm (:18789 - autonomous daemon, openai/gpt-5.6-sol high)
   ├─ MemPalace MCP (stdio) → local palace
   ├─ Phase 1: Context — PM + context-curator read RESEARCH_LOG.md and MemPalace
   ├─ Phase 2: Debate — five OpenClaw agents, require 3-of-5 majority
@@ -33,9 +40,6 @@ OpenClaw PM (:18789 - autonomous daemon, openai/gpt-5.6-sol high via Codex runti
   ├─ Phase 7: Fix/test — fixer handles concrete defects only
   ├─ Phase 8: Decide/log — PM writes final experiment outcome to MemPalace
   └─ Continue — loop NEVER self-terminates, seek orthogonal strategies
-  ↓
-Gateway (:8765) — G2 transport, reconnect briefing, and task status display
-  ↓
 OpenClaw Codex runtime (codex plugin, OpenAI auth)
   ↓
 ~/repos/quantipy — all kept changes committed by implementation subagents
@@ -47,10 +51,9 @@ OpenClaw Codex runtime (codex plugin, OpenAI auth)
 
 **Objective:** Identify, backtest, and validate multiple profitable intraday strategies across diverse asset classes. Start with low-to-mid cap equities, expand freely.
 
-**Monitoring strategy:** Human proxy monitors via Dev API (`/_dev/display`,
-`/_dev/conversation`, `/_dev/state`). Intervenes only on stuck loops, dead
-processes, and protocol violations. Improves OpenClaw via skills/agent config
-when deviations are detected.
+**Control strategy:** The supervisor communicates directly with OpenClaw in the
+dedicated PM session. G2 is a human interface for explicit start/status/stop
+requests only.
 
 **Validation target:** At least 2+ strategies with IS walk-forward Sharpe > 0.5 (net of costs), passing adversarial review.
 
@@ -85,7 +88,8 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 
 | Agent | Role |
 |-------|------|
-| main | PM; openai/gpt-5.6-sol high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
+| main | G2 human interface only; openai/gpt-5.4 high; no `mempalace`, no `autoresearch`, no stage allowlist |
+| autoresearch-pm | PM; openai/gpt-5.6-sol high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
 | context-curator | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
 | debater-microstructure | Market mechanics theory; openai/gpt-5.5 high |
 | debater-data | Data availability, coverage, and target construction; openai/gpt-5.6-terra high |
@@ -132,7 +136,7 @@ against the final artifact and persists its read-only verification receipt.
 1. Every experiment goes through adversarial review before keep/discard
 2. Loop runs continuously — implement → review → decide → next (zero human needed)
 3. Build a portfolio of orthogonal strategies, not just one
-4. Human's role is strategic steering: connect → get status → "try X next" → disconnect
+4. Human's role is explicit control: start/continue, status, or stop through G2
 5. At least 2+ validated profitable strategies (IS Sharpe > 0.5 net, reviewer PASS)
 
 ## Monitoring Log

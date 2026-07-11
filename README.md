@@ -25,6 +25,11 @@ Glasses display: 576×288 px, 4-bit greyscale micro-LED.
 7. Gateway forwards text frames to G2 App
 8. G2 App renders in reverse chronological order on glasses (newest first — no scroll API)
 
+G2 traffic routes to OpenClaw agent `main`, which is only a human-facing
+interface. Autonomous Quantipy research is handed off explicitly to
+`agent:autoresearch-pm:autoresearch:quantipy`; the PM session runs separately
+and does not send autonomous completion announcements to G2.
+
 ## Repository Structure
 
 ```

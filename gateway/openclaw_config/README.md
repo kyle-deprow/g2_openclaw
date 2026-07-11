@@ -60,25 +60,28 @@ these settings into the local config with `jq`, preserving everything else.
 
 - **Codex runtime** — enables the `codex` plugin, sets the OpenAI provider
   `agentRuntime.id` to `codex`, defaults bounded execution stages to
-  `openai/gpt-5.4`, and pins high-judgment PM/review/consensus stages to
-  `openai/gpt-5.6-sol` high.
+  `openai/gpt-5.4`, keeps `main` as a G2 interface agent, and pins
+  high-judgment PM/review/consensus stages to `openai/gpt-5.6-sol` high.
 - **OpenAI provider** — declares `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`,
   `gpt-5.6-terra`, and `gpt-5-mini` model refs for authenticated OpenAI/Codex
   use.
 - **MemPalace-only research memory** — disables built-in OpenClaw memory search
   and memory flush, denies `memory_search`/`memory_get`, and requires the
-  MemPalace MCP server split: full `mempalace` for `main`, filtered
-  `mempalace-readonly` for every non-PM stage agent.
+  MemPalace MCP server split: full `mempalace` for `autoresearch-pm`, no
+  MemPalace access for `main`, and filtered `mempalace-readonly` for every
+  read-only stage agent.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
-- **Agent roster** — exact autoresearch stage-agent IDs, model assignments,
-  high reasoning, MemPalace skill split, Quantipy methodology loading, tool
-  denies, disabled built-in memory search/flush, and concurrency limits.
+- **Agent roster** — exact `main` interface agent, `autoresearch-pm`, and
+  autoresearch stage-agent IDs, model assignments, high reasoning, MemPalace
+  skill split, Quantipy methodology loading, tool denies, disabled built-in
+  memory search/flush, and concurrency limits.
 - **Managed bootstrap files** — `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and
   `BOOTSTRAP.md` are copied to every configured OpenClaw agent workspace derived
-  from `agents.list`; `main` uses `~/.openclaw/workspace`, other agents default
-  to `~/.openclaw/workspace-{id}` unless `.workspace` is set, and local files
-  such as `USER.md` and `IDENTITY.md` are left untouched.
+  from `agents.list`; `main` uses `~/.openclaw/workspace`, `autoresearch-pm`
+  and stage agents default to `~/.openclaw/workspace-{id}` unless `.workspace`
+  is set, and local files such as `USER.md` and `IDENTITY.md` are left
+  untouched.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -157,8 +160,9 @@ The script will:
 4. Install the repo-managed MemPalace read-only wrapper, then resolve the full
    and read-only MemPalace MCP commands plus palace path
 5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
-6. Validate repo-managed invariants for exact stage-agent models, high
-   reasoning, memory policy, and the full/read-only MemPalace MCP server split
+6. Validate repo-managed invariants for `main` interface isolation,
+   `autoresearch-pm`, exact stage-agent models, high reasoning, memory policy,
+   and the full/read-only MemPalace MCP server split
 7. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`
@@ -202,6 +206,14 @@ Change them in `gateway/openclaw_config/openclaw.json` and run the push script;
 the script validates the exact model matrix before writing local OpenClaw
 config.
 
+## G2 Interface and PM Session
+
+G2 traffic routes to `main`, the human-facing interface agent. It does not load
+`mempalace` or `autoresearch`, has no stage-agent allowlist, and may only hand
+human start/status/stop requests to deterministic control commands. Autonomous
+research runs in `agent:autoresearch-pm:autoresearch:quantipy`; supervisors and
+control commands communicate with OpenClaw there directly.
+
 ## OpenAI/Codex Provider Details
 
 | Setting | Value |
@@ -210,7 +222,8 @@ config.
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
 | Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
 | Default stage model | `openai/gpt-5.4` |
-| Main PM model | `openai/gpt-5.6-sol` |
+| G2 interface model | `openai/gpt-5.4` for `main` |
+| Autoresearch PM model | `openai/gpt-5.6-sol` for `autoresearch-pm` |
 | Frontier judgment model | `openai/gpt-5.6-sol` for PM, skeptic, consensus, and review |
 | Data debate model | `openai/gpt-5.6-terra` |
 | Microstructure debate model | `openai/gpt-5.5` |

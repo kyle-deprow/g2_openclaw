@@ -20,6 +20,11 @@ ENV_FILE="${REPO_ROOT}/gateway/openclaw_config/.env"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
+SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
+SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
+SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
+SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
+PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
@@ -29,7 +34,7 @@ OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 MEMPALACE_FULL_AGENT_IDS=(
-  "main"
+  "autoresearch-pm"
 )
 MEMPALACE_READONLY_AGENT_IDS=(
   "context-curator"
@@ -86,6 +91,10 @@ build_mempalace_obsolete_mutation_alias_ids_json() {
 
 build_string_array_json() {
   printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
+}
+
+escape_sed_replacement() {
+  printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
 }
 
 expand_user_path() {
@@ -165,6 +174,7 @@ ROLLBACK_ARMED=0
 rollback_local_config_on_exit() {
   local exit_status=$?
   trap - EXIT
+  rm -f "${SUPERVISOR_UNIT_TMP:-}"
   if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
     if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
       echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
@@ -233,6 +243,21 @@ fi
 
 if [[ ! -f "${MEMPALACE_READONLY_WRAPPER_SRC}" ]]; then
   echo "ERROR: Repo-managed MemPalace read-only wrapper not found at ${MEMPALACE_READONLY_WRAPPER_SRC}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
+  echo "ERROR: Repo-managed supervisor unit template not found at ${SUPERVISOR_UNIT_TEMPLATE}" >&2
+  exit 1
+fi
+
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+  echo "ERROR: Supervisor Python is missing or not executable at ${PYTHON_BIN}. Run 'uv sync' first." >&2
+  exit 1
+fi
+
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo "ERROR: The systemd user manager is unavailable; cannot install ${SUPERVISOR_SERVICE_NAME}." >&2
   exit 1
 fi
 
@@ -516,9 +541,9 @@ if ! echo "${MERGED}" | jq -e --arg provider "${MODEL_PROVIDER}" --arg model "${
   exit 1
 fi
 
-PM_MODEL_PRIMARY=$(jq -r '.agents.list[] | select(.id == "main") | .model.primary // empty' "${REPO_CONFIG}")
+PM_MODEL_PRIMARY=$(jq -r '.agents.list[] | select(.id == "autoresearch-pm") | .model.primary // empty' "${REPO_CONFIG}")
 if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
-  echo "ERROR: Repo config must pin agents.list[].id == \"main\" to a model.primary." >&2
+  echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
   exit 1
 fi
 PM_MODEL_ID="${PM_MODEL_PRIMARY#openai/}"
@@ -540,31 +565,33 @@ MERGED=$(echo "${MERGED}" | jq --arg primary "${MODEL_PRIMARY}" '
 ')
 
 MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
-  (.agents.list[] | select(.id == "main") | .model.primary) = $pm
-  | (.agents.list[] | select(.id == "main") | .thinkingDefault) = "high"
+  (.agents.list[] | select(.id == "autoresearch-pm") | .model.primary) = $pm
+  | (.agents.list[] | select(.id == "autoresearch-pm") | .thinkingDefault) = "high"
 ')
 
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 
-# Non-main agents must deny exactly the internal OpenClaw MCP tool.name ids.
+# Read-only stage agents must deny exactly the internal OpenClaw MCP tool.name ids.
 # Dotted names are Codex-facing display/docs ids only, and historical bare/mcp__
 # aliases are rejected instead of accepted as compatibility forms.
 if ! echo "${MERGED}" | jq -e \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
-  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
+  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" \
+  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
   def denies: (.tools.deny // []);
-  ([.agents.list[] | select(.id != "main") | select(denies != $mempalace_mutation_denies)] | length) == 0
+  def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
+  ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
     .agents.list[] | denies[]?
   ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
   and (([
-    .agents.list[] | select(.id == "main") | denies[]?
+    .agents.list[] | select(.id == "autoresearch-pm") | denies[]?
   ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
-  echo "ERROR: Every non-main autoresearch agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
+  echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
   echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
   echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       Main must retain MemPalace mutator access for final experiment logging." >&2
+  echo "       autoresearch-pm must retain MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
 
@@ -584,8 +611,10 @@ if ! echo "${MERGED}" | jq -e \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
   --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
   def denies: (.tools.deny // []);
+  def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
   def expected_models: {
-    "main": $pm,
+    "main": "openai/gpt-5.4",
+    "autoresearch-pm": $pm,
     "context-curator": "openai/gpt-5.4",
     "debater-microstructure": "openai/gpt-5.5",
     "debater-data": "openai/gpt-5.6-terra",
@@ -622,27 +651,37 @@ if ! echo "${MERGED}" | jq -e \
   and all(.agents.list[]; .model.primary == expected_models[.id])
   and all(.agents.list[]; .thinkingDefault == "high")
   and ([.agents.list[] | select(
-    .id == "main"
+    .id == "autoresearch-pm"
     and .model.primary == $pm
     and .thinkingDefault == "high"
     and ((.skills // []) | contains(["mempalace", "autoresearch"]))
   )] | length) == 1
-  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
-  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "main") | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "main") | select(denies != $mempalace_mutation_denies)] | length) == 0
+  and ([.agents.list[] | select(
+    .id == "main"
+    and .model.primary == "openai/gpt-5.4"
+    and .thinkingDefault == "high"
+    and (((.skills // []) | index("mempalace")) == null)
+    and (((.skills // []) | index("autoresearch")) == null)
+    and (((.skills // []) | index("mempalace-readonly")) == null)
+    and (((.subagents.allowAgents? // []) | length) == 0)
+  )] | length) == 1
+  and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
+  and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("autoresearch")) != null)] | length) == 0
+  and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
+  and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
+  and ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
     .agents.list[] | denies[]?
   ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
   and (([
-    .agents.list[] | select(.id == "main") | denies[]?
+    .agents.list[] | select(.id == "autoresearch-pm") | denies[]?
   ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, PM model/skills, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, autoresearch-pm model/skills, main interface restrictions, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface split, autoresearch-pm model, exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
@@ -714,7 +753,6 @@ echo "Local workspace files such as USER.md and IDENTITY.md were left untouched.
 STALE_BOOTSTRAP_DIRS=(
   "${OPENCLAW_HOME}"
   "${OPENCLAW_HOME}/workspace"
-  "${OPENCLAW_HOME}/workspace-claw"
 )
 for FILE in "${BOOTSTRAP_FILES[@]}"; do
   for STALE_DIR in "${STALE_BOOTSTRAP_DIRS[@]}"; do
@@ -759,39 +797,6 @@ if [[ -f "${PRELOAD_SRC}" ]]; then
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
 fi
 
-# ── Fix per-agent model overrides ────────────────────────────────────────────
-# OpenClaw may generate per-agent models.json with stale URLs (e.g. model-router).
-# Force the azure-oai-g2 provider to use the direct deployment URL from our config.
-AGENT_MODELS="${OPENCLAW_HOME}/agents/claw/agent/models.json"
-if [[ -f "${AGENT_MODELS}" ]] && command -v python3 &>/dev/null; then
-  CORRECT_BASE_URL=$(jq -r '.models.providers["azure-oai-g2"].baseUrl // empty' "${LOCAL_CONFIG}")
-  if [[ -n "${CORRECT_BASE_URL}" ]]; then
-    python3 -c "
-import json, sys
-with open('${AGENT_MODELS}') as f:
-    c = json.load(f)
-changed = False
-for name in ['azure-oai-g2', 'azure-oai-g2-mini']:
-    p = c.get('providers', {}).get(name)
-    if not p: continue
-    if 'apiKey' in p:
-        del p['apiKey']  # Entra tokens via preload, not API keys
-        changed = True
-if 'azure-oai-g2' in c.get('providers', {}):
-    p = c['providers']['azure-oai-g2']
-    if p.get('baseUrl') != '${CORRECT_BASE_URL}':
-        p['baseUrl'] = '${CORRECT_BASE_URL}'
-        changed = True
-if changed:
-    with open('${AGENT_MODELS}', 'w') as f:
-        json.dump(c, f, indent=2)
-    print('Fixed per-agent models.json: baseUrl + removed apiKeys')
-else:
-    print('Per-agent models.json already correct')
-"
-  fi
-fi
-
 # ── Validate ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Validating config ──"
@@ -832,6 +837,28 @@ if [[ "${PROVIDER}" == "codex" ]]; then
   fi
   echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
 fi
+
+# Install the supervisor definition without starting autonomous work. The
+# human-facing control command owns enable/start and stop transitions.
+mkdir -p "${SYSTEMD_USER_DIR}"
+SUPERVISOR_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${SUPERVISOR_SERVICE_NAME}.XXXXXX")"
+sed \
+  -e "s|@REPO_ROOT@|$(escape_sed_replacement "${REPO_ROOT}")|g" \
+  -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
+  -e "s|@OPENCLAW_HOME@|$(escape_sed_replacement "${OPENCLAW_HOME}")|g" \
+  -e "s|@OPENCLAW_BIN@|$(escape_sed_replacement "${OPENCLAW_BIN_RESOLVED}")|g" \
+  -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
+  -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
+  "${SUPERVISOR_UNIT_TEMPLATE}" > "${SUPERVISOR_UNIT_TMP}"
+if grep -q '@[A-Z_][A-Z_]*@' "${SUPERVISOR_UNIT_TMP}"; then
+  echo "ERROR: Unresolved placeholder in generated ${SUPERVISOR_SERVICE_NAME}." >&2
+  exit 1
+fi
+chmod 0644 "${SUPERVISOR_UNIT_TMP}"
+mv "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"
+SUPERVISOR_UNIT_TMP=""
+systemctl --user daemon-reload
+echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
 
 ROLLBACK_ARMED=0
 trap - EXIT

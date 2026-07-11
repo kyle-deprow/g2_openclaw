@@ -43,7 +43,7 @@ repo config binds each stage to its model.
 | `debater-implementation` | Buildability and verification cost |
 | `consensus-arbiter` | 3-of-5 majority decision and implementation brief |
 | `implementer` | End-to-end implementation |
-| `reviewer` | Single GPT-5.5 high methodology review |
+| `reviewer` | Single GPT-5.6-sol high methodology review |
 | `fixer` | Concrete fixes only |
 
 ## Implementation/Review/Fix Pattern

@@ -382,7 +382,8 @@ class StageAgentPolicy:
 
 @dataclass(frozen=True, slots=True)
 class AutoresearchPolicy:
-    main: StageAgentPolicy
+    pm: StageAgentPolicy
+    main_interface: StageAgentPolicy
     context_curator: StageAgentPolicy
     debate_agents: tuple[StageAgentPolicy, ...]
     consensus: StageAgentPolicy
@@ -407,7 +408,8 @@ class AutoresearchPolicy:
 
     def model_policy_summary(self) -> str:
         lines = [
-            self.main.to_summary(),
+            self.pm.to_summary(),
+            self.main_interface.to_summary(),
             self.context_curator.to_summary(),
             *(agent.to_summary() for agent in self.debate_agents),
             self.consensus.to_summary(),
@@ -1817,7 +1819,8 @@ def load_autoresearch_policy(
         agent_map[_require_str(data, "id")] = data
 
     policy = AutoresearchPolicy(
-        main=_agent_policy_from_json(agent_map, "main"),
+        pm=_agent_policy_from_json(agent_map, "autoresearch-pm"),
+        main_interface=_agent_policy_from_json(agent_map, "main"),
         context_curator=_agent_policy_from_json(agent_map, "context-curator"),
         debate_agents=tuple(
             _agent_policy_from_json(agent_map, agent_id)
@@ -1843,8 +1846,15 @@ def _validate_policy(
     agent_map: Mapping[str, Mapping[str, object]],
     config: Mapping[str, object],
 ) -> None:
-    if policy.main.model != "openai/gpt-5.6-sol" or policy.main.reasoning != "high":
-        raise AutoresearchConfigError("main must be openai/gpt-5.6-sol with high reasoning")
+    if policy.main_interface.model != "openai/gpt-5.4" or policy.main_interface.reasoning != "high":
+        raise AutoresearchConfigError("main must be openai/gpt-5.4 with high reasoning")
+    if policy.main_interface.skills:
+        raise AutoresearchConfigError("main must load no skills")
+    main_raw = agent_map["main"]
+    if main_raw.get("subagents") is not None:
+        raise AutoresearchConfigError("main must not declare a subagent allowlist")
+    if policy.pm.model != "openai/gpt-5.6-sol" or policy.pm.reasoning != "high":
+        raise AutoresearchConfigError("PM must be openai/gpt-5.6-sol with high reasoning")
     if (
         policy.context_curator.model != "openai/gpt-5.4"
         or policy.context_curator.reasoning != "high"
@@ -1881,14 +1891,14 @@ def _validate_policy(
     if policy.reviewer.agent_id != "reviewer":
         raise AutoresearchConfigError("reviewer stage must be configured as agent id 'reviewer'")
 
-    main_raw = agent_map["main"]
-    if tuple(policy.main.skills) != ("mempalace", "autoresearch"):
-        raise AutoresearchConfigError("main must load exactly mempalace and autoresearch")
-    subagents = _ensure_mapping(main_raw.get("subagents"), label="main.subagents")
+    if tuple(policy.pm.skills) != ("mempalace", "autoresearch"):
+        raise AutoresearchConfigError("PM must load exactly mempalace and autoresearch")
+    pm_raw = agent_map["autoresearch-pm"]
+    subagents = _ensure_mapping(pm_raw.get("subagents"), label="autoresearch-pm.subagents")
     allow_agents = _require_string_list(subagents, "allowAgents")
     if tuple(allow_agents) != policy.all_stage_agent_ids:
         raise AutoresearchConfigError(
-            "main allowAgents must exactly match the autoresearch stage roster"
+            "PM allowAgents must exactly match the autoresearch stage roster"
         )
     _validate_mempalace_server_split(config, policy)
     for agent in (
@@ -1955,7 +1965,7 @@ def _validate_mempalace_server_split(
         _validate_mempalace_server(
             full_server,
             server_id=MEMPALACE_FULL_SERVER_ID,
-            expected_agents=("main",),
+            expected_agents=(policy.pm.agent_id,),
             expected_args_prefix=("-m", "mempalace.mcp_server", "--palace"),
         )
         _validate_mempalace_server(
@@ -2243,7 +2253,7 @@ def _select_phase_target(
 ) -> PhaseTarget:
     if state.phase is Phase.SETUP_CONTEXT:
         if state.setup is None:
-            return PhaseTarget((policy.main.agent_id,), ArtifactType.SETUP)
+            return PhaseTarget((policy.pm.agent_id,), ArtifactType.SETUP)
         return PhaseTarget((policy.context_curator.agent_id,), ArtifactType.CONTEXT_PACKET)
     if state.phase is Phase.DEBATE:
         return PhaseTarget(policy.debate_agent_ids, ArtifactType.DEBATE_RESULT)
@@ -2259,13 +2269,13 @@ def _select_phase_target(
             )
         return PhaseTarget((policy.implementer.agent_id,), ArtifactType.IMPLEMENTATION_RESULT)
     if state.phase is Phase.VERIFICATION:
-        return PhaseTarget((policy.main.agent_id,), ArtifactType.VERIFICATION_RESULT)
+        return PhaseTarget((policy.pm.agent_id,), ArtifactType.VERIFICATION_RESULT)
     if state.phase is Phase.REVIEW:
         return PhaseTarget((policy.reviewer.agent_id,), ArtifactType.REVIEW_RESULT)
     if state.phase is Phase.FIX_TEST:
         return PhaseTarget((policy.fixer.agent_id,), ArtifactType.FIX_RESULT)
     if state.phase is Phase.DECISION_LOG:
-        return PhaseTarget((policy.main.agent_id,), ArtifactType.FINAL_DECISION)
+        return PhaseTarget((policy.pm.agent_id,), ArtifactType.FINAL_DECISION)
     if state.final_decision is not None and state.final_decision.memory_write_required:
         if state.memory_written:
             return PhaseTarget((), ArtifactType.NEXT_ITERATION)
