@@ -16,14 +16,19 @@ set -euo pipefail
 # ── Paths ────────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
-ENV_FILE="${REPO_ROOT}/gateway/openclaw_config/.env"
+ENV_FILE="${OPENCLAW_PUSH_ENV_FILE:-${REPO_ROOT}/gateway/openclaw_config/.env}"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
 SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
+GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
+GATEWAY_SERVICE_NAME="openclaw-gateway.service"
+GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
+GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
+GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
@@ -66,6 +71,16 @@ MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_sync"
   "mempalace_update_drawer"
 )
+RUNTIME_CAP_ENV_LINES=(
+  'Environment="LOKY_MAX_CPU_COUNT=1"'
+  'Environment="OMP_NUM_THREADS=1"'
+  'Environment="OPENBLAS_NUM_THREADS=1"'
+  'Environment="MKL_NUM_THREADS=1"'
+  'Environment="BLIS_NUM_THREADS=1"'
+  'Environment="NUMEXPR_NUM_THREADS=1"'
+  'Environment="VECLIB_MAXIMUM_THREADS=1"'
+  'Environment="PYTHONFAULTHANDLER=1"'
+)
 
 build_mempalace_mutation_policy_ids_json() {
   local tool_names_json
@@ -104,6 +119,54 @@ expand_user_path() {
     "~/"*) printf '%s/%s\n' "${HOME}" "${path:2}" ;;
     *) printf '%s\n' "${path}" ;;
   esac
+}
+
+validate_runtime_caps_dropin_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed OpenClaw gateway runtime caps drop-in not found at ${path}" >&2
+    return 1
+  fi
+  if ! diff -u <(printf '[Service]\n'; printf '%s\n' "${RUNTIME_CAP_ENV_LINES[@]}") "${path}" >&2; then
+    echo "ERROR: OpenClaw gateway runtime caps drop-in must match the repo-managed numerical runtime cap set exactly." >&2
+    return 1
+  fi
+}
+
+require_gateway_service_loadable() {
+  local service_state load_state active_state
+  if ! service_state="$(systemctl --user show "${GATEWAY_SERVICE_NAME}" --property=LoadState --property=ActiveState 2>&1)"; then
+    echo "ERROR: Could not inspect ${GATEWAY_SERVICE_NAME} as a user service." >&2
+    echo "       systemctl output: ${service_state}" >&2
+    return 1
+  fi
+
+  load_state="$(printf '%s\n' "${service_state}" | awk -F= '$1 == "LoadState" { print $2; exit }')"
+  active_state="$(printf '%s\n' "${service_state}" | awk -F= '$1 == "ActiveState" { print $2; exit }')"
+  case "${load_state}" in
+    loaded)
+      echo "Verified ${GATEWAY_SERVICE_NAME} is loadable (ActiveState=${active_state:-unknown})."
+      ;;
+    not-found | "")
+      echo "ERROR: ${GATEWAY_SERVICE_NAME} is not installed as a loadable user unit (LoadState=${load_state:-unknown})." >&2
+      echo "       Refusing to install ${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}; run OpenClaw onboarding or restore the user unit first." >&2
+      return 1
+      ;;
+    *)
+      echo "ERROR: ${GATEWAY_SERVICE_NAME} is not loadable (LoadState=${load_state}, ActiveState=${active_state:-unknown})." >&2
+      echo "       Refusing to install ${GATEWAY_RUNTIME_CAPS_DROPIN_NAME} until the user unit is loadable." >&2
+      return 1
+      ;;
+  esac
+}
+
+prepare_runtime_caps_dropin_dir() {
+  mkdir -p "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+  if [[ ! -O "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    echo "ERROR: Runtime caps drop-in directory is not owned by the current user: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
+    return 1
+  fi
+  chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
 }
 
 resolve_openclaw_bin() {
@@ -175,6 +238,7 @@ rollback_local_config_on_exit() {
   local exit_status=$?
   trap - EXIT
   rm -f "${SUPERVISOR_UNIT_TMP:-}"
+  rm -f "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"
   if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
     if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
       echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
@@ -251,6 +315,10 @@ if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
   exit 1
 fi
 
+if ! validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}"; then
+  exit 1
+fi
+
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "ERROR: Supervisor Python is missing or not executable at ${PYTHON_BIN}. Run 'uv sync' first." >&2
   exit 1
@@ -258,6 +326,10 @@ fi
 
 if ! systemctl --user show-environment >/dev/null 2>&1; then
   echo "ERROR: The systemd user manager is unavailable; cannot install ${SUPERVISOR_SERVICE_NAME}." >&2
+  exit 1
+fi
+
+if ! require_gateway_service_loadable; then
   exit 1
 fi
 
@@ -309,7 +381,21 @@ fi
 echo "Verified repo-managed skill definitions: ${SKILLS_TO_CHECK[*]}"
 
 # ── Load env vars from .env ───────────────────────────────────────────────────
-PRESERVE_ENV_VARS=(OPENCLAW_PROVIDER OPENAI_MODEL OPENROUTER_MODEL OPENROUTER_API_KEY AZURE_OAI_API_KEY)
+PRESERVE_ENV_VARS=(
+  HOME
+  PATH
+  OPENCLAW_HOME
+  OPENCLAW_PROVIDER
+  OPENAI_MODEL
+  OPENROUTER_MODEL
+  OPENROUTER_API_KEY
+  AZURE_OAI_API_KEY
+  FASTEMBED_CACHE_PATH
+  HF_HUB_OFFLINE
+  MEMPALACE_EMBEDDING_MODEL
+  MEMPALACE_EXPECTED_EMBEDDING_MODEL
+  MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+)
 declare -A PRESERVED_ENV=()
 for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
   if [[ -v "${VAR_NAME}" ]]; then
@@ -856,8 +942,22 @@ fi
 chmod 0644 "${SUPERVISOR_UNIT_TMP}"
 mv "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"
 SUPERVISOR_UNIT_TMP=""
-systemctl --user daemon-reload
 echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
+
+# Install persistent numerical-runtime caps on the OpenClaw Gateway service so
+# all OpenClaw-launched Quantipy child processes inherit bounded BLAS/joblib
+# thread counts. This is shared operator infrastructure, not agent-owned state.
+prepare_runtime_caps_dropin_dir
+GATEWAY_RUNTIME_CAPS_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}.XXXXXX")"
+cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
+chmod 0644 "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
+validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
+mv "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+GATEWAY_RUNTIME_CAPS_DROPIN_TMP=""
+validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+systemctl --user daemon-reload
+echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
 
 ROLLBACK_ARMED=0
 trap - EXIT

@@ -105,6 +105,12 @@ guardrails exist only to keep execution clean:
   Every alpha module, experiment notebook, experiment-specific unit test, and
   research metric/methodology behavior belongs to autoresearch even when a
   dependency upgrade exposed the bug.
+- Numerical runtime caps on OpenClaw-launched Quantipy processes are
+  operator-managed shared infrastructure. PM and stage agents must not override,
+  remove, or work around them. A systemd `daemon-reload` after installing the
+  drop-in does not change an already running OpenClaw Gateway process; only an
+  external operator restart makes the caps effective for subsequently launched
+  children.
 - Classification test: if a change alters strategy/features/folds/models/null
   tests/metrics, do not operator-edit it; record the exact failure and let the
   loop implement/review/fix it. If it only repairs shared execution substrate,

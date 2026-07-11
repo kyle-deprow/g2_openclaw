@@ -10,6 +10,7 @@ configuration used by the G2 Gateway.
 | `openclaw.json` | Model providers (OpenAI/Codex + Azure + OpenRouter), agent defaults, session settings |
 | `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
+| `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
 | `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for non-PM agents |
 | `README.md` | This file |
 
@@ -82,6 +83,10 @@ these settings into the local config with `jq`, preserving everything else.
   and stage agents default to `~/.openclaw/workspace-{id}` unless `.workspace`
   is set, and local files such as `USER.md` and `IDENTITY.md` are left
   untouched.
+- **Numerical runtime caps** — installs the repo-managed user-systemd drop-in
+  `openclaw-gateway.service.d/10-quantipy-runtime-caps.conf` so
+  OpenClaw-launched Quantipy children inherit one-thread BLAS/joblib caps and
+  `PYTHONFAULTHANDLER=1` after the gateway is externally restarted.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -153,22 +158,32 @@ bash scripts/push-openclaw-config.sh
 
 The script will:
 
-1. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
-2. Deep-merge the repo config into the local config (local-only keys preserved)
-3. Set the selected default model, force the repo-managed agent roster, and
+1. Verify `openclaw-gateway.service` is loadable before any backup, config,
+   bootstrap, skill, or unit-file mutation
+2. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
+3. Deep-merge the repo config into the local config (local-only keys preserved)
+4. Set the selected default model, force the repo-managed agent roster, and
    fail if any pinned agent model is not declared
-4. Install the repo-managed MemPalace read-only wrapper, then resolve the full
+5. Install the repo-managed MemPalace read-only wrapper, then resolve the full
    and read-only MemPalace MCP commands plus palace path
-5. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
-6. Validate repo-managed invariants for `main` interface isolation,
+6. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
+7. Validate repo-managed invariants for `main` interface isolation,
    `autoresearch-pm`, exact stage-agent models, high reasoning, memory policy,
    and the full/read-only MemPalace MCP server split
-7. Copy managed agent bootstrap files to every configured agent workspace, copy
+8. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`
-8. Validate the result with `openclaw config validate`
+9. Validate the result with `openclaw config validate`
+10. Install the supervisor service definition and the persistent OpenClaw Gateway
+   runtime-cap drop-in, then run `systemctl --user daemon-reload`
 
 The script is idempotent — safe to run repeatedly.
+
+`systemctl --user daemon-reload` only refreshes systemd's view of unit files and
+drop-ins. It does not update the environment of an already running
+`openclaw-gateway.service` process. The push script intentionally keeps its
+no-restart behavior; operators must restart the gateway externally when they
+want the runtime caps to take effect for new OpenClaw-launched children.
 
 ### 5. Enable the api-version preload for Azure only
 

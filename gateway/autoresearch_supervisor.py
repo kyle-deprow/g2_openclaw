@@ -19,6 +19,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import NoReturn
 
 from gateway.autoresearch_runner import (
     DEFAULT_QUANTIPY_ROOT,
@@ -116,6 +117,34 @@ class WorkspaceEvidenceError(SupervisorError):
     """Raised when an active implementation workspace cannot be verified."""
 
 
+class ShutdownInterrupted(Exception):
+    """A command failure observed after shutdown was already requested."""
+
+
+ShutdownRequested = Callable[[], bool]
+
+
+def _shutdown_not_requested() -> bool:
+    return False
+
+
+def _raise_command_failure(
+    detail: str,
+    *,
+    shutdown_requested: ShutdownRequested,
+    cause: Exception | None = None,
+    error_type: type[SupervisorError] = SupervisorError,
+) -> NoReturn:
+    """Classify a failed OpenClaw process before constructing its domain error."""
+    if shutdown_requested():
+        if cause is None:
+            raise ShutdownInterrupted(detail)
+        raise ShutdownInterrupted(detail) from cause
+    if cause is None:
+        raise error_type(detail)
+    raise error_type(detail) from cause
+
+
 def _require_finite_positive(value: object, *, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise SupervisorError(f"{field_name} must be a finite positive number")
@@ -164,7 +193,9 @@ class OpenClawRPC:
         self._default_openclaw_bin = default_openclaw_bin
         self._run_command = run_command
 
-    def require_binary(self) -> Path:
+    def require_binary(
+        self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
+    ) -> Path:
         executable = self._resolve_executable()
         try:
             result = self._run_command(
@@ -174,14 +205,19 @@ class OpenClawRPC:
                 text=True,
             )
         except OSError as exc:
-            raise OpenClawResolutionError(
-                f"failed to execute OpenClaw at {executable}: {exc}"
-            ) from exc
+            _raise_command_failure(
+                f"failed to execute OpenClaw at {executable}: {exc}",
+                shutdown_requested=shutdown_requested,
+                cause=exc,
+                error_type=OpenClawResolutionError,
+            )
         output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
         version = self._parse_version(output)
         if result.returncode != 0 or version is None:
-            raise OpenClawVersionError(
-                f"OpenClaw version check failed for {executable}: {output or 'no output'}"
+            _raise_command_failure(
+                f"OpenClaw version check failed for {executable}: {output or 'no output'}",
+                shutdown_requested=shutdown_requested,
+                error_type=OpenClawVersionError,
             )
         if version != REQUIRED_OPENCLAW_VERSION:
             required = ".".join(str(part) for part in REQUIRED_OPENCLAW_VERSION)
@@ -191,16 +227,27 @@ class OpenClawRPC:
             )
         return executable
 
-    def run_json(self, executable: Path, args: Sequence[str]) -> Mapping[str, object]:
+    def run_json(
+        self,
+        executable: Path,
+        args: Sequence[str],
+        *,
+        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+    ) -> Mapping[str, object]:
         command = [str(executable), *args]
         try:
             result = self._run_command(command, check=False, capture_output=True, text=True)
         except OSError as exc:
-            raise SupervisorError(f"failed to execute {' '.join(command)}: {exc}") from exc
+            _raise_command_failure(
+                f"failed to execute {' '.join(command)}: {exc}",
+                shutdown_requested=shutdown_requested,
+                cause=exc,
+            )
         output = result.stdout.strip() or result.stderr.strip()
         if result.returncode != 0:
-            raise SupervisorError(
-                f"OpenClaw command failed ({' '.join(command)}): {output or 'no output'}"
+            _raise_command_failure(
+                f"OpenClaw command failed ({' '.join(command)}): {output or 'no output'}",
+                shutdown_requested=shutdown_requested,
             )
         try:
             parsed = json.loads(output, object_pairs_hook=_strict_json_object)
@@ -214,7 +261,14 @@ class OpenClawRPC:
             )
         return parsed
 
-    def wake(self, executable: Path, *, message: str, idempotency_key: str) -> str:
+    def wake(
+        self,
+        executable: Path,
+        *,
+        message: str,
+        idempotency_key: str,
+        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+    ) -> str:
         params = json.dumps(
             {
                 "message": message,
@@ -226,6 +280,7 @@ class OpenClawRPC:
         payload = self.run_json(
             executable,
             ["gateway", "call", "agent", "--json", "--params", params, "--timeout", "30000"],
+            shutdown_requested=shutdown_requested,
         )
         status = payload.get("status")
         session_key = payload.get("sessionKey")
@@ -611,19 +666,24 @@ class AutoresearchSupervisor:
         self._sleep = sleep
         self._rpc = OpenClawRPC(self.config.default_openclaw_bin, run_command=run_command)
 
-    def run_once(self) -> SupervisorResult:
-        executable = self._rpc.require_binary()
+    def run_once(
+        self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
+    ) -> SupervisorResult:
+        executable = self._rpc.require_binary(shutdown_requested=shutdown_requested)
         state = self._load_state()
         if self._is_terminal_state(state):
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
-        running_tasks = self._running_tasks(executable)
+        running_tasks = self._running_tasks(executable, shutdown_requested=shutdown_requested)
         activity = self._activity_guard(state, running_tasks)
         if activity is not None:
             return activity
         probe = self._build_state_probe(state)
         if self._now() - probe.latest_update_ts < self.config.grace_period_seconds:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
-        activity = self._activity_guard(state, self._running_tasks(executable))
+        activity = self._activity_guard(
+            state,
+            self._running_tasks(executable, shutdown_requested=shutdown_requested),
+        )
         if activity is not None:
             return activity
         writers = self._active_target_repo_writer_processes(state)
@@ -643,6 +703,7 @@ class AutoresearchSupervisor:
                     purpose="recovery",
                     material=f"{recovery_key}\nclaim={claim.token}",
                 ),
+                shutdown_requested=shutdown_requested,
             )
         except BaseException as exc:
             self._fail_recovery_claim(claim, exc)
@@ -670,7 +731,15 @@ class AutoresearchSupervisor:
         previous_term = signal.signal(signal.SIGTERM, request_stop)
         try:
             while not stop_requested:
-                self.run_once()
+                try:
+                    self.run_once(shutdown_requested=lambda: stop_requested)
+                except ShutdownInterrupted as exc:
+                    _structured_log(
+                        logging.INFO,
+                        "supervisor.shutdown_interrupted",
+                        detail=str(exc),
+                    )
+                    return 0
                 deadline = self._now() + self.config.poll_interval_seconds
                 while not stop_requested and self._now() < deadline:
                     self._sleep(min(0.5, deadline - self._now()))
@@ -707,8 +776,14 @@ class AutoresearchSupervisor:
             and (not decision.memory_write_required or state.memory_written)
         )
 
-    def _running_tasks(self, executable: Path) -> list[dict[str, object]]:
-        payload = self._rpc.run_json(executable, ["tasks", "list", "--status", "running", "--json"])
+    def _running_tasks(
+        self, executable: Path, *, shutdown_requested: ShutdownRequested
+    ) -> list[dict[str, object]]:
+        payload = self._rpc.run_json(
+            executable,
+            ["tasks", "list", "--status", "running", "--json"],
+            shutdown_requested=shutdown_requested,
+        )
         raw_tasks = payload.get("tasks")
         if not isinstance(raw_tasks, Sequence) or isinstance(raw_tasks, str | bytes):
             raise SupervisorError("OpenClaw tasks JSON missing tasks array")

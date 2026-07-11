@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import signal
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import FrameType
 
 import pytest
 from gateway.autoresearch_runner import (
@@ -16,10 +20,32 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_SESSION_KEY,
     AutoresearchSupervisor,
+    ShutdownInterrupted,
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
+    main,
 )
+
+SignalHandler = Callable[[int, FrameType | None], None]
+SignalDisposition = SignalHandler | signal.Handlers
+
+
+@dataclass(slots=True)
+class SignalHarness:
+    """Installs and invokes supervisor signal handlers without OS-level signals."""
+
+    handlers: dict[int, SignalDisposition] = field(default_factory=dict)
+
+    def install(self, signum: int, handler: SignalDisposition) -> SignalDisposition:
+        previous = self.handlers.get(signum, signal.SIG_DFL)
+        self.handlers[signum] = handler
+        return previous
+
+    def trigger(self, signum: int) -> None:
+        handler = self.handlers[signum]
+        assert callable(handler)
+        handler(signum, None)
 
 
 def _write_state(
@@ -79,6 +105,28 @@ class FakeOpenClaw:
         if command[1:4] == ["gateway", "call", "agent"]:
             return subprocess.CompletedProcess(command, 0, json.dumps(self.agent_payload), "")
         raise AssertionError(f"unexpected command: {command}")
+
+
+class FailingTaskListOpenClaw(FakeOpenClaw):
+    def __init__(self, *, before_failure: Callable[[], None] | None = None) -> None:
+        super().__init__()
+        self._before_failure = before_failure
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
+            del check, capture_output, text
+            self.calls.append(command)
+            if self._before_failure is not None:
+                self._before_failure()
+            return subprocess.CompletedProcess(command, 1, "", "poll failed")
+        return super().__call__(command, check=check, capture_output=capture_output, text=text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,3 +498,164 @@ def test_supervisor_source_contains_no_g2_dev_surface() -> None:
     assert "/_dev" not in source
     assert "localhost:5173" not in source
     assert "agent:main:g2" not in source
+
+
+def test_supervisor_source_does_not_manipulate_python_tracing() -> None:
+    source = Path("gateway/autoresearch_supervisor.py").read_text(encoding="utf-8")
+
+    assert "sys.settrace" not in source
+    assert "sys.setprofile" not in source
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_run_forever_treats_a_signal_before_command_failure_detection_as_clean_shutdown(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    signum: int,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(
+        supervisor_env,
+        FailingTaskListOpenClaw(before_failure=lambda: signal_harness.trigger(signum)),
+    )
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    exit_code = supervisor.run_forever()
+
+    shutdown_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.shutdown_interrupted"
+    ]
+    assert exit_code == 0
+    assert shutdown_events == [
+        {
+            "detail": (
+                f"OpenClaw command failed ({supervisor_env.executable} tasks list "
+                "--status running --json): poll failed"
+            ),
+            "event": "supervisor.shutdown_interrupted",
+        }
+    ]
+
+
+def test_run_forever_reraises_a_command_failure_when_shutdown_was_not_requested(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FailingTaskListOpenClaw())
+
+    with pytest.raises(SupervisorError) as raised:
+        supervisor.run_forever()
+
+    assert str(raised.value).endswith(": poll failed")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_run_forever_preserves_command_failure_when_signal_follows_it_during_unwinding(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: int,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FailingTaskListOpenClaw())
+    run_once = supervisor.run_once
+
+    def fail_poll(*, shutdown_requested: Callable[[], bool]) -> None:
+        try:
+            run_once(shutdown_requested=shutdown_requested)
+        finally:
+            signal_harness.trigger(signum)
+
+    monkeypatch.setattr(supervisor, "run_once", fail_poll)
+
+    with pytest.raises(SupervisorError) as raised:
+        supervisor.run_forever()
+
+    assert str(raised.value).endswith(": poll failed")
+
+
+def test_run_forever_keeps_shutdown_classification_after_repeated_mixed_signals(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+
+    def request_shutdown() -> None:
+        signal_harness.trigger(signal.SIGINT)
+
+    supervisor = _supervisor(
+        supervisor_env,
+        FailingTaskListOpenClaw(before_failure=request_shutdown),
+    )
+    run_once = supervisor.run_once
+
+    def preserve_classified_shutdown(*, shutdown_requested: Callable[[], bool]) -> None:
+        try:
+            run_once(shutdown_requested=shutdown_requested)
+        except ShutdownInterrupted:
+            signal_harness.trigger(signal.SIGTERM)
+            signal_harness.trigger(signal.SIGINT)
+            raise
+
+    monkeypatch.setattr(supervisor, "run_once", preserve_classified_shutdown)
+
+    exit_code = supervisor.run_forever()
+
+    assert exit_code == 0
+
+
+def test_main_returns_error_for_a_poll_failure_without_a_shutdown_signal(
+    supervisor_env: SupervisorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_openclaw = supervisor_env.executable.parent / "missing-openclaw"
+    monkeypatch.setenv("OPENCLAW_BIN", str(missing_openclaw))
+
+    exit_code = main(["--state-path", str(supervisor_env.state_path)])
+
+    assert exit_code == 1
+
+
+def test_main_once_returns_error_for_a_poll_failure(
+    supervisor_env: SupervisorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing_openclaw = supervisor_env.executable.parent / "missing-openclaw"
+    monkeypatch.setenv("OPENCLAW_BIN", str(missing_openclaw))
+
+    exit_code = main(["--once", "--state-path", str(supervisor_env.state_path)])
+
+    assert exit_code == 1
+
+
+def test_run_forever_does_not_poll_again_after_shutdown_during_sleep(
+    supervisor_env: SupervisorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signal_harness = SignalHarness()
+    poll_count = 0
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    def poll_once(*, shutdown_requested: Callable[[], bool]) -> None:
+        nonlocal poll_count
+        poll_count += 1
+
+    def request_stop_while_sleeping(_: float) -> None:
+        signal_harness.trigger(signal.SIGTERM)
+
+    monkeypatch.setattr(supervisor, "run_once", poll_once)
+    monkeypatch.setattr(supervisor, "_sleep", request_stop_while_sleeping)
+
+    exit_code = supervisor.run_forever()
+
+    assert exit_code == 0
+    assert poll_count == 1
