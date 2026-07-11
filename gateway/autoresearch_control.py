@@ -66,7 +66,7 @@ class SystemdSupervisorServiceController:
         self._run_required("enable", "--now", self._service_name)
 
     def stop(self) -> None:
-        self._run_required("stop", self._service_name)
+        self._run_required("disable", "--now", self._service_name)
 
     def is_active(self) -> bool:
         command = [*self._command_prefix, "is-active", "--quiet", self._service_name]

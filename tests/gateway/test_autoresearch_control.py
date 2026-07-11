@@ -10,6 +10,7 @@ from gateway.autoresearch_control import (
     AutoresearchControl,
     ControlConfig,
     ControlError,
+    SystemdSupervisorServiceController,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -146,6 +147,43 @@ class FailingSupervisorService(FakeSupervisorService):
         super().stop()
         if self._fail_on == "stop":
             raise ControlError("service stop failed")
+
+
+def test_systemd_controller_uses_durable_enable_and_disable_transitions() -> None:
+    calls: list[list[str]] = []
+
+    def run_command(
+        command: list[str], *, check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    controller = SystemdSupervisorServiceController(
+        command_prefix=("systemctl", "--user"),
+        service_name=DEFAULT_SUPERVISOR_SERVICE_NAME,
+        run_command=run_command,
+    )
+
+    controller.ensure_started()
+    controller.stop()
+
+    assert calls == [
+        [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            DEFAULT_SUPERVISOR_SERVICE_NAME,
+        ],
+        [
+            "systemctl",
+            "--user",
+            "disable",
+            "--now",
+            DEFAULT_SUPERVISOR_SERVICE_NAME,
+        ],
+    ]
 
 
 @pytest.fixture()
