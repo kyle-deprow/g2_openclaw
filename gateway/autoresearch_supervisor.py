@@ -179,6 +179,10 @@ class SupervisorConfig:
 
     def __post_init__(self) -> None:
         _require_finite_positive(
+            self.grace_period_seconds,
+            field_name="grace_period_seconds",
+        )
+        _require_finite_positive(
             self.expected_stage_task_stale_seconds,
             field_name="expected_stage_task_stale_seconds",
         )
@@ -721,13 +725,41 @@ class AutoresearchSupervisor:
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
             record = checkpoint.recovery_records.setdefault(recovery_key, RecoveryRecord())
             if record.status is RecoveryStatus.SUCCEEDED:
-                return self._checkpoint_alert_result(
-                    checkpoint,
-                    record,
-                    state,
-                    recovery_key,
-                    reason="duplicate_recovery_blocked",
-                )
+                nudged_at = record.nudged_at
+                if nudged_at is None:
+                    raise SupervisorError(
+                        f"succeeded recovery is missing nudged_at: {recovery_key}"
+                    )
+                if not math.isfinite(nudged_at):
+                    raise SupervisorError(
+                        f"succeeded recovery has invalid nudged_at: {recovery_key}"
+                    )
+                elapsed_seconds = self._now() - nudged_at
+                if not math.isfinite(elapsed_seconds):
+                    raise SupervisorError(
+                        f"succeeded recovery has invalid elapsed time: {recovery_key}"
+                    )
+                if elapsed_seconds < 0:
+                    raise SupervisorError(
+                        f"succeeded recovery has future nudged_at: {recovery_key}"
+                    )
+                if elapsed_seconds < self.config.grace_period_seconds:
+                    _structured_log(
+                        logging.INFO,
+                        "supervisor.no_action",
+                        reason="recovery_settling",
+                        recovery_key=recovery_key,
+                        elapsed_seconds=round(elapsed_seconds, 3),
+                        phase=state.phase.value,
+                        iteration=state.iteration,
+                    )
+                    return SupervisorResult(
+                        outcome=SupervisorOutcome.NO_ACTION,
+                        reason="recovery_settling",
+                        recovery_key=recovery_key,
+                    )
+
+            retrying_unobserved_success = record.status is RecoveryStatus.SUCCEEDED
 
             if record.status is RecoveryStatus.IN_FLIGHT:
                 if record.claim_started_at is None or record.claim_pid is None:
@@ -795,7 +827,10 @@ class AutoresearchSupervisor:
             record.alert_at = None
             rotation_reasons: tuple[str, ...] = ()
             if not record.rotated:
-                rotation_reasons = tuple(self._rotation_reasons(state, g2_snapshot, checkpoint))
+                reasons = self._rotation_reasons(state, g2_snapshot, checkpoint)
+                if retrying_unobserved_success:
+                    reasons.append("unobserved_recovery_progress")
+                rotation_reasons = tuple(reasons)
             checkpoint.save(self.config.checkpoint_path)
             _structured_log(
                 logging.INFO,

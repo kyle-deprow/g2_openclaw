@@ -68,6 +68,20 @@ def _touch_old(paths: list[Path], *, now_seconds: float, age_seconds: float) -> 
         os.utime(path, (timestamp, timestamp))
 
 
+def _make_state_stale(env: dict[str, Any]) -> None:
+    _touch_old(
+        [
+            env["state_path"],
+            env["repo_root"] / ".git" / "HEAD",
+            env["repo_root"] / ".git" / "index",
+            env["repo_root"] / ".git" / "logs" / "HEAD",
+            env["repo_root"] / ".git" / "refs" / "heads" / "main",
+        ],
+        now_seconds=env["now_seconds"],
+        age_seconds=600.0,
+    )
+
+
 def _write_main_sessions_store(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
@@ -219,6 +233,8 @@ def _make_supervisor(
     *,
     runner: FakeRunCommand,
     expected_stage_task_stale_seconds: float = 300.0,
+    grace_period_seconds: float = 120.0,
+    max_recovery_attempts: int = 2,
 ) -> AutoresearchSupervisor:
     config = SupervisorConfig(
         state_path=env["state_path"],
@@ -228,8 +244,9 @@ def _make_supervisor(
         target_repo=env["repo_root"],
         proc_root=env["proc_root"],
         default_openclaw_bin=env["openclaw_bin"],
-        grace_period_seconds=120.0,
+        grace_period_seconds=grace_period_seconds,
         expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
+        max_recovery_attempts=max_recovery_attempts,
     )
     return AutoresearchSupervisor(
         config,
@@ -642,6 +659,21 @@ def test_stale_threshold_must_be_finite_and_positive(
             supervisor_env,
             runner=runner,
             expected_stage_task_stale_seconds=threshold,
+        )
+
+
+@pytest.mark.parametrize("grace_period_seconds", [0.0, -1.0, float("nan"), float("inf")])
+def test_recovery_settling_period_must_be_finite_and_positive(
+    supervisor_env: dict[str, Any],
+    grace_period_seconds: float,
+) -> None:
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+
+    with pytest.raises(SupervisorError, match="grace_period_seconds"):
+        _make_supervisor(
+            supervisor_env,
+            runner=runner,
+            grace_period_seconds=grace_period_seconds,
         )
 
 
@@ -2114,22 +2146,12 @@ def test_idle_setup_context_nudges_after_fresh_session_rotation(
     assert record["rotated"] is True
 
 
-def test_duplicate_fingerprint_alerts_without_retry(
+def test_successful_recovery_settles_without_a_second_nudge(
     supervisor_env: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=9)
-    _touch_old(
-        [
-            supervisor_env["state_path"],
-            supervisor_env["repo_root"] / ".git" / "HEAD",
-            supervisor_env["repo_root"] / ".git" / "index",
-            supervisor_env["repo_root"] / ".git" / "logs" / "HEAD",
-            supervisor_env["repo_root"] / ".git" / "refs" / "heads" / "main",
-        ],
-        now_seconds=supervisor_env["now_seconds"],
-        age_seconds=600.0,
-    )
+    _make_state_stale(supervisor_env)
     runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
     supervisor = _make_supervisor(supervisor_env, runner=runner)
     sends: list[str] = []
@@ -2144,9 +2166,168 @@ def test_duplicate_fingerprint_alerts_without_retry(
     second = supervisor.run_once()
 
     assert first.outcome is SupervisorOutcome.NUDGED
-    assert second.outcome is SupervisorOutcome.ALERT
-    assert second.reason == "duplicate_recovery_blocked"
+    assert second.outcome is SupervisorOutcome.NO_ACTION
+    assert second.reason == "recovery_settling"
     assert sends == ["send"]
+
+
+def test_stale_fingerprint_claims_a_second_recovery_after_settling(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=10)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_rotate_g2_session", lambda state: None)
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    first = supervisor.run_once()
+    supervisor_env["now_seconds"] += 120.0
+    second = supervisor.run_once()
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert sends == ["send", "send"]
+
+
+def test_unobserved_retry_forces_one_session_rotation_before_the_nudge(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=11)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    actions: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(
+        supervisor,
+        "_rotate_g2_session",
+        lambda state: actions.append(f"rotate:{state}"),
+    )
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: actions.append("send"))
+
+    supervisor.run_once()
+    supervisor_env["now_seconds"] += 120.0
+    retry = supervisor.run_once()
+
+    assert retry.rotated_session is True
+    assert actions == ["send", "rotate:idle", "send"]
+
+
+def test_already_rotated_recovery_retries_without_another_rotation(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.SETUP_CONTEXT, iteration=12)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    actions: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(
+        supervisor,
+        "_rotate_g2_session",
+        lambda state: actions.append(f"rotate:{state}"),
+    )
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: actions.append("send"))
+
+    supervisor.run_once()
+    supervisor_env["now_seconds"] += 120.0
+    retry = supervisor.run_once()
+
+    assert retry.rotated_session is True
+    assert actions == ["rotate:idle", "send", "send"]
+
+
+def test_stale_fingerprint_alerts_once_after_successful_attempts_are_exhausted(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=13)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_rotate_g2_session", lambda state: None)
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    supervisor.run_once()
+    supervisor_env["now_seconds"] += 120.0
+    supervisor.run_once()
+    supervisor_env["now_seconds"] += 120.0
+    exhausted = supervisor.run_once()
+    already_alerted = supervisor.run_once()
+
+    assert exhausted.reason == "recovery_attempts_exhausted"
+    assert already_alerted.reason == "alert_already_emitted"
+    assert sends == ["send", "send"]
+
+
+@pytest.mark.parametrize(
+    ("nudged_at", "error"),
+    [
+        (None, "missing nudged_at"),
+        (1_000_001.0, "future nudged_at"),
+    ],
+)
+def test_succeeded_recovery_with_invalid_nudge_timestamp_fails_closed(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    nudged_at: float | None,
+    error: str,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=14)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    state = supervisor._load_state()
+    probe = supervisor._build_state_probe(state)
+    recovery_key = f"{state.iteration}:{state.phase.value}:{probe.fingerprint}"
+    supervisor_env["checkpoint_path"].write_text(
+        json.dumps(
+            {
+                "setup_iteration_rotations": {},
+                "recovery_records": {
+                    recovery_key: {
+                        "status": "succeeded",
+                        "attempt_count": 1,
+                        "nudged_at": nudged_at,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+
+    with pytest.raises(SupervisorError, match=error):
+        supervisor.run_once()
+
+
+def test_state_fingerprint_progress_creates_an_independent_recovery_key(
+    supervisor_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_state(supervisor_env["state_path"], phase=Phase.VERIFICATION, iteration=15)
+    _make_state_stale(supervisor_env)
+    runner = FakeRunCommand(now_ms=supervisor_env["now_ms"], tasks=[], sessions=[])
+    supervisor = _make_supervisor(supervisor_env, runner=runner)
+    sends: list[str] = []
+    monkeypatch.setattr(supervisor, "_read_g2_snapshot", lambda: G2Snapshot("idle", "", None))
+    monkeypatch.setattr(supervisor, "_send_recovery_message", lambda: sends.append("send"))
+
+    first = supervisor.run_once()
+    _write_state(supervisor_env["state_path"], phase=Phase.CONSENSUS, iteration=15)
+    _make_state_stale(supervisor_env)
+    progressed = supervisor.run_once()
+
+    assert first.recovery_key != progressed.recovery_key
+    assert sends == ["send", "send"]
 
 
 def test_concurrent_supervisors_allow_only_one_in_flight_send(
