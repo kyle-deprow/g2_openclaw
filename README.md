@@ -192,6 +192,12 @@ bash scripts/push-openclaw-config.sh
 cd g2_app && npm install && cd ..
 ```
 
+The push script writes to `$HOME/.openclaw` by default. For isolated pushes,
+set `OPENCLAW_PUSH_HOME`; do not use `OPENCLAW_HOME`, which is reserved for the
+OpenClaw CLI/runtime environment. During validation, the script runs the
+OpenClaw CLI with `OPENCLAW_STATE_DIR` set to the push root and
+`OPENCLAW_CONFIG_PATH` set to that root's `openclaw.json`.
+
 MemPalace is a strict startup dependency for OpenClaw research memory. Cold
 start, config push, and the CLI launcher validate that the active palace uses
 the configured local embedding model and a cosine Chroma index. The expected

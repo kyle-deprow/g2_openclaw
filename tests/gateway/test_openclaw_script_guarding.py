@@ -111,6 +111,28 @@ def _write_push_script_fixture_bin(
     _write_executable(
         openclaw,
         r"""
+if [[ -v OPENCLAW_HOME ]]; then
+  printf 'refusing leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
+  exit 66
+fi
+if [[ -v OPENCLAW_PUSH_HOME ]]; then
+  printf 'refusing leaked OPENCLAW_PUSH_HOME=%s\n' "$OPENCLAW_PUSH_HOME" >&2
+  exit 67
+fi
+if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_OPENCLAW_STATE_DIR" ]]; then
+  printf 'unexpected OPENCLAW_STATE_DIR=%s\n' "${OPENCLAW_STATE_DIR:-<unset>}" >&2
+  exit 68
+fi
+if [[ "${OPENCLAW_CONFIG_PATH:-}" != "$EXPECTED_OPENCLAW_CONFIG_PATH" ]]; then
+  printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+  exit 69
+fi
+printf '%s %s %s %s %s\n' \
+  "openclaw $*" \
+  "OPENCLAW_HOME=<unset>" \
+  "OPENCLAW_PUSH_HOME=<unset>" \
+  "OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR" \
+  "OPENCLAW_CONFIG_PATH=$OPENCLAW_CONFIG_PATH" >> "$OPENCLAW_LOG"
 case "${1:-}" in
   --version)
     printf 'openclaw 2026.6.11\n'
@@ -221,9 +243,15 @@ def _prepare_push_script_home(
     gateway_active_state: str = "inactive",
 ) -> dict[str, str]:
     home = tmp_path / "home"
-    openclaw_home = tmp_path / "openclaw-home"
+    openclaw_home = home / "isolated push root with spaces $literal"
+    leaked_openclaw_home = tmp_path / "inherited-openclaw-home"
+    leaked_state_dir = tmp_path / "inherited-state-dir"
+    leaked_config_path = tmp_path / "inherited-config.json"
     home.mkdir()
     openclaw_home.mkdir()
+    leaked_openclaw_home.mkdir()
+    leaked_state_dir.mkdir()
+    leaked_config_path.write_text("{}", encoding="utf-8")
     (openclaw_home / "openclaw.json").write_text(
         json.dumps({}),
         encoding="utf-8",
@@ -233,12 +261,28 @@ def _prepare_push_script_home(
         gateway_load_state=gateway_load_state,
         gateway_active_state=gateway_active_state,
     )
-    env_file = tmp_path / "empty-openclaw-push.env"
-    env_file.write_text("", encoding="utf-8")
+    env_file = tmp_path / "openclaw-push.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                f"OPENCLAW_HOME={tmp_path / 'env-file-openclaw-home'}",
+                f"OPENCLAW_PUSH_HOME={tmp_path / 'env-file-push-home'}",
+                f"OPENCLAW_STATE_DIR={tmp_path / 'env-file-state-dir'}",
+                f"OPENCLAW_CONFIG_PATH={tmp_path / 'env-file-config.json'}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     return _base_subprocess_env(
         home,
         {
-            "OPENCLAW_HOME": str(openclaw_home),
+            "OPENCLAW_PUSH_HOME": str(openclaw_home),
+            "OPENCLAW_HOME": str(leaked_openclaw_home),
+            "OPENCLAW_STATE_DIR": str(leaked_state_dir),
+            "OPENCLAW_CONFIG_PATH": str(leaked_config_path),
+            "EXPECTED_OPENCLAW_STATE_DIR": str(openclaw_home),
+            "EXPECTED_OPENCLAW_CONFIG_PATH": str(openclaw_home / "openclaw.json"),
             "OPENCLAW_BIN": str(mock_bin / "openclaw"),
             "OPENCLAW_PROVIDER": "codex",
             "OPENAI_MODEL": "gpt-5.4",
@@ -251,6 +295,7 @@ def _prepare_push_script_home(
             "MEMPALACE_EXPECTED_EMBEDDING_DIMENSION": "768",
             "SYSTEMCTL_LOG": str(home / "systemctl.log"),
             "CP_LOG": str(home / "cp.log"),
+            "OPENCLAW_LOG": str(home / "openclaw.log"),
             "TEST_ROOT": str(tmp_path),
         },
     )
@@ -275,7 +320,7 @@ def _assert_missing_gateway_left_managed_destinations_untouched(
     initial_config: str,
 ) -> None:
     home = Path(env["HOME"])
-    openclaw_home = Path(env["OPENCLAW_HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
 
     assert (openclaw_home / "openclaw.json").read_text(encoding="utf-8") == initial_config
     assert not list(openclaw_home.glob("openclaw.json.bak.*"))
@@ -393,7 +438,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
 
 def test_push_script_fails_before_dropin_when_gateway_service_missing(tmp_path: Path) -> None:
     env = _prepare_push_script_home(tmp_path, gateway_load_state="not-found")
-    initial_config = (Path(env["OPENCLAW_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
 
     result = _run_push_script(env)
 
@@ -429,6 +474,17 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert "start openclaw-gateway.service" not in systemctl_log
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 1
+    openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
+    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 3
+    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 3
+    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 3
+    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 3
+    assert "inherited-openclaw-home" not in openclaw_log
+    assert "inherited-state-dir" not in openclaw_log
+    assert "inherited-config.json" not in openclaw_log
+    assert "env-file-push-home" not in openclaw_log
+    assert "env-file-state-dir" not in openclaw_log
+    assert "env-file-config.json" not in openclaw_log
 
 
 def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
@@ -690,7 +746,8 @@ def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> N
         env=_base_subprocess_env(
             home,
             {
-                "OPENCLAW_HOME": str(openclaw_home),
+                "OPENCLAW_PUSH_HOME": str(openclaw_home),
+                "OPENCLAW_HOME": str(tmp_path / "inherited-openclaw-home"),
                 "OPENCLAW_BIN": str(executable),
             },
         ),
@@ -701,9 +758,48 @@ def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> N
     assert not openclaw_home.exists()
 
 
-def test_push_script_expands_literal_home_override(tmp_path: Path) -> None:
+def test_push_script_defaults_to_home_openclaw_not_inherited_openclaw_home(
+    tmp_path: Path,
+) -> None:
     home = tmp_path / "home"
-    openclaw_home = tmp_path / "openclaw-home"
+    inherited_openclaw_home = tmp_path / "inherited-openclaw-home"
+    inherited_openclaw_home.mkdir()
+    (inherited_openclaw_home / "openclaw.json").write_text("{}", encoding="utf-8")
+    executable = home / "openclaw"
+    _write_executable(
+        executable,
+        """
+if [[ -v OPENCLAW_HOME ]]; then
+  printf 'leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
+  exit 66
+fi
+printf 'openclaw 2026.6.11\n'
+""".strip(),
+    )
+
+    result = subprocess.run(
+        ["bash", str(PUSH_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_base_subprocess_env(
+            home,
+            {
+                "OPENCLAW_HOME": str(inherited_openclaw_home),
+                "OPENCLAW_BIN": str(executable),
+            },
+        ),
+    )
+
+    expected_config = home / ".openclaw/openclaw.json"
+    assert result.returncode == 1
+    assert "leaked OPENCLAW_HOME" not in result.stderr
+    assert f"Local OpenClaw config not found at {expected_config}" in result.stderr
+
+
+def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    openclaw_home = home / "openclaw-home"
     executable = home / "bin/openclaw"
     _write_executable(executable, "printf 'openclaw 2026.6.11\\n'")
 
@@ -715,7 +811,8 @@ def test_push_script_expands_literal_home_override(tmp_path: Path) -> None:
         env=_base_subprocess_env(
             home,
             {
-                "OPENCLAW_HOME": str(openclaw_home),
+                "OPENCLAW_PUSH_HOME": "~/openclaw-home",
+                "OPENCLAW_HOME": str(tmp_path / "inherited-openclaw-home"),
                 "OPENCLAW_BIN": "~/bin/openclaw",
             },
         ),
@@ -723,7 +820,7 @@ def test_push_script_expands_literal_home_override(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert f"Using OpenClaw: {executable} (version 2026.6.11)" in result.stdout
-    assert "Local OpenClaw config not found" in result.stderr
+    assert f"Local OpenClaw config not found at {openclaw_home / 'openclaw.json'}" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -746,7 +843,8 @@ def test_push_script_rejects_unstable_exact_prefix_version(
         env=_base_subprocess_env(
             home,
             {
-                "OPENCLAW_HOME": str(openclaw_home),
+                "OPENCLAW_PUSH_HOME": str(openclaw_home),
+                "OPENCLAW_HOME": str(tmp_path / "inherited-openclaw-home"),
                 "OPENCLAW_BIN": str(executable),
             },
         ),

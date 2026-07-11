@@ -31,8 +31,6 @@ GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
-OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
-LOCAL_CONFIG="${OPENCLAW_HOME}/openclaw.json"
 REQUIRED_OPENCLAW_VERSION="2026.6.11"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
 OPENCLAW_BIN_RESOLVED=""
@@ -119,6 +117,20 @@ expand_user_path() {
     "~/"*) printf '%s/%s\n' "${HOME}" "${path:2}" ;;
     *) printf '%s\n' "${path}" ;;
   esac
+}
+
+OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
+LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
+
+run_openclaw_cli() {
+  env \
+    -u OPENCLAW_HOME \
+    -u OPENCLAW_PUSH_HOME \
+    -u OPENCLAW_STATE_DIR \
+    -u OPENCLAW_CONFIG_PATH \
+    OPENCLAW_STATE_DIR="${OPENCLAW_PUSH_HOME}" \
+    OPENCLAW_CONFIG_PATH="${LOCAL_CONFIG}" \
+    "${OPENCLAW_BIN_RESOLVED}" "$@"
 }
 
 validate_runtime_caps_dropin_file() {
@@ -213,7 +225,7 @@ require_openclaw_supported() {
   if ! resolve_openclaw_bin; then
     return 1
   fi
-  if ! version_line="$("${OPENCLAW_BIN_RESOLVED}" --version 2>&1)"; then
+  if ! version_line="$(run_openclaw_cli --version 2>&1)"; then
     echo "ERROR: OpenClaw version check failed for ${OPENCLAW_BIN_RESOLVED}" >&2
     return 1
   fi
@@ -384,7 +396,7 @@ echo "Verified repo-managed skill definitions: ${SKILLS_TO_CHECK[*]}"
 PRESERVE_ENV_VARS=(
   HOME
   PATH
-  OPENCLAW_HOME
+  OPENCLAW_PUSH_HOME
   OPENCLAW_PROVIDER
   OPENAI_MODEL
   OPENROUTER_MODEL
@@ -414,6 +426,7 @@ for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
   printf -v "${VAR_NAME}" '%s' "${PRESERVED_ENV[${VAR_NAME}]}"
   export "${VAR_NAME}"
 done
+unset OPENCLAW_HOME
 
 if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
@@ -443,7 +456,7 @@ MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
 MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
 MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
 MEMPALACE_PALACE="${HOME}/.mempalace/palace"
-MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
+MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_PUSH_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
 MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
 MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
 MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
@@ -474,7 +487,7 @@ if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; the
   exit 1
 fi
 
-mkdir -p "${OPENCLAW_HOME}"
+mkdir -p "${OPENCLAW_PUSH_HOME}"
 cp "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}"
 echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
 
@@ -776,7 +789,7 @@ echo "Merged repo config into ${LOCAL_CONFIG}"
 # ── Copy bootstrap files ────────────────────────────────────────────────────
 # OpenClaw uses ~/.openclaw/workspace for the main agent when no workspace is
 # configured. Other agents default to workspace-{agent_id}. An explicit
-# .workspace value is used as-is relative to OPENCLAW_HOME unless it is absolute.
+# .workspace value is used as-is relative to OPENCLAW_PUSH_HOME unless it is absolute.
 BOOTSTRAP_FILES=(AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md)
 for FILE in "${BOOTSTRAP_FILES[@]}"; do
   SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"
@@ -791,9 +804,9 @@ workspace_dir_for_target() {
   if [[ "${workspace_target}" == /* ]]; then
     printf '%s\n' "${workspace_target}"
   elif [[ "${workspace_target}" == "__OPENCLAW_DEFAULT_WORKSPACE__" ]]; then
-    printf '%s/workspace\n' "${OPENCLAW_HOME}"
+    printf '%s/workspace\n' "${OPENCLAW_PUSH_HOME}"
   else
-    printf '%s/%s\n' "${OPENCLAW_HOME}" "${workspace_target}"
+    printf '%s/%s\n' "${OPENCLAW_PUSH_HOME}" "${workspace_target}"
   fi
 }
 
@@ -837,8 +850,8 @@ echo "Local workspace files such as USER.md and IDENTITY.md were left untouched.
 # Clean stale copies from wrong bootstrap locations without touching local
 # per-workspace files such as USER.md, IDENTITY.md, or other notes.
 STALE_BOOTSTRAP_DIRS=(
-  "${OPENCLAW_HOME}"
-  "${OPENCLAW_HOME}/workspace"
+  "${OPENCLAW_PUSH_HOME}"
+  "${OPENCLAW_PUSH_HOME}/workspace"
 )
 for FILE in "${BOOTSTRAP_FILES[@]}"; do
   for STALE_DIR in "${STALE_BOOTSTRAP_DIRS[@]}"; do
@@ -851,7 +864,7 @@ for FILE in "${BOOTSTRAP_FILES[@]}"; do
 done
 
 # ── Copy repo skills ─────────────────────────────────────────────────────────
-SKILLS_DST="${OPENCLAW_HOME}/skills"
+SKILLS_DST="${OPENCLAW_PUSH_HOME}/skills"
 STALE_SKILLS=(
   "copilot-cli"
 )
@@ -877,7 +890,7 @@ fi
 
 # ── Copy Azure API-version preload if present ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
-PRELOAD_DST="${OPENCLAW_HOME}/azure-api-version-preload.cjs"
+PRELOAD_DST="${OPENCLAW_PUSH_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
@@ -887,13 +900,13 @@ fi
 echo ""
 echo "── Validating config ──"
 echo "Running: ${OPENCLAW_BIN_RESOLVED} config validate"
-if ! "${OPENCLAW_BIN_RESOLVED}" config validate; then
+if ! run_openclaw_cli config validate; then
   echo "ERROR: '${OPENCLAW_BIN_RESOLVED} config validate' failed. Restored backup ${BACKUP}." >&2
   exit 1
 fi
 if [[ "${PROVIDER}" == "codex" ]]; then
   echo "Running: ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
-  CODEX_PLUGIN_INSPECT_JSON="$("${OPENCLAW_BIN_RESOLVED}" plugins inspect codex --json)"
+  CODEX_PLUGIN_INSPECT_JSON="$(run_openclaw_cli plugins inspect codex --json)"
   if ! echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -e '
     .plugin.id == "codex"
     and .plugin.enabled == true
