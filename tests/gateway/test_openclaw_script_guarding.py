@@ -112,8 +112,8 @@ def test_push_script_installs_but_does_not_start_the_supervisor_service() -> Non
     assert "start quantipy-autoresearch-supervisor.service" not in script
     assert "@REPO_ROOT@" in template
     assert "@HOME@" in template
-    assert "@OPENCLAW_HOME@" in template
     assert "@OPENCLAW_BIN@" in template
+    assert "Environment=OPENCLAW_HOME=" not in template
     assert "-m gateway.autoresearch_supervisor" in template
 
 

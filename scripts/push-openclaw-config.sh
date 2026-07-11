@@ -845,7 +845,6 @@ SUPERVISOR_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${SUPERVISOR_SERVICE_NAME}.X
 sed \
   -e "s|@REPO_ROOT@|$(escape_sed_replacement "${REPO_ROOT}")|g" \
   -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
-  -e "s|@OPENCLAW_HOME@|$(escape_sed_replacement "${OPENCLAW_HOME}")|g" \
   -e "s|@OPENCLAW_BIN@|$(escape_sed_replacement "${OPENCLAW_BIN_RESOLVED}")|g" \
   -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
   -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
