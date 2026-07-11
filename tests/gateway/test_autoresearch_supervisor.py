@@ -284,6 +284,53 @@ def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
     assert result.reason == "active_expected_stage_task"
 
 
+def test_stage_task_uses_the_raw_cli_requester_and_owner_fields(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "review-raw-1",
+                "status": "running",
+                "runtime": "subagent",
+                "agentId": "reviewer",
+                "requesterSessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+                "lastEventAt": int(supervisor_env.now * 1000) - 1_000,
+            }
+        ]
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_expected_stage_task"
+
+
+def test_task_with_disagreeing_raw_and_summary_requester_keys_is_ambiguous(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "review-conflict",
+                "agentId": "reviewer",
+                "requesterSessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "sessionKey": "agent:other:session",
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+                "lastEventAt": int(supervisor_env.now * 1000) - 1_000,
+            }
+        ]
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "recovery_message_sent"
+
+
 def test_stage_task_with_ambiguous_child_agent_is_ignored(
     supervisor_env: SupervisorEnv,
 ) -> None:

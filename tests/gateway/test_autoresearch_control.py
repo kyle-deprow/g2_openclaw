@@ -285,11 +285,15 @@ def test_stop_cancels_only_tasks_with_the_exact_owner_session(
                 "taskId": "owned",
                 "id": "owned",
                 "agentId": "reviewer",
-                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "requesterSessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
                 "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
                 "childSessionKey": "agent:reviewer:task-child",
             },
-            {"taskId": "other", "agentId": "reviewer", "sessionKey": "agent:other:session"},
+            {
+                "taskId": "other",
+                "agentId": "reviewer",
+                "requesterSessionKey": "agent:other:session",
+            },
         ]
     )
     events: list[str] = []

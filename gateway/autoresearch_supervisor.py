@@ -366,13 +366,27 @@ class TaskProvenance(StrEnum):
 
 
 def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
-    """Classify public OpenClaw task-summary provenance without guessing fields."""
-    session_key = task.get("sessionKey")
+    """Classify the two exact OpenClaw 2026.6.11 task-list projections."""
+    # The CLI emits raw TaskRecord.requesterSessionKey. Gateway tasks.list maps
+    # that same field to TaskSummary.sessionKey. If both appear they must agree.
+    raw_requester_key = task.get("requesterSessionKey")
+    summary_session_key = task.get("sessionKey")
+    if (
+        raw_requester_key is not None
+        and summary_session_key is not None
+        and raw_requester_key != summary_session_key
+    ):
+        return TaskProvenance.AMBIGUOUS
+    requester_key = raw_requester_key if raw_requester_key is not None else summary_session_key
     owner_key = task.get("ownerKey")
     owns_one_key = (
-        session_key == AUTORESEARCH_OWNER_SESSION_KEY or owner_key == AUTORESEARCH_OWNER_SESSION_KEY
+        requester_key == AUTORESEARCH_OWNER_SESSION_KEY
+        or owner_key == AUTORESEARCH_OWNER_SESSION_KEY
     )
-    if session_key != AUTORESEARCH_OWNER_SESSION_KEY or owner_key != AUTORESEARCH_OWNER_SESSION_KEY:
+    if (
+        requester_key != AUTORESEARCH_OWNER_SESSION_KEY
+        or owner_key != AUTORESEARCH_OWNER_SESSION_KEY
+    ):
         if owns_one_key or task.get("agentId") == AUTORESEARCH_OWNER_AGENT_ID:
             return TaskProvenance.AMBIGUOUS
         return TaskProvenance.UNRELATED
