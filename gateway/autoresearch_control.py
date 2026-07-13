@@ -241,7 +241,7 @@ class AutoresearchControl:
             raise ControlError(f"invalid autoresearch state: {exc}") from exc
 
     def _running_tasks(self, executable: Path) -> tuple[Mapping[str, object], ...]:
-        payload = self._rpc.run_json(executable, ["tasks", "list", "--status", "running", "--json"])
+        payload = self._rpc.list_running_tasks(executable)
         raw_tasks = payload.get("tasks")
         if not isinstance(raw_tasks, Sequence) or isinstance(raw_tasks, str | bytes):
             raise ControlError("OpenClaw tasks JSON missing tasks array")

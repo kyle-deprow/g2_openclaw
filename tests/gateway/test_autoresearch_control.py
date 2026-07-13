@@ -28,12 +28,14 @@ class FakeOpenClaw:
         cancel_response: dict[str, object] | None = None,
         abort_response: dict[str, object] | None = None,
         events: list[str] | None = None,
+        task_list_failures_before_success: int = 0,
     ) -> None:
         self.tasks = tasks or []
         self.task_snapshots = task_snapshots
         self.shown_tasks = shown_tasks
         self.cancel_response = cancel_response
         self.abort_response = abort_response
+        self.task_list_failures_before_success = task_list_failures_before_success
         self.task_list_calls = 0
         self.calls: list[list[str]] = []
         self.events = events
@@ -60,6 +62,9 @@ class FakeOpenClaw:
         if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
             if self.events is not None:
                 self.events.append("rpc:list")
+            if self.task_list_calls < self.task_list_failures_before_success:
+                self.task_list_calls += 1
+                return subprocess.CompletedProcess(command, 1, "", "")
             if self.task_snapshots is None:
                 tasks = self.tasks
             else:
@@ -454,6 +459,35 @@ def test_status_is_read_only_and_reports_only_owner_scoped_tasks(
     assert status.supervisor_active is True
     assert all(call[1:4] != ["gateway", "call", "tasks.cancel"] for call in fake.calls)
     assert all(call[1:4] != ["gateway", "call", "sessions.delete"] for call in fake.calls)
+
+
+def test_status_retries_a_transient_empty_task_list_failure(
+    control_env: tuple[ControlConfig, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gateway.autoresearch_supervisor.time.sleep", lambda _seconds: None)
+    config, _ = control_env
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "owned",
+                "id": "owned",
+                "agentId": "reviewer",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+            }
+        ],
+        task_list_failures_before_success=1,
+    )
+
+    status = AutoresearchControl(
+        config,
+        run_command=fake,
+        service_controller=FakeSupervisorService([], active=True),
+    ).status()
+
+    assert status.tasks[0].task_id == "owned"
+    assert fake.task_list_calls == 2
 
 
 def test_stop_fails_closed_when_a_owned_task_has_conflicting_session_provenance(

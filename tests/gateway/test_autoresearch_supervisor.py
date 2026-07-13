@@ -86,9 +86,12 @@ class FakeOpenClaw:
         *,
         tasks: list[dict[str, object]] | None = None,
         shown_tasks: dict[str, dict[str, object]] | None = None,
+        task_list_failures_before_success: int = 0,
     ) -> None:
         self.tasks = tasks or []
         self.shown_tasks = shown_tasks
+        self.task_list_failures_before_success = task_list_failures_before_success
+        self.task_list_calls = 0
         self.calls: list[list[str]] = []
         self.agent_payload: dict[str, object] = {
             "status": "accepted",
@@ -109,6 +112,10 @@ class FakeOpenClaw:
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, "OpenClaw 2026.6.11", "")
         if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
+            if self.task_list_calls < self.task_list_failures_before_success:
+                self.task_list_calls += 1
+                return subprocess.CompletedProcess(command, 1, "", "")
+            self.task_list_calls += 1
             return subprocess.CompletedProcess(command, 0, json.dumps({"tasks": self.tasks}), "")
         if (
             len(command) == 5
@@ -416,6 +423,34 @@ def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "active_expected_stage_task"
+
+
+def test_supervisor_retries_a_transient_empty_task_list_failure(
+    supervisor_env: SupervisorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("gateway.autoresearch_supervisor.time.sleep", lambda _seconds: None)
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "id": "review-1",
+                "taskId": "review-1",
+                "status": "running",
+                "runtime": "subagent",
+                "agentId": "reviewer",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+                "updatedAt": int(supervisor_env.now * 1000) - 1_000,
+            }
+        ],
+        task_list_failures_before_success=1,
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_expected_stage_task"
+    assert fake.task_list_calls == 2
 
 
 def test_stage_task_uses_the_raw_cli_requester_and_owner_fields(
@@ -782,6 +817,29 @@ def test_run_forever_preserves_command_failure_when_signal_follows_it_during_unw
     with pytest.raises(SupervisorError) as raised:
         supervisor.run_forever()
 
+    assert str(raised.value).endswith(": poll failed")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_run_forever_preserves_task_list_failure_when_signal_arrives_during_retry_delay(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    signum: int,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FailingTaskListOpenClaw())
+
+    def request_shutdown(_seconds: float) -> None:
+        signal_harness.trigger(signum)
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.time.sleep", request_shutdown)
+
+    with pytest.raises(SupervisorError) as raised:
+        supervisor.run_forever()
+
+    assert "failed before shutdown during retry" in str(raised.value)
     assert str(raised.value).endswith(": poll failed")
 
 

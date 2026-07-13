@@ -49,6 +49,8 @@ DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
+READ_ONLY_TASK_LIST_ATTEMPTS = 3
+READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
 REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
@@ -260,6 +262,50 @@ class OpenClawRPC:
                 f"OpenClaw command returned non-object JSON ({' '.join(command)})"
             )
         return parsed
+
+    def list_running_tasks(
+        self,
+        executable: Path,
+        *,
+        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+    ) -> Mapping[str, object]:
+        """Read OpenClaw running tasks with strict bounded retry for CLI crashes."""
+        args = ["tasks", "list", "--status", "running", "--json"]
+        last_error: SupervisorError | None = None
+        for attempt in range(1, READ_ONLY_TASK_LIST_ATTEMPTS + 1):
+            try:
+                return self.run_json(
+                    executable,
+                    args,
+                    shutdown_requested=shutdown_requested,
+                )
+            except ShutdownInterrupted:
+                if last_error is not None:
+                    raise SupervisorError(
+                        "OpenClaw running task list failed before shutdown during retry: "
+                        f"{last_error}"
+                    ) from last_error
+                raise
+            except SupervisorError as exc:
+                last_error = exc
+                if attempt >= READ_ONLY_TASK_LIST_ATTEMPTS:
+                    break
+                logger.warning(
+                    "OpenClaw read-only task list failed; retrying (%s/%s): %s",
+                    attempt,
+                    READ_ONLY_TASK_LIST_ATTEMPTS,
+                    exc,
+                )
+                time.sleep(READ_ONLY_TASK_LIST_RETRY_SECONDS)
+                if shutdown_requested():
+                    raise SupervisorError(
+                        "OpenClaw running task list failed before shutdown during retry: "
+                        f"{last_error}"
+                    ) from last_error
+        raise SupervisorError(
+            "OpenClaw running task list failed after "
+            f"{READ_ONLY_TASK_LIST_ATTEMPTS} attempts: {last_error}"
+        ) from last_error
 
     def wake(
         self,
@@ -916,9 +962,8 @@ class AutoresearchSupervisor:
     def _running_tasks(
         self, executable: Path, *, shutdown_requested: ShutdownRequested
     ) -> list[dict[str, object]]:
-        payload = self._rpc.run_json(
+        payload = self._rpc.list_running_tasks(
             executable,
-            ["tasks", "list", "--status", "running", "--json"],
             shutdown_requested=shutdown_requested,
         )
         raw_tasks = payload.get("tasks")
