@@ -33,6 +33,45 @@ SignalHandler = Callable[[int, FrameType | None], None]
 SignalDisposition = SignalHandler | signal.Handlers
 
 
+def _operator_precondition_state_json() -> str:
+    return json.dumps(
+        {
+            "phase": "implementation",
+            "iteration": 26,
+            "mode": "data_infra_g0",
+            "consensus_history": [
+                {
+                    "round_number": 1,
+                    "status": "MAJORITY",
+                    "winner_theory_id": "i26-operator-evidence-precondition",
+                    "winner_theory_family": "no-code-operator-evidence-precondition",
+                    "majority_count": 5,
+                    "majority_agent_ids": [
+                        "debater-microstructure",
+                        "debater-data",
+                        "debater-skeptic",
+                        "debater-theory",
+                        "debater-implementation",
+                    ],
+                    "dissenting_positions": [],
+                    "novelty_score": 1.0,
+                    "theory_score": 9.0,
+                    "implementation_risk_score": 1.0,
+                    "data_adequacy_score": 1.0,
+                    "overfit_risk_score": 1.0,
+                    "expected_net_sharpe": 0.0,
+                    "rejection_reasons": ["missing operator evidence"],
+                    "implementation_brief": (
+                        "Do not enter ENGINEER and do not modify Quantipy. "
+                        "The operator must supply the manifest."
+                    ),
+                    "dissent_summary": "No semantic dissent.",
+                }
+            ],
+        }
+    )
+
+
 @dataclass(slots=True)
 class SignalHarness:
     """Installs and invokes supervisor signal handlers without OS-level signals."""
@@ -287,6 +326,17 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert payload["message"]
     assert payload["idempotencyKey"].startswith("autoresearch-")
     assert "--expect-final" not in command
+
+
+def test_supervisor_normalizes_operator_precondition_implementation_state(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(_operator_precondition_state_json(), encoding="utf-8")
+
+    state = _supervisor(supervisor_env, FakeOpenClaw())._load_state()
+
+    assert state.phase is Phase.DECISION_LOG
 
 
 def test_recovery_retries_use_distinct_idempotency_keys(

@@ -59,6 +59,7 @@ from gateway.autoresearch_runner import (
     load_autoresearch_policy,
     mark_memory_written,
     next_action,
+    normalize_autoresearch_state,
     standardize_mempalace_kg_object,
     standardized_mempalace_kg_facts,
     start_next_iteration,
@@ -241,6 +242,33 @@ def _majority_consensus(
         rejection_reasons=("Losers lacked coverage plan",),
         implementation_brief="Implement VWAP + OBV with walk-forward tuning.",
         dissent_summary="Two dissenters preferred a simpler regime filter.",
+    )
+
+
+def _operator_precondition_consensus(
+    round_number: int,
+    policy: AutoresearchPolicy,
+) -> ConsensusResultArtifact:
+    return ConsensusResultArtifact(
+        round_number=round_number,
+        status=ConsensusStatus.MAJORITY,
+        winner_theory_id="i26-operator-evidence-precondition",
+        winner_theory_family="no-code-operator-evidence-precondition",
+        majority_count=5,
+        majority_agent_ids=policy.debate_agent_ids,
+        dissenting_positions=(),
+        novelty_score=1.0,
+        theory_score=9.0,
+        implementation_risk_score=1.0,
+        data_adequacy_score=1.0,
+        overfit_risk_score=1.0,
+        expected_net_sharpe=0.0,
+        rejection_reasons=("Missing immutable operator evidence bundle.",),
+        implementation_brief=(
+            "Do not enter ENGINEER and do not modify Quantipy. The operator "
+            "must first supply the immutable SEC/XNYS bundle manifest."
+        ),
+        dissent_summary="All agents agree this is an operator precondition.",
     )
 
 
@@ -553,6 +581,132 @@ def test_no_majority_allows_one_retry_then_routes_to_decision(
     state = advance_state(state, _debate_result(policy, round_number=2), policy)
     state = advance_state(state, _no_consensus(round_number=2), policy)
     assert state.phase is Phase.DECISION_LOG
+
+
+def test_operator_precondition_majority_routes_to_decision_log(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+
+    assert state.phase is Phase.DECISION_LOG
+    action = next_action(state, policy, receipts)
+    assert action.next_agent_ids == (policy.pm.agent_id,)
+    assert action.expected_artifact_type is ArtifactType.FINAL_DECISION
+    assert "memory_write_required=false" in action.prompt_text
+    assert "no-code operator precondition" in action.prompt_text
+
+
+def test_operator_precondition_final_decision_allows_infra_blocked_without_verification(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+
+    decided = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+        policy,
+    )
+
+    assert decided.phase is Phase.REPEAT
+    assert decided.final_decision is not None
+    assert decided.final_decision.decision is FinalDecision.INFRA_BLOCKED
+    assert can_write_memory(decided) is False
+    assert start_next_iteration(decided).iteration == 2
+
+
+def test_operator_precondition_final_decision_rejects_unverified_metric(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+
+    with pytest.raises(AutoresearchValidationError, match="recommended_metric_value=null"):
+        advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="i26-operator-evidence-precondition",
+                decision=FinalDecision.INFRA_BLOCKED,
+                recommended_metric_name="operator_precondition",
+                recommended_metric_value=1.0,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+                rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+                log_summary="Blocked before implementation on missing operator evidence.",
+                continue_loop=True,
+                memory_write_required=False,
+                infra_rationale="Missing operator-supplied first-party evidence bundle.",
+            ),
+            policy,
+        )
+
+
+def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+    malformed = replace(
+        state,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=1.0,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+        next_action(malformed, policy, receipts)
+
+
+def test_normalize_operator_precondition_implementation_state_routes_to_decision_log(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_consensus(policy),
+        consensus_history=(_operator_precondition_consensus(1, policy),),
+        phase=Phase.IMPLEMENTATION,
+    )
+
+    normalized = normalize_autoresearch_state(state)
+
+    assert normalized.phase is Phase.DECISION_LOG
+
+
+def test_next_action_rejects_operator_precondition_implementation_state(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = replace(
+        _state_to_consensus(policy),
+        consensus_history=(_operator_precondition_consensus(1, policy),),
+        phase=Phase.IMPLEMENTATION,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="operator-precondition"):
+        next_action(state, policy, receipts)
 
 
 def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(

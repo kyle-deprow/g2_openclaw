@@ -11,7 +11,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-from gateway.autoresearch_runner import AutoresearchState, AutoresearchValidationError
+from gateway.autoresearch_runner import (
+    AutoresearchState,
+    AutoresearchValidationError,
+    normalize_autoresearch_state,
+)
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
@@ -232,7 +236,9 @@ class AutoresearchControl:
 
     def _load_state(self) -> AutoresearchState:
         try:
-            return AutoresearchState.from_dict(json.loads(self._state_material()))
+            return normalize_autoresearch_state(
+                AutoresearchState.from_dict(json.loads(self._state_material()))
+            )
         except json.JSONDecodeError as exc:
             raise ControlError(
                 f"invalid autoresearch state JSON: {self.config.state_path}"

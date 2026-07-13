@@ -26,6 +26,7 @@ from gateway.autoresearch_runner import (
     AutoresearchState,
     AutoresearchValidationError,
     Phase,
+    normalize_autoresearch_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -934,7 +935,7 @@ class AutoresearchSupervisor:
     def _load_state(self) -> AutoresearchState:
         try:
             raw = json.loads(self.config.state_path.read_text(encoding="utf-8"))
-            return AutoresearchState.from_dict(raw)
+            return normalize_autoresearch_state(AutoresearchState.from_dict(raw))
         except FileNotFoundError as exc:
             raise SupervisorError(
                 f"missing autoresearch state file: {self.config.state_path}"

@@ -22,6 +22,14 @@ DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
 _T = TypeVar("_T")
+_OPERATOR_PRECONDITION_MARKERS = (
+    "no-code-operator",
+    "operator-evidence-precondition",
+)
+_OPERATOR_PRECONDITION_BRIEF_MARKERS = (
+    "do not enter engineer",
+    "do not modify quantipy",
+)
 
 
 class AutoresearchError(ValueError):
@@ -738,6 +746,26 @@ class ConsensusResultArtifact:
             "implementation_brief": self.implementation_brief,
             "dissent_summary": self.dissent_summary,
         }
+
+
+def _is_operator_precondition_consensus(
+    consensus: ConsensusResultArtifact | None,
+) -> bool:
+    """Return true for a majority that deliberately requires operator action."""
+    if consensus is None or consensus.status is not ConsensusStatus.MAJORITY:
+        return False
+    id_text = " ".join(
+        value.lower()
+        for value in (
+            consensus.winner_theory_id,
+            consensus.winner_theory_family,
+        )
+        if value
+    )
+    if any(marker in id_text for marker in _OPERATOR_PRECONDITION_MARKERS):
+        return True
+    brief = (consensus.implementation_brief or "").lower()
+    return all(marker in brief for marker in _OPERATOR_PRECONDITION_BRIEF_MARKERS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2110,7 +2138,9 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
                 raise AutoresearchValidationError(
                     "NO_CONSENSUS must not have a memory_verification_receipt"
                 )
-        elif not decision.memory_write_required:
+        elif not decision.memory_write_required and not _is_operator_precondition_no_memory_state(
+            state
+        ):
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
             )
@@ -2162,6 +2192,12 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
     ):
         raise AutoresearchValidationError("implementation phase requires a majority consensus")
+    if state.phase is Phase.IMPLEMENTATION and _is_operator_precondition_consensus(
+        state.latest_consensus
+    ):
+        raise AutoresearchValidationError(
+            "operator-precondition consensus must route to decision_log, not implementation"
+        )
     if state.phase is Phase.VERIFICATION and state.implementation_result is None:
         raise AutoresearchValidationError("verification phase requires an implementation_result")
     if state.phase is Phase.REVIEW:
@@ -2652,6 +2688,33 @@ def _validate_final_decision_artifact(
             )
         return
 
+    if (
+        _is_operator_precondition_consensus(latest_consensus)
+        and state.implementation_result is None
+        and latest_verification is None
+    ):
+        if artifact.decision is not FinalDecision.INFRA_BLOCKED:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus requires final_decision=INFRA_BLOCKED"
+            )
+        if artifact.memory_write_required:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus requires memory_write_required=false"
+            )
+        if artifact.reviewer_verdict is not FinalReviewerVerdict.NOT_RUN:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus requires reviewer_verdict=NOT_RUN"
+            )
+        if artifact.recommended_metric_value is not None:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus requires recommended_metric_value=null"
+            )
+        if not artifact.infra_rationale:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus requires infra_rationale"
+            )
+        return
+
     if state.mode is ResearchMode.DATA_INFRA_G0:
         if artifact.decision not in (FinalDecision.INFRA_REPAIRED, FinalDecision.INFRA_BLOCKED):
             raise AutoresearchValidationError(
@@ -2828,6 +2891,11 @@ def _phase_instruction(
     workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
     mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
+    operator_precondition_instruction = _operator_precondition_decision_instruction(
+        state,
+        phase,
+        expected_artifact_type,
+    )
     return (
         f"Autoresearch phase: {phase.value}\n"
         f"Target agents: {agent_text}\n"
@@ -2836,9 +2904,34 @@ def _phase_instruction(
         f"{mode_contract}"
         f"{workspace_contract}"
         f"{mempalace_fact_instruction}"
+        f"{operator_precondition_instruction}"
         f"Artifact contract:\n{contract}\n\n"
         f"Current state snapshot:\n{state_json}"
     )
+
+
+def _operator_precondition_decision_instruction(
+    state: AutoresearchState,
+    phase: Phase,
+    expected_artifact_type: ArtifactType,
+) -> str:
+    if (
+        phase is Phase.DECISION_LOG
+        and expected_artifact_type is ArtifactType.FINAL_DECISION
+        and _is_operator_precondition_consensus(state.latest_consensus)
+        and state.implementation_result is None
+        and state.latest_verification is None
+    ):
+        return (
+            "Operator-precondition final decision contract:\n"
+            "- The latest consensus is a no-code operator precondition, not an "
+            "implemented experiment.\n"
+            "- Emit final_decision=INFRA_BLOCKED, reviewer_verdict=NOT_RUN, "
+            "recommended_metric_value=null, and a concrete infra_rationale.\n"
+            "- Set memory_write_required=false. Do not write MemPalace facts for "
+            "this no-code transition because no verification_result exists.\n\n"
+        )
+    return ""
 
 
 def _mode_contract(state: AutoresearchState) -> str:
@@ -3043,6 +3136,12 @@ def advance_state(
             )
         next_consensus_history = (*state.consensus_history, artifact)
         if artifact.status is ConsensusStatus.MAJORITY:
+            if _is_operator_precondition_consensus(artifact):
+                return replace(
+                    state,
+                    consensus_history=next_consensus_history,
+                    phase=Phase.DECISION_LOG,
+                )
             return replace(
                 state,
                 consensus_history=next_consensus_history,
@@ -3180,12 +3279,32 @@ def can_write_memory(state: AutoresearchState) -> bool:
 
 
 def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
+    if _is_operator_precondition_no_memory_state(state):
+        return True
     decision = state.final_decision
     return (
         state.phase is Phase.REPEAT
         and decision is not None
         and decision.decision is FinalDecision.NO_CONSENSUS
         and not decision.memory_write_required
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+    )
+
+
+def _is_operator_precondition_no_memory_state(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    return (
+        state.phase is Phase.REPEAT
+        and decision is not None
+        and decision.decision is FinalDecision.INFRA_BLOCKED
+        and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
+        and decision.recommended_metric_value is None
+        and bool(decision.infra_rationale)
+        and not decision.memory_write_required
+        and _is_operator_precondition_consensus(state.latest_consensus)
+        and state.implementation_result is None
+        and state.latest_verification is None
         and not state.memory_written
         and state.memory_verification_receipt is None
     )
@@ -3424,8 +3543,19 @@ def load_state_file(path: Path) -> AutoresearchState:
         raise AutoresearchValidationError(f"missing state file: {path}") from exc
     except json.JSONDecodeError as exc:
         raise AutoresearchValidationError(f"invalid state JSON: {path}") from exc
-    return AutoresearchState.from_dict(raw)
+    return normalize_autoresearch_state(AutoresearchState.from_dict(raw))
 
 
 def save_state_file(path: Path, state: AutoresearchState) -> None:
     path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+
+
+def normalize_autoresearch_state(state: AutoresearchState) -> AutoresearchState:
+    """Repair persisted states whose deterministic routing was tightened."""
+    if (
+        state.phase is Phase.IMPLEMENTATION
+        and state.implementation_result is None
+        and _is_operator_precondition_consensus(state.latest_consensus)
+    ):
+        return replace(state, phase=Phase.DECISION_LOG)
+    return state

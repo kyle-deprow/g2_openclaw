@@ -18,6 +18,45 @@ from gateway.autoresearch_supervisor import (
 )
 
 
+def _operator_precondition_state_json() -> str:
+    return json.dumps(
+        {
+            "phase": "implementation",
+            "iteration": 26,
+            "mode": "data_infra_g0",
+            "consensus_history": [
+                {
+                    "round_number": 1,
+                    "status": "MAJORITY",
+                    "winner_theory_id": "i26-operator-evidence-precondition",
+                    "winner_theory_family": "no-code-operator-evidence-precondition",
+                    "majority_count": 5,
+                    "majority_agent_ids": [
+                        "debater-microstructure",
+                        "debater-data",
+                        "debater-skeptic",
+                        "debater-theory",
+                        "debater-implementation",
+                    ],
+                    "dissenting_positions": [],
+                    "novelty_score": 1.0,
+                    "theory_score": 9.0,
+                    "implementation_risk_score": 1.0,
+                    "data_adequacy_score": 1.0,
+                    "overfit_risk_score": 1.0,
+                    "expected_net_sharpe": 0.0,
+                    "rejection_reasons": ["missing operator evidence"],
+                    "implementation_brief": (
+                        "Do not enter ENGINEER and do not modify Quantipy. "
+                        "The operator must supply the manifest."
+                    ),
+                    "dissent_summary": "No semantic dissent.",
+                }
+            ],
+        }
+    )
+
+
 class FakeOpenClaw:
     def __init__(
         self,
@@ -459,6 +498,21 @@ def test_status_is_read_only_and_reports_only_owner_scoped_tasks(
     assert status.supervisor_active is True
     assert all(call[1:4] != ["gateway", "call", "tasks.cancel"] for call in fake.calls)
     assert all(call[1:4] != ["gateway", "call", "sessions.delete"] for call in fake.calls)
+
+
+def test_status_normalizes_operator_precondition_implementation_state(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    config.state_path.write_text(_operator_precondition_state_json(), encoding="utf-8")
+
+    status = AutoresearchControl(
+        config,
+        run_command=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([], active=False),
+    ).status()
+
+    assert status.phase == "decision_log"
 
 
 def test_status_retries_a_transient_empty_task_list_failure(
