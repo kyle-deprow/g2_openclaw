@@ -187,6 +187,37 @@ Only the human operator or Codex may promote independently reviewed
 shared-infrastructure patches from the authoritative checkout. The PM never
 promotes.
 
+Compact decision tree:
+
+1. G2/OpenClaw orchestration, task ledger, supervisor/recovery, shared Quantipy
+   platform/runtime/tooling, shared data loaders, shared test
+   harnesses/fixtures, dependency/runtime failures, G2 simulator, headless
+   launch, or Codex/OpenClaw route/process failure: operator/Codex-owned.
+2. Alpha modules, experiment notebooks, experiment-specific unit tests,
+   strategy features, folds, models, null tests, metrics, validation, or
+   methodology behavior: autoresearch-owned, even when exposed by dependency
+   upgrades.
+3. Ambiguous or risks unrelated dirty/shared state: classify as a shared-infra
+   blocker, collect evidence, and wait for human/Codex operator action.
+
+Examples:
+
+- T36 read-only shuffle failure: autoresearch-owned because it is an
+  experiment/null-test methodology failure.
+- Task ledger corruption, supervisor recovery defects, G2 simulator failures,
+  headless launch failures, shared loader failures, shared fixture/harness
+  failures, dependency import/runtime launch failures: operator/Codex-owned.
+
+PM/stage boundary:
+
+- PM and stage agents report shared-infrastructure blockers with exact evidence
+  and wait. Evidence should include failing command/test, path, label/session
+  id, timestamp when available, and decisive log/stderr lines.
+- Only human/Codex fixes, promotes, restarts, or relaunches operator-owned
+  surfaces. PM never touches G2, promotes patches, edits shared infrastructure,
+  or relaunches recovery for shared-infrastructure failures.
+- Non-PM agents do not write MemPalace; stage agents use readonly retrieval.
+
 Do not run concurrent `pytest` processes in the same checkout; coverage state
 can corrupt. Serialize verification or use isolated worktrees.
 

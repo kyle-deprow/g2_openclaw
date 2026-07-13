@@ -168,6 +168,59 @@ guardrails exist only to keep execution clean:
 - Crash residue from a prior iteration is not evidence and must not be reused
   as scaffolding unless a later committed experiment explicitly owns it.
 
+### Quantipy Ownership Decision Tree
+
+Use this tree before classifying a failure, editing files, relaunching work, or
+asking a stage agent to fix anything:
+
+1. Did the failure involve G2/OpenClaw orchestration, task ledger state,
+   supervisor/recovery, shared Quantipy platform/runtime/tooling, shared data
+   loaders, shared test harnesses/fixtures, dependency installation/import
+   failures, runtime launch failures, the G2 simulator, headless launch, Codex
+   routing, or OpenClaw process control?
+   - Yes: this is operator/Codex-owned shared infrastructure. Report the exact
+     blocker evidence and wait. Only the human operator or Codex fixes,
+     promotes, restarts, relaunches, or changes these surfaces.
+   - No: continue.
+2. Did the failure involve an alpha module, experiment notebook,
+   experiment-specific unit test, strategy feature, fold construction, model,
+   null test, metric calculation, alpha validation, or methodology behavior?
+   - Yes: this is autoresearch-owned experiment work, even when a dependency
+     upgrade exposed the issue. Let implementer/reviewer/fixer handle it in
+     the disposable experiment worktree.
+   - No: continue.
+3. Is the classification ambiguous or would a fix risk shared state or
+   unrelated dirty changes?
+   - Yes: fail closed as a shared-infrastructure blocker with evidence and
+     wait for human/Codex operator action.
+   - No: classify by the smallest owned surface actually changed.
+
+Examples:
+
+- T36 read-only shuffle failure in an experiment-specific null test is
+  autoresearch-owned because it is methodology/null-test behavior in the alpha
+  artifact.
+- Task ledger corruption, missed terminal task reconciliation, supervisor
+  recovery loops, G2 simulator failures, headless launch failures, Codex route
+  failures, dependency/runtime failures, shared loader regressions, and shared
+  fixture or harness failures are operator/Codex-owned shared infrastructure.
+- A dependency upgrade that exposes a bug in a strategy fold, feature pipeline,
+  model fit, null test, notebook metric, or alpha module remains
+  autoresearch-owned. A dependency upgrade that prevents the platform, loader,
+  harness, process launcher, or runtime from starting is operator/Codex-owned.
+
+PM and stage-agent conduct:
+
+- PM and stage agents report shared-infrastructure blockers with evidence and
+  wait. Evidence must include the command or test, paths, labels/session ids,
+  timestamps when available, and decisive stderr/log lines.
+- Only the human operator or Codex fixes, promotes patches, restarts services,
+  relaunches stages for shared-infrastructure recovery, or touches G2/OpenClaw
+  orchestration. The PM never touches G2, promotes patches, edits shared
+  infrastructure, or performs recovery relaunches for operator-owned issues.
+- Non-PM agents do not write MemPalace. Stage agents use readonly retrieval
+  only; the PM writes MemPalace only at the allowed final decision points.
+
 ## Setup
 
 Do once before the first iteration:
