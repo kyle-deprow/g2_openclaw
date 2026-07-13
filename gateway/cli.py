@@ -12,6 +12,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -62,6 +63,10 @@ class _OpenClawResolutionError(RuntimeError):
 
 class _OpenClawVersionError(RuntimeError):
     """Raised when the resolved OpenClaw executable does not meet requirements."""
+
+
+class _SimulatorLaunchError(RuntimeError):
+    """Raised when the simulator cannot be launched safely in this environment."""
 
 
 class _ResolvedOpenClaw:
@@ -1035,6 +1040,62 @@ def _capture_vite_port(proc: subprocess.Popen[str], default: int, timeout: float
     return default
 
 
+def _simulator_launch_command(
+    sim_cmd: list[str], *, env: dict[str, str] | None = None
+) -> list[str]:
+    """Return a simulator command that has a display backend in headless shells."""
+    launch_env = os.environ if env is None else env
+    if launch_env.get("DISPLAY") or launch_env.get("WAYLAND_DISPLAY"):
+        return sim_cmd
+    xvfb_run = shutil.which("xvfb-run")
+    if xvfb_run is None:
+        raise _SimulatorLaunchError(
+            "EvenHub simulator needs DISPLAY/WAYLAND_DISPLAY or xvfb-run in PATH"
+        )
+    return [xvfb_run, "-a", *sim_cmd]
+
+
+def _require_simulator_backend(env: dict[str, str] | None = None) -> None:
+    """Fail before launching services if the native simulator cannot render."""
+    launch_env = os.environ if env is None else env
+    if launch_env.get("DISPLAY") or launch_env.get("WAYLAND_DISPLAY"):
+        return
+    if shutil.which("xvfb-run") is None:
+        raise _SimulatorLaunchError(
+            "EvenHub simulator needs DISPLAY/WAYLAND_DISPLAY or xvfb-run in PATH"
+        )
+
+
+def _require_simulator_still_running(
+    proc: subprocess.Popen[Any], *, log_path: Path, timeout: float = 2.0
+) -> None:
+    """Catch immediate native simulator startup failures before reporting success."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        exit_code = proc.poll()
+        if exit_code is not None:
+            detail = _tail_file_text(log_path, bytes_limit=4096)
+            raise _SimulatorLaunchError(
+                f"EvenHub simulator exited during startup with code {exit_code}: "
+                f"{detail or 'no log output'}"
+            )
+        time.sleep(0.1)
+
+
+def _tail_file_text(path: Path, *, bytes_limit: int) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > bytes_limit:
+                handle.seek(size - bytes_limit)
+                handle.readline()
+            return handle.read().decode("utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise _SimulatorLaunchError(f"failed to read simulator log {path}: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # stop command
 # ---------------------------------------------------------------------------
@@ -1295,6 +1356,12 @@ def launch(
         )
         raise typer.Exit()
 
+    if not no_simulator:
+        try:
+            _require_simulator_backend()
+        except _SimulatorLaunchError as exc:
+            console.print(f"[red]✗[/red] {exc}")
+            raise typer.Exit(code=1) from exc
     if not no_openclaw:
         console.print("[bold]MemPalace health[/bold]")
         if not _check_mempalace_health():
@@ -1536,8 +1603,9 @@ def launch(
                     **os.environ,
                     "RUST_LOG": "debug",
                 }
+                launch_cmd = _simulator_launch_command(sim_cmd, env=sim_env)
                 sim_proc = subprocess.Popen(
-                    sim_cmd,
+                    launch_cmd,
                     cwd=str(_PROJECT_ROOT),
                     stdout=_sim_log,
                     stderr=_sim_log,
@@ -1545,10 +1613,14 @@ def launch(
                     start_new_session=True,
                 )
                 spawned.append(sim_proc)
+                _require_simulator_still_running(sim_proc, log_path=_log_dir / "simulator.log")
                 simulator_started = True
                 console.print("  [green]✓[/green] Simulator launched")
             except FileNotFoundError:
                 console.print("  [red]✗[/red] evenhub-simulator not found on PATH — skipping")
+            except _SimulatorLaunchError as exc:
+                console.print(f"  [red]✗[/red] {exc}")
+                raise typer.Exit(code=1) from exc
 
         # -- Summary ---------------------------------------------------------------
         rows = [
@@ -1599,3 +1671,6 @@ def launch(
 
     except KeyboardInterrupt:
         _cleanup()
+    except Exception:
+        _cleanup()
+        raise

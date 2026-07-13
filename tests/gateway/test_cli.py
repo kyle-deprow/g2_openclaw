@@ -52,8 +52,12 @@ from gateway.cli import (
     _parse_gpu_output,
     _read_openclaw_config,
     _render_env,
+    _require_simulator_backend,
+    _require_simulator_still_running,
     _ResolvedOpenClaw,
     _signal_process_group,
+    _simulator_launch_command,
+    _SimulatorLaunchError,
     app,
 )
 from typer.testing import CliRunner
@@ -1187,6 +1191,63 @@ class TestGetLocalIp:
         assert isinstance(ip, str)
         parts = ip.split(".")
         assert len(parts) == 4
+
+
+# ---------------------------------------------------------------------------
+# Simulator launch helper
+# ---------------------------------------------------------------------------
+
+
+class TestSimulatorLaunchCommand:
+    """Simulator launch command handles headless shells explicitly."""
+
+    def test_uses_direct_command_when_display_is_available(self) -> None:
+        command = ["evenhub-simulator", "http://localhost:5173"]
+
+        assert _simulator_launch_command(command, env={"DISPLAY": ":0"}) == command
+
+    def test_wraps_with_xvfb_when_headless(self) -> None:
+        command = ["evenhub-simulator", "http://localhost:5173"]
+
+        with patch("gateway.cli.shutil.which", return_value="/usr/bin/xvfb-run"):
+            wrapped = _simulator_launch_command(command, env={})
+
+        assert wrapped == ["/usr/bin/xvfb-run", "-a", *command]
+
+    def test_fails_when_headless_and_xvfb_is_missing(self) -> None:
+        command = ["evenhub-simulator", "http://localhost:5173"]
+
+        with (
+            patch("gateway.cli.shutil.which", return_value=None),
+            pytest.raises(_SimulatorLaunchError, match="DISPLAY/WAYLAND_DISPLAY"),
+        ):
+            _simulator_launch_command(command, env={})
+
+    def test_preflight_fails_before_launch_when_headless_and_xvfb_is_missing(self) -> None:
+        with (
+            patch("gateway.cli.shutil.which", return_value=None),
+            pytest.raises(_SimulatorLaunchError, match="DISPLAY/WAYLAND_DISPLAY"),
+        ):
+            _require_simulator_backend(env={})
+
+    def test_preflight_accepts_headless_when_xvfb_is_available(self) -> None:
+        with patch("gateway.cli.shutil.which", return_value="/usr/bin/xvfb-run"):
+            _require_simulator_backend(env={})
+
+    def test_immediate_simulator_exit_reports_log_tail(self, tmp_path: Path) -> None:
+        log_path = tmp_path / "simulator.log"
+        log_path.write_text("Failed to initialize GTK\n", encoding="utf-8")
+        proc = MagicMock()
+        proc.poll.return_value = 70
+
+        with pytest.raises(_SimulatorLaunchError, match="Failed to initialize GTK"):
+            _require_simulator_still_running(proc, log_path=log_path, timeout=0.1)
+
+    def test_running_simulator_survives_startup_check(self, tmp_path: Path) -> None:
+        proc = MagicMock()
+        proc.poll.return_value = None
+
+        _require_simulator_still_running(proc, log_path=tmp_path / "simulator.log", timeout=0.1)
 
 
 # ---------------------------------------------------------------------------
