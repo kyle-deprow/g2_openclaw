@@ -1124,6 +1124,60 @@ def test_fix_result_trigger_must_match_pending_verification_failure(
         advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
 
 
+def test_test_failure_persists_without_fabricating_unavailable_metrics(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    artifact = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        data_coverage=None,
+    )
+
+    parsed = VerificationResultArtifact.from_dict(artifact.to_dict(), mode=state.mode)
+    next_state = advance_state(state, parsed, policy)
+
+    assert next_state.phase is Phase.FIX_TEST
+    assert next_state.latest_verification is not None
+    assert next_state.latest_verification.data_coverage is None
+    assert next_state.latest_verification.oos_sharpe_net is None
+
+
+def test_pass_rejects_unavailable_metrics_or_coverage(
+    policy: AutoresearchPolicy,
+) -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=None,
+        data_coverage=None,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="PASS verification requires complete metrics and data_coverage",
+    ):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_verification_requires_explicit_data_coverage_key() -> None:
+    raw = _verification_result(VerificationStatus.TEST_FAILURE).to_dict()
+    raw.pop("data_coverage")
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="data_coverage must be an object or null",
+    ):
+        VerificationResultArtifact.from_dict(raw)
+
+
 def test_fix_result_requires_workspace_identity() -> None:
     with pytest.raises(AutoresearchValidationError, match="workspace_path"):
         FixResultArtifact.from_dict(

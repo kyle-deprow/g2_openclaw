@@ -307,6 +307,28 @@ def _require_float(raw: Mapping[str, object], field_name: str) -> float:
     return float(value)
 
 
+def _optional_int(raw: Mapping[str, object], field_name: str) -> int | None:
+    if field_name not in raw:
+        raise AutoresearchValidationError(f"{field_name} must be an integer or null")
+    value = raw[field_name]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AutoresearchValidationError(f"{field_name} must be an integer or null")
+    return value
+
+
+def _optional_float(raw: Mapping[str, object], field_name: str) -> float | None:
+    if field_name not in raw:
+        raise AutoresearchValidationError(f"{field_name} must be numeric or null")
+    value = raw[field_name]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise AutoresearchValidationError(f"{field_name} must be numeric or null")
+    return float(value)
+
+
 def _require_string_list(raw: Mapping[str, object], field_name: str) -> tuple[str, ...]:
     value = raw.get(field_name)
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
@@ -1093,19 +1115,19 @@ class AggregateCoverageReceipt:
 @dataclass(frozen=True, slots=True)
 class VerificationResultArtifact:
     status: VerificationStatus
-    is_walk_forward_sharpe_net: float
-    oos_sharpe_net: float
-    max_drawdown_pct: float
-    win_rate: float
-    trade_count: int
-    trades_per_day: float
-    oos_trading_days: int
+    is_walk_forward_sharpe_net: float | None
+    oos_sharpe_net: float | None
+    max_drawdown_pct: float | None
+    win_rate: float | None
+    trade_count: int | None
+    trades_per_day: float | None
+    oos_trading_days: int | None
     feature_importances_summary: str
     null_test_summary: str
     bug_signals: tuple[str, ...]
     tests_passed: bool
     commands_run: tuple[str, ...]
-    data_coverage: AggregateCoverageReceipt
+    data_coverage: AggregateCoverageReceipt | None
     infra_gate_outcome: InfraGateOutcome | None = None
     infra_rationale: str | None = None
 
@@ -1120,21 +1142,29 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError("infra_gate_outcome must be a string or null")
         if infra_rationale is not None and not isinstance(infra_rationale, str):
             raise AutoresearchValidationError("infra_rationale must be a string or null")
+        if "data_coverage" not in data:
+            raise AutoresearchValidationError("data_coverage must be an object or null")
+        data_coverage_raw = data["data_coverage"]
+        data_coverage = (
+            None
+            if data_coverage_raw is None
+            else AggregateCoverageReceipt.from_dict(data_coverage_raw)
+        )
         artifact = cls(
             status=VerificationStatus(_require_str(data, "status")),
-            is_walk_forward_sharpe_net=_require_float(data, "is_walk_forward_sharpe_net"),
-            oos_sharpe_net=_require_float(data, "oos_sharpe_net"),
-            max_drawdown_pct=_require_float(data, "max_drawdown_pct"),
-            win_rate=_require_float(data, "win_rate"),
-            trade_count=_require_int(data, "trade_count"),
-            trades_per_day=_require_float(data, "trades_per_day"),
-            oos_trading_days=_require_int(data, "oos_trading_days"),
+            is_walk_forward_sharpe_net=_optional_float(data, "is_walk_forward_sharpe_net"),
+            oos_sharpe_net=_optional_float(data, "oos_sharpe_net"),
+            max_drawdown_pct=_optional_float(data, "max_drawdown_pct"),
+            win_rate=_optional_float(data, "win_rate"),
+            trade_count=_optional_int(data, "trade_count"),
+            trades_per_day=_optional_float(data, "trades_per_day"),
+            oos_trading_days=_optional_int(data, "oos_trading_days"),
             feature_importances_summary=_require_str(data, "feature_importances_summary"),
             null_test_summary=_require_str(data, "null_test_summary"),
             bug_signals=_require_string_list(data, "bug_signals"),
             tests_passed=_require_bool(data, "tests_passed"),
             commands_run=_require_string_list(data, "commands_run"),
-            data_coverage=AggregateCoverageReceipt.from_dict(data.get("data_coverage")),
+            data_coverage=data_coverage,
             infra_gate_outcome=InfraGateOutcome(infra_gate_raw)
             if infra_gate_raw is not None
             else None,
@@ -1161,7 +1191,21 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError(
                 "TEST_FAILURE verification cannot mark tests_passed=true"
             )
-        self.data_coverage.validate()
+        if self.status is VerificationStatus.PASS and (
+            self.is_walk_forward_sharpe_net is None
+            or self.oos_sharpe_net is None
+            or self.max_drawdown_pct is None
+            or self.win_rate is None
+            or self.trade_count is None
+            or self.trades_per_day is None
+            or self.oos_trading_days is None
+            or self.data_coverage is None
+        ):
+            raise AutoresearchValidationError(
+                "PASS verification requires complete metrics and data_coverage"
+            )
+        if self.data_coverage is not None:
+            self.data_coverage.validate()
         outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
         if mode is ResearchMode.DATA_INFRA_G0 and (outcome is None or not self.infra_rationale):
             raise AutoresearchValidationError(
@@ -1173,6 +1217,7 @@ class VerificationResultArtifact:
             )
         if (
             mode is ResearchMode.ALPHA_RESEARCH
+            and self.data_coverage is not None
             and self.data_coverage.fixed_sleeve_local_data
             and self.data_coverage.cap_provenance_available
         ):
@@ -1195,7 +1240,9 @@ class VerificationResultArtifact:
             "bug_signals": list(self.bug_signals),
             "tests_passed": self.tests_passed,
             "commands_run": list(self.commands_run),
-            "data_coverage": self.data_coverage.to_dict(),
+            "data_coverage": self.data_coverage.to_dict()
+            if self.data_coverage is not None
+            else None,
             "infra_gate_outcome": self.infra_gate_outcome.value
             if self.infra_gate_outcome is not None
             else None,
@@ -2770,7 +2817,11 @@ def _validate_final_decision_artifact(
             )
         return
 
-    if latest_verification is not None and latest_verification.max_drawdown_pct >= 30.0:
+    if (
+        latest_verification is not None
+        and latest_verification.max_drawdown_pct is not None
+        and latest_verification.max_drawdown_pct >= 30.0
+    ):
         if artifact.decision is not FinalDecision.DISCARD:
             raise AutoresearchValidationError(
                 "max_drawdown_pct >= 30 requires final_decision=DISCARD"
@@ -2992,13 +3043,16 @@ def _verification_handoff_contract(
         "status TEST_FAILURE with tests_passed=false; impossible, leaky, or "
         "anomalous metrics are status BUG_SIGNAL with nonempty bug_signals; use "
         "PASS only when tests passed, bug_signals is empty, and every required "
-        "metric and coverage field is complete.\n"
-        "- Include the required data_coverage aggregate and per-symbol fields: "
-        "declared_intended_start, declared_intended_end, actual_common_start, "
-        "actual_common_end, oos_start, oos_end, expected_trading_days, "
-        "actual_trading_days, coverage_percent, missing_reason, "
-        "default_fold_count, fallback_fold_count, cap_provenance_available, and "
-        "fixed_sleeve_local_data.\n"
+        "metric and coverage field is complete. Every required JSON key must be "
+        "present; for TEST_FAILURE or BUG_SIGNAL, unavailable metrics or coverage "
+        "must be null rather than fabricated or zero-valued.\n"
+        "- When coverage is available, include the required data_coverage aggregate "
+        "and per-symbol fields: declared_intended_start, declared_intended_end, "
+        "actual_common_start, actual_common_end, oos_start, oos_end, "
+        "expected_trading_days, actual_trading_days, coverage_percent, "
+        "missing_reason, default_fold_count, fallback_fold_count, "
+        "cap_provenance_available, and fixed_sleeve_local_data. When coverage is "
+        "unavailable for TEST_FAILURE or BUG_SIGNAL, set data_coverage to null.\n"
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
         "REMEDIATION_REQUIRED. Do not use Sharpe as the gate rationale.\n\n"
@@ -3394,10 +3448,15 @@ def standardized_mempalace_kg_facts(state: AutoresearchState) -> dict[str, str]:
             "standardized MemPalace facts require the final decision's verification_result"
         )
     decision = state.final_decision
+    data_window = (
+        standardize_mempalace_kg_object("unavailable")
+        if verification.data_coverage is None
+        else _standard_data_window_object(verification.data_coverage)
+    )
     facts = {
         "decision": standardize_mempalace_kg_object(decision.decision.value),
         "research_mode": standardize_mempalace_kg_object(state.mode.value),
-        "data_window": _standard_data_window_object(verification.data_coverage),
+        "data_window": data_window,
         "reviewer_verdict": standardize_mempalace_kg_object(decision.reviewer_verdict.value),
     }
     if state.mode is ResearchMode.ALPHA_RESEARCH:

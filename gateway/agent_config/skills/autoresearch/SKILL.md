@@ -353,6 +353,10 @@ Failure classification is mandatory:
   nonempty, and include the exact command and evidence that exposed it.
 - Use `PASS` only when tests passed, `bug_signals` is empty, all required
   metrics are present, and the coverage receipt is complete.
+- Every required JSON key must still be present for failures. For `TEST_FAILURE`
+  or `BUG_SIGNAL`, unavailable metrics or coverage must be `null`; do not use
+  fabricated or zero-valued placeholders. `PASS` requires complete metrics and
+  coverage.
 
 Required metrics:
 
@@ -365,11 +369,14 @@ Required metrics:
 - Feature importances.
 - Null test results.
 
-Every verification artifact also contains a structured coverage receipt for
-each symbol plus one aggregate receipt: declared intended start/end, actual
-common start/end, OOS start/end, expected/actual trading days, coverage percent,
-missing reason, default/fallback fold counts, cap-provenance availability, and
-an explicit `fixed_sleeve_local_data` flag. Date ranges and counts must agree.
+When coverage is available, every verification artifact contains a structured
+coverage receipt for each symbol plus one aggregate receipt: declared intended
+start/end, actual common start/end, OOS start/end, expected/actual trading days,
+coverage percent, missing reason, default/fallback fold counts,
+cap-provenance availability, and an explicit `fixed_sleeve_local_data` flag.
+For `TEST_FAILURE` or `BUG_SIGNAL` when coverage is unavailable, set
+`data_coverage` to `null` instead of inventing a receipt. Date ranges and counts
+must agree whenever a receipt is supplied.
 A fixed local sleeve is permitted only when explicitly declared and may not
 claim cap-verified universe compliance.
 
