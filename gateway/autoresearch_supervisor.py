@@ -63,16 +63,34 @@ RECOVERY_MESSAGE = (
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile terminal stage "
     "outputs from task and child-session records before waiting or relaunching; "
-    "infrastructure recovery only; no research steering."
+    "infrastructure recovery only; no research steering. Do not silently switch "
+    "provider, runtime, or model. If provider/model/auth/capacity is blocked, "
+    "surface the control-plane blocker exactly and do not edit Quantipy experiment "
+    "files."
 )
+PROVIDER_BLOCKED_ALERT_REASON = "control_plane_provider_blocked"
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryErrorPattern:
+    pattern: str
+    alert_reason: str | None = None
+
+
 RECOVERY_ERROR_PATTERNS = (
-    "cli transcript compaction failed",
-    'no api key found for provider "openai"',
-    "context overflow",
-    "prompt too long",
-    "maximum context length",
-    "maximum context size",
-    "too many tokens",
+    RecoveryErrorPattern('no api key found for provider "openai"', PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("no api key found for provider", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("selected model is at capacity", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("model is at capacity", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("selected model is overloaded", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("authentication failed", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("auth rejected", PROVIDER_BLOCKED_ALERT_REASON),
+    RecoveryErrorPattern("cli transcript compaction failed"),
+    RecoveryErrorPattern("context overflow"),
+    RecoveryErrorPattern("prompt too long"),
+    RecoveryErrorPattern("maximum context length"),
+    RecoveryErrorPattern("maximum context size"),
+    RecoveryErrorPattern("too many tokens"),
 )
 EXPECTED_STAGE_AGENT_IDS: dict[Phase, tuple[str, ...]] = {
     Phase.DEBATE: (
@@ -509,6 +527,37 @@ class ReconciledRunningTasks:
 
     running_tasks: tuple[Mapping[str, object], ...]
     terminal_task_seen: bool
+    observed_error: RecoveryErrorPattern | None = None
+
+
+def _detect_recovery_error_in_text(text: str) -> RecoveryErrorPattern | None:
+    lowered = text.lower()
+    for pattern in RECOVERY_ERROR_PATTERNS:
+        if pattern.pattern in lowered:
+            return pattern
+    return None
+
+
+def _detect_recovery_error_in_object(value: object) -> RecoveryErrorPattern | None:
+    try:
+        rendered = json.dumps(value, sort_keys=True, default=str)
+    except TypeError:
+        rendered = str(value)
+    return _detect_recovery_error_in_text(rendered)
+
+
+def _preferred_recovery_error(
+    *candidates: RecoveryErrorPattern | None,
+) -> RecoveryErrorPattern | None:
+    preferred: RecoveryErrorPattern | None = None
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        if preferred is None or (
+            preferred.alert_reason is None and candidate.alert_reason is not None
+        ):
+            preferred = candidate
+    return preferred
 
 
 def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
@@ -600,6 +649,7 @@ def reconcile_relevant_running_tasks(
     """Resolve relevant task-list projections through canonical ``tasks show`` records."""
     running_tasks: list[Mapping[str, object]] = []
     terminal_task_seen = False
+    observed_error: RecoveryErrorPattern | None = None
     terminal_statuses = {
         CanonicalTaskStatus.SUCCEEDED,
         CanonicalTaskStatus.FAILED,
@@ -645,13 +695,21 @@ def reconcile_relevant_running_tasks(
             ) from exc
         if status is CanonicalTaskStatus.RUNNING:
             running_tasks.append(canonical_task)
+            observed_error = _preferred_recovery_error(
+                observed_error,
+                _detect_recovery_error_in_object(canonical_task),
+            )
         elif status in terminal_statuses:
             terminal_task_seen = True
+            observed_error = _preferred_recovery_error(
+                observed_error,
+                _detect_recovery_error_in_object(canonical_task),
+            )
         else:
             raise TaskReconciliationError(
                 f"task-show response has non-terminal non-running status: {status.value}"
             )
-    return ReconciledRunningTasks(tuple(running_tasks), terminal_task_seen)
+    return ReconciledRunningTasks(tuple(running_tasks), terminal_task_seen, observed_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -874,11 +932,18 @@ class AutoresearchSupervisor:
         if writers:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "target_repo_writer_active")
         recovery_key = f"{state.iteration}:{state.phase.value}:{probe.fingerprint}"
-        claim_or_result = self._claim_recovery(state, recovery_key)
+        detected_error = _preferred_recovery_error(
+            reconciled_tasks.observed_error,
+            self._detect_owner_error(),
+        )
+        claim_or_result = self._claim_recovery(
+            state,
+            recovery_key,
+            detected_error=detected_error,
+        )
         if isinstance(claim_or_result, SupervisorResult):
             return claim_or_result
         claim = claim_or_result
-        detected_error = self._detect_owner_error()
         try:
             self._rpc.wake(
                 executable,
@@ -1059,7 +1124,11 @@ class AutoresearchSupervisor:
         }
 
     def _claim_recovery(
-        self, state: AutoresearchState, recovery_key: str
+        self,
+        state: AutoresearchState,
+        recovery_key: str,
+        *,
+        detected_error: RecoveryErrorPattern | None,
     ) -> RecoveryClaim | SupervisorResult:
         with self._checkpoint_lock():
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
@@ -1085,7 +1154,12 @@ class AutoresearchSupervisor:
                         checkpoint, record, recovery_key, "stale_recovery_claim_owner_alive"
                     )
             if record.attempt_count >= self.config.max_recovery_attempts:
-                return self._alert(checkpoint, record, recovery_key, "recovery_attempts_exhausted")
+                return self._alert(
+                    checkpoint,
+                    record,
+                    recovery_key,
+                    self._exhausted_recovery_reason(record, detected_error),
+                )
             pid = os.getpid()
             identity = self._process_identity(pid)
             token = (
@@ -1149,6 +1223,19 @@ class AutoresearchSupervisor:
         checkpoint.save(self.config.checkpoint_path)
         return SupervisorResult(SupervisorOutcome.ALERT, reason, recovery_key)
 
+    def _exhausted_recovery_reason(
+        self, record: RecoveryRecord, detected_error: RecoveryErrorPattern | None
+    ) -> str:
+        matched_error = _preferred_recovery_error(
+            detected_error,
+            _detect_recovery_error_in_text(record.last_error)
+            if record.last_error is not None
+            else None,
+        )
+        if matched_error is not None and matched_error.alert_reason is not None:
+            return matched_error.alert_reason
+        return "recovery_attempts_exhausted"
+
     @contextmanager
     def _checkpoint_lock(self) -> Iterator[None]:
         lock_path = self.config.checkpoint_path.with_name(
@@ -1208,20 +1295,20 @@ class AutoresearchSupervisor:
             raise SupervisorError("invalid owner session store payload")
         return raw
 
-    def _detect_owner_error(self) -> str | None:
+    def _detect_owner_error(self) -> RecoveryErrorPattern | None:
         lifecycle = self._load_owner_session_store().get(AUTORESEARCH_OWNER_SESSION_KEY)
         if not isinstance(lifecycle, Mapping):
             return None
-        haystacks = [json.dumps(lifecycle, sort_keys=True)]
+        detected = _detect_recovery_error_in_object(lifecycle)
         session_file = lifecycle.get("sessionFile")
         if isinstance(session_file, str):
-            haystacks.append(self._tail_text(Path(session_file), bytes_limit=128_000))
-        for haystack in haystacks:
-            lowered = haystack.lower()
-            for pattern in RECOVERY_ERROR_PATTERNS:
-                if pattern in lowered:
-                    return pattern
-        return None
+            detected = _preferred_recovery_error(
+                detected,
+                _detect_recovery_error_in_text(
+                    self._tail_text(Path(session_file), bytes_limit=128_000)
+                ),
+            )
+        return detected
 
     def _tail_text(self, path: Path, *, bytes_limit: int) -> str:
         try:

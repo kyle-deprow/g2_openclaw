@@ -228,6 +228,26 @@ class FailingTaskShowOpenClaw(FakeOpenClaw):
         return super().__call__(command, check=check, capture_output=capture_output, text=text)
 
 
+class FailingWakeOpenClaw(FakeOpenClaw):
+    def __init__(self, *, stderr: str) -> None:
+        super().__init__()
+        self._stderr = stderr
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["gateway", "call", "agent"]:
+            del check, capture_output, text
+            self.calls.append(command)
+            return subprocess.CompletedProcess(command, 1, "", self._stderr)
+        return super().__call__(command, check=check, capture_output=capture_output, text=text)
+
+
 @dataclass(frozen=True, slots=True)
 class SupervisorEnv:
     now: float
@@ -592,6 +612,80 @@ def test_recovery_attempts_remain_bounded_after_repeated_wake_failures(
     result = supervisor.run_once()
 
     assert result.reason == "recovery_attempts_exhausted"
+
+
+def test_provider_auth_wake_failures_alert_as_control_plane_blockers(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FailingWakeOpenClaw(
+        stderr=(
+            "CLI transcript compaction failed for openai/gpt-5.6-sol: "
+            'No API key found for provider "openai"'
+        )
+    )
+    supervisor = _supervisor(supervisor_env, fake)
+
+    with pytest.raises(SupervisorError, match="No API key found"):
+        supervisor.run_once()
+    with pytest.raises(SupervisorError, match="No API key found"):
+        supervisor.run_once()
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "control_plane_provider_blocked"
+
+
+def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.DEBATE)
+    clock = [supervisor_env.now]
+    task: dict[str, object] = {
+        "taskId": "debate-1",
+        "status": "running",
+        "agentId": "debater-data",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "childSessionKey": "agent:debater-data:task-child",
+        "updatedAt": int(supervisor_env.now * 1000) - 1_000,
+    }
+    fake = FakeOpenClaw(
+        tasks=[task],
+        shown_tasks={
+            "debate-1": {
+                **task,
+                "status": "failed",
+                "error": "Selected model is at capacity",
+            }
+        },
+    )
+    supervisor = AutoresearchSupervisor(
+        SupervisorConfig(
+            state_path=supervisor_env.state_path,
+            checkpoint_path=supervisor_env.checkpoint_path,
+            autoresearch_dir=supervisor_env.state_path.parent,
+            owner_sessions_path=supervisor_env.sessions_path,
+            target_repo=supervisor_env.repo_root,
+            proc_root=supervisor_env.proc_root,
+            default_openclaw_bin=supervisor_env.executable,
+        ),
+        now=lambda: clock[0],
+        sleep=lambda _: None,
+        run_command=fake,
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 121.0
+    second = supervisor.run_once()
+    clock[0] += 121.0
+    third = supervisor.run_once()
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert third.outcome is SupervisorOutcome.ALERT
+    assert third.reason == "control_plane_provider_blocked"
 
 
 def test_active_target_writer_process_suppresses_owner_wake(

@@ -41,7 +41,10 @@ uv run python -m gateway launch
 ```
 
 Steps 4 and 6 are idempotent. Re-run the push step after any config change or
-key rotation.
+key rotation. The push step copies OpenClaw's local Codex OAuth profile from
+the `main` agent into each managed autoresearch agent's own auth store; this is
+required because some OpenClaw Codex compaction paths read the per-agent SQLite
+store directly.
 The `launch` command handles `NODE_OPTIONS` for the OpenClaw daemon automatically.
 
 ## How It Works
@@ -101,7 +104,8 @@ these settings into the local config with `jq`, preserving everything else.
 
 ### 1. Install the Codex plugin and authenticate OpenAI/Codex
 
-The default provider is `codex`, which uses OpenAI auth managed by OpenClaw:
+The default provider is `codex`, which uses OpenAI/Codex OAuth auth managed by
+OpenClaw, not an OpenAI API key:
 
 ```bash
 openclaw plugins install @openclaw/codex
@@ -109,7 +113,10 @@ openclaw models auth login --provider openai
 ```
 
 No OpenAI key is stored in this repo. The login populates the local OpenClaw
-auth store.
+auth store. `scripts/push-openclaw-config.sh` then syncs the portable auth
+profile rows into the managed `autoresearch-pm` and stage-agent stores so
+agent-scoped Codex turns and transcript compaction can use the same OAuth
+profile.
 
 ### 2. Install/upgrade required MemPalace MCP
 
@@ -233,7 +240,7 @@ control commands communicate with OpenClaw there directly.
 
 | Setting | Value |
 |---|---|
-| Auth | `openclaw models auth login --provider openai` |
+| Auth | `openclaw models auth login --provider openai`, then push config to sync the OAuth profile into managed agent stores |
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
 | Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
 | Default stage model | `openai/gpt-5.4` |

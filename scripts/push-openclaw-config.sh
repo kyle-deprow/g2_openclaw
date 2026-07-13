@@ -6,9 +6,12 @@
 #
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
+#   - sqlite3 CLI
 #   - OpenClaw CLI exactly 2026.6.11
 #   - MemPalace installed with 'make mempalace-install'
-#   - For codex: run 'openclaw models auth login --provider openai'
+#   - For codex: run 'openclaw models auth login --provider openai' for main;
+#     this script syncs that OpenClaw-managed Codex OAuth profile into managed
+#     agent auth stores.
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
 set -euo pipefail
@@ -79,6 +82,84 @@ RUNTIME_CAP_ENV_LINES=(
   'Environment="VECLIB_MAXIMUM_THREADS=1"'
   'Environment="PYTHONFAULTHANDLER=1"'
 )
+
+quote_sqlite_literal() {
+  local value="$1"
+  printf "'%s'" "${value//\'/\'\'}"
+}
+
+sync_managed_agent_codex_auth() {
+  local source_agent_dir="${OPENCLAW_PUSH_HOME}/agents/main/agent"
+  local source_db="${source_agent_dir}/openclaw-agent.sqlite"
+  local source_profiles="${source_agent_dir}/auth-profiles.json"
+
+  if [[ ! -f "${source_db}" ]]; then
+    echo "ERROR: Missing main OpenClaw auth store ${source_db}." >&2
+    echo "       Run: ${OPENCLAW_BIN_RESOLVED} models auth login --provider openai" >&2
+    exit 1
+  fi
+  if ! sqlite3 "${source_db}" \
+    "select 1 from auth_profile_store where store_json like '%\"provider\":\"openai\"%' limit 1;" \
+    | grep -qx '1'; then
+    echo "ERROR: Main OpenClaw auth store has no OpenAI/Codex OAuth profile." >&2
+    echo "       Run: ${OPENCLAW_BIN_RESOLVED} models auth login --provider openai" >&2
+    exit 1
+  fi
+
+  mapfile -t OPENAI_AGENT_IDS < <(jq -r '
+    .agents.list[]?
+    | select((.model.primary // "") | startswith("openai/"))
+    | .id
+  ' "${REPO_CONFIG}")
+  if [[ "${#OPENAI_AGENT_IDS[@]}" -eq 0 ]]; then
+    echo "ERROR: No OpenAI/Codex-managed agents found in ${REPO_CONFIG}" >&2
+    exit 1
+  fi
+
+  echo "Syncing OpenClaw-managed Codex OAuth profile to ${#OPENAI_AGENT_IDS[@]} agent auth stores:"
+  local source_db_sql
+  source_db_sql="$(quote_sqlite_literal "${source_db}")"
+  for AGENT_ID in "${OPENAI_AGENT_IDS[@]}"; do
+    local agent_dir="${OPENCLAW_PUSH_HOME}/agents/${AGENT_ID}/agent"
+    local target_db="${agent_dir}/openclaw-agent.sqlite"
+    if [[ "${AGENT_ID}" == "main" ]]; then
+      echo "  ${AGENT_ID} → ${target_db} (source)"
+      continue
+    fi
+    mkdir -p "${agent_dir}"
+    if [[ -f "${source_profiles}" ]]; then
+      cp "${source_profiles}" "${agent_dir}/auth-profiles.json"
+      chmod 0600 "${agent_dir}/auth-profiles.json"
+    fi
+    sqlite3 "${target_db}" <<SQL
+ATTACH DATABASE ${source_db_sql} AS source_auth;
+BEGIN IMMEDIATE;
+CREATE TABLE IF NOT EXISTS auth_profile_store (
+  store_key TEXT NOT NULL PRIMARY KEY,
+  store_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_profile_state (
+  state_key TEXT NOT NULL PRIMARY KEY,
+  state_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+DELETE FROM auth_profile_store;
+INSERT INTO auth_profile_store SELECT store_key, store_json, updated_at FROM source_auth.auth_profile_store;
+DELETE FROM auth_profile_state;
+INSERT INTO auth_profile_state SELECT state_key, state_json, updated_at FROM source_auth.auth_profile_state;
+COMMIT;
+SQL
+    chmod 0600 "${target_db}"
+    if ! sqlite3 "${target_db}" \
+      "select 1 from auth_profile_store where store_json like '%\"provider\":\"openai\"%' limit 1;" \
+      | grep -qx '1'; then
+      echo "ERROR: Failed to sync OpenAI/Codex auth into ${target_db}" >&2
+      exit 1
+    fi
+    echo "  ${AGENT_ID} → ${target_db}"
+  done
+}
 
 build_mempalace_mutation_policy_ids_json() {
   local tool_names_json
@@ -894,6 +975,10 @@ PRELOAD_DST="${OPENCLAW_PUSH_HOME}/azure-api-version-preload.cjs"
 if [[ -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
+fi
+
+if [[ "${PROVIDER}" == "codex" ]]; then
+  sync_managed_agent_codex_auth
 fi
 
 # ── Validate ─────────────────────────────────────────────────────────────────

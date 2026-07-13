@@ -32,6 +32,7 @@ openclaw plugins install @openclaw/codex
 openclaw models auth login --provider openai
 openclaw models list --provider openai
 openclaw models status --plain
+bash scripts/push-openclaw-config.sh
 ```
 
 For headless machines, use:
@@ -83,6 +84,14 @@ or model.
 
 - OpenClaw manages its own OpenAI OAuth profile; it no longer imports auth from
   `~/.codex`.
+- The repo uses Codex OAuth, not `OPENAI_API_KEY`. OpenClaw still labels these
+  model refs as `openai/*` because that is the provider namespace for Codex
+  app-server models.
+- Agent-scoped Codex compaction can read the selected agent's local
+  `openclaw-agent.sqlite` auth tables directly. After logging in on `main`,
+  run `bash scripts/push-openclaw-config.sh`; the push script syncs the
+  portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
+  store. Do not replace this with API-key fallback.
 - Prefer canonical model refs like `openai/gpt-5.4` or `openai/gpt-5.5` in
   OpenClaw config. Legacy Codex-prefixed refs should be repaired with
   `openclaw doctor --fix`.
