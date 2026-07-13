@@ -24,12 +24,14 @@ class FakeOpenClaw:
         *,
         tasks: list[dict[str, object]] | None = None,
         task_snapshots: list[list[dict[str, object]]] | None = None,
+        shown_tasks: dict[str, dict[str, object]] | None = None,
         cancel_response: dict[str, object] | None = None,
         abort_response: dict[str, object] | None = None,
         events: list[str] | None = None,
     ) -> None:
         self.tasks = tasks or []
         self.task_snapshots = task_snapshots
+        self.shown_tasks = shown_tasks
         self.cancel_response = cancel_response
         self.abort_response = abort_response
         self.task_list_calls = 0
@@ -65,6 +67,25 @@ class FakeOpenClaw:
                 tasks = self.task_snapshots[index]
             self.task_list_calls += 1
             return subprocess.CompletedProcess(command, 0, json.dumps({"tasks": tasks}), "")
+        if (
+            len(command) == 5
+            and command[1] == "tasks"
+            and command[2] == "show"
+            and command[4] == "--json"
+        ):
+            task_id = command[3]
+            if self.shown_tasks is not None:
+                task = self.shown_tasks[task_id]
+            else:
+                snapshots = self.task_snapshots or [self.tasks]
+                task = next(
+                    task
+                    for snapshot in snapshots
+                    for task in snapshot
+                    if task.get("taskId") == task_id
+                ).copy()
+                task.setdefault("status", "running")
+            return subprocess.CompletedProcess(command, 0, json.dumps(task), "")
         if command[1:4] == ["gateway", "call", "agent"]:
             return subprocess.CompletedProcess(
                 command,
@@ -511,6 +532,51 @@ def test_control_rejects_disagreeing_legacy_and_canonical_task_ids(
         AutoresearchControl(
             config, run_command=fake, service_controller=FakeSupervisorService([])
         ).stop()
+
+
+def test_status_excludes_a_lost_canonical_task_projection(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    task: dict[str, object] = {
+        "taskId": "owned",
+        "id": "owned",
+        "agentId": "reviewer",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "childSessionKey": "agent:reviewer:task-child",
+    }
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "lost"}})
+
+    status = AutoresearchControl(
+        config,
+        run_command=fake,
+        service_controller=FakeSupervisorService([], active=True),
+    ).status()
+
+    assert status.tasks == ()
+
+
+def test_stop_does_not_cancel_a_lost_canonical_task_projection(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    task: dict[str, object] = {
+        "taskId": "owned",
+        "id": "owned",
+        "agentId": "reviewer",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "childSessionKey": "agent:reviewer:task-child",
+    }
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "lost"}})
+
+    result = AutoresearchControl(
+        config, run_command=fake, service_controller=FakeSupervisorService([])
+    ).stop()
+
+    assert result.cancelled_task_ids == ()
+    assert not any(call[1:4] == ["gateway", "call", "tasks.cancel"] for call in fake.calls)
 
 
 def test_control_source_contains_no_g2_dev_surface() -> None:

@@ -389,6 +389,19 @@ class OpenClawRPC:
                 f"OpenClaw task cancellation response is malformed or mismatched: {task_id}"
             )
 
+    def show_task(
+        self,
+        executable: Path,
+        *,
+        task_id: str,
+        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+    ) -> Mapping[str, object]:
+        return self.run_json(
+            executable,
+            ["tasks", "show", task_id, "--json"],
+            shutdown_requested=shutdown_requested,
+        )
+
     def _resolve_executable(self) -> Path:
         override = os.environ.get("OPENCLAW_BIN")
         candidate = Path(override).expanduser() if override else self._default_openclaw_bin
@@ -425,6 +438,30 @@ class TaskProvenance(StrEnum):
     OWNER_TURN = "owner_turn"
     STAGE_CHILD = "stage_child"
     AMBIGUOUS = "ambiguous"
+
+
+class CanonicalTaskStatus(StrEnum):
+    """OpenClaw 2026.6.11 task-record statuses accepted by this supervisor."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+    LOST = "lost"
+
+
+class TaskReconciliationError(SupervisorError):
+    """A task-list projection cannot be proven to match a canonical task record."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciledRunningTasks:
+    """Canonical running tasks and evidence that a projected task has ended."""
+
+    running_tasks: tuple[Mapping[str, object], ...]
+    terminal_task_seen: bool
 
 
 def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
@@ -476,6 +513,98 @@ def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
     ):
         return TaskProvenance.AMBIGUOUS
     return TaskProvenance.STAGE_CHILD
+
+
+def _task_id_for_reconciliation(task: Mapping[str, object], *, source: str) -> str:
+    task_id = task.get("taskId")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise TaskReconciliationError(f"{source} task is missing a non-empty taskId")
+    legacy_id = task.get("id")
+    if legacy_id is not None and (
+        not isinstance(legacy_id, str) or not legacy_id.strip() or legacy_id != task_id
+    ):
+        raise TaskReconciliationError(f"{source} task id must agree with canonical taskId")
+    return task_id
+
+
+def _task_provenance_fingerprint(task: Mapping[str, object]) -> tuple[object, ...]:
+    provenance = classify_autoresearch_task(task)
+    if provenance not in {TaskProvenance.OWNER_TURN, TaskProvenance.STAGE_CHILD}:
+        raise TaskReconciliationError("canonical task has invalid autoresearch provenance")
+    requester_key = task.get("requesterSessionKey")
+    if requester_key is None:
+        requester_key = task.get("sessionKey")
+    return (
+        provenance,
+        task.get("agentId"),
+        requester_key,
+        task.get("ownerKey"),
+        task.get("childSessionKey"),
+    )
+
+
+def reconcile_relevant_running_tasks(
+    rpc: OpenClawRPC,
+    executable: Path,
+    tasks: Sequence[Mapping[str, object]],
+    *,
+    shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+) -> ReconciledRunningTasks:
+    """Resolve relevant task-list projections through canonical ``tasks show`` records."""
+    running_tasks: list[Mapping[str, object]] = []
+    terminal_task_seen = False
+    terminal_statuses = {
+        CanonicalTaskStatus.SUCCEEDED,
+        CanonicalTaskStatus.FAILED,
+        CanonicalTaskStatus.TIMED_OUT,
+        CanonicalTaskStatus.CANCELLED,
+        CanonicalTaskStatus.LOST,
+    }
+    for projected_task in tasks:
+        provenance = classify_autoresearch_task(projected_task)
+        if provenance is TaskProvenance.UNRELATED:
+            continue
+        if provenance is TaskProvenance.AMBIGUOUS:
+            raise TaskReconciliationError(
+                "task-list projection has ambiguous autoresearch provenance"
+            )
+        task_id = _task_id_for_reconciliation(projected_task, source="task-list")
+        try:
+            canonical_task = rpc.show_task(
+                executable,
+                task_id=task_id,
+                shutdown_requested=shutdown_requested,
+            )
+        except SupervisorError as exc:
+            raise TaskReconciliationError(
+                f"task-show command failed during reconciliation: {task_id}"
+            ) from exc
+        if _task_id_for_reconciliation(canonical_task, source="task-show") != task_id:
+            raise TaskReconciliationError("task-show taskId does not match task-list projection")
+        if _task_provenance_fingerprint(canonical_task) != _task_provenance_fingerprint(
+            projected_task
+        ):
+            raise TaskReconciliationError(
+                "task-show provenance does not match task-list projection"
+            )
+        status_raw = canonical_task.get("status")
+        if not isinstance(status_raw, str):
+            raise TaskReconciliationError("task-show response is missing a string status")
+        try:
+            status = CanonicalTaskStatus(status_raw)
+        except ValueError as exc:
+            raise TaskReconciliationError(
+                f"task-show response has unsupported status: {status_raw}"
+            ) from exc
+        if status is CanonicalTaskStatus.RUNNING:
+            running_tasks.append(canonical_task)
+        elif status in terminal_statuses:
+            terminal_task_seen = True
+        else:
+            raise TaskReconciliationError(
+                f"task-show response has non-terminal non-running status: {status.value}"
+            )
+    return ReconciledRunningTasks(tuple(running_tasks), terminal_task_seen)
 
 
 @dataclass(frozen=True, slots=True)
@@ -673,17 +802,25 @@ class AutoresearchSupervisor:
         state = self._load_state()
         if self._is_terminal_state(state):
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
-        running_tasks = self._running_tasks(executable, shutdown_requested=shutdown_requested)
-        activity = self._activity_guard(state, running_tasks)
+        try:
+            reconciled_tasks = self._reconciled_running_tasks(
+                executable, shutdown_requested=shutdown_requested
+            )
+        except TaskReconciliationError:
+            return SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
+        activity = self._activity_guard(state, reconciled_tasks)
         if activity is not None:
             return activity
         probe = self._build_state_probe(state)
         if self._now() - probe.latest_update_ts < self.config.grace_period_seconds:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
-        activity = self._activity_guard(
-            state,
-            self._running_tasks(executable, shutdown_requested=shutdown_requested),
-        )
+        try:
+            reconciled_tasks = self._reconciled_running_tasks(
+                executable, shutdown_requested=shutdown_requested
+            )
+        except TaskReconciliationError:
+            return SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
+        activity = self._activity_guard(state, reconciled_tasks)
         if activity is not None:
             return activity
         writers = self._active_target_repo_writer_processes(state)
@@ -787,7 +924,19 @@ class AutoresearchSupervisor:
         raw_tasks = payload.get("tasks")
         if not isinstance(raw_tasks, Sequence) or isinstance(raw_tasks, str | bytes):
             raise SupervisorError("OpenClaw tasks JSON missing tasks array")
+        if not all(isinstance(task, Mapping) for task in raw_tasks):
+            raise SupervisorError("OpenClaw tasks JSON contains a non-object task")
         return [dict(task) for task in raw_tasks if isinstance(task, Mapping)]
+
+    def _reconciled_running_tasks(
+        self, executable: Path, *, shutdown_requested: ShutdownRequested
+    ) -> ReconciledRunningTasks:
+        return reconcile_relevant_running_tasks(
+            self._rpc,
+            executable,
+            self._running_tasks(executable, shutdown_requested=shutdown_requested),
+            shutdown_requested=shutdown_requested,
+        )
 
     def _expected_stage_agent_ids(self, state: AutoresearchState) -> tuple[str, ...]:
         if state.phase is Phase.SETUP_CONTEXT:
@@ -795,8 +944,9 @@ class AutoresearchSupervisor:
         return EXPECTED_STAGE_AGENT_IDS[state.phase]
 
     def _activity_guard(
-        self, state: AutoresearchState, running_tasks: Sequence[Mapping[str, object]]
+        self, state: AutoresearchState, reconciled_tasks: ReconciledRunningTasks
     ) -> SupervisorResult | None:
+        running_tasks = reconciled_tasks.running_tasks
         expected = [
             task
             for task in running_tasks
@@ -812,9 +962,10 @@ class AutoresearchSupervisor:
             ):
                 return SupervisorResult(SupervisorOutcome.ALERT, "stale_expected_stage_task")
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_expected_stage_task")
-        lifecycle_result = self._owner_lifecycle_guard(state)
-        if lifecycle_result is not None:
-            return lifecycle_result
+        if not reconciled_tasks.terminal_task_seen:
+            lifecycle_result = self._owner_lifecycle_guard(state)
+            if lifecycle_result is not None:
+                return lifecycle_result
         fresh = [
             task
             for task in running_tasks

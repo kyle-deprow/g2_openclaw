@@ -24,6 +24,7 @@ from gateway.autoresearch_supervisor import (
     TaskProvenance,
     classify_autoresearch_task,
     make_idempotency_key,
+    reconcile_relevant_running_tasks,
 )
 
 
@@ -185,9 +186,7 @@ class AutoresearchControl:
     def status(self) -> ControlStatus:
         executable = self._rpc.require_binary()
         state = self._load_state()
-        tasks = tuple(
-            self._task_status(task) for task in self._owned_tasks(self._running_tasks(executable))
-        )
+        tasks = tuple(self._task_status(task) for task in self._owned_running_tasks(executable))
         lifecycle_status = self._owner_lifecycle_status()
         return ControlStatus(
             owner_agent_id=AUTORESEARCH_OWNER_AGENT_ID,
@@ -202,11 +201,11 @@ class AutoresearchControl:
     def stop(self) -> StopResult:
         executable = self._rpc.require_binary()
         # Validate the live task schema and ownership before disabling recovery.
-        self._owned_tasks(self._running_tasks(executable))
+        self._owned_running_tasks(executable)
         self._service_controller.stop()
         # Re-read after the supervisor is stopped so a task launched during the
         # preflight window is included in cancellation.
-        owned_tasks = self._owned_tasks(self._running_tasks(executable))
+        owned_tasks = self._owned_running_tasks(executable)
         task_ids = tuple(self._task_id(task) for task in owned_tasks)
         for task_id in task_ids:
             try:
@@ -263,6 +262,14 @@ class AutoresearchControl:
             self._task_id(task)
             owned.append(task)
         return tuple(owned)
+
+    def _owned_running_tasks(self, executable: Path) -> tuple[Mapping[str, object], ...]:
+        owned_tasks = self._owned_tasks(self._running_tasks(executable))
+        try:
+            reconciled = reconcile_relevant_running_tasks(self._rpc, executable, owned_tasks)
+        except SupervisorError as exc:
+            raise ControlError(f"task reconciliation failed: {exc}") from exc
+        return reconciled.running_tasks
 
     def _task_id(self, task: Mapping[str, object]) -> str:
         task_id = task.get("taskId")

@@ -18,12 +18,14 @@ from gateway.autoresearch_runner import (
     ResearchMode,
 )
 from gateway.autoresearch_supervisor import (
+    AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     AutoresearchSupervisor,
     ShutdownInterrupted,
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
+    SupervisorResult,
     main,
 )
 
@@ -79,8 +81,14 @@ def _make_stale(paths: list[Path], *, now: float) -> None:
 
 
 class FakeOpenClaw:
-    def __init__(self, *, tasks: list[dict[str, object]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        tasks: list[dict[str, object]] | None = None,
+        shown_tasks: dict[str, dict[str, object]] | None = None,
+    ) -> None:
         self.tasks = tasks or []
+        self.shown_tasks = shown_tasks
         self.calls: list[list[str]] = []
         self.agent_payload: dict[str, object] = {
             "status": "accepted",
@@ -102,6 +110,19 @@ class FakeOpenClaw:
             return subprocess.CompletedProcess(command, 0, "OpenClaw 2026.6.11", "")
         if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
             return subprocess.CompletedProcess(command, 0, json.dumps({"tasks": self.tasks}), "")
+        if (
+            len(command) == 5
+            and command[1] == "tasks"
+            and command[2] == "show"
+            and command[4] == "--json"
+        ):
+            task_id = command[3]
+            if self.shown_tasks is not None:
+                task = self.shown_tasks[task_id]
+            else:
+                task = next(task for task in self.tasks if task.get("taskId") == task_id).copy()
+                task.setdefault("status", "running")
+            return subprocess.CompletedProcess(command, 0, json.dumps(task), "")
         if command[1:4] == ["gateway", "call", "agent"]:
             return subprocess.CompletedProcess(command, 0, json.dumps(self.agent_payload), "")
         raise AssertionError(f"unexpected command: {command}")
@@ -126,6 +147,38 @@ class FailingTaskListOpenClaw(FakeOpenClaw):
             if self._before_failure is not None:
                 self._before_failure()
             return subprocess.CompletedProcess(command, 1, "", "poll failed")
+        return super().__call__(command, check=check, capture_output=capture_output, text=text)
+
+
+class FailingTaskShowOpenClaw(FakeOpenClaw):
+    def __init__(
+        self,
+        *,
+        tasks: list[dict[str, object]],
+        before_failure: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(tasks=tasks)
+        self._before_failure = before_failure
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        if (
+            len(command) == 5
+            and command[1] == "tasks"
+            and command[2] == "show"
+            and command[4] == "--json"
+        ):
+            del check, capture_output, text
+            self.calls.append(command)
+            if self._before_failure is not None:
+                self._before_failure()
+            return subprocess.CompletedProcess(command, 1, "", "task missing")
         return super().__call__(command, check=check, capture_output=capture_output, text=text)
 
 
@@ -409,10 +462,10 @@ def test_task_with_disagreeing_raw_and_summary_requester_keys_is_ambiguous(
 
     result = _supervisor(supervisor_env, fake).run_once()
 
-    assert result.reason == "recovery_message_sent"
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
 
 
-def test_stage_task_with_ambiguous_child_agent_is_ignored(
+def test_stage_task_with_ambiguous_child_agent_fails_closed(
     supervisor_env: SupervisorEnv,
 ) -> None:
     _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
@@ -431,7 +484,7 @@ def test_stage_task_with_ambiguous_child_agent_is_ignored(
 
     result = _supervisor(supervisor_env, fake).run_once()
 
-    assert result.reason == "recovery_message_sent"
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
 
 
 def test_recovery_attempts_remain_bounded_after_repeated_wake_failures(
@@ -490,6 +543,155 @@ def test_active_writer_in_the_verified_implementation_workspace_suppresses_owner
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "target_repo_writer_active"
+
+
+def test_lost_task_projection_with_active_persisted_writer_suppresses_recovery(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    workspace = supervisor_env.repo_root.parent / "quantipy-worktree"
+    workspace.mkdir()
+    _write_state(
+        supervisor_env.state_path,
+        implementation_result=_implementation_result(workspace),
+    )
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(supervisor_env.now * 1000) - 600_000,
+                    "lastInteractionAt": int(supervisor_env.now * 1000) - 600_000,
+                    "startedAt": int(supervisor_env.now * 1000) - 700_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    process_dir = supervisor_env.proc_root / "1234"
+    process_dir.mkdir()
+    (process_dir / "cmdline").write_bytes(b"uv\x00run\x00pytest\x00")
+    (process_dir / "cwd").symlink_to(workspace, target_is_directory=True)
+    task: dict[str, object] = {
+        "taskId": "owner-turn",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+    }
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owner-turn": {**task, "status": "lost"}})
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "target_repo_writer_active"
+    assert any(call[1:3] == ["tasks", "show"] for call in fake.calls)
+
+
+def test_lost_task_projection_permits_recovery_after_persisted_writer_exits(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(supervisor_env.now * 1000) - 600_000,
+                    "lastInteractionAt": int(supervisor_env.now * 1000) - 600_000,
+                    "startedAt": int(supervisor_env.now * 1000) - 700_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    task: dict[str, object] = {
+        "taskId": "owner-turn",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+    }
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owner-turn": {**task, "status": "lost"}})
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+
+
+def test_mismatched_canonical_task_show_fails_closed_with_an_alert(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    task: dict[str, object] = {
+        "taskId": "owner-turn",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+    }
+    fake = FakeOpenClaw(
+        tasks=[task],
+        shown_tasks={"owner-turn": {**task, "taskId": "different", "status": "running"}},
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
+
+
+def test_task_show_failure_during_reconciliation_returns_a_controlled_alert(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    task: dict[str, object] = {
+        "taskId": "owner-turn",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+    }
+    fake = FailingTaskShowOpenClaw(tasks=[task])
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
+
+
+def test_task_show_failure_preserves_shutdown_interruption(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    stop_requested = False
+
+    def request_shutdown() -> None:
+        nonlocal stop_requested
+        stop_requested = True
+
+    task: dict[str, object] = {
+        "taskId": "owner-turn",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+    }
+    fake = FailingTaskShowOpenClaw(tasks=[task], before_failure=request_shutdown)
+
+    with pytest.raises(ShutdownInterrupted):
+        _supervisor(supervisor_env, fake).run_once(shutdown_requested=lambda: stop_requested)
+
+
+def test_supervisor_rejects_non_object_task_list_entries(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    fake.tasks = [
+        {
+            "taskId": "owner-turn",
+            "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+            "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        },
+        "corrupted-task-entry",  # type: ignore[list-item]
+    ]
+
+    with pytest.raises(SupervisorError, match="non-object task"):
+        _supervisor(supervisor_env, fake).run_once()
 
 
 def test_supervisor_source_contains_no_g2_dev_surface() -> None:
