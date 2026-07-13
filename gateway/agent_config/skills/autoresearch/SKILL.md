@@ -334,6 +334,26 @@ Implementation requirements:
 The PM extracts metrics. Use task output if sufficient; otherwise run focused
 read-only commands in the target repo.
 
+Every verification attempt must end with a structured JSON
+`verification_result` artifact, including attempts where tests fail or the run
+uncovers a bug signal. The PM must write the JSON artifact and run
+`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance
+/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>` before
+any prose completion, status report, or handoff. A prose-only verification
+completion is invalid and must be treated as no artifact.
+
+Failure classification is mandatory:
+
+- If any test or verification command exits nonzero or reports a failed test,
+  set `status` to `TEST_FAILURE`, set `tests_passed` to `false`, and include
+  the exact command in `commands_run` plus the decisive failure evidence in the
+  artifact summaries.
+- If commands ran but metrics are impossible, leaky, internally inconsistent,
+  or match a bug signal, set `status` to `BUG_SIGNAL`, keep `bug_signals`
+  nonempty, and include the exact command and evidence that exposed it.
+- Use `PASS` only when tests passed, `bug_signals` is empty, all required
+  metrics are present, and the coverage receipt is complete.
+
 Required metrics:
 
 - IS walk-forward Sharpe net.
@@ -364,7 +384,8 @@ per-symbol folds.
 
 In `DATA_INFRA_G0`, record `infra_gate_outcome` (`GATE_PASSED` or
 `REMEDIATION_REQUIRED`) plus `infra_rationale`; do not use Sharpe to decide
-whether the infrastructure repair succeeded.
+whether the infrastructure repair succeeded. Persist the gate rationale in the
+`verification_result` before reporting the stage outcome.
 
 Bug signals:
 

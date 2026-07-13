@@ -10,7 +10,7 @@ import os
 import subprocess
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,6 +28,7 @@ from gateway.autoresearch_supervisor import (
     DEFAULT_OWNER_SESSIONS_PATH,
     DEFAULT_STATE_PATH,
     WAKE_MESSAGE,
+    LegacyCommandRunner,
     OpenClawRPC,
     SupervisorError,
     TaskProvenance,
@@ -58,6 +59,12 @@ class SupervisorServiceController(Protocol):
     def is_active(self) -> bool: ...
 
 
+def _run_default_command(
+    command: list[str], *, check: bool, capture_output: bool, text: bool
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, check=check, capture_output=capture_output, text=text)
+
+
 class SystemdSupervisorServiceController:
     """Runs only explicit systemd user-service lifecycle commands."""
 
@@ -66,7 +73,7 @@ class SystemdSupervisorServiceController:
         *,
         command_prefix: tuple[str, ...],
         service_name: str,
-        run_command: Callable[..., subprocess.CompletedProcess[str]],
+        run_command: LegacyCommandRunner,
     ) -> None:
         if not command_prefix:
             raise ControlError("supervisor service command prefix must not be empty")
@@ -151,15 +158,18 @@ class AutoresearchControl:
         self,
         config: ControlConfig | None = None,
         *,
-        run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        run_command: LegacyCommandRunner | None = None,
         service_controller: SupervisorServiceController | None = None,
     ) -> None:
         self.config = config or ControlConfig()
         self._rpc = OpenClawRPC(self.config.default_openclaw_bin, run_command=run_command)
+        service_run_command: LegacyCommandRunner = (
+            _run_default_command if run_command is None else run_command
+        )
         self._service_controller = service_controller or SystemdSupervisorServiceController(
             command_prefix=self.config.service_control_command,
             service_name=self.config.supervisor_service_name,
-            run_command=run_command,
+            run_command=service_run_command,
         )
 
     def wake(self) -> str:

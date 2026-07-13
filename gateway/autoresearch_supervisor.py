@@ -19,7 +19,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Protocol
 
 from gateway.autoresearch_runner import (
     DEFAULT_QUANTIPY_ROOT,
@@ -50,6 +50,9 @@ DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
+DEFAULT_OPENCLAW_COMMAND_TIMEOUT_SECONDS = 45.0
+DEFAULT_OPENCLAW_COMMAND_POLL_INTERVAL_SECONDS = 0.05
+DEFAULT_OPENCLAW_SHUTDOWN_KILL_GRACE_SECONDS = 0.2
 READ_ONLY_TASK_LIST_ATTEMPTS = 3
 READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
 REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
@@ -68,7 +71,23 @@ RECOVERY_MESSAGE = (
     "surface the control-plane blocker exactly and do not edit Quantipy experiment "
     "files."
 )
+MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
+    "Recover Quantipy autoresearch from a stale verification phase with an "
+    "implementation_result but no verification_history. First run exactly: "
+    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json. This is artifact recovery, "
+    "not research steering. Do not fabricate verification_result metrics, commands, "
+    "coverage, status, or provenance from prose. Inspect the authoritative state, "
+    "implementation_result workspace, task records, and child-session transcripts. "
+    "If existing machine-verifiable terminal outputs prove a valid verification_result, "
+    "persist only that exact artifact through the control-plane path. Otherwise rerun "
+    "the verification stage from the authoritative state. Do not edit Quantipy experiment "
+    "files outside the normal verification/fix workflow. If provider/model/auth/capacity "
+    "is blocked, surface the control-plane blocker exactly and do not silently switch "
+    "provider, runtime, or model."
+)
 PROVIDER_BLOCKED_ALERT_REASON = "control_plane_provider_blocked"
+MISSING_VERIFICATION_ARTIFACT_REASON = "missing_verification_artifact"
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +168,87 @@ def _shutdown_not_requested() -> bool:
     return False
 
 
+class LegacyCommandRunner(Protocol):
+    """Compatibility boundary for existing subprocess.run-shaped test doubles."""
+
+    def __call__(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+
+class CommandRunner(Protocol):
+    """Shutdown-aware command runner used by the production OpenClaw RPC boundary."""
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        start_new_session: bool,
+        shutdown_requested: ShutdownRequested,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyCommandRunnerAdapter:
+    """Adapts old callables without leaking new keyword arguments into fakes."""
+
+    run_command: LegacyCommandRunner
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        start_new_session: bool,
+        shutdown_requested: ShutdownRequested,
+    ) -> subprocess.CompletedProcess[str]:
+        del shutdown_requested, timeout, start_new_session
+        return self.run_command(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessGroupCommandRunner:
+    """Production runner that owns timeout and shutdown cleanup for a process group."""
+
+    def run(
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        start_new_session: bool,
+        shutdown_requested: ShutdownRequested,
+    ) -> subprocess.CompletedProcess[str]:
+        return _run_command_with_process_group_timeout(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            start_new_session=start_new_session,
+            shutdown_requested=shutdown_requested,
+        )
+
+
 def _raise_command_failure(
     detail: str,
     *,
@@ -164,6 +264,64 @@ def _raise_command_failure(
     if cause is None:
         raise error_type(detail)
     raise error_type(detail) from cause
+
+
+def _run_command_with_process_group_timeout(
+    command: list[str],
+    *,
+    check: bool,
+    capture_output: bool,
+    text: bool,
+    timeout: float,
+    start_new_session: bool,
+    shutdown_requested: ShutdownRequested = _shutdown_not_requested,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command in its own session and kill the whole process group on timeout."""
+    if check:
+        raise ValueError("OpenClawRPC always handles non-zero command exits explicitly")
+    if not capture_output or not text or not start_new_session:
+        raise ValueError("OpenClawRPC requires captured text output in a new session")
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+    def kill_and_collect(signum: int, *, grace_seconds: float | None = None) -> tuple[str, str]:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signum)
+        if grace_seconds is not None:
+            try:
+                return process.communicate(timeout=grace_seconds)
+            except subprocess.TimeoutExpired:
+                pass
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        return process.communicate()
+
+    deadline = time.monotonic() + timeout
+    while True:
+        if shutdown_requested():
+            kill_and_collect(
+                signal.SIGTERM,
+                grace_seconds=DEFAULT_OPENCLAW_SHUTDOWN_KILL_GRACE_SECONDS,
+            )
+            raise ShutdownInterrupted(
+                "OpenClaw command interrupted during shutdown; process group was killed"
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            stdout, stderr = kill_and_collect(signal.SIGKILL)
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        try:
+            stdout, stderr = process.communicate(
+                timeout=min(DEFAULT_OPENCLAW_COMMAND_POLL_INTERVAL_SECONDS, remaining)
+            )
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            continue
 
 
 def _require_finite_positive(value: object, *, field_name: str) -> float:
@@ -209,28 +367,44 @@ class OpenClawRPC:
         self,
         default_openclaw_bin: Path,
         *,
-        run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        run_command: LegacyCommandRunner | None = None,
+        runner: CommandRunner | None = None,
+        command_timeout_seconds: float = DEFAULT_OPENCLAW_COMMAND_TIMEOUT_SECONDS,
     ) -> None:
+        if run_command is not None and runner is not None:
+            raise ValueError("provide either run_command or runner, not both")
         self._default_openclaw_bin = default_openclaw_bin
-        self._run_command = run_command
+        if runner is not None:
+            selected_runner: CommandRunner = runner
+        elif run_command is not None:
+            selected_runner = LegacyCommandRunnerAdapter(run_command)
+        else:
+            selected_runner = ProcessGroupCommandRunner()
+        self._runner = selected_runner
+        self._command_timeout_seconds = _require_finite_positive(
+            command_timeout_seconds, field_name="command_timeout_seconds"
+        )
 
     def require_binary(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
     ) -> Path:
         executable = self._resolve_executable()
         try:
-            result = self._run_command(
-                [str(executable), "--version"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
+            result = self._run([str(executable), "--version"], shutdown_requested)
         except OSError as exc:
             _raise_command_failure(
                 f"failed to execute OpenClaw at {executable}: {exc}",
                 shutdown_requested=shutdown_requested,
                 cause=exc,
                 error_type=OpenClawResolutionError,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _raise_command_failure(
+                "OpenClaw version check timed out after "
+                f"{self._command_timeout_seconds:g}s for {executable}; process group was killed",
+                shutdown_requested=shutdown_requested,
+                cause=exc,
+                error_type=OpenClawVersionError,
             )
         output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
         version = self._parse_version(output)
@@ -257,10 +431,18 @@ class OpenClawRPC:
     ) -> Mapping[str, object]:
         command = [str(executable), *args]
         try:
-            result = self._run_command(command, check=False, capture_output=True, text=True)
+            result = self._run(command, shutdown_requested)
         except OSError as exc:
             _raise_command_failure(
                 f"failed to execute {' '.join(command)}: {exc}",
+                shutdown_requested=shutdown_requested,
+                cause=exc,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _raise_command_failure(
+                "OpenClaw command timed out after "
+                f"{self._command_timeout_seconds:g}s ({' '.join(command)}); "
+                "process group was killed",
                 shutdown_requested=shutdown_requested,
                 cause=exc,
             )
@@ -281,6 +463,19 @@ class OpenClawRPC:
                 f"OpenClaw command returned non-object JSON ({' '.join(command)})"
             )
         return parsed
+
+    def _run(
+        self, command: list[str], shutdown_requested: ShutdownRequested
+    ) -> subprocess.CompletedProcess[str]:
+        return self._runner.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=self._command_timeout_seconds,
+            start_new_session=True,
+            shutdown_requested=shutdown_requested,
+        )
 
     def list_running_tasks(
         self,
@@ -755,6 +950,13 @@ class SupervisorResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryPlan:
+    reason: str
+    message: str
+    key_prefix: str
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryClaim:
     recovery_key: str
     token: str
@@ -893,12 +1095,17 @@ class AutoresearchSupervisor:
         *,
         now: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
-        run_command: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        run_command: LegacyCommandRunner | None = None,
+        runner: CommandRunner | None = None,
     ) -> None:
         self.config = config or SupervisorConfig()
         self._now = now
         self._sleep = sleep
-        self._rpc = OpenClawRPC(self.config.default_openclaw_bin, run_command=run_command)
+        self._rpc = OpenClawRPC(
+            self.config.default_openclaw_bin,
+            run_command=run_command,
+            runner=runner,
+        )
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -931,7 +1138,10 @@ class AutoresearchSupervisor:
         writers = self._active_target_repo_writer_processes(state)
         if writers:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "target_repo_writer_active")
-        recovery_key = f"{state.iteration}:{state.phase.value}:{probe.fingerprint}"
+        recovery_plan = self._recovery_plan(state)
+        recovery_key = (
+            f"{recovery_plan.key_prefix}:{state.iteration}:{state.phase.value}:{probe.fingerprint}"
+        )
         detected_error = _preferred_recovery_error(
             reconciled_tasks.observed_error,
             self._detect_owner_error(),
@@ -947,7 +1157,7 @@ class AutoresearchSupervisor:
         try:
             self._rpc.wake(
                 executable,
-                message=RECOVERY_MESSAGE,
+                message=recovery_plan.message,
                 idempotency_key=make_idempotency_key(
                     purpose="recovery",
                     material=f"{recovery_key}\nclaim={claim.token}",
@@ -958,15 +1168,36 @@ class AutoresearchSupervisor:
             self._fail_recovery_claim(claim, exc)
             raise
         self._complete_recovery_claim(claim)
-        reason = (
-            "owner_session_error_recovery"
-            if detected_error is not None
-            else "recovery_message_sent"
-        )
         _structured_log(
-            logging.WARNING, "supervisor.nudged", recovery_key=recovery_key, reason=reason
+            logging.WARNING,
+            "supervisor.nudged",
+            recovery_key=recovery_key,
+            reason=recovery_plan.reason,
+            detected_error=detected_error.pattern if detected_error is not None else None,
         )
-        return SupervisorResult(SupervisorOutcome.NUDGED, reason, recovery_key, sent_wake=True)
+        return SupervisorResult(
+            SupervisorOutcome.NUDGED,
+            recovery_plan.reason,
+            recovery_key,
+            sent_wake=True,
+        )
+
+    def _recovery_plan(self, state: AutoresearchState) -> RecoveryPlan:
+        if (
+            state.phase is Phase.VERIFICATION
+            and state.implementation_result is not None
+            and not state.verification_history
+        ):
+            return RecoveryPlan(
+                reason=MISSING_VERIFICATION_ARTIFACT_REASON,
+                message=MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
+                key_prefix=MISSING_VERIFICATION_ARTIFACT_REASON,
+            )
+        return RecoveryPlan(
+            reason="recovery_message_sent",
+            message=RECOVERY_MESSAGE,
+            key_prefix="stale_state",
+        )
 
     def run_forever(self) -> int:
         stop_requested = False

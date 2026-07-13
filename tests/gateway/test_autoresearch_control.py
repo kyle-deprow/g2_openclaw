@@ -85,9 +85,16 @@ class FakeOpenClaw:
         self.events = events
 
     def __call__(
-        self, command: list[str], *, check: bool, capture_output: bool, text: bool
+        self,
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float | None = None,
+        start_new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text
+        del check, capture_output, text, timeout, start_new_session
         self.calls.append(command)
         event_names = {
             "agent": "rpc:wake",

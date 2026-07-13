@@ -2896,6 +2896,10 @@ def _phase_instruction(
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
+    verification_handoff_contract = _verification_handoff_contract(
+        phase,
+        expected_artifact_type,
+    )
     mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
     operator_precondition_instruction = _operator_precondition_decision_instruction(
         state,
@@ -2909,6 +2913,7 @@ def _phase_instruction(
         f"Phase instruction:\n{instructions[phase]}\n\n"
         f"{mode_contract}"
         f"{workspace_contract}"
+        f"{verification_handoff_contract}"
         f"{mempalace_fact_instruction}"
         f"{operator_precondition_instruction}"
         f"Artifact contract:\n{contract}\n\n"
@@ -2958,6 +2963,45 @@ def _mode_contract(state: AutoresearchState) -> str:
         "- This is a strategy experiment. Burned theory families require materially "
         "new evidence. A fixed local sleeve must be disclosed and cannot claim "
         "cap-verified compliance.\n\n"
+    )
+
+
+def _verification_handoff_contract(
+    phase: Phase,
+    expected_artifact_type: ArtifactType,
+) -> str:
+    if (
+        phase is not Phase.VERIFICATION
+        or expected_artifact_type is not ArtifactType.VERIFICATION_RESULT
+    ):
+        return ""
+    return (
+        "Verification handoff contract:\n"
+        "- Every verification attempt must terminate by writing a structured JSON "
+        "verification_result artifact and advancing it with "
+        "`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance "
+        "/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>` "
+        "before any prose completion or status report. A prose-only verification "
+        "completion is invalid.\n"
+        "- This applies to failing tests and partial runs: do not stop after "
+        "describing a failure. Persist and advance the JSON artifact with exact "
+        "commands in commands_run and decisive evidence in the metric fields, "
+        "null_test_summary, bug_signals, data_coverage, and infra_rationale when "
+        "applicable.\n"
+        "- Classify failures mechanically: any nonzero or failed test command is "
+        "status TEST_FAILURE with tests_passed=false; impossible, leaky, or "
+        "anomalous metrics are status BUG_SIGNAL with nonempty bug_signals; use "
+        "PASS only when tests passed, bug_signals is empty, and every required "
+        "metric and coverage field is complete.\n"
+        "- Include the required data_coverage aggregate and per-symbol fields: "
+        "declared_intended_start, declared_intended_end, actual_common_start, "
+        "actual_common_end, oos_start, oos_end, expected_trading_days, "
+        "actual_trading_days, coverage_percent, missing_reason, "
+        "default_fold_count, fallback_fold_count, cap_provenance_available, and "
+        "fixed_sleeve_local_data.\n"
+        "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
+        "explaining why the infrastructure gate is GATE_PASSED or "
+        "REMEDIATION_REQUIRED. Do not use Sharpe as the gate rationale.\n\n"
     )
 
 

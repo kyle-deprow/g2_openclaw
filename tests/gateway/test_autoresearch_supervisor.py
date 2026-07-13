@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
+import shlex
 import signal
 import subprocess
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +25,7 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     AutoresearchSupervisor,
+    OpenClawRPC,
     ShutdownInterrupted,
     SupervisorConfig,
     SupervisorError,
@@ -93,11 +98,12 @@ def _write_state(
     path: Path,
     *,
     phase: Phase = Phase.VERIFICATION,
+    iteration: int = 4,
     implementation_result: ImplementationResultArtifact | None = None,
 ) -> None:
     state = AutoresearchState(
         phase=phase,
-        iteration=4,
+        iteration=iteration,
         mode=ResearchMode.ALPHA_RESEARCH,
         implementation_result=implementation_result,
     )
@@ -117,6 +123,44 @@ def _write_git_markers(repo_root: Path) -> list[Path]:
 def _make_stale(paths: list[Path], *, now: float) -> None:
     for path in paths:
         os.utime(path, (now - 600.0, now - 600.0))
+
+
+def _process_is_running(pid: int) -> bool:
+    stat_path = Path("/proc") / str(pid) / "stat"
+    try:
+        raw = stat_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raw = ""
+    closing = raw.rfind(")")
+    fields = raw[closing + 1 :].split() if closing >= 0 else []
+    if fields and fields[0] == "Z":
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _eventually_not_running(pid: int) -> bool:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not _process_is_running(pid):
+            return True
+        time.sleep(0.02)
+    return not _process_is_running(pid)
+
+
+def _wait_for_paths(*paths: Path, timeout_seconds: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in paths):
+            return
+        time.sleep(0.01)
+    missing = ", ".join(str(path) for path in paths if not path.exists())
+    raise AssertionError(f"timed out waiting for paths: {missing}")
 
 
 class FakeOpenClaw:
@@ -145,8 +189,10 @@ class FakeOpenClaw:
         check: bool,
         capture_output: bool,
         text: bool,
+        timeout: float | None = None,
+        start_new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text
+        del check, capture_output, text, timeout, start_new_session
         self.calls.append(command)
         if command[-1] == "--version":
             return subprocess.CompletedProcess(command, 0, "OpenClaw 2026.6.11", "")
@@ -186,14 +232,23 @@ class FailingTaskListOpenClaw(FakeOpenClaw):
         check: bool,
         capture_output: bool,
         text: bool,
+        timeout: float | None = None,
+        start_new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
-            del check, capture_output, text
+            del check, capture_output, text, timeout, start_new_session
             self.calls.append(command)
             if self._before_failure is not None:
                 self._before_failure()
             return subprocess.CompletedProcess(command, 1, "", "poll failed")
-        return super().__call__(command, check=check, capture_output=capture_output, text=text)
+        return super().__call__(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            start_new_session=start_new_session,
+        )
 
 
 class FailingTaskShowOpenClaw(FakeOpenClaw):
@@ -213,6 +268,8 @@ class FailingTaskShowOpenClaw(FakeOpenClaw):
         check: bool,
         capture_output: bool,
         text: bool,
+        timeout: float | None = None,
+        start_new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if (
             len(command) == 5
@@ -220,12 +277,19 @@ class FailingTaskShowOpenClaw(FakeOpenClaw):
             and command[2] == "show"
             and command[4] == "--json"
         ):
-            del check, capture_output, text
+            del check, capture_output, text, timeout, start_new_session
             self.calls.append(command)
             if self._before_failure is not None:
                 self._before_failure()
             return subprocess.CompletedProcess(command, 1, "", "task missing")
-        return super().__call__(command, check=check, capture_output=capture_output, text=text)
+        return super().__call__(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            start_new_session=start_new_session,
+        )
 
 
 class FailingWakeOpenClaw(FakeOpenClaw):
@@ -240,12 +304,21 @@ class FailingWakeOpenClaw(FakeOpenClaw):
         check: bool,
         capture_output: bool,
         text: bool,
+        timeout: float | None = None,
+        start_new_session: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if command[1:4] == ["gateway", "call", "agent"]:
-            del check, capture_output, text
+            del check, capture_output, text, timeout, start_new_session
             self.calls.append(command)
             return subprocess.CompletedProcess(command, 1, "", self._stderr)
-        return super().__call__(command, check=check, capture_output=capture_output, text=text)
+        return super().__call__(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            start_new_session=start_new_session,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +378,175 @@ def _supervisor(env: SupervisorEnv, fake: FakeOpenClaw) -> AutoresearchSuperviso
     )
 
 
+def test_openclaw_rpc_fails_closed_when_a_command_times_out(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    calls: list[tuple[list[str], float | None, bool]] = []
+
+    def run_command(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        calls.append((command, None, False))
+        raise subprocess.TimeoutExpired(command, 0.25)
+
+    rpc = OpenClawRPC(
+        supervisor_env.executable,
+        run_command=run_command,
+        command_timeout_seconds=0.25,
+    )
+
+    with pytest.raises(SupervisorError, match=r"timed out after 0\.25s.*process group was killed"):
+        rpc.run_json(supervisor_env.executable, ["tasks", "list", "--json"])
+
+    assert calls == [([str(supervisor_env.executable), "tasks", "list", "--json"], None, False)]
+
+
+def test_openclaw_rpc_preserves_shutdown_interruption_when_timeout_follows_signal(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    def run_command(
+        command: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        raise subprocess.TimeoutExpired(command, 0.25)
+
+    rpc = OpenClawRPC(
+        supervisor_env.executable,
+        run_command=run_command,
+        command_timeout_seconds=0.25,
+    )
+
+    with pytest.raises(ShutdownInterrupted, match=r"timed out after 0\.25s"):
+        rpc.run_json(
+            supervisor_env.executable,
+            ["tasks", "list", "--json"],
+            shutdown_requested=lambda: True,
+        )
+
+
+def test_openclaw_rpc_timeout_kills_shell_wrapper_and_descendant_processes(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "openclaw"
+    wrapper_pid_path = tmp_path / "wrapper.pid"
+    child_pid_path = tmp_path / "child.pid"
+    child_ready_path = tmp_path / "child.ready"
+    executable.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"echo $$ > {shlex.quote(str(wrapper_pid_path))}",
+                (
+                    'sh -c \'echo $$ > "$1"; touch "$2"; sleep 60\' sh '
+                    f"{shlex.quote(str(child_pid_path))} "
+                    f"{shlex.quote(str(child_ready_path))} &"
+                ),
+                f"while [ ! -f {shlex.quote(str(child_ready_path))} ]; do sleep 0.01; done",
+                "sleep 60",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    rpc = OpenClawRPC(executable, command_timeout_seconds=1.0)
+    result_queue: queue.Queue[BaseException | None] = queue.Queue()
+
+    def run_rpc() -> None:
+        try:
+            rpc.run_json(executable, ["tasks", "list", "--json"])
+        except BaseException as exc:
+            result_queue.put(exc)
+        else:
+            result_queue.put(None)
+
+    thread = threading.Thread(target=run_rpc, daemon=True)
+    thread.start()
+    _wait_for_paths(wrapper_pid_path, child_pid_path, child_ready_path)
+
+    try:
+        result = result_queue.get(timeout=2.0)
+    except queue.Empty as exc:
+        raise AssertionError("OpenClaw RPC did not time out") from exc
+    thread.join(timeout=1.0)
+
+    wrapper_pid = int(wrapper_pid_path.read_text(encoding="utf-8"))
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert isinstance(result, SupervisorError)
+    assert "timed out after 1s" in str(result)
+    assert "process group was killed" in str(result)
+    assert _eventually_not_running(wrapper_pid)
+    assert _eventually_not_running(child_pid)
+
+
+def test_openclaw_rpc_shutdown_kills_process_group_without_waiting_for_timeout(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "openclaw"
+    wrapper_pid_path = tmp_path / "wrapper.pid"
+    child_pid_path = tmp_path / "child.pid"
+    child_ready_path = tmp_path / "child.ready"
+    executable.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                f"echo $$ > {shlex.quote(str(wrapper_pid_path))}",
+                (
+                    'sh -c \'trap "" TERM; echo $$ > "$1"; touch "$2"; sleep 60\' sh '
+                    f"{shlex.quote(str(child_pid_path))} "
+                    f"{shlex.quote(str(child_ready_path))} &"
+                ),
+                f"while [ ! -f {shlex.quote(str(child_ready_path))} ]; do sleep 0.01; done",
+                "sleep 60",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    shutdown_requested = threading.Event()
+    rpc = OpenClawRPC(executable, command_timeout_seconds=45.0)
+    result_queue: queue.Queue[BaseException | None] = queue.Queue()
+
+    def run_rpc() -> None:
+        try:
+            rpc.run_json(
+                executable,
+                ["tasks", "list", "--json"],
+                shutdown_requested=shutdown_requested.is_set,
+            )
+        except BaseException as exc:
+            result_queue.put(exc)
+        else:
+            result_queue.put(None)
+
+    thread = threading.Thread(target=run_rpc, daemon=True)
+    started_at = time.monotonic()
+    thread.start()
+    _wait_for_paths(wrapper_pid_path, child_pid_path, child_ready_path)
+    shutdown_requested.set()
+    try:
+        result = result_queue.get(timeout=2.0)
+    except queue.Empty as exc:
+        raise AssertionError("OpenClaw RPC did not react to shutdown promptly") from exc
+    elapsed = time.monotonic() - started_at
+    thread.join(timeout=1.0)
+
+    wrapper_pid = int(wrapper_pid_path.read_text(encoding="utf-8"))
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    assert isinstance(result, ShutdownInterrupted)
+    assert elapsed < 2.0
+    assert _eventually_not_running(wrapper_pid)
+    assert _eventually_not_running(child_pid)
+
+
 def _prepare_stale_state(env: SupervisorEnv, *, phase: Phase = Phase.VERIFICATION) -> None:
     _write_state(env.state_path, phase=phase)
     _make_stale([env.state_path, *env.marker_paths], now=env.now)
@@ -346,6 +588,31 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert payload["message"]
     assert payload["idempotencyKey"].startswith("autoresearch-")
     assert "--expect-final" not in command
+
+
+def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    workspace = supervisor_env.repo_root.parent / "quantipy-worktree"
+    workspace.mkdir()
+    _write_state(
+        supervisor_env.state_path,
+        iteration=30,
+        implementation_result=_implementation_result(workspace),
+    )
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    command = fake.calls[-1]
+    payload = json.loads(command[6])
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert result.reason == "missing_verification_artifact"
+    assert result.recovery_key is not None
+    assert result.recovery_key.startswith("missing_verification_artifact:30:verification:")
+    assert "implementation_result but no verification_history" in payload["message"]
+    assert "Do not fabricate verification_result metrics" in payload["message"]
 
 
 def test_supervisor_normalizes_operator_precondition_implementation_state(
@@ -463,7 +730,38 @@ def test_error_detection_reads_only_the_dedicated_owner_transcript(
 
     result = _supervisor(supervisor_env, fake).run_once()
 
-    assert result.reason == "owner_session_error_recovery"
+    assert result.reason == "recovery_message_sent"
+
+
+def test_missing_verification_reason_is_not_masked_by_owner_session_error(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    workspace = supervisor_env.repo_root.parent / "quantipy-worktree"
+    workspace.mkdir()
+    _write_state(
+        supervisor_env.state_path,
+        iteration=30,
+        implementation_result=_implementation_result(workspace),
+    )
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    owner_transcript = supervisor_env.sessions_path.parent / "owner.jsonl"
+    owner_transcript.write_text("context overflow", encoding="utf-8")
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "idle",
+                    "sessionFile": str(owner_transcript),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "missing_verification_artifact"
 
 
 def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(

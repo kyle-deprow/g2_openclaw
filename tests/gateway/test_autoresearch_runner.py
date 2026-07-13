@@ -1794,6 +1794,88 @@ def test_verification_prompt_uses_recorded_workspace(
     assert "implementation_result.commit_sha" in prompt
 
 
+def test_verification_prompt_requires_terminal_structured_artifact_persistence(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert "Verification handoff contract" in prompt
+    assert "structured JSON verification_result artifact" in prompt
+    assert (
+        "uv run gateway-cli autoresearch-advance "
+        "/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>"
+    ) in prompt
+    assert "before any prose completion or status report" in prompt
+    assert "prose-only verification completion is invalid" in prompt
+    assert "Persist and advance the JSON artifact" in prompt
+    assert "commands_run" in prompt
+
+
+def test_verification_prompt_requires_failure_classification_and_coverage_fields(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert "status TEST_FAILURE with tests_passed=false" in prompt
+    assert "status BUG_SIGNAL with nonempty bug_signals" in prompt
+    assert "PASS only when tests passed" in prompt
+    for field_name in (
+        "declared_intended_start",
+        "declared_intended_end",
+        "actual_common_start",
+        "actual_common_end",
+        "oos_start",
+        "oos_end",
+        "expected_trading_days",
+        "actual_trading_days",
+        "coverage_percent",
+        "missing_reason",
+        "default_fold_count",
+        "fallback_fold_count",
+        "cap_provenance_available",
+        "fixed_sleeve_local_data",
+    ):
+        assert field_name in prompt
+
+
+def test_g0_verification_prompt_requires_infra_gate_rationale(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    prompt = next_action(state, policy, receipts).prompt_text
+
+    assert "Mode contract: DATA_INFRA_G0" in prompt
+    assert "infra_gate_outcome" in prompt
+    assert "infra_rationale" in prompt
+    assert "GATE_PASSED" in prompt
+    assert "REMEDIATION_REQUIRED" in prompt
+    assert "Do not use Sharpe as the gate rationale" in prompt
+
+
 def _load_config() -> dict[str, object]:
     raw: object = json.loads(DEFAULT_OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
     return cast(dict[str, object], raw)
