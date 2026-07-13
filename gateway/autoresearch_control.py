@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
+import os
 import subprocess
+import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
@@ -38,6 +43,9 @@ class ControlError(SupervisorError):
 
 DEFAULT_SUPERVISOR_SERVICE_NAME = "quantipy-autoresearch-supervisor.service"
 DEFAULT_SERVICE_CONTROL_COMMAND = ("systemctl", "--user")
+DEFAULT_WAKE_LOCK_PATH = Path.home() / ".openclaw" / "autoresearch" / "control-wake.lock"
+DEFAULT_WAKE_CLAIM_PATH = Path.home() / ".openclaw" / "autoresearch" / "control-wake.json"
+DEFAULT_WAKE_CLAIM_TTL_SECONDS = 300.0
 
 
 class SupervisorServiceController(Protocol):
@@ -107,6 +115,9 @@ class ControlConfig:
     default_openclaw_bin: Path = DEFAULT_OPENCLAW_BIN
     supervisor_service_name: str = DEFAULT_SUPERVISOR_SERVICE_NAME
     service_control_command: tuple[str, ...] = DEFAULT_SERVICE_CONTROL_COMMAND
+    wake_lock_path: Path = DEFAULT_WAKE_LOCK_PATH
+    wake_claim_path: Path = DEFAULT_WAKE_CLAIM_PATH
+    wake_claim_ttl_seconds: float = DEFAULT_WAKE_CLAIM_TTL_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,40 +163,156 @@ class AutoresearchControl:
         )
 
     def wake(self) -> str:
-        executable = self._rpc.require_binary()
-        state_material = self._state_material()
-        invocation_nonce = uuid.uuid4().hex
-        run_id = self._rpc.wake(
-            executable,
-            message=WAKE_MESSAGE,
-            idempotency_key=make_idempotency_key(
-                purpose="manual-wake",
-                material=f"{state_material}\ninvocation={invocation_nonce}",
-            ),
-        )
+        with self._wake_lock():
+            self._reject_recent_wake_claim()
+            executable = self._rpc.require_binary()
+            owned_tasks = self._owned_running_tasks(executable)
+            if owned_tasks:
+                task_ids = ", ".join(self._task_id(task) for task in owned_tasks)
+                raise ControlError(
+                    f"cannot wake autoresearch while owned task is already running: {task_ids}"
+                )
+            state_material = self._state_material()
+            state_digest = hashlib.sha256(state_material.encode("utf-8")).hexdigest()
+            self._write_wake_claim(run_id=None, state_digest=state_digest)
+            invocation_nonce = uuid.uuid4().hex
+            try:
+                run_id = self._rpc.wake(
+                    executable,
+                    message=WAKE_MESSAGE,
+                    idempotency_key=make_idempotency_key(
+                        purpose="manual-wake",
+                        material=f"{state_material}\ninvocation={invocation_nonce}",
+                    ),
+                )
+            except SupervisorError:
+                raise
+            try:
+                self._service_controller.ensure_started()
+                self._write_wake_claim(run_id=run_id, state_digest=state_digest)
+            except SupervisorError as exc:
+                rollback_errors: list[str] = []
+                try:
+                    self._service_controller.stop()
+                except SupervisorError as rollback_error:
+                    rollback_errors.append(f"supervisor stop: {rollback_error}")
+                try:
+                    self._rpc.abort_owner_run(executable, run_id=run_id)
+                except SupervisorError as rollback_error:
+                    rollback_errors.append(f"owner run abort: {rollback_error}")
+                try:
+                    self._rpc.delete_owner_session(executable)
+                except SupervisorError as rollback_error:
+                    rollback_errors.append(f"owner session delete: {rollback_error}")
+                if rollback_errors:
+                    details = "; ".join(rollback_errors)
+                    raise ControlError(
+                        f"supervisor start failed; rollback failed: {details}"
+                    ) from exc
+                self._clear_wake_claim()
+                raise ControlError(
+                    "supervisor start failed; accepted owner wake was rolled back"
+                ) from exc
+            return run_id
+
+    def _reject_recent_wake_claim(self) -> None:
+        claim_path = self.config.wake_claim_path.expanduser()
         try:
-            self._service_controller.ensure_started()
-        except SupervisorError as exc:
-            rollback_errors: list[str] = []
-            try:
-                self._service_controller.stop()
-            except SupervisorError as rollback_error:
-                rollback_errors.append(f"supervisor stop: {rollback_error}")
-            try:
-                self._rpc.abort_owner_run(executable, run_id=run_id)
-            except SupervisorError as rollback_error:
-                rollback_errors.append(f"owner run abort: {rollback_error}")
-            try:
-                self._rpc.delete_owner_session(executable)
-            except SupervisorError as rollback_error:
-                rollback_errors.append(f"owner session delete: {rollback_error}")
-            if rollback_errors:
-                details = "; ".join(rollback_errors)
-                raise ControlError(f"supervisor start failed; rollback failed: {details}") from exc
+            claim = json.loads(claim_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ControlError(f"failed to read autoresearch wake claim: {exc}") from exc
+        except json.JSONDecodeError as exc:
             raise ControlError(
-                "supervisor start failed; accepted owner wake was rolled back"
+                f"recent autoresearch wake claim blocks duplicate wake: {claim_path}"
             ) from exc
-        return run_id
+        if not isinstance(claim, Mapping):
+            raise ControlError(
+                f"recent autoresearch wake claim blocks duplicate wake: {claim_path}"
+            )
+        raw_created_at = claim.get("created_at")
+        if not isinstance(raw_created_at, int | float) or isinstance(raw_created_at, bool):
+            raise ControlError(
+                f"recent autoresearch wake claim blocks duplicate wake: {claim_path}"
+            )
+        now = time.time()
+        if raw_created_at > now + self.config.wake_claim_ttl_seconds:
+            age_seconds = self.config.wake_claim_ttl_seconds
+        else:
+            age_seconds = now - float(raw_created_at)
+        if age_seconds >= self.config.wake_claim_ttl_seconds:
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise ControlError(
+                    f"failed to remove stale autoresearch wake claim: {exc}"
+                ) from exc
+            return
+        run_id = claim.get("run_id") if isinstance(claim, Mapping) else None
+        suffix = f" ({run_id})" if isinstance(run_id, str) and run_id else ""
+        raise ControlError(
+            f"recent autoresearch wake claim blocks duplicate wake{suffix}: {claim_path}"
+        )
+
+    def _write_wake_claim(self, *, run_id: str | None, state_digest: str) -> None:
+        claim_path = self.config.wake_claim_path.expanduser()
+        payload = {
+            "created_at": time.time(),
+            "owner_session_key": AUTORESEARCH_OWNER_SESSION_KEY,
+            "run_id": run_id,
+            "state_sha256": state_digest,
+        }
+        temp_path = claim_path.with_name(f".{claim_path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            claim_path.parent.mkdir(parents=True, exist_ok=True)
+            with temp_path.open("w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, claim_path)
+            directory_fd = os.open(claim_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            raise ControlError(f"failed to write autoresearch wake claim: {exc}") from exc
+
+    def _clear_wake_claim(self) -> None:
+        try:
+            self.config.wake_claim_path.expanduser().unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ControlError(f"failed to clear autoresearch wake claim: {exc}") from exc
+
+    @contextmanager
+    def _wake_lock(self) -> Iterator[None]:
+        lock_path = self.config.wake_lock_path.expanduser()
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as handle:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    raise ControlError(
+                        f"autoresearch wake is already in progress: {lock_path}"
+                    ) from exc
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            raise ControlError(f"failed to acquire autoresearch wake lock: {exc}") from exc
 
     def status(self) -> ControlStatus:
         executable = self._rpc.require_binary()
@@ -203,24 +330,26 @@ class AutoresearchControl:
         )
 
     def stop(self) -> StopResult:
-        executable = self._rpc.require_binary()
-        # Validate the live task schema and ownership before disabling recovery.
-        self._owned_running_tasks(executable)
-        self._service_controller.stop()
-        # Re-read after the supervisor is stopped so a task launched during the
-        # preflight window is included in cancellation.
-        owned_tasks = self._owned_running_tasks(executable)
-        task_ids = tuple(self._task_id(task) for task in owned_tasks)
-        for task_id in task_ids:
+        with self._wake_lock():
+            executable = self._rpc.require_binary()
+            # Validate the live task schema and ownership before disabling recovery.
+            self._owned_running_tasks(executable)
+            self._service_controller.stop()
+            # Re-read after the supervisor is stopped so a task launched during the
+            # preflight window is included in cancellation.
+            owned_tasks = self._owned_running_tasks(executable)
+            task_ids = tuple(self._task_id(task) for task in owned_tasks)
+            for task_id in task_ids:
+                try:
+                    self._rpc.cancel_task(executable, task_id=task_id)
+                except SupervisorError as exc:
+                    raise ControlError(f"failed to cancel owned task {task_id}: {exc}") from exc
             try:
-                self._rpc.cancel_task(executable, task_id=task_id)
+                deleted_session = self._rpc.delete_owner_session(executable)
             except SupervisorError as exc:
-                raise ControlError(f"failed to cancel owned task {task_id}: {exc}") from exc
-        try:
-            deleted_session = self._rpc.delete_owner_session(executable)
-        except SupervisorError as exc:
-            raise ControlError(f"failed to delete autoresearch owner session: {exc}") from exc
-        return StopResult(cancelled_task_ids=task_ids, deleted_session=deleted_session)
+                raise ControlError(f"failed to delete autoresearch owner session: {exc}") from exc
+            self._clear_wake_claim()
+            return StopResult(cancelled_task_ids=task_ids, deleted_session=deleted_session)
 
     def _state_material(self) -> str:
         try:
