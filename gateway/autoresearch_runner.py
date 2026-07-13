@@ -9,10 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
+import shutil
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -84,6 +87,15 @@ class ResearchMode(StrEnum):
 
     ALPHA_RESEARCH = "alpha_research"
     DATA_INFRA_G0 = "data_infra_g0"
+
+
+class ComputeTarget(StrEnum):
+    """Execution target selected by an experiment without prescribing it."""
+
+    NONE = "none"
+    CPU = "cpu"
+    GPU = "gpu"
+    MIXED = "mixed"
 
 
 class ConsensusStatus(StrEnum):
@@ -451,6 +463,231 @@ class StageAgentPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class ComputeCapabilitySnapshot:
+    """Read-only host capability probe supplied to research stages."""
+
+    cpu_model: str
+    logical_cpus: int
+    memory_gib: float | None
+    target_python_available: bool
+    gpu_available: bool
+    gpu_name: str | None
+    gpu_vram_gib: float | None
+    cuda_runtime_available: bool
+    installed_gpu_packages: tuple[str, ...]
+    probe_errors: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "cpu_model": self.cpu_model,
+            "logical_cpus": self.logical_cpus,
+            "memory_gib": self.memory_gib,
+            "target_python_available": self.target_python_available,
+            "gpu_available": self.gpu_available,
+            "gpu_name": self.gpu_name,
+            "gpu_vram_gib": self.gpu_vram_gib,
+            "cuda_runtime_available": self.cuda_runtime_available,
+            "installed_gpu_packages": list(self.installed_gpu_packages),
+            "probe_errors": list(self.probe_errors),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeFitArtifact:
+    """Machine-readable experiment compute choice and its justification."""
+
+    target: ComputeTarget
+    rationale: str
+    required_dependencies: tuple[str, ...]
+    benchmark_plan: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ComputeFitArtifact:
+        data = _ensure_mapping(raw, label="compute_fit")
+        artifact = cls(
+            target=ComputeTarget(_require_str(data, "target")),
+            rationale=_require_str(data, "rationale"),
+            required_dependencies=_require_string_list(data, "required_dependencies"),
+            benchmark_plan=_require_str(data, "benchmark_plan"),
+        )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        if not self.rationale.strip():
+            raise AutoresearchValidationError("compute_fit rationale must be non-empty")
+        if not self.benchmark_plan.strip():
+            raise AutoresearchValidationError("compute_fit benchmark_plan must be non-empty")
+        if self.target is ComputeTarget.NONE and self.required_dependencies:
+            raise AutoresearchValidationError(
+                "compute_fit target=none cannot require compute dependencies"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "target": self.target.value,
+            "rationale": self.rationale,
+            "required_dependencies": list(self.required_dependencies),
+            "benchmark_plan": self.benchmark_plan,
+        }
+
+
+_GPU_PROBE_MODULES = (
+    "torch",
+    "tensorflow",
+    "jax",
+    "cupy",
+    "cudf",
+    "xgboost",
+    "lightgbm",
+    "catboost",
+)
+
+
+def _probe_installed_gpu_packages(target_repo: Path, errors: list[str]) -> tuple[str, ...]:
+    python = _target_python_path(target_repo)
+    if not python.is_file():
+        errors.append(f"Quantipy virtualenv not found: {python}")
+        return ()
+    code = (
+        "from importlib.util import find_spec; "
+        "mods=('torch','tensorflow','jax','cupy','cudf','xgboost','lightgbm','catboost'); "
+        "print(' '.join(m for m in mods if find_spec(m) is not None))"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        errors.append(f"GPU package probe failed: {type(exc).__name__}")
+        return ()
+    if result.returncode != 0:
+        errors.append("GPU package probe returned a nonzero exit code")
+        return ()
+    return tuple(sorted(set(result.stdout.split()) & set(_GPU_PROBE_MODULES)))
+
+
+def _target_python_path(target_repo: Path) -> Path:
+    return target_repo.expanduser().resolve() / ".venv" / "bin" / "python"
+
+
+def _read_memory_gib(errors: list[str]) -> float | None:
+    try:
+        memory_info = Path("/proc/meminfo").read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.append(f"memory probe failed: {type(exc).__name__}")
+        return None
+    match = re.search(r"^MemTotal:\s+(\d+)\s+kB$", memory_info, re.MULTILINE)
+    if match is None:
+        errors.append("memory probe returned no MemTotal")
+        return None
+    return round(int(match.group(1)) / 1024 / 1024, 2)
+
+
+def _probe_nvidia(errors: list[str]) -> tuple[bool, str | None, float | None]:
+    if shutil.which("nvidia-smi") is None:
+        errors.append("nvidia-smi is not installed")
+        return False, None, None
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        errors.append(f"nvidia-smi probe failed: {type(exc).__name__}")
+        return False, None, None
+    if result.returncode != 0 or not result.stdout.strip():
+        errors.append("nvidia-smi returned no usable GPU")
+        return False, None, None
+    name, _, memory = result.stdout.strip().splitlines()[0].partition(",")
+    try:
+        vram_gib = round(float(memory.strip()) / 1024, 2)
+    except ValueError:
+        errors.append("nvidia-smi returned an invalid memory value")
+        return False, name.strip() or None, None
+    return True, name.strip() or None, vram_gib
+
+
+def _probe_cuda_runtime(gpu_available: bool, errors: list[str]) -> bool:
+    if not gpu_available:
+        return False
+    if find_library("cuda") is None:
+        errors.append("CUDA driver library is not available")
+        return False
+    return True
+
+
+def collect_compute_capability_snapshot(
+    target_repo: Path = DEFAULT_QUANTIPY_ROOT,
+) -> ComputeCapabilitySnapshot:
+    """Collect non-mutating host and target-venv compute capabilities."""
+    errors: list[str] = []
+    gpu_available, gpu_name, gpu_vram_gib = _probe_nvidia(errors)
+    target_python_available = _target_python_path(target_repo).is_file()
+    cuda_runtime_available = _probe_cuda_runtime(gpu_available, errors)
+    return ComputeCapabilitySnapshot(
+        cpu_model=platform.processor() or platform.machine() or "unknown",
+        logical_cpus=os.cpu_count() or 1,
+        memory_gib=_read_memory_gib(errors),
+        target_python_available=target_python_available,
+        gpu_available=gpu_available,
+        gpu_name=gpu_name,
+        gpu_vram_gib=gpu_vram_gib,
+        cuda_runtime_available=cuda_runtime_available,
+        installed_gpu_packages=_probe_installed_gpu_packages(target_repo, errors),
+        probe_errors=tuple(errors),
+    )
+
+
+def _validate_compute_fit_environment(
+    compute_fit: ComputeFitArtifact,
+    target_repo: Path,
+) -> None:
+    compute_fit.validate()
+    if compute_fit.target not in {ComputeTarget.GPU, ComputeTarget.MIXED}:
+        return
+    snapshot = collect_compute_capability_snapshot(target_repo)
+    if snapshot.probe_errors:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the capability probe failed: "
+            + "; ".join(snapshot.probe_errors)
+        )
+    if not snapshot.target_python_available:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the target Quantipy virtualenv is unavailable"
+        )
+    if not snapshot.gpu_available or not snapshot.cuda_runtime_available:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the capability probe found no "
+            "usable GPU/CUDA runtime"
+        )
+    available = set(snapshot.installed_gpu_packages)
+    if snapshot.cuda_runtime_available:
+        available.add("cuda_runtime")
+    missing = sorted(
+        dependency
+        for dependency in compute_fit.required_dependencies
+        if dependency not in available
+    )
+    if missing:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution with unavailable dependencies: "
+            + ", ".join(missing)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AutoresearchPolicy:
     pm: StageAgentPolicy
     main_interface: StageAgentPolicy
@@ -608,6 +845,7 @@ class DebateSubmission:
     data_coverage_plan: str
     rejection_criteria: str
     objections: tuple[str, ...]
+    compute_fit: ComputeFitArtifact | None = None
     materially_new_evidence: str | None = None
 
     @classmethod
@@ -616,6 +854,7 @@ class DebateSubmission:
         exemption = data.get("materially_new_evidence")
         if exemption is not None and not isinstance(exemption, str):
             raise AutoresearchValidationError("materially_new_evidence must be a string or null")
+        compute_fit_raw = data.get("compute_fit")
         return cls(
             agent_id=_require_str(data, "agent_id"),
             theory_id=_require_str(data, "theory_id"),
@@ -631,6 +870,11 @@ class DebateSubmission:
             data_coverage_plan=_require_str(data, "data_coverage_plan"),
             rejection_criteria=_require_str(data, "rejection_criteria"),
             objections=_require_string_list(data, "objections"),
+            compute_fit=(
+                ComputeFitArtifact.from_dict(compute_fit_raw)
+                if compute_fit_raw is not None
+                else None
+            ),
             materially_new_evidence=exemption.strip() if isinstance(exemption, str) else None,
         )
 
@@ -650,6 +894,7 @@ class DebateSubmission:
             "data_coverage_plan": self.data_coverage_plan,
             "rejection_criteria": self.rejection_criteria,
             "objections": list(self.objections),
+            "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
             "materially_new_evidence": self.materially_new_evidence,
         }
 
@@ -799,10 +1044,12 @@ class ImplementationResultArtifact:
     notebook_path: str
     tests_added_or_updated: tuple[str, ...]
     commands_run: tuple[str, ...]
+    compute_fit: ComputeFitArtifact | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> ImplementationResultArtifact:
         data = _ensure_mapping(raw, label="implementation_result")
+        compute_fit_raw = data.get("compute_fit")
         artifact = cls(
             summary=_require_str(data, "summary"),
             workspace_path=_require_workspace_path(data, "workspace_path"),
@@ -811,6 +1058,11 @@ class ImplementationResultArtifact:
             notebook_path=_require_str(data, "notebook_path"),
             tests_added_or_updated=_require_string_list(data, "tests_added_or_updated"),
             commands_run=_require_string_list(data, "commands_run"),
+            compute_fit=(
+                ComputeFitArtifact.from_dict(compute_fit_raw)
+                if compute_fit_raw is not None
+                else None
+            ),
         )
         artifact.validate()
         return artifact
@@ -834,6 +1086,7 @@ class ImplementationResultArtifact:
             "notebook_path": self.notebook_path,
             "tests_added_or_updated": list(self.tests_added_or_updated),
             "commands_run": list(self.commands_run),
+            "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
         }
 
 
@@ -1729,7 +1982,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
         ]
     },
     ArtifactType.DEBATE_RESULT: {
-        "required_fields": ["round_number", "submissions[5]"],
+        "required_fields": ["round_number", "submissions[5]", "submissions[*].compute_fit"],
     },
     ArtifactType.CONSENSUS_RESULT: {
         "required_fields": [
@@ -1759,6 +2012,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "notebook_path",
             "tests_added_or_updated",
             "commands_run",
+            "compute_fit",
         ]
     },
     ArtifactType.VERIFICATION_RESULT: {
@@ -2300,6 +2554,8 @@ def _validate_debate_result(
     *,
     mode: ResearchMode | None = None,
     context: ContextPacketArtifact | None = None,
+    target_repo: Path | None = None,
+    require_compute_fit: bool = False,
 ) -> None:
     expected_ids = set(policy.debate_agent_ids)
     actual_ids = {submission.agent_id for submission in debate.submissions}
@@ -2315,6 +2571,15 @@ def _validate_debate_result(
                 raise AutoresearchValidationError(
                     "alpha debate theory_family is burned and requires materially_new_evidence"
                 )
+    for submission in debate.submissions:
+        if require_compute_fit and submission.compute_fit is None:
+            raise AutoresearchValidationError(
+                "new debate submissions must include a compute_fit artifact"
+            )
+        if submission.compute_fit is not None:
+            submission.compute_fit.validate()
+            if target_repo is not None:
+                _validate_compute_fit_environment(submission.compute_fit, target_repo)
 
 
 def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPolicy) -> None:
@@ -2327,8 +2592,21 @@ def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPo
 def _validate_implementation_workspace(
     state: AutoresearchState,
     artifact: ImplementationResultArtifact,
+    *,
+    require_compute_fit: bool = False,
 ) -> None:
     artifact.validate()
+    if require_compute_fit and artifact.compute_fit is None:
+        raise AutoresearchValidationError(
+            "new implementation_result artifacts must include a compute_fit artifact"
+        )
+    if artifact.compute_fit is not None:
+        artifact.compute_fit.validate()
+        if state.setup is not None:
+            _validate_compute_fit_environment(
+                artifact.compute_fit,
+                Path(state.setup.target_repo),
+            )
     _validate_persisted_autoresearch_workspace_path(
         artifact.workspace_path,
         label="implementation_result workspace_path",
@@ -2947,6 +3225,11 @@ def _phase_instruction(
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
+    compute_fit_contract = _compute_fit_contract(
+        state,
+        phase,
+        expected_artifact_type,
+    )
     verification_handoff_contract = _verification_handoff_contract(
         phase,
         expected_artifact_type,
@@ -2963,12 +3246,56 @@ def _phase_instruction(
         f"Expected artifact type: {expected_artifact_type.value}\n"
         f"Phase instruction:\n{instructions[phase]}\n\n"
         f"{mode_contract}"
+        f"{compute_fit_contract}"
         f"{workspace_contract}"
         f"{verification_handoff_contract}"
         f"{mempalace_fact_instruction}"
         f"{operator_precondition_instruction}"
         f"Artifact contract:\n{contract}\n\n"
         f"Current state snapshot:\n{state_json}"
+    )
+
+
+def _compute_fit_contract(
+    state: AutoresearchState,
+    phase: Phase,
+    expected_artifact_type: ArtifactType,
+) -> str:
+    if expected_artifact_type not in {
+        ArtifactType.DEBATE_RESULT,
+        ArtifactType.IMPLEMENTATION_RESULT,
+    }:
+        if phase is not Phase.VERIFICATION:
+            return ""
+        if (
+            state.implementation_result is not None
+            and state.implementation_result.compute_fit is None
+        ):
+            return (
+                "Compute execution contract:\n"
+                "- This is a legacy implementation_result without compute_fit. Do not infer "
+                "or silently assign a CPU/GPU target. Verify the exact recorded commands, "
+                "report compute-fit evidence as unavailable, and surface any mismatch or "
+                "migration blocker explicitly.\n\n"
+            )
+        return (
+            "Compute execution contract:\n"
+            "- Treat implementation_result.compute_fit as the declared execution target. "
+            "Verify the actual run against it and report any mismatch as a concrete failure; "
+            "never silently switch CPU/GPU execution.\n\n"
+        )
+    return (
+        "Compute-fit contract:\n"
+        "- Choose exactly one compute_fit.target: none, cpu, gpu, or mixed. The control plane "
+        "does not prefer GPU or CPU; choose based on the hypothesis, data scale, reproducibility, "
+        "and measured or planned cost.\n"
+        "- Return compute_fit with target, non-empty rationale, required_dependencies, and "
+        "benchmark_plan. Use importable package names for dependencies and `cuda_runtime` for "
+        "the CUDA runtime.\n"
+        "- A gpu or mixed choice is valid only when the supplied capability snapshot proves a "
+        "usable GPU/CUDA runtime and every declared dependency is installed. If not, choose "
+        "cpu/none or surface the exact infrastructure blocker; never install dependencies, "
+        "silently fall back, or pretend the GPU path ran.\n\n"
     )
 
 
@@ -3139,12 +3466,18 @@ def _build_prompt_text(
     agent_ids: Sequence[str],
     receipts: Sequence[SourceReceipt],
 ) -> str:
+    target_repo = (
+        Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
+    )
+    compute_snapshot = collect_compute_capability_snapshot(target_repo)
     return (
         "Deterministic autoresearch runner prompt.\n"
         "This phase, agent roster, and artifact contract are owned by "
         "executable control-plane logic. "
         "Do not carry loop state in prompt memory.\n\n"
         f"Validated model policy:\n{policy.model_policy_summary()}\n\n"
+        "Machine-readable compute capability snapshot (read-only probe; do not fabricate):\n"
+        f"{_json_block(compute_snapshot.to_dict())}\n\n"
         f"{_phase_instruction(state, phase, expected_artifact_type, agent_ids)}\n\n"
         "Loaded instructions and receipts:\n"
         f"{_render_receipt_block(receipts)}"
@@ -3216,6 +3549,8 @@ def advance_state(
             policy,
             mode=state.mode,
             context=state.context_packet,
+            target_repo=Path(state.setup.target_repo) if state.setup is not None else None,
+            require_compute_fit=True,
         )
         expected_round = len(state.debate_rounds) + 1
         if artifact.round_number != expected_round:
@@ -3276,7 +3611,7 @@ def advance_state(
             raise AutoresearchValidationError(
                 "cannot advance implementation without consensus majority"
             )
-        _validate_implementation_workspace(state, artifact)
+        _validate_implementation_workspace(state, artifact, require_compute_fit=True)
         return replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
 
     if state.phase is Phase.VERIFICATION:

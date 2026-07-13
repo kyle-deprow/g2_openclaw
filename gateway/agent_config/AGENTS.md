@@ -89,6 +89,11 @@ sentiment.
   traded positions.
 - Holding: intraday only. Flat by 15:50 ET. No entries before 9:45.
 - ML model: freely choose and iterate.
+- Compute: use the runner's read-only capability snapshot to choose `none`,
+  `cpu`, `gpu`, or `mixed` per experiment. Include `compute_fit` in every new
+  debate submission and implementation result. GPU or mixed requires proven
+  CUDA visibility and declared dependencies; never install, fabricate, or
+  silently fall back when the declared path is unavailable.
 - Do not propose exotic features. Simple indicators and defensible interactions
   are the focus.
 
@@ -150,18 +155,26 @@ See the `autoresearch` skill for the full multi-agent research protocol.
 
 After every implementation:
 
-1. Run `uv run pytest --tb=short -q` via `exec`.
-2. If tests pass, execute the notebook and extract metrics.
-3. If tests fail, delegate a fix to `fixer` with a maximum of 2 attempts.
-4. After 2 failures, revert the change, log the failure, and move to the next
-   idea.
+1. Use the deterministic runner to launch the verification stage and preserve
+   the exact implementation workspace.
+2. End every attempt, including failures, with a structured
+   `verification_result` artifact. Include the exact commands and decisive
+   evidence before reporting prose.
+3. If the artifact requests a fix, delegate only to `fixer` in the same
+   persisted workspace and advance the fix artifact through the runner.
+4. Do not revert or promote experiment code from the PM. A failed experiment
+   is classified and logged by the loop; shared infrastructure blockers are
+   reported to the human/Codex operator.
 
 ## Decision Protocol
 
 After verification and review:
 
-- Metrics improved or neutral: keep and commit.
-- Metrics degraded or review fails: revert and log why.
+- Metrics improved above the validated baseline: keep according to the
+  deterministic Sharpe thresholds.
+- Metrics neutral or degraded: discard and log why.
+- Review failure: follow the deterministic fix/test path, then discard if it
+  remains unresolved.
 - No subjective judgment. Numbers decide.
 
 ## Memory Practices

@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 7.2.0
+version: 7.3.0
 ---
 
 # Autoresearch
@@ -37,6 +37,32 @@ The context packet also records normalized `burned_theory_families`. In alpha
 mode, a debate submission in a burned family is rejected unless it contains a
 nonempty `materially_new_evidence` explanation. Do not evade this gate by
 renaming the family.
+
+## Compute Fit and GPU Choice
+
+The deterministic runner injects a read-only machine-readable capability
+snapshot into every stage prompt. It reports CPU, memory, GPU/VRAM, CUDA
+visibility, and GPU-capable packages found in the Quantipy virtualenv. Treat
+that snapshot as authoritative and do not infer capabilities from prose.
+
+The loop has no CPU/GPU preference. Every new debate submission and
+implementation result must include `compute_fit`:
+
+- `target`: exactly `none`, `cpu`, `gpu`, or `mixed`.
+- `rationale`: why that execution target fits the hypothesis and data scale.
+- `required_dependencies`: importable package names, plus `cuda_runtime` when
+  the CUDA runtime is required.
+- `benchmark_plan`: how wall time, memory, or acceleration will be measured.
+
+Choose the target from the hypothesis, data scale, reproducibility, and planned
+or measured cost. GPU and mixed declarations are mechanically accepted only
+when the snapshot proves usable GPU/CUDA access and all declared dependencies
+are available. Otherwise choose CPU/none or report the exact infrastructure
+blocker. The dependency gate applies to dependencies declared for GPU or mixed
+execution; CPU/none choices must still be reproducible in the existing
+environment. Never install dependencies, fabricate capability evidence, or
+silently switch execution devices. Verification must compare the actual run
+with the declared implementation compute fit and report any mismatch.
 
 ## Loop
 
@@ -269,6 +295,7 @@ Every proposal must include:
 - Transaction cost model.
 - Full data coverage plan using 2021-2026 and at least 95% of available trading
   days.
+- Compute fit with target, rationale, required dependencies, and benchmark plan.
 - Rejection criteria.
 
 For alpha mode, a burned theory family requires materially new evidence, not a
@@ -299,9 +326,13 @@ If there is no 3-of-5 majority, run one concise debate retry with the same
 context plus the dissent summary. If there is still no majority, log
 `NO_CONSENSUS` to `RESEARCH_LOG.md`, then start a fresh context pass. Do not
 implement without a majority. The final decision must explicitly set
-`reviewer_verdict=NOT_RUN` and `memory_write_required=false`; this is the only
-auditable no-memory transition. Do not write MemPalace facts or fabricate a
-memory receipt for `NO_CONSENSUS`.
+`reviewer_verdict=NOT_RUN` and `memory_write_required=false`; do not write
+MemPalace facts or fabricate a memory receipt for `NO_CONSENSUS`.
+
+An operator-precondition consensus may also terminate before implementation as
+`INFRA_BLOCKED`, with `reviewer_verdict=NOT_RUN`, a concrete `infra_rationale`,
+and `memory_write_required=false`. This is a separate auditable no-memory path
+for shared infrastructure prerequisites, not an experiment result.
 
 The PM writes the winning theory and dissent summary to `RESEARCH_LOG.md`
 before implementation. Do not write theories, debate notes, or consensus drafts

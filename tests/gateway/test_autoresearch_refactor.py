@@ -13,6 +13,8 @@ from gateway.autoresearch_runner import (
     ArtifactType,
     AutoresearchState,
     AutoresearchValidationError,
+    ComputeFitArtifact,
+    ComputeTarget,
     ContextPacketArtifact,
     CoverageReceipt,
     FinalDecision,
@@ -254,6 +256,14 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
         notebook_path="notebooks/experiments/example.ipynb",
         tests_added_or_updated=("tests/test_example.py",),
         commands_run=("uv run pytest tests/test_example.py",),
+        compute_fit=ComputeFitArtifact(
+            target=ComputeTarget.CPU,
+            rationale=(
+                "The example is a small tabular experiment and CPU execution is reproducible."
+            ),
+            required_dependencies=(),
+            benchmark_plan="Record wall time and peak memory during verification.",
+        ),
     )
     final_decision = FinalDecisionArtifact(
         experiment_id="iteration-1",

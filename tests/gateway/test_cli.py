@@ -21,6 +21,8 @@ from gateway.autoresearch_runner import (
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     AutoresearchState,
+    ComputeFitArtifact,
+    ComputeTarget,
     ConsensusResultArtifact,
     ConsensusStatus,
     ContextPacketArtifact,
@@ -519,6 +521,15 @@ class TestAutoresearchCliCommands:
                     data_coverage_plan="Use the common 2021-2026 calendar.",
                     rejection_criteria="Discard below baseline.",
                     objections=(),
+                    compute_fit=ComputeFitArtifact(
+                        target=ComputeTarget.CPU,
+                        rationale=(
+                            "The tabular feature set is small and the existing CPU stack "
+                            "is reproducible."
+                        ),
+                        required_dependencies=(),
+                        benchmark_plan="Record wall time and peak memory for verification.",
+                    ),
                 )
                 for index, agent_id in enumerate(policy.debate_agent_ids, start=1)
             ),
@@ -564,6 +575,14 @@ class TestAutoresearchCliCommands:
             notebook_path="notebooks/experiments/vwap_obv.ipynb",
             tests_added_or_updated=("tests/test_vwap_obv.py",),
             commands_run=("uv run pytest tests/test_vwap_obv.py",),
+            compute_fit=ComputeFitArtifact(
+                target=ComputeTarget.CPU,
+                rationale=(
+                    "The tabular feature set is small and the existing CPU stack is reproducible."
+                ),
+                required_dependencies=(),
+                benchmark_plan="Record wall time and peak memory for verification.",
+            ),
         )
 
     @staticmethod

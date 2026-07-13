@@ -35,9 +35,23 @@
 
 ## Compute Resources
 
-You are on a machine with a Nvidia graphics card. Feel free to designate true ML
-training routines to Codex subagents if your experiments are pushing you in
-that direction.
+The autoresearch runner supplies every stage with a read-only, machine-readable
+compute capability snapshot covering CPU, memory, GPU/VRAM, CUDA visibility, and
+GPU-capable packages in the Quantipy virtualenv. Treat that snapshot as the only
+authoritative evidence of available compute.
+
+The loop does not prefer CPU or GPU. For every new debate submission and
+implementation result, declare `compute_fit` with exactly one target (`none`,
+`cpu`, `gpu`, or `mixed`), a rationale, importable required dependencies, and a
+benchmark plan. Choose based on the hypothesis, data scale, reproducibility, and
+measured or planned cost. A GPU or mixed declaration is accepted only when the
+snapshot proves a usable GPU/CUDA runtime and every declared dependency is
+present. Missing dependencies are an exact infrastructure blocker: do not
+install them, fabricate evidence, or silently fall back to another device.
+
+CPU and no-accelerator choices are fully valid. The compute contract exists to
+make resource decisions explicit while preserving the PM's freedom to pursue
+any research strategy.
 
 ## Intraday Trading Focus
 

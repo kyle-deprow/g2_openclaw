@@ -30,6 +30,9 @@ from gateway.autoresearch_runner import (
     AutoresearchReceiptError,
     AutoresearchState,
     AutoresearchValidationError,
+    ComputeCapabilitySnapshot,
+    ComputeFitArtifact,
+    ComputeTarget,
     ConsensusResultArtifact,
     ConsensusStatus,
     ContextPacketArtifact,
@@ -216,6 +219,17 @@ def _debate_result(policy: AutoresearchPolicy, round_number: int) -> DebateResul
                 data_coverage_plan="Use 2021-2026 and >=95% of trading days",
                 rejection_criteria="Discard if OOS Sharpe net <= baseline",
                 objections=("Signal may be regime-specific",),
+                compute_fit=ComputeFitArtifact(
+                    target=ComputeTarget.CPU,
+                    rationale=(
+                        "The tabular feature set is small and the existing CPU stack is "
+                        "reproducible."
+                    ),
+                    required_dependencies=(),
+                    benchmark_plan=(
+                        "Record wall time and peak memory for the full walk-forward run."
+                    ),
+                ),
             )
         )
     return DebateResultArtifact(round_number=round_number, submissions=tuple(submissions))
@@ -302,6 +316,14 @@ def _implementation_result() -> ImplementationResultArtifact:
         notebook_path="notebooks/experiments/vwap_obv_intraday.ipynb",
         tests_added_or_updated=("tests/test_vwap_obv.py",),
         commands_run=("uv run pytest tests/test_vwap_obv.py",),
+        compute_fit=ComputeFitArtifact(
+            target=ComputeTarget.CPU,
+            rationale=(
+                "The tabular feature set is small and the existing CPU stack is reproducible."
+            ),
+            required_dependencies=(),
+            benchmark_plan="Record wall time and peak memory for the full walk-forward run.",
+        ),
     )
 
 
@@ -323,6 +345,98 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
         commands_run=("uv run pytest", "uv run jupyter execute notebook.ipynb"),
         data_coverage=_coverage_receipt(),
     )
+
+
+def test_gpu_compute_fit_fails_closed_when_dependency_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = ComputeCapabilitySnapshot(
+        cpu_model="test-cpu",
+        logical_cpus=16,
+        memory_gib=32.0,
+        target_python_available=True,
+        gpu_available=True,
+        gpu_name="Test GPU",
+        gpu_vram_gib=10.0,
+        cuda_runtime_available=True,
+        installed_gpu_packages=(),
+        probe_errors=(),
+    )
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "collect_compute_capability_snapshot",
+        lambda _target_repo: snapshot,
+    )
+    compute_fit = ComputeFitArtifact(
+        target=ComputeTarget.GPU,
+        rationale="The proposed model requires GPU acceleration.",
+        required_dependencies=("torch",),
+        benchmark_plan="Compare GPU and CPU wall time on the full training window.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="unavailable dependencies"):
+        autoresearch_runner._validate_compute_fit_environment(compute_fit, tmp_path)
+
+
+def test_gpu_compute_fit_fails_closed_without_target_virtualenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    snapshot = ComputeCapabilitySnapshot(
+        cpu_model="test-cpu",
+        logical_cpus=16,
+        memory_gib=32.0,
+        target_python_available=False,
+        gpu_available=True,
+        gpu_name="Test GPU",
+        gpu_vram_gib=10.0,
+        cuda_runtime_available=True,
+        installed_gpu_packages=(),
+        probe_errors=(),
+    )
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "collect_compute_capability_snapshot",
+        lambda _target_repo: snapshot,
+    )
+    compute_fit = ComputeFitArtifact(
+        target=ComputeTarget.GPU,
+        rationale="The proposed model requires GPU acceleration.",
+        required_dependencies=("cuda_runtime",),
+        benchmark_plan="Compare GPU and CPU wall time on the full training window.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="virtualenv is unavailable"):
+        autoresearch_runner._validate_compute_fit_environment(compute_fit, tmp_path)
+
+
+def test_compute_capability_snapshot_is_serializable() -> None:
+    snapshot = ComputeCapabilitySnapshot(
+        cpu_model="test-cpu",
+        logical_cpus=8,
+        memory_gib=16.0,
+        target_python_available=False,
+        gpu_available=False,
+        gpu_name=None,
+        gpu_vram_gib=None,
+        cuda_runtime_available=False,
+        installed_gpu_packages=(),
+        probe_errors=("nvidia-smi is not installed",),
+    )
+
+    assert snapshot.to_dict() == {
+        "cpu_model": "test-cpu",
+        "logical_cpus": 8,
+        "memory_gib": 16.0,
+        "target_python_available": False,
+        "gpu_available": False,
+        "gpu_name": None,
+        "gpu_vram_gib": None,
+        "cuda_runtime_available": False,
+        "installed_gpu_packages": [],
+        "probe_errors": ["nvidia-smi is not installed"],
+    }
 
 
 def _review_result(verdict: ReviewVerdict, policy: AutoresearchPolicy) -> ReviewResultArtifact:
