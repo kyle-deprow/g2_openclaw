@@ -1819,6 +1819,13 @@ def _set_agent_runtime_id(config: dict[str, object]) -> None:
     runtime["id"] = "other"
 
 
+def _set_safeguard_compaction(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    compaction = cast(dict[str, object], defaults["compaction"])
+    compaction["mode"] = "safeguard"
+
+
 def _agent(config: dict[str, object], agent_id: str) -> dict[str, object]:
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
@@ -1885,6 +1892,10 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_drop_codex_plugin_allow, "plugins.allow must explicitly include codex"),
         (_set_openai_api, "providers.openai.api must be openai-responses"),
         (_set_agent_runtime_id, "providers.openai.agentRuntime.id must be codex"),
+        (
+            _set_safeguard_compaction,
+            "agents.defaults.compaction.mode must be default for the Codex OAuth route",
+        ),
         (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
         (_give_main_a_pm_skill, "main must load no skills"),
         (

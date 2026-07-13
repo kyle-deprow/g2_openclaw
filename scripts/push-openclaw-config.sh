@@ -26,12 +26,15 @@ MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.p
 SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
+CODEX_RUNTIME_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-codex-runtime.conf"
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
+CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
+CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 REQUIRED_OPENCLAW_VERSION="2026.6.11"
@@ -226,6 +229,18 @@ validate_runtime_caps_dropin_file() {
   fi
 }
 
+validate_codex_runtime_dropin_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed OpenClaw Codex runtime drop-in not found at ${path}" >&2
+    return 1
+  fi
+  if ! diff -u "${CODEX_RUNTIME_DROPIN_SRC}" "${path}" >&2; then
+    echo "ERROR: OpenClaw Codex runtime drop-in must match the repo-managed pre-start verifier exactly." >&2
+    return 1
+  fi
+}
+
 require_gateway_service_loadable() {
   local service_state load_state active_state
   if ! service_state="$(systemctl --user show "${GATEWAY_SERVICE_NAME}" --property=LoadState --property=ActiveState 2>&1)"; then
@@ -332,6 +347,7 @@ rollback_local_config_on_exit() {
   trap - EXIT
   rm -f "${SUPERVISOR_UNIT_TMP:-}"
   rm -f "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"
+  rm -f "${CODEX_RUNTIME_DROPIN_TMP:-}"
   if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
     if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
       echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
@@ -409,6 +425,13 @@ if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
 fi
 
 if ! validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}"; then
+  exit 1
+fi
+if [[ ! -x "${REPO_ROOT}/scripts/ensure-openclaw-codex-runtime.mjs" ]]; then
+  echo "ERROR: Codex runtime verifier is missing or not executable at ${REPO_ROOT}/scripts/ensure-openclaw-codex-runtime.mjs" >&2
+  exit 1
+fi
+if ! validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_SRC}"; then
   exit 1
 fi
 
@@ -809,6 +832,7 @@ if ! echo "${MERGED}" | jq -e \
   (.agents.defaults.thinkingDefault == "high")
   and ((.plugins.allow // []) | contains(["codex"]))
   and (.agents.defaults.memorySearch.enabled == false)
+  and (.agents.defaults.compaction.mode == "default")
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
   and (.mcp.servers.mempalace.command == $cmd)
@@ -1053,8 +1077,16 @@ validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
 mv "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 GATEWAY_RUNTIME_CAPS_DROPIN_TMP=""
 validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+CODEX_RUNTIME_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${CODEX_RUNTIME_DROPIN_NAME}.XXXXXX")"
+cp "${CODEX_RUNTIME_DROPIN_SRC}" "${CODEX_RUNTIME_DROPIN_TMP}"
+chmod 0644 "${CODEX_RUNTIME_DROPIN_TMP}"
+validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_TMP}"
+mv "${CODEX_RUNTIME_DROPIN_TMP}" "${CODEX_RUNTIME_DROPIN_DST}"
+CODEX_RUNTIME_DROPIN_TMP=""
+validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_DST}"
 systemctl --user daemon-reload
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+echo "Installed ${GATEWAY_SERVICE_NAME} Codex runtime verifier → ${CODEX_RUNTIME_DROPIN_DST}"
 echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
 
 ROLLBACK_ARMED=0

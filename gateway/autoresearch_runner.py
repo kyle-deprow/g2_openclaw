@@ -1853,6 +1853,13 @@ def load_autoresearch_policy(
         raise AutoresearchConfigError("plugins.allow must explicitly include codex") from exc
     if "codex" not in plugin_allow:
         raise AutoresearchConfigError("plugins.allow must explicitly include codex")
+    agents = _ensure_mapping(config.get("agents"), label="agents")
+    defaults = _ensure_mapping(agents.get("defaults"), label="agents.defaults")
+    compaction = _ensure_mapping(defaults.get("compaction"), label="agents.defaults.compaction")
+    if _require_str(compaction, "mode") != "default":
+        raise AutoresearchConfigError(
+            "agents.defaults.compaction.mode must be default for the Codex OAuth route"
+        )
     models = _ensure_mapping(config.get("models"), label="models")
     providers = _ensure_mapping(models.get("providers"), label="providers")
     openai_provider = _ensure_mapping(providers.get("openai"), label="providers.openai")
@@ -1874,7 +1881,6 @@ def load_autoresearch_policy(
         if model_caps.get(required_model) is not True:
             raise AutoresearchConfigError(f"openai/{required_model} must exist with reasoning=true")
 
-    agents = _ensure_mapping(config.get("agents"), label="agents")
     agent_list_raw = agents.get("list")
     if not isinstance(agent_list_raw, Sequence) or isinstance(agent_list_raw, str | bytes):
         raise AutoresearchConfigError("agents.list must be a list")

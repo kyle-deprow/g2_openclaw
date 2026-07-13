@@ -92,6 +92,17 @@ or model.
   run `bash scripts/push-openclaw-config.sh`; the push script syncs the
   portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
   store. Do not replace this with API-key fallback.
+- Keep `agents.defaults.compaction.mode` at `default` for Codex. In OpenClaw
+  2026.6.11, `safeguard` can send automatic CLI-budget compaction through the
+  generic OpenAI API-key path after Codex declines non-manual native
+  compaction. This repo uses Codex OAuth only, so `safeguard` causes false
+  `No API key found for provider "openai"` failures.
+- The gateway pre-start verifier at
+  `scripts/ensure-openclaw-codex-runtime.mjs` is mandatory infrastructure. It
+  patches only the known 2026.6.11 branch that turns Codex's intentional
+  automatic-compaction deferral into a generic API-key fallback. It must fail
+  closed when the package version or source shape changes; do not replace it
+  with a provider fallback or an API key.
 - Prefer canonical model refs like `openai/gpt-5.4` or `openai/gpt-5.5` in
   OpenClaw config. Legacy Codex-prefixed refs should be repaired with
   `openclaw doctor --fix`.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 from pathlib import Path
@@ -20,6 +21,7 @@ SUPERVISOR_UNIT_TEMPLATE = (
 GATEWAY_RUNTIME_CAPS_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 )
+CODEX_RUNTIME_DROPIN = REPO_ROOT / "gateway/openclaw_config/openclaw-codex-runtime.conf"
 
 STAGE_AGENT_IDS = [
     "context-curator",
@@ -45,6 +47,11 @@ EXPECTED_RUNTIME_CAP_LINES = [
     'Environment="PYTHONFAULTHANDLER=1"',
 ]
 EXPECTED_RUNTIME_CAP_TEXT = "\n".join(EXPECTED_RUNTIME_CAP_LINES) + "\n"
+EXPECTED_CODEX_RUNTIME_TEXT = CODEX_RUNTIME_DROPIN.read_text(encoding="utf-8")
+EXPECTED_CODEX_RUNTIME_EXECSTARTPRE = (
+    "ExecStartPre=/usr/bin/env node "
+    "/home/dev/repos/g2_openclaw/scripts/ensure-openclaw-codex-runtime.mjs"
+)
 SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM")
 
 
@@ -98,6 +105,10 @@ fi
 
 def _runtime_caps_dropin_dst(home: Path) -> Path:
     return home / ".config/systemd/user/openclaw-gateway.service.d/10-quantipy-runtime-caps.conf"
+
+
+def _codex_runtime_dropin_dst(home: Path) -> Path:
+    return home / ".config/systemd/user/openclaw-gateway.service.d/20-openclaw-codex-runtime.conf"
 
 
 def _write_push_script_fixture_bin(
@@ -231,6 +242,17 @@ case "$dest" in
     ;;
 esac
 /usr/bin/cp "$@"
+        """.strip(),
+    )
+    _write_executable(
+        mock_bin / "sqlite3",
+        r"""
+if [[ "$#" -ge 2 ]]; then
+  printf '1\n'
+else
+  cat >/dev/null
+  : > "$1"
+fi
 """.strip(),
     )
     return mock_bin
@@ -249,6 +271,25 @@ def _prepare_push_script_home(
     leaked_config_path = tmp_path / "inherited-config.json"
     home.mkdir()
     openclaw_home.mkdir()
+    auth_db = openclaw_home / "agents/main/agent/openclaw-agent.sqlite"
+    auth_db.parent.mkdir(parents=True)
+    with sqlite3.connect(auth_db) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE auth_profile_store (
+                store_key TEXT NOT NULL PRIMARY KEY,
+                store_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE auth_profile_state (
+                state_key TEXT NOT NULL PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO auth_profile_store VALUES
+                ('openai:test', '{"provider":"openai","mode":"oauth"}', 1);
+            """
+        )
     leaked_openclaw_home.mkdir()
     leaked_state_dir.mkdir()
     leaked_config_path.write_text("{}", encoding="utf-8")
@@ -389,6 +430,13 @@ def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
     )
 
 
+def test_codex_runtime_dropin_declares_prestart_verifier() -> None:
+    assert EXPECTED_CODEX_RUNTIME_TEXT.splitlines() == [
+        "[Service]",
+        EXPECTED_CODEX_RUNTIME_EXECSTARTPRE,
+    ]
+
+
 def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
@@ -398,6 +446,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     ) in script
     assert 'GATEWAY_SERVICE_NAME="openclaw-gateway.service"' in script
     assert 'GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"' in script
+    assert 'CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"' in script
     assert (
         'GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"'
     ) in script
@@ -420,6 +469,8 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert "GATEWAY_RUNTIME_CAPS_DROPIN" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_DST" in script
+    assert "validate_codex_runtime_dropin_file" in script
+    assert "CODEX_RUNTIME_DROPIN_DST" in script
     assert "daemon-reload ||" not in script
     assert (
         'cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" ||'
@@ -464,6 +515,8 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert result.returncode == 0, result.stderr
     dropin = _runtime_caps_dropin_dst(home)
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
+    codex_dropin = _codex_runtime_dropin_dst(home)
+    assert codex_dropin.read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
     assert _mode(dropin_dir) == 0o755
     assert _mode(dropin) == 0o644
     assert not list(dropin_dir.glob(".10-quantipy-runtime-caps.conf.*"))
@@ -498,6 +551,9 @@ def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     assert second.returncode == 0, second.stderr
     dropin = _runtime_caps_dropin_dst(home)
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
+    assert (
+        _codex_runtime_dropin_dst(home).read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
+    )
     assert _mode(dropin.parent) == 0o755
     assert _mode(dropin) == 0o644
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")

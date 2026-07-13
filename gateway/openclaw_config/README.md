@@ -11,6 +11,7 @@ configuration used by the G2 Gateway.
 | `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
+| `openclaw-codex-runtime.conf` | User-systemd drop-in source for the fail-closed Codex compaction verifier |
 | `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for non-PM agents |
 | `README.md` | This file |
 
@@ -33,7 +34,7 @@ make mempalace-install
 # 5. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 6. Push config + restart daemon (merges provider/runtime config and copies bootstrap files)
+# 6. Push config + install the Codex runtime verifier (merges provider/runtime config and copies bootstrap files)
 uv run python -m gateway push-config
 
 # 7. Launch everything
@@ -70,10 +71,11 @@ these settings into the local config with `jq`, preserving everything else.
   `gpt-5.6-terra`, and `gpt-5-mini` model refs for authenticated OpenAI/Codex
   use.
 - **MemPalace-only research memory** — disables built-in OpenClaw memory search
-  and memory flush, denies `memory_search`/`memory_get`, and requires the
-  MemPalace MCP server split: full `mempalace` for `autoresearch-pm`, no
-  MemPalace access for `main`, and filtered `mempalace-readonly` for every
-  read-only stage agent.
+  and memory flush, keeps OpenClaw compaction in `default` mode so Codex
+  app-server native compaction owns Codex sessions, denies
+  `memory_search`/`memory_get`, and requires the MemPalace MCP server split:
+  full `mempalace` for `autoresearch-pm`, no MemPalace access for `main`, and
+  filtered `mempalace-readonly` for every read-only stage agent.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent roster** — exact `main` interface agent, `autoresearch-pm`, and
@@ -117,6 +119,20 @@ auth store. `scripts/push-openclaw-config.sh` then syncs the portable auth
 profile rows into the managed `autoresearch-pm` and stage-agent stores so
 agent-scoped Codex turns and transcript compaction can use the same OAuth
 profile.
+
+Keep `agents.defaults.compaction.mode` set to `default` for the Codex route.
+OpenClaw `safeguard` compaction can route automatic CLI-budget compaction
+through the generic OpenAI API-key compactor after the Codex app-server
+declines non-manual compaction. That is wrong for this repo because auth is
+Codex OAuth, not `OPENAI_API_KEY`.
+
+The managed gateway also installs
+`20-openclaw-codex-runtime.conf`. Its `ExecStartPre` verifier applies the
+repo-owned, version-checked OpenClaw 2026.6.11 fix that treats Codex's
+automatic-compaction ownership response as a native deferral, never as
+permission to invoke the generic API-key summarizer. The verifier fails closed
+on an unknown OpenClaw version, package layout, or source branch. This keeps a
+package reinstall or gateway restart from silently restoring the wrong route.
 
 ### 2. Install/upgrade required MemPalace MCP
 
@@ -180,9 +196,10 @@ The script will:
 8. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`
-9. Validate the result with `openclaw config validate`
-10. Install the supervisor service definition and the persistent OpenClaw Gateway
-   runtime-cap drop-in, then run `systemctl --user daemon-reload`
+9. Validate the result with `openclaw config validate` and inspect the Codex plugin
+10. Install the supervisor service definition, the persistent OpenClaw Gateway
+   runtime-cap drop-in, and the Codex runtime-verifier drop-in, then run
+   `systemctl --user daemon-reload`
 
 The script is idempotent — safe to run repeatedly.
 
@@ -190,7 +207,9 @@ The script is idempotent — safe to run repeatedly.
 drop-ins. It does not update the environment of an already running
 `openclaw-gateway.service` process. The push script intentionally keeps its
 no-restart behavior; operators must restart the gateway externally when they
-want the runtime caps to take effect for new OpenClaw-launched children.
+want the runtime caps or Codex runtime verifier to take effect. The verifier
+then runs before every gateway start and rejects unknown OpenClaw package
+versions or source layouts instead of falling back to an API-key compactor.
 
 ### 5. Enable the api-version preload for Azure only
 

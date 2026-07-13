@@ -140,7 +140,7 @@
         "enabled": false
       },
       "compaction": {
-        "mode": "safeguard",
+        "mode": "default",
         "memoryFlush": {
           "enabled": false,
           "softThresholdTokens": 4000
