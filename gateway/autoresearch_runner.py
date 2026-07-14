@@ -2491,12 +2491,13 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
                 )
         elif (
             not decision.memory_write_required
-            and not state.suspended
             and not _is_operator_precondition_no_memory_state(state)
+            and not _is_data_infra_g0_blocked_no_memory_state(state)
         ):
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
             )
+        _validate_final_decision_artifact(decision, state)
     if state.implementation_result and (
         state.latest_consensus is None
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
@@ -3819,6 +3820,25 @@ def _is_operator_precondition_no_memory_state(state: AutoresearchState) -> bool:
         and state.latest_verification is None
         and not state.memory_written
         and state.memory_verification_receipt is None
+    )
+
+
+def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    latest_verification = state.latest_verification
+    return (
+        state.phase is Phase.REPEAT
+        and state.mode is ResearchMode.DATA_INFRA_G0
+        and state.suspended
+        and decision is not None
+        and decision.decision is FinalDecision.INFRA_BLOCKED
+        and bool(decision.infra_rationale)
+        and not decision.memory_write_required
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+        and state.implementation_result is not None
+        and latest_verification is not None
+        and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
     )
 
 

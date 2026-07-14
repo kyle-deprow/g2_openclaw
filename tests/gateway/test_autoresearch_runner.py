@@ -68,6 +68,7 @@ from gateway.autoresearch_runner import (
     standardized_mempalace_kg_facts,
     start_next_iteration,
     validate_artifact_workspace,
+    validate_state,
     validate_target_worktree_clean,
     verify_mempalace_final_decision,
 )
@@ -830,6 +831,35 @@ def test_operator_precondition_final_decision_allows_infra_blocked_without_verif
         start_next_iteration(decided)
 
 
+def test_persisted_operator_precondition_no_memory_state_validates(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+    state = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+        policy,
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(state.to_dict())))
+
+    validate_state(persisted, policy)
+
+    assert persisted.suspended is True
+    assert can_write_memory(persisted) is False
+
+
 def test_operator_precondition_final_decision_rejects_unverified_metric(
     policy: AutoresearchPolicy,
 ) -> None:
@@ -1101,6 +1131,128 @@ def test_g0_infra_blocked_false_memory_suspends_without_memory_transition(
     assert can_write_memory(state) is False
     with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
         next_action(state, policy, receipts, platform_readiness)
+
+
+def test_persisted_g0_infra_blocked_no_memory_state_validates(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        readiness=platform_readiness,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+    )
+    state = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data infrastructure remains blocked.",
+            log_summary="G0 gate still requires remediation.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Cap/source provenance still needs operator remediation.",
+        ),
+        policy,
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(state.to_dict())))
+
+    validate_state(persisted, policy)
+
+    assert persisted.suspended is True
+    assert can_write_memory(persisted) is False
+
+
+def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_decision(policy)
+    impossible = replace(
+        state,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="alpha-infra-blocked-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.38,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Incorrectly blocked alpha research on infrastructure.",
+            log_summary="Impossible alpha infrastructure blocker.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Alpha research cannot own infrastructure gate remediation.",
+        ),
+        suspended=True,
+        suspension_reason="Alpha research cannot own infrastructure gate remediation.",
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(impossible.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+        validate_state(persisted, policy)
+
+
+def test_persisted_suspended_g0_infra_blocked_requires_verification_context(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        readiness=platform_readiness,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+    )
+    state = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data infrastructure remains blocked.",
+            log_summary="G0 gate still requires remediation.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Cap/source provenance still needs operator remediation.",
+        ),
+        policy,
+    )
+    malformed = replace(state, verification_history=(), review_history=())
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(malformed.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+        validate_state(persisted, policy)
+
+
+def test_persisted_g0_infra_repaired_retains_memory_write_contract(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+    )
+    invalid = replace(
+        state,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_REPAIRED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data repair completed.",
+            log_summary="G0 gate passed.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+        ),
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(invalid.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+        validate_state(persisted, policy)
 
 
 def test_standardize_mempalace_kg_object_preserves_short_normalized_objects() -> None:
