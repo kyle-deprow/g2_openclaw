@@ -2489,8 +2489,10 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
                 raise AutoresearchValidationError(
                     "NO_CONSENSUS must not have a memory_verification_receipt"
                 )
-        elif not decision.memory_write_required and not _is_operator_precondition_no_memory_state(
-            state
+        elif (
+            not decision.memory_write_required
+            and not state.suspended
+            and not _is_operator_precondition_no_memory_state(state)
         ):
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
@@ -3116,6 +3118,10 @@ def _validate_final_decision_artifact(
         if artifact.decision is not expected:
             raise AutoresearchValidationError(
                 "DATA_INFRA_G0 final_decision must match infra_gate_outcome"
+            )
+        if artifact.decision is FinalDecision.INFRA_BLOCKED and artifact.memory_write_required:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 INFRA_BLOCKED requires memory_write_required=false"
             )
         return
 

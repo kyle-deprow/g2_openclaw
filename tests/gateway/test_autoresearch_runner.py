@@ -557,6 +557,40 @@ def _state_to_decision(
     return state
 
 
+def _state_to_g0_decision(
+    policy: AutoresearchPolicy,
+    *,
+    readiness: PlatformReadinessManifest | None = None,
+    infra_gate_outcome: InfraGateOutcome,
+) -> AutoresearchState:
+    state = AutoresearchState(
+        platform_readiness=readiness.identity() if readiness is not None else None
+    )
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=infra_gate_outcome,
+            infra_rationale="Cap/source provenance still needs operator remediation.",
+        ),
+        policy,
+    )
+    return advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
+
+
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -1006,6 +1040,67 @@ def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
 
     assert result.final_decision is not None
     assert result.final_decision.decision is FinalDecision.INFRA_REPAIRED
+
+
+def test_g0_infra_blocked_rejects_memory_write_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="memory_write_required=false"):
+        advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="g0-iteration-1",
+                decision=FinalDecision.INFRA_BLOCKED,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+                rationale="Data infrastructure remains blocked.",
+                log_summary="G0 gate still requires remediation.",
+                continue_loop=True,
+                memory_write_required=True,
+                infra_rationale="Cap/source provenance still needs operator remediation.",
+            ),
+            policy,
+        )
+
+
+def test_g0_infra_blocked_false_memory_suspends_without_memory_transition(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        readiness=platform_readiness,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+    )
+
+    state = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data infrastructure remains blocked.",
+            log_summary="G0 gate still requires remediation.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Cap/source provenance still needs operator remediation.",
+        ),
+        policy,
+    )
+
+    assert state.suspended is True
+    assert can_write_memory(state) is False
+    with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_standardize_mempalace_kg_object_preserves_short_normalized_objects() -> None:
