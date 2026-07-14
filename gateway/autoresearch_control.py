@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+from gateway.autoresearch_readiness import (
+    DEFAULT_PLATFORM_READINESS_PATH,
+    load_platform_readiness,
+    validate_state_readiness,
+)
 from gateway.autoresearch_runner import (
     AutoresearchState,
     AutoresearchValidationError,
@@ -125,6 +130,7 @@ class ControlConfig:
     wake_lock_path: Path = DEFAULT_WAKE_LOCK_PATH
     wake_claim_path: Path = DEFAULT_WAKE_CLAIM_PATH
     wake_claim_ttl_seconds: float = DEFAULT_WAKE_CLAIM_TTL_SECONDS
+    readiness_manifest_path: Path = DEFAULT_PLATFORM_READINESS_PATH
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +180,7 @@ class AutoresearchControl:
 
     def wake(self) -> str:
         with self._wake_lock():
+            state_material = self._load_dispatchable_state()
             self._reject_recent_wake_claim()
             executable = self._rpc.require_binary()
             owned_tasks = self._owned_running_tasks(executable)
@@ -182,7 +189,6 @@ class AutoresearchControl:
                 raise ControlError(
                     f"cannot wake autoresearch while owned task is already running: {task_ids}"
                 )
-            state_material = self._state_material()
             state_digest = hashlib.sha256(state_material.encode("utf-8")).hexdigest()
             self._write_wake_claim(run_id=None, state_digest=state_digest)
             invocation_nonce = uuid.uuid4().hex
@@ -373,10 +379,26 @@ class AutoresearchControl:
                 f"failed to read autoresearch state file: {self.config.state_path}"
             ) from exc
 
-    def _load_state(self) -> AutoresearchState:
+    def _load_dispatchable_state(self) -> str:
+        """Validate state and readiness before any OpenClaw wake RPC is sent."""
+        state_material = self._state_material()
+        state = self._parse_state_material(state_material)
+        if state.suspended:
+            raise ControlError(
+                "cannot wake autoresearch: loop is suspended on an infrastructure blocker; "
+                "run autoresearch-resume after platform readiness changes"
+            )
+        try:
+            readiness = load_platform_readiness(self.config.readiness_manifest_path)
+            validate_state_readiness(state.platform_readiness, readiness)
+        except ValueError as exc:
+            raise ControlError(f"cannot wake autoresearch: {exc}") from exc
+        return state_material
+
+    def _parse_state_material(self, state_material: str) -> AutoresearchState:
         try:
             return normalize_autoresearch_state(
-                AutoresearchState.from_dict(json.loads(self._state_material()))
+                AutoresearchState.from_dict(json.loads(state_material))
             )
         except json.JSONDecodeError as exc:
             raise ControlError(
@@ -384,6 +406,9 @@ class AutoresearchControl:
             ) from exc
         except AutoresearchValidationError as exc:
             raise ControlError(f"invalid autoresearch state: {exc}") from exc
+
+    def _load_state(self) -> AutoresearchState:
+        return self._parse_state_material(self._state_material())
 
     def _running_tasks(self, executable: Path) -> tuple[Mapping[str, object], ...]:
         payload = self._rpc.list_running_tasks(executable)
@@ -462,12 +487,18 @@ class AutoresearchControl:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("wake", "status", "stop"))
+    parser.add_argument(
+        "--readiness-manifest",
+        type=Path,
+        default=DEFAULT_PLATFORM_READINESS_PATH,
+        help="Operator-owned platform readiness manifest used before wake.",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
-    control = AutoresearchControl()
+    control = AutoresearchControl(ControlConfig(readiness_manifest_path=args.readiness_manifest))
     try:
         if args.command == "wake":
             print(json.dumps({"runId": control.wake()}, sort_keys=True))

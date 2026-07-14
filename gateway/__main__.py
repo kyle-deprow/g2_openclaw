@@ -49,6 +49,8 @@ _cli_commands = {
     "autoresearch-advance",
     "autoresearch-mark-memory",
     "autoresearch-start-next",
+    "autoresearch-pin-readiness",
+    "autoresearch-resume",
 }
 if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
     _run_cli()

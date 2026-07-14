@@ -21,6 +21,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
+from gateway.autoresearch_readiness import (
+    PlatformReadinessManifest,
+    ReadinessIdentity,
+    validate_state_readiness,
+)
+
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
@@ -1720,6 +1726,9 @@ class AutoresearchState:
     memory_written: bool = False
     mode: ResearchMode | None = None
     memory_verification_receipt: MemoryVerificationReceipt | None = None
+    platform_readiness: ReadinessIdentity | None = None
+    suspended: bool = False
+    suspension_reason: str | None = None
 
     @property
     def latest_debate(self) -> DebateResultArtifact | None:
@@ -1759,6 +1768,7 @@ class AutoresearchState:
         implementation_raw = data.get("implementation_result")
         decision_raw = data.get("final_decision")
         receipt_raw = data.get("memory_verification_receipt")
+        platform_readiness_raw = data.get("platform_readiness")
         pending_fix_trigger_raw = data.get("pending_fix_trigger")
         if pending_fix_trigger_raw is not None and not isinstance(pending_fix_trigger_raw, str):
             raise AutoresearchValidationError("pending_fix_trigger must be a string or null")
@@ -1809,6 +1819,15 @@ class AutoresearchState:
             memory_verification_receipt=MemoryVerificationReceipt.from_dict(receipt_raw)
             if receipt_raw is not None
             else None,
+            platform_readiness=ReadinessIdentity.from_dict(platform_readiness_raw)
+            if platform_readiness_raw is not None
+            else None,
+            suspended=_require_bool(data, "suspended") if "suspended" in data else False,
+            suspension_reason=(
+                _require_str(data, "suspension_reason")
+                if data.get("suspension_reason") is not None
+                else None
+            ),
         )
         return state
 
@@ -1837,6 +1856,11 @@ class AutoresearchState:
             "memory_verification_receipt": self.memory_verification_receipt.to_dict()
             if self.memory_verification_receipt is not None
             else None,
+            "platform_readiness": self.platform_readiness.to_dict()
+            if self.platform_readiness is not None
+            else None,
+            "suspended": self.suspended,
+            "suspension_reason": self.suspension_reason,
         }
 
 
@@ -2400,6 +2424,26 @@ def _validate_mempalace_server(
 def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:
     if state.iteration < 1:
         raise AutoresearchValidationError("iteration must be >= 1")
+    if state.suspended:
+        decision = state.final_decision
+        if state.phase is not Phase.REPEAT or decision is None:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state must be in repeat phase with a final decision"
+            )
+        if decision.decision is not FinalDecision.INFRA_BLOCKED:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state requires final_decision=INFRA_BLOCKED"
+            )
+        if not state.suspension_reason:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state requires suspension_reason"
+            )
+        if decision.memory_write_required or state.memory_written:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state cannot require or record a memory write"
+            )
+    elif state.suspension_reason is not None:
+        raise AutoresearchValidationError("suspension_reason requires suspended=true")
     if state.consensus_retry_count not in (0, 1):
         raise AutoresearchValidationError("consensus_retry_count must be 0 or 1")
     if state.context_packet is not None and state.setup is None:
@@ -2909,6 +2953,11 @@ def _render_receipt_block(receipts: Sequence[SourceReceipt]) -> str:
 def _artifact_context(state: AutoresearchState) -> dict[str, object]:
     return {
         "iteration": state.iteration,
+        "platform_readiness": state.platform_readiness.to_dict()
+        if state.platform_readiness is not None
+        else None,
+        "suspended": state.suspended,
+        "suspension_reason": state.suspension_reason,
         "setup": state.setup.to_dict() if state.setup else None,
         "context_packet": state.context_packet.to_dict() if state.context_packet else None,
         "latest_debate": state.latest_debate.to_dict() if state.latest_debate else None,
@@ -3488,8 +3537,18 @@ def next_action(
     state: AutoresearchState,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    readiness: PlatformReadinessManifest,
 ) -> NextAction:
     _validate_state(state, policy)
+    if state.suspended:
+        raise AutoresearchValidationError(
+            "autoresearch is suspended on an infrastructure blocker; "
+            "run autoresearch-resume after platform readiness changes"
+        )
+    try:
+        validate_state_readiness(state.platform_readiness, readiness)
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
     return NextAction(
@@ -3702,6 +3761,14 @@ def advance_state(
         ):
             raise AutoresearchValidationError("final_decision requires prior artifacts")
         _validate_final_decision_artifact(artifact, state)
+        if artifact.decision is FinalDecision.INFRA_BLOCKED:
+            return replace(
+                state,
+                final_decision=artifact,
+                phase=Phase.REPEAT,
+                suspended=True,
+                suspension_reason=artifact.infra_rationale,
+            )
         return replace(state, final_decision=artifact, phase=Phase.REPEAT)
 
     raise AutoresearchValidationError(
@@ -3918,9 +3985,25 @@ def mark_memory_written(
     return replace(state, memory_written=True, memory_verification_receipt=receipt)
 
 
-def start_next_iteration(state: AutoresearchState) -> AutoresearchState:
+def start_next_iteration(
+    state: AutoresearchState,
+    *,
+    readiness: PlatformReadinessManifest | None = None,
+) -> AutoresearchState:
     if state.setup is None or state.final_decision is None:
         raise AutoresearchValidationError("next iteration requires completed current iteration")
+    if state.suspended:
+        raise AutoresearchValidationError(
+            "suspended INFRA_BLOCKED state requires explicit autoresearch-resume"
+        )
+    if readiness is None:
+        raise AutoresearchValidationError(
+            "start_next_iteration requires an explicit platform readiness manifest"
+        )
+    try:
+        validate_state_readiness(state.platform_readiness, readiness)
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
     if not state.memory_written and not _is_explicit_no_memory_transition(state):
         raise AutoresearchValidationError(
             "cannot start next iteration before memory is written or an explicit "
@@ -3930,6 +4013,47 @@ def start_next_iteration(state: AutoresearchState) -> AutoresearchState:
         phase=Phase.SETUP_CONTEXT,
         iteration=state.iteration + 1,
         setup=state.setup,
+        platform_readiness=state.platform_readiness,
+    )
+
+
+def pin_platform_readiness(
+    state: AutoresearchState,
+    readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    """Explicitly initialize an unpinned state; never overwrite a stale pin."""
+    try:
+        identity = readiness.require_ready()
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    if state.platform_readiness is not None and state.platform_readiness != identity:
+        raise AutoresearchValidationError(
+            "state already has a different platform readiness receipt; "
+            "use autoresearch-resume to accept a changed manifest explicitly"
+        )
+    return replace(state, platform_readiness=identity)
+
+
+def resume_suspended_iteration(
+    state: AutoresearchState,
+    readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    """Explicitly recheck readiness and resume after a durable infrastructure pause."""
+    if not state.suspended or state.final_decision is None:
+        raise AutoresearchValidationError("autoresearch state is not suspended")
+    if state.final_decision.decision is not FinalDecision.INFRA_BLOCKED:
+        raise AutoresearchValidationError("only an INFRA_BLOCKED state can be resumed explicitly")
+    if state.setup is None:
+        raise AutoresearchValidationError("suspended state is missing setup context")
+    try:
+        identity = readiness.require_ready()
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    return AutoresearchState(
+        phase=Phase.SETUP_CONTEXT,
+        iteration=state.iteration + 1,
+        setup=state.setup,
+        platform_readiness=identity,
     )
 
 

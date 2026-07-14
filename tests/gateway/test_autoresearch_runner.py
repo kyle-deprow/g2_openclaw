@@ -12,6 +12,7 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
@@ -89,6 +90,34 @@ def quantipy_root(tmp_path: Path) -> Path:
 @pytest.fixture()
 def receipts(quantipy_root: Path) -> ReceiptCatalog:
     return build_receipt_catalog(quantipy_root)
+
+
+@pytest.fixture()
+def platform_readiness(tmp_path: Path) -> PlatformReadinessManifest:
+    return _ready_manifest(tmp_path / "platform-readiness")
+
+
+def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
+    evidence: dict[EvidenceId, dict[str, str | None]] = {}
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for evidence_id in EvidenceId:
+        path = tmp_path / f"{evidence_id.value}.json"
+        path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        evidence[evidence_id] = {
+            "path": str(path),
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "reason": None,
+        }
+    return PlatformReadinessManifest.from_dict(
+        {
+            "schema_version": 1,
+            "status": "READY",
+            "manifest_id": "manifest-test-1",
+            "snapshot_id": "snapshot-test-1",
+            "evidence": {evidence_id.value: value for evidence_id, value in evidence.items()},
+            "reason": None,
+        }
+    )
 
 
 @pytest.fixture()
@@ -495,24 +524,35 @@ def _final_decision_with(
     )
 
 
-def _state_to_consensus(policy: AutoresearchPolicy) -> AutoresearchState:
-    state = AutoresearchState()
+def _state_to_consensus(
+    policy: AutoresearchPolicy,
+    readiness: PlatformReadinessManifest | None = None,
+) -> AutoresearchState:
+    state = AutoresearchState(
+        platform_readiness=readiness.identity() if readiness is not None else None
+    )
     state = advance_state(state, _setup_artifact(), policy)
     state = advance_state(state, _context_artifact(), policy)
     state = advance_state(state, _debate_result(policy, round_number=1), policy)
     return state
 
 
-def _state_to_review(policy: AutoresearchPolicy) -> AutoresearchState:
-    state = _state_to_consensus(policy)
+def _state_to_review(
+    policy: AutoresearchPolicy,
+    readiness: PlatformReadinessManifest | None = None,
+) -> AutoresearchState:
+    state = _state_to_consensus(policy, readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
     state = advance_state(state, _verification_result(VerificationStatus.PASS), policy)
     return state
 
 
-def _state_to_decision(policy: AutoresearchPolicy) -> AutoresearchState:
-    state = _state_to_review(policy)
+def _state_to_decision(
+    policy: AutoresearchPolicy,
+    readiness: PlatformReadinessManifest | None = None,
+) -> AutoresearchState:
+    state = _state_to_review(policy, readiness)
     state = advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
     return state
 
@@ -636,20 +676,27 @@ def g0_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
     )
 
 
-def test_phase_progression(policy: AutoresearchPolicy, receipts: ReceiptCatalog) -> None:
-    state = AutoresearchState()
+def test_phase_progression(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
 
-    action = next_action(state, policy, receipts)
+    action = next_action(state, policy, receipts, platform_readiness)
     assert action.phase is Phase.SETUP_CONTEXT
     assert action.next_agent_ids == ("autoresearch-pm",)
 
     state = advance_state(state, _setup_artifact(), policy)
-    action = next_action(state, policy, receipts)
+    action = next_action(state, policy, receipts, platform_readiness)
     assert action.next_agent_ids == ("context-curator",)
 
     state = advance_state(state, _context_artifact(), policy)
     assert state.phase is Phase.DEBATE
-    assert next_action(state, policy, receipts).next_agent_ids == policy.debate_agent_ids
+    assert (
+        next_action(state, policy, receipts, platform_readiness).next_agent_ids
+        == policy.debate_agent_ids
+    )
 
     state = advance_state(state, _debate_result(policy, round_number=1), policy)
     assert state.phase is Phase.CONSENSUS
@@ -662,7 +709,9 @@ def test_phase_progression(policy: AutoresearchPolicy, receipts: ReceiptCatalog)
 
     state = advance_state(state, _verification_result(VerificationStatus.PASS), policy)
     assert state.phase is Phase.REVIEW
-    assert next_action(state, policy, receipts).next_agent_ids == (policy.reviewer.agent_id,)
+    assert next_action(state, policy, receipts, platform_readiness).next_agent_ids == (
+        policy.reviewer.agent_id,
+    )
 
     state = advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
     assert state.phase is Phase.DECISION_LOG
@@ -700,13 +749,14 @@ def test_no_majority_allows_one_retry_then_routes_to_decision(
 def test_operator_precondition_majority_routes_to_decision_log(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
 
     state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
 
     assert state.phase is Phase.DECISION_LOG
-    action = next_action(state, policy, receipts)
+    action = next_action(state, policy, receipts, platform_readiness)
     assert action.next_agent_ids == (policy.pm.agent_id,)
     assert action.expected_artifact_type is ArtifactType.FINAL_DECISION
     assert "memory_write_required=false" in action.prompt_text
@@ -740,7 +790,10 @@ def test_operator_precondition_final_decision_allows_infra_blocked_without_verif
     assert decided.final_decision is not None
     assert decided.final_decision.decision is FinalDecision.INFRA_BLOCKED
     assert can_write_memory(decided) is False
-    assert start_next_iteration(decided).iteration == 2
+    assert decided.iteration == 1
+    assert decided.suspended is True
+    with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
+        start_next_iteration(decided)
 
 
 def test_operator_precondition_final_decision_rejects_unverified_metric(
@@ -771,8 +824,9 @@ def test_operator_precondition_final_decision_rejects_unverified_metric(
 def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
     malformed = replace(
         state,
@@ -792,7 +846,7 @@ def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
     )
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
-        next_action(malformed, policy, receipts)
+        next_action(malformed, policy, receipts, platform_readiness)
 
 
 def test_normalize_operator_precondition_implementation_state_routes_to_decision_log(
@@ -812,22 +866,29 @@ def test_normalize_operator_precondition_implementation_state_routes_to_decision
 def test_next_action_rejects_operator_precondition_implementation_state(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
     state = replace(
-        _state_to_consensus(policy),
+        _state_to_consensus(policy, platform_readiness),
         consensus_history=(_operator_precondition_consensus(1, policy),),
         phase=Phase.IMPLEMENTATION,
     )
 
     with pytest.raises(AutoresearchValidationError, match="operator-precondition"):
-        next_action(state, policy, receipts)
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        _setup_artifact(),
+        policy,
+    )
     state = advance_state(
         state,
         replace(
@@ -854,12 +915,15 @@ def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
     )
 
     state = advance_state(state, decision, policy)
+    readiness = _ready_manifest(tmp_path)
+    state = replace(state, platform_readiness=readiness.identity())
 
     assert can_write_memory(state) is False
     assert (
-        next_action(state, policy, receipts).expected_artifact_type is ArtifactType.NEXT_ITERATION
+        next_action(state, policy, receipts, readiness).expected_artifact_type
+        is ArtifactType.NEXT_ITERATION
     )
-    assert start_next_iteration(state).iteration == 2
+    assert start_next_iteration(state, readiness=readiness).iteration == 2
 
 
 def test_no_consensus_rejects_a_memory_write_requirement(
@@ -970,12 +1034,13 @@ def test_standardize_mempalace_kg_object_distinguishes_long_objects_with_same_pr
 def test_repeat_prompt_exposes_exact_standardized_mempalace_kg_facts(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_decision(policy)
+    state = _state_to_decision(policy, platform_readiness)
     state = advance_state(state, _final_decision(), policy)
     expected_facts = standardized_mempalace_kg_facts(state)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert json.dumps(expected_facts, indent=2, sort_keys=True) in prompt
 
@@ -1108,13 +1173,14 @@ def test_mempalace_incident_replay_accepts_emitted_compacted_g0_infra_rationale(
 def test_no_implementation_without_majority(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _no_consensus(round_number=1), policy)
     invalid = replace(state, phase=Phase.IMPLEMENTATION)
 
     with pytest.raises(AutoresearchValidationError, match="majority consensus"):
-        next_action(invalid, policy, receipts)
+        next_action(invalid, policy, receipts, platform_readiness)
 
     with pytest.raises(AutoresearchValidationError, match="majority"):
         advance_state(invalid, _implementation_result(), policy)
@@ -1154,22 +1220,30 @@ def test_implementation_result_rejects_main_target_checkout(
 def test_review_fix_cycle_routes_back_through_verification(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_review(policy)
+    state = _state_to_review(policy, platform_readiness)
 
     state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
     assert state.phase is Phase.FIX_TEST
-    assert next_action(state, policy, receipts).next_agent_ids == (policy.fixer.agent_id,)
+    assert next_action(state, policy, receipts, platform_readiness).next_agent_ids == (
+        policy.fixer.agent_id,
+    )
 
     state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
     assert state.phase is Phase.VERIFICATION
 
     state = advance_state(state, _verification_result(VerificationStatus.PASS), policy)
     assert state.phase is Phase.REVIEW
-    assert next_action(state, policy, receipts).next_agent_ids == (policy.reviewer.agent_id,)
+    assert next_action(state, policy, receipts, platform_readiness).next_agent_ids == (
+        policy.reviewer.agent_id,
+    )
 
 
-def test_memory_write_gated_until_final_decision(policy: AutoresearchPolicy) -> None:
+def test_memory_write_gated_until_final_decision(
+    policy: AutoresearchPolicy,
+    tmp_path: Path,
+) -> None:
     state = _state_to_decision(policy)
 
     assert can_write_memory(state) is False
@@ -1198,7 +1272,9 @@ def test_memory_write_gated_until_final_decision(policy: AutoresearchPolicy) -> 
     )
     assert state.memory_written is True
 
-    next_iteration = start_next_iteration(state)
+    readiness = _ready_manifest(tmp_path)
+    state = replace(state, platform_readiness=readiness.identity())
+    next_iteration = start_next_iteration(state, readiness=readiness)
     assert next_iteration.phase is Phase.SETUP_CONTEXT
     assert next_iteration.iteration == 2
 
@@ -1206,21 +1282,32 @@ def test_memory_write_gated_until_final_decision(policy: AutoresearchPolicy) -> 
 def test_repeat_phase_requires_final_decision(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = replace(AutoresearchState(), phase=Phase.REPEAT)
+    state = replace(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        phase=Phase.REPEAT,
+    )
 
     with pytest.raises(AutoresearchValidationError, match="repeat phase requires final_decision"):
-        next_action(state, policy, receipts)
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_debate_phase_requires_context_packet(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = replace(AutoresearchState(setup=_setup_artifact()), phase=Phase.DEBATE)
+    state = replace(
+        AutoresearchState(
+            setup=_setup_artifact(),
+            platform_readiness=platform_readiness.identity(),
+        ),
+        phase=Phase.DEBATE,
+    )
 
     with pytest.raises(AutoresearchValidationError, match="debate phase requires a context_packet"):
-        next_action(state, policy, receipts)
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_fix_result_trigger_must_match_pending_verification_failure(
@@ -1368,15 +1455,18 @@ def test_fix_result_rejects_different_workspace(
 def test_verification_failure_routes_fix_test_with_pending_trigger(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
     state = advance_state(state, _verification_result(VerificationStatus.BUG_SIGNAL), policy)
 
     assert state.phase is Phase.FIX_TEST
     assert state.pending_fix_trigger is FixTriggerPhase.VERIFICATION
-    assert next_action(state, policy, receipts).next_agent_ids == (policy.fixer.agent_id,)
+    assert next_action(state, policy, receipts, platform_readiness).next_agent_ids == (
+        policy.fixer.agent_id,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1856,11 +1946,12 @@ def test_fix_workspace_validation_rejects_exact_persisted_workspace_outside_root
 def test_implementation_prompt_contains_workspace_isolation_contract(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "Workspace isolation contract" in prompt
     assert "disposable git worktree" in prompt
@@ -1876,8 +1967,9 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
 def test_next_action_rejects_legacy_tmp_persisted_implementation_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = replace(
         state,
@@ -1889,14 +1981,15 @@ def test_next_action_rejects_legacy_tmp_persisted_implementation_workspace(
     )
 
     with pytest.raises(AutoresearchValidationError, match="implementation_result workspace_path"):
-        next_action(state, policy, receipts)
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_next_action_rejects_legacy_tmp_fix_history_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = replace(
         state,
@@ -1911,20 +2004,21 @@ def test_next_action_rejects_legacy_tmp_fix_history_workspace(
     )
 
     with pytest.raises(AutoresearchValidationError, match="fix_history workspace_path"):
-        next_action(state, policy, receipts)
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     implementation = _implementation_result()
     state = advance_state(state, implementation, policy)
     state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
     fixed = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
 
     assert "Reuse the exact persisted implementation worktree" in prompt
@@ -1938,11 +2032,12 @@ def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
 def test_implementation_prompt_does_not_direct_reuse_of_a_prior_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "Create and use a disposable git worktree" in prompt
     assert "Reuse the exact persisted implementation worktree" not in prompt
@@ -1951,12 +2046,13 @@ def test_implementation_prompt_does_not_direct_reuse_of_a_prior_workspace(
 def test_verification_prompt_uses_recorded_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "implementation_result.workspace_path" in prompt
     assert "implementation_result.commit_sha" in prompt
@@ -1965,12 +2061,13 @@ def test_verification_prompt_uses_recorded_workspace(
 def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "Verification handoff contract" in prompt
     assert "structured JSON verification_result artifact" in prompt
@@ -1987,12 +2084,13 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
 def test_verification_prompt_requires_failure_classification_and_coverage_fields(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = _state_to_consensus(policy)
+    state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "status TEST_FAILURE with tests_passed=false" in prompt
     assert "status BUG_SIGNAL with nonempty bug_signals" in prompt
@@ -2019,8 +2117,13 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
 def test_g0_verification_prompt_requires_infra_gate_rationale(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        _setup_artifact(),
+        policy,
+    )
     state = advance_state(
         state,
         replace(
@@ -2034,7 +2137,7 @@ def test_g0_verification_prompt_requires_infra_gate_rationale(
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
 
-    prompt = next_action(state, policy, receipts).prompt_text
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "Mode contract: DATA_INFRA_G0" in prompt
     assert "infra_gate_outcome" in prompt

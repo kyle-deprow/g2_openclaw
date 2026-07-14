@@ -4,6 +4,7 @@ import fcntl
 import json
 import subprocess
 import time
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -14,11 +15,43 @@ from gateway.autoresearch_control import (
     ControlError,
     SystemdSupervisorServiceController,
 )
+from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
+from gateway.autoresearch_runner import (
+    AutoresearchState,
+    FinalDecision,
+    FinalDecisionArtifact,
+    FinalReviewerVerdict,
+    Phase,
+    ResearchMode,
+)
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     SupervisorError,
 )
+
+
+def _ready_manifest(path: Path) -> PlatformReadinessManifest:
+    evidence: dict[str, dict[str, str | None]] = {}
+    path.mkdir(parents=True, exist_ok=True)
+    for evidence_id in EvidenceId:
+        evidence_path = path / f"{evidence_id.value}.json"
+        evidence_path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        evidence[evidence_id.value] = {
+            "path": str(evidence_path),
+            "sha256": sha256(evidence_path.read_bytes()).hexdigest(),
+            "reason": None,
+        }
+    return PlatformReadinessManifest.from_dict(
+        {
+            "schema_version": 1,
+            "status": "READY",
+            "manifest_id": "control-manifest-1",
+            "snapshot_id": "control-snapshot-1",
+            "evidence": evidence,
+            "reason": None,
+        }
+    )
 
 
 def _operator_precondition_state_json() -> str:
@@ -271,9 +304,20 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
     state_path = tmp_path / "quantipy-state.json"
+    readiness = _ready_manifest(tmp_path / "readiness-evidence")
     state_path.write_text(
-        '{"phase":"review","iteration":7,"mode":"alpha_research"}', encoding="utf-8"
+        json.dumps(
+            {
+                "phase": "review",
+                "iteration": 7,
+                "mode": "alpha_research",
+                "platform_readiness": readiness.identity().to_dict(),
+            }
+        ),
+        encoding="utf-8",
     )
+    readiness_path = tmp_path / "readiness-manifest.json"
+    readiness_path.write_text(json.dumps(readiness.to_dict()), encoding="utf-8")
     sessions_path = tmp_path / "sessions.json"
     sessions_path.write_text("{}", encoding="utf-8")
     return ControlConfig(
@@ -282,6 +326,7 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
         default_openclaw_bin=executable,
         wake_lock_path=tmp_path / "control-wake.lock",
         wake_claim_path=tmp_path / "control-wake.json",
+        readiness_manifest_path=readiness_path,
     ), executable
 
 
@@ -305,6 +350,62 @@ def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
     ) in params["message"]
     assert "--expect-final" not in command
     assert events == ["rpc:version", "rpc:list", "rpc:wake", "service:start"]
+
+
+def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    config.state_path.write_text(
+        '{"phase":"review","iteration":7,"mode":"alpha_research"}',
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    with pytest.raises(ControlError, match="no pinned platform readiness receipt"):
+        AutoresearchControl(
+            config,
+            run_command=fake,
+            service_controller=FakeSupervisorService([]),
+        ).wake()
+
+    assert fake.calls == []
+
+
+def test_wake_rejects_a_suspended_state_before_any_openclaw_rpc(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    suspended = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=7,
+        mode=ResearchMode.DATA_INFRA_G0,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-7",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="Evidence is unavailable.",
+            log_summary="Suspended.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Operator must publish evidence.",
+        ),
+        suspended=True,
+        suspension_reason="Operator must publish evidence.",
+    )
+    config.state_path.write_text(json.dumps(suspended.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+
+    with pytest.raises(ControlError, match="run autoresearch-resume"):
+        AutoresearchControl(
+            config,
+            run_command=fake,
+            service_controller=FakeSupervisorService([]),
+        ).wake()
+
+    assert fake.calls == []
 
 
 def test_wake_rejects_duplicate_owned_running_task(

@@ -21,6 +21,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import NoReturn, Protocol
 
+from gateway.autoresearch_readiness import (
+    DEFAULT_PLATFORM_READINESS_PATH,
+    load_platform_readiness,
+    validate_state_readiness,
+)
 from gateway.autoresearch_runner import (
     DEFAULT_QUANTIPY_ROOT,
     AutoresearchState,
@@ -910,6 +915,7 @@ def reconcile_relevant_running_tasks(
 @dataclass(frozen=True, slots=True)
 class SupervisorConfig:
     state_path: Path = DEFAULT_STATE_PATH
+    readiness_manifest_path: Path = DEFAULT_PLATFORM_READINESS_PATH
     checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH
     autoresearch_dir: Path = DEFAULT_AUTORESEARCH_DIR
     owner_sessions_path: Path = DEFAULT_OWNER_SESSIONS_PATH
@@ -1110,10 +1116,20 @@ class AutoresearchSupervisor:
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
     ) -> SupervisorResult:
-        executable = self._rpc.require_binary(shutdown_requested=shutdown_requested)
         state = self._load_state()
+        if state.suspended:
+            return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
         if self._is_terminal_state(state):
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
+        try:
+            self._validate_dispatchable_state(state)
+        except SupervisorError as exc:
+            _structured_log(logging.ERROR, "supervisor.readiness_blocked", detail=str(exc))
+            return SupervisorResult(
+                SupervisorOutcome.ALERT,
+                f"platform_readiness_blocked: {exc}",
+            )
+        executable = self._rpc.require_binary(shutdown_requested=shutdown_requested)
         try:
             reconciled_tasks = self._reconciled_running_tasks(
                 executable, shutdown_requested=shutdown_requested
@@ -1246,6 +1262,14 @@ class AutoresearchSupervisor:
             ) from exc
         except AutoresearchValidationError as exc:
             raise SupervisorError(f"invalid autoresearch state: {exc}") from exc
+
+    def _validate_dispatchable_state(self, state: AutoresearchState) -> None:
+        """Require a current operator readiness receipt before recovery wake."""
+        try:
+            readiness = load_platform_readiness(self.config.readiness_manifest_path)
+            validate_state_readiness(state.platform_readiness, readiness)
+        except ValueError as exc:
+            raise SupervisorError(f"cannot wake autoresearch: {exc}") from exc
 
     def _is_terminal_state(self, state: AutoresearchState) -> bool:
         decision = state.final_decision

@@ -11,12 +11,17 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from types import FrameType
 
 import pytest
+from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest, ReadinessIdentity
 from gateway.autoresearch_runner import (
     AutoresearchState,
+    FinalDecision,
+    FinalDecisionArtifact,
+    FinalReviewerVerdict,
     ImplementationResultArtifact,
     Phase,
     ResearchMode,
@@ -100,12 +105,14 @@ def _write_state(
     phase: Phase = Phase.VERIFICATION,
     iteration: int = 4,
     implementation_result: ImplementationResultArtifact | None = None,
+    platform_readiness: ReadinessIdentity | None = None,
 ) -> None:
     state = AutoresearchState(
         phase=phase,
         iteration=iteration,
         mode=ResearchMode.ALPHA_RESEARCH,
         implementation_result=implementation_result,
+        platform_readiness=platform_readiness,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
@@ -331,6 +338,8 @@ class SupervisorEnv:
     executable: Path
     proc_root: Path
     checkpoint_path: Path
+    readiness_manifest_path: Path
+    readiness_identity: ReadinessIdentity
 
 
 @pytest.fixture()
@@ -349,6 +358,29 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
     executable.chmod(0o755)
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
+    readiness_evidence = tmp_path / "readiness-evidence"
+    readiness_evidence.mkdir()
+    evidence: dict[str, dict[str, str | None]] = {}
+    for evidence_id in EvidenceId:
+        evidence_path = readiness_evidence / f"{evidence_id.value}.json"
+        evidence_path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        evidence[evidence_id.value] = {
+            "path": str(evidence_path),
+            "sha256": sha256(evidence_path.read_bytes()).hexdigest(),
+            "reason": None,
+        }
+    readiness = PlatformReadinessManifest.from_dict(
+        {
+            "schema_version": 1,
+            "status": "READY",
+            "manifest_id": "supervisor-manifest-1",
+            "snapshot_id": "supervisor-snapshot-1",
+            "evidence": evidence,
+            "reason": None,
+        }
+    )
+    readiness_manifest_path = tmp_path / "platform-readiness.json"
+    readiness_manifest_path.write_text(json.dumps(readiness.to_dict()), encoding="utf-8")
     return SupervisorEnv(
         now=now,
         state_path=state_path,
@@ -358,6 +390,8 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         executable=executable,
         proc_root=proc_root,
         checkpoint_path=tmp_path / "autoresearch" / "owner-recovery.json",
+        readiness_manifest_path=readiness_manifest_path,
+        readiness_identity=readiness.identity(),
     )
 
 
@@ -365,6 +399,7 @@ def _supervisor(env: SupervisorEnv, fake: FakeOpenClaw) -> AutoresearchSuperviso
     return AutoresearchSupervisor(
         SupervisorConfig(
             state_path=env.state_path,
+            readiness_manifest_path=env.readiness_manifest_path,
             checkpoint_path=env.checkpoint_path,
             autoresearch_dir=env.state_path.parent,
             owner_sessions_path=env.sessions_path,
@@ -548,7 +583,7 @@ def test_openclaw_rpc_shutdown_kills_process_group_without_waiting_for_timeout(
 
 
 def _prepare_stale_state(env: SupervisorEnv, *, phase: Phase = Phase.VERIFICATION) -> None:
-    _write_state(env.state_path, phase=phase)
+    _write_state(env.state_path, phase=phase, platform_readiness=env.readiness_identity)
     _make_stale([env.state_path, *env.marker_paths], now=env.now)
 
 
@@ -590,6 +625,21 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert "--expect-final" not in command
 
 
+def test_supervisor_rejects_an_unpinned_state_before_any_openclaw_rpc(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _write_state(supervisor_env.state_path)
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert "platform_readiness_blocked" in result.reason
+    assert "no pinned platform readiness receipt" in result.reason
+    assert fake.calls == []
+
+
 def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
     supervisor_env: SupervisorEnv,
 ) -> None:
@@ -599,6 +649,7 @@ def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
         supervisor_env.state_path,
         iteration=30,
         implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
     )
     _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     fake = FakeOpenClaw()
@@ -626,6 +677,37 @@ def test_supervisor_normalizes_operator_precondition_implementation_state(
     assert state.phase is Phase.DECISION_LOG
 
 
+def test_supervisor_does_not_wake_a_suspended_state(supervisor_env: SupervisorEnv) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=36,
+        mode=ResearchMode.DATA_INFRA_G0,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-36",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="Evidence is unavailable.",
+            log_summary="Suspended.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Operator must publish evidence.",
+        ),
+        suspended=True,
+        suspension_reason="Operator must publish evidence.",
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "platform_readiness_suspended"
+    assert not any(call[1:4] == ["gateway", "call", "agent"] for call in fake.calls)
+
+
 def test_recovery_retries_use_distinct_idempotency_keys(
     supervisor_env: SupervisorEnv,
 ) -> None:
@@ -635,6 +717,7 @@ def test_recovery_retries_use_distinct_idempotency_keys(
     supervisor = AutoresearchSupervisor(
         SupervisorConfig(
             state_path=supervisor_env.state_path,
+            readiness_manifest_path=supervisor_env.readiness_manifest_path,
             checkpoint_path=supervisor_env.checkpoint_path,
             autoresearch_dir=supervisor_env.state_path.parent,
             owner_sessions_path=supervisor_env.sessions_path,
@@ -742,6 +825,7 @@ def test_missing_verification_reason_is_not_masked_by_owner_session_error(
         supervisor_env.state_path,
         iteration=30,
         implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
     )
     _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     owner_transcript = supervisor_env.sessions_path.parent / "owner.jsonl"
@@ -962,6 +1046,7 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
     supervisor = AutoresearchSupervisor(
         SupervisorConfig(
             state_path=supervisor_env.state_path,
+            readiness_manifest_path=supervisor_env.readiness_manifest_path,
             checkpoint_path=supervisor_env.checkpoint_path,
             autoresearch_dir=supervisor_env.state_path.parent,
             owner_sessions_path=supervisor_env.sessions_path,
@@ -1009,6 +1094,7 @@ def test_active_writer_in_the_verified_implementation_workspace_suppresses_owner
     _write_state(
         supervisor_env.state_path,
         implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
     )
     _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     process_dir = supervisor_env.proc_root / "1234"
@@ -1030,6 +1116,7 @@ def test_lost_task_projection_with_active_persisted_writer_suppresses_recovery(
     _write_state(
         supervisor_env.state_path,
         implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
     )
     _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     supervisor_env.sessions_path.write_text(

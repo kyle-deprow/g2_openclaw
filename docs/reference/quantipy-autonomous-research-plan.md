@@ -1,7 +1,7 @@
 # Autonomous Research Loop — Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-07-09
+**Last Updated:** 2026-07-14
 
 ## Goal
 
@@ -55,6 +55,18 @@ OpenClaw Codex runtime (codex plugin, OpenAI auth)
 dedicated PM session. G2 is a human interface for explicit start/status/stop
 requests only.
 
+**Platform readiness:** Before any stage is dispatched, the control plane
+validates the operator-owned `~/.openclaw/autoresearch/platform-readiness.json`
+manifest. It pins the immutable snapshot identity and verifies the SEC
+common-stock provenance and authoritative XNYS calendar evidence by SHA-256.
+Missing, blocked, stale, or modified evidence fails closed. An
+`INFRA_BLOCKED` operator-precondition decision suspends the current iteration
+without incrementing it; the supervisor and G2 wake path do not retry it. The
+operator must publish a new `READY` manifest and run
+`gateway-cli autoresearch-resume` explicitly. This preflight runs once per
+data snapshot, while each iteration performs only the lightweight identity and
+hash recheck.
+
 **Validation target:** At least 2+ strategies with IS walk-forward Sharpe > 0.5 (net of costs), passing adversarial review.
 
 ## Data Available
@@ -83,6 +95,7 @@ These were hard-won from 18 prior experiments (all discarded) and are now baked 
 | Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
 | 5-agent research debate | Mixed 5.6/5.5/5.4 high-reasoning panel spends frontier intelligence on data/skeptic pressure while keeping bounded theory and implementation-feasibility work cheaper |
 | Deterministic methodology loading | Stage agents read Quantipy's current `AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents` before context/debate/implementation/review/fix |
+| Platform readiness manifest | Operator-owned SEC/common-stock and XNYS evidence is validated and pinned once per data snapshot; blocked readiness suspends instead of consuming iterations |
 
 ## OpenClaw Stage Roster
 
@@ -130,6 +143,12 @@ The runner also blocks burned alpha theory families unless a debate submission
 documents materially new evidence. Final MemPalace logging is complete only
 after `autoresearch-mark-memory` verifies standardized, provenanced KG facts
 against the final artifact and persists its read-only verification receipt.
+
+An existing state must be explicitly initialized with
+`gateway-cli autoresearch-pin-readiness`. A changed snapshot is accepted only
+through `gateway-cli autoresearch-resume`; there is no automatic evidence
+download, inferred calendar, provider substitution, or repeated debate while
+the platform gate is blocked.
 
 ## Success Criteria
 

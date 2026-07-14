@@ -28,6 +28,8 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from gateway.autoresearch_readiness import DEFAULT_PLATFORM_READINESS_PATH, load_platform_readiness
+
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
 console = Console()
 
@@ -504,6 +506,13 @@ _quantipy_root_option = typer.Option(
 )
 _state_path_argument = typer.Argument(..., exists=True, dir_okay=False, readable=True)
 _artifact_path_argument = typer.Argument(..., exists=True, dir_okay=False, readable=True)
+_readiness_manifest_option = typer.Option(
+    DEFAULT_PLATFORM_READINESS_PATH,
+    "--readiness-manifest",
+    dir_okay=False,
+    readable=True,
+    help="Operator-owned platform readiness manifest.",
+)
 _output_path_option = typer.Option(
     ...,
     "--output",
@@ -644,6 +653,7 @@ def autoresearch_next(
     state_path: Path = _state_path_argument,
     openclaw_config: Path = _openclaw_config_option,
     quantipy_root: Path = _quantipy_root_option,
+    readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Validate autoresearch state/config and print the deterministic next action."""
     from gateway.autoresearch_runner import (
@@ -657,6 +667,7 @@ def autoresearch_next(
     try:
         state = load_state_file(state_path)
         policy = load_autoresearch_policy(openclaw_config)
+        readiness = load_platform_readiness(readiness_manifest)
         receipts = build_receipt_catalog(quantipy_root)
         status_lines = _git_status_short(quantipy_root)
         if status_lines is not None:
@@ -669,7 +680,7 @@ def autoresearch_next(
                 f"{details}\n"
                 "Stop them before launching the next autoresearch stage."
             )
-        action = next_action(state, policy, receipts)
+        action = next_action(state, policy, receipts, readiness=readiness)
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -804,6 +815,7 @@ def autoresearch_start_next(
     state_path: Path = _state_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Start the next persisted autoresearch iteration after memory is written."""
     from gateway.autoresearch_runner import (
@@ -818,10 +830,66 @@ def autoresearch_start_next(
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
         validate_state(state, policy)
-        next_state = start_next_iteration(state)
+        readiness = load_platform_readiness(readiness_manifest)
+        next_state = start_next_iteration(state, readiness=readiness)
         save_state_file(output_path, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-start-next failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-pin-readiness")
+def autoresearch_pin_readiness(
+    state_path: Path = _state_path_argument,
+    output_path: Path = _output_path_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Explicitly initialize an unpinned state with a READY readiness receipt."""
+    from gateway.autoresearch_runner import (
+        load_state_file,
+        pin_platform_readiness,
+        save_state_file,
+    )
+
+    try:
+        state = load_state_file(state_path)
+        readiness = load_platform_readiness(readiness_manifest)
+        next_state = pin_platform_readiness(state, readiness)
+        save_state_file(output_path, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-pin-readiness failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-resume")
+def autoresearch_resume(
+    state_path: Path = _state_path_argument,
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Explicitly recheck readiness and resume a suspended iteration."""
+    from gateway.autoresearch_runner import (
+        load_autoresearch_policy,
+        load_state_file,
+        resume_suspended_iteration,
+        save_state_file,
+        validate_state,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        validate_state(state, policy)
+        readiness = load_platform_readiness(readiness_manifest)
+        next_state = resume_suspended_iteration(state, readiness)
+        save_state_file(output_path, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-resume failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")

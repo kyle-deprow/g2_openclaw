@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 from unittest.mock import MagicMock, patch
@@ -15,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
+from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
@@ -65,6 +67,33 @@ from gateway.cli import (
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
+    evidence: dict[str, dict[str, str | None]] = {}
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for evidence_id in EvidenceId:
+        path = tmp_path / f"{evidence_id.value}.json"
+        path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        evidence[evidence_id.value] = {
+            "path": str(path),
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "reason": None,
+        }
+    return PlatformReadinessManifest.from_dict(
+        {
+            "schema_version": 1,
+            "status": "READY",
+            "manifest_id": "manifest-cli-test-1",
+            "snapshot_id": "snapshot-cli-test-1",
+            "evidence": evidence,
+            "reason": None,
+        }
+    )
+
+
+def _write_readiness_manifest(path: Path, manifest: PlatformReadinessManifest) -> None:
+    path.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
 
 
 class CliInvocationResult(Protocol):
@@ -905,6 +934,9 @@ class TestAutoresearchCliCommands:
                 per_symbol=(coverage_symbol,),
             ),
         )
+        readiness = _ready_manifest(tmp_path / "readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
         repeat_state = AutoresearchState(
             phase=Phase.REPEAT,
             iteration=3,
@@ -967,6 +999,7 @@ class TestAutoresearchCliCommands:
                 memory_write_required=True,
             ),
             mode=ResearchMode.ALPHA_RESEARCH,
+            platform_readiness=readiness.identity(),
         )
         state_path = tmp_path / "repeat-state.json"
         memory_state_path = tmp_path / "memory-state.json"
@@ -1036,6 +1069,8 @@ class TestAutoresearchCliCommands:
                 str(next_state_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
             ],
         )
         assert next_result.exit_code == 0
@@ -1048,7 +1083,13 @@ class TestAutoresearchCliCommands:
         state_path = tmp_path / "state.json"
         quantipy_root = tmp_path / "quantipy"
         self._write_quantipy_receipts(quantipy_root)
-        state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+        readiness = _ready_manifest(tmp_path / "readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state_path.write_text(
+            json.dumps(AutoresearchState(platform_readiness=readiness.identity()).to_dict()),
+            encoding="utf-8",
+        )
 
         with (
             patch("gateway.cli._git_status_short", return_value=()),
@@ -1066,6 +1107,8 @@ class TestAutoresearchCliCommands:
                     str(quantipy_root),
                     "--openclaw-config",
                     str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                    "--readiness-manifest",
+                    str(readiness_path),
                 ],
             )
 

@@ -20,6 +20,44 @@ Durable research memory is MemPalace only. Do not use `memory_search`,
 loop memory for research continuity. Only the PM loads the write-capable
 `mempalace` skill; all stage agents load `mempalace-readonly`.
 
+## Platform Readiness Preflight
+
+Before any stage dispatch, the runner validates the operator-owned manifest at
+`~/.openclaw/autoresearch/platform-readiness.json`. Override it explicitly with
+`--readiness-manifest <path>` for tests or a controlled operator migration. The
+manifest must be schema version 1, identify a canonical `manifest_id` and
+`snapshot_id`, and contain SHA-256 receipts for immutable SEC/common-stock
+provenance and authoritative XNYS calendar files. `READY` requires both files
+to be absolute, regular files whose current hashes match. `BLOCKED` must state
+the concrete operator action required. The runner never downloads, infers,
+substitutes, repairs, or silently falls back to evidence.
+
+An existing state without a pinned readiness receipt fails closed. Initialize it
+explicitly:
+
+```bash
+uv run gateway-cli autoresearch-pin-readiness STATE.json \
+  --readiness-manifest ~/.openclaw/autoresearch/platform-readiness.json \
+  --output STATE-pinned.json
+```
+
+`autoresearch-next` checks the current manifest before selecting or dispatching
+any stage and rejects a blocked, invalid, or stale-pinned state. An
+`INFRA_BLOCKED` operator-precondition decision is durable: it sets the state to
+suspended, does not increment the iteration, and does not write MemPalace. The
+supervisor recognizes the suspended state and does not wake the PM. After the
+operator changes and validates readiness, resume explicitly:
+
+```bash
+uv run gateway-cli autoresearch-resume STATE.json \
+  --readiness-manifest ~/.openclaw/autoresearch/platform-readiness.json \
+  --output STATE-resumed.json
+```
+
+Resume accepts the new READY receipt, clears the suspension, and starts the next
+iteration. Normal completed alpha and `NO_CONSENSUS` transitions still use
+`autoresearch-start-next`, which rechecks the pinned receipt.
+
 ## Explicit Research Modes
 
 The context packet must select exactly one mode and give a nonempty

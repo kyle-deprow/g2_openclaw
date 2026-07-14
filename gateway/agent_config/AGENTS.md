@@ -33,6 +33,17 @@ thin interface:
 If the control command fails, report the exact blocker. Do not improvise PM
 behavior inside the G2 session.
 
+## Platform Readiness Control
+
+Autoresearch cannot dispatch from an unpinned, blocked, invalid, or stale
+platform-readiness manifest. The default manifest is
+`~/.openclaw/autoresearch/platform-readiness.json`; controlled tests/operators
+may pass `--readiness-manifest <path>`. Initialize an existing state explicitly
+with `gateway-cli autoresearch-pin-readiness`, and resume a durable
+`INFRA_BLOCKED` suspension only with `gateway-cli autoresearch-resume` after the
+manifest is READY. A suspended state does not increment iterations and the
+supervisor must not wake it repeatedly.
+
 ## Autonomous PM Rules
 
 If you are `autoresearch-pm`, use the deterministic runner in
