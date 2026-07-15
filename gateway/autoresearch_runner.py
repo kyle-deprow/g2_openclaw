@@ -34,7 +34,12 @@ from gateway.autoresearch_readiness import (
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
+G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
 AUTORESEARCH_STATE_SCHEMA_VERSION = 2
+INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v2"
+INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
+MAX_NEXT_ACTION_PROMPT_BYTES = 32 * 1024
+MAX_ARTIFACT_FILE_BYTES = 24 * 1024
 MAX_UNIVERSE_SELECTION_DATES = 2200
 MAX_UNIVERSE_BATCH_DATES = 32
 MAX_UNIVERSE_BATCH_RESULTS = 10_000
@@ -551,7 +556,6 @@ class SourceReceipt:
     receipt_id: str
     path: Path
     sha256: str
-    content: str
 
     @property
     def label(self) -> str:
@@ -563,6 +567,152 @@ class SourceReceipt:
             "path": str(self.path),
             "sha256": self.sha256,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionSourceEntry:
+    receipt_id: str
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_receipt(cls, receipt: SourceReceipt) -> InstructionSourceEntry:
+        return cls(
+            receipt_id=receipt.receipt_id,
+            path=str(receipt.path),
+            sha256=receipt.sha256,
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "receipt_id": self.receipt_id,
+            "path": self.path,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class InstructionSourceManifest:
+    version: str
+    digest_domain: str
+    phase: str
+    expected_artifact_type: str
+    target_agent_ids: tuple[str, ...]
+    target_repo_root: str
+    sources: tuple[InstructionSourceEntry, ...]
+
+    @classmethod
+    def from_context(
+        cls,
+        *,
+        phase: Phase,
+        expected_artifact_type: ArtifactType,
+        target_agent_ids: Sequence[str],
+        target_repo_root: Path,
+        receipts: Sequence[SourceReceipt],
+    ) -> InstructionSourceManifest:
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for receipt in receipts:
+            if receipt.receipt_id in seen:
+                duplicates.add(receipt.receipt_id)
+            seen.add(receipt.receipt_id)
+        if duplicates:
+            raise AutoresearchReceiptError(
+                "duplicate instruction source receipt ids: " + ", ".join(sorted(duplicates))
+            )
+        ordered = tuple(sorted(receipts, key=lambda receipt: receipt.receipt_id))
+        return cls(
+            version=INSTRUCTION_SOURCE_MANIFEST_VERSION,
+            digest_domain=INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
+            phase=phase.value,
+            expected_artifact_type=expected_artifact_type.value,
+            target_agent_ids=tuple(target_agent_ids),
+            target_repo_root=str(target_repo_root.expanduser().resolve(strict=False)),
+            sources=tuple(InstructionSourceEntry.from_receipt(item) for item in ordered),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "digest_domain": self.digest_domain,
+            "phase": self.phase,
+            "expected_artifact_type": self.expected_artifact_type,
+            "target_agent_ids": list(self.target_agent_ids),
+            "target_repo_root": self.target_repo_root,
+            "sources": [source.to_dict() for source in self.sources],
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    def sha256(self) -> str:
+        return _sha256_text(
+            "\n".join(
+                (
+                    self.digest_domain,
+                    self.version,
+                    self.canonical_json(),
+                )
+            )
+        )
+
+
+def build_instruction_source_manifest(
+    *,
+    phase: Phase,
+    expected_artifact_type: ArtifactType,
+    target_agent_ids: Sequence[str],
+    target_repo_root: Path,
+    receipts: Sequence[SourceReceipt],
+) -> InstructionSourceManifest:
+    return InstructionSourceManifest.from_context(
+        phase=phase,
+        expected_artifact_type=expected_artifact_type,
+        target_agent_ids=target_agent_ids,
+        target_repo_root=target_repo_root,
+        receipts=receipts,
+    )
+
+
+def instruction_source_manifest_sha256(
+    *,
+    phase: Phase,
+    expected_artifact_type: ArtifactType,
+    target_agent_ids: Sequence[str],
+    target_repo_root: Path,
+    receipts: Sequence[SourceReceipt],
+) -> str:
+    return build_instruction_source_manifest(
+        phase=phase,
+        expected_artifact_type=expected_artifact_type,
+        target_agent_ids=target_agent_ids,
+        target_repo_root=target_repo_root,
+        receipts=receipts,
+    ).sha256()
+
+
+def expected_instruction_manifest_sha256(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> str:
+    target = _select_phase_target(state, policy)
+    required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
+    return instruction_source_manifest_sha256(
+        phase=state.phase,
+        expected_artifact_type=target.artifact_type,
+        target_agent_ids=target.agent_ids,
+        target_repo_root=_target_repo_root_for_state(state),
+        receipts=required_receipts,
+    )
+
+
+def _target_repo_root_for_state(state: AutoresearchState) -> Path:
+    target_repo = (
+        Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
+    )
+    return target_repo.expanduser().resolve(strict=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2938,6 +3088,8 @@ class NextAction:
     next_agent_ids: tuple[str, ...]
     expected_artifact_type: ArtifactType
     required_receipts: tuple[SourceReceipt, ...]
+    instruction_source_manifest: InstructionSourceManifest
+    source_manifest_sha256: str
     prompt_text: str
 
     def to_dict(self) -> dict[str, object]:
@@ -2946,6 +3098,8 @@ class NextAction:
             "next_agent_ids": list(self.next_agent_ids),
             "expected_artifact_type": self.expected_artifact_type.value,
             "required_receipts": [receipt.to_dict() for receipt in self.required_receipts],
+            "instruction_source_manifest": self.instruction_source_manifest.to_dict(),
+            "source_manifest_sha256": self.source_manifest_sha256,
             "prompt_text": self.prompt_text,
         }
 
@@ -3430,19 +3584,33 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
 }
 
 
+def _canonical_receipt_path(path: Path) -> Path:
+    try:
+        canonical = path.expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise AutoresearchReceiptError(f"missing required receipt source: {path}") from exc
+    if not canonical.is_file():
+        raise AutoresearchReceiptError(f"missing required receipt source: {canonical}")
+    return canonical
+
+
 def _load_receipt(receipt_id: str, path: Path) -> SourceReceipt:
-    if not path.is_file():
-        raise AutoresearchReceiptError(f"missing required receipt source: {path}")
-    content = path.read_text(encoding="utf-8")
+    canonical = _canonical_receipt_path(path)
+    try:
+        content = canonical.read_bytes()
+    except OSError as exc:
+        raise AutoresearchReceiptError(f"unreadable required receipt source: {canonical}") from exc
     return SourceReceipt(
-        receipt_id=receipt_id, path=path, sha256=_sha256_text(content), content=content
+        receipt_id=receipt_id,
+        path=canonical,
+        sha256=hashlib.sha256(content).hexdigest(),
     )
 
 
 def build_receipt_catalog(quantipy_root: Path = DEFAULT_QUANTIPY_ROOT) -> ReceiptCatalog:
     receipts: dict[str, SourceReceipt] = {}
     for receipt_id, path in LOCAL_RECEIPT_PATHS.items():
-        receipts[receipt_id] = _load_receipt(receipt_id, path)
+        receipts[receipt_id] = _load_receipt(receipt_id, G2_OPENCLAW_REPO_ROOT / path)
     for receipt_id, relative_path in QUANTIPY_RECEIPT_PATHS.items():
         receipts[receipt_id] = _load_receipt(receipt_id, quantipy_root / relative_path)
     return ReceiptCatalog(receipts=receipts)
@@ -4304,12 +4472,8 @@ def _json_block(payload: Mapping[str, object]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
-def _render_receipt_block(receipts: Sequence[SourceReceipt]) -> str:
-    parts: list[str] = []
-    for receipt in receipts:
-        header = f"=== {receipt.receipt_id} | {receipt.path} | sha256={receipt.sha256} ==="
-        parts.append(f"{header}\n{receipt.content}")
-    return "\n\n".join(parts)
+def _render_instruction_source_manifest(manifest: InstructionSourceManifest) -> str:
+    return json.dumps(manifest.to_dict(), indent=2, sort_keys=True)
 
 
 def _artifact_context(state: AutoresearchState) -> dict[str, object]:
@@ -4904,12 +5068,11 @@ def _build_prompt_text(
     phase: Phase,
     expected_artifact_type: ArtifactType,
     agent_ids: Sequence[str],
-    receipts: Sequence[SourceReceipt],
+    instruction_source_manifest: InstructionSourceManifest,
+    source_manifest_sha256: str,
     readiness: PlatformReadinessManifest,
 ) -> str:
-    target_repo = (
-        Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
-    )
+    target_repo = _target_repo_root_for_state(state)
     compute_snapshot = collect_compute_capability_snapshot(target_repo)
     return (
         "Deterministic autoresearch runner prompt.\n"
@@ -4921,8 +5084,24 @@ def _build_prompt_text(
         "Machine-readable compute capability snapshot (read-only probe; do not fabricate):\n"
         f"{_json_block(compute_snapshot.to_dict())}\n\n"
         f"{_phase_instruction(state, phase, expected_artifact_type, agent_ids)}\n\n"
-        "Loaded instructions and receipts:\n"
-        f"{_render_receipt_block(receipts)}"
+        "Instruction source manifest:\n"
+        f"source_manifest_sha256={source_manifest_sha256}\n"
+        f"{_render_instruction_source_manifest(instruction_source_manifest)}\n\n"
+        "Instruction source contract:\n"
+        "- Read every live file listed in instruction_source_manifest before doing stage "
+        "work; OpenClaw-configured skills remain authoritative and target-repo files must "
+        "be read live from their listed canonical paths.\n"
+        "- Recompute SHA-256 over each listed file's current bytes and fail before stage "
+        "work if any path is missing, unreadable, or hash-mismatched.\n"
+        "- Compute the manifest digest from the exact canonical compact manifest above. "
+        "It is versioned, domain-separated, and bound to this phase, expected artifact "
+        "type, ordered target agent IDs, canonical target repo root, and sorted source "
+        "receipts.\n"
+        "- Write production artifacts with exactly this JSON envelope: "
+        '{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}. '
+        "Legacy unwrapped artifacts, missing digests, mismatches, and extra envelope keys "
+        "are invalid and must not be advanced. The complete artifact file must be no more "
+        f"than {MAX_ARTIFACT_FILE_BYTES} bytes; compact the artifact instead of truncating.\n"
     )
 
 
@@ -4948,20 +5127,39 @@ def next_action(
         raise AutoresearchValidationError(str(exc)) from exc
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
+    instruction_source_manifest = build_instruction_source_manifest(
+        phase=state.phase,
+        expected_artifact_type=target.artifact_type,
+        target_agent_ids=target.agent_ids,
+        target_repo_root=_target_repo_root_for_state(state),
+        receipts=required_receipts,
+    )
+    source_manifest_sha256 = instruction_source_manifest.sha256()
+    prompt_text = _build_prompt_text(
+        state=state,
+        policy=policy,
+        phase=state.phase,
+        expected_artifact_type=target.artifact_type,
+        agent_ids=target.agent_ids,
+        instruction_source_manifest=instruction_source_manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        readiness=readiness,
+    )
+    prompt_bytes = len(prompt_text.encode("utf-8"))
+    if prompt_bytes > MAX_NEXT_ACTION_PROMPT_BYTES:
+        raise AutoresearchValidationError(
+            "autoresearch prompt exceeds hard byte budget: "
+            f"{prompt_bytes} > {MAX_NEXT_ACTION_PROMPT_BYTES} bytes for phase "
+            f"{state.phase.value}; compact accepted artifact/state fields before dispatch"
+        )
     action = NextAction(
         phase=state.phase,
         next_agent_ids=target.agent_ids,
         expected_artifact_type=target.artifact_type,
         required_receipts=required_receipts,
-        prompt_text=_build_prompt_text(
-            state=state,
-            policy=policy,
-            phase=state.phase,
-            expected_artifact_type=target.artifact_type,
-            agent_ids=target.agent_ids,
-            receipts=required_receipts,
-            readiness=readiness,
-        ),
+        instruction_source_manifest=instruction_source_manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        prompt_text=prompt_text,
     )
     if state.phase is Phase.REVIEW:
         # Keep this external-file check adjacent to review dispatch.
@@ -5523,6 +5721,8 @@ def load_artifact_file(
     path: Path,
     state: AutoresearchState,
     policy: AutoresearchPolicy,
+    *,
+    instruction_manifest_sha256: str,
 ) -> (
     SetupContextArtifact
     | ContextPacketArtifact
@@ -5535,32 +5735,56 @@ def load_artifact_file(
     | FinalDecisionArtifact
 ):
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        raw_bytes = path.read_bytes()
     except FileNotFoundError as exc:
         raise AutoresearchValidationError(f"missing artifact file: {path}") from exc
+    if len(raw_bytes) > MAX_ARTIFACT_FILE_BYTES:
+        raise AutoresearchValidationError(
+            "artifact file exceeds hard byte budget: "
+            f"{len(raw_bytes)} > {MAX_ARTIFACT_FILE_BYTES} bytes; compact the "
+            "phase artifact and write the strict instruction_manifest_sha256 envelope"
+        )
+    try:
+        raw = json.loads(raw_bytes.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise AutoresearchValidationError(f"artifact JSON is not UTF-8: {path}") from exc
     except json.JSONDecodeError as exc:
         raise AutoresearchValidationError(f"invalid artifact JSON: {path}") from exc
+
+    _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
+    data = _ensure_mapping(raw, label="artifact_file")
+    _require_exact_keys(
+        data,
+        label="artifact_file",
+        expected=("instruction_manifest_sha256", "artifact"),
+    )
+    envelope_digest = _require_sha256(data, "instruction_manifest_sha256")
+    if envelope_digest != instruction_manifest_sha256:
+        raise AutoresearchValidationError(
+            "artifact instruction_manifest_sha256 does not match dispatched manifest"
+        )
+    artifact_raw = data["artifact"]
 
     _validate_state(state, policy)
     target = _select_phase_target(state, policy)
     if target.artifact_type is ArtifactType.SETUP:
-        return SetupContextArtifact.from_dict(raw)
+        return SetupContextArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.CONTEXT_PACKET:
-        return ContextPacketArtifact.from_dict(raw)
+        return ContextPacketArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.DEBATE_RESULT:
-        return DebateResultArtifact.from_dict(raw)
+        return DebateResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.CONSENSUS_RESULT:
-        return ConsensusResultArtifact.from_dict(raw)
+        return ConsensusResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.IMPLEMENTATION_RESULT:
-        return ImplementationResultArtifact.from_dict(raw)
+        return ImplementationResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.VERIFICATION_RESULT:
-        return VerificationResultArtifact.from_dict(raw, mode=state.mode)
+        return VerificationResultArtifact.from_dict(artifact_raw, mode=state.mode)
     if target.artifact_type is ArtifactType.REVIEW_RESULT:
-        return ReviewResultArtifact.from_dict(raw)
+        return ReviewResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.FIX_RESULT:
-        return FixResultArtifact.from_dict(raw)
+        return FixResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.FINAL_DECISION:
-        return FinalDecisionArtifact.from_dict(raw)
+        return FinalDecisionArtifact.from_dict(artifact_raw)
     raise AutoresearchValidationError(
         f"{state.phase.value} does not accept artifact files; use state mutation commands instead"
     )

@@ -214,6 +214,8 @@ def test_ownership_memory_and_config_guidance_remain_explicit() -> None:
     assert "Human/Codex owns shared loaders" in agents
     assert "only the PM may write" in agents
     assert "Do not use OpenClaw built-in memory" in agents
+    assert "strict production envelope" in readme
+    assert "Never write or pass a raw unwrapped `verification_result`" in agents
     assert "bash scripts/push-openclaw-config.sh" in readme
     assert "restart the OpenClaw gateway service" in readme
 
@@ -225,7 +227,8 @@ def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     assert "Plain KEEP is invalid without a numeric" in protocol
     assert "Decision Sharpe > 0.5: SIGNIFICANT KEEP or STRONG KEEP" in protocol
     assert "Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP" in protocol
-    assert "structured JSON\n`verification_result` artifact" in protocol
+    assert "strict `instruction_manifest_sha256` envelope" in protocol
+    assert "Never pass a raw unwrapped `verification_result`" in protocol
 
 
 def test_alpha_docs_require_dynamic_coverage_and_explicit_state_migration() -> None:

@@ -802,6 +802,7 @@ def autoresearch_advance(
     artifact_path: Path = _artifact_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    quantipy_root: Path = _quantipy_root_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Advance autoresearch state with a validated artifact and persist the result."""
@@ -810,6 +811,8 @@ def autoresearch_advance(
         FixResultArtifact,
         ImplementationResultArtifact,
         advance_state,
+        build_receipt_catalog,
+        expected_instruction_manifest_sha256,
         load_artifact_file,
         load_autoresearch_policy,
         load_state_file,
@@ -823,7 +826,14 @@ def autoresearch_advance(
         readiness = load_platform_readiness(readiness_manifest)
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
         validation_context.validate_for_state(state)
-        artifact = load_artifact_file(artifact_path, state, policy)
+        receipts = build_receipt_catalog(quantipy_root)
+        source_manifest_sha256 = expected_instruction_manifest_sha256(state, policy, receipts)
+        artifact = load_artifact_file(
+            artifact_path,
+            state,
+            policy,
+            instruction_manifest_sha256=source_manifest_sha256,
+        )
         if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
             validate_artifact_workspace(state, artifact)
         next_state = advance_state(state, artifact, policy, validation_context=validation_context)

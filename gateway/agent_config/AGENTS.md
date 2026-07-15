@@ -108,7 +108,8 @@ Use the `autoresearch` skill for the complete protocol:
    digests; the runner derives deterministic contiguous history batches.
 4. `implementer` creates code, tests, notebook, and a clean commit in the
    persisted experiment worktree.
-5. Verification emits and advances a structured artifact before prose.
+5. Verification emits and advances a strict-envelope structured artifact before
+   prose.
 6. One configured high-reasoning `reviewer` performs adversarial review.
 7. `fixer` handles bounded experiment defects in the same worktree.
 8. The PM decides, logs, performs any required MemPalace write, and continues.
@@ -132,10 +133,13 @@ persisted workspace. Every attempt, including test failures and bug signals,
 must:
 
 1. Run the exact focused commands and capture decisive evidence.
-2. Write a complete JSON `verification_result`; unavailable fields are `null`,
-   never fabricated values.
-3. Persist it with `gateway-cli autoresearch-advance` before any prose status or
-   handoff.
+2. Write a complete JSON `verification_result` inside the strict production
+   envelope from the active `autoresearch-next` output:
+   `{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}`.
+   Unavailable fields are `null`, never fabricated values. Never write or pass
+   a raw unwrapped `verification_result`.
+3. Persist that envelope with `gateway-cli autoresearch-advance` before any
+   prose status or handoff.
 4. Route an accepted fix request only to `fixer` in that same workspace, then
    repeat structured verification and review as directed by the runner.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
@@ -21,6 +22,10 @@ from gateway.autoresearch_readiness import (
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
+    INSTRUCTION_SOURCE_MANIFEST_VERSION,
+    MAX_ARTIFACT_FILE_BYTES,
+    MAX_NEXT_ACTION_PROMPT_BYTES,
     MEMBER_UNION_DIGEST_ALGORITHM,
     MEMPALACE_FULL_SERVER_ID,
     MEMPALACE_MUTATION_DENY_TOOL_IDS,
@@ -67,14 +72,19 @@ from gateway.autoresearch_runner import (
     ReviewResultArtifact,
     ReviewVerdict,
     SetupContextArtifact,
+    SourceReceipt,
     UniverseDateVerificationReceipt,
     UniverseHistoryBatchReceipt,
     UniversePlanArtifact,
     UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
+    build_instruction_source_manifest,
     build_receipt_catalog,
     can_write_memory,
+    expected_instruction_manifest_sha256,
+    instruction_source_manifest_sha256,
+    load_artifact_file,
     load_autoresearch_policy,
     mark_memory_written,
     next_action,
@@ -242,6 +252,242 @@ def test_every_stage_prompt_has_one_compact_canonical_capabilities_block(
     for evidence in platform_readiness.evidence.values():
         assert evidence.path is not None
         assert evidence.path not in prompt
+
+
+def test_instruction_source_manifest_digest_is_canonical_and_deterministic(
+    receipts: ReceiptCatalog,
+) -> None:
+    required_receipts = receipts.require(tuple(QUANTIPY_RECEIPT_PATHS))
+
+    first = build_instruction_source_manifest(
+        phase=Phase.SETUP_CONTEXT,
+        expected_artifact_type=ArtifactType.SETUP,
+        target_agent_ids=("autoresearch-pm",),
+        target_repo_root=Path("/home/dev/repos/quantipy"),
+        receipts=required_receipts,
+    )
+    second = build_instruction_source_manifest(
+        phase=Phase.SETUP_CONTEXT,
+        expected_artifact_type=ArtifactType.SETUP,
+        target_agent_ids=("autoresearch-pm",),
+        target_repo_root=Path("/home/dev/repos/quantipy"),
+        receipts=tuple(reversed(required_receipts)),
+    )
+
+    assert first.canonical_json() == second.canonical_json()
+    assert first.sha256() == second.sha256()
+    assert first.sha256() == instruction_source_manifest_sha256(
+        phase=Phase.SETUP_CONTEXT,
+        expected_artifact_type=ArtifactType.SETUP,
+        target_agent_ids=("autoresearch-pm",),
+        target_repo_root=Path("/home/dev/repos/quantipy"),
+        receipts=required_receipts,
+    )
+    assert [source.receipt_id for source in first.sources] == sorted(
+        receipt.receipt_id for receipt in required_receipts
+    )
+
+
+def test_instruction_source_manifest_rejects_duplicate_receipt_ids(
+    receipts: ReceiptCatalog,
+) -> None:
+    receipt = receipts.require(("quantipy.agents",))[0]
+
+    with pytest.raises(AutoresearchReceiptError, match="duplicate instruction source"):
+        build_instruction_source_manifest(
+            phase=Phase.SETUP_CONTEXT,
+            expected_artifact_type=ArtifactType.SETUP,
+            target_agent_ids=("autoresearch-pm",),
+            target_repo_root=Path("/home/dev/repos/quantipy"),
+            receipts=(
+                receipt,
+                SourceReceipt(
+                    receipt_id=receipt.receipt_id,
+                    path=receipt.path,
+                    sha256=receipt.sha256,
+                ),
+            ),
+        )
+
+
+def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
+    receipts: ReceiptCatalog,
+) -> None:
+    required_receipts = receipts.require(tuple(QUANTIPY_RECEIPT_PATHS))
+    baseline = build_instruction_source_manifest(
+        phase=Phase.SETUP_CONTEXT,
+        expected_artifact_type=ArtifactType.SETUP,
+        target_agent_ids=("autoresearch-pm",),
+        target_repo_root=Path("/home/dev/repos/quantipy"),
+        receipts=required_receipts,
+    ).sha256()
+
+    variants = (
+        build_instruction_source_manifest(
+            phase=Phase.DEBATE,
+            expected_artifact_type=ArtifactType.SETUP,
+            target_agent_ids=("autoresearch-pm",),
+            target_repo_root=Path("/home/dev/repos/quantipy"),
+            receipts=required_receipts,
+        ).sha256(),
+        build_instruction_source_manifest(
+            phase=Phase.SETUP_CONTEXT,
+            expected_artifact_type=ArtifactType.CONTEXT_PACKET,
+            target_agent_ids=("autoresearch-pm",),
+            target_repo_root=Path("/home/dev/repos/quantipy"),
+            receipts=required_receipts,
+        ).sha256(),
+        build_instruction_source_manifest(
+            phase=Phase.SETUP_CONTEXT,
+            expected_artifact_type=ArtifactType.SETUP,
+            target_agent_ids=("context-curator",),
+            target_repo_root=Path("/home/dev/repos/quantipy"),
+            receipts=required_receipts,
+        ).sha256(),
+        build_instruction_source_manifest(
+            phase=Phase.SETUP_CONTEXT,
+            expected_artifact_type=ArtifactType.SETUP,
+            target_agent_ids=("autoresearch-pm",),
+            target_repo_root=Path("/home/dev/repos/quantipy-alt"),
+            receipts=required_receipts,
+        ).sha256(),
+    )
+
+    assert all(variant != baseline for variant in variants)
+
+
+def test_next_action_exposes_compact_instruction_manifest_without_source_bytes(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+
+    action = next_action(state, policy, receipts, platform_readiness)
+    payload = action.to_dict()
+
+    assert action.source_manifest_sha256 == action.instruction_source_manifest.sha256()
+    assert action.source_manifest_sha256 == expected_instruction_manifest_sha256(
+        state, policy, receipts
+    )
+    assert len(action.source_manifest_sha256) == 64
+    assert "fixture for" not in action.prompt_text
+    assert "content" not in json.dumps(payload, sort_keys=True)
+    required = payload["required_receipts"]
+    manifest = payload["instruction_source_manifest"]
+    assert isinstance(required, list)
+    assert isinstance(manifest, dict)
+    assert manifest["version"] == INSTRUCTION_SOURCE_MANIFEST_VERSION
+    assert manifest["digest_domain"] == INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN
+    assert manifest["phase"] == "setup_context"
+    assert manifest["expected_artifact_type"] == "setup_context"
+    assert manifest["target_agent_ids"] == ["autoresearch-pm"]
+    assert manifest["target_repo_root"] == str(Path("/home/dev/repos/quantipy").resolve())
+    assert set(manifest) == {
+        "version",
+        "digest_domain",
+        "phase",
+        "expected_artifact_type",
+        "target_agent_ids",
+        "target_repo_root",
+        "sources",
+    }
+    assert [source["receipt_id"] for source in manifest["sources"]] == sorted(
+        receipt["receipt_id"] for receipt in required
+    )
+    for receipt in required:
+        assert set(receipt) == {"receipt_id", "path", "sha256"}
+        assert Path(receipt["path"]).is_absolute()
+        assert re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
+
+
+def test_build_receipt_catalog_fails_closed_when_required_source_is_missing(
+    quantipy_root: Path,
+) -> None:
+    missing = quantipy_root / QUANTIPY_RECEIPT_PATHS["quantipy.agents"]
+    missing.unlink()
+
+    with pytest.raises(AutoresearchReceiptError, match="missing required receipt source"):
+        build_receipt_catalog(quantipy_root)
+
+
+def test_load_artifact_file_rejects_missing_bad_and_legacy_instruction_envelopes(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    digest = expected_instruction_manifest_sha256(state, policy, receipts)
+    artifact = _setup_artifact().to_dict()
+    cases = [
+        artifact,
+        {"artifact": artifact},
+        {"instruction_manifest_sha256": "0" * 64, "artifact": artifact},
+        {
+            "instruction_manifest_sha256": digest,
+            "artifact": artifact,
+            "legacy_extra": True,
+        },
+    ]
+
+    for index, payload in enumerate(cases):
+        artifact_path = tmp_path / f"bad-artifact-{index}.json"
+        artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(AutoresearchValidationError):
+            load_artifact_file(
+                artifact_path,
+                state,
+                policy,
+                instruction_manifest_sha256=digest,
+            )
+
+
+def test_load_artifact_file_accepts_exact_instruction_envelope(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    digest = expected_instruction_manifest_sha256(state, policy, receipts)
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": digest,
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    artifact = load_artifact_file(
+        artifact_path,
+        state,
+        policy,
+        instruction_manifest_sha256=digest,
+    )
+
+    assert isinstance(artifact, SetupContextArtifact)
+    assert artifact.metric_name == "OOS Sharpe net"
+
+
+def test_load_artifact_file_rejects_oversized_envelope_before_json_parse(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    artifact_path = tmp_path / "oversized-artifact.json"
+    artifact_path.write_bytes(b"{" + (b'"x":' + b'"' + b"a" * MAX_ARTIFACT_FILE_BYTES + b'"'))
+    digest = expected_instruction_manifest_sha256(state, policy, receipts)
+
+    with pytest.raises(AutoresearchValidationError, match="artifact file exceeds hard byte budget"):
+        load_artifact_file(
+            artifact_path,
+            state,
+            policy,
+            instruction_manifest_sha256=digest,
+        )
 
 
 @pytest.fixture()
@@ -982,6 +1228,106 @@ def test_phase_progression(
 
     state = advance_state(state, _final_decision(), policy)
     assert state.phase is Phase.REPEAT
+
+
+def test_prompt_hard_byte_budget_for_reachable_phase_modes(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    identity = platform_readiness.identity()
+    initial = AutoresearchState(platform_readiness=identity)
+    setup_done = advance_state(initial, _setup_artifact(), policy)
+    context_done = advance_state(setup_done, _context_artifact(), policy)
+    debate_done = advance_state(context_done, _debate_result(policy, round_number=1), policy)
+    consensus_done = advance_state(
+        debate_done, _majority_consensus(round_number=1, policy=policy), policy
+    )
+    implementation_done = advance_state(consensus_done, _implementation_result(), policy)
+    verification_failed = advance_state(
+        implementation_done, _verification_result(VerificationStatus.TEST_FAILURE), policy
+    )
+    fix_done = advance_state(verification_failed, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    verification_done = advance_state(
+        implementation_done, _verification_result(VerificationStatus.PASS), policy
+    )
+    review_done = advance_state(
+        verification_done, _review_result(ReviewVerdict.PASS, policy), policy
+    )
+    repeat_memory = advance_state(review_done, _final_decision(), policy)
+    no_consensus_once = advance_state(debate_done, _no_consensus(round_number=1), policy)
+    no_consensus_retry = advance_state(
+        no_consensus_once, _debate_result(policy, round_number=2), policy
+    )
+    no_consensus_decision = advance_state(no_consensus_retry, _no_consensus(round_number=2), policy)
+    g0_setup = advance_state(initial, _setup_artifact(), policy)
+    g0_context = advance_state(
+        g0_setup,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    g0_debate = advance_state(g0_context, _debate_result(policy, round_number=1), policy)
+    g0_consensus = advance_state(
+        g0_debate, _majority_consensus(round_number=1, policy=policy), policy
+    )
+    g0_implementation = advance_state(g0_consensus, _implementation_result(), policy)
+    g0_verification = advance_state(
+        g0_implementation,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="Data infrastructure gate passed.",
+        ),
+        policy,
+    )
+    g0_decision = advance_state(g0_verification, _review_result(ReviewVerdict.PASS, policy), policy)
+    states = (
+        initial,
+        setup_done,
+        context_done,
+        debate_done,
+        consensus_done,
+        implementation_done,
+        verification_failed,
+        fix_done,
+        verification_done,
+        review_done,
+        repeat_memory,
+        no_consensus_retry,
+        no_consensus_decision,
+        g0_context,
+        g0_consensus,
+        g0_implementation,
+        g0_verification,
+        g0_decision,
+    )
+
+    for state in states:
+        prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+        assert len(prompt.encode("utf-8")) <= MAX_NEXT_ACTION_PROMPT_BYTES, state.phase.value
+
+
+def test_next_action_fails_closed_when_state_would_exceed_prompt_budget(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    state = advance_state(
+        state,
+        replace(
+            _setup_artifact(),
+            baseline_summary="reviewer baseline overflow " + ("x" * 40_000),
+        ),
+        policy,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="prompt exceeds hard byte budget"):
+        next_action(state, policy, receipts, platform_readiness)
 
 
 def test_next_action_fails_closed_when_accepted_union_manifest_is_deleted(

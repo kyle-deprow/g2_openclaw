@@ -673,6 +673,8 @@ def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
     assert result.recovery_key.startswith("missing_verification_artifact:30:verification:")
     assert "implementation_result but no verification_history" in payload["message"]
     assert "Do not fabricate verification_result metrics" in payload["message"]
+    assert "strict production envelope" in payload["message"]
+    assert "Never pass a raw unwrapped verification_result" in payload["message"]
 
 
 def test_supervisor_normalizes_operator_precondition_implementation_state(

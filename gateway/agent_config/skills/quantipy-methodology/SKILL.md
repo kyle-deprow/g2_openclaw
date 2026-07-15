@@ -18,17 +18,28 @@ or Codex agent definitions into G2 OpenClaw.
 
 Before context, debate, consensus, implementation, review, or fix work:
 
-1. Read `/home/dev/repos/quantipy/AGENTS.md` completely.
-2. Load `quantipy-data-contract` and consume the injected
+1. Read every file listed in the runner's `instruction_source_manifest` from
+   its absolute canonical path.
+2. Recompute SHA-256 over each file's current bytes and require exact match to
+   the listed receipt. Missing, unreadable, or mismatched sources are
+   operator-owned blockers.
+3. Read `/home/dev/repos/quantipy/AGENTS.md` completely when listed or routed.
+4. Load `quantipy-data-contract` and consume the injected
    `PLATFORM_READINESS_CAPABILITIES` receipt.
-3. Read only the target-repo skills and rule files routed below or clearly
+5. Read only the target-repo skills and rule files routed below or clearly
    required by the candidate task.
-4. Read the routed Codex agent definitions.
-5. Record the exact Quantipy source paths loaded in the structured stage
-   artifact.
+6. Read the routed Codex agent definitions.
+7. Record the exact Quantipy source paths loaded in the structured stage
+   artifact and return the exact `source_manifest_sha256` as
+   `instruction_manifest_sha256` in the production artifact envelope. The
+   digest is bound to the phase, expected artifact type, ordered target agent
+   IDs, canonical target repo root, and sorted source receipts.
 
 If a required path is missing, report that exact path as an operator-owned
 blocker. Do not reconstruct missing methodology or capabilities from memory.
+Never emit a raw unwrapped artifact; every production file passed to
+`autoresearch-advance` uses the strict envelope and stays under the 24 KiB file
+budget.
 
 ## Stage Routing
 

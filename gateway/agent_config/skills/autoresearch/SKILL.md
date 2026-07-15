@@ -96,6 +96,41 @@ Resume accepts the new READY receipt, clears the suspension, and starts the next
 iteration. Normal completed alpha and `NO_CONSENSUS` transitions still use
 `autoresearch-start-next`, which rechecks the pinned receipt.
 
+## Instruction Source Manifest
+
+`autoresearch-next` no longer injects full instruction file contents. It emits
+only `required_receipts`, a canonical v2 `instruction_source_manifest`, and
+`source_manifest_sha256`. Each listed source has exactly `receipt_id`, absolute
+canonical `path`, and `sha256`. The manifest is versioned,
+domain-separated, sorted by `receipt_id`, duplicate-rejecting, and bound to the
+current phase, expected artifact type, ordered target agent IDs, and canonical
+target repo root.
+
+Before dispatching or doing stage work, the PM and every stage agent must read
+every listed live source from disk, recompute SHA-256 over the current bytes,
+and fail closed if any file is missing, unreadable, or hash-mismatched.
+OpenClaw-configured skills remain authoritative; target-repo methodology and
+agent files are read live from `/home/dev/repos/quantipy` using the listed
+canonical paths.
+
+Every production artifact file passed to `gateway-cli autoresearch-advance`
+must be exactly:
+
+```json
+{
+  "instruction_manifest_sha256": "<source_manifest_sha256 from autoresearch-next>",
+  "artifact": {}
+}
+```
+
+The `artifact` value is the phase-specific structured artifact. Do not add
+extra envelope keys, omit the digest, or pass legacy unwrapped artifacts.
+`autoresearch-advance` rejects mismatched, missing, extra-key, and unwrapped
+files before state advance. The complete envelope file must be at most 24 KiB;
+compact the artifact rather than truncating it. `autoresearch-next` also has a
+hard 32 KiB prompt budget and fails closed with an actionable error if accepted
+state artifacts would exceed it.
+
 ## Explicit Research Modes
 
 The context packet must select exactly one mode and give a nonempty
@@ -461,7 +496,9 @@ uncovers a bug signal. The PM must write the JSON artifact and run
 `cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance
 /home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>` before
 any prose completion, status report, or handoff. A prose-only verification
-completion is invalid and must be treated as no artifact.
+completion is invalid and must be treated as no artifact. The artifact file
+must use the strict `instruction_manifest_sha256` envelope from the active
+`autoresearch-next` output. Never pass a raw unwrapped `verification_result`.
 
 Verification is the first stage that records materialization evidence. Capture
 each history batch's contract digest, the per-date snapshot and grouped-daily

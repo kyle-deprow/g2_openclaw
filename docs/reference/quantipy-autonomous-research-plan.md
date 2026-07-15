@@ -1,7 +1,7 @@
 # Autonomous Research Loop - Operating Plan
 
 **Created:** 2026-03-15
-**Last Updated:** 2026-07-14
+**Last Updated:** 2026-07-15
 
 ## Goal
 
@@ -45,6 +45,16 @@ Human via G2
 Every research stage loads `mempalace-readonly`, `quantipy-methodology`, and
 `quantipy-data-contract`. Methodology routing reads current Quantipy sources;
 the compact data skill defines the runtime contract.
+
+Phase 5 prompt compaction keeps instruction identity deterministic without
+placing full instruction files in every prompt. The runner emits compact
+`required_receipts`, a v2 `instruction_source_manifest` of `receipt_id`,
+canonical absolute path, and SHA-256, plus `source_manifest_sha256`. The digest
+is versioned, domain-separated, sorted by receipt ID, duplicate-rejecting, and
+bound to the current phase, expected artifact type, ordered target agent IDs,
+and canonical target repo root. Stage agents read every listed live source,
+verify the hashes, and fail before work on missing, unreadable, or mismatched
+files. No redundant manifest data is stored in campaign state.
 
 ## Platform Readiness
 
@@ -171,7 +181,12 @@ when commands fail or expose a bug signal:
 4. Set unavailable fields to `null`; never invent zero-valued metrics or
    coverage.
 5. Persist the artifact with `gateway-cli autoresearch-advance` before prose,
-   status, review, or handoff.
+   status, review, or handoff. The artifact file must be exactly
+   `{"instruction_manifest_sha256": "<source_manifest_sha256>", "artifact": {...}}`;
+   legacy unwrapped artifacts, missing digests, digest mismatches, and extra
+   envelope keys fail before state advance. The complete envelope is capped at
+   24 KiB, below the 32 KiB hard prompt budget; compact artifacts rather than
+   truncating.
 6. Route accepted fixes only to `fixer` in the same workspace, then repeat the
    structured verification/review sequence directed by the runner.
 

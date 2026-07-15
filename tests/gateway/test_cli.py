@@ -62,6 +62,8 @@ from gateway.autoresearch_runner import (
     VerificationResultArtifact,
     VerificationStatus,
     advance_state,
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
     load_autoresearch_policy,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
@@ -900,16 +902,30 @@ class TestAutoresearchCliCommands:
         tmp_path: Path,
         state: AutoresearchState,
         artifact: ImplementationResultArtifact | FixResultArtifact,
+        *,
+        legacy_unwrapped: bool = False,
     ) -> tuple[CliInvocationResult, Path]:
         readiness = _ready_manifest(tmp_path / "advance-readiness")
         readiness_path = tmp_path / "advance-readiness.json"
         _write_readiness_manifest(readiness_path, readiness)
         state = replace(state, platform_readiness=readiness.identity())
+        quantipy_root = tmp_path / "quantipy"
+        TestAutoresearchCliCommands._write_quantipy_receipts(quantipy_root)
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        digest = expected_instruction_manifest_sha256(
+            state, policy, build_receipt_catalog(quantipy_root)
+        )
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
         output_path = tmp_path / "state-out.json"
         state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
-        artifact_path.write_text(json.dumps(artifact.to_dict()), encoding="utf-8")
+        artifact_payload: object = artifact.to_dict()
+        if not legacy_unwrapped:
+            artifact_payload = {
+                "instruction_manifest_sha256": digest,
+                "artifact": artifact_payload,
+            }
+        artifact_path.write_text(json.dumps(artifact_payload), encoding="utf-8")
         result = runner.invoke(
             app,
             [
@@ -920,6 +936,8 @@ class TestAutoresearchCliCommands:
                 str(output_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--quantipy-root",
+                str(quantipy_root),
                 "--readiness-manifest",
                 str(readiness_path),
             ],
@@ -958,6 +976,87 @@ class TestAutoresearchCliCommands:
 
         assert result.exit_code == 1
         assert "canonical resolved path" in result.output
+
+    def test_autoresearch_advance_rejects_legacy_unwrapped_artifact(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        state = self._state_for_implementation(git_worktree.target_checkout)
+        artifact = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.final_commit,
+        )
+
+        result, _ = self._invoke_autoresearch_advance(
+            tmp_path,
+            state,
+            artifact,
+            legacy_unwrapped=True,
+        )
+
+        assert result.exit_code == 1
+        assert "artifact_file must contain exact keys" in result.output
+
+    def test_autoresearch_advance_rejects_oversized_artifact_envelope(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        readiness = _ready_manifest(tmp_path / "oversized-readiness")
+        readiness_path = tmp_path / "oversized-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = AutoresearchState(platform_readiness=readiness.identity())
+        state_path = tmp_path / "state.json"
+        output_path = tmp_path / "state-out.json"
+        artifact_path = tmp_path / "oversized-artifact.json"
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        digest = expected_instruction_manifest_sha256(
+            state, policy, build_receipt_catalog(quantipy_root)
+        )
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "instruction_manifest_sha256": digest,
+                    "artifact": {
+                        **SetupContextArtifact(
+                            goal="Find a profitable intraday alpha",
+                            metric_name="OOS Sharpe net",
+                            metric_direction=MetricDirection.MAXIMIZE,
+                            target_repo="/home/dev/repos/quantipy",
+                            writable_scope="src/quantipy/alpha",
+                            baseline_summary="reviewer baseline " + ("x" * 40_000),
+                            hard_constraints=("No overnight holds",),
+                            data_sources=("qp.prices()",),
+                        ).to_dict(),
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-advance",
+                str(state_path),
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--quantipy-root",
+                str(quantipy_root),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "artifact file exceeds hard byte budget" in result.output
+        assert not output_path.exists()
 
     def test_autoresearch_advance_validates_and_accepts_fix_worktree(
         self,
@@ -1033,22 +1132,30 @@ class TestAutoresearchCliCommands:
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
         output_path = tmp_path / "state-out.json"
-        state_path.write_text(
-            json.dumps(AutoresearchState(platform_readiness=readiness.identity()).to_dict()),
-            encoding="utf-8",
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        state = AutoresearchState(platform_readiness=readiness.identity())
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        digest = expected_instruction_manifest_sha256(
+            state, policy, build_receipt_catalog(quantipy_root)
+        )
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        setup_artifact = SetupContextArtifact(
+            goal="Find a profitable intraday alpha",
+            metric_name="OOS Sharpe net",
+            metric_direction=MetricDirection.MAXIMIZE,
+            target_repo="/home/dev/repos/quantipy",
+            writable_scope="src/quantipy/alpha",
+            baseline_summary="Baseline OOS Sharpe net is 0.18.",
+            hard_constraints=("No overnight holds",),
+            data_sources=("qp.prices()",),
         )
         artifact_path.write_text(
             json.dumps(
-                SetupContextArtifact(
-                    goal="Find a profitable intraday alpha",
-                    metric_name="OOS Sharpe net",
-                    metric_direction=MetricDirection.MAXIMIZE,
-                    target_repo="/home/dev/repos/quantipy",
-                    writable_scope="src/quantipy/alpha",
-                    baseline_summary="Baseline OOS Sharpe net is 0.18.",
-                    hard_constraints=("No overnight holds",),
-                    data_sources=("qp.prices()",),
-                ).to_dict()
+                {
+                    "instruction_manifest_sha256": digest,
+                    "artifact": setup_artifact.to_dict(),
+                }
             ),
             encoding="utf-8",
         )
@@ -1063,6 +1170,8 @@ class TestAutoresearchCliCommands:
                 str(output_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--quantipy-root",
+                str(quantipy_root),
                 "--readiness-manifest",
                 str(readiness_path),
             ],
