@@ -519,6 +519,20 @@ _output_path_option = typer.Option(
     dir_okay=False,
     help="Path to write the updated autoresearch state JSON.",
 )
+_readiness_build_manifest_argument = typer.Argument(
+    ..., help="Schema-v2 readiness manifest output."
+)
+_readiness_expected_commit_option = typer.Option(
+    ..., "--expected-quantipy-commit", help="Full Quantipy commit to attest."
+)
+_readiness_xnys_calendar_option = typer.Option(
+    ..., "--xnys-calendar", help="Existing operator-owned XNYS calendar evidence."
+)
+_readiness_evidence_output_option = typer.Option(
+    None,
+    "--quantipy-evidence",
+    help="Quantipy data-contract evidence output; defaults beside the manifest.",
+)
 
 
 @app.command()
@@ -846,7 +860,7 @@ def autoresearch_pin_readiness(
     output_path: Path = _output_path_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
-    """Explicitly initialize an unpinned state with a READY readiness receipt."""
+    """Initialize readiness or explicitly repin an active state to the same IDs."""
     from gateway.autoresearch_runner import (
         load_state_file,
         pin_platform_readiness,
@@ -863,6 +877,35 @@ def autoresearch_pin_readiness(
         raise typer.Exit(code=1) from exc
 
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-build-readiness")
+def autoresearch_build_readiness(
+    manifest_path: Path = _readiness_build_manifest_argument,
+    quantipy_root: Path = _quantipy_root_option,
+    expected_quantipy_commit: str = _readiness_expected_commit_option,
+    xnys_calendar: Path = _readiness_xnys_calendar_option,
+    quantipy_evidence: Path | None = _readiness_evidence_output_option,
+) -> None:
+    """Build and revalidate strict Quantipy readiness evidence and manifest v2."""
+    from gateway.autoresearch_readiness import build_quantipy_readiness
+
+    evidence_path = quantipy_evidence or manifest_path.with_name("quantipy-data-contract.json")
+    try:
+        manifest = build_quantipy_readiness(
+            manifest_path=manifest_path,
+            quantipy_evidence_path=evidence_path,
+            quantipy_root=quantipy_root,
+            expected_quantipy_commit=expected_quantipy_commit,
+            xnys_calendar_path=xnys_calendar,
+        )
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-build-readiness failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]wrote platform readiness v{manifest.schema_version}:[/green] {manifest_path}"
+    )
 
 
 @app.command("autoresearch-resume")

@@ -2956,9 +2956,6 @@ def _render_receipt_block(receipts: Sequence[SourceReceipt]) -> str:
 def _artifact_context(state: AutoresearchState) -> dict[str, object]:
     return {
         "iteration": state.iteration,
-        "platform_readiness": state.platform_readiness.to_dict()
-        if state.platform_readiness is not None
-        else None,
         "suspended": state.suspended,
         "suspension_reason": state.suspension_reason,
         "setup": state.setup.to_dict() if state.setup else None,
@@ -3521,6 +3518,7 @@ def _build_prompt_text(
     expected_artifact_type: ArtifactType,
     agent_ids: Sequence[str],
     receipts: Sequence[SourceReceipt],
+    readiness: PlatformReadinessManifest,
 ) -> str:
     target_repo = (
         Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
@@ -3531,6 +3529,7 @@ def _build_prompt_text(
         "This phase, agent roster, and artifact contract are owned by "
         "executable control-plane logic. "
         "Do not carry loop state in prompt memory.\n\n"
+        f"PLATFORM_READINESS_CAPABILITIES={readiness.prompt_capabilities()}\n\n"
         f"Validated model policy:\n{policy.model_policy_summary()}\n\n"
         "Machine-readable compute capability snapshot (read-only probe; do not fabricate):\n"
         f"{_json_block(compute_snapshot.to_dict())}\n\n"
@@ -3570,6 +3569,7 @@ def next_action(
             expected_artifact_type=target.artifact_type,
             agent_ids=target.agent_ids,
             receipts=required_receipts,
+            readiness=readiness,
         ),
     )
 
@@ -4047,15 +4047,21 @@ def pin_platform_readiness(
     state: AutoresearchState,
     readiness: PlatformReadinessManifest,
 ) -> AutoresearchState:
-    """Explicitly initialize an unpinned state; never overwrite a stale pin."""
+    """Initialize readiness or repin an active state to the same contract IDs."""
     try:
         identity = readiness.require_ready()
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
-    if state.platform_readiness is not None and state.platform_readiness != identity:
+    if state.suspended:
         raise AutoresearchValidationError(
-            "state already has a different platform readiness receipt; "
-            "use autoresearch-resume to accept a changed manifest explicitly"
+            "suspended readiness must continue through autoresearch-resume"
+        )
+    pinned = state.platform_readiness
+    if pinned is not None and (
+        pinned.manifest_id != identity.manifest_id or pinned.snapshot_id != identity.snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "state readiness manifest_id or snapshot_id changed; same-ID repin required"
         )
     return replace(state, platform_readiness=identity)
 

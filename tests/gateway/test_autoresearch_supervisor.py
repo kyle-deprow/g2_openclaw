@@ -16,7 +16,13 @@ from pathlib import Path
 from types import FrameType
 
 import pytest
-from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest, ReadinessIdentity
+from gateway.autoresearch_readiness import (
+    READINESS_SCHEMA_VERSION,
+    EvidenceId,
+    PlatformReadinessManifest,
+    ReadinessIdentity,
+    canonical_platform_capabilities,
+)
 from gateway.autoresearch_runner import (
     AutoresearchState,
     FinalDecision,
@@ -371,11 +377,12 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         }
     readiness = PlatformReadinessManifest.from_dict(
         {
-            "schema_version": 1,
+            "schema_version": READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "supervisor-manifest-1",
             "snapshot_id": "supervisor-snapshot-1",
             "evidence": evidence,
+            "capabilities": canonical_platform_capabilities().to_dict(),
             "reason": None,
         }
     )

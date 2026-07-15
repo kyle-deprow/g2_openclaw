@@ -15,7 +15,12 @@ from gateway.autoresearch_control import (
     ControlError,
     SystemdSupervisorServiceController,
 )
-from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
+from gateway.autoresearch_readiness import (
+    READINESS_SCHEMA_VERSION,
+    EvidenceId,
+    PlatformReadinessManifest,
+    canonical_platform_capabilities,
+)
 from gateway.autoresearch_runner import (
     AutoresearchState,
     FinalDecision,
@@ -44,11 +49,12 @@ def _ready_manifest(path: Path) -> PlatformReadinessManifest:
         }
     return PlatformReadinessManifest.from_dict(
         {
-            "schema_version": 1,
+            "schema_version": READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "control-manifest-1",
             "snapshot_id": "control-snapshot-1",
             "evidence": evidence,
+            "capabilities": canonical_platform_capabilities().to_dict(),
             "reason": None,
         }
     )

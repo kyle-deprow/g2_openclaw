@@ -12,7 +12,11 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
-from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
+from gateway.autoresearch_readiness import (
+    READINESS_SCHEMA_VERSION,
+    EvidenceId,
+    PlatformReadinessManifest,
+)
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
@@ -111,14 +115,80 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
         }
     return PlatformReadinessManifest.from_dict(
         {
-            "schema_version": 1,
+            "schema_version": READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "manifest-test-1",
             "snapshot_id": "snapshot-test-1",
             "evidence": {evidence_id.value: value for evidence_id, value in evidence.items()},
+            "capabilities": {
+                "security_master": {
+                    "historical_snapshots_interface": True,
+                    "inactive_listings_interface": True,
+                    "unadjusted_liquidity_screens_interface": True,
+                    "universe_history_api_and_client_interface": True,
+                    "next_session_execution_policy_interface": True,
+                    "split_actions_interface": True,
+                    "dividend_actions_interface": True,
+                    "ticker_detail_market_cap_interface": True,
+                    "ticker_detail_market_cap_pit_certified": False,
+                },
+                "market_data": {
+                    "ohlcv_cache_or_hydrate_interface": True,
+                    "historical_trades_interface": False,
+                    "historical_quotes_interface": False,
+                    "historical_fundamentals_interface": False,
+                },
+                "reddit_dataset": {
+                    "available": False,
+                    "start_date": None,
+                    "end_date": None,
+                    "record_count": None,
+                    "reason": "live database query unavailable",
+                },
+                "news_dataset": {
+                    "available": False,
+                    "start_date": None,
+                    "end_date": None,
+                    "record_count": None,
+                    "reason": "live database query unavailable",
+                },
+            },
             "reason": None,
         }
     )
+
+
+def test_every_stage_prompt_has_one_compact_canonical_capabilities_block(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    marker = "PLATFORM_READINESS_CAPABILITIES="
+    assert prompt.count(marker) == 1
+    line = next(line for line in prompt.splitlines() if line.startswith(marker))
+    payload = json.loads(line.removeprefix(marker))
+    assert payload["capabilities"] == platform_readiness.to_dict()["capabilities"]
+    assert set(payload["evidence"]) == {
+        "quantipy_data_contract",
+        "xnys_trading_calendar",
+    }
+    assert all(isinstance(item, str) for item in payload["evidence"].values())
+    assert payload["contract_identity"] == {
+        "manifest_id": platform_readiness.manifest_id,
+        "snapshot_id": platform_readiness.snapshot_id,
+    }
+    assert "content" not in line
+    assert "tickers" not in line
+    assert "members" not in line
+    assert prompt.count(platform_readiness.manifest_id) == 1
+    assert prompt.count(platform_readiness.snapshot_id) == 1
+    for evidence in platform_readiness.evidence.values():
+        assert evidence.path is not None
+        assert evidence.path not in prompt
 
 
 @pytest.fixture()
@@ -310,7 +380,7 @@ def _operator_precondition_consensus(
         rejection_reasons=("Missing immutable operator evidence bundle.",),
         implementation_brief=(
             "Do not enter ENGINEER and do not modify Quantipy. The operator "
-            "must first supply the immutable SEC/XNYS bundle manifest."
+            "must first supply the immutable Quantipy/XNYS bundle manifest."
         ),
         dissent_summary="All agents agree this is an operator precondition.",
     )
@@ -812,7 +882,7 @@ def test_operator_precondition_final_decision_allows_infra_blocked_without_verif
             recommended_metric_name="operator_precondition",
             recommended_metric_value=None,
             reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
-            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
             log_summary="Blocked before implementation on missing operator evidence.",
             continue_loop=True,
             memory_write_required=False,
@@ -844,7 +914,7 @@ def test_persisted_operator_precondition_no_memory_state_validates(
             recommended_metric_name="operator_precondition",
             recommended_metric_value=None,
             reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
-            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
             log_summary="Blocked before implementation on missing operator evidence.",
             continue_loop=True,
             memory_write_required=False,
@@ -875,7 +945,7 @@ def test_operator_precondition_final_decision_rejects_unverified_metric(
                 recommended_metric_name="operator_precondition",
                 recommended_metric_value=1.0,
                 reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
-                rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+                rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
                 log_summary="Blocked before implementation on missing operator evidence.",
                 continue_loop=True,
                 memory_write_required=False,
@@ -901,7 +971,7 @@ def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
             recommended_metric_name="operator_precondition",
             recommended_metric_value=1.0,
             reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
-            rationale="The required immutable SEC/XNYS evidence bundle is absent.",
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
             log_summary="Blocked before implementation on missing operator evidence.",
             continue_loop=True,
             memory_write_required=False,

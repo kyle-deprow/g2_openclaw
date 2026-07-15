@@ -7,7 +7,7 @@ import signal
 import sqlite3
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
@@ -16,7 +16,12 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
-from gateway.autoresearch_readiness import EvidenceId, PlatformReadinessManifest
+from gateway.autoresearch_readiness import (
+    READINESS_SCHEMA_VERSION,
+    EvidenceId,
+    PlatformReadinessManifest,
+    canonical_platform_capabilities,
+)
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
@@ -82,11 +87,12 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
         }
     return PlatformReadinessManifest.from_dict(
         {
-            "schema_version": 1,
+            "schema_version": READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "manifest-cli-test-1",
             "snapshot_id": "snapshot-cli-test-1",
             "evidence": evidence,
+            "capabilities": canonical_platform_capabilities().to_dict(),
             "reason": None,
         }
     )
@@ -94,6 +100,64 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
 
 def _write_readiness_manifest(path: Path, manifest: PlatformReadinessManifest) -> None:
     path.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
+
+
+def test_autoresearch_build_readiness_command_fails_closed_on_invalid_commit(
+    tmp_path: Path,
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    xnys.write_text("{}\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-build-readiness",
+            str(tmp_path / "manifest.json"),
+            "--quantipy-root",
+            str(quantipy_root),
+            "--expected-quantipy-commit",
+            "not-a-commit",
+            "--xnys-calendar",
+            str(xnys),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "full" in result.output
+    assert "lowercase Git hash" in result.output
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_autoresearch_pin_readiness_repins_same_ids_without_resetting_state(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "evidence")
+    readiness_path = tmp_path / "readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    old_identity = replace(readiness.identity(), receipt_sha256="0" * 64)
+    state = AutoresearchState(iteration=9, platform_readiness=old_identity)
+    state_path = tmp_path / "state.json"
+    output_path = tmp_path / "repinned.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-pin-readiness",
+            str(state_path),
+            "--output",
+            str(output_path),
+            "--readiness-manifest",
+            str(readiness_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    repinned = AutoresearchState.from_dict(json.loads(output_path.read_text(encoding="utf-8")))
+    assert repinned.platform_readiness == readiness.identity()
+    assert replace(repinned, platform_readiness=old_identity) == state
 
 
 class CliInvocationResult(Protocol):
