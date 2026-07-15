@@ -23,6 +23,7 @@ from gateway.autoresearch_readiness import (
 )
 from gateway.autoresearch_runner import (
     AutoresearchState,
+    AutoresearchValidationContext,
     AutoresearchValidationError,
     normalize_autoresearch_state,
 )
@@ -391,6 +392,7 @@ class AutoresearchControl:
         try:
             readiness = load_platform_readiness(self.config.readiness_manifest_path)
             validate_state_readiness(state.platform_readiness, readiness)
+            AutoresearchValidationContext.from_readiness(readiness).validate_for_state(state)
         except ValueError as exc:
             raise ControlError(f"cannot wake autoresearch: {exc}") from exc
         return state_material

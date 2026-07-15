@@ -535,6 +535,43 @@ _readiness_evidence_output_option = typer.Option(
 )
 
 
+@app.command("autoresearch-migrate-state")
+def autoresearch_migrate_state(
+    state_path: Path = _state_path_argument,
+    output_path: Path = _output_path_option,
+) -> None:
+    """Explicitly migrate a lossless schema-less pristine live state to schema v2."""
+    from gateway.autoresearch_runner import migrate_state_file
+
+    try:
+        state = migrate_state_file(state_path, output_path)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-migrate-state failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(
+        f"[green]wrote autoresearch state v{state.to_dict()['schema_version']}:[/green] "
+        f"{output_path}"
+    )
+
+
+@app.command("autoresearch-init-state")
+def autoresearch_init_state(
+    output_path: Path = _output_path_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Initialize a pristine schema-v2 campaign pinned to platform readiness."""
+    from gateway.autoresearch_runner import initialize_state, save_state_file
+
+    try:
+        readiness = load_platform_readiness(readiness_manifest)
+        state = initialize_state(readiness)
+        save_state_file(output_path, state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]wrote pristine autoresearch state v2:[/green] {output_path}")
+
+
 @app.command()
 def init_env(
     force: bool = _force_option,
@@ -765,9 +802,11 @@ def autoresearch_advance(
     artifact_path: Path = _artifact_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Advance autoresearch state with a validated artifact and persist the result."""
     from gateway.autoresearch_runner import (
+        AutoresearchValidationContext,
         FixResultArtifact,
         ImplementationResultArtifact,
         advance_state,
@@ -781,10 +820,13 @@ def autoresearch_advance(
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
+        readiness = load_platform_readiness(readiness_manifest)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        validation_context.validate_for_state(state)
         artifact = load_artifact_file(artifact_path, state, policy)
         if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
             validate_artifact_workspace(state, artifact)
-        next_state = advance_state(state, artifact, policy)
+        next_state = advance_state(state, artifact, policy, validation_context=validation_context)
         save_state_file(output_path, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-advance failed:[/red] {exc}")

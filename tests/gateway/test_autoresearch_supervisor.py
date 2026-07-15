@@ -25,6 +25,8 @@ from gateway.autoresearch_readiness import (
 )
 from gateway.autoresearch_runner import (
     AutoresearchState,
+    ConsensusResultArtifact,
+    ConsensusStatus,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
@@ -51,40 +53,40 @@ SignalDisposition = SignalHandler | signal.Handlers
 
 def _operator_precondition_state_json() -> str:
     return json.dumps(
-        {
-            "phase": "implementation",
-            "iteration": 26,
-            "mode": "data_infra_g0",
-            "consensus_history": [
-                {
-                    "round_number": 1,
-                    "status": "MAJORITY",
-                    "winner_theory_id": "i26-operator-evidence-precondition",
-                    "winner_theory_family": "no-code-operator-evidence-precondition",
-                    "majority_count": 5,
-                    "majority_agent_ids": [
+        AutoresearchState(
+            phase=Phase.IMPLEMENTATION,
+            iteration=26,
+            mode=ResearchMode.DATA_INFRA_G0,
+            consensus_history=(
+                ConsensusResultArtifact(
+                    round_number=1,
+                    status=ConsensusStatus.MAJORITY,
+                    winner_theory_id="i26-operator-evidence-precondition",
+                    winner_theory_family="no-code-operator-evidence-precondition",
+                    majority_count=5,
+                    majority_agent_ids=(
                         "debater-microstructure",
                         "debater-data",
                         "debater-skeptic",
                         "debater-theory",
                         "debater-implementation",
-                    ],
-                    "dissenting_positions": [],
-                    "novelty_score": 1.0,
-                    "theory_score": 9.0,
-                    "implementation_risk_score": 1.0,
-                    "data_adequacy_score": 1.0,
-                    "overfit_risk_score": 1.0,
-                    "expected_net_sharpe": 0.0,
-                    "rejection_reasons": ["missing operator evidence"],
-                    "implementation_brief": (
+                    ),
+                    dissenting_positions=(),
+                    novelty_score=1.0,
+                    theory_score=9.0,
+                    implementation_risk_score=1.0,
+                    data_adequacy_score=1.0,
+                    overfit_risk_score=1.0,
+                    expected_net_sharpe=0.0,
+                    rejection_reasons=("missing operator evidence",),
+                    implementation_brief=(
                         "Do not enter ENGINEER and do not modify Quantipy. "
                         "The operator must supply the manifest."
                     ),
-                    "dissent_summary": "No semantic dissent.",
-                }
-            ],
-        }
+                    dissent_summary="No semantic dissent.",
+                ),
+            ),
+        ).to_dict()
     )
 
 

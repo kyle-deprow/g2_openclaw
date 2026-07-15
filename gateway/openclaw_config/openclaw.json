@@ -193,7 +193,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -224,7 +225,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -255,7 +257,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -286,7 +289,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -317,7 +321,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -348,7 +353,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -379,7 +385,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "subagents": {
           "allowAgents": [
@@ -419,7 +426,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -450,7 +458,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [
@@ -481,7 +490,8 @@
         "thinkingDefault": "high",
         "skills": [
           "mempalace-readonly",
-          "quantipy-methodology"
+          "quantipy-methodology",
+          "quantipy-data-contract"
         ],
         "tools": {
           "deny": [

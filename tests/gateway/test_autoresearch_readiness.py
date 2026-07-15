@@ -35,6 +35,11 @@ from gateway.autoresearch_runner import (
     resume_suspended_iteration,
 )
 
+from tests.gateway.autoresearch_fixtures import (
+    write_xnys_calendar_evidence,
+    xnys_calendar_payload,
+)
+
 
 def _capabilities_payload() -> dict[str, object]:
     return {
@@ -83,7 +88,10 @@ def _manifest_payload(
     evidence: dict[str, dict[str, str | None]] = {}
     for evidence_id in EvidenceId:
         path = tmp_path / f"{evidence_id.value}.json"
-        path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
+            write_xnys_calendar_evidence(path)
+        else:
+            path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {
             "path": str(path),
             "sha256": sha256(path.read_bytes()).hexdigest(),
@@ -520,7 +528,7 @@ def test_operator_builder_generates_and_reloads_v2_contract(
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
     xnys = tmp_path / "xnys.json"
-    xnys.write_text('{"calendar":"XNYS"}\n', encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
     manifest_path = tmp_path / "platform-readiness.json"
     evidence_path = tmp_path / "quantipy-data-contract.json"
     _stub_successful_probes(monkeypatch, commit)
@@ -546,7 +554,7 @@ def test_operator_builder_fails_for_wrong_quantipy_commit(tmp_path: Path) -> Non
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
     xnys = tmp_path / "xnys.json"
-    xnys.write_text("{}\n", encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
 
     with pytest.raises(ReadinessManifestError, match="commit mismatch"):
         build_quantipy_readiness(
@@ -565,7 +573,7 @@ def test_operator_builder_rejects_dirty_tracked_worktree_without_writes(tmp_path
     client_path = quantipy_root / "src/quantipy/client.py"
     client_path.write_text("uncommitted and invalid\n", encoding="utf-8")
     xnys = tmp_path / "xnys.json"
-    xnys.write_text("{}\n", encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
 
     with pytest.raises(ReadinessManifestError, match="tracked worktree must be clean"):
         build_quantipy_readiness(
@@ -600,7 +608,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
         text=True,
     ).stdout.strip()
     xnys = tmp_path / "xnys.json"
-    xnys.write_text("{}\n", encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
 
     with pytest.raises(ReadinessManifestError, match="runtime contract probe failed closed"):
         build_quantipy_readiness(
@@ -620,7 +628,7 @@ def test_operator_builder_rejects_missing_alembic_010(tmp_path: Path) -> None:
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
     xnys = tmp_path / "xnys.json"
-    xnys.write_text("{}\n", encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
 
     with pytest.raises(ReadinessManifestError, match="Alembic head 010"):
         build_quantipy_readiness(
@@ -721,7 +729,7 @@ def test_operator_builder_preserves_outputs_when_xnys_mutates_before_commit(
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
     xnys = tmp_path / "xnys.json"
-    xnys.write_bytes(b'{"calendar":"XNYS","version":1}\n')
+    write_xnys_calendar_evidence(xnys)
     manifest = tmp_path / "manifest.json"
     evidence = tmp_path / "contract.json"
     old_manifest = b"existing manifest bytes\n"
@@ -735,7 +743,9 @@ def test_operator_builder_preserves_outputs_when_xnys_mutates_before_commit(
     )
 
     def mutate_xnys(root: Path) -> tuple[DatasetAvailability, DatasetAvailability]:
-        xnys.write_bytes(b'{"calendar":"XNYS","version":2}\n')
+        payload = xnys_calendar_payload()
+        payload["retrieved_at"] = "2026-07-15T12:00:01+00:00"
+        xnys.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         unavailable = DatasetAvailability(
             False, None, None, None, "live database query unavailable"
         )

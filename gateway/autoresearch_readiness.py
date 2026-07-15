@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import InitVar, dataclass
-from datetime import date
+from datetime import date, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -29,6 +29,7 @@ DATASET_AVAILABILITY_REASON_RE = re.compile(
     rf"[A-Za-z0-9][A-Za-z0-9 .,;:()'/_-]{{0,{DATASET_AVAILABILITY_REASON_MAX_CHARS - 1}}}"
 )
 READINESS_PROMPT_CAPABILITIES_MAX_BYTES = 4096
+XNYS_EVIDENCE_SCHEMA_VERSION = 1
 
 
 class ReadinessError(ValueError):
@@ -51,6 +52,117 @@ class ReadinessStatus(StrEnum):
 class EvidenceId(StrEnum):
     QUANTIPY_DATA_CONTRACT = "quantipy_data_contract"
     XNYS_TRADING_CALENDAR = "xnys_trading_calendar"
+
+
+@dataclass(frozen=True, slots=True)
+class XNYSCalendarEvidence:
+    """Parsed authoritative XNYS sessions from the pinned operator receipt."""
+
+    range_start: date
+    range_end: date
+    closed_dates: frozenset[date]
+    scheduled_half_days: frozenset[date]
+
+    @classmethod
+    def from_dict(cls, raw: object) -> XNYSCalendarEvidence:
+        data = _require_mapping(raw, label="XNYS calendar evidence")
+        _require_exact_keys(
+            data,
+            {
+                "admission_status",
+                "authority",
+                "closed_dates",
+                "declared_range",
+                "evidence_type",
+                "limitations",
+                "retrieved_at",
+                "scheduled_half_days",
+                "schema_version",
+                "session_definition",
+                "source_files",
+            },
+            label="XNYS calendar evidence",
+        )
+        if data["schema_version"] != XNYS_EVIDENCE_SCHEMA_VERSION:
+            raise ReadinessManifestError("unsupported XNYS calendar evidence schema_version")
+        if data["evidence_type"] != EvidenceId.XNYS_TRADING_CALENDAR.value:
+            raise ReadinessManifestError("XNYS evidence_type must be xnys_trading_calendar")
+        if data["admission_status"] != ReadinessStatus.READY.value:
+            raise ReadinessManifestError("XNYS calendar evidence admission_status must be READY")
+
+        declared_range = _require_mapping(
+            data["declared_range"], label="XNYS calendar evidence.declared_range"
+        )
+        _require_exact_keys(
+            declared_range,
+            {"start", "end", "timezone"},
+            label="XNYS calendar evidence.declared_range",
+        )
+        if declared_range["timezone"] != "America/New_York":
+            raise ReadinessManifestError("XNYS calendar timezone must be America/New_York")
+        range_start = _parse_evidence_date(declared_range["start"], label="declared_range.start")
+        range_end = _parse_evidence_date(declared_range["end"], label="declared_range.end")
+        if range_start > range_end:
+            raise ReadinessManifestError("XNYS declared range start must not follow end")
+
+        session_definition = _require_mapping(
+            data["session_definition"], label="XNYS calendar evidence.session_definition"
+        )
+        _require_exact_keys(
+            session_definition,
+            {"regular_close", "regular_open", "scheduled_early_close", "unit"},
+            label="XNYS calendar evidence.session_definition",
+        )
+        if session_definition != {
+            "regular_close": "16:00",
+            "regular_open": "09:30",
+            "scheduled_early_close": "13:00",
+            "unit": "ET",
+        }:
+            raise ReadinessManifestError("XNYS session_definition is not the supported contract")
+
+        closed_dates = _parse_evidence_date_list(data["closed_dates"], label="closed_dates")
+        half_days = _parse_evidence_date_list(
+            data["scheduled_half_days"], label="scheduled_half_days"
+        )
+        for label, values in (("closed_dates", closed_dates), ("scheduled_half_days", half_days)):
+            if any(value < range_start or value > range_end for value in values):
+                raise ReadinessManifestError(f"XNYS {label} must fit declared_range")
+            if any(value.weekday() >= 5 for value in values):
+                raise ReadinessManifestError(f"XNYS {label} cannot contain weekends")
+        if closed_dates & half_days:
+            raise ReadinessManifestError(
+                "XNYS closed_dates and scheduled_half_days must be disjoint"
+            )
+        return cls(range_start, range_end, closed_dates, half_days)
+
+    @property
+    def sessions(self) -> tuple[date, ...]:
+        current = self.range_start
+        sessions: list[date] = []
+        while current <= self.range_end:
+            if current.weekday() < 5 and current not in self.closed_dates:
+                sessions.append(current)
+            current += timedelta(days=1)
+        return tuple(sessions)
+
+
+def _parse_evidence_date(raw: object, *, label: str) -> date:
+    if not isinstance(raw, str):
+        raise ReadinessManifestError(f"XNYS {label} must be an ISO date")
+    try:
+        return date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ReadinessManifestError(f"XNYS {label} must be an ISO date") from exc
+
+
+def _parse_evidence_date_list(raw: object, *, label: str) -> frozenset[date]:
+    if not isinstance(raw, list) or not raw:
+        raise ReadinessManifestError(f"XNYS {label} must be a non-empty date list")
+    parsed = tuple(_parse_evidence_date(item, label=label) for item in raw)
+    if tuple(sorted(set(parsed))) != parsed:
+        raise ReadinessManifestError(f"XNYS {label} must be sorted and unique")
+    return frozenset(parsed)
 
 
 def _require_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -454,6 +566,17 @@ class _ImmutableEvidenceDescriptor:
     def close(self) -> None:
         os.close(self.descriptor)
 
+    def read_bytes(self) -> bytes:
+        os.lseek(self.descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(self.descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        self.revalidate()
+        return b"".join(chunks)
+
 
 @dataclass(frozen=True, slots=True)
 class ReadinessEvidence:
@@ -804,6 +927,30 @@ def validate_state_readiness(
             "run autoresearch-resume explicitly after reviewing the new manifest"
         )
     return current
+
+
+def load_xnys_calendar_evidence(
+    manifest: PlatformReadinessManifest,
+) -> tuple[str, XNYSCalendarEvidence]:
+    """Re-read, hash, and parse the XNYS file pinned by a READY manifest."""
+    manifest.require_ready()
+    receipt = manifest.evidence[EvidenceId.XNYS_TRADING_CALENDAR]
+    if receipt.path is None or receipt.sha256 is None:
+        raise ReadinessManifestError("READY manifest requires pinned XNYS evidence")
+    descriptor = _ImmutableEvidenceDescriptor.open(Path(receipt.path))
+    try:
+        if descriptor.sha256 != receipt.sha256:
+            raise ReadinessManifestError(
+                "XNYS evidence SHA-256 does not match the readiness manifest"
+            )
+        content = descriptor.read_bytes()
+    finally:
+        descriptor.close()
+    try:
+        raw = json.loads(content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReadinessManifestError("XNYS calendar evidence must be valid UTF-8 JSON") from exc
+    return receipt.sha256, XNYSCalendarEvidence.from_dict(raw)
 
 
 def canonical_platform_capabilities(
@@ -1323,6 +1470,10 @@ def build_quantipy_readiness(
     )
     xnys = _ImmutableEvidenceDescriptor.open(xnys_path)
     try:
+        try:
+            XNYSCalendarEvidence.from_dict(json.loads(xnys.read_bytes()))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReadinessManifestError("XNYS calendar evidence must be valid UTF-8 JSON") from exc
         actual_commit, contract_probe = _probe_quantipy_contract(
             quantipy_root.expanduser().resolve(), expected_quantipy_commit
         )

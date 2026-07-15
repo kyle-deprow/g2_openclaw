@@ -2,6 +2,8 @@
 
 This directory contains repo-managed bootstrap files for OpenClaw agent
 identity. Deploy them with `bash scripts/push-openclaw-config.sh`.
+After changing these runtime docs or skills, run that push command and restart
+the OpenClaw gateway service so every configured workspace receives the update.
 
 The push script copies `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and `BOOTSTRAP.md`
 to every configured agent workspace derived from
@@ -17,6 +19,10 @@ workspace files such as `USER.md`, `IDENTITY.md`, or personal notes.
 - `AGENTS.md` — Operational rules: G2 handoff, PM loop, stage isolation.
 - `TOOLS.md` — Tool usage guide for OpenClaw Codex runtime and built-in tools.
 - `BOOTSTRAP.md` — Project context: tech stack, repo layout, conventions.
+- `skills/quantipy-methodology/` — Stage-specific routing to current Quantipy
+  instructions.
+- `skills/quantipy-data-contract/` — Compact runtime data-access,
+  point-in-time, receipt, and prompt-hygiene contract.
 
 ## Load Order
 
@@ -28,3 +34,47 @@ Later files can reference concepts from earlier ones.
 The Gateway uses `agent:main:g2` as the base session key for human G2
 interactions. Autonomous research runs only in
 `agent:autoresearch-pm:autoresearch:quantipy`.
+
+## State Preparation
+
+Stop the supervisor before preparing state. Before any `autoresearch-next`, use
+exactly one procedure. Each procedure writes a temporary file, validates the
+command result, and atomically replaces the authoritative state path.
+
+```bash
+# Losslessly migratable schema-less pristine state only.
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
+
+# New campaign, or after archiving an incompatible historical state.
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-init-state \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
+```
+
+The control command and supervisor already use that authoritative path. Run:
+
+```bash
+cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
+  /home/dev/.openclaw/autoresearch/quantipy-state.json
+```
+
+Never run both preparation procedures for the same campaign. Archive
+incompatible state before initialization.

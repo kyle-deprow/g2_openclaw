@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 7.3.0
+version: 8.0.0
 ---
 
 # Autoresearch
@@ -25,21 +25,59 @@ loop memory for research continuity. Only the PM loads the write-capable
 Before any stage dispatch, the runner validates the operator-owned manifest at
 `~/.openclaw/autoresearch/platform-readiness.json`. Override it explicitly with
 `--readiness-manifest <path>` for tests or a controlled operator migration. The
-manifest must be schema version 1, identify a canonical `manifest_id` and
-`snapshot_id`, and contain SHA-256 receipts for immutable SEC/common-stock
-provenance and authoritative XNYS calendar files. `READY` requires both files
-to be absolute, regular files whose current hashes match. `BLOCKED` must state
-the concrete operator action required. The runner never downloads, infers,
-substitutes, repairs, or silently falls back to evidence.
+manifest must be schema version 2, identify a canonical `manifest_id` and
+`snapshot_id`, and contain SHA-256 receipts for the Quantipy data contract and
+authoritative XNYS calendar evidence. `READY` requires both files to be
+absolute, regular files whose current hashes match and exposes the canonical
+capability object injected into every stage. `BLOCKED` states the concrete
+operator action required. The runner never downloads, infers, substitutes, or
+repairs evidence.
 
-An existing state without a pinned readiness receipt fails closed. Initialize it
-explicitly:
+Before `autoresearch-next`, stop the supervisor and prepare schema-v2
+state with exactly one procedure. Losslessly migrate only a schema-less
+pristine state:
 
 ```bash
-uv run gateway-cli autoresearch-pin-readiness STATE.json \
-  --readiness-manifest ~/.openclaw/autoresearch/platform-readiness.json \
-  --output STATE-pinned.json
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
 ```
+
+For a new campaign, or after archiving state that cannot migrate losslessly,
+initialize a pristine state from the READY manifest:
+
+```bash
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-init-state \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
+```
+
+Both procedures atomically leave schema-v2 state at the authoritative path
+used by control and the supervisor. Use that path for the first dispatch:
+
+```bash
+cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
+  /home/dev/.openclaw/autoresearch/quantipy-state.json
+```
+
+Never run both preparation procedures for one campaign. An existing
+incompatible state must be archived, not rewritten or silently pinned.
 
 `autoresearch-next` checks the current manifest before selecting or dispatching
 any stage and rejects a blocked, invalid, or stale-pinned state. An
@@ -88,19 +126,20 @@ implementation result must include `compute_fit`:
 
 - `target`: exactly `none`, `cpu`, `gpu`, or `mixed`.
 - `rationale`: why that execution target fits the hypothesis and data scale.
-- `required_dependencies`: importable package names, plus `cuda_runtime` when
-  the CUDA runtime is required.
+- `required_dependencies`: a JSON list of compute dependencies required by the
+  declared path; it is empty for `target=none` and includes `cuda_runtime` when
+  GPU/CUDA execution requires it.
 - `benchmark_plan`: how wall time, memory, or acceleration will be measured.
 
 Choose the target from the hypothesis, data scale, reproducibility, and planned
 or measured cost. GPU and mixed declarations are mechanically accepted only
 when the snapshot proves usable GPU/CUDA access and all declared dependencies
-are available. Otherwise choose CPU/none or report the exact infrastructure
-blocker. The dependency gate applies to dependencies declared for GPU or mixed
-execution; CPU/none choices must still be reproducible in the existing
-environment. Never install dependencies, fabricate capability evidence, or
-silently switch execution devices. Verification must compare the actual run
-with the declared implementation compute fit and report any mismatch.
+are available. Otherwise report the exact infrastructure blocker. The
+mechanical dependency gate applies to dependencies declared for GPU or mixed
+execution; CPU choices must still be reproducible in the existing environment.
+Never install dependencies, fabricate capability evidence, or switch execution
+devices. Verification compares the actual run with the declared implementation
+compute fit and reports any mismatch.
 
 ## Loop
 
@@ -151,9 +190,10 @@ inform prompt content, but they are not OpenClaw stage names.
 | Review | `reviewer` | `openai/gpt-5.6-sol`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
 
-Every stage agent except `autoresearch-pm` loads `mempalace-readonly` and
-`quantipy-methodology`. The methodology skill requires stage agents to read the
-current Quantipy source-of-truth files from `/home/dev/repos/quantipy`
+Every stage agent except `autoresearch-pm` loads `mempalace-readonly`,
+`quantipy-methodology`, and `quantipy-data-contract`. The methodology skill
+routes stage agents to current Quantipy source-of-truth files from
+`/home/dev/repos/quantipy`
 (`AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents`) before
 context, debate, consensus, implementation, review, or fix work. Do not copy
 those target-repo files into G2 OpenClaw.
@@ -201,7 +241,7 @@ guardrails exist only to keep execution clean:
   default allowlisted local file.
 - All implementation and Fix/Test workspaces must be under the exact canonical
   operator-controlled root `/home/dev/.openclaw/autoresearch/worktrees`; never
-  use `/tmp` or another fallback. Create that parent with `mkdir -p` before
+  use `/tmp` or any other root. Create that parent with `mkdir -p` before
   `git worktree add`. `/tmp` is a 31G tmpfs and each Quantipy worktree virtualenv
   is about 1.5G, so stale iteration worktrees can exhaust it. Fix/Test reuses
   the exact persisted implementation worktree and accepted experiment commit;
@@ -308,7 +348,9 @@ packet for the debate:
 - Prior MemPalace findings: failures, keeps, feature families, model families,
   data coverage issues, and reviewer objections.
 - Open proposals from `RESEARCH_LOG.md`, marked as prior context only.
-- Hard constraints and available data sources.
+- The pinned readiness receipt, capability summary, and compact references to
+  relevant universe/coverage receipts. Do not include full ticker arrays.
+- Hard constraints and supported data sources from those receipts.
 - Selected `research_mode`, a concrete mode rationale, and burned theory
   families from completed failures.
 
@@ -326,13 +368,16 @@ configured model.
 Every proposal must include:
 
 - Hypothesis and why the signal should exist.
-- Universe and traded tickers; large caps may be sources but not traded names.
+- Historical universe screen profile, explicit full-range selection schedule,
+  plan/profile identity, deterministic contiguous batch plan, and execution
+  timing. Do not claim materialization identities or digests before
+  verification.
 - Feature pipeline from raw OHLCV/sentiment to model input.
 - Model type and hyperparameter search plan.
 - Walk-forward split, purge/embargo if applicable, and OOS holdout.
 - Transaction cost model.
-- Full data coverage plan using 2021-2026 and at least 95% of available trading
-  days.
+- Broad common-calendar coverage plan bounded by readiness and cache/hydration
+  receipts, with an untouched OOS holdout.
 - Compute fit with target, rationale, required dependencies, and benchmark plan.
 - Rejection criteria.
 
@@ -342,12 +387,12 @@ provenance repair needed to restore a valid alpha gate, not a new strategy.
 
 Quantipy constraints:
 
-- Intraday small/mid cap equities only, $500M-$20B market cap.
+- Load `quantipy-data-contract`; use only its universe, price, action,
+  execution-timing, unsupported-data, cache-reuse, and prompt-hygiene rules.
 - No overnight holds; flat by the target repo's close-out rule.
-- Real PostgreSQL OHLCV via `qp.prices()` or direct SQL. No synthetic data.
-- Simple indicator core: Moving Averages, Bollinger Bands, OBV, VWAP, volume
-  profiles, and optional Reddit/news sentiment conditioning.
-- Hyperparameter tuning must use time-series-aware splits.
+- Use real platform OHLCV through `qp.prices()` and no synthetic research data.
+- Use a simple indicator core with optional Reddit/news sentiment conditioning.
+- Hyperparameter tuning uses time-series-aware splits.
 
 ## 3. Consensus
 
@@ -359,6 +404,13 @@ majority. Required output:
   and expected net Sharpe.
 - Explicit reasons losers were rejected.
 - Final implementation brief.
+- Frozen canonical universe plan inputs: profile identity and digest, sorted
+  full-range selection schedule, maximum members per date, and execution
+  policy. Consensus stores no redundant batch boundaries. The runner derives
+  deterministic contiguous batches that each stay within 32 dates, 1,000
+  members per date, and 10,000 date-member slots; implementation performs one
+  `qp.security_universe_history()` operation per batch. Consensus must
+  not contain snapshot, summary, or member-union materialization digests.
 
 If there is no 3-of-5 majority, run one concise debate retry with the same
 context plus the dissent summary. If there is still no majority, log
@@ -411,6 +463,14 @@ uncovers a bug signal. The PM must write the JSON artifact and run
 any prose completion, status report, or handoff. A prose-only verification
 completion is invalid and must be treated as no artifact.
 
+Verification is the first stage that records materialization evidence. Capture
+each history batch's contract digest, the per-date snapshot and grouped-daily
+identities and content digests, and the final member-union count and digest.
+Verify them against the consensus plan/profile identity and batch order. Follow
+the compact `quantipy-data-contract` rules for exact source receipt fields,
+pinned-XNYS next-session validation, canonical union bytes, and the external
+union-manifest path/SHA receipt; never place the member array in state.
+
 Failure classification is mandatory:
 
 - If any test or verification command exits nonzero or reports a failed test,
@@ -438,25 +498,19 @@ Required metrics:
 - Feature importances.
 - Null test results.
 
-When coverage is available, every verification artifact contains a structured
-coverage receipt for each symbol plus one aggregate receipt: declared intended
-start/end, actual common start/end, OOS start/end, expected/actual trading days,
-coverage percent, missing reason, default/fallback fold counts,
-cap-provenance availability, and an explicit `fixed_sleeve_local_data` flag.
+For `ALPHA_RESEARCH`, the only coverage artifact is the compact
+`DynamicUniverseCoverageReceipt`, bound to the verified member union, hydrated
+range, timeframe, market-hours policy, OOS range, symbol-session counts, and
+fold counts. ALPHA does not emit per-symbol or aggregate coverage receipts.
 For `TEST_FAILURE` or `BUG_SIGNAL` when coverage is unavailable, set
-`data_coverage` to `null` instead of inventing a receipt. Date ranges and counts
-must agree whenever a receipt is supplied.
-A fixed local sleeve is permitted only when explicitly declared and may not
-claim cap-verified universe compliance.
+`data_coverage` to `null` instead of inventing a receipt.
 
-Coverage is a common-calendar analysis. Every per-symbol receipt must use the
-aggregate declared range; aggregate actual start is the latest per-symbol
-actual start and aggregate actual end is the earliest per-symbol actual end.
-Aggregate OOS is the intersection of per-symbol OOS windows. Expected/actual
-trading-day counts, coverage percent, and missing reason must be identical
-across all receipts after common-calendar filtering; never sum symbol day
-counts. Aggregate default/fallback folds equal the fewest corresponding
-per-symbol folds.
+Legacy per-symbol `CoverageReceipt` plus `AggregateCoverageReceipt` is
+explicitly `DATA_INFRA_G0`-only. In G0, every per-symbol receipt uses the
+aggregate declared range; aggregate actual and OOS ranges are the common
+intersections, common-calendar day counts and percentages agree, and aggregate
+fold counts equal the minimum corresponding per-symbol folds. Locally inferred
+or manually fixed symbol sleeves are not valid ALPHA universe evidence.
 
 In `DATA_INFRA_G0`, record `infra_gate_outcome` (`GATE_PASSED` or
 `REMEDIATION_REQUIRED`) plus `infra_rationale`; do not use Sharpe to decide
@@ -482,10 +536,10 @@ binding.
 Reviewer focus:
 
 - Was the chosen theory implemented correctly?
-- Was the full intended dataset and timerange used, including 2021-2026 and at
-  least 95% of available trading days?
-- Did the experiment avoid cherry-picking tickers, windows, parameters, and
-  thresholds?
+- Did the experiment use the full receipt-bounded intended range and broad
+  common-calendar coverage?
+- Did the experiment avoid cherry-picking universe dates, windows, parameters,
+  and thresholds?
 - Did the method avoid leakage, overfitting, overlapping-hold errors, and
   transaction-cost omissions?
 - Are null tests and OOS evaluation sufficient to trust the recommended metric?
@@ -497,12 +551,13 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 
 - Critical reviewer issue: send a narrow fix to `fixer`, rerun tests/notebook,
   then rerun the single reviewer.
-- Test failure: fix up to two times, then revert and log CRASH.
+- Test failure: fix up to two times, then classify and log CRASH. The disposable
+  experiment worktree is not promoted.
 - No methodology issue: proceed to decide/log.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
   it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
-  the Fix/Test artifact must report that same canonical path. There is no
-  legacy or `/tmp` fallback. Never create another worktree. Before editing,
+  the Fix/Test artifact must report that same canonical path. Paths outside
+  that root are invalid. Never create another worktree. Before editing,
   preserve unrelated work and use only already-authoritative human/Codex shared
   infrastructure history; never edit shared infrastructure, and fail closed if
   reconciliation is ambiguous or risks unrelated loss. These are agent
@@ -517,9 +572,11 @@ Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
 - Tests fail after retries: CRASH.
 - Critical review issue remains: DISCARD.
 - Decision Sharpe <= -0.5: DISCARD.
-- Decision Sharpe improves baseline: KEEP.
-- Decision Sharpe > 0.5: SIGNIFICANT KEEP.
 - Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP.
+- Decision Sharpe > 0.5: SIGNIFICANT KEEP or STRONG KEEP.
+- At or below 0.5, require a numeric baseline: an improvement is KEEP-family
+  and a non-improvement is DISCARD. Plain KEEP is invalid without a numeric
+  baseline.
 - Max drawdown >= 30%: DISCARD regardless of Sharpe.
 
 For `DATA_INFRA_G0`, decide `INFRA_REPAIRED` only when its explicit
@@ -529,16 +586,18 @@ strategy has passed.
 
 Actions:
 
-- KEEP: keep the commit, update baseline if appropriate, and log the metrics.
-- DISCARD/CRASH: revert the experiment commit, log why, and move to the next
-  proposal.
+- KEEP-family: retain the accepted experiment commit, update the numeric
+  baseline when the decision artifact requires it, and log the metrics.
+- DISCARD/CRASH: do not promote the disposable experiment commit; log why and
+  move to the next proposal.
 - NO_CONSENSUS: log the split to `RESEARCH_LOG.md`; set `NOT_RUN` and the
   explicit no-memory flag, then begin the next context pass.
 - Always append to the target repo's experiment log and `RESEARCH_LOG.md`.
 - After every memory-required final decision, the PM writes MemPalace drawers
   and KG facts for experiment, feature, model, metric, decision, and failure
-  mode. `NO_CONSENSUS` never enters MemPalace.
-- Write a MemPalace diary entry only as part of final experiment logging.
+  mode. `NO_CONSENSUS` and `INFRA_BLOCKED` never enter MemPalace.
+- Write a MemPalace diary entry only as part of memory-required final experiment
+  logging.
 
 ## Recovery And Status
 

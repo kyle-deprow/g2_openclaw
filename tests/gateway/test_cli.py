@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
@@ -25,33 +26,44 @@ from gateway.autoresearch_readiness import (
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMBER_UNION_DIGEST_ALGORITHM,
     QUANTIPY_RECEIPT_PATHS,
-    AggregateCoverageReceipt,
+    AuthoritativeSnapshotReceipt,
     AutoresearchState,
+    AutoresearchValidationContext,
     ComputeFitArtifact,
     ComputeTarget,
     ConsensusResultArtifact,
     ConsensusStatus,
     ContextPacketArtifact,
-    CoverageReceipt,
     DebateResultArtifact,
     DebateSubmission,
+    DynamicUniverseCoverageReceipt,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
     FixResultArtifact,
     FixTriggerPhase,
+    GroupedSummaryReceipt,
     ImplementationResultArtifact,
+    MemberUnionManifestReceipt,
     MetricDirection,
     Phase,
+    PriceHydrationReceipt,
     ResearchMode,
     ReviewResultArtifact,
     ReviewVerdict,
     SetupContextArtifact,
+    UniverseDateVerificationReceipt,
+    UniverseHistoryBatchReceipt,
+    UniversePlanArtifact,
+    UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
     advance_state,
     load_autoresearch_policy,
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -71,7 +83,151 @@ from gateway.cli import (
 )
 from typer.testing import CliRunner
 
+from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
+
 runner = CliRunner()
+
+
+def _universe_plan() -> UniversePlanArtifact:
+    return UniversePlanArtifact(
+        profile_id="liquid-common-stocks-v1",
+        profile_digest="a" * 64,
+        selection_dates=("2021-01-04",),
+        max_members_per_date=300,
+        execution_policy="next-session-or-later",
+    )
+
+
+def _universe_receipt() -> UniverseVerificationReceipt:
+    return UniverseVerificationReceipt(
+        profile_id="liquid-common-stocks-v1",
+        profile_digest="a" * 64,
+        execution_policy="next-session-or-later",
+        max_members_per_date=300,
+        batches=(
+            UniverseHistoryBatchReceipt(
+                contract_digest="b" * 64,
+                operation_count=1,
+                dates=(
+                    UniverseDateVerificationReceipt(
+                        selection_date="2021-01-04",
+                        earliest_execution_date="2021-01-05",
+                        calendar_identity="XNYS",
+                        calendar_digest="f" * 64,
+                        selected_member_count=17,
+                        snapshot=AuthoritativeSnapshotReceipt(
+                            as_of_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="c" * 64,
+                            content_digest="c" * 64,
+                            completed_at="2026-07-15T12:00:00+00:00",
+                        ),
+                        summary=GroupedSummaryReceipt(
+                            summary_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="d" * 64,
+                            content_digest="d" * 64,
+                            completed_at="2026-07-15T12:00:00+00:00",
+                            adjusted=False,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        member_union_digest_algorithm=MEMBER_UNION_DIGEST_ALGORITHM,
+        member_union_count=17,
+        member_union_digest="e" * 64,
+        member_union_manifest=MemberUnionManifestReceipt(
+            path="/tmp/quantipy-member-union.txt", sha256="e" * 64
+        ),
+    )
+
+
+def _hydration_receipt() -> PriceHydrationReceipt:
+    request_digest = price_hydration_request_digest(
+        member_union_count=17,
+        member_union_digest="e" * 64,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+    )
+    completed_at = "2026-07-15T12:00:00+00:00"
+    return PriceHydrationReceipt(
+        member_union_count=17,
+        member_union_digest="e" * 64,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+        operation_count=1,
+        request_digest=request_digest,
+        coverage_receipt_digest=price_hydration_coverage_digest(
+            request_digest=request_digest, operation_count=1, completed_at=completed_at
+        ),
+        completed_at=completed_at,
+        folds_started_at="2026-07-15T12:01:00+00:00",
+    )
+
+
+def _dynamic_coverage() -> DynamicUniverseCoverageReceipt:
+    return DynamicUniverseCoverageReceipt(
+        member_union_count=17,
+        member_union_digest="e" * 64,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        oos_start="2021-10-01",
+        oos_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+        expected_symbol_sessions=2400,
+        covered_symbol_sessions=2400,
+        missing_symbol_count=0,
+        missing_symbol_sessions=0,
+        default_fold_count=24,
+        fallback_fold_count=0,
+    )
+
+
+def test_autoresearch_migrate_state_smoke(tmp_path: Path) -> None:
+    readiness = _ready_manifest(tmp_path / "migration-readiness")
+    raw = AutoresearchState(platform_readiness=readiness.identity()).to_dict()
+    del raw["schema_version"]
+    source = tmp_path / "live-schema-less.json"
+    output = tmp_path / "live-v2.json"
+    source.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["autoresearch-migrate-state", str(source), "--output", str(output)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
+
+
+def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    output = tmp_path / "pristine-v2.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-init-state",
+            "--output",
+            str(output),
+            "--readiness-manifest",
+            str(readiness_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    state = AutoresearchState.from_dict(json.loads(output.read_text(encoding="utf-8")))
+    assert state.platform_readiness == readiness.identity()
 
 
 def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
@@ -79,7 +235,10 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
     tmp_path.mkdir(parents=True, exist_ok=True)
     for evidence_id in EvidenceId:
         path = tmp_path / f"{evidence_id.value}.json"
-        path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
+            write_xnys_calendar_evidence(path)
+        else:
+            path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {
             "path": str(path),
             "sha256": sha256(path.read_bytes()).hexdigest(),
@@ -108,7 +267,7 @@ def test_autoresearch_build_readiness_command_fails_closed_on_invalid_commit(
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     xnys = tmp_path / "xnys.json"
-    xnys.write_text("{}\n", encoding="utf-8")
+    write_xnys_calendar_evidence(xnys)
 
     result = runner.invoke(
         app,
@@ -606,7 +765,7 @@ class TestAutoresearchCliCommands:
                     vote_family="vwap-obv",
                     hypothesis="VWAP and OBV capture intraday accumulation.",
                     universe="Small-cap semiconductors",
-                    traded_tickers=("AMD", "SMCI"),
+                    example_tickers=("AMD", "SMCI"),
                     feature_pipeline="OHLCV to VWAP and OBV features",
                     model_plan="Time-series classifier",
                     walk_forward_plan="Expanding windows",
@@ -647,6 +806,7 @@ class TestAutoresearchCliCommands:
                 rejection_reasons=(),
                 implementation_brief="Implement the narrow VWAP and OBV experiment.",
                 dissent_summary="The panel reached consensus.",
+                universe_plan=_universe_plan(),
             ),
             policy,
         )
@@ -680,23 +840,6 @@ class TestAutoresearchCliCommands:
 
     @staticmethod
     def _verification_failure() -> VerificationResultArtifact:
-        coverage = CoverageReceipt(
-            symbol="AMD",
-            declared_intended_start="2021-01-04",
-            declared_intended_end="2021-12-31",
-            actual_common_start="2021-01-04",
-            actual_common_end="2021-12-31",
-            oos_start="2021-10-01",
-            oos_end="2021-12-31",
-            expected_trading_days=252,
-            actual_trading_days=252,
-            coverage_percent=100.0,
-            missing_reason=None,
-            default_fold_count=0,
-            fallback_fold_count=0,
-            cap_provenance_available=True,
-            fixed_sleeve_local_data=False,
-        )
         return VerificationResultArtifact(
             status=VerificationStatus.TEST_FAILURE,
             is_walk_forward_sharpe_net=0.41,
@@ -711,23 +854,7 @@ class TestAutoresearchCliCommands:
             bug_signals=(),
             tests_passed=False,
             commands_run=("uv run pytest",),
-            data_coverage=AggregateCoverageReceipt(
-                declared_intended_start=coverage.declared_intended_start,
-                declared_intended_end=coverage.declared_intended_end,
-                actual_common_start=coverage.actual_common_start,
-                actual_common_end=coverage.actual_common_end,
-                oos_start=coverage.oos_start,
-                oos_end=coverage.oos_end,
-                expected_trading_days=coverage.expected_trading_days,
-                actual_trading_days=coverage.actual_trading_days,
-                coverage_percent=coverage.coverage_percent,
-                missing_reason=None,
-                default_fold_count=0,
-                fallback_fold_count=0,
-                cap_provenance_available=True,
-                fixed_sleeve_local_data=False,
-                per_symbol=(coverage,),
-            ),
+            data_coverage=None,
         )
 
     @staticmethod
@@ -754,6 +881,10 @@ class TestAutoresearchCliCommands:
         state: AutoresearchState,
         artifact: ImplementationResultArtifact | FixResultArtifact,
     ) -> tuple[CliInvocationResult, Path]:
+        readiness = _ready_manifest(tmp_path / "advance-readiness")
+        readiness_path = tmp_path / "advance-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = replace(state, platform_readiness=readiness.identity())
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
         output_path = tmp_path / "state-out.json"
@@ -769,6 +900,8 @@ class TestAutoresearchCliCommands:
                 str(output_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
             ],
         )
         return result, output_path
@@ -821,7 +954,14 @@ class TestAutoresearchCliCommands:
             implementation,
             policy,
         )
-        state = advance_state(state, self._verification_failure(), policy)
+        state = advance_state(
+            state,
+            self._verification_failure(),
+            policy,
+            validation_context=AutoresearchValidationContext(
+                state.platform_readiness, "f" * 64, (date(2021, 1, 5),)
+            ),
+        )
 
         result, output_path = self._invoke_autoresearch_advance(
             tmp_path,
@@ -847,7 +987,14 @@ class TestAutoresearchCliCommands:
             implementation,
             policy,
         )
-        state = advance_state(state, self._verification_failure(), policy)
+        state = advance_state(
+            state,
+            self._verification_failure(),
+            policy,
+            validation_context=AutoresearchValidationContext(
+                state.platform_readiness, "f" * 64, (date(2021, 1, 5),)
+            ),
+        )
         alias = str(git_worktree.workspace / ".." / git_worktree.workspace.name)
 
         result, _ = self._invoke_autoresearch_advance(
@@ -860,10 +1007,16 @@ class TestAutoresearchCliCommands:
         assert "canonical resolved path" in result.output
 
     def test_autoresearch_advance_persists_state(self, tmp_path: Path) -> None:
+        readiness = _ready_manifest(tmp_path / "setup-readiness")
+        readiness_path = tmp_path / "setup-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
         output_path = tmp_path / "state-out.json"
-        state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+        state_path.write_text(
+            json.dumps(AutoresearchState(platform_readiness=readiness.identity()).to_dict()),
+            encoding="utf-8",
+        )
         artifact_path.write_text(
             json.dumps(
                 SetupContextArtifact(
@@ -890,6 +1043,8 @@ class TestAutoresearchCliCommands:
                 str(output_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
             ],
         )
 
@@ -919,7 +1074,7 @@ class TestAutoresearchCliCommands:
                     vote_family="vwap-obv",
                     hypothesis="VWAP and OBV capture intraday accumulation.",
                     universe="Small-cap semiconductors",
-                    traded_tickers=("AMD", "SMCI"),
+                    example_tickers=("AMD", "SMCI"),
                     feature_pipeline="OHLCV to VWAP and OBV features",
                     model_plan="Time-series classifier",
                     walk_forward_plan="Expanding windows",
@@ -948,23 +1103,7 @@ class TestAutoresearchCliCommands:
             rejection_reasons=(),
             implementation_brief="Implement the narrow VWAP and OBV experiment.",
             dissent_summary="The panel reached consensus.",
-        )
-        coverage_symbol = CoverageReceipt(
-            symbol="AMD",
-            declared_intended_start="2021-01-04",
-            declared_intended_end="2021-12-31",
-            actual_common_start="2021-01-04",
-            actual_common_end="2021-12-31",
-            oos_start="2021-10-01",
-            oos_end="2021-12-31",
-            expected_trading_days=252,
-            actual_trading_days=252,
-            coverage_percent=100.0,
-            missing_reason=None,
-            default_fold_count=0,
-            fallback_fold_count=0,
-            cap_provenance_available=True,
-            fixed_sleeve_local_data=False,
+            universe_plan=_universe_plan(),
         )
         verification = VerificationResultArtifact(
             status=VerificationStatus.PASS,
@@ -980,23 +1119,9 @@ class TestAutoresearchCliCommands:
             bug_signals=(),
             tests_passed=True,
             commands_run=("uv run pytest",),
-            data_coverage=AggregateCoverageReceipt(
-                declared_intended_start=coverage_symbol.declared_intended_start,
-                declared_intended_end=coverage_symbol.declared_intended_end,
-                actual_common_start=coverage_symbol.actual_common_start,
-                actual_common_end=coverage_symbol.actual_common_end,
-                oos_start=coverage_symbol.oos_start,
-                oos_end=coverage_symbol.oos_end,
-                expected_trading_days=coverage_symbol.expected_trading_days,
-                actual_trading_days=coverage_symbol.actual_trading_days,
-                coverage_percent=coverage_symbol.coverage_percent,
-                missing_reason=None,
-                default_fold_count=0,
-                fallback_fold_count=0,
-                cap_provenance_available=True,
-                fixed_sleeve_local_data=False,
-                per_symbol=(coverage_symbol,),
-            ),
+            data_coverage=_dynamic_coverage(),
+            universe_verification_receipt=_universe_receipt(),
+            price_hydration_receipt=_hydration_receipt(),
         )
         readiness = _ready_manifest(tmp_path / "readiness")
         readiness_path = tmp_path / "platform-readiness.json"

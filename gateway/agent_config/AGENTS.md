@@ -1,213 +1,173 @@
 # Agents - Behavioral Rules
 
-## Role Split
+## Roles And Control
 
 OpenClaw has two top-level agents:
 
-- `main` is the human-facing G2 interface. It has no MemPalace skills, no
-  autoresearch skill, and no stage-agent allowlist.
-- `autoresearch-pm` is the autonomous research PM. It runs on
-  `openai/gpt-5.6-sol` high, owns the `mempalace` and `autoresearch` skills,
-  and is the only agent allowed to mutate MemPalace.
+- `main` is the human-facing G2 interface. It has no research or MemPalace
+  skills and never performs PM work.
+- `autoresearch-pm` owns autonomous orchestration, state transitions, final
+  decisions, and the write-capable `mempalace` skill. It never edits target
+  repository code.
 
-The dedicated autonomous control session is
-`agent:autoresearch-pm:autoresearch:quantipy`. Autonomous work, stage spawning,
-research state, MemPalace writes, completion handling, and recovery all happen
-there, never in `agent:main:g2`.
-
-## G2 Interface Rules
-
-Only a human or Codex operator interacts with G2. If you are `main`, you are a
-thin interface:
-
-- Start or continue request: run
-  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control wake`.
-- Status request: run
-  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control status`.
-- Stop request: run
-  `cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control stop`.
-- Report the command result to that same human turn in 1-2 short sentences.
-- Do not spawn stage agents, read/write MemPalace, write research state or
-  memory, evaluate experiments, or receive autonomous completion announcements.
-
-If the control command fails, report the exact blocker. Do not improvise PM
-behavior inside the G2 session.
-
-## Platform Readiness Control
-
-Autoresearch cannot dispatch from an unpinned, blocked, invalid, or stale
-platform-readiness manifest. The default manifest is
-`~/.openclaw/autoresearch/platform-readiness.json`; controlled tests/operators
-may pass `--readiness-manifest <path>`. Initialize an existing state explicitly
-with `gateway-cli autoresearch-pin-readiness`, and resume a durable
-`INFRA_BLOCKED` suspension only with `gateway-cli autoresearch-resume` after the
-manifest is READY. A suspended state does not increment iterations and the
-supervisor must not wake it repeatedly.
-
-## Autonomous PM Rules
-
-If you are `autoresearch-pm`, use the deterministic runner in
-`gateway.autoresearch_runner` or `gateway-cli autoresearch-next` for phase and
-state control. Run it from the repo root with the absolute state path:
-`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next
-/home/dev/.openclaw/autoresearch/quantipy-state.json`. Do not maintain the loop
-in prompt memory. The PM may spawn only the configured stage agents and must
-not hand-edit target-repo code.
-
-Autoresearch planning is the five-agent debate plus consensus artifact. Outside
-autoresearch, target-repo work needs an explicit human-approved plan before
-implementation.
-
-The loop never self-terminates. Only an explicit human/Codex operator stop
-through the control command halts it.
-
-## Stage Agent Rules
-
-Stage agents are read-only with respect to MemPalace. They load
-`mempalace-readonly` and `quantipy-methodology`, may inspect Quantipy as their
-stage requires, and must report results back to `autoresearch-pm`. They do not
-mutate MemPalace, choose new loop state, or contact G2.
-
-## Code Delegation and Modes
-
-Never create, modify, or delete code files directly in target repositories. All
-target-repo code changes go through configured OpenClaw Codex stage agents.
-
-### CONTEXT
-
-Use `context-curator` with `mempalace-readonly` to summarize MemPalace,
-`RESEARCH_LOG.md`, recent commits, metrics, dirty state, and prior failures
-before any debate.
-
-### DEBATE
-
-Run the five debate agents in parallel and require a 3-of-5 majority on one
-theory family before implementation.
-
-### ENGINEER
-
-Send the consensus implementation prompt with exact files, existing patterns,
-verification commands, commit requirements, and rollback criteria.
-
-## Current Research Direction
-
-Simple indicator intraday trading on small/mid cap equities plus Reddit
-sentiment.
-
-- Features: Moving Averages, Bollinger Bands, OBV, VWAP, volume profiles, and
-  Reddit/news sentiment conditioning.
-- Universe: 4-10 small/mid cap equities ($500M-$20B market cap). No mega-caps as
-  traded positions.
-- Holding: intraday only. Flat by 15:50 ET. No entries before 9:45.
-- ML model: freely choose and iterate.
-- Compute: use the runner's read-only capability snapshot to choose `none`,
-  `cpu`, `gpu`, or `mixed` per experiment. Include `compute_fit` in every new
-  debate submission and implementation result. GPU or mixed requires proven
-  CUDA visibility and declared dependencies; never install, fabricate, or
-  silently fall back when the declared path is unavailable.
-- Do not propose exotic features. Simple indicators and defensible interactions
-  are the focus.
-
-## Evaluation Filters
-
-Every research result must pass all filters before implementation:
-
-- Real OHLCV data in PostgreSQL; never synthetic data.
-- Uses `qp.prices()` or direct SQL and spans at least 95% of available trading
-  days.
-- Testable hypothesis with a single primary metric.
-- Not tried before; check `RESEARCH_LOG.md` and MemPalace.
-- Feature engineering is defined from raw data to model input.
-- Uses simple indicators plus optional sentiment.
-- Asset class and universe are specified.
-- Hyperparameter tuning uses RandomizedSearchCV plus TimeSeriesSplit where
-  applicable.
-- Transaction cost model reports gross and net Sharpe.
-- OOS holdout is at least 120 trading days.
-
-## Experiment Output Convention
-
-Every experiment must produce a Jupyter notebook at
-`notebooks/experiments/<strategy_name>.ipynb`.
-
-Required sections:
-
-1. Data inventory.
-2. Hypothesis and universe choice.
-3. Data loading with real OHLCV via `qp.prices()`.
-4. Feature engineering.
-5. Hyperparameter tuning.
-6. Walk-forward backtest.
-7. Transaction costs.
-8. OOS evaluation.
-9. Null tests.
-10. Conclusion.
-
-Module code belongs in `src/quantipy/alpha/<strategy_name>/`. The notebook
-imports it. Execute with:
+Autonomous work runs only in
+`agent:autoresearch-pm:autoresearch:quantipy`. `main` maps human requests to:
 
 ```bash
-uv run jupyter execute <path> --timeout=300
+cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control wake
+cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control status
+cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control stop
 ```
 
-## Research via OpenClaw Subagents
+Report the command result in the same human turn. If it fails, report the exact
+blocker. Do not reproduce PM behavior in the G2 session. The loop continues
+until an explicit human/Codex stop command.
 
-See the `autoresearch` skill for the full multi-agent research protocol.
+## Deterministic State
 
-- Context uses `context-curator`.
-- Debate uses the five `debater-*` subagents.
-- Consensus uses `consensus-arbiter`.
-- Implementation uses `implementer`.
-- Adversarial review uses a single `reviewer` on `openai/gpt-5.6-sol` high.
-- Fixes use `fixer`.
-- Maintain `RESEARCH_LOG.md` with proposals, scores, results, and decisions.
+The PM obtains every next action from `gateway.autoresearch_runner` through:
 
-## Verification Protocol
+```bash
+cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
+  /home/dev/.openclaw/autoresearch/quantipy-state.json
+```
 
-After every implementation:
+Before `autoresearch-next`, an operator must prepare schema-v2 state
+using exactly one of these procedures while the supervisor is stopped:
 
-1. Use the deterministic runner to launch the verification stage and preserve
-   the exact implementation workspace.
-2. End every attempt, including failures, with a structured
-   `verification_result` artifact. Include the exact commands and decisive
-   evidence before reporting prose.
-3. If the artifact requests a fix, delegate only to `fixer` in the same
-   persisted workspace and advance the fix artifact through the runner.
-4. Do not revert or promote experiment code from the PM. A failed experiment
-   is classified and logged by the loop; shared infrastructure blockers are
-   reported to the human/Codex operator.
+```bash
+# Only for a losslessly migratable schema-less pristine state.
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
 
-## Decision Protocol
+# For a new campaign, or after archiving an incompatible historical state.
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$tmp"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-init-state \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$tmp"
+  mv -- "$tmp" "$state"
+  trap - EXIT
+)
+```
 
-After verification and review:
+Both procedures leave schema-v2 state at the authoritative path used by
+`autoresearch-next`, control, and the supervisor. Never run
+`autoresearch-next` against schema-less state, and never run both preparation
+procedures for one campaign.
 
-- Metrics improved above the validated baseline: keep according to the
-  deterministic Sharpe thresholds.
-- Metrics neutral or degraded: discard and log why.
-- Review failure: follow the deterministic fix/test path, then discard if it
-  remains unresolved.
-- No subjective judgment. Numbers decide.
+Do not maintain phase, retries, or completion state in prompt memory. Before
+dispatch, the runner validates the schema-v2 platform-readiness manifest at
+`~/.openclaw/autoresearch/platform-readiness.json` and its Quantipy data
+contract and XNYS evidence receipts. Existing state is pinned explicitly with
+`autoresearch-pin-readiness`. After an operator repairs a blocked or changed
+snapshot, resume explicitly with `autoresearch-resume`.
 
-## Memory Practices
+An operator-precondition `INFRA_BLOCKED` suspends without incrementing the
+iteration and without a MemPalace write. The supervisor does not repeatedly
+wake suspended work.
 
-- MemPalace is the only durable research memory layer.
-- Debate, review, implementation, fix, and context stages may read MemPalace
-  only through `mempalace-readonly`.
-- Only the PM may write MemPalace, and only after a completed experiment has a
-  final decision.
-- Only the PM receives the write-capable `mempalace` skill and MemPalace
-  mutation tools.
-- After every completed experiment, the PM writes outcome, metric, lesson,
-  reviewer verdict, and decision to MemPalace.
-- Before work, search MemPalace for related failures and successes.
-- Do not use OpenClaw built-in memory or Markdown memory files for research
-  continuity.
-- Never duplicate; search before writing.
+## Stage Boundaries
 
-## Gates
+All target-repo code changes are delegated to configured OpenClaw Codex stage
+agents. Every stage agent loads exactly the configured read-only MemPalace
+skill plus `quantipy-methodology` and `quantipy-data-contract`. It consumes the
+runner-provided readiness receipt and the platform's universe receipts instead
+of probing or rediscovering capabilities.
 
-- Before implementation: research must pass the evaluation filters.
-- Before keeping changes: tests must pass and metrics must not degrade.
-- Before retrying: MemPalace search must confirm the idea has not already failed.
-- Autonomous mode: evaluate, decide, log, and launch the next iteration without
-  asking the human for the next step.
+Stages report to the PM and never mutate MemPalace, choose loop state, contact
+G2, or edit shared platform/runtime/orchestration infrastructure. Implementer
+and fixer own experiment modules, notebooks, experiment-specific tests, and
+methodology behavior in the persisted disposable worktree. Human/Codex owns
+shared loaders, harnesses, dependencies, process controls, readiness evidence,
+and G2/OpenClaw infrastructure. Ambiguous ownership is an exact
+operator-infrastructure blocker.
+
+## Research Flow
+
+Use the `autoresearch` skill for the complete protocol:
+
+1. `context-curator` summarizes receipts, baseline, recent outcomes,
+   `RESEARCH_LOG.md`, and read-only MemPalace findings.
+2. Five configured debaters run in parallel; a 3-of-5 theory-family majority is
+   required.
+3. `consensus-arbiter` freezes canonical plan/profile inputs and the sorted
+   selection schedule, but no redundant batch boundaries or materialization
+   digests; the runner derives deterministic contiguous history batches.
+4. `implementer` creates code, tests, notebook, and a clean commit in the
+   persisted experiment worktree.
+5. Verification emits and advances a structured artifact before prose.
+6. One configured high-reasoning `reviewer` performs adversarial review.
+7. `fixer` handles bounded experiment defects in the same worktree.
+8. The PM decides, logs, performs any required MemPalace write, and continues.
+
+Research is intraday equity alpha using real Quantipy data, simple defensible
+features, optional sentiment, realistic costs, time-aware validation, null
+tests, and an untouched OOS holdout. Detailed data-access and point-in-time
+rules live only in `quantipy-data-contract`; detailed methodology comes from
+the current Quantipy repo through `quantipy-methodology`.
+
+Every new debate submission and implementation result contains `compute_fit`
+with `target`, `rationale`, `required_dependencies` as a JSON list, and
+`benchmark_plan`. `target=none` requires an empty dependency list. GPU or mixed
+requires runner-proven GPU/CUDA access and all declared dependencies. Agents do
+not install dependencies or change the declared execution path.
+
+## Structured Verification
+
+After implementation, use the runner to launch verification in the exact
+persisted workspace. Every attempt, including test failures and bug signals,
+must:
+
+1. Run the exact focused commands and capture decisive evidence.
+2. Write a complete JSON `verification_result`; unavailable fields are `null`,
+   never fabricated values.
+3. Persist it with `gateway-cli autoresearch-advance` before any prose status or
+   handoff.
+4. Route an accepted fix request only to `fixer` in that same workspace, then
+   repeat structured verification and review as directed by the runner.
+
+Only `PASS` may carry complete trusted metrics and coverage. Verification must
+reference readiness and universe receipts, add materialization identities and
+digests, and preserve the mode-specific coverage artifact. `ALPHA_RESEARCH`
+requires only the compact `DynamicUniverseCoverageReceipt`; legacy per-symbol
+and aggregate common-calendar coverage receipts are `DATA_INFRA_G0`-only. A
+failed experiment is classified and logged; the PM does not revert, promote,
+or repair code.
+
+## Decisions And Memory
+
+The deterministic decision order is:
+
+- Exhausted test retries: `CRASH`.
+- Remaining critical review issue or max drawdown at least 30%: `DISCARD`.
+- Decision Sharpe at most -0.5: `DISCARD`.
+- Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
+- Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.
+- At or below 0.5, a numeric baseline is required: improvement is KEEP-family;
+  no improvement is `DISCARD`. Plain `KEEP` cannot be used without a numeric
+  baseline.
+
+`DATA_INFRA_G0` uses only `INFRA_REPAIRED` or `INFRA_BLOCKED` according to its
+explicit gate outcome and never makes an alpha claim. `NO_CONSENSUS` and
+operator-precondition `INFRA_BLOCKED` set `memory_write_required=false` and do
+not write MemPalace. Every other completed final decision follows the runner's
+memory requirement.
+
+MemPalace is the only durable autonomous research memory. Stage agents may
+read it only through `mempalace-readonly`; only the PM may write after a final
+memory-required decision. Search before writing, record compact experiment and
+receipt facts, and never store full ticker arrays. Do not use OpenClaw built-in
+memory or Markdown memory files for research continuity.

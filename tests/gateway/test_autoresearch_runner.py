@@ -6,6 +6,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from typing import cast
@@ -20,6 +21,7 @@ from gateway.autoresearch_readiness import (
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMBER_UNION_DIGEST_ALGORITHM,
     MEMPALACE_FULL_SERVER_ID,
     MEMPALACE_MUTATION_DENY_TOOL_IDS,
     MEMPALACE_MUTATION_TOOLS,
@@ -30,10 +32,12 @@ from gateway.autoresearch_runner import (
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
+    AuthoritativeSnapshotReceipt,
     AutoresearchConfigError,
     AutoresearchPolicy,
     AutoresearchReceiptError,
     AutoresearchState,
+    AutoresearchValidationContext,
     AutoresearchValidationError,
     ComputeCapabilitySnapshot,
     ComputeFitArtifact,
@@ -44,30 +48,39 @@ from gateway.autoresearch_runner import (
     CoverageReceipt,
     DebateResultArtifact,
     DebateSubmission,
+    DynamicUniverseCoverageReceipt,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
     FixResultArtifact,
     FixTriggerPhase,
+    GroupedSummaryReceipt,
     ImplementationResultArtifact,
     InfraGateOutcome,
+    MemberUnionManifestReceipt,
     MemoryVerificationReceipt,
     MetricDirection,
     Phase,
+    PriceHydrationReceipt,
     ReceiptCatalog,
     ResearchMode,
     ReviewResultArtifact,
     ReviewVerdict,
     SetupContextArtifact,
+    UniverseDateVerificationReceipt,
+    UniverseHistoryBatchReceipt,
+    UniversePlanArtifact,
+    UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
-    advance_state,
     build_receipt_catalog,
     can_write_memory,
     load_autoresearch_policy,
     mark_memory_written,
     next_action,
     normalize_autoresearch_state,
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
     standardize_mempalace_kg_object,
     standardized_mempalace_kg_facts,
     start_next_iteration,
@@ -76,6 +89,43 @@ from gateway.autoresearch_runner import (
     validate_target_worktree_clean,
     verify_mempalace_final_decision,
 )
+from gateway.autoresearch_runner import (
+    advance_state as _runner_advance_state,
+)
+
+from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
+
+_MEMBER_UNION_PATH = Path("tests/fixtures/autoresearch-member-union.txt").resolve()
+_MEMBER_UNION_SHA256 = sha256(_MEMBER_UNION_PATH.read_bytes()).hexdigest()
+_MEMBER_UNION_DIGEST = (
+    "549c815538959493fe913ff6e4514bb52cd37cec360a9908c9795cd303f743e6"  # pragma: allowlist secret
+)
+
+
+def advance_state(
+    state: AutoresearchState,
+    artifact: SetupContextArtifact
+    | ContextPacketArtifact
+    | DebateResultArtifact
+    | ConsensusResultArtifact
+    | ImplementationResultArtifact
+    | VerificationResultArtifact
+    | ReviewResultArtifact
+    | FixResultArtifact
+    | FinalDecisionArtifact,
+    policy: AutoresearchPolicy,
+) -> AutoresearchState:
+    context: AutoresearchValidationContext | None = None
+    if (
+        isinstance(artifact, VerificationResultArtifact)
+        and state.mode is ResearchMode.ALPHA_RESEARCH
+    ):
+        context = AutoresearchValidationContext(
+            state.platform_readiness,
+            "f" * 64,
+            (date(2021, 1, 5),),
+        )
+    return _runner_advance_state(state, artifact, policy, validation_context=context)
 
 
 @pytest.fixture()
@@ -107,7 +157,10 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
     tmp_path.mkdir(parents=True, exist_ok=True)
     for evidence_id in EvidenceId:
         path = tmp_path / f"{evidence_id.value}.json"
-        path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
+            write_xnys_calendar_evidence(path)
+        else:
+            path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id] = {
             "path": str(path),
             "sha256": sha256(path.read_bytes()).hexdigest(),
@@ -263,6 +316,109 @@ def _context_artifact() -> ContextPacketArtifact:
     )
 
 
+def _universe_plan() -> UniversePlanArtifact:
+    return UniversePlanArtifact(
+        profile_id="liquid-common-stocks-v1",
+        profile_digest="a" * 64,
+        selection_dates=("2021-01-04",),
+        max_members_per_date=300,
+        execution_policy="next-session-or-later",
+    )
+
+
+def _universe_verification_receipt() -> UniverseVerificationReceipt:
+    return UniverseVerificationReceipt(
+        profile_id="liquid-common-stocks-v1",
+        profile_digest="a" * 64,
+        execution_policy="next-session-or-later",
+        max_members_per_date=300,
+        batches=(
+            UniverseHistoryBatchReceipt(
+                contract_digest="b" * 64,
+                operation_count=1,
+                dates=(
+                    UniverseDateVerificationReceipt(
+                        selection_date="2021-01-04",
+                        earliest_execution_date="2021-01-05",
+                        calendar_identity="XNYS",
+                        calendar_digest="f" * 64,
+                        selected_member_count=1,
+                        snapshot=AuthoritativeSnapshotReceipt(
+                            as_of_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="c" * 64,
+                            content_digest="c" * 64,
+                            completed_at="2026-07-15T12:00:00+00:00",
+                        ),
+                        summary=GroupedSummaryReceipt(
+                            summary_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="d" * 64,
+                            content_digest="d" * 64,
+                            completed_at="2026-07-15T12:00:00+00:00",
+                            adjusted=False,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        member_union_digest_algorithm=MEMBER_UNION_DIGEST_ALGORITHM,
+        member_union_count=1,
+        member_union_digest=_MEMBER_UNION_DIGEST,
+        member_union_manifest=MemberUnionManifestReceipt(
+            path=str(_MEMBER_UNION_PATH), sha256=_MEMBER_UNION_SHA256
+        ),
+    )
+
+
+def _price_hydration_receipt() -> PriceHydrationReceipt:
+    request_digest = price_hydration_request_digest(
+        member_union_count=1,
+        member_union_digest=_MEMBER_UNION_DIGEST,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+    )
+    completed_at = "2026-07-15T12:00:00+00:00"
+    return PriceHydrationReceipt(
+        member_union_count=1,
+        member_union_digest=_MEMBER_UNION_DIGEST,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+        operation_count=1,
+        request_digest=request_digest,
+        coverage_receipt_digest=price_hydration_coverage_digest(
+            request_digest=request_digest, operation_count=1, completed_at=completed_at
+        ),
+        completed_at=completed_at,
+        folds_started_at="2026-07-15T12:01:00+00:00",
+    )
+
+
+def _dynamic_coverage_receipt() -> DynamicUniverseCoverageReceipt:
+    return DynamicUniverseCoverageReceipt(
+        member_union_count=1,
+        member_union_digest=_MEMBER_UNION_DIGEST,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        oos_start="2021-10-01",
+        oos_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+        expected_symbol_sessions=2400,
+        covered_symbol_sessions=2400,
+        missing_symbol_count=0,
+        missing_symbol_sessions=0,
+        default_fold_count=24,
+        fallback_fold_count=0,
+    )
+
+
 def _coverage_receipt() -> AggregateCoverageReceipt:
     per_symbol = CoverageReceipt(
         symbol="AMD",
@@ -311,7 +467,7 @@ def _debate_result(policy: AutoresearchPolicy, round_number: int) -> DebateResul
                 vote_family="vwap-obv" if index <= 3 else "bollinger-regime",
                 hypothesis="VWAP + OBV captures intraday accumulation regimes.",
                 universe="4-6 small-cap semis",
-                traded_tickers=("AMD", "SMCI"),
+                example_tickers=("AMD", "SMCI"),
                 feature_pipeline="OHLCV -> VWAP/OBV/Bollinger -> classifier",
                 model_plan="HistGradientBoosting with time-series tuning",
                 walk_forward_plan="Expanding walk-forward with monthly test blocks",
@@ -356,6 +512,7 @@ def _majority_consensus(
         rejection_reasons=("Losers lacked coverage plan",),
         implementation_brief="Implement VWAP + OBV with walk-forward tuning.",
         dissent_summary="Two dissenters preferred a simpler regime filter.",
+        universe_plan=_universe_plan(),
     )
 
 
@@ -443,7 +600,9 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
         bug_signals=bug_signals,
         tests_passed=status is not VerificationStatus.TEST_FAILURE,
         commands_run=("uv run pytest", "uv run jupyter execute notebook.ipynb"),
-        data_coverage=_coverage_receipt(),
+        data_coverage=_dynamic_coverage_receipt(),
+        universe_verification_receipt=_universe_verification_receipt(),
+        price_hydration_receipt=_price_hydration_receipt(),
     )
 
 
@@ -825,6 +984,72 @@ def test_phase_progression(
     assert state.phase is Phase.REPEAT
 
 
+def test_next_action_fails_closed_when_accepted_union_manifest_is_deleted(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "member-union.txt"
+    manifest.write_bytes(_MEMBER_UNION_PATH.read_bytes())
+    state = _state_to_review(policy, platform_readiness)
+    verification = state.latest_verification
+    assert verification is not None
+    universe = verification.universe_verification_receipt
+    assert universe is not None
+    state = replace(
+        state,
+        verification_history=(
+            replace(
+                verification,
+                universe_verification_receipt=replace(
+                    universe,
+                    member_union_manifest=MemberUnionManifestReceipt(
+                        path=str(manifest), sha256=_MEMBER_UNION_SHA256
+                    ),
+                ),
+            ),
+        ),
+    )
+    manifest.unlink()
+
+    with pytest.raises(AutoresearchValidationError, match="cannot read member union manifest"):
+        next_action(state, policy, receipts, platform_readiness)
+
+
+def test_next_action_fails_closed_when_accepted_union_manifest_is_mutated_later(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "member-union.txt"
+    manifest.write_bytes(_MEMBER_UNION_PATH.read_bytes())
+    state = _state_to_decision(policy, platform_readiness)
+    verification = state.latest_verification
+    assert verification is not None
+    universe = verification.universe_verification_receipt
+    assert universe is not None
+    state = replace(
+        state,
+        verification_history=(
+            replace(
+                verification,
+                universe_verification_receipt=replace(
+                    universe,
+                    member_union_manifest=MemberUnionManifestReceipt(
+                        path=str(manifest), sha256=_MEMBER_UNION_SHA256
+                    ),
+                ),
+            ),
+        ),
+    )
+    manifest.write_bytes(b"MUTATED\n")
+
+    with pytest.raises(AutoresearchValidationError, match="SHA-256 mismatch"):
+        next_action(state, policy, receipts, platform_readiness)
+
+
 def test_missing_receipt_file_fails_fast(tmp_path: Path) -> None:
     for receipt_id, relative_path in QUANTIPY_RECEIPT_PATHS.items():
         if receipt_id == "quantipy.skill.data_querying":
@@ -1038,7 +1263,7 @@ def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
     state = advance_state(state, _no_consensus(round_number=2), policy)
     decision = FinalDecisionArtifact(
         experiment_id="g0-no-consensus-1",
-        decision=FinalDecision.NO_CONSENSUS,
+        decision=FinalDecision.INFRA_BLOCKED,
         recommended_metric_name="consensus outcome",
         recommended_metric_value=None,
         reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
@@ -1046,6 +1271,7 @@ def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
         log_summary="No consensus after the allowed retry.",
         continue_loop=True,
         memory_write_required=False,
+        infra_rationale="The G0 panel could not agree on a repair path.",
     )
 
     state = advance_state(state, decision, policy)
@@ -1053,11 +1279,8 @@ def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
     state = replace(state, platform_readiness=readiness.identity())
 
     assert can_write_memory(state) is False
-    assert (
-        next_action(state, policy, receipts, readiness).expected_artifact_type
-        is ArtifactType.NEXT_ITERATION
-    )
-    assert start_next_iteration(state, readiness=readiness).iteration == 2
+    with pytest.raises(AutoresearchValidationError, match="suspended"):
+        next_action(state, policy, receipts, readiness)
 
 
 def test_no_consensus_rejects_a_memory_write_requirement(
@@ -1691,7 +1914,7 @@ def test_verification_requires_explicit_data_coverage_key() -> None:
 
     with pytest.raises(
         AutoresearchValidationError,
-        match="data_coverage must be an object or null",
+        match=r"exact keys.*data_coverage",
     ):
         VerificationResultArtifact.from_dict(raw)
 
@@ -2281,6 +2504,22 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
     assert "commit_sha" in prompt
 
 
+def test_alpha_implementation_prompt_batches_history_and_hydrates_union_once(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "one qp.security_universe_history() operation per batch" in prompt
+    assert "qp.prices() exactly once for that union" in prompt
+    assert "qp.security_universe_history() exactly once for all dates" not in prompt
+    assert "qp.security_universe_history() exactly once over all dates" not in prompt
+
+
 def test_next_action_rejects_legacy_tmp_persisted_implementation_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -2413,20 +2652,18 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
     assert "status BUG_SIGNAL with nonempty bug_signals" in prompt
     assert "PASS only when tests passed" in prompt
     for field_name in (
-        "declared_intended_start",
-        "declared_intended_end",
-        "actual_common_start",
-        "actual_common_end",
+        "member_union_count",
+        "member_union_digest",
+        "experiment_start",
+        "experiment_end",
         "oos_start",
         "oos_end",
-        "expected_trading_days",
-        "actual_trading_days",
-        "coverage_percent",
-        "missing_reason",
+        "expected_symbol_sessions",
+        "covered_symbol_sessions",
+        "missing_symbol_count",
+        "missing_symbol_sessions",
         "default_fold_count",
         "fallback_fold_count",
-        "cap_provenance_available",
-        "fixed_sleeve_local_data",
     ):
         assert field_name in prompt
 
@@ -2570,7 +2807,8 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_give_main_a_pm_skill, "main must load no skills"),
         (
             _give_stage_agent_write_skill,
-            "must load exactly mempalace-readonly and quantipy-methodology",
+            "must load exactly mempalace-readonly, quantipy-methodology, and "
+            "quantipy-data-contract",
         ),
         (
             _drop_mempalace_readonly_server,

@@ -1,171 +1,219 @@
-# Autonomous Research Loop — Operating Plan
+# Autonomous Research Loop - Operating Plan
 
 **Created:** 2026-03-15
 **Last Updated:** 2026-07-14
 
 ## Goal
 
-Run a fully autonomous quantitative research pipeline: OpenClaw
-`autoresearch-pm` ideates with Codex subagents, delegates implementation/review
-to Codex subagents, evaluates results, decides keep/discard, and continues.
-The human connects via G2 AR glasses only for explicit start/status/stop
-handoffs through `main`; the loop runs 24/7 without interaction in the
-dedicated PM session.
+Run a continuous Quantipy research pipeline in the dedicated
+`agent:autoresearch-pm:autoresearch:quantipy` session. The PM curates context,
+runs a five-agent debate, delegates experiment implementation and review,
+advances structured artifacts through the deterministic runner, decides and
+logs the outcome, and begins the next iteration. G2 `main` handles only explicit
+human start/status/stop requests.
 
-## Critical Rule
+## Ownership
 
-**We do not touch quantipy directly.** All code in `~/repos/quantipy` is written
-through OpenClaw Codex subagents. We tune OpenClaw's persona/config and fix
-infrastructure in this repo.
+The PM orchestrates but does not edit Quantipy. Configured Codex stage agents
+own experiment modules, notebooks, experiment-specific tests, and accepted
+methodology work in disposable persisted worktrees. Shared Quantipy platform,
+data loaders, harnesses, dependencies, runtime controls, readiness evidence,
+and G2/OpenClaw infrastructure remain human/Codex operator owned. The PM never
+promotes or repairs shared infrastructure.
+
+Only `autoresearch-pm` has write-capable MemPalace access. All stage agents are
+read-only. This boundary applies to implementation, recovery, and final logging.
 
 ## Architecture
 
-```
-Human (G2 glasses — start/status/stop)
-  ↓
-Gateway (:8765) — G2 transport
-  ↓
-OpenClaw main (:18789 - G2 interface, openai/gpt-5.4 high)
-  ↓ explicit control handoff
-agent:autoresearch-pm:autoresearch:quantipy
-  ↓
-OpenClaw autoresearch-pm (:18789 - autonomous daemon, openai/gpt-5.6-sol high)
-  ├─ MemPalace MCP (stdio) → local palace
-  ├─ Phase 1: Context — PM + context-curator read RESEARCH_LOG.md and MemPalace
-  ├─ Phase 2: Debate — five OpenClaw agents, require 3-of-5 majority
-  ├─ Phase 3: Consensus — consensus-arbiter emits one implementation brief
-  ├─ Phase 4: Implement — implementer subagent (code + test + notebook)
-  ├─ Phase 5: Verify — sanity checks (Sharpe >10 = BUG, OOS >2x IS = unreliable)
-  ├─ Phase 6: Review — single openai/gpt-5.6-sol high reviewer
-  ├─ Phase 7: Fix/test — fixer handles concrete defects only
-  ├─ Phase 8: Decide/log — PM writes final experiment outcome to MemPalace
-  └─ Continue — loop NEVER self-terminates, seek orthogonal strategies
-OpenClaw Codex runtime (codex plugin, OpenAI auth)
-  ↓
-~/repos/quantipy — all kept changes committed by implementation subagents
+```text
+Human via G2
+  -> OpenClaw main: explicit control handoff only
+  -> agent:autoresearch-pm:autoresearch:quantipy
+     -> deterministic runner and persisted state
+     -> context-curator
+     -> five parallel debaters
+     -> consensus-arbiter (3-of-5 majority)
+     -> implementer
+     -> structured verification
+     -> one high-reasoning reviewer
+     -> fixer in the same worktree when directed
+     -> PM decision, experiment log, required MemPalace write
+     -> next iteration until explicit stop
 ```
 
-## Current Phase (2026-03-28)
+Every research stage loads `mempalace-readonly`, `quantipy-methodology`, and
+`quantipy-data-contract`. Methodology routing reads current Quantipy sources;
+the compact data skill defines the runtime contract.
 
-**Status: Data range fix applied, relaunching loop.** First cycle revealed all experiments used only 6 months of NVDA/AMD 2022 data — root cause was hardcoded constraints in quantipy's experiment-data skill. Fixed across all config layers (AGENTS.md, BOOTSTRAP.md, experiment-data skill). Worktrees cleaned. Ready for second cycle with full 2021-2026 data mandate.
+## Platform Readiness
 
-**Objective:** Identify, backtest, and validate multiple profitable intraday strategies across diverse asset classes. Start with low-to-mid cap equities, expand freely.
+Before dispatch, the runner validates the operator-owned schema-v2 manifest at
+`~/.openclaw/autoresearch/platform-readiness.json`. It pins canonical manifest
+and snapshot identities and verifies SHA-256 receipts for the Quantipy data
+contract and authoritative XNYS calendar evidence. A `READY` manifest exposes
+the canonical capability object injected into every stage prompt.
 
-**Control strategy:** The supervisor communicates directly with OpenClaw in the
-dedicated PM session. G2 is a human interface for explicit start/status/stop
-requests only.
+Control-plane validation reopens the pinned XNYS evidence, verifies its exact
+readiness SHA-256, parses its declared range and closed dates into actual XNYS
+sessions, and carries that digest/session context through artifact advance.
+Every universe receipt must report that exact digest and set
+`earliest_execution_date` to the first actual XNYS session after selection;
+same-day, weekend, holiday, arbitrary later, and out-of-range dates fail closed.
 
-**Platform readiness:** Before any stage is dispatched, the control plane
-validates the operator-owned `~/.openclaw/autoresearch/platform-readiness.json`
-manifest. It pins the immutable snapshot identity and verifies the SEC
-common-stock provenance and authoritative XNYS calendar evidence by SHA-256.
-Missing, blocked, stale, or modified evidence fails closed. An
-`INFRA_BLOCKED` operator-precondition decision suspends the current iteration
-without incrementing it; the supervisor and G2 wake path do not retry it. The
-operator must publish a new `READY` manifest and run
-`gateway-cli autoresearch-resume` explicitly. This preflight runs once per
-data snapshot, while each iteration performs only the lightweight identity and
-hash recheck.
+Stages consume this receipt and do not probe providers, database contents,
+cached symbols, or environment configuration to rediscover capabilities.
+Existing state is initialized with `gateway-cli autoresearch-pin-readiness`.
+After an operator changes a blocked or stale snapshot, only
+`gateway-cli autoresearch-resume` accepts the new READY receipt.
 
-**Validation target:** At least 2+ strategies with IS walk-forward Sharpe > 0.5 (net of costs), passing adversarial review.
+An operator-precondition `INFRA_BLOCKED` decision suspends without incrementing
+the iteration. The supervisor does not repeatedly wake it. This branch sets
+`memory_write_required=false` and writes nothing to MemPalace.
 
-## Data Available
+## Quantipy Data Contract
 
-- **OHLCV**: Any ticker, any timeframe (down to 1-min bars) via Massive.com subscription. Not limited to what's on disk — the agent can pull any data it needs. Period: 2021–2026.
-- **Reddit sentiment**: 2021–2026 historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
-- **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
-- All loaded via `quantipy.prices()` or direct SQL to localhost:5433
+- Historical universe selection uses only
+  `qp.security_universe_screen()` and `qp.security_universe_history()`.
+- Prewarm each explicit selection/rebalance date once with the screen call,
+  then request those dates through cache-only, all-or-nothing history. One
+  history request is limited to 32 dates, 1,000 members per date, and 10,000
+  total date-member slots.
+- For longer full-range schedules, sort and deduplicate dates and partition
+  them into deterministic contiguous batches that each satisfy all three
+  limits, budgeting slots from the profile member limit. Make exactly one
+  `qp.security_universe_history()` call per batch, preserve batch order, and
+  fail the full schedule if any batch fails.
+- Consensus carries only canonical plan inputs: profile ID, profile digest,
+  sorted schedule, maximum members per date, and `execution_policy`. Consensus
+  stores no batch boundaries; the runner mechanically derives deterministic
+  contiguous batch boundaries from those inputs. Per-batch contract digests
+  plus per-date snapshot/grouped-daily and member-union materialization
+  identities and digests are recorded only at verification. Stage prompts and
+  memory use these compact artifacts rather than full ticker arrays.
+- Universe liquidity summaries are explicitly unadjusted. Membership known
+  from date D may execute only in the next market session or later.
+- Source receipts match Quantipy exactly. Snapshot proof is
+  `as_of_date/source/result_count/identity_digest/content_digest/completed_at`
+  with no adjustment field. Grouped-summary proof uses `summary_date`, the same
+  evidence fields, and literal `adjusted=false`; neither uses generic `date`.
+- Canonical member-union bytes are uppercase normalized symbols, sorted and
+  deduplicated, UTF-8 encoded, with each symbol followed by LF (`\n`), including
+  an explicit trailing LF after the final symbol. SHA-256 of those bytes is the
+  member-union digest. State stores no ticker array: it stores count/digest and
+  an absolute external union-manifest path plus SHA-256 receipt. Reviewer
+  execution reopens that manifest, verifies its file SHA, requires exact
+  canonical bytes, and recomputes the count and digest.
+- Market cap and shares are not point-in-time certified and market cap is not a
+  historical screen criterion.
+- Research OHLCV uses only `qp.prices()`, which hydrates selected-symbol ranges
+  into the platform cache before reading them. Reuse cache coverage across
+  folds and iterations; hydrate only the needed selected symbols and range.
+- Price bars from the platform adjusted-price path must not receive a second
+  split/dividend adjustment. Event facts use `qp.corporate_actions()`.
+- Historical trades, quotes, and fundamentals are unsupported. Provider-direct
+  access, direct database reads, cache-derived universes, and manually fixed
+  symbol sleeves are outside the contract.
 
-## Methodology Guardrails
+## Research Methodology
 
-These were hard-won from 18 prior experiments (all discarded) and are now baked into the agent config:
+`ALPHA_RESEARCH` evaluates intraday equity strategies. Each proposal defines a
+receipt-backed historical universe, signal rationale, prediction and holding
+horizon, position sizing, transaction costs, time-aware train/CV/OOS split,
+null tests, and rejection criteria. It uses real platform OHLCV, simple
+defensible features, optional sentiment, broad common-calendar coverage, and an
+untouched OOS holdout.
 
-| Guardrail | Why |
-|-----------|-----|
-| IS walk-forward Sharpe is the decision metric | OOS on <60 days is meaningless; OOS >2× IS indicates luck |
-| Adversarial reviewer runs after every experiment | Caught T8-MSG methodology bugs that inflated Sharpe from -2.76 to +5.9 |
-| Sanity checks: Sharpe >10 = BUG | Caught annualization bugs (T8-MSG fix #1 showed IS Sharpe 13.2) |
-| Cooldown must match holding period | Per-bar returns without cooldown inflate results massively |
-| Loop never stops | "GOAL MET" was premature at OOS 5.9; continuous exploration builds a portfolio |
-| Real data only, no synthetic | Early experiments used synthetic data — all were meaningless |
-| 95% data range coverage | Experiments limited to 6mo caused useless OOS; use full 2021-2026 range |
-| Explicit mode gate | Data/provenance repair runs as DATA_INFRA_G0, never as alpha performance validation |
-| Coverage receipts | Per-symbol and aggregate intended/actual/OOS windows, days, folds, provenance, and fixed-sleeve disclosure are required |
-| Min 20 walk-forward folds | 10 folds on 6mo data was too few; 3+ years enables 70+ folds |
-| Min 120-day OOS holdout | <60 days OOS has Sharpe SE of ±1-3, making estimates meaningless |
-| 5-agent research debate | Mixed 5.6/5.5/5.4 high-reasoning panel spends frontier intelligence on data/skeptic pressure while keeping bounded theory and implementation-feasibility work cheaper |
-| Deterministic methodology loading | Stage agents read Quantipy's current `AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents` before context/debate/implementation/review/fix |
-| Platform readiness manifest | Operator-owned SEC/common-stock and XNYS evidence is validated and pinned once per data snapshot; blocked readiness suspends instead of consuming iterations |
+`DATA_INFRA_G0` repairs data/provenance/fold construction and produces an
+explicit `GATE_PASSED` or `REMEDIATION_REQUIRED` result. It cannot claim alpha
+performance. Burned alpha theory families require materially new evidence.
 
-## OpenClaw Stage Roster
+Every new debate submission and implementation result includes a structured
+`compute_fit`:
 
-| Agent | Role |
-|-------|------|
-| main | G2 human interface only; openai/gpt-5.4 high; no `mempalace`, no `autoresearch`, no stage allowlist |
-| autoresearch-pm | PM; openai/gpt-5.6-sol high; only agent with write-capable `mempalace` skill and MemPalace mutation tools |
-| context-curator | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
-| debater-microstructure | Market mechanics theory; openai/gpt-5.5 high |
-| debater-data | Data availability, coverage, and target construction; openai/gpt-5.6-terra high |
-| debater-skeptic | Leakage, overfit, and cherry-picking pressure; openai/gpt-5.6-sol high |
-| debater-theory | Statistical and finance rationale; openai/gpt-5.4 high |
-| debater-implementation | Buildability and verification cost; openai/gpt-5.4 high |
-| consensus-arbiter | 3-of-5 majority decision and implementation brief; openai/gpt-5.6-sol high |
-| implementer | End-to-end implementation; openai/gpt-5.4 high |
-| reviewer | Single openai/gpt-5.6-sol high methodology review |
-| fixer | Concrete fixes only; openai/gpt-5.4 high |
+- `target`: `none`, `cpu`, `gpu`, or `mixed`.
+- `rationale`: fit to hypothesis and data scale.
+- `required_dependencies`: JSON list, empty for `none`.
+- `benchmark_plan`: planned wall-time, memory, or acceleration measurement.
 
-## Config Files
+GPU or mixed execution requires runner-proven GPU/CUDA access and every
+declared dependency. Agents do not install dependencies, fabricate evidence,
+or change the declared device path. Missing required capability is an exact
+operator-owned infrastructure blocker.
 
-| File | Location | Purpose |
-|------|----------|---------|
-| SOUL.md | `gateway/agent_config/` | OpenClaw identity, principles, vibe |
-| AGENTS.md | `gateway/agent_config/` | Behavioral rules, verification protocol, phase flow |
-| BOOTSTRAP.md | `gateway/agent_config/` | Quantipy context (modules, data, commands) |
-| TOOLS.md | `gateway/agent_config/` | Tool reference, exec syntax |
-| autoresearch/ | `gateway/agent_config/skills/` | Full 8-phase autonomous loop protocol |
-| experiment-data/ | `quantipy .agents/skills/` | Data loading, walk-forward, sanity checks |
-| mempalace/ | `gateway/agent_config/skills/` | PM-only MemPalace writes for completed experiment decisions |
-| mempalace-readonly/ | `gateway/agent_config/skills/` | Non-PM MemPalace search, diary reads, traversal, and KG queries |
-| quantipy-methodology/ | `gateway/agent_config/skills/` | Stage-agent preflight that loads Quantipy source-of-truth instructions from `/home/dev/repos/quantipy` |
+## Stage Roster
 
-The `quantipy-methodology` skill is assigned to `context-curator`, all
-`debater-*` agents, `consensus-arbiter`, `implementer`, `reviewer`, and
-`fixer`. It does not vendor Quantipy methodology into this repo; agents must
-read the live target-repo files at stage time. The PM must use the
-deterministic runner in `gateway.autoresearch_runner` or
-`gateway-cli autoresearch-next` for phase selection, retry gates, and receipt
-validation instead of prompt-only loop memory.
+| Agent | Responsibility |
+|-------|----------------|
+| `main` | G2 control interface only |
+| `autoresearch-pm` | State orchestration, final decisions, experiment logging, PM-only MemPalace writes |
+| `context-curator` | Readiness/universe receipts, baseline, recent results, research log, read-only MemPalace context |
+| `debater-microstructure` | Market mechanics theory |
+| `debater-data` | Supported data, universe receipts, coverage, target construction |
+| `debater-skeptic` | Leakage, overfit, unsupported assumptions, cherry-picking pressure |
+| `debater-theory` | Statistical and finance rationale |
+| `debater-implementation` | Buildability, compute fit, verification cost |
+| `consensus-arbiter` | Majority decision and one implementation brief |
+| `implementer` | Experiment code, tests, notebook, clean commit |
+| `reviewer` | Single adversarial methodology review |
+| `fixer` | Bounded accepted experiment fixes in the persisted worktree |
 
-Each context packet chooses `ALPHA_RESEARCH` (strategy performance work) or
-`DATA_INFRA_G0` (data/provenance repair) with a rationale. G0 has its own
-explicit infrastructure gate outcome and cannot produce an alpha KEEP claim.
-The runner also blocks burned alpha theory families unless a debate submission
-documents materially new evidence. Final MemPalace logging is complete only
-after `autoresearch-mark-memory` verifies standardized, provenanced KG facts
-against the final artifact and persists its read-only verification receipt.
+## Structured Verification
 
-An existing state must be explicitly initialized with
-`gateway-cli autoresearch-pin-readiness`. A changed snapshot is accepted only
-through `gateway-cli autoresearch-resume`; there is no automatic evidence
-download, inferred calendar, provider substitution, or repeated debate while
-the platform gate is blocked.
+Every verification attempt ends in a complete JSON `verification_result`, even
+when commands fail or expose a bug signal:
+
+1. Run exact focused commands in the persisted implementation workspace.
+2. Capture decisive command, test, metric, compute-fit, and receipt evidence.
+3. Capture per-batch contract, snapshot, grouped-daily, and member-union
+   materialization identities and digests and bind them to the consensus
+   plan/profile identity.
+4. Set unavailable fields to `null`; never invent zero-valued metrics or
+   coverage.
+5. Persist the artifact with `gateway-cli autoresearch-advance` before prose,
+   status, review, or handoff.
+6. Route accepted fixes only to `fixer` in the same workspace, then repeat the
+   structured verification/review sequence directed by the runner.
+
+`PASS` requires passing tests, no bug signals, complete required metrics, and
+consistent readiness and universe receipts. `ALPHA_RESEARCH` coverage is only
+the compact `DynamicUniverseCoverageReceipt`; legacy per-symbol
+`CoverageReceipt` and aggregate `AggregateCoverageReceipt` are explicitly
+`DATA_INFRA_G0`-only. Nonzero tests are `TEST_FAILURE`; impossible, leaky, or
+internally inconsistent metrics are `BUG_SIGNAL`.
+
+The single reviewer checks implementation fidelity, receipt-bounded range and
+universe use, leakage, overlapping holds, costs, tuning, null tests, OOS
+independence, compute-fit consistency, and reproducibility.
+
+## Decisions And Memory
+
+The runner enforces this order for alpha work:
+
+1. Exhausted test retries: `CRASH`.
+2. Remaining critical review issue or max drawdown at least 30%: `DISCARD`.
+3. Decision Sharpe at most -0.5: `DISCARD`.
+4. Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
+5. Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.
+6. At or below 0.5, a numeric baseline is mandatory: improvement is
+   KEEP-family; no improvement is `DISCARD`. Plain `KEEP` requires that numeric
+   baseline.
+
+G0 decides only `INFRA_REPAIRED` or `INFRA_BLOCKED` from its gate outcome.
+`NO_CONSENSUS` and `INFRA_BLOCKED` set `memory_write_required=false` and do not
+write MemPalace. For every other memory-required final decision, the PM writes
+compact experiment, feature, model, metric, reviewer, decision, failure, and
+receipt facts after the decision artifact is accepted. Full ticker arrays are
+never stored in prompts, `RESEARCH_LOG.md`, or MemPalace.
 
 ## Success Criteria
 
-1. Every experiment goes through adversarial review before keep/discard
-2. Loop runs continuously — implement → review → decide → next (zero human needed)
-3. Build a portfolio of orthogonal strategies, not just one
-4. Human's role is explicit control: start/continue, status, or stop through G2
-5. At least 2+ validated profitable strategies (IS Sharpe > 0.5 net, reviewer PASS)
-
-## Monitoring Log
-
-| Timestamp | Event | Action | Outcome |
-|-----------|-------|--------|---------|
-| 2026-03-28 03:00 | Launch | Fresh start, graph enabled, autoresearch sent | Loop started |
-| 2026-03-28 03:15 | T9-HRA | Implementation subagent built Hurst Regime Adaptive | Tests failed → reverted |
-| 2026-03-28 03:30 | T9-IFA | Implementation subagent built Isolation Forest Adaptive | Notebook not executed, incomplete |
-| 2026-03-28 03:45 | Resume | OpenClaw self-healed with --continue | T9-IFA resumed |
-| 2026-03-28 04:00 | DATA RANGE VIOLATION | All experiments used only 6mo NVDA/AMD 2022 | Stopped loop for fix |
-| 2026-03-28 04:30 | Config fix | Updated AGENTS.md, BOOTSTRAP.md, experiment-data skill | 95% coverage rule, 3yr train, 120d OOS, 20+ folds |
-| 2026-03-28 04:45 | Restart | Pushed config, restarted OpenClaw, cleaned worktrees | Ready for new cycle |
+1. Every implemented alpha experiment completes structured verification and
+   one adversarial review before its final decision.
+2. Every stage uses pinned readiness and universe receipts instead of capability
+   discovery.
+3. Every accepted strategy is reproducible from committed experiment artifacts
+   and compact data receipts.
+4. The loop continues autonomously until an explicit human/Codex stop command.
+5. The portfolio accumulates independently validated, orthogonal strategies
+   rather than optimizing one result indefinitely.

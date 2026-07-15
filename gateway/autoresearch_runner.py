@@ -13,10 +13,13 @@ import platform
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
+from bisect import bisect_right
 from collections.abc import Callable, Mapping, Sequence
 from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
@@ -24,12 +27,23 @@ from typing import TypeVar
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
+    load_xnys_calendar_evidence,
     validate_state_readiness,
 )
 
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
+AUTORESEARCH_STATE_SCHEMA_VERSION = 2
+MAX_UNIVERSE_SELECTION_DATES = 2200
+MAX_UNIVERSE_BATCH_DATES = 32
+MAX_UNIVERSE_BATCH_RESULTS = 10_000
+MAX_UNIVERSE_MEMBERS_PER_DATE = 1_000
+MAX_EXAMPLE_TICKERS = 8
+MAX_FIXED_SLEEVE_SYMBOLS = 32
+NEXT_SESSION_EXECUTION_POLICY = "next-session-or-later"
+MEMBER_UNION_DIGEST_ALGORITHM = "sha256-uppercase-sorted-unique-newline-v1"
+XNYS_CALENDAR_IDENTITY = "XNYS"
 _T = TypeVar("_T")
 _OPERATOR_PRECONDITION_MARKERS = (
     "no-code-operator",
@@ -259,6 +273,17 @@ def _ensure_mapping(raw: object, *, label: str) -> Mapping[str, object]:
     return raw
 
 
+def _require_exact_keys(raw: Mapping[str, object], *, label: str, expected: Sequence[str]) -> None:
+    expected_keys = set(expected)
+    actual_keys = set(raw)
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        unexpected = sorted(actual_keys - expected_keys)
+        raise AutoresearchValidationError(
+            f"{label} must contain exact keys; missing={missing}, unexpected={unexpected}"
+        )
+
+
 def _require_str(raw: Mapping[str, object], field_name: str) -> str:
     value = raw.get(field_name)
     if not isinstance(value, str) or not value.strip():
@@ -376,8 +401,92 @@ def _optional_string_list(raw: Mapping[str, object], field_name: str) -> tuple[s
     return _require_string_list(raw, field_name)
 
 
+def _validate_sha256(value: str, *, label: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise AutoresearchValidationError(f"{label} must be a lowercase SHA-256 digest")
+
+
+def _require_sha256(raw: Mapping[str, object], field_name: str) -> str:
+    value = _require_str(raw, field_name)
+    _validate_sha256(value, label=field_name)
+    return value
+
+
+def _validate_iso_date_value(value: str, *, label: str) -> None:
+    try:
+        from datetime import date
+
+        date.fromisoformat(value)
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an ISO-8601 date") from exc
+
+
 def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _canonical_json_digest(value: Mapping[str, object]) -> str:
+    return _sha256_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def canonical_member_union_digest(tickers: Sequence[str]) -> tuple[int, str]:
+    """SHA-256 uppercase sorted-unique symbols joined by LF, including final LF."""
+    canonical = sorted({ticker.strip().upper() for ticker in tickers if ticker.strip()})
+    if not canonical:
+        raise AutoresearchValidationError("member union must contain at least one ticker")
+    payload = canonical_member_union_manifest(canonical)
+    return len(canonical), hashlib.sha256(payload).hexdigest()
+
+
+def canonical_member_union_manifest(tickers: Sequence[str]) -> bytes:
+    """Return canonical UTF-8 union bytes with one symbol per line and a trailing LF."""
+    canonical = sorted({ticker.strip().upper() for ticker in tickers if ticker.strip()})
+    if not canonical:
+        raise AutoresearchValidationError("member union must contain at least one ticker")
+    return "".join(f"{ticker}\n" for ticker in canonical).encode("utf-8")
+
+
+def price_hydration_request_digest(
+    *,
+    member_union_count: int,
+    member_union_digest: str,
+    experiment_start: str,
+    experiment_end: str,
+    timeframe: str,
+    market_hours: str,
+) -> str:
+    return _canonical_json_digest(
+        {
+            "member_union_count": member_union_count,
+            "member_union_digest": member_union_digest,
+            "experiment_start": experiment_start,
+            "experiment_end": experiment_end,
+            "timeframe": timeframe,
+            "market_hours": market_hours,
+        }
+    )
+
+
+def price_hydration_coverage_digest(
+    *, request_digest: str, operation_count: int, completed_at: str
+) -> str:
+    return _canonical_json_digest(
+        {
+            "request_digest": request_digest,
+            "operation_count": operation_count,
+            "completed_at": completed_at,
+        }
+    )
+
+
+def _parse_timestamp(value: str, *, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AutoresearchValidationError(f"{label} must include a UTC offset")
+    return parsed
 
 
 def _normalise_identifier(value: str) -> str:
@@ -510,6 +619,11 @@ class ComputeFitArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ComputeFitArtifact:
         data = _ensure_mapping(raw, label="compute_fit")
+        _require_exact_keys(
+            data,
+            label="compute_fit",
+            expected=("target", "rationale", "required_dependencies", "benchmark_plan"),
+        )
         artifact = cls(
             target=ComputeTarget(_require_str(data, "target")),
             rationale=_require_str(data, "rationale"),
@@ -761,7 +875,21 @@ class SetupContextArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> SetupContextArtifact:
         data = _ensure_mapping(raw, label="setup_context")
-        return cls(
+        _require_exact_keys(
+            data,
+            label="setup_context",
+            expected=(
+                "goal",
+                "metric_name",
+                "metric_direction",
+                "target_repo",
+                "writable_scope",
+                "baseline_summary",
+                "hard_constraints",
+                "data_sources",
+            ),
+        )
+        artifact = cls(
             goal=_require_str(data, "goal"),
             metric_name=_require_str(data, "metric_name"),
             metric_direction=MetricDirection(_require_str(data, "metric_direction")),
@@ -771,6 +899,7 @@ class SetupContextArtifact:
             hard_constraints=_optional_string_list(data, "hard_constraints"),
             data_sources=_optional_string_list(data, "data_sources"),
         )
+        return artifact
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -802,6 +931,23 @@ class ContextPacketArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ContextPacketArtifact:
         data = _ensure_mapping(raw, label="context_packet")
+        _require_exact_keys(
+            data,
+            label="context_packet",
+            expected=(
+                "baseline_metric",
+                "current_best_metric",
+                "recent_experiment_outcomes",
+                "prior_findings",
+                "open_proposals",
+                "hard_constraints",
+                "available_data_sources",
+                "loaded_quantipy_sources",
+                "research_mode",
+                "mode_rationale",
+                "burned_theory_families",
+            ),
+        )
         return cls(
             baseline_metric=_require_str(data, "baseline_metric"),
             current_best_metric=_require_str(data, "current_best_metric"),
@@ -836,6 +982,73 @@ class ContextPacketArtifact:
 
 
 @dataclass(frozen=True, slots=True)
+class UniversePlanArtifact:
+    profile_id: str
+    profile_digest: str
+    selection_dates: tuple[str, ...]
+    max_members_per_date: int
+    execution_policy: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> UniversePlanArtifact:
+        data = _ensure_mapping(raw, label="universe_plan")
+        _require_exact_keys(
+            data,
+            label="universe_plan",
+            expected=(
+                "profile_id",
+                "profile_digest",
+                "selection_dates",
+                "max_members_per_date",
+                "execution_policy",
+            ),
+        )
+        artifact = cls(
+            profile_id=_require_str(data, "profile_id"),
+            profile_digest=_require_sha256(data, "profile_digest"),
+            selection_dates=_require_string_list(data, "selection_dates"),
+            max_members_per_date=_require_int(data, "max_members_per_date"),
+            execution_policy=_require_str(data, "execution_policy"),
+        )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        _validate_sha256(self.profile_digest, label="profile_digest")
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.profile_id):
+            raise AutoresearchValidationError("universe plan profile_id must be kebab-case")
+        if not self.selection_dates:
+            raise AutoresearchValidationError("universe plan requires selection dates")
+        if len(self.selection_dates) > MAX_UNIVERSE_SELECTION_DATES:
+            raise AutoresearchValidationError(
+                f"universe plan allows at most {MAX_UNIVERSE_SELECTION_DATES} selection dates"
+            )
+        for selection_date in self.selection_dates:
+            _validate_iso_date_value(selection_date, label="selection_date")
+        if tuple(sorted(set(self.selection_dates))) != self.selection_dates:
+            raise AutoresearchValidationError(
+                "universe plan selection_dates must be sorted and unique"
+            )
+        if not 1 <= self.max_members_per_date <= MAX_UNIVERSE_MEMBERS_PER_DATE:
+            raise AutoresearchValidationError(
+                "universe plan max_members_per_date must be between 1 and 1000"
+            )
+        if self.execution_policy != NEXT_SESSION_EXECUTION_POLICY:
+            raise AutoresearchValidationError(
+                f"universe plan execution_policy must be {NEXT_SESSION_EXECUTION_POLICY}"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "profile_id": self.profile_id,
+            "profile_digest": self.profile_digest,
+            "selection_dates": list(self.selection_dates),
+            "max_members_per_date": self.max_members_per_date,
+            "execution_policy": self.execution_policy,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class DebateSubmission:
     agent_id: str
     theory_id: str
@@ -843,7 +1056,7 @@ class DebateSubmission:
     vote_family: str
     hypothesis: str
     universe: str
-    traded_tickers: tuple[str, ...]
+    example_tickers: tuple[str, ...]
     feature_pipeline: str
     model_plan: str
     walk_forward_plan: str
@@ -857,18 +1070,40 @@ class DebateSubmission:
     @classmethod
     def from_dict(cls, raw: object) -> DebateSubmission:
         data = _ensure_mapping(raw, label="debate_submission")
+        _require_exact_keys(
+            data,
+            label="debate_submission",
+            expected=(
+                "agent_id",
+                "theory_id",
+                "theory_family",
+                "vote_family",
+                "hypothesis",
+                "universe",
+                "example_tickers",
+                "feature_pipeline",
+                "model_plan",
+                "walk_forward_plan",
+                "transaction_cost_model",
+                "data_coverage_plan",
+                "rejection_criteria",
+                "objections",
+                "compute_fit",
+                "materially_new_evidence",
+            ),
+        )
         exemption = data.get("materially_new_evidence")
         if exemption is not None and not isinstance(exemption, str):
             raise AutoresearchValidationError("materially_new_evidence must be a string or null")
         compute_fit_raw = data.get("compute_fit")
-        return cls(
+        artifact = cls(
             agent_id=_require_str(data, "agent_id"),
             theory_id=_require_str(data, "theory_id"),
             theory_family=_require_str(data, "theory_family"),
             vote_family=_require_str(data, "vote_family"),
             hypothesis=_require_str(data, "hypothesis"),
             universe=_require_str(data, "universe"),
-            traded_tickers=_require_string_list(data, "traded_tickers"),
+            example_tickers=_require_string_list(data, "example_tickers"),
             feature_pipeline=_require_str(data, "feature_pipeline"),
             model_plan=_require_str(data, "model_plan"),
             walk_forward_plan=_require_str(data, "walk_forward_plan"),
@@ -883,6 +1118,11 @@ class DebateSubmission:
             ),
             materially_new_evidence=exemption.strip() if isinstance(exemption, str) else None,
         )
+        if len(artifact.example_tickers) > MAX_EXAMPLE_TICKERS:
+            raise AutoresearchValidationError("example_tickers allows at most 8 symbols")
+        if tuple(sorted(set(artifact.example_tickers))) != artifact.example_tickers:
+            raise AutoresearchValidationError("example_tickers must be sorted and unique")
+        return artifact
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -892,7 +1132,7 @@ class DebateSubmission:
             "vote_family": self.vote_family,
             "hypothesis": self.hypothesis,
             "universe": self.universe,
-            "traded_tickers": list(self.traded_tickers),
+            "example_tickers": list(self.example_tickers),
             "feature_pipeline": self.feature_pipeline,
             "model_plan": self.model_plan,
             "walk_forward_plan": self.walk_forward_plan,
@@ -913,6 +1153,7 @@ class DebateResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> DebateResultArtifact:
         data = _ensure_mapping(raw, label="debate_result")
+        _require_exact_keys(data, label="debate_result", expected=("round_number", "submissions"))
         submissions_raw = data.get("submissions")
         if not isinstance(submissions_raw, Sequence) or isinstance(submissions_raw, str | bytes):
             raise AutoresearchValidationError("submissions must be a list")
@@ -946,13 +1187,40 @@ class ConsensusResultArtifact:
     rejection_reasons: tuple[str, ...]
     implementation_brief: str | None
     dissent_summary: str
+    universe_plan: UniversePlanArtifact | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> ConsensusResultArtifact:
         data = _ensure_mapping(raw, label="consensus_result")
+        _require_exact_keys(
+            data,
+            label="consensus_result",
+            expected=(
+                "round_number",
+                "status",
+                "winner_theory_id",
+                "winner_theory_family",
+                "majority_count",
+                "majority_agent_ids",
+                "dissenting_positions",
+                "novelty_score",
+                "theory_score",
+                "implementation_risk_score",
+                "data_adequacy_score",
+                "overfit_risk_score",
+                "expected_net_sharpe",
+                "rejection_reasons",
+                "implementation_brief",
+                "dissent_summary",
+                "universe_plan",
+            ),
+        )
         winner_theory_id = data.get("winner_theory_id")
         winner_theory_family = data.get("winner_theory_family")
         implementation_brief = data.get("implementation_brief")
+        if "universe_plan" not in data:
+            raise AutoresearchValidationError("universe_plan must be an object or null")
+        universe_plan_raw = data["universe_plan"]
         if winner_theory_id is not None and not isinstance(winner_theory_id, str):
             raise AutoresearchValidationError("winner_theory_id must be a string or null")
         if winner_theory_family is not None and not isinstance(winner_theory_family, str):
@@ -978,6 +1246,11 @@ class ConsensusResultArtifact:
             if isinstance(implementation_brief, str)
             else None,
             dissent_summary=_require_str(data, "dissent_summary"),
+            universe_plan=(
+                UniversePlanArtifact.from_dict(universe_plan_raw)
+                if universe_plan_raw is not None
+                else None
+            ),
         )
         artifact.validate()
         return artifact
@@ -995,10 +1268,17 @@ class ConsensusResultArtifact:
         else:
             if self.majority_count >= 3:
                 raise AutoresearchValidationError("NO_CONSENSUS cannot report a 3-of-5 majority")
-            if self.winner_theory_id or self.winner_theory_family or self.implementation_brief:
+            if (
+                self.winner_theory_id
+                or self.winner_theory_family
+                or self.implementation_brief
+                or self.universe_plan is not None
+            ):
                 raise AutoresearchValidationError(
-                    "NO_CONSENSUS must not include winner or implementation brief"
+                    "NO_CONSENSUS must not include winner, implementation brief, or universe plan"
                 )
+        if self.universe_plan is not None:
+            self.universe_plan.validate()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1018,6 +1298,9 @@ class ConsensusResultArtifact:
             "rejection_reasons": list(self.rejection_reasons),
             "implementation_brief": self.implementation_brief,
             "dissent_summary": self.dissent_summary,
+            "universe_plan": self.universe_plan.to_dict()
+            if self.universe_plan is not None
+            else None,
         }
 
 
@@ -1055,6 +1338,20 @@ class ImplementationResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ImplementationResultArtifact:
         data = _ensure_mapping(raw, label="implementation_result")
+        _require_exact_keys(
+            data,
+            label="implementation_result",
+            expected=(
+                "summary",
+                "workspace_path",
+                "commit_sha",
+                "module_path",
+                "notebook_path",
+                "tests_added_or_updated",
+                "commands_run",
+                "compute_fit",
+            ),
+        )
         compute_fit_raw = data.get("compute_fit")
         artifact = cls(
             summary=_require_str(data, "summary"),
@@ -1098,14 +1395,783 @@ class ImplementationResultArtifact:
 
 def _require_iso_date(raw: Mapping[str, object], field_name: str) -> str:
     value = _require_str(raw, field_name)
-    try:
-        # ISO date lexical ordering is also chronological ordering.
-        from datetime import date
-
-        date.fromisoformat(value)
-    except ValueError as exc:
-        raise AutoresearchValidationError(f"{field_name} must be an ISO-8601 date") from exc
+    _validate_iso_date_value(value, label=field_name)
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class AutoresearchValidationContext:
+    readiness_identity: ReadinessIdentity | None
+    xnys_evidence_digest: str
+    xnys_sessions: tuple[date, ...]
+
+    @classmethod
+    def from_readiness(cls, readiness: PlatformReadinessManifest) -> AutoresearchValidationContext:
+        try:
+            digest, evidence = load_xnys_calendar_evidence(readiness)
+            identity = readiness.require_ready()
+        except ValueError as exc:
+            raise AutoresearchValidationError(str(exc)) from exc
+        sessions = evidence.sessions
+        if not sessions:
+            raise AutoresearchValidationError("XNYS calendar evidence contains no sessions")
+        return cls(identity, digest, sessions)
+
+    def validate_for_state(self, state: AutoresearchState) -> None:
+        if state.platform_readiness != self.readiness_identity:
+            raise AutoresearchValidationError(
+                "validation context readiness identity must match pinned state readiness"
+            )
+
+    def validate_universe_receipt(self, receipt: UniverseVerificationReceipt) -> None:
+        _verify_member_union_manifest(receipt)
+        for item in (date_receipt for batch in receipt.batches for date_receipt in batch.dates):
+            if item.calendar_identity != XNYS_CALENDAR_IDENTITY:
+                raise AutoresearchValidationError("calendar_identity must be XNYS")
+            if item.calendar_digest != self.xnys_evidence_digest:
+                raise AutoresearchValidationError(
+                    "calendar_digest must exactly match pinned readiness XNYS evidence"
+                )
+            selection_date = date.fromisoformat(item.selection_date)
+            index = bisect_right(self.xnys_sessions, selection_date)
+            if index == len(self.xnys_sessions):
+                raise AutoresearchValidationError(
+                    "XNYS evidence does not cover a session after selection_date"
+                )
+            expected = self.xnys_sessions[index].isoformat()
+            if item.earliest_execution_date != expected:
+                raise AutoresearchValidationError(
+                    "earliest_execution_date must equal the first actual XNYS session "
+                    f"after selection_date ({expected})"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativeSnapshotReceipt:
+    as_of_date: str
+    source: str
+    result_count: int
+    identity_digest: str
+    content_digest: str
+    completed_at: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> AuthoritativeSnapshotReceipt:
+        data = _ensure_mapping(raw, label="authoritative_snapshot_receipt")
+        _require_exact_keys(
+            data,
+            label="authoritative_snapshot_receipt",
+            expected=(
+                "as_of_date",
+                "source",
+                "result_count",
+                "identity_digest",
+                "content_digest",
+                "completed_at",
+            ),
+        )
+        receipt = cls(
+            as_of_date=_require_iso_date(data, "as_of_date"),
+            source=_require_str(data, "source"),
+            result_count=_require_int(data, "result_count"),
+            identity_digest=_require_sha256(data, "identity_digest"),
+            content_digest=_require_sha256(data, "content_digest"),
+            completed_at=_require_str(data, "completed_at"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_iso_date_value(self.as_of_date, label="as_of_date")
+        _validate_sha256(self.identity_digest, label="identity_digest")
+        _validate_sha256(self.content_digest, label="content_digest")
+        _parse_timestamp(self.completed_at, label="completed_at")
+        if self.result_count < 0:
+            raise AutoresearchValidationError("snapshot result_count must be non-negative")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "as_of_date": self.as_of_date,
+            "source": self.source,
+            "result_count": self.result_count,
+            "identity_digest": self.identity_digest,
+            "content_digest": self.content_digest,
+            "completed_at": self.completed_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GroupedSummaryReceipt:
+    summary_date: str
+    source: str
+    result_count: int
+    identity_digest: str
+    content_digest: str
+    completed_at: str
+    adjusted: bool
+
+    @classmethod
+    def from_dict(cls, raw: object) -> GroupedSummaryReceipt:
+        data = _ensure_mapping(raw, label="grouped_summary_receipt")
+        _require_exact_keys(
+            data,
+            label="grouped_summary_receipt",
+            expected=(
+                "summary_date",
+                "source",
+                "result_count",
+                "identity_digest",
+                "content_digest",
+                "completed_at",
+                "adjusted",
+            ),
+        )
+        receipt = cls(
+            summary_date=_require_iso_date(data, "summary_date"),
+            source=_require_str(data, "source"),
+            result_count=_require_int(data, "result_count"),
+            identity_digest=_require_sha256(data, "identity_digest"),
+            content_digest=_require_sha256(data, "content_digest"),
+            completed_at=_require_str(data, "completed_at"),
+            adjusted=_require_bool(data, "adjusted"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_iso_date_value(self.summary_date, label="summary_date")
+        _validate_sha256(self.identity_digest, label="identity_digest")
+        _validate_sha256(self.content_digest, label="content_digest")
+        _parse_timestamp(self.completed_at, label="completed_at")
+        if self.result_count < 0:
+            raise AutoresearchValidationError("summary result_count must be non-negative")
+        if self.adjusted:
+            raise AutoresearchValidationError("grouped summary receipt requires adjusted=false")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "summary_date": self.summary_date,
+            "source": self.source,
+            "result_count": self.result_count,
+            "identity_digest": self.identity_digest,
+            "content_digest": self.content_digest,
+            "completed_at": self.completed_at,
+            "adjusted": self.adjusted,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseDateVerificationReceipt:
+    selection_date: str
+    earliest_execution_date: str
+    calendar_identity: str
+    calendar_digest: str
+    selected_member_count: int
+    snapshot: AuthoritativeSnapshotReceipt
+    summary: GroupedSummaryReceipt
+
+    @classmethod
+    def from_dict(cls, raw: object) -> UniverseDateVerificationReceipt:
+        data = _ensure_mapping(raw, label="universe_date_verification_receipt")
+        _require_exact_keys(
+            data,
+            label="universe_date_verification_receipt",
+            expected=(
+                "selection_date",
+                "earliest_execution_date",
+                "calendar_identity",
+                "calendar_digest",
+                "selected_member_count",
+                "snapshot",
+                "summary",
+            ),
+        )
+        receipt = cls(
+            selection_date=_require_iso_date(data, "selection_date"),
+            earliest_execution_date=_require_iso_date(data, "earliest_execution_date"),
+            calendar_identity=_require_str(data, "calendar_identity"),
+            calendar_digest=_require_sha256(data, "calendar_digest"),
+            selected_member_count=_require_int(data, "selected_member_count"),
+            snapshot=AuthoritativeSnapshotReceipt.from_dict(data["snapshot"]),
+            summary=GroupedSummaryReceipt.from_dict(data["summary"]),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_iso_date_value(self.selection_date, label="selection_date")
+        _validate_iso_date_value(self.earliest_execution_date, label="earliest_execution_date")
+        _validate_sha256(self.calendar_digest, label="calendar_digest")
+        if self.selected_member_count < 0:
+            raise AutoresearchValidationError("selected_member_count must be non-negative")
+        if self.earliest_execution_date <= self.selection_date:
+            raise AutoresearchValidationError(
+                "earliest_execution_date must be after selection_date"
+            )
+        self.snapshot.validate()
+        self.summary.validate()
+        if self.snapshot.as_of_date != self.selection_date:
+            raise AutoresearchValidationError(
+                "snapshot receipt as_of_date must match selection_date"
+            )
+        if self.summary.summary_date != self.selection_date:
+            raise AutoresearchValidationError(
+                "summary receipt summary_date must match selection_date"
+            )
+        if self.snapshot.source != self.summary.source:
+            raise AutoresearchValidationError(
+                "snapshot and summary sources must match for each selection date"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "selection_date": self.selection_date,
+            "earliest_execution_date": self.earliest_execution_date,
+            "calendar_identity": self.calendar_identity,
+            "calendar_digest": self.calendar_digest,
+            "selected_member_count": self.selected_member_count,
+            "snapshot": self.snapshot.to_dict(),
+            "summary": self.summary.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseHistoryBatchReceipt:
+    contract_digest: str
+    operation_count: int
+    dates: tuple[UniverseDateVerificationReceipt, ...]
+
+    @classmethod
+    def from_dict(cls, raw: object) -> UniverseHistoryBatchReceipt:
+        data = _ensure_mapping(raw, label="universe_history_batch_receipt")
+        _require_exact_keys(
+            data,
+            label="universe_history_batch_receipt",
+            expected=("contract_digest", "operation_count", "dates"),
+        )
+        dates_raw = data["dates"]
+        if not isinstance(dates_raw, Sequence) or isinstance(dates_raw, str | bytes):
+            raise AutoresearchValidationError("batch dates must be a list")
+        receipt = cls(
+            contract_digest=_require_sha256(data, "contract_digest"),
+            operation_count=_require_int(data, "operation_count"),
+            dates=tuple(UniverseDateVerificationReceipt.from_dict(item) for item in dates_raw),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_sha256(self.contract_digest, label="contract_digest")
+        if self.operation_count != 1:
+            raise AutoresearchValidationError(
+                "each universe history batch requires operation_count=1"
+            )
+        if not 1 <= len(self.dates) <= MAX_UNIVERSE_BATCH_DATES:
+            raise AutoresearchValidationError("universe history batch requires 1 to 32 dates")
+        for receipt in self.dates:
+            receipt.validate()
+        dates = tuple(receipt.selection_date for receipt in self.dates)
+        if tuple(sorted(set(dates))) != dates:
+            raise AutoresearchValidationError(
+                "universe history batch dates must be sorted and unique"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "contract_digest": self.contract_digest,
+            "operation_count": self.operation_count,
+            "dates": [receipt.to_dict() for receipt in self.dates],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MemberUnionManifestReceipt:
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> MemberUnionManifestReceipt:
+        data = _ensure_mapping(raw, label="member_union_manifest_receipt")
+        _require_exact_keys(
+            data,
+            label="member_union_manifest_receipt",
+            expected=("path", "sha256"),
+        )
+        receipt = cls(path=_require_str(data, "path"), sha256=_require_sha256(data, "sha256"))
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        if not Path(self.path).is_absolute():
+            raise AutoresearchValidationError("member union manifest path must be absolute")
+        _validate_sha256(self.sha256, label="member union manifest sha256")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseVerificationReceipt:
+    profile_id: str
+    profile_digest: str
+    execution_policy: str
+    max_members_per_date: int
+    batches: tuple[UniverseHistoryBatchReceipt, ...]
+    member_union_digest_algorithm: str
+    member_union_count: int
+    member_union_digest: str
+    member_union_manifest: MemberUnionManifestReceipt
+
+    @classmethod
+    def from_dict(cls, raw: object) -> UniverseVerificationReceipt:
+        data = _ensure_mapping(raw, label="universe_verification_receipt")
+        _require_exact_keys(
+            data,
+            label="universe_verification_receipt",
+            expected=(
+                "profile_id",
+                "profile_digest",
+                "execution_policy",
+                "max_members_per_date",
+                "batches",
+                "member_union_digest_algorithm",
+                "member_union_count",
+                "member_union_digest",
+                "member_union_manifest",
+            ),
+        )
+        batches_raw = data["batches"]
+        if not isinstance(batches_raw, Sequence) or isinstance(batches_raw, str | bytes):
+            raise AutoresearchValidationError("batches must be a list")
+        receipt = cls(
+            profile_id=_require_str(data, "profile_id"),
+            profile_digest=_require_sha256(data, "profile_digest"),
+            execution_policy=_require_str(data, "execution_policy"),
+            max_members_per_date=_require_int(data, "max_members_per_date"),
+            batches=tuple(UniverseHistoryBatchReceipt.from_dict(item) for item in batches_raw),
+            member_union_digest_algorithm=_require_str(data, "member_union_digest_algorithm"),
+            member_union_count=_require_int(data, "member_union_count"),
+            member_union_digest=_require_sha256(data, "member_union_digest"),
+            member_union_manifest=MemberUnionManifestReceipt.from_dict(
+                data["member_union_manifest"]
+            ),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_sha256(self.profile_digest, label="profile_digest")
+        _validate_sha256(self.member_union_digest, label="member_union_digest")
+        self.member_union_manifest.validate()
+        if not self.batches:
+            raise AutoresearchValidationError("universe verification requires history batches")
+        for batch in self.batches:
+            batch.validate()
+        if self.execution_policy != NEXT_SESSION_EXECUTION_POLICY:
+            raise AutoresearchValidationError(
+                f"universe execution_policy must be {NEXT_SESSION_EXECUTION_POLICY}"
+            )
+        if self.member_union_count <= 0:
+            raise AutoresearchValidationError("member_union_count must be positive")
+        if self.member_union_digest_algorithm != MEMBER_UNION_DIGEST_ALGORITHM:
+            raise AutoresearchValidationError(
+                f"member_union_digest_algorithm must be {MEMBER_UNION_DIGEST_ALGORITHM}"
+            )
+        if not 1 <= self.max_members_per_date <= MAX_UNIVERSE_MEMBERS_PER_DATE:
+            raise AutoresearchValidationError(
+                "universe verification max_members_per_date must be between 1 and 1000"
+            )
+        selected_member_counts = tuple(
+            item.selected_member_count for batch in self.batches for item in batch.dates
+        )
+        if self.member_union_count < max(selected_member_counts):
+            raise AutoresearchValidationError(
+                "member_union_count must be at least the largest selected_member_count"
+            )
+        if self.member_union_count > sum(selected_member_counts):
+            raise AutoresearchValidationError(
+                "member_union_count cannot exceed the sum of selected_member_count values"
+            )
+
+    def validate_against_plan(self, plan: UniversePlanArtifact) -> None:
+        self.validate()
+        plan.validate()
+        for field_name in (
+            "profile_id",
+            "profile_digest",
+            "execution_policy",
+            "max_members_per_date",
+        ):
+            if getattr(self, field_name) != getattr(plan, field_name):
+                raise AutoresearchValidationError(
+                    f"universe verification {field_name} must match universe plan"
+                )
+        flattened = tuple(item.selection_date for batch in self.batches for item in batch.dates)
+        if flattened != plan.selection_dates:
+            raise AutoresearchValidationError(
+                "universe verification batches must exactly cover plan dates "
+                "without gaps or overlap"
+            )
+        max_batch_dates = min(
+            MAX_UNIVERSE_BATCH_DATES,
+            MAX_UNIVERSE_BATCH_RESULTS // plan.max_members_per_date,
+        )
+        if max_batch_dates < 1:
+            raise AutoresearchValidationError("max_members_per_date cannot fit one history batch")
+        expected_batches = tuple(
+            plan.selection_dates[index : index + max_batch_dates]
+            for index in range(0, len(plan.selection_dates), max_batch_dates)
+        )
+        actual_batches = tuple(
+            tuple(item.selection_date for item in batch.dates) for batch in self.batches
+        )
+        if actual_batches != expected_batches:
+            raise AutoresearchValidationError(
+                "universe history batches must use deterministic contiguous canonical chunks"
+            )
+        if any(
+            len(batch.dates) * plan.max_members_per_date > MAX_UNIVERSE_BATCH_RESULTS
+            for batch in self.batches
+        ):
+            raise AutoresearchValidationError("universe history batch exceeds 10000 results")
+        date_receipts = tuple(item for batch in self.batches for item in batch.dates)
+        calendar_bindings = {
+            (item.calendar_identity, item.calendar_digest) for item in date_receipts
+        }
+        if len(calendar_bindings) != 1:
+            raise AutoresearchValidationError(
+                "all execution dates must bind the same XNYS calendar receipt"
+            )
+        for item in date_receipts:
+            if item.selected_member_count > plan.max_members_per_date:
+                raise AutoresearchValidationError(
+                    "selected_member_count exceeds plan max_members_per_date"
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "profile_id": self.profile_id,
+            "profile_digest": self.profile_digest,
+            "execution_policy": self.execution_policy,
+            "max_members_per_date": self.max_members_per_date,
+            "batches": [receipt.to_dict() for receipt in self.batches],
+            "member_union_digest_algorithm": self.member_union_digest_algorithm,
+            "member_union_count": self.member_union_count,
+            "member_union_digest": self.member_union_digest,
+            "member_union_manifest": self.member_union_manifest.to_dict(),
+        }
+
+
+def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> None:
+    manifest = receipt.member_union_manifest
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            manifest.path,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        )
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise AutoresearchValidationError("member union manifest must be a regular file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"cannot read member union manifest: {manifest.path}"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    content = b"".join(chunks)
+    if hashlib.sha256(content).hexdigest() != manifest.sha256:
+        raise AutoresearchValidationError("member union manifest SHA-256 mismatch")
+    try:
+        symbols = content.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise AutoresearchValidationError("member union manifest must be UTF-8") from exc
+    canonical = canonical_member_union_manifest(symbols)
+    if content != canonical:
+        raise AutoresearchValidationError(
+            "member union manifest must be uppercase sorted unique UTF-8 lines "
+            "with one trailing newline"
+        )
+    count, digest = canonical_member_union_digest(symbols)
+    if count != receipt.member_union_count or digest != receipt.member_union_digest:
+        raise AutoresearchValidationError(
+            "member union manifest must recompute the persisted count and digest"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PriceHydrationReceipt:
+    member_union_count: int
+    member_union_digest: str
+    experiment_start: str
+    experiment_end: str
+    timeframe: str
+    market_hours: str
+    operation_count: int
+    request_digest: str
+    coverage_receipt_digest: str
+    completed_at: str
+    folds_started_at: str
+
+    def request_identity(self) -> dict[str, object]:
+        return {
+            "member_union_count": self.member_union_count,
+            "member_union_digest": self.member_union_digest,
+            "experiment_start": self.experiment_start,
+            "experiment_end": self.experiment_end,
+            "timeframe": self.timeframe,
+            "market_hours": self.market_hours,
+        }
+
+    def coverage_identity(self) -> dict[str, object]:
+        return {
+            "request_digest": self.request_digest,
+            "operation_count": self.operation_count,
+            "completed_at": self.completed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> PriceHydrationReceipt:
+        data = _ensure_mapping(raw, label="price_hydration_receipt")
+        _require_exact_keys(
+            data,
+            label="price_hydration_receipt",
+            expected=(
+                "member_union_count",
+                "member_union_digest",
+                "experiment_start",
+                "experiment_end",
+                "timeframe",
+                "market_hours",
+                "operation_count",
+                "request_digest",
+                "coverage_receipt_digest",
+                "completed_at",
+                "folds_started_at",
+            ),
+        )
+        receipt = cls(
+            member_union_count=_require_int(data, "member_union_count"),
+            member_union_digest=_require_sha256(data, "member_union_digest"),
+            experiment_start=_require_iso_date(data, "experiment_start"),
+            experiment_end=_require_iso_date(data, "experiment_end"),
+            timeframe=_require_str(data, "timeframe"),
+            market_hours=_require_str(data, "market_hours"),
+            operation_count=_require_int(data, "operation_count"),
+            request_digest=_require_sha256(data, "request_digest"),
+            coverage_receipt_digest=_require_sha256(data, "coverage_receipt_digest"),
+            completed_at=_require_str(data, "completed_at"),
+            folds_started_at=_require_str(data, "folds_started_at"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_sha256(self.member_union_digest, label="member_union_digest")
+        _validate_iso_date_value(self.experiment_start, label="experiment_start")
+        _validate_iso_date_value(self.experiment_end, label="experiment_end")
+        if self.member_union_count <= 0:
+            raise AutoresearchValidationError("member_union_count must be positive")
+        if self.experiment_start > self.experiment_end:
+            raise AutoresearchValidationError("price hydration experiment range is invalid")
+        if self.operation_count != 1:
+            raise AutoresearchValidationError("price hydration requires operation_count=1")
+        if self.request_digest != price_hydration_request_digest(
+            member_union_count=self.member_union_count,
+            member_union_digest=self.member_union_digest,
+            experiment_start=self.experiment_start,
+            experiment_end=self.experiment_end,
+            timeframe=self.timeframe,
+            market_hours=self.market_hours,
+        ):
+            raise AutoresearchValidationError("price hydration request_digest is not canonical")
+        if self.coverage_receipt_digest != price_hydration_coverage_digest(
+            request_digest=self.request_digest,
+            operation_count=self.operation_count,
+            completed_at=self.completed_at,
+        ):
+            raise AutoresearchValidationError(
+                "price hydration coverage_receipt_digest is not canonical"
+            )
+        completed_at = _parse_timestamp(self.completed_at, label="completed_at")
+        folds_started_at = _parse_timestamp(self.folds_started_at, label="folds_started_at")
+        if completed_at >= folds_started_at:
+            raise AutoresearchValidationError("price hydration must complete before folds start")
+
+    def validate_against_universe(self, universe: UniverseVerificationReceipt) -> None:
+        self.validate()
+        universe.validate()
+        if (
+            self.member_union_count != universe.member_union_count
+            or self.member_union_digest != universe.member_union_digest
+        ):
+            raise AutoresearchValidationError(
+                "price hydration member union must match universe verification"
+            )
+        hydration_completed_at = _parse_timestamp(self.completed_at, label="completed_at")
+        for date_receipt in (item for batch in universe.batches for item in batch.dates):
+            for label, completed_at in (
+                ("snapshot", date_receipt.snapshot.completed_at),
+                ("summary", date_receipt.summary.completed_at),
+            ):
+                materialization_completed_at = _parse_timestamp(
+                    completed_at,
+                    label=f"{label} completed_at",
+                )
+                if materialization_completed_at > hydration_completed_at:
+                    raise AutoresearchValidationError(
+                        f"{label} materialization must complete before or at price hydration"
+                    )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "member_union_count": self.member_union_count,
+            "member_union_digest": self.member_union_digest,
+            "experiment_start": self.experiment_start,
+            "experiment_end": self.experiment_end,
+            "timeframe": self.timeframe,
+            "market_hours": self.market_hours,
+            "operation_count": self.operation_count,
+            "request_digest": self.request_digest,
+            "coverage_receipt_digest": self.coverage_receipt_digest,
+            "completed_at": self.completed_at,
+            "folds_started_at": self.folds_started_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DynamicUniverseCoverageReceipt:
+    member_union_count: int
+    member_union_digest: str
+    experiment_start: str
+    experiment_end: str
+    oos_start: str
+    oos_end: str
+    timeframe: str
+    market_hours: str
+    expected_symbol_sessions: int
+    covered_symbol_sessions: int
+    missing_symbol_count: int
+    missing_symbol_sessions: int
+    default_fold_count: int
+    fallback_fold_count: int
+
+    @classmethod
+    def from_dict(cls, raw: object) -> DynamicUniverseCoverageReceipt:
+        data = _ensure_mapping(raw, label="dynamic_universe_coverage_receipt")
+        _require_exact_keys(
+            data,
+            label="dynamic_universe_coverage_receipt",
+            expected=(
+                "member_union_count",
+                "member_union_digest",
+                "experiment_start",
+                "experiment_end",
+                "oos_start",
+                "oos_end",
+                "timeframe",
+                "market_hours",
+                "expected_symbol_sessions",
+                "covered_symbol_sessions",
+                "missing_symbol_count",
+                "missing_symbol_sessions",
+                "default_fold_count",
+                "fallback_fold_count",
+            ),
+        )
+        receipt = cls(
+            member_union_count=_require_int(data, "member_union_count"),
+            member_union_digest=_require_sha256(data, "member_union_digest"),
+            experiment_start=_require_iso_date(data, "experiment_start"),
+            experiment_end=_require_iso_date(data, "experiment_end"),
+            oos_start=_require_iso_date(data, "oos_start"),
+            oos_end=_require_iso_date(data, "oos_end"),
+            timeframe=_require_str(data, "timeframe"),
+            market_hours=_require_str(data, "market_hours"),
+            expected_symbol_sessions=_require_int(data, "expected_symbol_sessions"),
+            covered_symbol_sessions=_require_int(data, "covered_symbol_sessions"),
+            missing_symbol_count=_require_int(data, "missing_symbol_count"),
+            missing_symbol_sessions=_require_int(data, "missing_symbol_sessions"),
+            default_fold_count=_require_int(data, "default_fold_count"),
+            fallback_fold_count=_require_int(data, "fallback_fold_count"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_sha256(self.member_union_digest, label="member_union_digest")
+        _validate_iso_date_value(self.experiment_start, label="experiment_start")
+        _validate_iso_date_value(self.experiment_end, label="experiment_end")
+        if self.member_union_count <= 0 or self.experiment_start > self.experiment_end:
+            raise AutoresearchValidationError("dynamic universe coverage identity is invalid")
+        if not self.experiment_start <= self.oos_start <= self.oos_end <= self.experiment_end:
+            raise AutoresearchValidationError(
+                "dynamic universe OOS range must fit experiment range"
+            )
+        if not 0 <= self.covered_symbol_sessions <= self.expected_symbol_sessions:
+            raise AutoresearchValidationError("dynamic universe symbol-session counts are invalid")
+        if self.expected_symbol_sessions <= 0:
+            raise AutoresearchValidationError("expected_symbol_sessions must be positive")
+        if (
+            min(
+                self.missing_symbol_count,
+                self.missing_symbol_sessions,
+                self.default_fold_count,
+                self.fallback_fold_count,
+            )
+            < 0
+        ):
+            raise AutoresearchValidationError("dynamic universe counts must be non-negative")
+
+    def validate_against_hydration(
+        self, hydration: PriceHydrationReceipt, *, require_complete: bool
+    ) -> None:
+        self.validate()
+        hydration.validate()
+        for field_name in (
+            "member_union_count",
+            "member_union_digest",
+            "experiment_start",
+            "experiment_end",
+            "timeframe",
+            "market_hours",
+        ):
+            if getattr(self, field_name) != getattr(hydration, field_name):
+                raise AutoresearchValidationError(
+                    f"dynamic coverage {field_name} must match price hydration"
+                )
+        if require_complete and (
+            self.missing_symbol_count != 0
+            or self.missing_symbol_sessions != 0
+            or self.covered_symbol_sessions != self.expected_symbol_sessions
+        ):
+            raise AutoresearchValidationError(
+                "PASS dynamic coverage requires zero missing symbols and symbol sessions"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "member_union_count": self.member_union_count,
+            "member_union_digest": self.member_union_digest,
+            "experiment_start": self.experiment_start,
+            "experiment_end": self.experiment_end,
+            "oos_start": self.oos_start,
+            "oos_end": self.oos_end,
+            "timeframe": self.timeframe,
+            "market_hours": self.market_hours,
+            "expected_symbol_sessions": self.expected_symbol_sessions,
+            "covered_symbol_sessions": self.covered_symbol_sessions,
+            "missing_symbol_count": self.missing_symbol_count,
+            "missing_symbol_sessions": self.missing_symbol_sessions,
+            "default_fold_count": self.default_fold_count,
+            "fallback_fold_count": self.fallback_fold_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -1129,6 +2195,27 @@ class CoverageReceipt:
     @classmethod
     def from_dict(cls, raw: object) -> CoverageReceipt:
         data = _ensure_mapping(raw, label="coverage_receipt")
+        _require_exact_keys(
+            data,
+            label="coverage_receipt",
+            expected=(
+                "symbol",
+                "declared_intended_start",
+                "declared_intended_end",
+                "actual_common_start",
+                "actual_common_end",
+                "oos_start",
+                "oos_end",
+                "expected_trading_days",
+                "actual_trading_days",
+                "coverage_percent",
+                "missing_reason",
+                "default_fold_count",
+                "fallback_fold_count",
+                "cap_provenance_available",
+                "fixed_sleeve_local_data",
+            ),
+        )
         missing_reason = data.get("missing_reason")
         if missing_reason is not None and not isinstance(missing_reason, str):
             raise AutoresearchValidationError("missing_reason must be a string or null")
@@ -1237,6 +2324,27 @@ class AggregateCoverageReceipt:
     @classmethod
     def from_dict(cls, raw: object) -> AggregateCoverageReceipt:
         data = _ensure_mapping(raw, label="aggregate_coverage_receipt")
+        _require_exact_keys(
+            data,
+            label="aggregate_coverage_receipt",
+            expected=(
+                "declared_intended_start",
+                "declared_intended_end",
+                "actual_common_start",
+                "actual_common_end",
+                "oos_start",
+                "oos_end",
+                "expected_trading_days",
+                "actual_trading_days",
+                "coverage_percent",
+                "missing_reason",
+                "default_fold_count",
+                "fallback_fold_count",
+                "cap_provenance_available",
+                "fixed_sleeve_local_data",
+                "per_symbol",
+            ),
+        )
         symbols_raw = data.get("per_symbol")
         if not isinstance(symbols_raw, Sequence) or isinstance(symbols_raw, str | bytes):
             raise AutoresearchValidationError("per_symbol must be a list")
@@ -1267,6 +2375,10 @@ class AggregateCoverageReceipt:
         if not self.per_symbol:
             raise AutoresearchValidationError(
                 "aggregate coverage requires at least one per-symbol receipt"
+            )
+        if len(self.per_symbol) > MAX_FIXED_SLEEVE_SYMBOLS:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 coverage allows at most 32 per-symbol receipts"
             )
         synthetic = CoverageReceipt(
             symbol="aggregate",
@@ -1386,15 +2498,41 @@ class VerificationResultArtifact:
     bug_signals: tuple[str, ...]
     tests_passed: bool
     commands_run: tuple[str, ...]
-    data_coverage: AggregateCoverageReceipt | None
+    data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
     infra_gate_outcome: InfraGateOutcome | None = None
     infra_rationale: str | None = None
+    universe_verification_receipt: UniverseVerificationReceipt | None = None
+    price_hydration_receipt: PriceHydrationReceipt | None = None
 
     @classmethod
     def from_dict(
         cls, raw: object, *, mode: ResearchMode | None = None
     ) -> VerificationResultArtifact:
         data = _ensure_mapping(raw, label="verification_result")
+        _require_exact_keys(
+            data,
+            label="verification_result",
+            expected=(
+                "status",
+                "is_walk_forward_sharpe_net",
+                "oos_sharpe_net",
+                "max_drawdown_pct",
+                "win_rate",
+                "trade_count",
+                "trades_per_day",
+                "oos_trading_days",
+                "feature_importances_summary",
+                "null_test_summary",
+                "bug_signals",
+                "tests_passed",
+                "commands_run",
+                "data_coverage",
+                "infra_gate_outcome",
+                "infra_rationale",
+                "universe_verification_receipt",
+                "price_hydration_receipt",
+            ),
+        )
         infra_gate_raw = data.get("infra_gate_outcome")
         infra_rationale = data.get("infra_rationale")
         if infra_gate_raw is not None and not isinstance(infra_gate_raw, str):
@@ -1404,11 +2542,43 @@ class VerificationResultArtifact:
         if "data_coverage" not in data:
             raise AutoresearchValidationError("data_coverage must be an object or null")
         data_coverage_raw = data["data_coverage"]
-        data_coverage = (
-            None
-            if data_coverage_raw is None
-            else AggregateCoverageReceipt.from_dict(data_coverage_raw)
-        )
+        data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
+        if data_coverage_raw is None:
+            data_coverage = None
+        else:
+            coverage_data = _ensure_mapping(data_coverage_raw, label="data_coverage")
+            if mode is ResearchMode.DATA_INFRA_G0:
+                dynamic_keys = {
+                    "member_union_count",
+                    "member_union_digest",
+                    "experiment_start",
+                    "experiment_end",
+                    "oos_start",
+                    "oos_end",
+                    "timeframe",
+                    "market_hours",
+                    "expected_symbol_sessions",
+                    "covered_symbol_sessions",
+                    "missing_symbol_count",
+                    "missing_symbol_sessions",
+                    "default_fold_count",
+                    "fallback_fold_count",
+                }
+                data_coverage = (
+                    DynamicUniverseCoverageReceipt.from_dict(coverage_data)
+                    if set(coverage_data) == dynamic_keys
+                    else AggregateCoverageReceipt.from_dict(coverage_data)
+                )
+            else:
+                data_coverage = DynamicUniverseCoverageReceipt.from_dict(coverage_data)
+        if "universe_verification_receipt" not in data:
+            raise AutoresearchValidationError(
+                "universe_verification_receipt must be an object or null"
+            )
+        if "price_hydration_receipt" not in data:
+            raise AutoresearchValidationError("price_hydration_receipt must be an object or null")
+        universe_receipt_raw = data["universe_verification_receipt"]
+        hydration_receipt_raw = data["price_hydration_receipt"]
         artifact = cls(
             status=VerificationStatus(_require_str(data, "status")),
             is_walk_forward_sharpe_net=_optional_float(data, "is_walk_forward_sharpe_net"),
@@ -1428,6 +2598,16 @@ class VerificationResultArtifact:
             if infra_gate_raw is not None
             else None,
             infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
+            universe_verification_receipt=(
+                UniverseVerificationReceipt.from_dict(universe_receipt_raw)
+                if universe_receipt_raw is not None
+                else None
+            ),
+            price_hydration_receipt=(
+                PriceHydrationReceipt.from_dict(hydration_receipt_raw)
+                if hydration_receipt_raw is not None
+                else None
+            ),
         )
         artifact.validate(mode=mode)
         return artifact
@@ -1465,6 +2645,30 @@ class VerificationResultArtifact:
             )
         if self.data_coverage is not None:
             self.data_coverage.validate()
+        if (self.universe_verification_receipt is None) != (self.price_hydration_receipt is None):
+            raise AutoresearchValidationError(
+                "universe and price hydration receipts must both be present or both be null"
+            )
+        if (
+            self.universe_verification_receipt is not None
+            and self.price_hydration_receipt is not None
+        ):
+            self.price_hydration_receipt.validate_against_universe(
+                self.universe_verification_receipt
+            )
+        if self.status is VerificationStatus.PASS and mode is ResearchMode.ALPHA_RESEARCH:
+            if self.universe_verification_receipt is None or self.price_hydration_receipt is None:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH PASS requires universe and price hydration receipts"
+                )
+            if isinstance(self.data_coverage, DynamicUniverseCoverageReceipt):
+                self.data_coverage.validate_against_hydration(
+                    self.price_hydration_receipt, require_complete=True
+                )
+            else:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH PASS requires compact dynamic universe coverage"
+                )
         outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
         if mode is ResearchMode.DATA_INFRA_G0 and (outcome is None or not self.infra_rationale):
             raise AutoresearchValidationError(
@@ -1473,15 +2677,6 @@ class VerificationResultArtifact:
         if mode is ResearchMode.ALPHA_RESEARCH and (outcome is not None or self.infra_rationale):
             raise AutoresearchValidationError(
                 "ALPHA_RESEARCH verification cannot contain infrastructure gate outcomes"
-            )
-        if (
-            mode is ResearchMode.ALPHA_RESEARCH
-            and self.data_coverage is not None
-            and self.data_coverage.fixed_sleeve_local_data
-            and self.data_coverage.cap_provenance_available
-        ):
-            raise AutoresearchValidationError(
-                "ALPHA_RESEARCH fixed local sleeve cannot claim cap-verified universe compliance"
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -1506,6 +2701,12 @@ class VerificationResultArtifact:
             if self.infra_gate_outcome is not None
             else None,
             "infra_rationale": self.infra_rationale,
+            "universe_verification_receipt": self.universe_verification_receipt.to_dict()
+            if self.universe_verification_receipt is not None
+            else None,
+            "price_hydration_receipt": self.price_hydration_receipt.to_dict()
+            if self.price_hydration_receipt is not None
+            else None,
         }
 
 
@@ -1523,6 +2724,20 @@ class ReviewResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ReviewResultArtifact:
         data = _ensure_mapping(raw, label="review_result")
+        _require_exact_keys(
+            data,
+            label="review_result",
+            expected=(
+                "reviewer_agent_id",
+                "verdict",
+                "recommended_metric_name",
+                "recommended_metric_value",
+                "critical_issues",
+                "noncritical_issues",
+                "fix_requests",
+                "summary",
+            ),
+        )
         artifact = cls(
             reviewer_agent_id=_require_str(data, "reviewer_agent_id"),
             verdict=ReviewVerdict(_require_str(data, "verdict")),
@@ -1569,6 +2784,19 @@ class FixResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> FixResultArtifact:
         data = _ensure_mapping(raw, label="fix_result")
+        _require_exact_keys(
+            data,
+            label="fix_result",
+            expected=(
+                "trigger_phase",
+                "summary",
+                "workspace_path",
+                "commit_sha",
+                "fixes_applied",
+                "tests_rerun",
+                "remaining_issues",
+            ),
+        )
         artifact = cls(
             trigger_phase=FixTriggerPhase(_require_str(data, "trigger_phase")),
             summary=_require_str(data, "summary"),
@@ -1614,6 +2842,22 @@ class FinalDecisionArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> FinalDecisionArtifact:
         data = _ensure_mapping(raw, label="final_decision")
+        _require_exact_keys(
+            data,
+            label="final_decision",
+            expected=(
+                "experiment_id",
+                "decision",
+                "recommended_metric_name",
+                "recommended_metric_value",
+                "reviewer_verdict",
+                "rationale",
+                "log_summary",
+                "continue_loop",
+                "memory_write_required",
+                "infra_rationale",
+            ),
+        )
         metric_value = data.get("recommended_metric_value")
         if metric_value is not None and (
             isinstance(metric_value, bool) or not isinstance(metric_value, int | float)
@@ -1668,6 +2912,11 @@ class MemoryVerificationReceipt:
     @classmethod
     def from_dict(cls, raw: object) -> MemoryVerificationReceipt:
         data = _ensure_mapping(raw, label="memory_verification_receipt")
+        _require_exact_keys(
+            data,
+            label="memory_verification_receipt",
+            expected=("experiment_id", "kg_path", "predicates", "verified_rows_digest"),
+        )
         digest = _require_str(data, "verified_rows_digest")
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise AutoresearchValidationError("verified_rows_digest must be a SHA-256 hex digest")
@@ -1753,6 +3002,18 @@ class AutoresearchState:
     @classmethod
     def from_dict(cls, raw: object) -> AutoresearchState:
         data = _ensure_mapping(raw, label="autoresearch_state")
+        if "schema_version" not in data:
+            raise AutoresearchValidationError(
+                "schema-less live state must run `gateway-cli autoresearch-migrate-state` "
+                "before `gateway-cli autoresearch-next`; "
+                f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
+            )
+        schema_version = _require_int(data, "schema_version")
+        if schema_version != AUTORESEARCH_STATE_SCHEMA_VERSION:
+            raise AutoresearchValidationError(
+                "autoresearch state schema migration is required; "
+                f"expected {AUTORESEARCH_STATE_SCHEMA_VERSION}, got {schema_version}"
+            )
 
         def _parse_tuple(
             field_name: str,
@@ -1776,6 +3037,33 @@ class AutoresearchState:
             raise AutoresearchValidationError(
                 "mode must be explicit in persisted autoresearch state"
             )
+        _require_exact_keys(
+            data,
+            label="autoresearch_state",
+            expected=(
+                "schema_version",
+                "phase",
+                "iteration",
+                "consensus_retry_count",
+                "verification_fix_attempts",
+                "setup",
+                "context_packet",
+                "debate_rounds",
+                "consensus_history",
+                "implementation_result",
+                "verification_history",
+                "review_history",
+                "fix_history",
+                "pending_fix_trigger",
+                "final_decision",
+                "memory_written",
+                "mode",
+                "memory_verification_receipt",
+                "platform_readiness",
+                "suspended",
+                "suspension_reason",
+            ),
+        )
         mode_raw = data.get("mode")
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
@@ -1833,6 +3121,7 @@ class AutoresearchState:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "schema_version": AUTORESEARCH_STATE_SCHEMA_VERSION,
             "phase": self.phase.value,
             "iteration": self.iteration,
             "consensus_retry_count": self.consensus_retry_count,
@@ -1867,6 +3156,9 @@ class AutoresearchState:
 LOCAL_RECEIPT_PATHS: dict[str, Path] = {
     "g2.autoresearch_skill": Path("gateway/agent_config/skills/autoresearch/SKILL.md"),
     "g2.quantipy_methodology": Path("gateway/agent_config/skills/quantipy-methodology/SKILL.md"),
+    "g2.quantipy_data_contract": Path(
+        "gateway/agent_config/skills/quantipy-data-contract/SKILL.md"
+    ),
 }
 
 QUANTIPY_RECEIPT_PATHS: dict[str, Path] = {
@@ -1889,6 +3181,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.SETUP_CONTEXT: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.experiment_data",
         "quantipy.skill.data_querying",
@@ -1898,6 +3191,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.DEBATE: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backend_python",
         "quantipy.skill.backtesting",
@@ -1914,6 +3208,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.CONSENSUS: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backtesting",
         "quantipy.skill.data_collection",
@@ -1927,6 +3222,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.IMPLEMENTATION: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backend_python",
         "quantipy.skill.backtesting",
@@ -1938,6 +3234,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.VERIFICATION: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backtesting",
         "quantipy.skill.data_querying",
@@ -1947,6 +3244,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.REVIEW: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backtesting",
         "quantipy.skill.data_querying",
@@ -1957,6 +3255,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.FIX_TEST: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
         "quantipy.skill.backend_python",
         "quantipy.skill.backtesting",
@@ -1969,6 +3268,7 @@ PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
     Phase.DECISION_LOG: (
         "g2.autoresearch_skill",
         "g2.quantipy_methodology",
+        "g2.quantipy_data_contract",
         "quantipy.agents",
     ),
     Phase.REPEAT: (
@@ -2006,7 +3306,12 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
         ]
     },
     ArtifactType.DEBATE_RESULT: {
-        "required_fields": ["round_number", "submissions[5]", "submissions[*].compute_fit"],
+        "required_fields": [
+            "round_number",
+            "submissions[5]",
+            "submissions[*].example_tickers",
+            "submissions[*].compute_fit",
+        ],
     },
     ArtifactType.CONSENSUS_RESULT: {
         "required_fields": [
@@ -2025,6 +3330,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "dissent_summary",
             "winner_theory_id|null",
             "implementation_brief|null",
+            "universe_plan|null",
         ]
     },
     ArtifactType.IMPLEMENTATION_RESULT: {
@@ -2057,6 +3363,8 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "data_coverage",
             "infra_gate_outcome",
             "infra_rationale",
+            "universe_verification_receipt",
+            "price_hydration_receipt",
         ],
         "mode_requirements": {
             ResearchMode.ALPHA_RESEARCH.value: {
@@ -2305,9 +3613,14 @@ def _validate_policy(
         policy.reviewer,
         policy.fixer,
     ):
-        if tuple(agent.skills) != ("mempalace-readonly", "quantipy-methodology"):
+        if tuple(agent.skills) != (
+            "mempalace-readonly",
+            "quantipy-methodology",
+            "quantipy-data-contract",
+        ):
             raise AutoresearchConfigError(
-                f"{agent.agent_id} must load exactly mempalace-readonly and quantipy-methodology"
+                f"{agent.agent_id} must load exactly mempalace-readonly, "
+                "quantipy-methodology, and quantipy-data-contract"
             )
         if "mempalace" in agent.skills:
             raise AutoresearchConfigError(f"{agent.agent_id} must not load mempalace")
@@ -2421,6 +3734,51 @@ def _validate_mempalace_server(
         )
 
 
+def _validate_alpha_universe_chain(
+    state: AutoresearchState,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    consensus = state.latest_consensus
+    if consensus is None or consensus.status is not ConsensusStatus.MAJORITY:
+        return
+    if _is_operator_precondition_consensus(consensus):
+        return
+    if consensus.universe_plan is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH majority consensus requires a frozen universe_plan"
+        )
+    consensus.universe_plan.validate()
+    for verification in state.verification_history:
+        if verification.universe_verification_receipt is None:
+            if verification.status is VerificationStatus.PASS:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH PASS cannot omit universe verification receipts"
+                )
+            continue
+        if verification.price_hydration_receipt is None:
+            raise AutoresearchValidationError(
+                "verification cannot persist a partial universe receipt chain"
+            )
+        verification.universe_verification_receipt.validate_against_plan(consensus.universe_plan)
+        if validation_context is not None:
+            validation_context.validate_universe_receipt(verification.universe_verification_receipt)
+        verification.price_hydration_receipt.validate_against_universe(
+            verification.universe_verification_receipt
+        )
+
+
+def _revalidate_accepted_member_union_manifests(state: AutoresearchState) -> None:
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    for verification in state.verification_history:
+        receipt = verification.universe_verification_receipt
+        if verification.status is VerificationStatus.PASS and receipt is not None:
+            receipt.member_union_manifest.validate()
+            _verify_member_union_manifest(receipt)
+
+
 def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:
     if state.iteration < 1:
         raise AutoresearchValidationError("iteration must be >= 1")
@@ -2456,6 +3814,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("debate history requires a context_packet")
     if state.consensus_history and state.latest_debate is None:
         raise AutoresearchValidationError("consensus history requires a debate_result")
+    _validate_alpha_universe_chain(state)
     if state.memory_written and state.final_decision is None:
         raise AutoresearchValidationError("memory_written cannot be true before final_decision")
     if (
@@ -3054,15 +4413,25 @@ def _validate_final_decision_artifact(
         and latest_consensus.status is ConsensusStatus.NO_CONSENSUS
         and state.implementation_result is None
     ):
-        if artifact.decision is not FinalDecision.NO_CONSENSUS:
+        expected_no_consensus = (
+            FinalDecision.INFRA_BLOCKED
+            if state.mode is ResearchMode.DATA_INFRA_G0
+            else FinalDecision.NO_CONSENSUS
+        )
+        if artifact.decision is not expected_no_consensus:
             raise AutoresearchValidationError(
-                "final_decision must be NO_CONSENSUS when consensus never reached a majority"
+                f"final_decision must be {expected_no_consensus.value} when consensus "
+                "never reached a majority"
             )
         if artifact.memory_write_required:
             raise AutoresearchValidationError(
                 "NO_CONSENSUS requires final_decision.memory_write_required=false"
             )
-        if artifact.infra_rationale is not None:
+        if state.mode is ResearchMode.DATA_INFRA_G0 and not artifact.infra_rationale:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 no-consensus final_decision requires infra_rationale"
+            )
+        if state.mode is not ResearchMode.DATA_INFRA_G0 and artifact.infra_rationale is not None:
             raise AutoresearchValidationError(
                 "NO_CONSENSUS final_decision cannot contain infra_rationale"
             )
@@ -3239,12 +4608,22 @@ def _phase_instruction(
         Phase.CONSENSUS: (
             "Decide whether the latest debate round has a 3-of-5 majority. "
             "Return MAJORITY or NO_CONSENSUS only. "
-            "There is exactly one retry if the first consensus is NO_CONSENSUS."
+            "There is exactly one retry if the first consensus is NO_CONSENSUS. "
+            "For an ALPHA_RESEARCH majority, freeze exactly one compact universe_plan "
+            "with the profile identity/digests, sorted unique explicit selection dates, "
+            "and next-session-or-later execution policy."
         ),
         Phase.IMPLEMENTATION: (
             "Implementation is allowed only after a majority consensus. "
             "Use the final implementation brief exactly "
-            "as approved. No implementation without consensus majority."
+            "as approved. No implementation without consensus majority. For "
+            "ALPHA_RESEARCH, prewarm every frozen explicit selection date once with "
+            "qp.security_universe_screen(), derive deterministic contiguous batches from "
+            "the frozen canonical plan inputs, perform one "
+            "qp.security_universe_history() operation per batch, form only an in-memory "
+            "sorted member union, and call "
+            "qp.prices() exactly once for that union and the full experiment "
+            "range/timeframe/market-hours before constructing any fold."
         ),
         Phase.VERIFICATION: (
             "Verify the produced experiment deterministically. "
@@ -3392,8 +4771,10 @@ def _mode_contract(state: AutoresearchState) -> str:
     return (
         "Mode contract: ALPHA_RESEARCH\n"
         "- This is a strategy experiment. Burned theory families require materially "
-        "new evidence. A fixed local sleeve must be disclosed and cannot claim "
-        "cap-verified compliance.\n\n"
+        "new evidence. Consensus must freeze a strict universe_plan. Persist only compact "
+        "universe, hydration, and coverage identities/counts/digests; never persist full "
+        "membership arrays. ALPHA_RESEARCH has no fixed-sleeve or per-symbol coverage "
+        "alternative.\n\n"
     )
 
 
@@ -3426,13 +4807,19 @@ def _verification_handoff_contract(
         "metric and coverage field is complete. Every required JSON key must be "
         "present; for TEST_FAILURE or BUG_SIGNAL, unavailable metrics or coverage "
         "must be null rather than fabricated or zero-valued.\n"
-        "- When coverage is available, include the required data_coverage aggregate "
-        "and per-symbol fields: declared_intended_start, declared_intended_end, "
-        "actual_common_start, actual_common_end, oos_start, oos_end, "
-        "expected_trading_days, actual_trading_days, coverage_percent, "
-        "missing_reason, default_fold_count, fallback_fold_count, "
-        "cap_provenance_available, and fixed_sleeve_local_data. When coverage is "
-        "unavailable for TEST_FAILURE or BUG_SIGNAL, set data_coverage to null.\n"
+        "- Verification owns all factual receipts; implementation_result must not contain "
+        "them. For ALPHA_RESEARCH PASS, construct deterministic contiguous universe history "
+        "batches from the canonical plan, with one operation per batch and authoritative "
+        "contract/source/calendar evidence for every date. Include one canonical price "
+        "hydration receipt and compact dynamic data_coverage bound to the same union, range, "
+        "timeframe, and market-hours. PASS requires missing_symbol_count=0, "
+        "missing_symbol_sessions=0, and covered_symbol_sessions=expected_symbol_sessions. "
+        "Dynamic coverage must include member_union_count, member_union_digest, "
+        "experiment_start, experiment_end, oos_start, oos_end, timeframe, market_hours, "
+        "expected_symbol_sessions, covered_symbol_sessions, missing_symbol_count, "
+        "missing_symbol_sessions, default_fold_count, and fallback_fold_count. "
+        "TEST_FAILURE or BUG_SIGNAL may set all three receipts to null when unavailable, "
+        "but must never emit a partial receipt chain or a partial PASS.\n"
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
         "REMEDIATION_REQUIRED. Do not use Sharpe as the gate rationale.\n\n"
@@ -3553,11 +4940,15 @@ def next_action(
         )
     try:
         validate_state_readiness(state.platform_readiness, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        validation_context.validate_for_state(state)
+        if state.phase is not Phase.REVIEW:
+            _revalidate_accepted_member_union_manifests(state)
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
-    return NextAction(
+    action = NextAction(
         phase=state.phase,
         next_agent_ids=target.agent_ids,
         expected_artifact_type=target.artifact_type,
@@ -3572,6 +4963,10 @@ def next_action(
             readiness=readiness,
         ),
     )
+    if state.phase is Phase.REVIEW:
+        # Keep this external-file check adjacent to review dispatch.
+        _revalidate_accepted_member_union_manifests(state)
+    return action
 
 
 def advance_state(
@@ -3586,8 +4981,15 @@ def advance_state(
     | FixResultArtifact
     | FinalDecisionArtifact,
     policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
 ) -> AutoresearchState:
     _validate_state(state, policy)
+    if state.mode is ResearchMode.ALPHA_RESEARCH and state.phase is Phase.VERIFICATION:
+        if validation_context is None:
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH artifact advancement requires a strict readiness validation context"
+            )
+        validation_context.validate_for_state(state)
 
     if state.phase is Phase.SETUP_CONTEXT:
         if isinstance(artifact, SetupContextArtifact):
@@ -3647,6 +5049,10 @@ def advance_state(
                     consensus_history=next_consensus_history,
                     phase=Phase.DECISION_LOG,
                 )
+            if state.mode is ResearchMode.ALPHA_RESEARCH and artifact.universe_plan is None:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH majority consensus requires a frozen universe_plan"
+                )
             return replace(
                 state,
                 consensus_history=next_consensus_history,
@@ -3678,7 +5084,9 @@ def advance_state(
                 "cannot advance implementation without consensus majority"
             )
         _validate_implementation_workspace(state, artifact, require_compute_fit=True)
-        return replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
+        next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
+        _validate_alpha_universe_chain(next_state)
+        return next_state
 
     if state.phase is Phase.VERIFICATION:
         if not isinstance(artifact, VerificationResultArtifact):
@@ -3688,28 +5096,34 @@ def advance_state(
         artifact.validate(mode=state.mode)
         next_verification_history = (*state.verification_history, artifact)
         if artifact.status is VerificationStatus.PASS:
-            return replace(
+            next_state = replace(
                 state,
                 verification_history=next_verification_history,
                 pending_fix_trigger=None,
                 phase=Phase.REVIEW,
             )
+            _validate_alpha_universe_chain(next_state, validation_context)
+            return next_state
         if (
             artifact.status is VerificationStatus.TEST_FAILURE
             and state.verification_fix_attempts >= 2
         ):
-            return replace(
+            next_state = replace(
                 state,
                 verification_history=next_verification_history,
                 pending_fix_trigger=None,
                 phase=Phase.DECISION_LOG,
             )
-        return replace(
+            _validate_alpha_universe_chain(next_state, validation_context)
+            return next_state
+        next_state = replace(
             state,
             verification_history=next_verification_history,
             pending_fix_trigger=FixTriggerPhase.VERIFICATION,
             phase=Phase.FIX_TEST,
         )
+        _validate_alpha_universe_chain(next_state, validation_context)
+        return next_state
 
     if state.phase is Phase.REVIEW:
         if not isinstance(artifact, ReviewResultArtifact):
@@ -3836,9 +5250,18 @@ def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
         and not decision.memory_write_required
         and not state.memory_written
         and state.memory_verification_receipt is None
-        and state.implementation_result is not None
-        and latest_verification is not None
-        and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
+        and (
+            (
+                state.implementation_result is not None
+                and latest_verification is not None
+                and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
+            )
+            or (
+                state.implementation_result is None
+                and state.latest_consensus is not None
+                and state.latest_consensus.status is ConsensusStatus.NO_CONSENSUS
+            )
+        )
     )
 
 
@@ -3856,8 +5279,15 @@ def _standard_metric_object(decision: FinalDecisionArtifact) -> str:
     return standardize_mempalace_kg_object(metric)
 
 
-def _standard_data_window_object(coverage: AggregateCoverageReceipt) -> str:
+def _standard_data_window_object(
+    coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt,
+) -> str:
     """Return the normalized common data/OOS window token required in MemPalace."""
+    if isinstance(coverage, DynamicUniverseCoverageReceipt):
+        return standardize_mempalace_kg_object(
+            f"{coverage.experiment_start}_to_{coverage.experiment_end}_oos_"
+            f"{coverage.oos_start}_to_{coverage.oos_end}"
+        )
     return standardize_mempalace_kg_object(
         f"{coverage.actual_common_start}_to_{coverage.actual_common_end}_oos_"
         f"{coverage.oos_start}_to_{coverage.oos_end}"
@@ -4144,6 +5574,68 @@ def load_state_file(path: Path) -> AutoresearchState:
     except json.JSONDecodeError as exc:
         raise AutoresearchValidationError(f"invalid state JSON: {path}") from exc
     return normalize_autoresearch_state(AutoresearchState.from_dict(raw))
+
+
+def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchState:
+    """Explicitly migrate the sole lossless schema-less live-state shape to v2."""
+    try:
+        raw = json.loads(source_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AutoresearchValidationError(f"missing state file: {source_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise AutoresearchValidationError(f"invalid state JSON: {source_path}") from exc
+    data = _ensure_mapping(raw, label="autoresearch_state")
+    if "schema_version" in data:
+        state = AutoresearchState.from_dict(data)
+        save_state_file(output_path, state)
+        return state
+
+    expected_schema_less = set(AutoresearchState().to_dict()) - {"schema_version"}
+    pristine_values: dict[str, object] = {
+        "phase": Phase.SETUP_CONTEXT.value,
+        "iteration": 1,
+        "consensus_retry_count": 0,
+        "verification_fix_attempts": 0,
+        "setup": None,
+        "context_packet": None,
+        "debate_rounds": [],
+        "consensus_history": [],
+        "implementation_result": None,
+        "verification_history": [],
+        "review_history": [],
+        "fix_history": [],
+        "pending_fix_trigger": None,
+        "final_decision": None,
+        "memory_written": False,
+        "mode": None,
+        "memory_verification_receipt": None,
+        "suspended": False,
+        "suspension_reason": None,
+    }
+    is_pristine = set(data) == expected_schema_less and all(
+        data.get(key) == value for key, value in pristine_values.items()
+    )
+    if not is_pristine or data.get("platform_readiness") is None:
+        raise AutoresearchValidationError(
+            "schema-less historical state is incompatible with lossless v2 migration. "
+            "Archive it, then start a new campaign with `gateway-cli "
+            "autoresearch-init-state --output <new-state.json> "
+            "--readiness-manifest <platform-readiness.json>`."
+        )
+    migrated = dict(data)
+    migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
+    state = AutoresearchState.from_dict(migrated)
+    save_state_file(output_path, state)
+    return state
+
+
+def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
+    """Create a pristine v2 campaign state pinned to authoritative readiness."""
+    try:
+        identity = readiness.require_ready()
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    return AutoresearchState(platform_readiness=identity)
 
 
 def save_state_file(path: Path, state: AutoresearchState) -> None:

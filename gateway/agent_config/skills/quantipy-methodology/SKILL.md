@@ -1,80 +1,79 @@
 ---
 name: quantipy-methodology
-description: Deterministic source-of-truth loading for Quantipy stage agents before context, debate, implementation, review, and fix work.
-version: 1.0.0
+description: Deterministic source-of-truth routing for Quantipy autoresearch stages.
+version: 2.0.0
 ---
 
 # Quantipy Methodology
 
-This skill is for OpenClaw stage agents working on Quantipy. It keeps
-methodology, repo rules, Codex role definitions, and target-repo skills sourced
-from `/home/dev/repos/quantipy` at task time.
+This skill routes OpenClaw stage agents to the minimum current Quantipy
+methodology needed for their task. Every stage also loads
+`quantipy-data-contract`; that compact runtime skill and the injected readiness
+receipt define platform capabilities, so stages do not rediscover them.
 
-Do not copy Quantipy's `AGENTS.md`, `.agents/skills`, or `.codex/agents` files
-into this repo. Quantipy is the source of truth. If the target repo changes,
-load the current files from `/home/dev/repos/quantipy` again.
+Quantipy remains the source of truth. Do not copy its `AGENTS.md`, repo skills,
+or Codex agent definitions into G2 OpenClaw.
 
 ## Required Preflight
 
-Before doing context, debate, consensus, implementation, review, or fix work:
+Before context, debate, consensus, implementation, review, or fix work:
 
 1. Read `/home/dev/repos/quantipy/AGENTS.md` completely.
-2. List `/home/dev/repos/quantipy/.agents/skills/*/SKILL.md`.
-3. Read each target-repo skill that is relevant to the stage and task.
-4. For any relevant skill that points to rule files, read the required rule
-   files from Quantipy before acting on that skill.
-5. List `/home/dev/repos/quantipy/.codex/agents/*.toml`.
-6. Read the Codex agent definition files relevant to the stage.
-7. State which Quantipy files were loaded before giving conclusions or making
-   changes.
+2. Load `quantipy-data-contract` and consume the injected
+   `PLATFORM_READINESS_CAPABILITIES` receipt.
+3. Read only the target-repo skills and rule files routed below or clearly
+   required by the candidate task.
+4. Read the routed Codex agent definitions.
+5. Record the exact Quantipy source paths loaded in the structured stage
+   artifact.
 
-If a listed file is missing, say exactly which path is missing and continue only
-if the remaining files are enough to perform the stage safely. Do not invent or
-reconstruct missing methodology from memory.
+If a required path is missing, report that exact path as an operator-owned
+blocker. Do not reconstruct missing methodology or capabilities from memory.
 
 ## Stage Routing
 
-Use this routing as a minimum. Read additional Quantipy files when the task
-clearly needs them.
+Every row assumes `AGENTS.md`, `quantipy-data-contract`, and the readiness
+receipt are already loaded.
 
-| Stage agent | Required Quantipy sources |
-|-------------|---------------------------|
-| `context-curator` | `AGENTS.md`, `experiment-data`, `data-querying`, relevant `.codex/agents/explorer.toml` and `researcher.toml` |
-| `debater-microstructure` | `AGENTS.md`, `backtesting`, `experiment-data`, relevant `theorist.toml` and `researcher.toml` |
-| `debater-data` | `AGENTS.md`, `data-collection`, `data-querying`, `experiment-data`, `backtesting`, relevant `researcher.toml` |
-| `debater-skeptic` | `AGENTS.md`, `experiment-data`, `backtesting`, relevant `contrarian.toml` and `reviewer.toml` |
-| `debater-theory` | `AGENTS.md`, `backtesting`, `experiment-data`, relevant `theorist.toml` and `researcher.toml` |
-| `debater-implementation` | `AGENTS.md`, `backend-python`, `backtesting`, `data-querying`, `experiment-data`, relevant `backend-python.toml` and `orchestrator.toml` |
-| `consensus-arbiter` | `AGENTS.md`, skills loaded by the debaters for the candidate theories, relevant `contrarian.toml`, `theorist.toml`, and `reviewer.toml` |
-| `implementer` | `AGENTS.md`, `backend-python`, `backtesting`, `data-querying`, `experiment-data`, relevant `backend-python.toml` and `orchestrator.toml` |
-| `reviewer` | `AGENTS.md`, `experiment-data`, `backtesting`, `data-querying`, relevant `reviewer.toml` and `contrarian.toml` |
-| `fixer` | `AGENTS.md`, `backend-python`, the skill(s) governing the defect, relevant `backend-python.toml`, `orchestrator.toml`, and `reviewer.toml` |
+| Stage agent | Additional Quantipy sources |
+|-------------|-----------------------------|
+| `context-curator` | `experiment-data`; `data-querying` only to interpret existing universe receipts; `explorer.toml`, `researcher.toml` |
+| `debater-microstructure` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
+| `debater-data` | `data-querying` including its price and security-master rules, `experiment-data`, `backtesting`; `researcher.toml` |
+| `debater-skeptic` | `experiment-data`, `backtesting`; `contrarian.toml`, `reviewer.toml` |
+| `debater-theory` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
+| `debater-implementation` | `backend-python`, `backtesting`, `data-querying`, `experiment-data`; `backend-python.toml`, `orchestrator.toml` |
+| `consensus-arbiter` | Candidate-governing skills cited by debaters; `contrarian.toml`, `theorist.toml`, `reviewer.toml` |
+| `implementer` | `backend-python`, `backtesting`, `data-querying`, `experiment-data`; `backend-python.toml`, `orchestrator.toml` |
+| `reviewer` | `experiment-data`, `backtesting`, `data-querying`; `reviewer.toml`, `contrarian.toml` |
+| `fixer` | `backend-python` and the skill governing the accepted defect; `backend-python.toml`, `orchestrator.toml`, `reviewer.toml` |
 
 ## Execution Rules
 
-- Treat target-repo methodology as current only after reading it in the active
-  stage turn.
-- Use shell commands from the OpenClaw workspace when needed to read Quantipy
-  files outside the workspace, for example `sed`, `rg`, `find`, and `jq`.
-- Do not change Quantipy methodology files unless the stage task explicitly asks
-  for a methodology update.
-- Do not substitute old G2 OpenClaw bootstrap knowledge for Quantipy's current
-  target-repo instructions.
-- If Quantipy methodology conflicts with this repo's autoresearch orchestration,
-  report the conflict to the PM instead of silently choosing one.
-- Read the context packet's explicit mode before acting. `DATA_INFRA_G0` work
-  repairs data/provenance/folds and emits a gate outcome; it does not validate
-  alpha performance. `ALPHA_RESEARCH` work requires coverage receipts before
-  any performance conclusion.
-- For every verification, preserve per-symbol and aggregate coverage receipts:
-  intended and actual ranges, OOS range, expected/actual days, percent, missing
-  reason, default/fallback folds, cap provenance, and fixed-local-sleeve flag.
-  A fixed sleeve must be declared and cannot claim cap-verified compliance.
-- Treat coverage as one common-calendar analysis: all receipts share the
-  declared range; aggregate actual/OOS windows are the per-symbol
-  intersections; day counts, coverage percent, and missing reason are shared
-  common-calendar values rather than symbol sums; aggregate fold counts are
-  the fewest per-symbol folds. Reject contradictory receipts.
-- In alpha mode, reject a normalized burned theory family unless the submission
-  provides materially new evidence. A reviewer methodology PASS is distinct
-  from a final alpha KEEP decision.
+- Read routed target-repo methodology in the active stage turn. Treat
+  capabilities as current only from the runner receipt.
+- At consensus, preserve only canonical universe plan inputs: profile identity
+  and digest, sorted selection schedule, maximum members per date, and execution
+  policy. Consensus stores no batch boundaries; the runner mechanically derives
+  deterministic contiguous batch boundaries from those inputs. Add snapshot,
+  summary, and member-union materialization identities and digests, including
+  each batch's contract digest, only to verification receipts after each history
+  batch is materialized. Include the compact external canonical member-union
+  manifest path/SHA receipt required by `quantipy-data-contract`. Do not replace
+  either artifact with narrative capability claims or symbol lists.
+- Use shell reads from the OpenClaw workspace when needed to inspect Quantipy.
+- Do not change Quantipy methodology unless the accepted experiment task
+  explicitly owns that change.
+- If Quantipy methodology conflicts with autoresearch orchestration, report the
+  conflict to the PM.
+- `DATA_INFRA_G0` repairs data/provenance/folds and emits a gate outcome; it
+  never validates alpha. `ALPHA_RESEARCH` requires valid readiness, universe,
+  and coverage receipts before a performance conclusion.
+- `ALPHA_RESEARCH` requires only compact `DynamicUniverseCoverageReceipt` for
+  coverage. Legacy per-symbol `CoverageReceipt` and aggregate
+  `AggregateCoverageReceipt` are explicitly `DATA_INFRA_G0`-only; when G0 uses
+  them, their ranges, intersections, day counts, percentages, missing reasons,
+  and fold counts must agree.
+- Reject a burned theory family unless the alpha submission provides materially
+  new evidence. Reviewer methodology `PASS` is distinct from an alpha KEEP
+  decision.

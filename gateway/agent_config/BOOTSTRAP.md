@@ -1,166 +1,92 @@
-# Bootstrap — Quantipy Context
+# Bootstrap - Quantipy Context
 
 ## Repository
 
-`~/repos/quantipy` — Quantitative finance platform for market intelligence.
+`/home/dev/repos/quantipy` is the target quantitative-research platform. Its
+current `AGENTS.md`, repo skills, source, and Codex agent definitions are the
+methodology source of truth. Use `uv`; do not use pip or Poetry.
 
-## Tech Stack
+Key paths:
 
-- Python 3.11+ (managed with **uv**, not pip)
-- SQLAlchemy 2.0 + asyncpg (async PostgreSQL)
-- Alembic migrations
-- pytest + ruff
-- Source layout: `src/quantipy/`
+- `src/quantipy/`: async Python services and research modules.
+- `src/quantipy/alpha/`: experiment-owned strategy modules.
+- `notebooks/experiments/`: experiment notebooks.
+- `RESEARCH_LOG.md`: human-readable experiment record.
+- `.agents/skills/` and `.codex/agents/`: current Quantipy instructions.
 
-## Modules
+## Runtime Contracts
 
-| Module | Purpose |
-|--------|---------|
-| `reddit_sentiment/` | Reddit post scraping + LLM sentiment analysis (live + historical) |
-| `news_sentiment/` | News article sentiment via Massive.com and Polygon.io |
-| `price_data/` | OHLCV 1-min bars via Databento |
-| `technical_indicators/` | 13 volume indicators (VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Vol) |
-| `universe/` | Trading universe builder (ticker selection) |
-| `queue/` | PostgreSQL job queue (SKIP LOCKED pattern) |
-| `llm/` | LLM provider abstraction for sentiment analysis |
-| `common/` | Config, database, enums, HTTP, logging, migrations |
-| `cli/` | Typer CLI: reddit, news, ohlc, jobs, reset commands |
+Every Quantipy stage loads `quantipy-methodology` and
+`quantipy-data-contract`. The compact data skill governs universe selection,
+price hydration and cache reuse, corporate actions, unsupported data, execution
+timing, history request limits, deterministic batching, and prompt hygiene. Use
+the runner-injected platform-readiness receipt and the platform's universe
+receipts; do not reconstruct platform capabilities from bootstrap prose.
 
-## Data Available
+## Research Scope
 
-- **OHLCV**: Any ticker, any timeframe (down to 1-min bars). `qp.prices()` auto-fetches missing data from Massive.com on first call — no manual fetch step needed. Period: 2021–2026.
-- **Reddit sentiment**: 2021–2026 historical posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores
-- **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
-- **Volume indicators**: VWAP, OBV, MFI, CMF, A/D, VROC, PVT, Klinger, EOM, VWMA, Elder Force, NVI, Chaikin Volatility
+Research intraday equity strategies using real platform data, simple and
+defensible indicator interactions, and optional Reddit/news sentiment. Define
+the universe, prediction and holding horizon, position sizing, transaction
+costs, train/CV/OOS split, null tests, and rejection criteria. Positions are
+intraday and obey the target repo's close-out rule.
 
-## Compute Resources
+Select each historical universe through the data contract. Market cap is not a
+point-in-time universe criterion. The actual date range comes from readiness
+and coverage receipts, not a hardcoded calendar promise. Require broad,
+auditable common-calendar coverage and an untouched OOS holdout; do not invent
+missing observations or capabilities.
 
-The autoresearch runner supplies every stage with a read-only, machine-readable
-compute capability snapshot covering CPU, memory, GPU/VRAM, CUDA visibility, and
-GPU-capable packages in the Quantipy virtualenv. Treat that snapshot as the only
-authoritative evidence of available compute.
+## Compute Fit
 
-The loop does not prefer CPU or GPU. For every new debate submission and
-implementation result, declare `compute_fit` with exactly one target (`none`,
-`cpu`, `gpu`, or `mixed`), a rationale, importable required dependencies, and a
-benchmark plan. Choose based on the hypothesis, data scale, reproducibility, and
-measured or planned cost. A GPU or mixed declaration is accepted only when the
-snapshot proves a usable GPU/CUDA runtime and every declared dependency is
-present. Missing dependencies are an exact infrastructure blocker: do not
-install them, fabricate evidence, or silently fall back to another device.
+The runner supplies a read-only capability snapshot. Every new debate
+submission and implementation result includes a `compute_fit` object with:
 
-CPU and no-accelerator choices are fully valid. The compute contract exists to
-make resource decisions explicit while preserving the PM's freedom to pursue
-any research strategy.
+- `target`: `none`, `cpu`, `gpu`, or `mixed`.
+- `rationale`: fit to the hypothesis and data scale.
+- `required_dependencies`: a JSON list; empty for `none` and containing only
+  the declared compute dependencies required by the selected path.
+- `benchmark_plan`: the planned wall-time, memory, or acceleration check.
 
-## Intraday Trading Focus
+`gpu` and `mixed` are valid only when the snapshot proves a usable GPU/CUDA
+runtime and every declared dependency. Missing runtime or dependency evidence
+is an exact infrastructure blocker. Stage agents do not install dependencies,
+change execution devices, or manufacture capability evidence. CPU and `none`
+remain valid choices.
 
-**All research targets INTRADAY strategies.** We have 1-minute OHLCV bars — exploit this granularity.
+## Experiment Artifacts
 
-- **Holding period**: Minutes to hours. No overnight positions. Entry and exit within the same trading day.
-- **Data edge**: 1-min bars give us microstructure resolution (volume profiles, VWAP dynamics, opening range patterns, intraday momentum/mean-reversion cycles).
-- **Intraday patterns to explore**: Opening range breakout/failure, VWAP reversion, volume-at-price concentration, lunch hour mean reversion, power hour momentum, intraday sentiment spikes (Reddit/news timing vs. price).
-- **Time features matter**: Hour-of-day, minutes-since-open, time-to-close, session half. Intraday alpha often has strong time-of-day dependence.
-- **Transaction costs are critical**: At intraday frequency, slippage and commissions can destroy alpha. Every backtest MUST model realistic transaction costs.
+Each experiment owns:
 
-## Data Range Coverage Rule (NON-NEGOTIABLE)
+- `src/quantipy/alpha/<strategy_name>/` module code.
+- `notebooks/experiments/<strategy_name>.ipynb` as the orchestration and report.
+- Focused tests for features, splits, backtest behavior, and metric extraction.
+- Structured verification, review, and final-decision artifacts advanced by the
+  deterministic runner.
 
-**Every experiment MUST use at least 95% of available trading days for the chosen ticker(s).** We have 2021–2026 data — use it all.
+The notebook records data inventory and receipts, hypothesis and universe
+profile, feature engineering, tuning, walk-forward evaluation, transaction
+costs, OOS results, null tests, and conclusion. Missing notebook/runtime
+tooling is operator-owned infrastructure; PM and stage agents report exact
+evidence and do not alter dependencies.
 
-- **Data is auto-fetched**: `qp.prices()` gap-fills missing dates from Massive.com automatically. Just request the full range.
-- **Train/CV period**: At least 3 years of data (e.g., 2021–2024)
-- **OOS holdout**: At least 6 months / 120 trading days (e.g., 2025-H1). NEVER touched during training.
-- **Walk-forward folds**: With 3+ years of data, use 20+ folds minimum.
+## Ownership And Memory
 
-## Research Direction
+The PM orchestrates and decides. Implementer and fixer own experiment code in
+the persisted disposable worktree. Shared platform, runtime, loader, harness,
+or orchestration changes belong to the human/Codex operator. Preserve those
+boundaries even when a shared change exposes an experiment defect.
 
-### Trading Universe: Small/Mid-Cap Only (NON-NEGOTIABLE)
-
-**You may ONLY trade small-cap and mid-cap stocks ($500M–$20B market cap).** This is the core thesis: simple indicators work better on less-efficient, higher-volatility names where institutional coverage is thinner and retail flow creates exploitable patterns.
-
-**Universe discovery IS part of the research.** You choose which small/mid-cap tickers to trade. Consider:
-- Liquidity (>2M avg daily volume — must be tradeable at intraday frequency)
-- Volatility (higher intraday range = more alpha opportunity)
-- Sector diversity (don't cluster everything in one sector)
-- Data availability (need 2021–2026 coverage for robust walk-forward)
-
-**Examples of valid small/mid-cap tickers** (not exhaustive — discover your own):
-- Meme/retail-heavy: PLTR, SOFI, HOOD, RIVN, LCID, MARA, BB, CLOV, WISH, SKLZ, BBBY
-- Biotech/pharma: MRNA (was mid-cap pre-2021), DNA, CRSP, BEAM
-- Tech mid-cap: RBLX, U, DKNG, OPEN, UPST, AFRM, BILL
-- EV/clean energy: CHPT, QS, PLUG, FCEL, BLNK
-- Fintech: SQ (was mid-cap), COIN, NU, LMND
-
-**Large-caps (SPY, AAPL, NVDA, TSLA, MSFT, GOOG, META, AMZN, etc.) may be used as SIGNAL SOURCES but NEVER traded.** Cross-asset lead-lag, beta hedging, sector rotation signals — all fine as features. But the positions you take must be in small/mid-caps.
-
-### Data Sources
-
-- **OHLCV**: Any ticker (1-min to daily bars, 2021–2026). Auto-fetched on first `qp.prices()` call.
-- **Reddit sentiment**: 2021–2026 posts from r/wallstreetbets, r/stocks, r/investing with LLM sentiment scores. Use for **feature generation and signal conditioning** — NOT to restrict the trading universe. Many tradeable small/mid-caps have zero Reddit coverage, and that's fine.
-- **News sentiment**: Articles with sentiment from Massive.com and Polygon.io
-
-### Data Download: Pre-fetch Before Backtesting
-
-When you select tickers for an experiment, **download the full 2021–2026 OHLCV data upfront** before running the backtest. `qp.prices()` auto-fetches missing data, but fetching inside a walk-forward loop is slow. Pre-fetch pattern:
-
-```python
-# Pre-fetch all tickers at experiment start (before any backtest logic)
-import quantipy as qp
-TICKERS = ["PLTR", "SOFI", "DKNG", "SPY"]  # SPY for signals only, not traded
-for t in TICKERS:
-    df = qp.prices(t, "2021-01-01", "2026-04-01")
-    print(f"{t}: {len(df)} bars, {df['timestamp'].dt.date.nunique()} trading days")
-```
-
-### Alpha Directions
-
-Pursue novel intraday alpha through any combination of:
-- **Intraday microstructure**: Volume profiles, VWAP deviation, opening range dynamics, bid-ask spread proxies
-- **Sentiment-gated signals**: Use Reddit/news sentiment as conditioning variables — but don't require tickers to have Reddit coverage
-- **Cross-asset signals**: Use SPY/QQQ/sector ETFs as leading indicators for small/mid-cap positions. The signal is from large-caps, the trade is in small/mid-caps.
-- **ML with theoretical basis**: LightGBM/XGBoost/HistGradientBoosting on engineered features with purged walk-forward CV
-- **Regime detection**: HMM on intraday volatility states, change-point detection → regime-conditional entry/exit
-- **Cross-session patterns**: Prior day closing action predicting opening patterns
-- **Feature engineering over indicator stacking**: Volatility ratios, volume imbalance, momentum decay, sentiment×volume interactions
-- **Universe selection as alpha**: Which small/mid-caps to trade on which days is itself a signal. Rotation, momentum, liquidity screening.
-
-## Experiment Notebooks
-
-All experiments produce Jupyter notebooks as primary output.
-
-- **Location:** `notebooks/experiments/<strategy_name>.ipynb`
-- **Existing:** `notebooks/llm_comparison_experiment.ipynb` (pre-existing)
-- **Dependency/runtime tooling:** If notebook execution requires missing
-  `jupyter`, `nbformat`, `matplotlib`, or any other dependency/runtime tooling,
-  fail closed: report/block with the exact missing-dependency evidence and
-  await human/Codex operator action. PM and stage agents do not modify
-  dependency or runtime tooling.
-- **Execution:** `uv run jupyter execute <notebook.ipynb> --timeout=300`
-- **Convention:** Notebook imports module code from `src/quantipy/alpha/<strategy_name>/` — it orchestrates the experiment, not duplicates the code.
-
-## Shared Experiment Memory
-
-The file `RESEARCH_LOG.md` in the quantipy repo tracks all experiments tried,
-rejected ideas, and insights. Read it before every ideation round. Update it
-after every experiment result. Pass this context to `context-curator`, then to
-the five debate agents through `consensus-arbiter`. MemPalace is the only
-durable research memory layer; use it for prior experiment summaries, metrics,
-reviewer objections, and failure patterns.
-
-## Data APIs
-
-You are authorized to instruct Codex subagents to pull OHLC data from an
-available API. Make sure that data is persisted on disk in the SQL databases and
-you are not making repeated requests. Do not make manual pushes. If features
-need to be added to the codebase to handle this, delegate planning and
-implementation to the appropriate subagent.
+MemPalace is the only durable autonomous research memory and only
+`autoresearch-pm` may mutate it. Stage agents have read-only access. Store
+compact receipt references and experiment facts, never full universe symbol
+arrays.
 
 ## Commands
 
 ```bash
-cd ~/repos/quantipy
-uv sync                          # install deps
-uv run pytest -q                 # run tests
-uv run ruff check src/           # lint
-uv run python -m quantipy --help # CLI
+cd /home/dev/repos/quantipy
+uv run pytest
+uv run ruff check src/ tests/
+uv run mypy src/
 ```

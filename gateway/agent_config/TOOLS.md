@@ -94,7 +94,8 @@ relaunch the loop. Do not continue with hidden or unstructured state.
 Non-PM stage agents both deny every MemPalace mutation/operation tool in config
 and avoid the write-capable `mempalace` skill. They may read context, but they
 cannot alter durable MemPalace state. The PM performs final experiment logging
-through the write-capable skill after review and decision gates pass.
+through the write-capable skill only when the accepted final artifact sets
+`memory_write_required=true`.
 
 ## Long-Running Tasks
 
