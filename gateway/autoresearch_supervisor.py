@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import hashlib
 import json
@@ -11,7 +12,6 @@ import math
 import os
 import re
 import signal
-import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -19,7 +19,9 @@ from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import Protocol
+
+from dotenv import load_dotenv
 
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
@@ -33,6 +35,7 @@ from gateway.autoresearch_runner import (
     Phase,
     normalize_autoresearch_state,
 )
+from gateway.openclaw_client import OpenClawClient, OpenClawError
 
 logger = logging.getLogger(__name__)
 
@@ -49,18 +52,17 @@ DEFAULT_OWNER_SESSIONS_PATH = (
     / "sessions"
     / "sessions.json"
 )
-DEFAULT_OPENCLAW_BIN = Path.home() / ".local" / "share" / "pnpm" / "openclaw"
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
-DEFAULT_OPENCLAW_COMMAND_TIMEOUT_SECONDS = 45.0
-DEFAULT_OPENCLAW_COMMAND_POLL_INTERVAL_SECONDS = 0.05
-DEFAULT_OPENCLAW_SHUTDOWN_KILL_GRACE_SECONDS = 0.2
+DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS = 0.05
 READ_ONLY_TASK_LIST_ATTEMPTS = 3
 READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
 REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
+REQUIRED_OPENCLAW_VERSION_TEXT = ".".join(str(part) for part in REQUIRED_OPENCLAW_VERSION)
+DEFAULT_TASK_RPC_TIMEOUT_SECONDS = 30.0
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
@@ -153,14 +155,6 @@ class SupervisorError(RuntimeError):
     """Base failure for strict autoresearch supervision."""
 
 
-class OpenClawResolutionError(SupervisorError):
-    """Raised when the pinned executable cannot be resolved safely."""
-
-
-class OpenClawVersionError(SupervisorError):
-    """Raised when the pinned executable version is unsupported."""
-
-
 class WorkspaceEvidenceError(SupervisorError):
     """Raised when an active implementation workspace cannot be verified."""
 
@@ -176,160 +170,92 @@ def _shutdown_not_requested() -> bool:
     return False
 
 
-class LegacyCommandRunner(Protocol):
-    """Compatibility boundary for existing subprocess.run-shaped test doubles."""
+class TaskGateway(Protocol):
+    """Synchronous boundary for native, authenticated gateway control RPCs."""
 
-    def __call__(
+    def request(
         self,
-        command: list[str],
+        method: str,
+        params: Mapping[str, object],
         *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-    ) -> subprocess.CompletedProcess[str]: ...
-
-
-class CommandRunner(Protocol):
-    """Shutdown-aware command runner used by the production OpenClaw RPC boundary."""
-
-    def run(
-        self,
-        command: list[str],
-        *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-        timeout: float,
-        start_new_session: bool,
         shutdown_requested: ShutdownRequested,
-    ) -> subprocess.CompletedProcess[str]: ...
+    ) -> Mapping[str, object]: ...
 
 
 @dataclass(frozen=True, slots=True)
-class LegacyCommandRunnerAdapter:
-    """Adapts old callables without leaking new keyword arguments into fakes."""
+class NativeGatewayRPC:
+    """One-shot native WebSocket gateway RPC client; it never launches the CLI."""
 
-    run_command: LegacyCommandRunner
+    host: str
+    port: int
+    token: str
 
-    def run(
+    def request(
         self,
-        command: list[str],
+        method: str,
+        params: Mapping[str, object],
         *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-        timeout: float,
-        start_new_session: bool,
         shutdown_requested: ShutdownRequested,
-    ) -> subprocess.CompletedProcess[str]:
-        del shutdown_requested, timeout, start_new_session
-        return self.run_command(
-            command,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ProcessGroupCommandRunner:
-    """Production runner that owns timeout and shutdown cleanup for a process group."""
-
-    def run(
-        self,
-        command: list[str],
-        *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-        timeout: float,
-        start_new_session: bool,
-        shutdown_requested: ShutdownRequested,
-    ) -> subprocess.CompletedProcess[str]:
-        return _run_command_with_process_group_timeout(
-            command,
-            check=check,
-            capture_output=capture_output,
-            text=text,
-            timeout=timeout,
-            start_new_session=start_new_session,
-            shutdown_requested=shutdown_requested,
-        )
-
-
-def _raise_command_failure(
-    detail: str,
-    *,
-    shutdown_requested: ShutdownRequested,
-    cause: Exception | None = None,
-    error_type: type[SupervisorError] = SupervisorError,
-) -> NoReturn:
-    """Classify a failed OpenClaw process before constructing its domain error."""
-    if shutdown_requested():
-        if cause is None:
-            raise ShutdownInterrupted(detail)
-        raise ShutdownInterrupted(detail) from cause
-    if cause is None:
-        raise error_type(detail)
-    raise error_type(detail) from cause
-
-
-def _run_command_with_process_group_timeout(
-    command: list[str],
-    *,
-    check: bool,
-    capture_output: bool,
-    text: bool,
-    timeout: float,
-    start_new_session: bool,
-    shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-) -> subprocess.CompletedProcess[str]:
-    """Run a command in its own session and kill the whole process group on timeout."""
-    if check:
-        raise ValueError("OpenClawRPC always handles non-zero command exits explicitly")
-    if not capture_output or not text or not start_new_session:
-        raise ValueError("OpenClawRPC requires captured text output in a new session")
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-
-    def kill_and_collect(signum: int, *, grace_seconds: float | None = None) -> tuple[str, str]:
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signum)
-        if grace_seconds is not None:
-            try:
-                return process.communicate(timeout=grace_seconds)
-            except subprocess.TimeoutExpired:
-                pass
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
-        return process.communicate()
-
-    deadline = time.monotonic() + timeout
-    while True:
+    ) -> Mapping[str, object]:
         if shutdown_requested():
-            kill_and_collect(
-                signal.SIGTERM,
-                grace_seconds=DEFAULT_OPENCLAW_SHUTDOWN_KILL_GRACE_SECONDS,
-            )
-            raise ShutdownInterrupted(
-                "OpenClaw command interrupted during shutdown; process group was killed"
-            )
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            stdout, stderr = kill_and_collect(signal.SIGKILL)
-            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+            raise ShutdownInterrupted("OpenClaw gateway RPC interrupted during shutdown")
         try:
-            stdout, stderr = process.communicate(
-                timeout=min(DEFAULT_OPENCLAW_COMMAND_POLL_INTERVAL_SECONDS, remaining)
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise SupervisorError("Native gateway RPC requests require a synchronous caller")
+        try:
+            return asyncio.run(self._request(method, params, shutdown_requested))
+        except OpenClawError as exc:
+            detail = f"OpenClaw gateway RPC failed ({method}): {exc}"
+            if shutdown_requested():
+                raise ShutdownInterrupted(detail) from exc
+            raise SupervisorError(detail) from exc
+
+    async def _request(
+        self,
+        method: str,
+        params: Mapping[str, object],
+        shutdown_requested: ShutdownRequested,
+    ) -> Mapping[str, object]:
+        client = OpenClawClient(self.host, self.port, self.token)
+        request = asyncio.create_task(
+            client.request_once(
+                method,
+                params,
+                timeout_seconds=DEFAULT_TASK_RPC_TIMEOUT_SECONDS,
+                required_server_version=REQUIRED_OPENCLAW_VERSION_TEXT,
             )
-            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-        except subprocess.TimeoutExpired:
-            continue
+        )
+        while not request.done():
+            if shutdown_requested():
+                request.cancel()
+                with suppress(asyncio.CancelledError):
+                    await request
+                raise ShutdownInterrupted("OpenClaw gateway RPC interrupted during shutdown")
+            await asyncio.sleep(DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS)
+        return await request
+
+
+def _default_task_gateway() -> NativeGatewayRPC:
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
+    if not token:
+        raise SupervisorError("OPENCLAW_GATEWAY_TOKEN is required for native task observation")
+    raw_port = os.environ.get("OPENCLAW_PORT", "18789")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise SupervisorError(
+            "OPENCLAW_PORT must be an integer for native task observation"
+        ) from exc
+    if not 1 <= port <= 65535:
+        raise SupervisorError("OPENCLAW_PORT must be between 1 and 65535")
+    host = os.environ.get("OPENCLAW_HOST", "127.0.0.1").strip()
+    if not host:
+        raise SupervisorError("OPENCLAW_HOST must be non-empty for native task observation")
+    return NativeGatewayRPC(host, port, token)
 
 
 def _require_finite_positive(value: object, *, field_name: str) -> float:
@@ -369,136 +295,35 @@ def make_idempotency_key(*, purpose: str, material: str) -> str:
 
 
 class OpenClawRPC:
-    """Pinned-executable RPC boundary shared by owner control surfaces."""
+    """Native authenticated gateway RPC boundary shared by owner control surfaces."""
 
     def __init__(
         self,
-        default_openclaw_bin: Path,
-        *,
-        run_command: LegacyCommandRunner | None = None,
-        runner: CommandRunner | None = None,
-        command_timeout_seconds: float = DEFAULT_OPENCLAW_COMMAND_TIMEOUT_SECONDS,
+        gateway: TaskGateway | None = None,
     ) -> None:
-        if run_command is not None and runner is not None:
-            raise ValueError("provide either run_command or runner, not both")
-        self._default_openclaw_bin = default_openclaw_bin
-        if runner is not None:
-            selected_runner: CommandRunner = runner
-        elif run_command is not None:
-            selected_runner = LegacyCommandRunnerAdapter(run_command)
-        else:
-            selected_runner = ProcessGroupCommandRunner()
-        self._runner = selected_runner
-        self._command_timeout_seconds = _require_finite_positive(
-            command_timeout_seconds, field_name="command_timeout_seconds"
-        )
+        self._gateway = gateway or _default_task_gateway()
 
-    def require_binary(
-        self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
-    ) -> Path:
-        executable = self._resolve_executable()
-        try:
-            result = self._run([str(executable), "--version"], shutdown_requested)
-        except OSError as exc:
-            _raise_command_failure(
-                f"failed to execute OpenClaw at {executable}: {exc}",
-                shutdown_requested=shutdown_requested,
-                cause=exc,
-                error_type=OpenClawResolutionError,
-            )
-        except subprocess.TimeoutExpired as exc:
-            _raise_command_failure(
-                "OpenClaw version check timed out after "
-                f"{self._command_timeout_seconds:g}s for {executable}; process group was killed",
-                shutdown_requested=shutdown_requested,
-                cause=exc,
-                error_type=OpenClawVersionError,
-            )
-        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
-        version = self._parse_version(output)
-        if result.returncode != 0 or version is None:
-            _raise_command_failure(
-                f"OpenClaw version check failed for {executable}: {output or 'no output'}",
-                shutdown_requested=shutdown_requested,
-                error_type=OpenClawVersionError,
-            )
-        if version != REQUIRED_OPENCLAW_VERSION:
-            required = ".".join(str(part) for part in REQUIRED_OPENCLAW_VERSION)
-            raise OpenClawVersionError(
-                f"OpenClaw {version[0]}.{version[1]}.{version[2]} at {executable} is "
-                f"unsupported; need exactly {required}."
-            )
-        return executable
-
-    def run_json(
+    def _request(
         self,
-        executable: Path,
-        args: Sequence[str],
+        method: str,
+        params: Mapping[str, object],
         *,
         shutdown_requested: ShutdownRequested = _shutdown_not_requested,
     ) -> Mapping[str, object]:
-        command = [str(executable), *args]
-        try:
-            result = self._run(command, shutdown_requested)
-        except OSError as exc:
-            _raise_command_failure(
-                f"failed to execute {' '.join(command)}: {exc}",
-                shutdown_requested=shutdown_requested,
-                cause=exc,
-            )
-        except subprocess.TimeoutExpired as exc:
-            _raise_command_failure(
-                "OpenClaw command timed out after "
-                f"{self._command_timeout_seconds:g}s ({' '.join(command)}); "
-                "process group was killed",
-                shutdown_requested=shutdown_requested,
-                cause=exc,
-            )
-        output = result.stdout.strip() or result.stderr.strip()
-        if result.returncode != 0:
-            _raise_command_failure(
-                f"OpenClaw command failed ({' '.join(command)}): {output or 'no output'}",
-                shutdown_requested=shutdown_requested,
-            )
-        try:
-            parsed = json.loads(output, object_pairs_hook=_strict_json_object)
-        except json.JSONDecodeError as exc:
-            raise SupervisorError(
-                f"OpenClaw command returned invalid JSON ({' '.join(command)})"
-            ) from exc
-        if not isinstance(parsed, Mapping):
-            raise SupervisorError(
-                f"OpenClaw command returned non-object JSON ({' '.join(command)})"
-            )
-        return parsed
-
-    def _run(
-        self, command: list[str], shutdown_requested: ShutdownRequested
-    ) -> subprocess.CompletedProcess[str]:
-        return self._runner.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=self._command_timeout_seconds,
-            start_new_session=True,
-            shutdown_requested=shutdown_requested,
-        )
+        return self._gateway.request(method, params, shutdown_requested=shutdown_requested)
 
     def list_running_tasks(
         self,
-        executable: Path,
         *,
         shutdown_requested: ShutdownRequested = _shutdown_not_requested,
     ) -> Mapping[str, object]:
-        """Read OpenClaw running tasks with strict bounded retry for CLI crashes."""
-        args = ["tasks", "list", "--status", "running", "--json"]
+        """Read OpenClaw running tasks with strict bounded retry for RPC failures."""
         last_error: SupervisorError | None = None
         for attempt in range(1, READ_ONLY_TASK_LIST_ATTEMPTS + 1):
             try:
-                return self.run_json(
-                    executable,
-                    args,
+                return self._request(
+                    "tasks.list",
+                    {"status": "running", "limit": 500},
                     shutdown_requested=shutdown_requested,
                 )
             except ShutdownInterrupted:
@@ -509,6 +334,8 @@ class OpenClawRPC:
                     ) from last_error
                 raise
             except SupervisorError as exc:
+                if shutdown_requested():
+                    raise ShutdownInterrupted(str(exc)) from exc
                 last_error = exc
                 if attempt >= READ_ONLY_TASK_LIST_ATTEMPTS:
                     break
@@ -531,7 +358,6 @@ class OpenClawRPC:
 
     def wake(
         self,
-        executable: Path,
         *,
         message: str,
         idempotency_key: str,
@@ -545,9 +371,9 @@ class OpenClawRPC:
             },
             separators=(",", ":"),
         )
-        payload = self.run_json(
-            executable,
-            ["gateway", "call", "agent", "--json", "--params", params, "--timeout", "30000"],
+        payload = self._request(
+            "agent",
+            json.loads(params, object_pairs_hook=_strict_json_object),
             shutdown_requested=shutdown_requested,
         )
         status = payload.get("status")
@@ -561,7 +387,7 @@ class OpenClawRPC:
             raise SupervisorError("OpenClaw wake response is missing a non-empty runId")
         return run_id
 
-    def delete_owner_session(self, executable: Path) -> bool:
+    def delete_owner_session(self) -> bool:
         params = json.dumps(
             {
                 "key": AUTORESEARCH_OWNER_SESSION_KEY,
@@ -570,18 +396,8 @@ class OpenClawRPC:
             },
             separators=(",", ":"),
         )
-        payload = self.run_json(
-            executable,
-            [
-                "gateway",
-                "call",
-                "sessions.delete",
-                "--json",
-                "--params",
-                params,
-                "--timeout",
-                "30000",
-            ],
+        payload = self._request(
+            "sessions.delete", json.loads(params, object_pairs_hook=_strict_json_object)
         )
         if payload.get("ok") is not True or payload.get("key") != AUTORESEARCH_OWNER_SESSION_KEY:
             raise SupervisorError(
@@ -595,7 +411,7 @@ class OpenClawRPC:
             "OpenClaw owner-session deletion response did not confirm deletion or absence"
         )
 
-    def abort_owner_run(self, executable: Path, *, run_id: str) -> None:
+    def abort_owner_run(self, *, run_id: str) -> None:
         params = json.dumps(
             {
                 "key": AUTORESEARCH_OWNER_SESSION_KEY,
@@ -604,18 +420,8 @@ class OpenClawRPC:
             },
             separators=(",", ":"),
         )
-        payload = self.run_json(
-            executable,
-            [
-                "gateway",
-                "call",
-                "sessions.abort",
-                "--json",
-                "--params",
-                params,
-                "--timeout",
-                "30000",
-            ],
+        payload = self._request(
+            "sessions.abort", json.loads(params, object_pairs_hook=_strict_json_object)
         )
         status = payload.get("status")
         aborted_run_id = payload.get("abortedRunId")
@@ -628,14 +434,13 @@ class OpenClawRPC:
                 f"OpenClaw owner-run abort response is malformed or mismatched: {run_id}"
             )
 
-    def cancel_task(self, executable: Path, *, task_id: str) -> None:
+    def cancel_task(self, *, task_id: str) -> None:
         params = json.dumps(
             {"taskId": task_id, "reason": "Quantipy autoresearch stopped by operator."},
             separators=(",", ":"),
         )
-        payload = self.run_json(
-            executable,
-            ["gateway", "call", "tasks.cancel", "--json", "--params", params, "--timeout", "30000"],
+        payload = self._request(
+            "tasks.cancel", json.loads(params, object_pairs_hook=_strict_json_object)
         )
         if payload.get("found") is not True or payload.get("cancelled") is not True:
             raise SupervisorError(
@@ -657,33 +462,21 @@ class OpenClawRPC:
                 f"OpenClaw task cancellation response is malformed or mismatched: {task_id}"
             )
 
-    def show_task(
+    def get_task(
         self,
-        executable: Path,
         *,
         task_id: str,
         shutdown_requested: ShutdownRequested = _shutdown_not_requested,
     ) -> Mapping[str, object]:
-        return self.run_json(
-            executable,
-            ["tasks", "show", task_id, "--json"],
+        payload = self._request(
+            "tasks.get",
+            {"taskId": task_id},
             shutdown_requested=shutdown_requested,
         )
-
-    def _resolve_executable(self) -> Path:
-        override = os.environ.get("OPENCLAW_BIN")
-        candidate = Path(override).expanduser() if override else self._default_openclaw_bin
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-        source = "OPENCLAW_BIN" if override else "the configured pinned path"
-        raise OpenClawResolutionError(f"{source} is missing or non-executable: {candidate}")
-
-    def _parse_version(self, output: str) -> tuple[int, int, int] | None:
-        for token in output.replace("(", " ").replace(")", " ").split():
-            bits = token.strip().split(".")
-            if len(bits) == 3 and all(bit.isdigit() for bit in bits):
-                return int(bits[0]), int(bits[1]), int(bits[2])
-        return None
+        task = payload.get("task")
+        if not isinstance(task, Mapping):
+            raise SupervisorError(f"OpenClaw tasks.get response has no object task: {task_id}")
+        return task
 
 
 class SupervisorOutcome(StrEnum):
@@ -709,15 +502,14 @@ class TaskProvenance(StrEnum):
 
 
 class CanonicalTaskStatus(StrEnum):
-    """OpenClaw 2026.6.11 task-record statuses accepted by this supervisor."""
+    """OpenClaw 2026.6.11 gateway task-ledger statuses."""
 
     QUEUED = "queued"
     RUNNING = "running"
-    SUCCEEDED = "succeeded"
+    COMPLETED = "completed"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
-    LOST = "lost"
 
 
 class TaskReconciliationError(SupervisorError):
@@ -844,21 +636,19 @@ def _task_provenance_fingerprint(task: Mapping[str, object]) -> tuple[object, ..
 
 def reconcile_relevant_running_tasks(
     rpc: OpenClawRPC,
-    executable: Path,
     tasks: Sequence[Mapping[str, object]],
     *,
     shutdown_requested: ShutdownRequested = _shutdown_not_requested,
 ) -> ReconciledRunningTasks:
-    """Resolve relevant task-list projections through canonical ``tasks show`` records."""
+    """Resolve relevant task-list projections through canonical gateway task records."""
     running_tasks: list[Mapping[str, object]] = []
     terminal_task_seen = False
     observed_error: RecoveryErrorPattern | None = None
     terminal_statuses = {
-        CanonicalTaskStatus.SUCCEEDED,
+        CanonicalTaskStatus.COMPLETED,
         CanonicalTaskStatus.FAILED,
         CanonicalTaskStatus.TIMED_OUT,
         CanonicalTaskStatus.CANCELLED,
-        CanonicalTaskStatus.LOST,
     }
     for projected_task in tasks:
         provenance = classify_autoresearch_task(projected_task)
@@ -870,31 +660,30 @@ def reconcile_relevant_running_tasks(
             )
         task_id = _task_id_for_reconciliation(projected_task, source="task-list")
         try:
-            canonical_task = rpc.show_task(
-                executable,
+            canonical_task = rpc.get_task(
                 task_id=task_id,
                 shutdown_requested=shutdown_requested,
             )
         except SupervisorError as exc:
             raise TaskReconciliationError(
-                f"task-show command failed during reconciliation: {task_id}"
+                f"tasks.get RPC failed during reconciliation: {task_id}"
             ) from exc
-        if _task_id_for_reconciliation(canonical_task, source="task-show") != task_id:
-            raise TaskReconciliationError("task-show taskId does not match task-list projection")
+        if _task_id_for_reconciliation(canonical_task, source="tasks.get") != task_id:
+            raise TaskReconciliationError("tasks.get taskId does not match task-list projection")
         if _task_provenance_fingerprint(canonical_task) != _task_provenance_fingerprint(
             projected_task
         ):
             raise TaskReconciliationError(
-                "task-show provenance does not match task-list projection"
+                "tasks.get provenance does not match task-list projection"
             )
         status_raw = canonical_task.get("status")
         if not isinstance(status_raw, str):
-            raise TaskReconciliationError("task-show response is missing a string status")
+            raise TaskReconciliationError("tasks.get response is missing a string status")
         try:
             status = CanonicalTaskStatus(status_raw)
         except ValueError as exc:
             raise TaskReconciliationError(
-                f"task-show response has unsupported status: {status_raw}"
+                f"tasks.get response has unsupported status: {status_raw}"
             ) from exc
         if status is CanonicalTaskStatus.RUNNING:
             running_tasks.append(canonical_task)
@@ -910,7 +699,7 @@ def reconcile_relevant_running_tasks(
             )
         else:
             raise TaskReconciliationError(
-                f"task-show response has non-terminal non-running status: {status.value}"
+                f"tasks.get response has non-terminal non-running status: {status.value}"
             )
     return ReconciledRunningTasks(tuple(running_tasks), terminal_task_seen, observed_error)
 
@@ -924,7 +713,6 @@ class SupervisorConfig:
     owner_sessions_path: Path = DEFAULT_OWNER_SESSIONS_PATH
     poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS
     grace_period_seconds: float = DEFAULT_GRACE_PERIOD_SECONDS
-    default_openclaw_bin: Path = DEFAULT_OPENCLAW_BIN
     target_repo: Path = DEFAULT_QUANTIPY_ROOT
     proc_root: Path = Path("/proc")
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
@@ -1104,17 +892,12 @@ class AutoresearchSupervisor:
         *,
         now: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
-        run_command: LegacyCommandRunner | None = None,
-        runner: CommandRunner | None = None,
+        task_gateway: TaskGateway | None = None,
     ) -> None:
         self.config = config or SupervisorConfig()
         self._now = now
         self._sleep = sleep
-        self._rpc = OpenClawRPC(
-            self.config.default_openclaw_bin,
-            run_command=run_command,
-            runner=runner,
-        )
+        self._rpc = OpenClawRPC(task_gateway)
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -1132,11 +915,8 @@ class AutoresearchSupervisor:
                 SupervisorOutcome.ALERT,
                 f"platform_readiness_blocked: {exc}",
             )
-        executable = self._rpc.require_binary(shutdown_requested=shutdown_requested)
         try:
-            reconciled_tasks = self._reconciled_running_tasks(
-                executable, shutdown_requested=shutdown_requested
-            )
+            reconciled_tasks = self._reconciled_running_tasks(shutdown_requested=shutdown_requested)
         except TaskReconciliationError:
             return SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
         activity = self._activity_guard(state, reconciled_tasks)
@@ -1146,9 +926,7 @@ class AutoresearchSupervisor:
         if self._now() - probe.latest_update_ts < self.config.grace_period_seconds:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
         try:
-            reconciled_tasks = self._reconciled_running_tasks(
-                executable, shutdown_requested=shutdown_requested
-            )
+            reconciled_tasks = self._reconciled_running_tasks(shutdown_requested=shutdown_requested)
         except TaskReconciliationError:
             return SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
         activity = self._activity_guard(state, reconciled_tasks)
@@ -1175,7 +953,6 @@ class AutoresearchSupervisor:
         claim = claim_or_result
         try:
             self._rpc.wake(
-                executable,
                 message=recovery_plan.message,
                 idempotency_key=make_idempotency_key(
                     purpose="recovery",
@@ -1283,11 +1060,8 @@ class AutoresearchSupervisor:
             and (not decision.memory_write_required or state.memory_written)
         )
 
-    def _running_tasks(
-        self, executable: Path, *, shutdown_requested: ShutdownRequested
-    ) -> list[dict[str, object]]:
+    def _running_tasks(self, *, shutdown_requested: ShutdownRequested) -> list[dict[str, object]]:
         payload = self._rpc.list_running_tasks(
-            executable,
             shutdown_requested=shutdown_requested,
         )
         raw_tasks = payload.get("tasks")
@@ -1298,12 +1072,11 @@ class AutoresearchSupervisor:
         return [dict(task) for task in raw_tasks if isinstance(task, Mapping)]
 
     def _reconciled_running_tasks(
-        self, executable: Path, *, shutdown_requested: ShutdownRequested
+        self, *, shutdown_requested: ShutdownRequested
     ) -> ReconciledRunningTasks:
         return reconcile_relevant_running_tasks(
             self._rpc,
-            executable,
-            self._running_tasks(executable, shutdown_requested=shutdown_requested),
+            self._running_tasks(shutdown_requested=shutdown_requested),
             shutdown_requested=shutdown_requested,
         )
 
@@ -1712,17 +1485,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_arg_parser().parse_args(argv)
     logging.basicConfig(level=getattr(logging, str(args.log_level).upper(), logging.INFO))
-    supervisor = AutoresearchSupervisor(
-        SupervisorConfig(
-            state_path=args.state_path,
-            checkpoint_path=args.checkpoint_path,
-            autoresearch_dir=args.state_path.parent,
-            poll_interval_seconds=args.interval,
-            grace_period_seconds=args.grace,
-            expected_stage_task_stale_seconds=args.expected_stage_task_stale,
-        )
-    )
     try:
+        supervisor = AutoresearchSupervisor(
+            SupervisorConfig(
+                state_path=args.state_path,
+                checkpoint_path=args.checkpoint_path,
+                autoresearch_dir=args.state_path.parent,
+                poll_interval_seconds=args.interval,
+                grace_period_seconds=args.grace,
+                expected_stage_task_stale_seconds=args.expected_stage_task_stale,
+            )
+        )
         if args.once:
             supervisor.run_once()
             return 0

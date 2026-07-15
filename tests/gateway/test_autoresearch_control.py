@@ -4,6 +4,7 @@ import fcntl
 import json
 import subprocess
 import time
+from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
+    ShutdownRequested,
     SupervisorError,
 )
 
@@ -113,7 +115,7 @@ class FakeOpenClaw:
         tasks: list[dict[str, object]] | None = None,
         task_snapshots: list[list[dict[str, object]]] | None = None,
         shown_tasks: dict[str, dict[str, object]] | None = None,
-        wake_response: subprocess.CompletedProcess[str] | None = None,
+        wake_error: str | None = None,
         cancel_response: dict[str, object] | None = None,
         abort_response: dict[str, object] | None = None,
         events: list[str] | None = None,
@@ -122,122 +124,80 @@ class FakeOpenClaw:
         self.tasks = tasks or []
         self.task_snapshots = task_snapshots
         self.shown_tasks = shown_tasks
-        self.wake_response = wake_response
+        self.wake_error = wake_error
         self.cancel_response = cancel_response
         self.abort_response = abort_response
         self.task_list_failures_before_success = task_list_failures_before_success
         self.task_list_calls = 0
-        self.calls: list[list[str]] = []
+        self.rpc_calls: list[tuple[str, Mapping[str, object]]] = []
         self.events = events
 
-    def __call__(
+    def request(
         self,
-        command: list[str],
+        method: str,
+        params: Mapping[str, object],
         *,
-        check: bool,
-        capture_output: bool,
-        text: bool,
-        timeout: float | None = None,
-        start_new_session: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        del check, capture_output, text, timeout, start_new_session
-        self.calls.append(command)
-        event_names = {
-            "agent": "rpc:wake",
-            "sessions.abort": "rpc:abort",
-            "tasks.cancel": "rpc:cancel",
-            "sessions.delete": "rpc:delete",
-        }
-        if self.events is not None and len(command) > 3:
-            event_name = event_names.get(command[3])
+        shutdown_requested: ShutdownRequested,
+    ) -> Mapping[str, object]:
+        del shutdown_requested
+        self.rpc_calls.append((method, params))
+        if self.events is not None:
+            event_names = {
+                "agent": "rpc:wake",
+                "sessions.abort": "rpc:abort",
+                "tasks.cancel": "rpc:cancel",
+                "sessions.delete": "rpc:delete",
+                "tasks.list": "rpc:list",
+            }
+            event_name = event_names.get(method)
             if event_name is not None:
                 self.events.append(event_name)
-        if command[-1] == "--version":
-            if self.events is not None:
-                self.events.append("rpc:version")
-            return subprocess.CompletedProcess(command, 0, "OpenClaw 2026.6.11", "")
-        if command[1:] == ["tasks", "list", "--status", "running", "--json"]:
-            if self.events is not None:
-                self.events.append("rpc:list")
+        if method == "tasks.list":
             if self.task_list_calls < self.task_list_failures_before_success:
                 self.task_list_calls += 1
-                return subprocess.CompletedProcess(command, 1, "", "")
-            if self.task_snapshots is None:
-                tasks = self.tasks
-            else:
-                index = min(self.task_list_calls, len(self.task_snapshots) - 1)
-                tasks = self.task_snapshots[index]
-            self.task_list_calls += 1
-            return subprocess.CompletedProcess(command, 0, json.dumps({"tasks": tasks}), "")
-        if (
-            len(command) == 5
-            and command[1] == "tasks"
-            and command[2] == "show"
-            and command[4] == "--json"
-        ):
-            task_id = command[3]
-            if self.shown_tasks is not None:
-                task = self.shown_tasks[task_id]
-            else:
-                snapshots = self.task_snapshots or [self.tasks]
-                task = next(
-                    task
-                    for snapshot in snapshots
-                    for task in snapshot
-                    if task.get("taskId") == task_id
-                ).copy()
-                task.setdefault("status", "running")
-            return subprocess.CompletedProcess(command, 0, json.dumps(task), "")
-        if command[1:4] == ["gateway", "call", "agent"]:
-            if self.wake_response is not None:
-                return self.wake_response
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                json.dumps(
-                    {
-                        "status": "accepted",
-                        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
-                        "runId": "wake-1",
-                    }
-                ),
-                "",
+                raise SupervisorError("poll failed")
+            tasks = (
+                self.tasks
+                if self.task_snapshots is None
+                else self.task_snapshots[min(self.task_list_calls, len(self.task_snapshots) - 1)]
             )
-        if command[1:4] == ["gateway", "call", "tasks.cancel"]:
-            params = json.loads(command[6])
-            response = self.cancel_response or {
+            self.task_list_calls += 1
+            return {"tasks": tasks}
+        if method == "tasks.get":
+            task_id = params["taskId"]
+            assert isinstance(task_id, str)
+            if self.shown_tasks is not None:
+                return {"task": self.shown_tasks[task_id]}
+            snapshots = self.task_snapshots or [self.tasks]
+            task = next(
+                task for snapshot in snapshots for task in snapshot if task.get("taskId") == task_id
+            ).copy()
+            task.setdefault("status", "running")
+            return {"task": task}
+        if method == "agent":
+            if self.wake_error is not None:
+                raise SupervisorError(self.wake_error)
+            return {
+                "status": "accepted",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "runId": "wake-1",
+            }
+        if method == "tasks.cancel":
+            task_id = params["taskId"]
+            return self.cancel_response or {
                 "found": True,
                 "cancelled": True,
-                "task": {"id": params["taskId"], "taskId": params["taskId"]},
+                "task": {"id": task_id, "taskId": task_id},
             }
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                json.dumps(response),
-                "",
-            )
-        if command[1:4] == ["gateway", "call", "sessions.abort"]:
-            params = json.loads(command[6])
-            response = self.abort_response or {
+        if method == "sessions.abort":
+            return self.abort_response or {
                 "ok": True,
                 "abortedRunId": params["runId"],
                 "status": "aborted",
             }
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                json.dumps(response),
-                "",
-            )
-        if command[1:4] == ["gateway", "call", "sessions.delete"]:
-            params = json.loads(command[6])
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                json.dumps({"ok": True, "deleted": False, "absent": True, "key": params["key"]}),
-                "",
-            )
-        raise AssertionError(f"unexpected command: {command}")
+        if method == "sessions.delete":
+            return {"ok": True, "deleted": False, "absent": True, "key": params["key"]}
+        raise AssertionError(f"unexpected RPC method: {method}")
 
 
 class FakeSupervisorService:
@@ -313,9 +273,6 @@ def test_systemd_controller_uses_durable_enable_and_disable_transitions() -> Non
 
 @pytest.fixture()
 def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
-    executable = tmp_path / "openclaw"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
     state_path = tmp_path / "quantipy-state.json"
     readiness = _ready_manifest(tmp_path / "readiness-evidence")
     state_path.write_text(
@@ -336,33 +293,32 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
     return ControlConfig(
         state_path=state_path,
         owner_sessions_path=sessions_path,
-        default_openclaw_bin=executable,
         wake_lock_path=tmp_path / "control-wake.lock",
         wake_claim_path=tmp_path / "control-wake.json",
         readiness_manifest_path=readiness_path,
-    ), executable
+    ), tmp_path
 
 
 def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
-    config, executable = control_env
+    config, _ = control_env
     events: list[str] = []
     fake = FakeOpenClaw(events=events)
     service = FakeSupervisorService(events)
 
-    AutoresearchControl(config, run_command=fake, service_controller=service).wake()
+    AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
 
-    command = fake.calls[-1]
-    assert command[:6] == [str(executable), "gateway", "call", "agent", "--json", "--params"]
-    params = json.loads(command[6])
+    method, params = fake.rpc_calls[-1]
+    assert method == "agent"
     assert params["sessionKey"] == AUTORESEARCH_OWNER_SESSION_KEY
+    message = params["message"]
+    assert isinstance(message, str)
     assert (
         "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
         "/home/dev/.openclaw/autoresearch/quantipy-state.json"
-    ) in params["message"]
-    assert "--expect-final" not in command
-    assert events == ["rpc:version", "rpc:list", "rpc:wake", "service:start"]
+    ) in message
+    assert events == ["rpc:list", "rpc:wake", "service:start"]
 
 
 def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(
@@ -382,11 +338,11 @@ def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(
     with pytest.raises(ControlError, match="no pinned platform readiness receipt"):
         AutoresearchControl(
             config,
-            run_command=fake,
+            task_gateway=fake,
             service_controller=FakeSupervisorService([]),
         ).wake()
 
-    assert fake.calls == []
+    assert fake.rpc_calls == []
 
 
 def test_wake_rejects_a_suspended_state_before_any_openclaw_rpc(
@@ -418,11 +374,11 @@ def test_wake_rejects_a_suspended_state_before_any_openclaw_rpc(
     with pytest.raises(ControlError, match="run autoresearch-resume"):
         AutoresearchControl(
             config,
-            run_command=fake,
+            task_gateway=fake,
             service_controller=FakeSupervisorService([]),
         ).wake()
 
-    assert fake.calls == []
+    assert fake.rpc_calls == []
 
 
 def test_wake_rejects_duplicate_owned_running_task(
@@ -446,12 +402,12 @@ def test_wake_rejects_duplicate_owned_running_task(
     with pytest.raises(ControlError, match="already running: owned"):
         AutoresearchControl(
             config,
-            run_command=fake,
+            task_gateway=fake,
             service_controller=FakeSupervisorService(events),
         ).wake()
 
-    assert all(call[1:4] != ["gateway", "call", "agent"] for call in fake.calls)
-    assert events == ["rpc:version", "rpc:list"]
+    assert all(method != "agent" for method, _ in fake.rpc_calls)
+    assert events == ["rpc:list"]
 
 
 def test_wake_rejects_concurrent_local_wake_before_rpc(
@@ -465,7 +421,7 @@ def test_wake_rejects_concurrent_local_wake_before_rpc(
         with pytest.raises(ControlError, match="wake is already in progress"):
             AutoresearchControl(
                 config,
-                run_command=FakeOpenClaw(events=events),
+                task_gateway=FakeOpenClaw(events=events),
                 service_controller=FakeSupervisorService(events),
             ).wake()
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -481,31 +437,30 @@ def test_recent_wake_claim_rejects_sequential_duplicate_wake(
     second = FakeOpenClaw()
 
     AutoresearchControl(
-        config, run_command=first, service_controller=FakeSupervisorService([])
+        config, task_gateway=first, service_controller=FakeSupervisorService([])
     ).wake()
 
-    first_key = json.loads(first.calls[-1][6])["idempotencyKey"]
+    first_key = first.rpc_calls[-1][1]["idempotencyKey"]
     with pytest.raises(ControlError, match="recent autoresearch wake claim"):
         AutoresearchControl(
-            config, run_command=second, service_controller=FakeSupervisorService([])
+            config, task_gateway=second, service_controller=FakeSupervisorService([])
         ).wake()
 
+    assert isinstance(first_key, str)
     assert first_key.startswith("autoresearch-manual-wake-")
-    assert second.calls == []
+    assert second.rpc_calls == []
 
 
 def test_ambiguous_wake_rpc_failure_preserves_claim(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
-    failed = FakeOpenClaw(
-        wake_response=subprocess.CompletedProcess(["openclaw"], 1, "", "ambiguous")
-    )
+    failed = FakeOpenClaw(wake_error="ambiguous")
 
     with pytest.raises(SupervisorError):
         AutoresearchControl(
             config,
-            run_command=failed,
+            task_gateway=failed,
             service_controller=FakeSupervisorService([]),
         ).wake()
 
@@ -514,10 +469,10 @@ def test_ambiguous_wake_rpc_failure_preserves_claim(
     with pytest.raises(ControlError, match="recent autoresearch wake claim"):
         AutoresearchControl(
             config,
-            run_command=second,
+            task_gateway=second,
             service_controller=FakeSupervisorService([]),
         ).wake()
-    assert second.calls == []
+    assert second.rpc_calls == []
 
 
 def test_stale_wake_claim_allows_new_wake(control_env: tuple[ControlConfig, Path]) -> None:
@@ -531,11 +486,11 @@ def test_stale_wake_claim_allows_new_wake(control_env: tuple[ControlConfig, Path
 
     AutoresearchControl(
         config,
-        run_command=fake,
+        task_gateway=fake,
         service_controller=FakeSupervisorService([]),
     ).wake()
 
-    assert any(call[1:4] == ["gateway", "call", "agent"] for call in fake.calls)
+    assert any(method == "agent" for method, _ in fake.rpc_calls)
 
 
 def test_future_wake_claim_eventually_expires(control_env: tuple[ControlConfig, Path]) -> None:
@@ -547,7 +502,7 @@ def test_future_wake_claim_eventually_expires(control_env: tuple[ControlConfig, 
 
     AutoresearchControl(
         config,
-        run_command=FakeOpenClaw(),
+        task_gateway=FakeOpenClaw(),
         service_controller=FakeSupervisorService([]),
     ).wake()
 
@@ -567,10 +522,9 @@ def test_wake_rolls_back_the_owner_session_when_supervisor_start_fails(
     service = FailingSupervisorService(events, fail_on="start")
 
     with pytest.raises(ControlError, match="rolled back"):
-        AutoresearchControl(config, run_command=fake, service_controller=service).wake()
+        AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
 
     assert events == [
-        "rpc:version",
         "rpc:list",
         "rpc:wake",
         "service:start",
@@ -589,9 +543,9 @@ def test_stop_does_not_cancel_or_delete_when_supervisor_stop_fails(
     service = FailingSupervisorService(events, fail_on="stop")
 
     with pytest.raises(ControlError, match="service stop failed"):
-        AutoresearchControl(config, run_command=fake, service_controller=service).stop()
+        AutoresearchControl(config, task_gateway=fake, service_controller=service).stop()
 
-    assert events == ["rpc:version", "rpc:list", "service:stop"]
+    assert events == ["rpc:list", "service:stop"]
 
 
 def test_wake_reports_abort_failure_but_still_deletes_owner_session(
@@ -606,7 +560,7 @@ def test_wake_reports_abort_failure_but_still_deletes_owner_session(
     service = FailingSupervisorService(events, fail_on="start")
 
     with pytest.raises(ControlError, match="owner run abort"):
-        AutoresearchControl(config, run_command=fake, service_controller=service).wake()
+        AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
 
     assert events[-2:] == ["rpc:abort", "rpc:delete"]
     assert config.wake_claim_path.exists()
@@ -623,7 +577,7 @@ def test_stop_rejects_concurrent_local_wake(
         with pytest.raises(ControlError, match="wake is already in progress"):
             AutoresearchControl(
                 config,
-                run_command=FakeOpenClaw(events=events),
+                task_gateway=FakeOpenClaw(events=events),
                 service_controller=FakeSupervisorService(events),
             ).stop()
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
@@ -656,23 +610,20 @@ def test_stop_cancels_only_tasks_with_the_exact_owner_session(
     fake.events = events
     service = FakeSupervisorService(events, active=True)
 
-    result = AutoresearchControl(config, run_command=fake, service_controller=service).stop()
+    result = AutoresearchControl(config, task_gateway=fake, service_controller=service).stop()
 
-    cancel_calls = [call for call in fake.calls if call[1:4] == ["gateway", "call", "tasks.cancel"]]
-    delete_calls = [
-        call for call in fake.calls if call[1:4] == ["gateway", "call", "sessions.delete"]
-    ]
+    cancel_calls = [params for method, params in fake.rpc_calls if method == "tasks.cancel"]
+    delete_calls = [params for method, params in fake.rpc_calls if method == "sessions.delete"]
     assert result.cancelled_task_ids == ("owned",)
     assert result.deleted_session is False
     assert len(cancel_calls) == 1
-    assert json.loads(cancel_calls[0][6])["taskId"] == "owned"
-    assert json.loads(delete_calls[0][6]) == {
+    assert cancel_calls[0]["taskId"] == "owned"
+    assert delete_calls[0] == {
         "agentId": AUTORESEARCH_OWNER_AGENT_ID,
         "deleteTranscript": False,
         "key": AUTORESEARCH_OWNER_SESSION_KEY,
     }
     assert events == [
-        "rpc:version",
         "rpc:list",
         "service:stop",
         "rpc:list",
@@ -697,10 +648,10 @@ def test_stop_revalidates_tasks_after_stopping_the_supervisor(
     fake = FakeOpenClaw(task_snapshots=[[task], [task]], events=events)
 
     AutoresearchControl(
-        config, run_command=fake, service_controller=FakeSupervisorService(events)
+        config, task_gateway=fake, service_controller=FakeSupervisorService(events)
     ).stop()
 
-    assert events[:4] == ["rpc:version", "rpc:list", "service:stop", "rpc:list"]
+    assert events[:4] == ["rpc:list", "service:stop", "rpc:list", "rpc:cancel"]
 
 
 def test_stop_rejects_a_cancel_response_with_a_mismatched_returned_task(
@@ -727,7 +678,7 @@ def test_stop_rejects_a_cancel_response_with_a_mismatched_returned_task(
 
     with pytest.raises(ControlError, match="cancellation response"):
         AutoresearchControl(
-            config, run_command=fake, service_controller=FakeSupervisorService([])
+            config, task_gateway=fake, service_controller=FakeSupervisorService([])
         ).stop()
 
 
@@ -755,14 +706,14 @@ def test_status_is_read_only_and_reports_only_owner_scoped_tasks(
 
     status = AutoresearchControl(
         config,
-        run_command=fake,
+        task_gateway=fake,
         service_controller=FakeSupervisorService([], active=True),
     ).status()
 
     assert status.tasks[0].task_id == "owned"
     assert status.supervisor_active is True
-    assert all(call[1:4] != ["gateway", "call", "tasks.cancel"] for call in fake.calls)
-    assert all(call[1:4] != ["gateway", "call", "sessions.delete"] for call in fake.calls)
+    assert all(method != "tasks.cancel" for method, _ in fake.rpc_calls)
+    assert all(method != "sessions.delete" for method, _ in fake.rpc_calls)
 
 
 def test_status_normalizes_operator_precondition_implementation_state(
@@ -773,7 +724,7 @@ def test_status_normalizes_operator_precondition_implementation_state(
 
     status = AutoresearchControl(
         config,
-        run_command=FakeOpenClaw(),
+        task_gateway=FakeOpenClaw(),
         service_controller=FakeSupervisorService([], active=False),
     ).status()
 
@@ -801,7 +752,7 @@ def test_status_retries_a_transient_empty_task_list_failure(
 
     status = AutoresearchControl(
         config,
-        run_command=fake,
+        task_gateway=fake,
         service_controller=FakeSupervisorService([], active=True),
     ).status()
 
@@ -826,7 +777,7 @@ def test_stop_fails_closed_when_a_owned_task_has_conflicting_session_provenance(
 
     with pytest.raises(ControlError, match="ambiguous"):
         AutoresearchControl(
-            config, run_command=fake, service_controller=FakeSupervisorService([])
+            config, task_gateway=fake, service_controller=FakeSupervisorService([])
         ).stop()
 
 
@@ -838,7 +789,7 @@ def test_stop_fails_closed_when_the_owner_agent_task_has_no_session_provenance(
 
     with pytest.raises(ControlError, match="ambiguous"):
         AutoresearchControl(
-            config, run_command=fake, service_controller=FakeSupervisorService([])
+            config, task_gateway=fake, service_controller=FakeSupervisorService([])
         ).stop()
 
 
@@ -859,7 +810,7 @@ def test_pm_owner_turn_without_a_child_session_is_supported(
     )
 
     result = AutoresearchControl(
-        config, run_command=fake, service_controller=FakeSupervisorService([])
+        config, task_gateway=fake, service_controller=FakeSupervisorService([])
     ).stop()
 
     assert result.cancelled_task_ids == ("pm-turn",)
@@ -883,7 +834,7 @@ def test_control_rejects_disagreeing_legacy_and_canonical_task_ids(
 
     with pytest.raises(ControlError, match="taskId"):
         AutoresearchControl(
-            config, run_command=fake, service_controller=FakeSupervisorService([])
+            config, task_gateway=fake, service_controller=FakeSupervisorService([])
         ).stop()
 
 
@@ -899,11 +850,11 @@ def test_status_excludes_a_lost_canonical_task_projection(
         "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
         "childSessionKey": "agent:reviewer:task-child",
     }
-    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "lost"}})
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "failed"}})
 
     status = AutoresearchControl(
         config,
-        run_command=fake,
+        task_gateway=fake,
         service_controller=FakeSupervisorService([], active=True),
     ).status()
 
@@ -922,14 +873,14 @@ def test_stop_does_not_cancel_a_lost_canonical_task_projection(
         "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
         "childSessionKey": "agent:reviewer:task-child",
     }
-    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "lost"}})
+    fake = FakeOpenClaw(tasks=[task], shown_tasks={"owned": {**task, "status": "failed"}})
 
     result = AutoresearchControl(
-        config, run_command=fake, service_controller=FakeSupervisorService([])
+        config, task_gateway=fake, service_controller=FakeSupervisorService([])
     ).stop()
 
     assert result.cancelled_task_ids == ()
-    assert not any(call[1:4] == ["gateway", "call", "tasks.cancel"] for call in fake.calls)
+    assert not any(method == "tasks.cancel" for method, _ in fake.rpc_calls)
 
 
 def test_control_source_contains_no_g2_dev_surface() -> None:

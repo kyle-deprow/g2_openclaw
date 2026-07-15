@@ -8,7 +8,7 @@ import json
 import logging
 import ssl
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 import websockets
@@ -150,6 +150,7 @@ class OpenClawClient:
         self._ws: ClientConnection | None = None
         self._next_id: int = 1
         self._connected: bool = False
+        self._server_version: str | None = None
 
         # Device identity — generate or load once
         self._identity = device_identity or load_or_create_device_identity(identity_path)
@@ -280,8 +281,71 @@ class OpenClawClient:
             error = resp.get("error", "unknown error")
             raise OpenClawError(f"auth rejected: {error}")
 
+        payload = resp.get("payload")
+        if isinstance(payload, Mapping):
+            server = payload.get("server")
+            if isinstance(server, Mapping):
+                version = server.get("version")
+                self._server_version = version if isinstance(version, str) else None
+
         self._connected = True
         logger.info("Connected and authenticated to OpenClaw at %s", self.url)
+
+    async def request_once(
+        self,
+        method: str,
+        params: Mapping[str, object],
+        *,
+        timeout_seconds: float,
+        required_server_version: str | None = None,
+    ) -> Mapping[str, object]:
+        """Make one authenticated RPC request and always close its socket."""
+        if not method.strip():
+            raise OpenClawError("RPC method must be non-empty")
+        if timeout_seconds <= 0:
+            raise OpenClawError("RPC timeout must be positive")
+        try:
+            await self.ensure_connected()
+            if self._ws is None:
+                raise OpenClawError("not connected")
+            if (
+                required_server_version is not None
+                and self._server_version != required_server_version
+            ):
+                raise OpenClawError(
+                    "OpenClaw gateway server version mismatch: "
+                    f"expected {required_server_version}, got {self._server_version!r}"
+                )
+
+            request_id = str(self._get_next_id())
+            await self._ws.send(
+                json.dumps(
+                    {"type": "req", "id": request_id, "method": method, "params": dict(params)}
+                )
+            )
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise OpenClawError(f"timed out waiting for {method} response")
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
+                message = json.loads(raw)
+                if not isinstance(message, Mapping) or message.get("type") == "event":
+                    continue
+                if message.get("type") != "res" or message.get("id") != request_id:
+                    raise OpenClawError(f"unexpected {method} response")
+                if message.get("ok") is not True:
+                    raise OpenClawError(
+                        f"{method} request rejected: {message.get('error', 'unknown error')}"
+                    )
+                result = message.get("payload")
+                if not isinstance(result, Mapping):
+                    raise OpenClawError(f"{method} response has a non-object payload")
+                return result
+        except (TimeoutError, websockets.WebSocketException, json.JSONDecodeError) as exc:
+            raise OpenClawError(f"{method} request failed: {exc}") from exc
+        finally:
+            await self.close()
 
     async def send_message(
         self,

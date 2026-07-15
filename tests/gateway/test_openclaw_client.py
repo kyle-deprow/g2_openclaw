@@ -169,6 +169,126 @@ def _make_client(port: int, token: str = "test-token") -> OpenClawClient:
 
 
 class TestHappyPath:
+    async def test_one_shot_request_authenticates_and_returns_the_rpc_payload(self) -> None:
+        captured: list[dict[str, object]] = []
+
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                captured.append(message)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"server": {"version": "2026.6.11"}},
+                            }
+                        )
+                    )
+                elif message["method"] == "tasks.list":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"tasks": []},
+                            }
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            result = await client.request_once(
+                "tasks.list",
+                {"status": "running", "limit": 500},
+                timeout_seconds=1.0,
+                required_server_version="2026.6.11",
+            )
+
+            assert result == {"tasks": []}
+            assert captured[-1]["method"] == "tasks.list"
+            assert captured[-1]["params"] == {"status": "running", "limit": 500}
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_one_shot_request_rejects_a_non_object_payload(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                else:
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": []})
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            with pytest.raises(OpenClawError, match="non-object payload"):
+                await client.request_once("tasks.list", {"status": "running"}, timeout_seconds=1.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_one_shot_request_rejects_a_mismatched_gateway_server_version(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"server": {"version": "2026.6.10"}},
+                            }
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            with pytest.raises(OpenClawError, match="server version mismatch"):
+                await client.request_once(
+                    "tasks.list",
+                    {"status": "running"},
+                    timeout_seconds=1.0,
+                    required_server_version="2026.6.11",
+                )
+        finally:
+            server.close()
+            await server.wait_closed()
+
     async def test_connect_auth_and_stream_deltas(self) -> None:
         server, port = await _start_mock_server(deltas=["Hello ", "world!"])
         try:

@@ -30,18 +30,23 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
-    DEFAULT_OPENCLAW_BIN,
     DEFAULT_OWNER_SESSIONS_PATH,
     DEFAULT_STATE_PATH,
     WAKE_MESSAGE,
-    LegacyCommandRunner,
     OpenClawRPC,
     SupervisorError,
+    TaskGateway,
     TaskProvenance,
     classify_autoresearch_task,
     make_idempotency_key,
     reconcile_relevant_running_tasks,
 )
+
+
+class ServiceCommandRunner(Protocol):
+    def __call__(
+        self, command: list[str], *, check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]: ...
 
 
 class ControlError(SupervisorError):
@@ -79,7 +84,7 @@ class SystemdSupervisorServiceController:
         *,
         command_prefix: tuple[str, ...],
         service_name: str,
-        run_command: LegacyCommandRunner,
+        run_command: ServiceCommandRunner,
     ) -> None:
         if not command_prefix:
             raise ControlError("supervisor service command prefix must not be empty")
@@ -125,7 +130,6 @@ class SystemdSupervisorServiceController:
 class ControlConfig:
     state_path: Path = DEFAULT_STATE_PATH
     owner_sessions_path: Path = DEFAULT_OWNER_SESSIONS_PATH
-    default_openclaw_bin: Path = DEFAULT_OPENCLAW_BIN
     supervisor_service_name: str = DEFAULT_SUPERVISOR_SERVICE_NAME
     service_control_command: tuple[str, ...] = DEFAULT_SERVICE_CONTROL_COMMAND
     wake_lock_path: Path = DEFAULT_WAKE_LOCK_PATH
@@ -165,13 +169,14 @@ class AutoresearchControl:
         self,
         config: ControlConfig | None = None,
         *,
-        run_command: LegacyCommandRunner | None = None,
+        service_command_runner: ServiceCommandRunner | None = None,
+        task_gateway: TaskGateway | None = None,
         service_controller: SupervisorServiceController | None = None,
     ) -> None:
         self.config = config or ControlConfig()
-        self._rpc = OpenClawRPC(self.config.default_openclaw_bin, run_command=run_command)
-        service_run_command: LegacyCommandRunner = (
-            _run_default_command if run_command is None else run_command
+        self._rpc = OpenClawRPC(task_gateway)
+        service_run_command: ServiceCommandRunner = (
+            _run_default_command if service_command_runner is None else service_command_runner
         )
         self._service_controller = service_controller or SystemdSupervisorServiceController(
             command_prefix=self.config.service_control_command,
@@ -183,8 +188,7 @@ class AutoresearchControl:
         with self._wake_lock():
             state_material = self._load_dispatchable_state()
             self._reject_recent_wake_claim()
-            executable = self._rpc.require_binary()
-            owned_tasks = self._owned_running_tasks(executable)
+            owned_tasks = self._owned_running_tasks()
             if owned_tasks:
                 task_ids = ", ".join(self._task_id(task) for task in owned_tasks)
                 raise ControlError(
@@ -195,7 +199,6 @@ class AutoresearchControl:
             invocation_nonce = uuid.uuid4().hex
             try:
                 run_id = self._rpc.wake(
-                    executable,
                     message=WAKE_MESSAGE,
                     idempotency_key=make_idempotency_key(
                         purpose="manual-wake",
@@ -214,11 +217,11 @@ class AutoresearchControl:
                 except SupervisorError as rollback_error:
                     rollback_errors.append(f"supervisor stop: {rollback_error}")
                 try:
-                    self._rpc.abort_owner_run(executable, run_id=run_id)
+                    self._rpc.abort_owner_run(run_id=run_id)
                 except SupervisorError as rollback_error:
                     rollback_errors.append(f"owner run abort: {rollback_error}")
                 try:
-                    self._rpc.delete_owner_session(executable)
+                    self._rpc.delete_owner_session()
                 except SupervisorError as rollback_error:
                     rollback_errors.append(f"owner session delete: {rollback_error}")
                 if rollback_errors:
@@ -332,9 +335,8 @@ class AutoresearchControl:
             raise ControlError(f"failed to acquire autoresearch wake lock: {exc}") from exc
 
     def status(self) -> ControlStatus:
-        executable = self._rpc.require_binary()
         state = self._load_state()
-        tasks = tuple(self._task_status(task) for task in self._owned_running_tasks(executable))
+        tasks = tuple(self._task_status(task) for task in self._owned_running_tasks())
         lifecycle_status = self._owner_lifecycle_status()
         return ControlStatus(
             owner_agent_id=AUTORESEARCH_OWNER_AGENT_ID,
@@ -348,21 +350,20 @@ class AutoresearchControl:
 
     def stop(self) -> StopResult:
         with self._wake_lock():
-            executable = self._rpc.require_binary()
             # Validate the live task schema and ownership before disabling recovery.
-            self._owned_running_tasks(executable)
+            self._owned_running_tasks()
             self._service_controller.stop()
             # Re-read after the supervisor is stopped so a task launched during the
             # preflight window is included in cancellation.
-            owned_tasks = self._owned_running_tasks(executable)
+            owned_tasks = self._owned_running_tasks()
             task_ids = tuple(self._task_id(task) for task in owned_tasks)
             for task_id in task_ids:
                 try:
-                    self._rpc.cancel_task(executable, task_id=task_id)
+                    self._rpc.cancel_task(task_id=task_id)
                 except SupervisorError as exc:
                     raise ControlError(f"failed to cancel owned task {task_id}: {exc}") from exc
             try:
-                deleted_session = self._rpc.delete_owner_session(executable)
+                deleted_session = self._rpc.delete_owner_session()
             except SupervisorError as exc:
                 raise ControlError(f"failed to delete autoresearch owner session: {exc}") from exc
             self._clear_wake_claim()
@@ -412,8 +413,8 @@ class AutoresearchControl:
     def _load_state(self) -> AutoresearchState:
         return self._parse_state_material(self._state_material())
 
-    def _running_tasks(self, executable: Path) -> tuple[Mapping[str, object], ...]:
-        payload = self._rpc.list_running_tasks(executable)
+    def _running_tasks(self) -> tuple[Mapping[str, object], ...]:
+        payload = self._rpc.list_running_tasks()
         raw_tasks = payload.get("tasks")
         if not isinstance(raw_tasks, Sequence) or isinstance(raw_tasks, str | bytes):
             raise ControlError("OpenClaw tasks JSON missing tasks array")
@@ -435,10 +436,10 @@ class AutoresearchControl:
             owned.append(task)
         return tuple(owned)
 
-    def _owned_running_tasks(self, executable: Path) -> tuple[Mapping[str, object], ...]:
-        owned_tasks = self._owned_tasks(self._running_tasks(executable))
+    def _owned_running_tasks(self) -> tuple[Mapping[str, object], ...]:
+        owned_tasks = self._owned_tasks(self._running_tasks())
         try:
-            reconciled = reconcile_relevant_running_tasks(self._rpc, executable, owned_tasks)
+            reconciled = reconcile_relevant_running_tasks(self._rpc, owned_tasks)
         except SupervisorError as exc:
             raise ControlError(f"task reconciliation failed: {exc}") from exc
         return reconciled.running_tasks

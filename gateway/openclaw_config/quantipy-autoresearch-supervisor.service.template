@@ -9,7 +9,6 @@ StartLimitBurst=10
 Type=simple
 WorkingDirectory=@REPO_ROOT@
 Environment=HOME=@HOME@
-Environment=OPENCLAW_BIN=@OPENCLAW_BIN@
 Environment=PATH=@PATH@
 ExecStart=@PYTHON_BIN@ -m gateway.autoresearch_supervisor --interval 60 --grace 120 --log-level INFO
 Restart=always
