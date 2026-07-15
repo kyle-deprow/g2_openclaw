@@ -11,29 +11,38 @@ description:
 # G2 Simulator Automation
 
 Control the G2 app running inside the EvenHub simulator through HTTP endpoints
-served by the Vite dev server on **port 5173**. The API plugin (`g2_app/dev-api.ts`)
-bridges external HTTP calls to `window.__g2Api` inside the simulator's webview.
+served by the loopback-only Vite simulator server on **port 5173**. The API plugin
+(`g2_app/dev-api.ts`) bridges external HTTP calls to `window.__g2Api` inside the
+simulator's webview. This control API is for the user or Codex only. It is not a
+phone/G2 feature and must never be exposed to another machine.
 
 ## Starting the Stack
 
 ```bash
-# Kill any leftover processes first
-pkill -f 'python.*gateway|vite|evenhub-simulator' 2>/dev/null; sleep 2
-
 # Option A: all-in-one (gateway + vite + simulator)
 make sim
 
 # Option B: manual (gives you individual control)
 > logs/gateway.log && uv run python -m gateway 2>>logs/gateway.log &  # port 8765
-cd g2_app && npm run dev 2>/dev/null &                      # port 5173
+cd g2_app && npm run dev:sim 2>/dev/null &                  # 127.0.0.1:5173 only
 sleep 3 && evenhub-simulator --no-aid http://localhost:5173 &
 ```
 
 Wait ~5 s after starting the simulator before issuing Dev API calls.
 
+Do not use broad `pkill` patterns. If a managed restart is required, use
+`make stop` followed by `make sim`; this scopes cleanup to G2 OpenClaw
+processes. `npm run dev` and `npm run dev:network` intentionally have no
+automation API or injected input, telemetry, or session controls.
+
 ## Dev API Endpoints
 
 Base URL: `http://localhost:5173`
+
+The API accepts a supplied `Origin` only when it is exactly
+`http://127.0.0.1:5173` or `http://localhost:5173` (using the active Vite port).
+Origin-less same-host curl/Codex requests remain supported. Never send the API
+to a phone, G2 device, LAN host, or remote browser.
 
 | Endpoint              | Method | Purpose                                  |
 |-----------------------|--------|------------------------------------------|

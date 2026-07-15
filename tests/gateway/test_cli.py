@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
+from email.message import Message
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
@@ -79,6 +80,8 @@ from gateway.cli import (
     _signal_process_group,
     _simulator_launch_command,
     _SimulatorLaunchError,
+    _vite_health_check,
+    _vite_launch_command,
     app,
 )
 from typer.testing import CliRunner
@@ -86,6 +89,23 @@ from typer.testing import CliRunner
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
 runner = CliRunner()
+
+
+def _health_response(*, content_type: str, body: bytes, status: int = 200) -> MagicMock:
+    response = MagicMock()
+    response.status = status
+    response.headers = Message()
+    response.headers["Content-Type"] = content_type
+    response.read.return_value = body
+    return response
+
+
+def test_readme_simulator_cleanup_guidance_is_process_scoped() -> None:
+    readme = (Path(__file__).parents[2] / "README.md").read_text(encoding="utf-8")
+
+    assert "Kill all" not in readme
+    assert "| `make sim` | Restart the project-owned" in readme
+    assert "| `make stop` | Stop project-owned" in readme
 
 
 def _universe_plan() -> UniversePlanArtifact:
@@ -1445,6 +1465,33 @@ class TestGetLocalIp:
 
 
 # ---------------------------------------------------------------------------
+# Vite simulator health helper
+# ---------------------------------------------------------------------------
+
+
+class TestViteHealthCheck:
+    def test_rejects_vite_spa_fallback_html_with_status_200(self) -> None:
+        response = _health_response(
+            content_type="text/html; charset=utf-8",
+            body=b"<!doctype html><html><body>G2 app</body></html>",
+        )
+        with patch("gateway.cli.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = response
+
+            assert not _vite_health_check(5173)
+
+    def test_accepts_only_the_exact_simulator_health_payload(self) -> None:
+        response = _health_response(
+            content_type="application/json; charset=utf-8",
+            body=b'{"ok":true}',
+        )
+        with patch("gateway.cli.urllib.request.urlopen") as urlopen:
+            urlopen.return_value.__enter__.return_value = response
+
+            assert _vite_health_check(5173)
+
+
+# ---------------------------------------------------------------------------
 # Simulator launch helper
 # ---------------------------------------------------------------------------
 
@@ -1499,6 +1546,10 @@ class TestSimulatorLaunchCommand:
         proc.poll.return_value = None
 
         _require_simulator_still_running(proc, log_path=tmp_path / "simulator.log", timeout=0.1)
+
+
+def test_vite_launch_uses_the_loopback_simulator_mode() -> None:
+    assert _vite_launch_command() == ["npm", "run", "dev:sim"]
 
 
 # ---------------------------------------------------------------------------

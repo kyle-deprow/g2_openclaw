@@ -211,7 +211,7 @@ make mempalace-health
 ### Running
 
 ```bash
-# Start everything (gateway + Vite dev server + simulator)
+# Start the loopback-only simulator stack (gateway + Vite + simulator)
 make sim
 
 # Or start the gateway alone
@@ -282,16 +282,30 @@ Configured hooks: ruff (lint + format), mypy, detect-secrets.
 
 ### Sim Stack
 
-`make sim` is the primary dev workflow command. It kills any running services, then starts:
+`make sim` is the primary simulator workflow command. It starts the Vite server
+with `npm run dev:sim`, which binds to `127.0.0.1` and enables the simulator
+control API and browser-only input, telemetry, and session panels. Those
+controls are for the user or Codex only; they are never exposed to a phone or
+G2 device.
+
+For phone/G2 delivery, run `cd g2_app && npm run dev:network`. It binds Vite to
+`0.0.0.0` but deliberately does not register `/_dev` endpoints or inject any
+control panels. Plain `npm run dev` is also control-free.
+
+`make sim` stops the processes it manages before it starts:
 
 1. PC Gateway (`uv run python -m gateway`)
-2. Vite dev server (`npm run dev` in `g2_app/`)
+2. Vite dev server (`npm run dev:sim` in `g2_app/`)
 3. EvenHub Simulator pointed at the Vite server
+
+For a manual restart, use `make stop` and then `make sim`. This uses the
+project-owned launcher/process records; do not use broad shell-wide process
+termination patterns that can affect unrelated development work.
 
 | Target | Description |
 |--------|-------------|
-| `make sim` | Kill all + restart gateway + Vite + simulator |
-| `make stop` | Kill all running services |
+| `make sim` | Restart the project-owned gateway, Vite, and simulator processes |
+| `make stop` | Stop project-owned gateway, Vite, and simulator processes |
 | `make test` | Run all tests (gateway + G2) |
 | `make lint` | Lint all components |
 | `make format` | Format all components |

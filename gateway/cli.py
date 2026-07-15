@@ -1144,13 +1144,23 @@ def _drain_pipe(pipe: IO[Any], log_path: Path | None = None) -> None:
 
 
 def _vite_health_check(port: int, *, timeout: float = 2.0) -> bool:
-    """Return *True* if the Vite dev server on *port* responds to a health check."""
+    """Return whether Vite exposes the exact simulator automation health contract."""
     try:
         req = urllib.request.Request(f"http://localhost:{port}/_dev/health")
-        with urllib.request.urlopen(req, timeout=timeout):
-            return True
-    except (urllib.error.URLError, OSError, ValueError):
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            if response.status != 200:
+                return False
+            if response.headers.get_content_type() != "application/json":
+                return False
+            payload = json.loads(response.read().decode("utf-8"))
+            return isinstance(payload, dict) and set(payload) == {"ok"} and payload["ok"] is True
+    except (urllib.error.URLError, OSError, UnicodeDecodeError, ValueError):
         return False
+
+
+def _vite_launch_command() -> list[str]:
+    """Return the loopback-only Vite command with simulator controls enabled."""
+    return ["npm", "run", "dev:sim"]
 
 
 def _read_vite_port_from_log(log_path: Path, timeout: float, default: int) -> int:
@@ -1696,7 +1706,7 @@ def launch(
                 # process survives after the launcher exits (no broken pipe).
                 # Redirect stdin from /dev/null to prevent EIO on TTY read.
                 vite_proc = subprocess.Popen(
-                    ["npm", "run", "dev:network"],
+                    _vite_launch_command(),
                     cwd=str(g2_app_dir),
                     stdin=subprocess.DEVNULL,
                     stdout=_vite_log,
@@ -1718,7 +1728,7 @@ def launch(
                 # Foreground mode: capture stdout to parse the port, then
                 # drain the rest into the log via a daemon thread.
                 vite_proc = subprocess.Popen(
-                    ["npm", "run", "dev:network"],
+                    _vite_launch_command(),
                     cwd=str(g2_app_dir),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

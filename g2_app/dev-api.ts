@@ -13,7 +13,10 @@
 
 import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
+
+export const SIMULATOR_LOOPBACK_HOST = '127.0.0.1';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -27,6 +30,45 @@ interface StoredResult {
   result: unknown;
   error?: string;
   ts: number;
+}
+
+/** Return the only browser origins allowed to use simulator automation. */
+export function allowedDevOrigins(port: number): readonly string[] {
+  return [
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+  ];
+}
+
+/**
+ * Permit same-host tools that do not send Origin, but reject every supplied
+ * origin except the exact loopback dev-server origins for the active port.
+ */
+export function isAllowedDevOrigin(origin: string | undefined, port: number): boolean {
+  return origin === undefined || allowedDevOrigins(port).includes(origin);
+}
+
+/** The automation plugin is intentionally IPv4-loopback-only. */
+export function isApprovedSimulatorHost(host: string | boolean | undefined): boolean {
+  return host === SIMULATOR_LOOPBACK_HOST;
+}
+
+function actualDevPort(server: { httpServer?: { address(): string | AddressInfo | null } }, fallback: number): number {
+  const address = server.httpServer?.address();
+  return address && typeof address !== 'string' ? address.port : fallback;
+}
+
+function requestOrigin(req: IncomingMessage): string | undefined {
+  const origin = req.headers.origin;
+  return typeof origin === 'string' ? origin : undefined;
+}
+
+function setAllowedOriginHeaders(res: ServerResponse, origin: string | undefined): void {
+  if (origin === undefined) return;
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Vary', 'Origin');
 }
 
 // ── Plugin ─────────────────────────────────────────────────────────────────
@@ -57,13 +99,10 @@ export function apiPlugin(): Plugin {
     });
   }
 
-  /** Standard JSON response helper. */
+  /** Standard JSON response helper. CORS headers are set only after origin validation. */
   function json(res: ServerResponse, status: number, data: unknown): void {
     res.writeHead(status, {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
     });
     res.end(JSON.stringify(data));
   }
@@ -96,15 +135,37 @@ export function apiPlugin(): Plugin {
     name: 'api',
     apply: 'serve',
 
+    configResolved(config) {
+      if (!isApprovedSimulatorHost(config.server.host)) {
+        throw new Error(
+          `Simulator automation requires Vite to bind ${SIMULATOR_LOOPBACK_HOST}; received ${String(config.server.host)}`,
+        );
+      }
+    },
+
     configureServer(server) {
       // Periodic GC every 30 s
       const gcTimer = setInterval(gc, 30_000);
       server.httpServer?.on('close', () => clearInterval(gcTimer));
 
-      // ── OPTIONS preflight ──────────────────────────────────────────
+      // ── Origin gate and OPTIONS preflight ───────────────────────────
       server.middlewares.use((req, res, next) => {
-        if (req.method === 'OPTIONS' && req.url?.startsWith('/_dev/')) {
-          json(res, 204, null);
+        if (!req.url?.startsWith('/_dev/')) {
+          next();
+          return;
+        }
+
+        const origin = requestOrigin(req);
+        const port = actualDevPort(server, server.config.server.port ?? 5173);
+        if (!isAllowedDevOrigin(origin, port)) {
+          json(res, 403, { error: 'origin not allowed' });
+          return;
+        }
+
+        setAllowedOriginHeaders(res, origin);
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204);
+          res.end();
           return;
         }
         next();

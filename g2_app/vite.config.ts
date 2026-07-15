@@ -1,5 +1,11 @@
-import { defineConfig, type Plugin } from 'vite';
-import { apiPlugin } from './dev-api';
+import { defineConfig, type ConfigEnv, type Plugin, type UserConfig } from 'vite';
+import { apiPlugin, SIMULATOR_LOOPBACK_HOST } from './dev-api';
+
+export const SIMULATOR_MODE = 'simulator';
+
+export function isSimulatorAutomationMode(mode: string): boolean {
+  return mode === SIMULATOR_MODE;
+}
 
 function inputBar(): Plugin {
   return {
@@ -641,25 +647,34 @@ function sessionPanel(): Plugin {
   };
 }
 
-export default defineConfig({
-  root: '.',
-  server: {
-    host: 'localhost',
-    port: 5173,
-    watch: {
-      usePolling: false,
-      // Disable file watching entirely — the dev API doesn't need HMR
-      ignored: ['**'],
-    },
-  },
-  plugins: [apiPlugin(), inputBar(), telemetryPanel(), sessionPanel()],
-  build: {
-    sourcemap: false,
-    outDir: 'dist',
-    rollupOptions: {
-      output: {
-        inlineDynamicImports: true,
+export function createViteConfig({ mode }: ConfigEnv): UserConfig {
+  const simulatorAutomation = isSimulatorAutomationMode(mode);
+
+  return {
+    root: '.',
+    server: {
+      host: simulatorAutomation ? SIMULATOR_LOOPBACK_HOST : 'localhost',
+      port: 5173,
+      // The simulator API sets narrow CORS headers after its origin gate.
+      cors: false,
+      watch: {
+        usePolling: false,
+        // Disable file watching entirely — the dev API doesn't need HMR
+        ignored: ['**'],
       },
     },
-  },
-});
+    // The automation API and browser control panels are simulator-only.
+    plugins: simulatorAutomation ? [apiPlugin(), inputBar(), telemetryPanel(), sessionPanel()] : [],
+    build: {
+      sourcemap: false,
+      outDir: 'dist',
+      rollupOptions: {
+        output: {
+          inlineDynamicImports: true,
+        },
+      },
+    },
+  };
+}
+
+export default defineConfig(createViteConfig);
