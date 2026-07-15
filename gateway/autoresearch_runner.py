@@ -39,6 +39,9 @@ AUTORESEARCH_STATE_SCHEMA_VERSION = 2
 INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v2"
 INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
 MAX_NEXT_ACTION_PROMPT_BYTES = 32 * 1024
+# Keep one KiB of headroom below the immutable transport maximum for path and
+# host-probe variation. The hard maximum remains the final fail-closed bound.
+NEXT_ACTION_PROMPT_TARGET_BYTES = 31 * 1024
 MAX_ARTIFACT_FILE_BYTES = 24 * 1024
 MAX_UNIVERSE_SELECTION_DATES = 2200
 MAX_UNIVERSE_BATCH_DATES = 32
@@ -984,17 +987,48 @@ class AutoresearchPolicy:
         )
 
     def model_policy_summary(self) -> str:
-        lines = [
-            self.pm.to_summary(),
-            self.main_interface.to_summary(),
-            self.context_curator.to_summary(),
-            *(agent.to_summary() for agent in self.debate_agents),
-            self.consensus.to_summary(),
-            self.implementer.to_summary(),
-            self.reviewer.to_summary(),
-            self.fixer.to_summary(),
-        ]
-        return "\n".join(lines)
+        """Render an indexed, lossless policy without repeating shared values."""
+        agents = (
+            self.pm,
+            self.main_interface,
+            self.context_curator,
+            *self.debate_agents,
+            self.consensus,
+            self.implementer,
+            self.reviewer,
+            self.fixer,
+        )
+        skill_sets: list[tuple[str, ...]] = []
+        models: list[str] = []
+        reasoning_levels: list[str] = []
+        for agent in agents:
+            if agent.skills not in skill_sets:
+                skill_sets.append(agent.skills)
+            if agent.model not in models:
+                models.append(agent.model)
+            if agent.reasoning not in reasoning_levels:
+                reasoning_levels.append(agent.reasoning)
+        payload: dict[str, object] = {
+            "agent_format": (
+                "agent_id",
+                "model_index",
+                "reasoning_index",
+                "skill_set_index",
+            ),
+            "models": models,
+            "reasoning_levels": reasoning_levels,
+            "skill_sets": skill_sets,
+            "agents": [
+                (
+                    agent.agent_id,
+                    models.index(agent.model),
+                    reasoning_levels.index(agent.reasoning),
+                    skill_sets.index(agent.skills),
+                )
+                for agent in agents
+            ],
+        }
+        return _compact_json_block(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -4468,12 +4502,18 @@ def validate_artifact_workspace(
         )
 
 
-def _json_block(payload: Mapping[str, object]) -> str:
+def _json_block(payload: Mapping[str, object], *, compact: bool = False) -> str:
+    if compact:
+        return _compact_json_block(payload)
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
+def _compact_json_block(payload: Mapping[str, object]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
 def _render_instruction_source_manifest(manifest: InstructionSourceManifest) -> str:
-    return json.dumps(manifest.to_dict(), indent=2, sort_keys=True)
+    return _compact_json_block(manifest.to_dict())
 
 
 def _artifact_context(state: AutoresearchState) -> dict[str, object]:
@@ -4770,12 +4810,11 @@ def _phase_instruction(
             "and explicit objections. Do not substitute agents or models."
         ),
         Phase.CONSENSUS: (
-            "Decide whether the latest debate round has a 3-of-5 majority. "
-            "Return MAJORITY or NO_CONSENSUS only. "
-            "There is exactly one retry if the first consensus is NO_CONSENSUS. "
-            "For an ALPHA_RESEARCH majority, freeze exactly one compact universe_plan "
-            "with the profile identity/digests, sorted unique explicit selection dates, "
-            "and next-session-or-later execution policy."
+            "Decide whether the latest debate has a 3-of-5 majority; return MAJORITY or "
+            "NO_CONSENSUS only. The first NO_CONSENSUS gets exactly one retry. For an "
+            "ALPHA_RESEARCH MAJORITY, freeze one compact universe_plan with profile "
+            "identity/digests, sorted unique explicit selection dates, and "
+            "next-session-or-later execution policy."
         ),
         Phase.IMPLEMENTATION: (
             "Implementation is allowed only after a majority consensus. "
@@ -4816,8 +4855,8 @@ def _phase_instruction(
             "Write memory only if allowed, then create a new state explicitly."
         ),
     }
-    contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type])
-    state_json = _json_block(_artifact_context(state))
+    contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type], compact=True)
+    state_json = _compact_json_block(_artifact_context(state))
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
@@ -4837,18 +4876,18 @@ def _phase_instruction(
         expected_artifact_type,
     )
     return (
-        f"Autoresearch phase: {phase.value}\n"
-        f"Target agents: {agent_text}\n"
-        f"Expected artifact type: {expected_artifact_type.value}\n"
-        f"Phase instruction:\n{instructions[phase]}\n\n"
+        f"phase={phase.value}\n"
+        f"agents={agent_text}\n"
+        f"artifact_type={expected_artifact_type.value}\n"
+        f"instruction={instructions[phase]}\n"
         f"{mode_contract}"
         f"{compute_fit_contract}"
         f"{workspace_contract}"
         f"{verification_handoff_contract}"
         f"{mempalace_fact_instruction}"
         f"{operator_precondition_instruction}"
-        f"Artifact contract:\n{contract}\n\n"
-        f"Current state snapshot:\n{state_json}"
+        f"ARTIFACT_CONTRACT={contract}\n"
+        f"STATE={state_json}"
     )
 
 
@@ -4933,12 +4972,10 @@ def _mode_contract(state: AutoresearchState) -> str:
             "infrastructure gate outcome; do not claim alpha performance validation.\n\n"
         )
     return (
-        "Mode contract: ALPHA_RESEARCH\n"
-        "- This is a strategy experiment. Burned theory families require materially "
-        "new evidence. Consensus must freeze a strict universe_plan. Persist only compact "
-        "universe, hydration, and coverage identities/counts/digests; never persist full "
-        "membership arrays. ALPHA_RESEARCH has no fixed-sleeve or per-symbol coverage "
-        "alternative.\n\n"
+        "mode=ALPHA_RESEARCH; strategy experiment. Burned theory families require materially "
+        "new evidence. Consensus freezes a strict universe_plan. Persist compact universe, "
+        "hydration, and coverage identities/counts/digests only; never full membership arrays. "
+        "No fixed-sleeve or per-symbol coverage alternative.\n"
     )
 
 
@@ -5075,33 +5112,22 @@ def _build_prompt_text(
     target_repo = _target_repo_root_for_state(state)
     compute_snapshot = collect_compute_capability_snapshot(target_repo)
     return (
-        "Deterministic autoresearch runner prompt.\n"
-        "This phase, agent roster, and artifact contract are owned by "
-        "executable control-plane logic. "
-        "Do not carry loop state in prompt memory.\n\n"
-        f"PLATFORM_READINESS_CAPABILITIES={readiness.prompt_capabilities()}\n\n"
-        f"Validated model policy:\n{policy.model_policy_summary()}\n\n"
-        "Machine-readable compute capability snapshot (read-only probe; do not fabricate):\n"
-        f"{_json_block(compute_snapshot.to_dict())}\n\n"
-        f"{_phase_instruction(state, phase, expected_artifact_type, agent_ids)}\n\n"
-        "Instruction source manifest:\n"
+        "Autoresearch prompt.\n"
+        f"PLATFORM_READINESS_CAPABILITIES={readiness.prompt_capabilities()}\n"
+        f"POLICY={policy.model_policy_summary()}\n"
+        f"COMPUTE_SNAPSHOT={_json_block(compute_snapshot.to_dict(), compact=True)}\n"
+        f"{_phase_instruction(state, phase, expected_artifact_type, agent_ids)}\n"
         f"source_manifest_sha256={source_manifest_sha256}\n"
-        f"{_render_instruction_source_manifest(instruction_source_manifest)}\n\n"
-        "Instruction source contract:\n"
-        "- Read every live file listed in instruction_source_manifest before doing stage "
-        "work; OpenClaw-configured skills remain authoritative and target-repo files must "
-        "be read live from their listed canonical paths.\n"
-        "- Recompute SHA-256 over each listed file's current bytes and fail before stage "
-        "work if any path is missing, unreadable, or hash-mismatched.\n"
-        "- Compute the manifest digest from the exact canonical compact manifest above. "
-        "It is versioned, domain-separated, and bound to this phase, expected artifact "
-        "type, ordered target agent IDs, canonical target repo root, and sorted source "
-        "receipts.\n"
-        "- Write production artifacts with exactly this JSON envelope: "
+        f"INSTRUCTION_MANIFEST={_render_instruction_source_manifest(instruction_source_manifest)}\n"
+        "Before work, read every live instruction_source_manifest file at its canonical "
+        "path; configured skills remain authoritative. Recompute SHA-256 from current bytes; "
+        "missing, unreadable, or mismatched files fail. The exact compact manifest's "
+        "versioned, domain-separated digest binds phase, artifact type, ordered agent IDs, "
+        "canonical repo root, and sorted receipts. Artifacts use this exact JSON envelope: "
         '{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}. '
-        "Legacy unwrapped artifacts, missing digests, mismatches, and extra envelope keys "
-        "are invalid and must not be advanced. The complete artifact file must be no more "
-        f"than {MAX_ARTIFACT_FILE_BYTES} bytes; compact the artifact instead of truncating.\n"
+        "Unwrapped artifacts, missing/mismatched digests, and extra envelope keys are invalid "
+        "and cannot advance. Artifact maximum: "
+        f"{MAX_ARTIFACT_FILE_BYTES} bytes; compact, never truncate.\n"
     )
 
 
@@ -5151,6 +5177,13 @@ def next_action(
             "autoresearch prompt exceeds hard byte budget: "
             f"{prompt_bytes} > {MAX_NEXT_ACTION_PROMPT_BYTES} bytes for phase "
             f"{state.phase.value}; compact accepted artifact/state fields before dispatch"
+        )
+    if prompt_bytes > NEXT_ACTION_PROMPT_TARGET_BYTES:
+        raise AutoresearchValidationError(
+            "autoresearch prompt exceeds operational byte target: "
+            f"{prompt_bytes} > {NEXT_ACTION_PROMPT_TARGET_BYTES} bytes for phase "
+            f"{state.phase.value}; preserve the {MAX_NEXT_ACTION_PROMPT_BYTES}-byte hard "
+            "limit reserve before dispatch"
         )
     action = NextAction(
         phase=state.phase,

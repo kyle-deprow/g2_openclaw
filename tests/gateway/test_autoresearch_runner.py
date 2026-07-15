@@ -34,6 +34,7 @@ from gateway.autoresearch_runner import (
     MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
     MEMPALACE_READONLY_SERVER_ID,
     MEMPALACE_READONLY_TOOL_NAMES,
+    NEXT_ACTION_PROMPT_TARGET_BYTES,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
@@ -219,6 +220,56 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
             "reason": None,
         }
     )
+
+
+def _all_policy_agents(
+    policy: AutoresearchPolicy,
+) -> tuple[autoresearch_runner.StageAgentPolicy, ...]:
+    return (
+        policy.pm,
+        policy.main_interface,
+        policy.context_curator,
+        *policy.debate_agents,
+        policy.consensus,
+        policy.implementer,
+        policy.reviewer,
+        policy.fixer,
+    )
+
+
+def _prompt_json_value(prompt: str, prefix: str) -> str:
+    return prompt.rsplit(prefix, maxsplit=1)[1].split("\n", maxsplit=1)[0]
+
+
+def _round_trip_compact_json(payload: str) -> dict[str, object]:
+    decoded = cast(dict[str, object], json.loads(payload))
+    assert json.dumps(decoded, sort_keys=True, separators=(",", ":")) == payload
+    return decoded
+
+
+def _reconstruct_former_pretty_prompt(
+    prompt: str,
+    policy: AutoresearchPolicy,
+    policy_json: str,
+    compute_json: str,
+    artifact_contract_json: str,
+    snapshot_json: str,
+    manifest_json: str,
+) -> str:
+    pretty_sections = (
+        (policy_json, "\n".join(agent.to_summary() for agent in _all_policy_agents(policy))),
+        (compute_json, json.dumps(json.loads(compute_json), indent=2, sort_keys=True)),
+        (
+            artifact_contract_json,
+            json.dumps(json.loads(artifact_contract_json), indent=2, sort_keys=True),
+        ),
+        (snapshot_json, json.dumps(json.loads(snapshot_json), indent=2, sort_keys=True)),
+        (manifest_json, json.dumps(json.loads(manifest_json), indent=2, sort_keys=True)),
+    )
+    former_pretty_prompt = prompt
+    for compact, pretty in pretty_sections:
+        former_pretty_prompt = former_pretty_prompt.replace(compact, pretty, 1)
+    return former_pretty_prompt
 
 
 def test_every_stage_prompt_has_one_compact_canonical_capabilities_block(
@@ -1328,6 +1379,95 @@ def test_next_action_fails_closed_when_state_would_exceed_prompt_budget(
 
     with pytest.raises(AutoresearchValidationError, match="prompt exceeds hard byte budget"):
         next_action(state, policy, receipts, platform_readiness)
+
+
+def test_next_action_compacts_verbose_debate_snapshot_without_losing_content(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    verbose_detail = "accepted debate evidence and provenance remain available. " * 16
+    base_debate = _debate_result(policy, round_number=1)
+    verbose_debate = DebateResultArtifact(
+        round_number=base_debate.round_number,
+        submissions=tuple(
+            replace(
+                submission,
+                hypothesis=f"{submission.hypothesis} {verbose_detail}",
+                feature_pipeline=f"{submission.feature_pipeline} {verbose_detail}",
+                model_plan=f"{submission.model_plan} {verbose_detail}",
+                objections=(f"{submission.objections[0]} {verbose_detail}",),
+            )
+            for submission in base_debate.submissions
+        ),
+    )
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(state, _context_artifact(), policy)
+    state = advance_state(state, verbose_debate, policy)
+    assert state.context_packet is not None
+    expected_context_packet = state.context_packet.to_dict()
+
+    action = next_action(state, policy, receipts, platform_readiness)
+    prompt = action.prompt_text
+    policy_json = _prompt_json_value(prompt, "POLICY=")
+    compute_json = _prompt_json_value(prompt, "COMPUTE_SNAPSHOT=")
+    artifact_contract_json = _prompt_json_value(prompt, "ARTIFACT_CONTRACT=")
+    snapshot_json = _prompt_json_value(prompt, "STATE=")
+    manifest_json = _prompt_json_value(prompt, "INSTRUCTION_MANIFEST=")
+
+    former_pretty_prompt = _reconstruct_former_pretty_prompt(
+        prompt,
+        policy,
+        policy_json,
+        compute_json,
+        artifact_contract_json,
+        snapshot_json,
+        manifest_json,
+    )
+
+    assert len(former_pretty_prompt.encode("utf-8")) > MAX_NEXT_ACTION_PROMPT_BYTES
+    assert len(prompt.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES
+    policy_payload = _round_trip_compact_json(policy_json)
+    _round_trip_compact_json(compute_json)
+    artifact_contract_payload = _round_trip_compact_json(artifact_contract_json)
+    snapshot_payload = _round_trip_compact_json(snapshot_json)
+    manifest_payload = _round_trip_compact_json(manifest_json)
+
+    assert (
+        artifact_contract_payload
+        == autoresearch_runner.ARTIFACT_CONTRACTS[action.expected_artifact_type]
+    )
+    assert snapshot_payload["latest_debate"] == verbose_debate.to_dict()
+    assert snapshot_payload["context_packet"] == expected_context_packet
+    assert manifest_payload == action.instruction_source_manifest.to_dict()
+    assert policy_payload["agent_format"] == [
+        "agent_id",
+        "model_index",
+        "reasoning_index",
+        "skill_set_index",
+    ]
+    models = cast(list[str], policy_payload["models"])
+    reasoning_levels = cast(list[str], policy_payload["reasoning_levels"])
+    agents = cast(list[list[object]], policy_payload["agents"])
+    skill_sets = cast(list[list[str]], policy_payload["skill_sets"])
+    for agent in _all_policy_agents(policy):
+        agent_id, model_index, reasoning_index, skill_set_index = next(
+            entry for entry in agents if entry[0] == agent.agent_id
+        )
+        assert agent_id == agent.agent_id
+        assert isinstance(model_index, int)
+        assert isinstance(reasoning_index, int)
+        assert isinstance(skill_set_index, int)
+        assert (
+            models[model_index],
+            reasoning_levels[reasoning_index],
+            tuple(skill_sets[skill_set_index]),
+        ) == (
+            agent.model,
+            agent.reasoning,
+            agent.skills,
+        )
 
 
 def test_next_action_fails_closed_when_accepted_union_manifest_is_deleted(
