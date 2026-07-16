@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 from typing import cast
@@ -41,6 +42,9 @@ from tests.gateway.autoresearch_fixtures import (
     write_xnys_calendar_evidence,
     xnys_calendar_payload,
 )
+
+CAMPAIGN_XNYS_START = date(2021, 1, 4)
+CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
 def test_quantipy_readiness_pins_price_coverage_repair_alembic_head() -> None:
@@ -639,6 +643,8 @@ def test_operator_builder_generates_v3_manifest_without_bumping_v2_contract_evid
         quantipy_root=quantipy_root,
         expected_quantipy_commit=commit,
         xnys_calendar_path=xnys,
+        campaign_xnys_start=CAMPAIGN_XNYS_START,
+        campaign_xnys_end=CAMPAIGN_XNYS_END,
     )
 
     assert manifest.schema_version == PLATFORM_READINESS_SCHEMA_VERSION
@@ -672,6 +678,8 @@ def test_operator_builder_fails_for_wrong_quantipy_commit(tmp_path: Path) -> Non
             quantipy_root=quantipy_root,
             expected_quantipy_commit="0" * len(commit),
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
 
@@ -691,6 +699,8 @@ def test_operator_builder_rejects_dirty_tracked_worktree_without_writes(tmp_path
             quantipy_root=quantipy_root,
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
     assert client_path.read_text(encoding="utf-8") == "uncommitted and invalid\n"
@@ -733,6 +743,8 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
             quantipy_root=quantipy_root,
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
     assert not (tmp_path / "manifest.json").exists()
@@ -756,6 +768,8 @@ def test_operator_builder_rejects_missing_alembic_014_head_file(tmp_path: Path) 
             quantipy_root=quantipy_root,
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
 
@@ -895,6 +909,8 @@ def test_operator_builder_rejects_output_collisions_before_probe(
             quantipy_root=quantipy_root,
             expected_quantipy_commit="0" * 40,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
     assert probe_called is False
@@ -921,6 +937,8 @@ def test_operator_builder_rejects_outputs_inside_quantipy_before_probe(
             quantipy_root=quantipy_root,
             expected_quantipy_commit="0" * 40,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
 
@@ -942,6 +960,8 @@ def test_operator_builder_preserves_existing_outputs_when_probe_fails(tmp_path: 
             quantipy_root=quantipy_root,
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
     assert manifest.read_text(encoding="utf-8") == "old manifest\n"
@@ -987,10 +1007,113 @@ def test_operator_builder_preserves_outputs_when_xnys_mutates_before_commit(
             quantipy_root=quantipy_root,
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
         )
 
     assert manifest.read_bytes() == old_manifest
     assert evidence.read_bytes() == old_evidence
+
+
+def test_operator_builder_rejects_noncanonical_campaign_bounds_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    write_xnys_calendar_evidence(xnys)
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_probe_quantipy_contract",
+        lambda root, expected: pytest.fail("probe must not run"),
+    )
+
+    with pytest.raises(
+        ReadinessManifestError,
+        match=r"must be pinned to 2021-01-04\.\.2025-12-31",
+    ):
+        build_quantipy_readiness(
+            manifest_path=tmp_path / "manifest.json",
+            quantipy_evidence_path=tmp_path / "contract.json",
+            quantipy_root=quantipy_root,
+            expected_quantipy_commit="0" * 40,
+            xnys_calendar_path=xnys,
+            campaign_xnys_start=date(2021, 1, 5),
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
+        )
+
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (tmp_path / "contract.json").exists()
+
+
+def test_operator_builder_rejects_xnys_evidence_outside_required_campaign_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    payload = xnys_calendar_payload()
+    declared_range = payload["declared_range"]
+    assert isinstance(declared_range, dict)
+    declared_range["end"] = "2025-12-30"
+    xnys.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_probe_quantipy_contract",
+        lambda root, expected: pytest.fail("probe must not run"),
+    )
+
+    with pytest.raises(
+        ReadinessManifestError,
+        match=r"does not cover required campaign interval 2021-01-04\.\.2025-12-31",
+    ):
+        build_quantipy_readiness(
+            manifest_path=tmp_path / "manifest.json",
+            quantipy_evidence_path=tmp_path / "contract.json",
+            quantipy_root=quantipy_root,
+            expected_quantipy_commit="0" * 40,
+            xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
+        )
+
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (tmp_path / "contract.json").exists()
+
+
+def test_operator_builder_rejects_required_campaign_endpoint_that_is_not_a_session_before_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    payload = xnys_calendar_payload()
+    closed_dates = payload["closed_dates"]
+    assert isinstance(closed_dates, list)
+    closed_dates.append(CAMPAIGN_XNYS_END.isoformat())
+    xnys.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_probe_quantipy_contract",
+        lambda root, expected: pytest.fail("probe must not run"),
+    )
+
+    with pytest.raises(
+        ReadinessManifestError,
+        match=r"campaign XNYS end 2025-12-31 is not an actual session",
+    ):
+        build_quantipy_readiness(
+            manifest_path=tmp_path / "manifest.json",
+            quantipy_evidence_path=tmp_path / "contract.json",
+            quantipy_root=quantipy_root,
+            expected_quantipy_commit="0" * 40,
+            xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
+        )
+
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (tmp_path / "contract.json").exists()
 
 
 def test_atomic_output_failure_rolls_back_every_target(

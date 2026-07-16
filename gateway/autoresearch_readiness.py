@@ -34,6 +34,8 @@ XNYS_EVIDENCE_SCHEMA_VERSION = 1
 QUANTIPY_ALEMBIC_HEAD_REVISION = "014_price_coverage_repair"
 QUANTIPY_ALEMBIC_HEAD_FILENAME = "014_repair_price_session_coverage_schema.py"
 QUANTIPY_ALEMBIC_HEAD_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_REVISION"
+QUANTIPY_CAMPAIGN_XNYS_START = date(2021, 1, 4)
+QUANTIPY_CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
 class ReadinessError(ValueError):
@@ -149,6 +151,36 @@ class XNYSCalendarEvidence:
                 sessions.append(current)
             current += timedelta(days=1)
         return tuple(sessions)
+
+
+def _validate_campaign_xnys_interval(
+    *,
+    xnys: XNYSCalendarEvidence,
+    campaign_start: date,
+    campaign_end: date,
+) -> None:
+    if campaign_start != QUANTIPY_CAMPAIGN_XNYS_START or campaign_end != QUANTIPY_CAMPAIGN_XNYS_END:
+        raise ReadinessManifestError(
+            "Quantipy campaign XNYS interval must be pinned to "
+            f"{QUANTIPY_CAMPAIGN_XNYS_START.isoformat()}.."
+            f"{QUANTIPY_CAMPAIGN_XNYS_END.isoformat()}"
+        )
+    if campaign_start < xnys.range_start or campaign_end > xnys.range_end:
+        raise ReadinessManifestError(
+            "XNYS evidence declared_range does not cover required campaign interval "
+            f"{campaign_start.isoformat()}..{campaign_end.isoformat()}"
+        )
+    sessions = xnys.sessions
+    if campaign_start not in sessions:
+        raise ReadinessManifestError(
+            f"campaign XNYS start {campaign_start.isoformat()} is not an actual session "
+            "in the pinned evidence"
+        )
+    if campaign_end not in sessions:
+        raise ReadinessManifestError(
+            f"campaign XNYS end {campaign_end.isoformat()} is not an actual session "
+            "in the pinned evidence"
+        )
 
 
 def _parse_evidence_date(raw: object, *, label: str) -> date:
@@ -1482,6 +1514,8 @@ def build_quantipy_readiness(
     quantipy_root: Path,
     expected_quantipy_commit: str,
     xnys_calendar_path: Path,
+    campaign_xnys_start: date,
+    campaign_xnys_end: date,
 ) -> PlatformReadinessManifest:
     """Generate a schema-v3 readiness manifest without changing the v2 Quantipy evidence schema."""
     manifest_path, evidence_path, xnys_path = _validate_output_paths(
@@ -1493,9 +1527,14 @@ def build_quantipy_readiness(
     xnys = _ImmutableEvidenceDescriptor.open(xnys_path)
     try:
         try:
-            XNYSCalendarEvidence.from_dict(json.loads(xnys.read_bytes()))
+            xnys_evidence = XNYSCalendarEvidence.from_dict(json.loads(xnys.read_bytes()))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ReadinessManifestError("XNYS calendar evidence must be valid UTF-8 JSON") from exc
+        _validate_campaign_xnys_interval(
+            xnys=xnys_evidence,
+            campaign_start=campaign_xnys_start,
+            campaign_end=campaign_xnys_end,
+        )
         actual_commit, contract_probe = _probe_quantipy_contract(
             quantipy_root.expanduser().resolve(), expected_quantipy_commit
         )

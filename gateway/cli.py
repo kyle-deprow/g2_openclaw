@@ -528,6 +528,16 @@ _readiness_expected_commit_option = typer.Option(
 _readiness_xnys_calendar_option = typer.Option(
     ..., "--xnys-calendar", help="Existing operator-owned XNYS calendar evidence."
 )
+_readiness_campaign_xnys_start_option = typer.Option(
+    ...,
+    "--campaign-xnys-start",
+    help="Required first XNYS session for the campaign.",
+)
+_readiness_campaign_xnys_end_option = typer.Option(
+    ...,
+    "--campaign-xnys-end",
+    help="Required last XNYS session for the campaign.",
+)
 _readiness_evidence_output_option = typer.Option(
     None,
     "--quantipy-evidence",
@@ -955,19 +965,27 @@ def autoresearch_build_readiness(
     quantipy_root: Path = _quantipy_root_option,
     expected_quantipy_commit: str = _readiness_expected_commit_option,
     xnys_calendar: Path = _readiness_xnys_calendar_option,
+    campaign_xnys_start: str = _readiness_campaign_xnys_start_option,
+    campaign_xnys_end: str = _readiness_campaign_xnys_end_option,
     quantipy_evidence: Path | None = _readiness_evidence_output_option,
 ) -> None:
     """Build and revalidate strict Quantipy evidence plus a schema-v3 readiness manifest."""
+    from datetime import date
+
     from gateway.autoresearch_readiness import build_quantipy_readiness
 
     evidence_path = quantipy_evidence or manifest_path.with_name("quantipy-data-contract.json")
     try:
+        parsed_campaign_start = date.fromisoformat(campaign_xnys_start)
+        parsed_campaign_end = date.fromisoformat(campaign_xnys_end)
         manifest = build_quantipy_readiness(
             manifest_path=manifest_path,
             quantipy_evidence_path=evidence_path,
             quantipy_root=quantipy_root,
             expected_quantipy_commit=expected_quantipy_commit,
             xnys_calendar_path=xnys_calendar,
+            campaign_xnys_start=parsed_campaign_start,
+            campaign_xnys_end=parsed_campaign_end,
         )
     except ValueError as exc:
         console.print(f"[red]autoresearch-build-readiness failed:[/red] {exc}")

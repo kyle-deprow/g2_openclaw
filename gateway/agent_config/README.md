@@ -82,8 +82,9 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
 ## Suspended Campaign Resume
 
 If a live campaign is suspended on `INFRA_BLOCKED`, rebuild the schema-v3
-platform-readiness manifest first, then atomically resume the same schema-v2
-state file:
+platform-readiness manifest first. The frozen Quantipy campaign requires the
+explicit XNYS interval `2021-01-04` through `2025-12-31`. Then atomically
+resume the same schema-v2 state file:
 
 ```bash
 (
@@ -96,7 +97,9 @@ state file:
     /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
-    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json
+    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
+    --campaign-xnys-start 2021-01-04 \
+    --campaign-xnys-end 2025-12-31
   uv run gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$resumed"

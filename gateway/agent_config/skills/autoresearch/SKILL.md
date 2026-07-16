@@ -85,8 +85,9 @@ any stage and rejects a blocked, invalid, or stale-pinned state. An
 `INFRA_BLOCKED` operator-precondition decision is durable: it sets the state to
 suspended, does not increment the iteration, and does not write MemPalace. The
 supervisor recognizes the suspended state and does not wake the PM. After the
-operator changes and validates readiness, rebuild the manifest and resume the
-same schema-v2 state atomically:
+operator changes and validates readiness, rebuild the manifest with the
+explicit frozen-campaign XNYS interval `2021-01-04` through `2025-12-31`, then
+resume the same schema-v2 state atomically:
 
 ```bash
 (
@@ -99,7 +100,9 @@ same schema-v2 state atomically:
     /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
-    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json
+    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
+    --campaign-xnys-start 2021-01-04 \
+    --campaign-xnys-end 2025-12-31
   uv run gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$resumed"

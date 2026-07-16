@@ -91,6 +91,8 @@ from typer.testing import CliRunner
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
 runner = CliRunner()
+CAMPAIGN_XNYS_START = "2021-01-04"
+CAMPAIGN_XNYS_END = "2025-12-31"
 
 
 @pytest.fixture(autouse=True)
@@ -315,12 +317,92 @@ def test_autoresearch_build_readiness_command_fails_closed_on_invalid_commit(
             "not-a-commit",
             "--xnys-calendar",
             str(xnys),
+            "--campaign-xnys-start",
+            CAMPAIGN_XNYS_START,
+            "--campaign-xnys-end",
+            CAMPAIGN_XNYS_END,
         ],
     )
 
     assert result.exit_code == 1
     assert "full" in result.output
     assert "lowercase Git hash" in result.output
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_autoresearch_build_readiness_command_requires_explicit_campaign_xnys_bounds(
+    tmp_path: Path,
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    write_xnys_calendar_evidence(xnys)
+
+    missing_start = runner.invoke(
+        app,
+        [
+            "autoresearch-build-readiness",
+            str(tmp_path / "manifest.json"),
+            "--quantipy-root",
+            str(quantipy_root),
+            "--expected-quantipy-commit",
+            "0" * 40,
+            "--xnys-calendar",
+            str(xnys),
+        ],
+    )
+
+    assert missing_start.exit_code == 2
+    assert "--campaign-xnys-start" in missing_start.output
+
+    missing_end = runner.invoke(
+        app,
+        [
+            "autoresearch-build-readiness",
+            str(tmp_path / "manifest.json"),
+            "--quantipy-root",
+            str(quantipy_root),
+            "--expected-quantipy-commit",
+            "0" * 40,
+            "--xnys-calendar",
+            str(xnys),
+            "--campaign-xnys-start",
+            CAMPAIGN_XNYS_START,
+        ],
+    )
+
+    assert missing_end.exit_code == 2
+    assert "--campaign-xnys-end" in missing_end.output
+
+
+def test_autoresearch_build_readiness_command_rejects_noncanonical_campaign_xnys_bounds(
+    tmp_path: Path,
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    xnys = tmp_path / "xnys.json"
+    write_xnys_calendar_evidence(xnys)
+
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-build-readiness",
+            str(tmp_path / "manifest.json"),
+            "--quantipy-root",
+            str(quantipy_root),
+            "--expected-quantipy-commit",
+            "0" * 40,
+            "--xnys-calendar",
+            str(xnys),
+            "--campaign-xnys-start",
+            "2021-01-05",
+            "--campaign-xnys-end",
+            CAMPAIGN_XNYS_END,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert " ".join(result.output.split()).endswith("must be pinned to 2021-01-04..2025-12-31")
     assert not (tmp_path / "manifest.json").exists()
 
 

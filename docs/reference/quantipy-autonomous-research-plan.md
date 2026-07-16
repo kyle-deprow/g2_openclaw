@@ -77,7 +77,8 @@ Stages consume this receipt and do not probe providers, database contents,
 cached symbols, or environment configuration to rediscover capabilities.
 Existing state is initialized with `gateway-cli autoresearch-pin-readiness`.
 After an operator changes a blocked or stale snapshot, rebuild readiness with
-`gateway-cli autoresearch-build-readiness` and then use
+`gateway-cli autoresearch-build-readiness --campaign-xnys-start 2021-01-04
+--campaign-xnys-end 2025-12-31` and then use
 `gateway-cli autoresearch-resume` to atomically replace the suspended live
 schema-v2 state with a resumed copy pinned to the new READY receipt.
 

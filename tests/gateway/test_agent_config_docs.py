@@ -11,6 +11,8 @@ PLAN = REPO_ROOT / "docs" / "reference" / "quantipy-autonomous-research-plan.md"
 DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 METHODOLOGY = AGENT_CONFIG / "skills" / "quantipy-methodology" / "SKILL.md"
 AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
+CAMPAIGN_XNYS_START = "2021-01-04"
+CAMPAIGN_XNYS_END = "2025-12-31"
 
 
 def _runtime_docs() -> tuple[Path, ...]:
@@ -178,12 +180,20 @@ def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspende
         assert resume_index > rebuild_index
         assert 'resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.' in text
         assert 'mv -- "$resumed" "$state"' in text
+        assert "--campaign-xnys-start" in text
+        assert "--campaign-xnys-end" in text
+        assert CAMPAIGN_XNYS_START in text
+        assert CAMPAIGN_XNYS_END in text
 
     plan_text = " ".join(PLAN.read_text(encoding="utf-8").split())
     assert "schema-v3 platform-readiness manifest" in plan_text
     assert "schema-v2 state" in plan_text
     assert "autoresearch-build-readiness" in plan_text
     assert "autoresearch-resume" in plan_text
+    assert "--campaign-xnys-start" in plan_text
+    assert "--campaign-xnys-end" in plan_text
+    assert CAMPAIGN_XNYS_START in plan_text
+    assert CAMPAIGN_XNYS_END in plan_text
 
 
 def test_consensus_docs_freeze_inputs_and_derive_batch_boundaries() -> None:
