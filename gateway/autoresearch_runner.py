@@ -4188,6 +4188,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
     if state.final_decision is not None:
         decision = state.final_decision
+        _validate_operator_precondition_infra_blocked_suspension(state)
         is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
         if decision.decision is FinalDecision.NO_CONSENSUS:
             if decision.memory_write_required:
@@ -5605,10 +5606,24 @@ def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
     )
 
 
+def _validate_operator_precondition_infra_blocked_suspension(state: AutoresearchState) -> None:
+    decision = state.final_decision
+    if (
+        decision is not None
+        and decision.decision is FinalDecision.INFRA_BLOCKED
+        and _is_operator_precondition_consensus(state.latest_consensus)
+        and not state.suspended
+    ):
+        raise AutoresearchValidationError(
+            "operator-precondition INFRA_BLOCKED state must be suspended"
+        )
+
+
 def _is_operator_precondition_no_memory_state(state: AutoresearchState) -> bool:
     decision = state.final_decision
     return (
         state.phase is Phase.REPEAT
+        and state.suspended
         and decision is not None
         and decision.decision is FinalDecision.INFRA_BLOCKED
         and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
@@ -5927,30 +5942,39 @@ def start_next_iteration(
     *,
     readiness: PlatformReadinessManifest | None = None,
 ) -> AutoresearchState:
+    """Begin a completed iteration's successor with a newly validated READY receipt."""
     if state.setup is None or state.final_decision is None:
         raise AutoresearchValidationError("next iteration requires completed current iteration")
+    _validate_operator_precondition_infra_blocked_suspension(state)
     if state.suspended:
         raise AutoresearchValidationError(
             "suspended INFRA_BLOCKED state requires explicit autoresearch-resume"
         )
+    if state.phase is not Phase.REPEAT:
+        raise AutoresearchValidationError("start_next_iteration requires a completed repeat phase")
     if readiness is None:
         raise AutoresearchValidationError(
             "start_next_iteration requires an explicit platform readiness manifest"
         )
-    try:
-        validate_state_readiness(state.platform_readiness, readiness)
-    except ValueError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
+    if state.platform_readiness is None:
+        raise AutoresearchValidationError(
+            "autoresearch state has no pinned platform readiness receipt; "
+            "run autoresearch-pin-readiness explicitly before dispatch"
+        )
     if not state.memory_written and not _is_explicit_no_memory_transition(state):
         raise AutoresearchValidationError(
             "cannot start next iteration before memory is written or an explicit "
             "NO_CONSENSUS no-memory transition"
         )
+    try:
+        readiness_identity = readiness.require_ready()
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
     return AutoresearchState(
         phase=Phase.SETUP_CONTEXT,
         iteration=state.iteration + 1,
         setup=state.setup,
-        platform_readiness=state.platform_readiness,
+        platform_readiness=readiness_identity,
     )
 
 

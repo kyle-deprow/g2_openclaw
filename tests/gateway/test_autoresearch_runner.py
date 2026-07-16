@@ -22,6 +22,7 @@ from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
+    ReadinessStatus,
 )
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_STATE_PATH,
@@ -187,6 +188,23 @@ def receipts(quantipy_root: Path) -> ReceiptCatalog:
 @pytest.fixture()
 def platform_readiness(tmp_path: Path) -> PlatformReadinessManifest:
     return _ready_manifest(tmp_path / "platform-readiness")
+
+
+@pytest.fixture()
+def completed_memory_written_state(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    state = advance_state(_state_to_decision(policy, platform_readiness), _final_decision(), policy)
+    return mark_memory_written(
+        state,
+        MemoryVerificationReceipt(
+            experiment_id="iteration-1",
+            kg_path="/tmp/knowledge_graph.sqlite3",
+            predicates=("decision",),
+            verified_rows_digest="0" * 64,
+        ),
+    )
 
 
 def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
@@ -2319,6 +2337,95 @@ def test_persisted_operator_precondition_no_memory_state_validates(
     assert can_write_memory(persisted) is False
 
 
+def test_persisted_unsuspended_operator_precondition_blocker_is_invalid(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+    suspended = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+        policy,
+    )
+    unsuspended = replace(suspended, suspended=False, suspension_reason=None)
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(unsuspended.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match=r"operator-precondition.*suspended"):
+        validate_state(persisted, policy)
+
+
+def test_start_next_rejects_unsuspended_operator_precondition_no_memory_state(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+    suspended = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+        policy,
+    )
+    unsuspended = replace(suspended, suspended=False, suspension_reason=None)
+
+    with pytest.raises(AutoresearchValidationError, match=r"operator-precondition.*suspended"):
+        start_next_iteration(unsuspended, readiness=platform_readiness)
+
+
+def test_start_next_rejects_forged_memory_on_unsuspended_operator_precondition_blocker(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+    suspended = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="i26-operator-evidence-precondition",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The required immutable Quantipy/XNYS evidence bundle is absent.",
+            log_summary="Blocked before implementation on missing operator evidence.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Missing operator-supplied first-party evidence bundle.",
+        ),
+        policy,
+    )
+    forged = replace(
+        suspended,
+        suspended=False,
+        suspension_reason=None,
+        memory_written=True,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match=r"operator-precondition.*suspended"):
+        start_next_iteration(forged, readiness=platform_readiness)
+
+
 def test_operator_precondition_final_decision_rejects_unverified_metric(
     policy: AutoresearchPolicy,
 ) -> None:
@@ -2366,6 +2473,8 @@ def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
             memory_write_required=False,
             infra_rationale="Missing operator-supplied first-party evidence bundle.",
         ),
+        suspended=True,
+        suspension_reason="Missing operator-supplied first-party evidence bundle.",
     )
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
@@ -3133,6 +3242,72 @@ def test_memory_write_gated_until_final_decision(
     next_iteration = start_next_iteration(state, readiness=readiness)
     assert next_iteration.phase is Phase.SETUP_CONTEXT
     assert next_iteration.iteration == 2
+
+
+def test_start_next_adopts_changed_ready_identity_at_completed_boundary(
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    changed_readiness = replace(
+        platform_readiness,
+        manifest_id="manifest-test-2",
+        snapshot_id="snapshot-test-2",
+    )
+
+    next_iteration = start_next_iteration(
+        completed_memory_written_state,
+        readiness=changed_readiness,
+    )
+
+    assert next_iteration.platform_readiness == changed_readiness.identity()
+
+
+def test_start_next_rejects_changed_ready_identity_before_completed_boundary(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    incomplete_state = replace(
+        _state_to_decision(policy, platform_readiness),
+        final_decision=_final_decision(),
+        memory_written=True,
+    )
+    changed_readiness = replace(
+        platform_readiness,
+        manifest_id="manifest-test-2",
+        snapshot_id="snapshot-test-2",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="completed repeat phase"):
+        start_next_iteration(incomplete_state, readiness=changed_readiness)
+
+
+def test_start_next_rejects_blocked_readiness_at_completed_boundary(
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    blocked_readiness = replace(
+        platform_readiness,
+        status=ReadinessStatus.BLOCKED,
+        capabilities=None,
+        reason="Historical market-data repair is incomplete.",
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="Historical market-data repair is incomplete",
+    ):
+        start_next_iteration(completed_memory_written_state, readiness=blocked_readiness)
+
+
+def test_start_next_rejects_invalid_readiness_at_completed_boundary(
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    evidence_path = Path(platform_readiness.evidence[EvidenceId.QUANTIPY_DATA_CONTRACT].path or "")
+    evidence_path.write_text("changed evidence\n", encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="SHA-256 mismatch"):
+        start_next_iteration(completed_memory_written_state, readiness=platform_readiness)
 
 
 def test_repeat_phase_requires_final_decision(

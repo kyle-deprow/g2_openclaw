@@ -71,9 +71,12 @@ procedures for one campaign.
 Do not maintain phase, retries, or completion state in prompt memory. Before
 dispatch, the runner validates the schema-v3 platform-readiness manifest at
 `~/.openclaw/autoresearch/platform-readiness.json` and its Quantipy data
-contract and XNYS evidence receipts. Existing state is pinned explicitly with
-`autoresearch-pin-readiness`. After an operator repairs a blocked or changed
-snapshot, resume explicitly with `autoresearch-resume`.
+contract and XNYS evidence receipts. Existing active state is pinned explicitly
+with `autoresearch-pin-readiness`. At a completed repeat boundary, only after
+the runner's memory or explicit no-memory obligation passes,
+`autoresearch-start-next` may atomically adopt a different validated READY
+receipt. A suspended `INFRA_BLOCKED` state instead resumes explicitly with
+`autoresearch-resume`.
 
 For a suspended live campaign, rebuild readiness first. The frozen Quantipy
 campaign requires the explicit XNYS interval `2021-01-04` through

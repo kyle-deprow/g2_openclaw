@@ -112,8 +112,12 @@ resume the same schema-v2 state atomically:
 ```
 
 Resume accepts the new READY receipt, clears the suspension, and starts the next
-iteration. Normal completed alpha and `NO_CONSENSUS` transitions still use
-`autoresearch-start-next`, which rechecks the pinned receipt.
+iteration. Normal completed transitions, including memory-required decisions
+such as `INFRA_REPAIRED`, and explicit no-memory `NO_CONSENSUS` transitions
+still use `autoresearch-start-next`. Only at that completed boundary, after the
+required memory write or explicit no-memory transition, `autoresearch-start-next`
+may atomically replace the pinned identity with a different validated READY
+receipt. It never changes an active or suspended iteration's receipt.
 
 ## Instruction Source Manifest
 
