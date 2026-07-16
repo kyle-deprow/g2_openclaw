@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import stat
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import date
 from hashlib import sha256
 from pathlib import Path
+from threading import Barrier, Event, Thread
 from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
@@ -20,6 +24,7 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
 )
 from gateway.autoresearch_runner import (
+    DEFAULT_AUTORESEARCH_STATE_PATH,
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
@@ -88,10 +93,13 @@ from gateway.autoresearch_runner import (
     load_artifact_file,
     load_autoresearch_policy,
     mark_memory_written,
+    migrate_state_file,
     next_action,
     normalize_autoresearch_state,
+    persist_derived_state,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
+    save_state_file,
     standardize_mempalace_kg_object,
     standardized_mempalace_kg_facts,
     start_next_iteration,
@@ -142,6 +150,19 @@ def advance_state(
 @pytest.fixture()
 def policy() -> AutoresearchPolicy:
     return load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+
+
+@pytest.fixture(autouse=True)
+def isolated_autoresearch_lock_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "AUTORESEARCH_LOCK_NAMESPACE",
+        tmp_path / "autoresearch-locks",
+        raising=False,
+    )
 
 
 @pytest.fixture()
@@ -222,21 +243,6 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
     )
 
 
-def _all_policy_agents(
-    policy: AutoresearchPolicy,
-) -> tuple[autoresearch_runner.StageAgentPolicy, ...]:
-    return (
-        policy.pm,
-        policy.main_interface,
-        policy.context_curator,
-        *policy.debate_agents,
-        policy.consensus,
-        policy.implementer,
-        policy.reviewer,
-        policy.fixer,
-    )
-
-
 def _prompt_json_value(prompt: str, prefix: str) -> str:
     return prompt.rsplit(prefix, maxsplit=1)[1].split("\n", maxsplit=1)[0]
 
@@ -247,29 +253,28 @@ def _round_trip_compact_json(payload: str) -> dict[str, object]:
     return decoded
 
 
-def _reconstruct_former_pretty_prompt(
-    prompt: str,
-    policy: AutoresearchPolicy,
-    policy_json: str,
-    compute_json: str,
-    artifact_contract_json: str,
-    snapshot_json: str,
-    manifest_json: str,
-) -> str:
-    pretty_sections = (
-        (policy_json, "\n".join(agent.to_summary() for agent in _all_policy_agents(policy))),
-        (compute_json, json.dumps(json.loads(compute_json), indent=2, sort_keys=True)),
-        (
-            artifact_contract_json,
-            json.dumps(json.loads(artifact_contract_json), indent=2, sort_keys=True),
-        ),
-        (snapshot_json, json.dumps(json.loads(snapshot_json), indent=2, sort_keys=True)),
-        (manifest_json, json.dumps(json.loads(manifest_json), indent=2, sort_keys=True)),
-    )
-    former_pretty_prompt = prompt
-    for compact, pretty in pretty_sections:
-        former_pretty_prompt = former_pretty_prompt.replace(compact, pretty, 1)
-    return former_pretty_prompt
+def _legacy_artifact_context(state: AutoresearchState) -> dict[str, object]:
+    return {
+        "iteration": state.iteration,
+        "suspended": state.suspended,
+        "suspension_reason": state.suspension_reason,
+        "setup": state.setup.to_dict() if state.setup else None,
+        "context_packet": state.context_packet.to_dict() if state.context_packet else None,
+        "latest_debate": state.latest_debate.to_dict() if state.latest_debate else None,
+        "latest_consensus": state.latest_consensus.to_dict() if state.latest_consensus else None,
+        "implementation_result": state.implementation_result.to_dict()
+        if state.implementation_result
+        else None,
+        "latest_verification": state.latest_verification.to_dict()
+        if state.latest_verification
+        else None,
+        "latest_review": state.latest_review.to_dict() if state.latest_review else None,
+        "latest_fix": state.latest_fix.to_dict() if state.latest_fix else None,
+        "pending_fix_trigger": state.pending_fix_trigger.value
+        if state.pending_fix_trigger is not None
+        else None,
+        "final_decision": state.final_decision.to_dict() if state.final_decision else None,
+    }
 
 
 def test_every_stage_prompt_has_one_compact_canonical_capabilities_block(
@@ -309,12 +314,14 @@ def test_instruction_source_manifest_digest_is_canonical_and_deterministic(
     receipts: ReceiptCatalog,
 ) -> None:
     required_receipts = receipts.require(tuple(QUANTIPY_RECEIPT_PATHS))
+    state = AutoresearchState()
 
     first = build_instruction_source_manifest(
         phase=Phase.SETUP_CONTEXT,
         expected_artifact_type=ArtifactType.SETUP,
         target_agent_ids=("autoresearch-pm",),
         target_repo_root=Path("/home/dev/repos/quantipy"),
+        state=state,
         receipts=required_receipts,
     )
     second = build_instruction_source_manifest(
@@ -322,6 +329,7 @@ def test_instruction_source_manifest_digest_is_canonical_and_deterministic(
         expected_artifact_type=ArtifactType.SETUP,
         target_agent_ids=("autoresearch-pm",),
         target_repo_root=Path("/home/dev/repos/quantipy"),
+        state=state,
         receipts=tuple(reversed(required_receipts)),
     )
 
@@ -332,6 +340,7 @@ def test_instruction_source_manifest_digest_is_canonical_and_deterministic(
         expected_artifact_type=ArtifactType.SETUP,
         target_agent_ids=("autoresearch-pm",),
         target_repo_root=Path("/home/dev/repos/quantipy"),
+        state=state,
         receipts=required_receipts,
     )
     assert [source.receipt_id for source in first.sources] == sorted(
@@ -343,6 +352,7 @@ def test_instruction_source_manifest_rejects_duplicate_receipt_ids(
     receipts: ReceiptCatalog,
 ) -> None:
     receipt = receipts.require(("quantipy.agents",))[0]
+    state = AutoresearchState()
 
     with pytest.raises(AutoresearchReceiptError, match="duplicate instruction source"):
         build_instruction_source_manifest(
@@ -350,6 +360,7 @@ def test_instruction_source_manifest_rejects_duplicate_receipt_ids(
             expected_artifact_type=ArtifactType.SETUP,
             target_agent_ids=("autoresearch-pm",),
             target_repo_root=Path("/home/dev/repos/quantipy"),
+            state=state,
             receipts=(
                 receipt,
                 SourceReceipt(
@@ -365,11 +376,13 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
     receipts: ReceiptCatalog,
 ) -> None:
     required_receipts = receipts.require(tuple(QUANTIPY_RECEIPT_PATHS))
+    state = AutoresearchState()
     baseline = build_instruction_source_manifest(
         phase=Phase.SETUP_CONTEXT,
         expected_artifact_type=ArtifactType.SETUP,
         target_agent_ids=("autoresearch-pm",),
         target_repo_root=Path("/home/dev/repos/quantipy"),
+        state=state,
         receipts=required_receipts,
     ).sha256()
 
@@ -379,6 +392,7 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
             expected_artifact_type=ArtifactType.SETUP,
             target_agent_ids=("autoresearch-pm",),
             target_repo_root=Path("/home/dev/repos/quantipy"),
+            state=state,
             receipts=required_receipts,
         ).sha256(),
         build_instruction_source_manifest(
@@ -386,6 +400,7 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
             expected_artifact_type=ArtifactType.CONTEXT_PACKET,
             target_agent_ids=("autoresearch-pm",),
             target_repo_root=Path("/home/dev/repos/quantipy"),
+            state=state,
             receipts=required_receipts,
         ).sha256(),
         build_instruction_source_manifest(
@@ -393,6 +408,7 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
             expected_artifact_type=ArtifactType.SETUP,
             target_agent_ids=("context-curator",),
             target_repo_root=Path("/home/dev/repos/quantipy"),
+            state=state,
             receipts=required_receipts,
         ).sha256(),
         build_instruction_source_manifest(
@@ -400,6 +416,7 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
             expected_artifact_type=ArtifactType.SETUP,
             target_agent_ids=("autoresearch-pm",),
             target_repo_root=Path("/home/dev/repos/quantipy-alt"),
+            state=state,
             receipts=required_receipts,
         ).sha256(),
     )
@@ -422,6 +439,9 @@ def test_next_action_exposes_compact_instruction_manifest_without_source_bytes(
         state, policy, receipts
     )
     assert len(action.source_manifest_sha256) == 64
+    assert (
+        action.state_reference_sha256 == action.instruction_source_manifest.state_reference.sha256()
+    )
     assert "fixture for" not in action.prompt_text
     assert "content" not in json.dumps(payload, sort_keys=True)
     required = payload["required_receipts"]
@@ -441,8 +461,18 @@ def test_next_action_exposes_compact_instruction_manifest_without_source_bytes(
         "expected_artifact_type",
         "target_agent_ids",
         "target_repo_root",
+        "state_reference",
         "sources",
     }
+    state_reference = manifest["state_reference"]
+    assert isinstance(state_reference, dict)
+    assert state_reference["path"] == str(DEFAULT_AUTORESEARCH_STATE_PATH)
+    assert state_reference["phase"] == state.phase.value
+    assert state_reference["iteration"] == state.iteration
+    assert (
+        state_reference["state_sha256"]
+        == action.instruction_source_manifest.state_reference.state_sha256
+    )
     assert [source["receipt_id"] for source in manifest["sources"]] == sorted(
         receipt["receipt_id"] for receipt in required
     )
@@ -499,12 +529,24 @@ def test_load_artifact_file_accepts_exact_instruction_envelope(
     receipts: ReceiptCatalog,
 ) -> None:
     state = AutoresearchState()
-    digest = expected_instruction_manifest_sha256(state, policy, receipts)
+    state_path = tmp_path / "custom-state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
     artifact_path = tmp_path / "artifact.json"
     artifact_path.write_text(
         json.dumps(
             {
                 "instruction_manifest_sha256": digest,
+                "state_reference_sha256": state_reference_sha256,
                 "artifact": _setup_artifact().to_dict(),
             }
         ),
@@ -516,10 +558,230 @@ def test_load_artifact_file_accepts_exact_instruction_envelope(
         state,
         policy,
         instruction_manifest_sha256=digest,
+        state_path=state_path,
     )
 
     assert isinstance(artifact, SetupContextArtifact)
     assert artifact.metric_name == "OOS Sharpe net"
+
+
+def test_load_artifact_file_rejects_a_tampered_persisted_state(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": digest,
+                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
+                    state,
+                    state_path=state_path,
+                ).sha256(),
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.write_text(
+        json.dumps(replace(state, iteration=2).to_dict()),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="persisted state does not match"):
+        load_artifact_file(
+            artifact_path,
+            state,
+            policy,
+            instruction_manifest_sha256=digest,
+            state_path=state_path,
+        )
+
+
+def test_load_artifact_file_rejects_a_missing_persisted_state(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "missing-state.json"
+    digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": digest,
+                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
+                    state,
+                    state_path=state_path,
+                ).sha256(),
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="missing state file"):
+        load_artifact_file(
+            artifact_path,
+            state,
+            policy,
+            instruction_manifest_sha256=digest,
+            state_path=state_path,
+        )
+
+
+def test_advance_state_rejects_a_tampered_persisted_state(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    state_path.write_text(
+        json.dumps(replace(state, iteration=2).to_dict()),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="persisted state does not match"):
+        _runner_advance_state(
+            state,
+            _setup_artifact(),
+            policy,
+            state_path=state_path,
+        )
+
+
+def test_load_artifact_file_rejects_an_envelope_bound_to_a_different_state_path(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state = AutoresearchState()
+    default_state_path = tmp_path / "default-state.json"
+    custom_state_path = tmp_path / "custom-state.json"
+    serialized_state = json.dumps(state.to_dict())
+    default_state_path.write_text(serialized_state, encoding="utf-8")
+    custom_state_path.write_text(serialized_state, encoding="utf-8")
+    digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=default_state_path,
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": digest,
+                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
+                    state,
+                    state_path=default_state_path,
+                ).sha256(),
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="dispatched manifest"):
+        load_artifact_file(
+            artifact_path,
+            state,
+            policy,
+            instruction_manifest_sha256=expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=custom_state_path,
+            ),
+            state_path=custom_state_path,
+        )
+
+
+def test_authoritative_state_reference_rejects_a_tampered_state_file(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    action = next_action(
+        state,
+        policy,
+        receipts,
+        platform_readiness,
+        state_path=state_path,
+    )
+    tampered = replace(state, iteration=2)
+    state_path.write_text(json.dumps(tampered.to_dict()), encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="does not match the current state"):
+        autoresearch_runner.validate_authoritative_state_reference(
+            action.instruction_source_manifest.state_reference
+        )
+
+
+def test_artifact_envelope_rejects_a_stale_state_reference(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    action = next_action(
+        state,
+        policy,
+        receipts,
+        platform_readiness,
+        state_path=state_path,
+    )
+    tampered = replace(state, iteration=2)
+    tampered_digest = expected_instruction_manifest_sha256(
+        tampered,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": tampered_digest,
+                "state_reference_sha256": action.state_reference_sha256,
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    state_path.write_text(json.dumps(tampered.to_dict()), encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="state_reference_sha256"):
+        load_artifact_file(
+            artifact_path,
+            tampered,
+            policy,
+            instruction_manifest_sha256=tampered_digest,
+            state_path=state_path,
+        )
 
 
 def test_load_artifact_file_rejects_oversized_envelope_before_json_parse(
@@ -1359,10 +1621,12 @@ def test_prompt_hard_byte_budget_for_reachable_phase_modes(
 
     for state in states:
         prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
-        assert len(prompt.encode("utf-8")) <= MAX_NEXT_ACTION_PROMPT_BYTES, state.phase.value
+        assert len(prompt.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES - 1024, (
+            state.phase.value
+        )
 
 
-def test_next_action_fails_closed_when_state_would_exceed_prompt_budget(
+def test_next_action_keeps_verbose_state_out_of_the_prompt(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
@@ -1377,16 +1641,19 @@ def test_next_action_fails_closed_when_state_would_exceed_prompt_budget(
         policy,
     )
 
-    with pytest.raises(AutoresearchValidationError, match="prompt exceeds hard byte budget"):
-        next_action(state, policy, receipts, platform_readiness)
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "reviewer baseline overflow" not in prompt
+    assert len(prompt.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES - 1024
 
 
-def test_next_action_compacts_verbose_debate_snapshot_without_losing_content(
+def test_next_action_uses_manifest_bound_state_reference_for_verbose_no_consensus_retry(
+    tmp_path: Path,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    verbose_detail = "accepted debate evidence and provenance remain available. " * 16
+    verbose_detail = "accepted debate evidence and provenance remain available. " * 28
     base_debate = _debate_result(policy, round_number=1)
     verbose_debate = DebateResultArtifact(
         round_number=base_debate.round_number,
@@ -1401,73 +1668,478 @@ def test_next_action_compacts_verbose_debate_snapshot_without_losing_content(
             for submission in base_debate.submissions
         ),
     )
+    verbose_context = replace(
+        _context_artifact(),
+        recent_experiment_outcomes=tuple(
+            f"real-shaped prior experiment outcome {index}: {verbose_detail}" for index in range(12)
+        ),
+        prior_findings=tuple(
+            f"real-shaped provenance finding {index}: {verbose_detail}" for index in range(8)
+        ),
+    )
     state = AutoresearchState(platform_readiness=platform_readiness.identity())
     state = advance_state(state, _setup_artifact(), policy)
-    state = advance_state(state, _context_artifact(), policy)
+    state = advance_state(state, verbose_context, policy)
     state = advance_state(state, verbose_debate, policy)
-    assert state.context_packet is not None
-    expected_context_packet = state.context_packet.to_dict()
+    state = advance_state(state, _no_consensus(round_number=1), policy)
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
 
-    action = next_action(state, policy, receipts, platform_readiness)
-    prompt = action.prompt_text
-    policy_json = _prompt_json_value(prompt, "POLICY=")
-    compute_json = _prompt_json_value(prompt, "COMPUTE_SNAPSHOT=")
-    artifact_contract_json = _prompt_json_value(prompt, "ARTIFACT_CONTRACT=")
-    snapshot_json = _prompt_json_value(prompt, "STATE=")
-    manifest_json = _prompt_json_value(prompt, "INSTRUCTION_MANIFEST=")
-
-    former_pretty_prompt = _reconstruct_former_pretty_prompt(
-        prompt,
+    action = next_action(
+        state,
         policy,
-        policy_json,
-        compute_json,
-        artifact_contract_json,
-        snapshot_json,
-        manifest_json,
+        receipts,
+        platform_readiness,
+        state_path=state_path,
+    )
+    prompt = action.prompt_text
+    state_reference = _round_trip_compact_json(_prompt_json_value(prompt, "STATE_REF="))
+    compact_state_reference = json.dumps(state_reference, sort_keys=True, separators=(",", ":"))
+    compact_legacy_state = json.dumps(
+        _legacy_artifact_context(state),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_embedded_state_prompt = prompt.replace(
+        f"STATE_REF={compact_state_reference}\n",
+        f"STATE={compact_legacy_state}\n",
     )
 
-    assert len(former_pretty_prompt.encode("utf-8")) > MAX_NEXT_ACTION_PROMPT_BYTES
-    assert len(prompt.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES
-    policy_payload = _round_trip_compact_json(policy_json)
-    _round_trip_compact_json(compute_json)
-    artifact_contract_payload = _round_trip_compact_json(artifact_contract_json)
-    snapshot_payload = _round_trip_compact_json(snapshot_json)
-    manifest_payload = _round_trip_compact_json(manifest_json)
+    assert len(legacy_embedded_state_prompt.encode("utf-8")) > MAX_NEXT_ACTION_PROMPT_BYTES
+    assert len(prompt.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES - 1024
+    assert "STATE=" not in prompt
+    assert state_reference == action.instruction_source_manifest.state_reference.to_dict()
+    assert state_reference["path"] == str(state_path.resolve())
+    assert state_reference["phase"] == Phase.DEBATE.value
+    assert (
+        state_reference["state_sha256"]
+        == action.instruction_source_manifest.state_reference.state_sha256
+    )
+
+
+def test_later_phase_prompt_keeps_verbose_history_in_the_verified_state_file(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+    assert state.context_packet is not None
+    assert state.latest_debate is not None
+    verbose_detail = "later phase historical evidence remains lossless in state. " * 32
+    verbose_context = replace(
+        state.context_packet,
+        prior_findings=tuple(f"finding {index}: {verbose_detail}" for index in range(12)),
+    )
+    verbose_debate = replace(
+        state.latest_debate,
+        submissions=tuple(
+            replace(submission, hypothesis=f"{submission.hypothesis} {verbose_detail}")
+            for submission in state.latest_debate.submissions
+        ),
+    )
+    verbose_state = replace(
+        state,
+        context_packet=verbose_context,
+        debate_rounds=(verbose_debate,),
+    )
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(verbose_state.to_dict()), encoding="utf-8")
+
+    action = next_action(
+        verbose_state,
+        policy,
+        receipts,
+        platform_readiness,
+        state_path=state_path,
+    )
+
+    assert action.phase is Phase.DECISION_LOG
+    assert len(action.prompt_text.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES - 1024
+    assert verbose_detail not in action.prompt_text
+    validated = autoresearch_runner.validate_authoritative_state_reference(
+        action.instruction_source_manifest.state_reference
+    )
+
+    assert validated.to_dict() == AutoresearchState.from_dict(verbose_state.to_dict()).to_dict()
+
+
+def test_persist_derived_state_rejects_source_mutated_immediately_before_publication(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    source_path = tmp_path / "source-state.json"
+    output_path = tmp_path / "derived-state.json"
+    source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    changed_source_state = replace(source_state, iteration=2)
+    derived_state = replace(source_state, phase=Phase.DEBATE)
+    source_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
+    failures: list[AutoresearchValidationError] = []
+
+    def persist() -> None:
+        try:
+            persist_derived_state(source_path, output_path, source_state, derived_state)
+        except AutoresearchValidationError as exc:
+            failures.append(exc)
+
+    with autoresearch_runner._exclusive_state_lock(source_path):
+        worker = Thread(target=persist)
+        worker.start()
+        source_path.write_text(json.dumps(changed_source_state.to_dict()), encoding="utf-8")
+
+    worker.join()
+
+    assert failures[0].args[0] == "persisted state does not match the supplied authoritative state"
+    assert not output_path.exists()
+
+
+def test_persist_derived_state_preserves_a_distinct_authorizing_source(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    source_path = tmp_path / "source-state.json"
+    output_path = tmp_path / "derived-state.json"
+    source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    derived_state = replace(source_state, iteration=2)
+    source_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
+
+    persist_derived_state(source_path, output_path, source_state, derived_state)
 
     assert (
-        artifact_contract_payload
-        == autoresearch_runner.ARTIFACT_CONTRACTS[action.expected_artifact_type]
+        AutoresearchState.from_dict(json.loads(source_path.read_text(encoding="utf-8"))),
+        AutoresearchState.from_dict(json.loads(output_path.read_text(encoding="utf-8"))),
+    ) == (source_state, derived_state)
+
+
+def test_persist_derived_state_replaces_the_matching_authorizing_source(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state_path = tmp_path / "state.json"
+    source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    derived_state = replace(source_state, iteration=2)
+    state_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
+
+    persist_derived_state(state_path, state_path, source_state, derived_state)
+
+    persisted_state = AutoresearchState.from_dict(
+        json.loads(state_path.read_text(encoding="utf-8"))
     )
-    assert snapshot_payload["latest_debate"] == verbose_debate.to_dict()
-    assert snapshot_payload["context_packet"] == expected_context_packet
-    assert manifest_payload == action.instruction_source_manifest.to_dict()
-    assert policy_payload["agent_format"] == [
-        "agent_id",
-        "model_index",
-        "reasoning_index",
-        "skill_set_index",
-    ]
-    models = cast(list[str], policy_payload["models"])
-    reasoning_levels = cast(list[str], policy_payload["reasoning_levels"])
-    agents = cast(list[list[object]], policy_payload["agents"])
-    skill_sets = cast(list[list[str]], policy_payload["skill_sets"])
-    for agent in _all_policy_agents(policy):
-        agent_id, model_index, reasoning_index, skill_set_index = next(
-            entry for entry in agents if entry[0] == agent.agent_id
+
+    assert persisted_state == derived_state
+
+
+def test_canonical_state_lock_paths_are_sorted_and_deduplicated(tmp_path: Path) -> None:
+    first_path = tmp_path / "a-state.json"
+    second_path = tmp_path / "b-state.json"
+    first_alias = tmp_path / "." / first_path.name
+
+    canonical_paths = autoresearch_runner._canonical_state_paths(
+        (second_path, first_alias, first_path)
+    )
+
+    assert canonical_paths == (first_path.resolve(), second_path.resolve())
+
+
+def test_state_lock_paths_hash_unique_canonical_paths_and_collapse_symlink_aliases(
+    tmp_path: Path,
+) -> None:
+    first_path = tmp_path / "first" / "state.json"
+    second_path = tmp_path / "second" / "state.json"
+    first_path.parent.mkdir()
+    second_path.parent.mkdir()
+    first_path.touch()
+    second_path.touch()
+    first_alias = tmp_path / "first-state-alias.json"
+    first_alias.symlink_to(first_path)
+
+    first_lock_path = autoresearch_runner._state_lock_path(first_path)
+    second_lock_path = autoresearch_runner._state_lock_path(second_path)
+    alias_lock_path = autoresearch_runner._state_lock_path(first_alias)
+
+    assert first_lock_path != second_lock_path
+    assert alias_lock_path == first_lock_path
+
+
+def test_lock_namespace_and_path_are_process_invariant_across_temp_environments(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "state.json"
+    first_temp_root = tmp_path / "first-temp"
+    second_temp_root = tmp_path / "second-temp"
+    first_temp_root.mkdir()
+    second_temp_root.mkdir()
+    script = (
+        "import json\n"
+        "from pathlib import Path\n"
+        "import gateway.autoresearch_runner as runner\n"
+        f"state_path = Path({str(state_path)!r})\n"
+        "print(json.dumps({"
+        "'namespace': str(runner.AUTORESEARCH_LOCK_NAMESPACE), "
+        "'lock_path': str(runner._state_lock_path(state_path))"
+        "}, sort_keys=True))\n"
+    )
+
+    outputs: list[str] = []
+    for temp_root in (first_temp_root, second_temp_root):
+        environment = {
+            **os.environ,
+            "TMPDIR": str(temp_root),
+            "TEMP": str(temp_root),
+            "TMP": str(temp_root),
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).parents[2],
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        assert agent_id == agent.agent_id
-        assert isinstance(model_index, int)
-        assert isinstance(reasoning_index, int)
-        assert isinstance(skill_set_index, int)
-        assert (
-            models[model_index],
-            reasoning_levels[reasoning_index],
-            tuple(skill_sets[skill_set_index]),
-        ) == (
-            agent.model,
-            agent.reasoning,
-            agent.skills,
+        outputs.append(result.stdout.strip())
+
+    expected_namespace = f"/tmp/g2-openclaw-autoresearch-locks-{os.getuid()}"
+    payload = cast(dict[str, str], json.loads(outputs[0]))
+
+    assert outputs[0] == outputs[1]
+    assert payload["namespace"] == expected_namespace
+    assert Path(payload["lock_path"]).parent == Path(expected_namespace)
+
+
+def test_lock_namespace_and_lock_files_use_private_permissions(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+
+    with autoresearch_runner._exclusive_state_locks((state_path,)):
+        lock_path = autoresearch_runner._state_lock_path(state_path)
+        namespace_path = lock_path.parent
+
+        assert stat.S_IMODE(namespace_path.stat().st_mode) == 0o700
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.parametrize("via_symlink", [False, True], ids=("direct", "symlink-alias"))
+def test_state_output_inside_lock_namespace_fails_closed(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+    *,
+    via_symlink: bool,
+) -> None:
+    source_path = tmp_path / "source.json"
+    source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    source_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
+    namespace_path = autoresearch_runner._prepare_lock_namespace()
+    output_parent = namespace_path
+    if via_symlink:
+        output_parent = tmp_path / "lock-namespace-alias"
+        output_parent.symlink_to(namespace_path, target_is_directory=True)
+    output_path = output_parent / "forbidden-state-output.json"
+
+    with pytest.raises(AutoresearchValidationError, match="lock namespace"):
+        persist_derived_state(
+            source_path,
+            output_path,
+            source_state,
+            replace(source_state, iteration=2),
         )
+
+
+def test_insecure_existing_lock_namespace_fails_closed(
+    tmp_path: Path,
+) -> None:
+    namespace_path = autoresearch_runner.AUTORESEARCH_LOCK_NAMESPACE
+    namespace_path.mkdir(mode=0o755)
+    namespace_path.chmod(0o755)
+
+    with (
+        pytest.raises(AutoresearchValidationError, match="permissions must be 0700"),
+        autoresearch_runner._exclusive_state_locks((tmp_path / "state.json",)),
+    ):
+        pass
+
+
+def test_symlink_lock_file_fails_with_validation_error(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+    autoresearch_runner._prepare_lock_namespace()
+    lock_path = autoresearch_runner._state_lock_path(state_path)
+    symlink_target = tmp_path / "lock-target"
+    symlink_target.touch(mode=0o600)
+    lock_path.symlink_to(symlink_target)
+
+    with (
+        pytest.raises(
+            AutoresearchValidationError,
+            match="unable to open autoresearch state lock",
+        ),
+        autoresearch_runner._exclusive_state_locks((state_path,)),
+    ):
+        pass
+
+
+def test_old_adjacent_sidecar_output_cannot_break_concurrent_source_coordination(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "state.json"
+    old_sidecar_output = tmp_path / ".state.json.lock"
+    source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    source_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
+    first_published = Event()
+    release_first = Event()
+    second_completed = Event()
+    original_atomic_save = autoresearch_runner._atomic_save_state_file
+
+    def pause_after_old_sidecar_publication(
+        path: Path,
+        state: AutoresearchState,
+    ) -> None:
+        original_atomic_save(path, state)
+        if path == old_sidecar_output.resolve():
+            first_published.set()
+            release_first.wait(timeout=2)
+
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "_atomic_save_state_file",
+        pause_after_old_sidecar_publication,
+    )
+
+    first_worker = Thread(
+        target=persist_derived_state,
+        args=(
+            source_path,
+            old_sidecar_output,
+            source_state,
+            replace(source_state, iteration=2),
+        ),
+    )
+
+    def persist_same_source() -> None:
+        persist_derived_state(
+            source_path,
+            source_path,
+            source_state,
+            replace(source_state, iteration=3),
+        )
+        second_completed.set()
+
+    first_worker.start()
+    assert first_published.wait(timeout=2)
+    second_worker = Thread(target=persist_same_source)
+    second_worker.start()
+
+    assert not second_completed.wait(timeout=0.1)
+    release_first.set()
+    first_worker.join(timeout=2)
+    second_worker.join(timeout=2)
+
+    assert second_completed.is_set()
+
+
+def test_crossed_source_destination_writers_complete_without_abba_deadlock(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    first_path = tmp_path / "a-state.json"
+    second_path = tmp_path / "b-state.json"
+    first_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    second_state = replace(first_state, iteration=2)
+    first_path.write_text(json.dumps(first_state.to_dict()), encoding="utf-8")
+    second_path.write_text(json.dumps(second_state.to_dict()), encoding="utf-8")
+    start = Barrier(3)
+    successes: list[str] = []
+    failures: list[AutoresearchValidationError] = []
+
+    def persist_crossed(
+        label: str,
+        source_path: Path,
+        output_path: Path,
+        source_state: AutoresearchState,
+        derived_state: AutoresearchState,
+    ) -> None:
+        start.wait()
+        try:
+            persist_derived_state(source_path, output_path, source_state, derived_state)
+            successes.append(label)
+        except AutoresearchValidationError as exc:
+            failures.append(exc)
+
+    first_worker = Thread(
+        target=persist_crossed,
+        args=("first", first_path, second_path, first_state, replace(first_state, iteration=3)),
+    )
+    second_worker = Thread(
+        target=persist_crossed,
+        args=(
+            "second",
+            second_path,
+            first_path,
+            second_state,
+            replace(second_state, iteration=4),
+        ),
+    )
+    first_worker.start()
+    second_worker.start()
+
+    start.wait()
+    first_worker.join(timeout=2)
+    second_worker.join(timeout=2)
+
+    assert not first_worker.is_alive() and not second_worker.is_alive()
+    assert len(successes) == 1
+    assert len(failures) == 1
+
+
+def test_save_state_file_waits_for_an_active_destination_writer(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    output_path = tmp_path / "initialized-state.json"
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    completed = Event()
+
+    def save() -> None:
+        save_state_file(output_path, state)
+        completed.set()
+
+    with autoresearch_runner._exclusive_state_locks((output_path,)):
+        worker = Thread(target=save)
+        worker.start()
+
+        assert not completed.wait(timeout=0.1)
+
+    worker.join(timeout=2)
+
+    assert completed.is_set()
+
+
+def test_migrate_state_file_reads_source_only_after_source_and_destination_are_locked(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    source_path = tmp_path / "migration-source.json"
+    output_path = tmp_path / "migration-output.json"
+    initial_state = AutoresearchState(platform_readiness=platform_readiness.identity())
+    changed_state = replace(initial_state, iteration=2)
+    source_path.write_text(json.dumps(initial_state.to_dict()), encoding="utf-8")
+    completed = Event()
+
+    def migrate() -> None:
+        migrate_state_file(source_path, output_path)
+        completed.set()
+
+    with autoresearch_runner._exclusive_state_locks((source_path,)):
+        worker = Thread(target=migrate)
+        worker.start()
+        assert not completed.wait(timeout=0.1)
+        source_path.write_text(json.dumps(changed_state.to_dict()), encoding="utf-8")
+
+    worker.join(timeout=2)
+    migrated_state = AutoresearchState.from_dict(
+        json.loads(output_path.read_text(encoding="utf-8"))
+    )
+
+    assert migrated_state == changed_state
 
 
 def test_next_action_fails_closed_when_accepted_union_manifest_is_deleted(
@@ -2057,18 +2729,18 @@ def test_standardize_mempalace_kg_object_distinguishes_long_objects_with_same_pr
     assert first != second
 
 
-def test_repeat_prompt_exposes_exact_standardized_mempalace_kg_facts(
+def test_repeat_prompt_requires_standardized_mempalace_kg_facts_from_verified_state(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
     state = _state_to_decision(policy, platform_readiness)
     state = advance_state(state, _final_decision(), policy)
-    expected_facts = standardized_mempalace_kg_facts(state)
-
     prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
-    assert json.dumps(expected_facts, indent=2, sort_keys=True) in prompt
+    assert "derive the exact standardized predicate/object pairs" in prompt
+    assert "STATE_REF=" in prompt
+    assert "alpha_decision_metric" not in prompt
 
 
 def test_verify_mempalace_final_decision_accepts_compacted_long_g0_infra_rationale(
@@ -3063,9 +3735,9 @@ def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
     prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
     fixed = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
 
-    assert "Reuse the exact persisted implementation worktree" in prompt
-    assert json.dumps(implementation.workspace_path) in prompt
-    assert json.dumps(implementation.commit_sha) in prompt
+    assert "reuse the exact persisted implementation worktree" in prompt
+    assert implementation.workspace_path not in prompt
+    assert implementation.commit_sha not in prompt
     assert "Never create another worktree" in prompt
     assert fixed.implementation_result is not None
     assert fixed.implementation_result.workspace_path == implementation.workspace_path
@@ -3101,6 +3773,7 @@ def test_verification_prompt_uses_recorded_workspace(
 
 
 def test_verification_prompt_requires_terminal_structured_artifact_persistence(
+    tmp_path: Path,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
@@ -3108,14 +3781,22 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
+    state_path = tmp_path / "verification-state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
 
-    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+    prompt = next_action(
+        state,
+        policy,
+        receipts,
+        platform_readiness,
+        state_path=state_path,
+    ).prompt_text
 
     assert "Verification handoff contract" in prompt
     assert "structured JSON verification_result artifact" in prompt
     assert (
         "uv run gateway-cli autoresearch-advance "
-        "/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>"
+        f"{json.dumps(str(state_path.resolve()))} <artifact.json>"
     ) in prompt
     assert "before any prose completion or status report" in prompt
     assert "prose-only verification completion is invalid" in prompt

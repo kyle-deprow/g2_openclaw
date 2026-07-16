@@ -93,6 +93,18 @@ from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def isolated_autoresearch_lock_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "AUTORESEARCH_LOCK_NAMESPACE",
+        tmp_path / "autoresearch-locks",
+    )
+
+
 def _health_response(*, content_type: str, body: bytes, status: int = 200) -> MagicMock:
     response = MagicMock()
     response.status = status
@@ -213,12 +225,13 @@ def _dynamic_coverage() -> DynamicUniverseCoverageReceipt:
     )
 
 
-def test_autoresearch_migrate_state_smoke(tmp_path: Path) -> None:
+@pytest.mark.parametrize("in_place", [False, True], ids=("distinct-output", "in-place"))
+def test_autoresearch_migrate_state_smoke(tmp_path: Path, *, in_place: bool) -> None:
     readiness = _ready_manifest(tmp_path / "migration-readiness")
     raw = AutoresearchState(platform_readiness=readiness.identity()).to_dict()
     del raw["schema_version"]
     source = tmp_path / "live-schema-less.json"
-    output = tmp_path / "live-v2.json"
+    output = source if in_place else tmp_path / "live-v2.json"
     source.write_text(json.dumps(raw), encoding="utf-8")
 
     result = runner.invoke(
@@ -912,17 +925,24 @@ class TestAutoresearchCliCommands:
         quantipy_root = tmp_path / "quantipy"
         TestAutoresearchCliCommands._write_quantipy_receipts(quantipy_root)
         policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-        digest = expected_instruction_manifest_sha256(
-            state, policy, build_receipt_catalog(quantipy_root)
-        )
         state_path = tmp_path / "state.json"
         artifact_path = tmp_path / "artifact.json"
         output_path = tmp_path / "state-out.json"
         state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        digest = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            build_receipt_catalog(quantipy_root),
+            state_path=state_path,
+        )
         artifact_payload: object = artifact.to_dict()
         if not legacy_unwrapped:
             artifact_payload = {
                 "instruction_manifest_sha256": digest,
+                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
+                    state,
+                    state_path=state_path,
+                ).sha256(),
                 "artifact": artifact_payload,
             }
         artifact_path.write_text(json.dumps(artifact_payload), encoding="utf-8")
@@ -959,6 +979,41 @@ class TestAutoresearchCliCommands:
 
         assert result.exit_code == 0
         assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
+
+    def test_autoresearch_advance_does_not_publish_output_after_source_changes_before_persistence(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        state = self._state_for_implementation(git_worktree.target_checkout)
+        artifact = self._implementation_artifact(
+            git_worktree,
+            commit_sha=git_worktree.final_commit,
+        )
+        original_persist = autoresearch_runner.persist_derived_state
+
+        def mutate_source_then_persist(
+            source_path: Path,
+            output_path: Path,
+            source_state: AutoresearchState,
+            derived_state: AutoresearchState,
+        ) -> None:
+            changed_source_state = replace(source_state, iteration=source_state.iteration + 1)
+            source_path.write_text(
+                json.dumps(changed_source_state.to_dict()),
+                encoding="utf-8",
+            )
+            original_persist(source_path, output_path, source_state, derived_state)
+
+        with patch.object(
+            autoresearch_runner,
+            "persist_derived_state",
+            new=mutate_source_then_persist,
+        ):
+            result, output_path = self._invoke_autoresearch_advance(tmp_path, state, artifact)
+
+        assert result.exit_code == 1
+        assert not output_path.exists()
 
     def test_autoresearch_advance_rejects_noncanonical_implementation_worktree(
         self,
@@ -1012,14 +1067,22 @@ class TestAutoresearchCliCommands:
         quantipy_root = tmp_path / "quantipy"
         self._write_quantipy_receipts(quantipy_root)
         policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-        digest = expected_instruction_manifest_sha256(
-            state, policy, build_receipt_catalog(quantipy_root)
-        )
         state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        digest = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            build_receipt_catalog(quantipy_root),
+            state_path=state_path,
+        )
+        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+            state,
+            state_path=state_path,
+        ).sha256()
         artifact_path.write_text(
             json.dumps(
                 {
                     "instruction_manifest_sha256": digest,
+                    "state_reference_sha256": state_reference_sha256,
                     "artifact": {
                         **SetupContextArtifact(
                             goal="Find a profitable intraday alpha",
@@ -1136,10 +1199,13 @@ class TestAutoresearchCliCommands:
         self._write_quantipy_receipts(quantipy_root)
         state = AutoresearchState(platform_readiness=readiness.identity())
         policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-        digest = expected_instruction_manifest_sha256(
-            state, policy, build_receipt_catalog(quantipy_root)
-        )
         state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        digest = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            build_receipt_catalog(quantipy_root),
+            state_path=state_path,
+        )
         setup_artifact = SetupContextArtifact(
             goal="Find a profitable intraday alpha",
             metric_name="OOS Sharpe net",
@@ -1150,10 +1216,15 @@ class TestAutoresearchCliCommands:
             hard_constraints=("No overnight holds",),
             data_sources=("qp.prices()",),
         )
+        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+            state,
+            state_path=state_path,
+        ).sha256()
         artifact_path.write_text(
             json.dumps(
                 {
                     "instruction_manifest_sha256": digest,
+                    "state_reference_sha256": state_reference_sha256,
                     "artifact": setup_artifact.to_dict(),
                 }
             ),

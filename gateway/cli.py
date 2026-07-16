@@ -731,7 +731,13 @@ def autoresearch_next(
                 f"{details}\n"
                 "Stop them before launching the next autoresearch stage."
             )
-        action = next_action(state, policy, receipts, readiness=readiness)
+        action = next_action(
+            state,
+            policy,
+            receipts,
+            readiness=readiness,
+            state_path=state_path,
+        )
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -816,7 +822,7 @@ def autoresearch_advance(
         load_artifact_file,
         load_autoresearch_policy,
         load_state_file,
-        save_state_file,
+        persist_derived_state,
         validate_artifact_workspace,
     )
 
@@ -827,17 +833,29 @@ def autoresearch_advance(
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
         validation_context.validate_for_state(state)
         receipts = build_receipt_catalog(quantipy_root)
-        source_manifest_sha256 = expected_instruction_manifest_sha256(state, policy, receipts)
+        source_manifest_sha256 = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            receipts,
+            state_path=state_path,
+        )
         artifact = load_artifact_file(
             artifact_path,
             state,
             policy,
             instruction_manifest_sha256=source_manifest_sha256,
+            state_path=state_path,
         )
         if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
             validate_artifact_workspace(state, artifact)
-        next_state = advance_state(state, artifact, policy, validation_context=validation_context)
-        save_state_file(output_path, next_state)
+        next_state = advance_state(
+            state,
+            artifact,
+            policy,
+            validation_context=validation_context,
+            state_path=state_path,
+        )
+        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-advance failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -857,7 +875,7 @@ def autoresearch_mark_memory(
         load_autoresearch_policy,
         load_state_file,
         mark_memory_written,
-        save_state_file,
+        persist_derived_state,
         validate_state,
         verify_mempalace_final_decision,
     )
@@ -868,7 +886,7 @@ def autoresearch_mark_memory(
         validate_state(state, policy)
         receipt = verify_mempalace_final_decision(state, mempalace_kg_path)
         next_state = mark_memory_written(state, receipt)
-        save_state_file(output_path, next_state)
+        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -887,7 +905,7 @@ def autoresearch_start_next(
     from gateway.autoresearch_runner import (
         load_autoresearch_policy,
         load_state_file,
-        save_state_file,
+        persist_derived_state,
         start_next_iteration,
         validate_state,
     )
@@ -898,7 +916,7 @@ def autoresearch_start_next(
         validate_state(state, policy)
         readiness = load_platform_readiness(readiness_manifest)
         next_state = start_next_iteration(state, readiness=readiness)
-        save_state_file(output_path, next_state)
+        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-start-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -915,15 +933,15 @@ def autoresearch_pin_readiness(
     """Initialize readiness or explicitly repin an active state to the same IDs."""
     from gateway.autoresearch_runner import (
         load_state_file,
+        persist_derived_state,
         pin_platform_readiness,
-        save_state_file,
     )
 
     try:
         state = load_state_file(state_path)
         readiness = load_platform_readiness(readiness_manifest)
         next_state = pin_platform_readiness(state, readiness)
-        save_state_file(output_path, next_state)
+        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-pin-readiness failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -971,8 +989,8 @@ def autoresearch_resume(
     from gateway.autoresearch_runner import (
         load_autoresearch_policy,
         load_state_file,
+        persist_derived_state,
         resume_suspended_iteration,
-        save_state_file,
         validate_state,
     )
 
@@ -982,7 +1000,7 @@ def autoresearch_resume(
         validate_state(state, policy)
         readiness = load_platform_readiness(readiness_manifest)
         next_state = resume_suspended_iteration(state, readiness)
-        save_state_file(output_path, next_state)
+        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-resume failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

@@ -6,6 +6,7 @@ skill/source receipts, artifact validation, and next-action selection.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -15,8 +16,10 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import tempfile
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
@@ -34,10 +37,16 @@ from gateway.autoresearch_readiness import (
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
+DEFAULT_AUTORESEARCH_STATE_PATH = Path("/home/dev/.openclaw/autoresearch/quantipy-state.json")
+AUTORESEARCH_LOCK_NAMESPACE = Path("/tmp") / f"g2-openclaw-autoresearch-locks-{os.getuid()}"
 G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
 AUTORESEARCH_STATE_SCHEMA_VERSION = 2
-INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v2"
+INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v3"
 INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
+AUTHORITATIVE_STATE_REFERENCE_VERSION = "g2-openclaw-autoresearch-state-reference-v1"
+AUTHORITATIVE_STATE_DIGEST_DOMAIN = "g2-openclaw.autoresearch.authoritative-state"
+AUTHORITATIVE_STATE_REFERENCE_DIGEST_DOMAIN = "g2-openclaw.autoresearch.state-reference"
+AUTORESEARCH_STATE_LOCK_DIGEST_DOMAIN = "g2-openclaw.autoresearch.state-lock"
 MAX_NEXT_ACTION_PROMPT_BYTES = 32 * 1024
 # Keep one KiB of headroom below the immutable transport maximum for path and
 # host-probe variation. The hard maximum remains the final fail-closed bound.
@@ -595,6 +604,42 @@ class InstructionSourceEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class AuthoritativeStateReference:
+    """Digest-bound location of the complete state required by a stage agent."""
+
+    version: str
+    digest_domain: str
+    path: str
+    state_sha256: str
+    phase: str
+    iteration: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": self.version,
+            "digest_domain": self.digest_domain,
+            "path": self.path,
+            "state_sha256": self.state_sha256,
+            "phase": self.phase,
+            "iteration": self.iteration,
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
+
+    def sha256(self) -> str:
+        return _sha256_text(
+            "\n".join(
+                (
+                    AUTHORITATIVE_STATE_REFERENCE_DIGEST_DOMAIN,
+                    self.version,
+                    self.canonical_json(),
+                )
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class InstructionSourceManifest:
     version: str
     digest_domain: str
@@ -602,6 +647,7 @@ class InstructionSourceManifest:
     expected_artifact_type: str
     target_agent_ids: tuple[str, ...]
     target_repo_root: str
+    state_reference: AuthoritativeStateReference
     sources: tuple[InstructionSourceEntry, ...]
 
     @classmethod
@@ -612,6 +658,8 @@ class InstructionSourceManifest:
         expected_artifact_type: ArtifactType,
         target_agent_ids: Sequence[str],
         target_repo_root: Path,
+        state: AutoresearchState,
+        state_path: Path,
         receipts: Sequence[SourceReceipt],
     ) -> InstructionSourceManifest:
         seen: set[str] = set()
@@ -632,6 +680,7 @@ class InstructionSourceManifest:
             expected_artifact_type=expected_artifact_type.value,
             target_agent_ids=tuple(target_agent_ids),
             target_repo_root=str(target_repo_root.expanduser().resolve(strict=False)),
+            state_reference=build_authoritative_state_reference(state, state_path=state_path),
             sources=tuple(InstructionSourceEntry.from_receipt(item) for item in ordered),
         )
 
@@ -643,6 +692,7 @@ class InstructionSourceManifest:
             "expected_artifact_type": self.expected_artifact_type,
             "target_agent_ids": list(self.target_agent_ids),
             "target_repo_root": self.target_repo_root,
+            "state_reference": self.state_reference.to_dict(),
             "sources": [source.to_dict() for source in self.sources],
         }
 
@@ -667,6 +717,8 @@ def build_instruction_source_manifest(
     expected_artifact_type: ArtifactType,
     target_agent_ids: Sequence[str],
     target_repo_root: Path,
+    state: AutoresearchState,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
     receipts: Sequence[SourceReceipt],
 ) -> InstructionSourceManifest:
     return InstructionSourceManifest.from_context(
@@ -674,6 +726,8 @@ def build_instruction_source_manifest(
         expected_artifact_type=expected_artifact_type,
         target_agent_ids=target_agent_ids,
         target_repo_root=target_repo_root,
+        state=state,
+        state_path=state_path,
         receipts=receipts,
     )
 
@@ -684,6 +738,8 @@ def instruction_source_manifest_sha256(
     expected_artifact_type: ArtifactType,
     target_agent_ids: Sequence[str],
     target_repo_root: Path,
+    state: AutoresearchState,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
     receipts: Sequence[SourceReceipt],
 ) -> str:
     return build_instruction_source_manifest(
@@ -691,6 +747,8 @@ def instruction_source_manifest_sha256(
         expected_artifact_type=expected_artifact_type,
         target_agent_ids=target_agent_ids,
         target_repo_root=target_repo_root,
+        state=state,
+        state_path=state_path,
         receipts=receipts,
     ).sha256()
 
@@ -699,6 +757,8 @@ def expected_instruction_manifest_sha256(
     state: AutoresearchState,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
+    *,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> str:
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
@@ -707,6 +767,8 @@ def expected_instruction_manifest_sha256(
         expected_artifact_type=target.artifact_type,
         target_agent_ids=target.agent_ids,
         target_repo_root=_target_repo_root_for_state(state),
+        state=state,
+        state_path=state_path,
         receipts=required_receipts,
     )
 
@@ -3124,6 +3186,7 @@ class NextAction:
     required_receipts: tuple[SourceReceipt, ...]
     instruction_source_manifest: InstructionSourceManifest
     source_manifest_sha256: str
+    state_reference_sha256: str
     prompt_text: str
 
     def to_dict(self) -> dict[str, object]:
@@ -3134,6 +3197,7 @@ class NextAction:
             "required_receipts": [receipt.to_dict() for receipt in self.required_receipts],
             "instruction_source_manifest": self.instruction_source_manifest.to_dict(),
             "source_manifest_sha256": self.source_manifest_sha256,
+            "state_reference_sha256": self.state_reference_sha256,
             "prompt_text": self.prompt_text,
         }
 
@@ -3339,6 +3403,65 @@ class AutoresearchState:
             "suspended": self.suspended,
             "suspension_reason": self.suspension_reason,
         }
+
+
+def build_authoritative_state_reference(
+    state: AutoresearchState,
+    *,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
+) -> AuthoritativeStateReference:
+    """Bind a stage dispatch to one canonical, complete persisted state."""
+    canonical_state_model = normalize_autoresearch_state(
+        AutoresearchState.from_dict(state.to_dict())
+    )
+    canonical_state = _compact_json_block(canonical_state_model.to_dict())
+    state_sha256 = _sha256_text("\n".join((AUTHORITATIVE_STATE_DIGEST_DOMAIN, canonical_state)))
+    return AuthoritativeStateReference(
+        version=AUTHORITATIVE_STATE_REFERENCE_VERSION,
+        digest_domain=AUTHORITATIVE_STATE_DIGEST_DOMAIN,
+        path=str(state_path.expanduser().resolve(strict=False)),
+        state_sha256=state_sha256,
+        phase=canonical_state_model.phase.value,
+        iteration=canonical_state_model.iteration,
+    )
+
+
+def validate_authoritative_state_reference(
+    reference: AuthoritativeStateReference,
+) -> AutoresearchState:
+    """Load the referenced state and reject any content, phase, or path mismatch."""
+    if reference.version != AUTHORITATIVE_STATE_REFERENCE_VERSION:
+        raise AutoresearchValidationError("authoritative state reference version is invalid")
+    if reference.digest_domain != AUTHORITATIVE_STATE_DIGEST_DOMAIN:
+        raise AutoresearchValidationError("authoritative state reference domain is invalid")
+    _validate_sha256(reference.state_sha256, label="authoritative state reference state_sha256")
+    state_path = Path(reference.path).expanduser().resolve(strict=False)
+    state = load_state_file(state_path)
+    expected = build_authoritative_state_reference(state, state_path=state_path)
+    if expected != reference:
+        raise AutoresearchValidationError(
+            "authoritative state reference does not match the current state file"
+        )
+    return state
+
+
+def _validate_persisted_state_matches(
+    state: AutoresearchState,
+    *,
+    state_path: Path,
+) -> AutoresearchState:
+    """Reject an artifact handoff if its input state changed after dispatch."""
+    supplied_reference = build_authoritative_state_reference(state, state_path=state_path)
+    persisted_state = load_state_file(state_path)
+    persisted_reference = build_authoritative_state_reference(
+        persisted_state,
+        state_path=state_path,
+    )
+    if persisted_reference != supplied_reference:
+        raise AutoresearchValidationError(
+            "persisted state does not match the supplied authoritative state"
+        )
+    return persisted_state
 
 
 LOCAL_RECEIPT_PATHS: dict[str, Path] = {
@@ -4516,30 +4639,6 @@ def _render_instruction_source_manifest(manifest: InstructionSourceManifest) -> 
     return _compact_json_block(manifest.to_dict())
 
 
-def _artifact_context(state: AutoresearchState) -> dict[str, object]:
-    return {
-        "iteration": state.iteration,
-        "suspended": state.suspended,
-        "suspension_reason": state.suspension_reason,
-        "setup": state.setup.to_dict() if state.setup else None,
-        "context_packet": state.context_packet.to_dict() if state.context_packet else None,
-        "latest_debate": state.latest_debate.to_dict() if state.latest_debate else None,
-        "latest_consensus": state.latest_consensus.to_dict() if state.latest_consensus else None,
-        "implementation_result": state.implementation_result.to_dict()
-        if state.implementation_result
-        else None,
-        "latest_verification": state.latest_verification.to_dict()
-        if state.latest_verification
-        else None,
-        "latest_review": state.latest_review.to_dict() if state.latest_review else None,
-        "latest_fix": state.latest_fix.to_dict() if state.latest_fix else None,
-        "pending_fix_trigger": state.pending_fix_trigger.value
-        if state.pending_fix_trigger is not None
-        else None,
-        "final_decision": state.final_decision.to_dict() if state.final_decision else None,
-    }
-
-
 def _select_phase_target(
     state: AutoresearchState,
     policy: AutoresearchPolicy,
@@ -4796,6 +4895,8 @@ def _phase_instruction(
     phase: Phase,
     expected_artifact_type: ArtifactType,
     agent_ids: Sequence[str],
+    *,
+    state_path: Path,
 ) -> str:
     instructions: dict[Phase, str] = {
         Phase.SETUP_CONTEXT: (
@@ -4856,7 +4957,6 @@ def _phase_instruction(
         ),
     }
     contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type], compact=True)
-    state_json = _compact_json_block(_artifact_context(state))
     agent_text = ", ".join(agent_ids) if agent_ids else "(controller/no agent spawn)"
     workspace_contract = _workspace_isolation_contract(state, phase)
     mode_contract = _mode_contract(state)
@@ -4868,6 +4968,7 @@ def _phase_instruction(
     verification_handoff_contract = _verification_handoff_contract(
         phase,
         expected_artifact_type,
+        state_path=state_path,
     )
     mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
     operator_precondition_instruction = _operator_precondition_decision_instruction(
@@ -4887,7 +4988,6 @@ def _phase_instruction(
         f"{mempalace_fact_instruction}"
         f"{operator_precondition_instruction}"
         f"ARTIFACT_CONTRACT={contract}\n"
-        f"STATE={state_json}"
     )
 
 
@@ -4982,6 +5082,8 @@ def _mode_contract(state: AutoresearchState) -> str:
 def _verification_handoff_contract(
     phase: Phase,
     expected_artifact_type: ArtifactType,
+    *,
+    state_path: Path,
 ) -> str:
     if (
         phase is not Phase.VERIFICATION
@@ -4993,7 +5095,7 @@ def _verification_handoff_contract(
         "- Every verification attempt must terminate by writing a structured JSON "
         "verification_result artifact and advancing it with "
         "`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance "
-        "/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>` "
+        f"{_render_literal(str(state_path))} <artifact.json>` "
         "before any prose completion or status report. A prose-only verification "
         "completion is invalid.\n"
         "- This applies to failing tests and partial runs: do not stop after "
@@ -5054,16 +5156,11 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         raise AutoresearchValidationError(
             "fix_test workspace contract requires implementation_result"
         )
-    implementation = state.implementation_result
-    workspace_path = _render_literal(implementation.workspace_path)
-    implementation_commit = _render_literal(implementation.commit_sha)
     return (
         "Fix/Test workspace continuity contract:\n"
-        "- Reuse the exact persisted implementation worktree "
-        f"{workspace_path}. Never create another worktree or edit the "
-        "main target checkout.\n"
-        "- Start from and preserve the accepted experiment commit "
-        f"{implementation_commit} in that worktree's history.\n"
+        "- From the verified authoritative state, reuse the exact persisted implementation "
+        "worktree and accepted implementation commit. Never create another worktree or edit "
+        "the main target checkout.\n"
         "- Before editing, require a clean or recoverable Git state. Do not discard or "
         "overwrite unrelated changes; if reconciliation is ambiguous or would lose "
         "unrelated work, fail closed and report the blocker.\n"
@@ -5073,9 +5170,8 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "independently edit shared infrastructure.\n"
         "- Do not leave background experiment, notebook, pytest, or data-generation "
         "processes running after the stage exits.\n"
-        "- Finish with a clean, committed result. The fix_result artifact must use the "
-        f"same workspace_path exactly ({workspace_path}) and report its "
-        "accepted final commit SHA in commit_sha.\n"
+        "- Finish with a clean, committed result. The fix_result artifact must use the same "
+        "verified workspace_path exactly and report its accepted final commit SHA in commit_sha.\n"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
     )
@@ -5089,13 +5185,11 @@ def _mempalace_kg_fact_instruction(
         return ""
     if state.final_decision is None:
         raise AutoresearchValidationError("MemPalace memory write requires final_decision")
-    facts = standardized_mempalace_kg_facts(state)
     return (
         "Required standardized MemPalace KG facts:\n"
-        "- Use the exact predicate/object pairs below with mempalace_kg_add. "
-        "Do not re-normalize, shorten, or regenerate their objects.\n"
-        f"- Use subject: {state.final_decision.experiment_id}\n"
-        f"{_json_block(facts)}\n\n"
+        "- From the verified authoritative state, derive the exact standardized predicate/object "
+        "pairs and final decision subject with the installed runner. Do not re-normalize, "
+        "shorten, or regenerate their objects.\n\n"
     )
 
 
@@ -5107,24 +5201,42 @@ def _build_prompt_text(
     agent_ids: Sequence[str],
     instruction_source_manifest: InstructionSourceManifest,
     source_manifest_sha256: str,
+    state_reference_sha256: str,
     readiness: PlatformReadinessManifest,
 ) -> str:
     target_repo = _target_repo_root_for_state(state)
     compute_snapshot = collect_compute_capability_snapshot(target_repo)
+    phase_instruction = _phase_instruction(
+        state,
+        phase,
+        expected_artifact_type,
+        agent_ids,
+        state_path=Path(instruction_source_manifest.state_reference.path),
+    )
     return (
         "Autoresearch prompt.\n"
         f"PLATFORM_READINESS_CAPABILITIES={readiness.prompt_capabilities()}\n"
         f"POLICY={policy.model_policy_summary()}\n"
         f"COMPUTE_SNAPSHOT={_json_block(compute_snapshot.to_dict(), compact=True)}\n"
-        f"{_phase_instruction(state, phase, expected_artifact_type, agent_ids)}\n"
+        f"{phase_instruction}\n"
+        f"STATE_REF={instruction_source_manifest.state_reference.canonical_json()}\n"
+        f"state_reference_sha256={state_reference_sha256}\n"
         f"source_manifest_sha256={source_manifest_sha256}\n"
         f"INSTRUCTION_MANIFEST={_render_instruction_source_manifest(instruction_source_manifest)}\n"
-        "Before work, read every live instruction_source_manifest file at its canonical "
+        "Before work, read STATE_REF.path as the complete authoritative state. Parse it with "
+        "the installed autoresearch runner, normalize it, serialize state.to_dict() as sorted "
+        "compact UTF-8 JSON, and verify SHA-256 of STATE_REF.digest_domain + LF + those bytes "
+        "against STATE_REF.state_sha256. Also verify its phase and iteration against STATE_REF. "
+        "Any missing, unreadable, malformed, stale, or mismatched state fails closed; do not "
+        "work from prompt memory or emit an artifact. STATE_REF is lossless by reference: every "
+        "phase artifact required for this dispatch remains only in that verified state file.\n"
+        "Then read every live instruction_source_manifest file at its canonical "
         "path; configured skills remain authoritative. Recompute SHA-256 from current bytes; "
         "missing, unreadable, or mismatched files fail. The exact compact manifest's "
-        "versioned, domain-separated digest binds phase, artifact type, ordered agent IDs, "
-        "canonical repo root, and sorted receipts. Artifacts use this exact JSON envelope: "
-        '{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}. '
+        "versioned, domain-separated digest binds the verified state reference, phase, artifact "
+        "type, ordered agent IDs, canonical repo root, and sorted receipts. Artifacts use this "
+        'exact JSON envelope: {"instruction_manifest_sha256":"<source_manifest_sha256>",'
+        '"state_reference_sha256":"<state_reference_sha256>","artifact":{...}}. '
         "Unwrapped artifacts, missing/mismatched digests, and extra envelope keys are invalid "
         "and cannot advance. Artifact maximum: "
         f"{MAX_ARTIFACT_FILE_BYTES} bytes; compact, never truncate.\n"
@@ -5136,6 +5248,8 @@ def next_action(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     readiness: PlatformReadinessManifest,
+    *,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> NextAction:
     _validate_state(state, policy)
     if state.suspended:
@@ -5158,9 +5272,12 @@ def next_action(
         expected_artifact_type=target.artifact_type,
         target_agent_ids=target.agent_ids,
         target_repo_root=_target_repo_root_for_state(state),
+        state=state,
+        state_path=state_path,
         receipts=required_receipts,
     )
     source_manifest_sha256 = instruction_source_manifest.sha256()
+    state_reference_sha256 = instruction_source_manifest.state_reference.sha256()
     prompt_text = _build_prompt_text(
         state=state,
         policy=policy,
@@ -5169,6 +5286,7 @@ def next_action(
         agent_ids=target.agent_ids,
         instruction_source_manifest=instruction_source_manifest,
         source_manifest_sha256=source_manifest_sha256,
+        state_reference_sha256=state_reference_sha256,
         readiness=readiness,
     )
     prompt_bytes = len(prompt_text.encode("utf-8"))
@@ -5192,6 +5310,7 @@ def next_action(
         required_receipts=required_receipts,
         instruction_source_manifest=instruction_source_manifest,
         source_manifest_sha256=source_manifest_sha256,
+        state_reference_sha256=state_reference_sha256,
         prompt_text=prompt_text,
     )
     if state.phase is Phase.REVIEW:
@@ -5213,7 +5332,11 @@ def advance_state(
     | FinalDecisionArtifact,
     policy: AutoresearchPolicy,
     validation_context: AutoresearchValidationContext | None = None,
+    *,
+    state_path: Path | None = None,
 ) -> AutoresearchState:
+    if state_path is not None:
+        state = _validate_persisted_state_matches(state, state_path=state_path)
     _validate_state(state, policy)
     if state.mode is ResearchMode.ALPHA_RESEARCH and state.phase is Phase.VERIFICATION:
         if validation_context is None:
@@ -5756,6 +5879,7 @@ def load_artifact_file(
     policy: AutoresearchPolicy,
     *,
     instruction_manifest_sha256: str,
+    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> (
     SetupContextArtifact
     | ContextPacketArtifact
@@ -5775,7 +5899,7 @@ def load_artifact_file(
         raise AutoresearchValidationError(
             "artifact file exceeds hard byte budget: "
             f"{len(raw_bytes)} > {MAX_ARTIFACT_FILE_BYTES} bytes; compact the "
-            "phase artifact and write the strict instruction_manifest_sha256 envelope"
+            "phase artifact and write the strict manifest/state-reference envelope"
         )
     try:
         raw = json.loads(raw_bytes.decode("utf-8"))
@@ -5789,12 +5913,22 @@ def load_artifact_file(
     _require_exact_keys(
         data,
         label="artifact_file",
-        expected=("instruction_manifest_sha256", "artifact"),
+        expected=("instruction_manifest_sha256", "state_reference_sha256", "artifact"),
     )
     envelope_digest = _require_sha256(data, "instruction_manifest_sha256")
     if envelope_digest != instruction_manifest_sha256:
         raise AutoresearchValidationError(
             "artifact instruction_manifest_sha256 does not match dispatched manifest"
+        )
+    state = _validate_persisted_state_matches(state, state_path=state_path)
+    expected_state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
+    envelope_state_reference_sha256 = _require_sha256(data, "state_reference_sha256")
+    if envelope_state_reference_sha256 != expected_state_reference_sha256:
+        raise AutoresearchValidationError(
+            "artifact state_reference_sha256 does not match the current authoritative state"
         )
     artifact_raw = data["artifact"]
 
@@ -5835,55 +5969,60 @@ def load_state_file(path: Path) -> AutoresearchState:
 
 def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchState:
     """Explicitly migrate the sole lossless schema-less live-state shape to v2."""
-    try:
-        raw = json.loads(source_path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise AutoresearchValidationError(f"missing state file: {source_path}") from exc
-    except json.JSONDecodeError as exc:
-        raise AutoresearchValidationError(f"invalid state JSON: {source_path}") from exc
-    data = _ensure_mapping(raw, label="autoresearch_state")
-    if "schema_version" in data:
-        state = AutoresearchState.from_dict(data)
-        save_state_file(output_path, state)
+    resolved_source_path = source_path.expanduser().resolve(strict=False)
+    resolved_output_path = output_path.expanduser().resolve(strict=False)
+    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
+        try:
+            raw = json.loads(resolved_source_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise AutoresearchValidationError(
+                f"missing state file: {resolved_source_path}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise AutoresearchValidationError(
+                f"invalid state JSON: {resolved_source_path}"
+            ) from exc
+        data = _ensure_mapping(raw, label="autoresearch_state")
+        if "schema_version" in data:
+            state = AutoresearchState.from_dict(data)
+        else:
+            expected_schema_less = set(AutoresearchState().to_dict()) - {"schema_version"}
+            pristine_values: dict[str, object] = {
+                "phase": Phase.SETUP_CONTEXT.value,
+                "iteration": 1,
+                "consensus_retry_count": 0,
+                "verification_fix_attempts": 0,
+                "setup": None,
+                "context_packet": None,
+                "debate_rounds": [],
+                "consensus_history": [],
+                "implementation_result": None,
+                "verification_history": [],
+                "review_history": [],
+                "fix_history": [],
+                "pending_fix_trigger": None,
+                "final_decision": None,
+                "memory_written": False,
+                "mode": None,
+                "memory_verification_receipt": None,
+                "suspended": False,
+                "suspension_reason": None,
+            }
+            is_pristine = set(data) == expected_schema_less and all(
+                data.get(key) == value for key, value in pristine_values.items()
+            )
+            if not is_pristine or data.get("platform_readiness") is None:
+                raise AutoresearchValidationError(
+                    "schema-less historical state is incompatible with lossless v2 migration. "
+                    "Archive it, then start a new campaign with `gateway-cli "
+                    "autoresearch-init-state --output <new-state.json> "
+                    "--readiness-manifest <platform-readiness.json>`."
+                )
+            migrated = dict(data)
+            migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
+            state = AutoresearchState.from_dict(migrated)
+        _atomic_save_state_file(resolved_output_path, state)
         return state
-
-    expected_schema_less = set(AutoresearchState().to_dict()) - {"schema_version"}
-    pristine_values: dict[str, object] = {
-        "phase": Phase.SETUP_CONTEXT.value,
-        "iteration": 1,
-        "consensus_retry_count": 0,
-        "verification_fix_attempts": 0,
-        "setup": None,
-        "context_packet": None,
-        "debate_rounds": [],
-        "consensus_history": [],
-        "implementation_result": None,
-        "verification_history": [],
-        "review_history": [],
-        "fix_history": [],
-        "pending_fix_trigger": None,
-        "final_decision": None,
-        "memory_written": False,
-        "mode": None,
-        "memory_verification_receipt": None,
-        "suspended": False,
-        "suspension_reason": None,
-    }
-    is_pristine = set(data) == expected_schema_less and all(
-        data.get(key) == value for key, value in pristine_values.items()
-    )
-    if not is_pristine or data.get("platform_readiness") is None:
-        raise AutoresearchValidationError(
-            "schema-less historical state is incompatible with lossless v2 migration. "
-            "Archive it, then start a new campaign with `gateway-cli "
-            "autoresearch-init-state --output <new-state.json> "
-            "--readiness-manifest <platform-readiness.json>`."
-        )
-    migrated = dict(data)
-    migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
-    state = AutoresearchState.from_dict(migrated)
-    save_state_file(output_path, state)
-    return state
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
@@ -5896,7 +6035,190 @@ def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
 
 
 def save_state_file(path: Path, state: AutoresearchState) -> None:
-    path.write_text(json.dumps(state.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+    resolved_path = path.expanduser().resolve(strict=False)
+    with _exclusive_state_locks((resolved_path,)):
+        _atomic_save_state_file(resolved_path, state)
+
+
+def _canonical_state_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
+    canonical_paths = {path.expanduser().resolve(strict=False) for path in paths}
+    lock_namespace = _prepare_lock_namespace()
+    for path in canonical_paths:
+        if path == lock_namespace or lock_namespace in path.parents:
+            raise AutoresearchValidationError(
+                f"autoresearch state path cannot be inside lock namespace: {path}"
+            )
+    return tuple(sorted(canonical_paths, key=os.fspath))
+
+
+def _prepare_lock_namespace() -> Path:
+    namespace_path = AUTORESEARCH_LOCK_NAMESPACE.expanduser().absolute()
+    try:
+        namespace_path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"unable to create autoresearch lock namespace: {namespace_path}"
+        ) from exc
+    try:
+        namespace_stat = namespace_path.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"unable to inspect autoresearch lock namespace: {namespace_path}"
+        ) from exc
+    if not stat.S_ISDIR(namespace_stat.st_mode):
+        raise AutoresearchValidationError(
+            f"autoresearch lock namespace is not a directory: {namespace_path}"
+        )
+    if namespace_stat.st_uid != os.getuid():
+        raise AutoresearchValidationError(
+            f"autoresearch lock namespace has wrong owner: {namespace_path}"
+        )
+    if stat.S_IMODE(namespace_stat.st_mode) != 0o700:
+        raise AutoresearchValidationError(
+            f"autoresearch lock namespace permissions must be 0700: {namespace_path}"
+        )
+    return namespace_path.resolve(strict=True)
+
+
+def _state_lock_path(state_path: Path) -> Path:
+    canonical_state_path = state_path.expanduser().resolve(strict=False)
+    lock_namespace = AUTORESEARCH_LOCK_NAMESPACE.expanduser().absolute()
+    state_path_digest = hashlib.sha256(
+        "\n".join((AUTORESEARCH_STATE_LOCK_DIGEST_DOMAIN, os.fspath(canonical_state_path))).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    return lock_namespace / f"{state_path_digest}.lock"
+
+
+def _open_state_lock_file(lock_path: Path) -> int:
+    create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        lock_fd = os.open(lock_path, create_flags, 0o600)
+    except FileExistsError:
+        try:
+            return os.open(
+                lock_path,
+                os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+            )
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                f"unable to open autoresearch state lock: {lock_path}"
+            ) from exc
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"unable to open autoresearch state lock: {lock_path}"
+        ) from exc
+    try:
+        os.fchmod(lock_fd, 0o600)
+    except OSError as exc:
+        os.close(lock_fd)
+        raise AutoresearchValidationError(
+            f"unable to secure autoresearch state lock: {lock_path}"
+        ) from exc
+    return lock_fd
+
+
+@contextmanager
+def _exclusive_state_locks(paths: Sequence[Path]) -> Iterator[None]:
+    """Lock canonical state paths once in deterministic order."""
+    with ExitStack() as stack:
+        for path in _canonical_state_paths(paths):
+            stack.enter_context(_exclusive_state_lock(path))
+        yield
+
+
+@contextmanager
+def _exclusive_state_lock(state_path: Path) -> Iterator[None]:
+    """Serialize access to one canonical state path across CLI processes."""
+    resolved_state_path = state_path.expanduser().resolve(strict=False)
+    _prepare_lock_namespace()
+    lock_path = _state_lock_path(resolved_state_path)
+    lock_fd = _open_state_lock_file(lock_path)
+    try:
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode):
+            raise AutoresearchValidationError(
+                f"autoresearch state lock is not a regular file: {lock_path}"
+            )
+        if lock_stat.st_uid != os.getuid():
+            raise AutoresearchValidationError(
+                f"autoresearch state lock has wrong owner: {lock_path}"
+            )
+        if stat.S_IMODE(lock_stat.st_mode) != 0o600:
+            raise AutoresearchValidationError(
+                f"autoresearch state lock permissions must be 0600: {lock_path}"
+            )
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except AutoresearchValidationError:
+        os.close(lock_fd)
+        raise
+    except OSError as exc:
+        os.close(lock_fd)
+        raise AutoresearchValidationError(
+            f"unable to lock autoresearch state: {resolved_state_path}"
+        ) from exc
+    try:
+        yield
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
+def persist_derived_state(
+    source_path: Path,
+    output_path: Path,
+    source_state: AutoresearchState,
+    derived_state: AutoresearchState,
+) -> None:
+    """Atomically publish a derived state only while its source remains authorized.
+
+    The source path, rather than a prior derived output, is always compared while
+    both canonical paths are locked. When the paths are equal, the verified source
+    is atomically replaced. When they differ, the source is left untouched and only
+    the derived output is atomically replaced.
+    """
+    resolved_source_path = source_path.expanduser().resolve(strict=False)
+    resolved_output_path = output_path.expanduser().resolve(strict=False)
+    expected_reference = build_authoritative_state_reference(
+        source_state,
+        state_path=resolved_source_path,
+    )
+    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
+        persisted_state = load_state_file(resolved_source_path)
+        persisted_reference = build_authoritative_state_reference(
+            persisted_state,
+            state_path=resolved_source_path,
+        )
+        if persisted_reference != expected_reference:
+            raise AutoresearchValidationError(
+                "persisted state does not match the supplied authoritative state"
+            )
+        _atomic_save_state_file(resolved_output_path, derived_state)
+
+
+def _atomic_save_state_file(path: Path, state: AutoresearchState) -> None:
+    serialized_state = json.dumps(state.to_dict(), indent=2, sort_keys=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(serialized_state)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None and temporary_path.exists():
+            temporary_path.unlink()
 
 
 def normalize_autoresearch_state(state: AutoresearchState) -> AutoresearchState:
