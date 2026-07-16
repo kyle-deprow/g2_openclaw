@@ -43,6 +43,18 @@ from tests.gateway.autoresearch_fixtures import (
 )
 
 
+def test_quantipy_readiness_pins_price_coverage_repair_alembic_head() -> None:
+    pinned_head = (
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
+    )
+
+    assert pinned_head == (
+        "014_price_coverage_repair",
+        "014_repair_price_session_coverage_schema.py",
+    )
+
+
 def _capabilities_payload() -> dict[str, object]:
     return {
         "security_master": {
@@ -703,7 +715,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
         encoding="utf-8",
     )
     subprocess.run(["git", "add", "."], cwd=quantipy_root, check=True)
-    subprocess.run(["git", "commit", "-qm", "fake 013"], cwd=quantipy_root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fake 014"], cwd=quantipy_root, check=True)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=quantipy_root,
@@ -727,7 +739,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     assert not (tmp_path / "contract.json").exists()
 
 
-def test_operator_builder_rejects_missing_alembic_013_head_file(tmp_path: Path) -> None:
+def test_operator_builder_rejects_missing_alembic_014_head_file(tmp_path: Path) -> None:
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
