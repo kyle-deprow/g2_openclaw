@@ -13,7 +13,7 @@ from types import FrameType
 
 import pytest
 from gateway.autoresearch_readiness import (
-    READINESS_SCHEMA_VERSION,
+    PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
     ReadinessIdentity,
@@ -292,7 +292,7 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         }
     readiness = PlatformReadinessManifest.from_dict(
         {
-            "schema_version": READINESS_SCHEMA_VERSION,
+            "schema_version": PLATFORM_READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "supervisor-manifest-1",
             "snapshot_id": "supervisor-snapshot-1",

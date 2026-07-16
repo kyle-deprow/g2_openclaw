@@ -520,7 +520,7 @@ _output_path_option = typer.Option(
     help="Path to write the updated autoresearch state JSON.",
 )
 _readiness_build_manifest_argument = typer.Argument(
-    ..., help="Schema-v2 readiness manifest output."
+    ..., help="Schema-v3 platform-readiness manifest output."
 )
 _readiness_expected_commit_option = typer.Option(
     ..., "--expected-quantipy-commit", help="Full Quantipy commit to attest."
@@ -957,7 +957,7 @@ def autoresearch_build_readiness(
     xnys_calendar: Path = _readiness_xnys_calendar_option,
     quantipy_evidence: Path | None = _readiness_evidence_output_option,
 ) -> None:
-    """Build and revalidate strict Quantipy readiness evidence and manifest v2."""
+    """Build and revalidate strict Quantipy evidence plus a schema-v3 readiness manifest."""
     from gateway.autoresearch_readiness import build_quantipy_readiness
 
     evidence_path = quantipy_evidence or manifest_path.with_name("quantipy-data-contract.json")

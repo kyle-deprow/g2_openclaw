@@ -19,7 +19,7 @@ from typing import cast
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from gateway.autoresearch_readiness import (
-    READINESS_SCHEMA_VERSION,
+    PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
 )
@@ -200,7 +200,7 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
         }
     return PlatformReadinessManifest.from_dict(
         {
-            "schema_version": READINESS_SCHEMA_VERSION,
+            "schema_version": PLATFORM_READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "manifest-test-1",
             "snapshot_id": "snapshot-test-1",
@@ -208,6 +208,7 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
             "capabilities": {
                 "security_master": {
                     "historical_snapshots_interface": True,
+                    "historical_security_type_common_stock_filter_pit_certified": True,
                     "inactive_listings_interface": True,
                     "unadjusted_liquidity_screens_interface": True,
                     "universe_history_api_and_client_interface": True,

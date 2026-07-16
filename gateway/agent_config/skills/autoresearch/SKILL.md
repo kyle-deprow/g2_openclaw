@@ -25,7 +25,7 @@ loop memory for research continuity. Only the PM loads the write-capable
 Before any stage dispatch, the runner validates the operator-owned manifest at
 `~/.openclaw/autoresearch/platform-readiness.json`. Override it explicitly with
 `--readiness-manifest <path>` for tests or a controlled operator migration. The
-manifest must be schema version 2, identify a canonical `manifest_id` and
+manifest must be schema version 3, identify a canonical `manifest_id` and
 `snapshot_id`, and contain SHA-256 receipts for the Quantipy data contract and
 authoritative XNYS calendar evidence. `READY` requires both files to be
 absolute, regular files whose current hashes match and exposes the canonical
@@ -79,17 +79,33 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
 Never run both preparation procedures for one campaign. An existing
 incompatible state must be archived, not rewritten or silently pinned.
 
-`autoresearch-next` checks the current manifest before selecting or dispatching
+`autoresearch-next` checks the current schema-v3 platform-readiness manifest
+before selecting or dispatching
 any stage and rejects a blocked, invalid, or stale-pinned state. An
 `INFRA_BLOCKED` operator-precondition decision is durable: it sets the state to
 suspended, does not increment the iteration, and does not write MemPalace. The
 supervisor recognizes the suspended state and does not wake the PM. After the
-operator changes and validates readiness, resume explicitly:
+operator changes and validates readiness, rebuild the manifest and resume the
+same schema-v2 state atomically:
 
 ```bash
-uv run gateway-cli autoresearch-resume STATE.json \
-  --readiness-manifest ~/.openclaw/autoresearch/platform-readiness.json \
-  --output STATE-resumed.json
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$resumed"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-build-readiness \
+    /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --quantipy-root /home/dev/repos/quantipy \
+    --expected-quantipy-commit <full-quantipy-git-hash> \
+    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json
+  uv run gateway-cli autoresearch-resume "$state" \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$resumed"
+  mv -- "$resumed" "$state"
+  trap - EXIT
+)
 ```
 
 Resume accepts the new READY receipt, clears the suspension, and starts the next

@@ -32,10 +32,12 @@ costs, train/CV/OOS split, null tests, and rejection criteria. Positions are
 intraday and obey the target repo's close-out rule.
 
 Select each historical universe through the data contract. Market cap is not a
-point-in-time universe criterion. The actual date range comes from readiness
-and coverage receipts, not a hardcoded calendar promise. Require broad,
-auditable common-calendar coverage and an untouched OOS holdout; do not invent
-missing observations or capabilities.
+point-in-time universe criterion. Historical `security_types` filtering,
+including `security_types=("CS",)` for common stocks, is point-in-time
+certified. The actual date range comes from readiness and coverage receipts,
+not a hardcoded calendar promise. Require broad, auditable common-calendar
+coverage and an untouched OOS holdout; do not invent missing observations or
+capabilities.
 
 ## Compute Fit
 

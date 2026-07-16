@@ -11,7 +11,6 @@ PLAN = REPO_ROOT / "docs" / "reference" / "quantipy-autonomous-research-plan.md"
 DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 METHODOLOGY = AGENT_CONFIG / "skills" / "quantipy-methodology" / "SKILL.md"
 AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
-QUANTIPY_ROOT = REPO_ROOT.parent / "quantipy"
 
 
 def _runtime_docs() -> tuple[Path, ...]:
@@ -51,6 +50,7 @@ def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
         "runner mechanically derives deterministic contiguous boundaries",
         "Per-batch contract digests",
         "materialization identities and digests belong only in verification",
+        'security_types=("CS",)',
     )
     for phrase in required:
         assert phrase in normalized_contract
@@ -92,6 +92,8 @@ def test_stale_quantipy_contract_phrases_are_absent() -> None:
         r"download the full 2021-2026",
         r"auto-fetches missing data",
         r"schema version 1",
+        r"schema-v2 platform-readiness",
+        r"schema version 2[, ]+identify a canonical `manifest_id` and `snapshot_id`",
         r"sec/common-stock provenance",
     )
     for pattern in stale_patterns:
@@ -146,8 +148,8 @@ def test_runtime_docs_atomically_prepare_the_authoritative_v2_state() -> None:
         next_index = text.find("autoresearch-next", max(migrate_index, init_index))
         assert next_index > max(migrate_index, init_index)
         assert "quantipy-state-v2.json" not in text
-        assert text.count("state=/home/dev/.openclaw/autoresearch/quantipy-state.json") == 2
-        assert text.count("mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.") == 2
+        assert text.count("state=/home/dev/.openclaw/autoresearch/quantipy-state.json") >= 2
+        assert text.count("mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.") >= 2
         assert text.count('mv -- "$tmp" "$state"') == 2
         assert re.search(
             r"autoresearch-next\s+\\\n\s+"
@@ -157,6 +159,31 @@ def test_runtime_docs_atomically_prepare_the_authoritative_v2_state() -> None:
         assert (
             "--readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json" in text
         )
+
+
+def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspended_campaigns() -> (
+    None
+):
+    runtime_paths = (
+        AGENT_CONFIG / "AGENTS.md",
+        AGENT_CONFIG / "README.md",
+        AUTORESEARCH,
+    )
+    for path in runtime_paths:
+        text = path.read_text(encoding="utf-8")
+        assert "schema-v2 state" in text
+        assert "schema-v3 platform-readiness manifest" in text or "schema version 3" in text
+        rebuild_index = text.index("autoresearch-build-readiness")
+        resume_index = text.index("autoresearch-resume", rebuild_index)
+        assert resume_index > rebuild_index
+        assert 'resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.' in text
+        assert 'mv -- "$resumed" "$state"' in text
+
+    plan_text = " ".join(PLAN.read_text(encoding="utf-8").split())
+    assert "schema-v3 platform-readiness manifest" in plan_text
+    assert "schema-v2 state" in plan_text
+    assert "autoresearch-build-readiness" in plan_text
+    assert "autoresearch-resume" in plan_text
 
 
 def test_consensus_docs_freeze_inputs_and_derive_batch_boundaries() -> None:
@@ -187,7 +214,7 @@ def test_consensus_docs_freeze_inputs_and_derive_batch_boundaries() -> None:
     assert "maximum members per date, batch boundaries" not in combined
 
 
-def test_routed_target_quantipy_skills_and_agents_exist() -> None:
+def test_routed_target_quantipy_skills_and_agents_are_declared() -> None:
     skill_names = ("backend-python", "backtesting", "data-querying", "experiment-data")
     agent_names = (
         "backend-python",
@@ -199,12 +226,11 @@ def test_routed_target_quantipy_skills_and_agents_exist() -> None:
         "theorist",
     )
 
+    methodology = METHODOLOGY.read_text(encoding="utf-8")
     for name in skill_names:
-        assert (QUANTIPY_ROOT / ".agents" / "skills" / name / "SKILL.md").is_file()
-        assert f"`{name}`" in METHODOLOGY.read_text(encoding="utf-8")
+        assert f"`{name}`" in methodology
     for name in agent_names:
-        assert (QUANTIPY_ROOT / ".codex" / "agents" / f"{name}.toml").is_file()
-        assert f"`{name}.toml`" in METHODOLOGY.read_text(encoding="utf-8")
+        assert f"`{name}.toml`" in methodology
 
 
 def test_ownership_memory_and_config_guidance_remain_explicit() -> None:

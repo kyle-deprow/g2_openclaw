@@ -12,7 +12,8 @@ from typing import cast
 import gateway.autoresearch_readiness as autoresearch_readiness
 import pytest
 from gateway.autoresearch_readiness import (
-    READINESS_SCHEMA_VERSION,
+    PLATFORM_READINESS_SCHEMA_VERSION,
+    QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION,
     DatasetAvailability,
     EvidenceId,
     PlatformReadinessManifest,
@@ -45,6 +46,7 @@ def _capabilities_payload() -> dict[str, object]:
     return {
         "security_master": {
             "historical_snapshots_interface": True,
+            "historical_security_type_common_stock_filter_pit_certified": True,
             "inactive_listings_interface": True,
             "unadjusted_liquidity_screens_interface": True,
             "universe_history_api_and_client_interface": True,
@@ -103,7 +105,7 @@ def _manifest_payload(
             for evidence_id in EvidenceId
         }
     return {
-        "schema_version": READINESS_SCHEMA_VERSION,
+        "schema_version": PLATFORM_READINESS_SCHEMA_VERSION,
         "status": status,
         "manifest_id": manifest_id,
         "snapshot_id": snapshot_id,
@@ -149,7 +151,7 @@ def test_direct_manifest_construction_rejects_non_string_reason(tmp_path: Path) 
 
     with pytest.raises(ReadinessManifestError, match="reason"):
         PlatformReadinessManifest(
-            schema_version=READINESS_SCHEMA_VERSION,
+            schema_version=PLATFORM_READINESS_SCHEMA_VERSION,
             status=manifest.status,
             manifest_id=manifest.manifest_id,
             snapshot_id=manifest.snapshot_id,
@@ -177,17 +179,25 @@ def test_ready_manifest_fails_closed_for_missing_or_mismatched_evidence(
         PlatformReadinessManifest.from_dict(payload)
 
 
-def test_v1_manifest_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("old_version", [1, 2])
+def test_old_platform_readiness_manifest_versions_fail_closed(
+    tmp_path: Path, old_version: int
+) -> None:
     payload = _manifest_payload(tmp_path)
-    payload["schema_version"] = 1
+    payload["schema_version"] = old_version
 
-    with pytest.raises(ReadinessManifestError, match=r"unsupported.*1"):
+    with pytest.raises(ReadinessManifestError, match=rf"unsupported.*{old_version}"):
         PlatformReadinessManifest.from_dict(payload)
 
 
 @pytest.mark.parametrize(
     ("section", "field", "value"),
     [
+        (
+            "security_master",
+            "historical_security_type_common_stock_filter_pit_certified",
+            False,
+        ),
         ("security_master", "ticker_detail_market_cap_pit_certified", True),
         ("security_master", "universe_history_api_and_client_interface", False),
         ("market_data", "ohlcv_cache_or_hydrate_interface", False),
@@ -521,7 +531,7 @@ def test_committed_contract_test_failure_is_actionable_bounded_and_sanitized(
     assert "/home/operator" not in detail
 
 
-def test_operator_builder_generates_and_reloads_v2_contract(
+def test_operator_builder_generates_v3_manifest_without_bumping_v2_contract_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     quantipy_root = tmp_path / "quantipy"
@@ -541,12 +551,18 @@ def test_operator_builder_generates_and_reloads_v2_contract(
         xnys_calendar_path=xnys,
     )
 
-    assert manifest.schema_version == 2
+    assert manifest.schema_version == PLATFORM_READINESS_SCHEMA_VERSION
     assert manifest.evidence[EvidenceId.QUANTIPY_DATA_CONTRACT].path == str(evidence_path)
+    evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence_payload["schema_version"] == QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION
     assert (
         PlatformReadinessManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
         == manifest
     )
+
+
+def test_committed_contract_suite_includes_quantipy_history_common_stock_proof() -> None:
+    assert "tests/unit/test_security_master_history.py" in autoresearch_readiness._CONTRACT_TESTS
 
 
 def test_operator_builder_fails_for_wrong_quantipy_commit(tmp_path: Path) -> None:

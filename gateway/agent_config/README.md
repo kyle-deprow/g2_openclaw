@@ -38,8 +38,11 @@ interactions. Autonomous research runs only in
 ## State Preparation
 
 Stop the supervisor before preparing state. Before any `autoresearch-next`, use
-exactly one procedure. Each procedure writes a temporary file, validates the
-command result, and atomically replaces the authoritative state path.
+exactly one procedure. The campaign uses schema-v2 state. The separate
+schema-v3 platform-readiness manifest writes to
+`~/.openclaw/autoresearch/platform-readiness.json`. Each state procedure writes
+a temporary file, validates the command result, and atomically replaces the
+authoritative state path.
 
 ```bash
 # Losslessly migratable schema-less pristine state only.
@@ -74,6 +77,32 @@ The control command and supervisor already use that authoritative path. Run:
 ```bash
 cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
+```
+
+## Suspended Campaign Resume
+
+If a live campaign is suspended on `INFRA_BLOCKED`, rebuild the schema-v3
+platform-readiness manifest first, then atomically resume the same schema-v2
+state file:
+
+```bash
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$resumed"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-build-readiness \
+    /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --quantipy-root /home/dev/repos/quantipy \
+    --expected-quantipy-commit <full-quantipy-git-hash> \
+    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json
+  uv run gateway-cli autoresearch-resume "$state" \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$resumed"
+  mv -- "$resumed" "$state"
+  trap - EXIT
+)
 ```
 
 The next-action output includes compact `required_receipts`, a v2

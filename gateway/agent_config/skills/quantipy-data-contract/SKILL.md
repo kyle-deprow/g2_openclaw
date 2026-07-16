@@ -55,6 +55,8 @@ providers, databases, cached symbols, or environment configuration.
   and SHA-256 receipt. The manifest itself must contain exactly those
   canonical bytes so reviewer execution can recompute both values without a
   ticker array in state.
+- Historical `security_types` filtering is point-in-time certified. Use
+  `security_types=("CS",)` when common-stock membership matters.
 - Market cap and shares from ticker detail are not point-in-time certified.
   Market cap is not a supported historical screen. Do not impose a historical
   market-cap band or claim cap-verified universe compliance.

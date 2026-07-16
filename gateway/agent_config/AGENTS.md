@@ -69,11 +69,34 @@ Both procedures leave schema-v2 state at the authoritative path used by
 procedures for one campaign.
 
 Do not maintain phase, retries, or completion state in prompt memory. Before
-dispatch, the runner validates the schema-v2 platform-readiness manifest at
+dispatch, the runner validates the schema-v3 platform-readiness manifest at
 `~/.openclaw/autoresearch/platform-readiness.json` and its Quantipy data
 contract and XNYS evidence receipts. Existing state is pinned explicitly with
 `autoresearch-pin-readiness`. After an operator repairs a blocked or changed
 snapshot, resume explicitly with `autoresearch-resume`.
+
+For a suspended live campaign, rebuild readiness first, then resume the same
+schema-v2 state atomically:
+
+```bash
+(
+  set -e
+  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+  resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+  trap 'rm -f "$resumed"' EXIT
+  cd /home/dev/repos/g2_openclaw
+  uv run gateway-cli autoresearch-build-readiness \
+    /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --quantipy-root /home/dev/repos/quantipy \
+    --expected-quantipy-commit <full-quantipy-git-hash> \
+    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json
+  uv run gateway-cli autoresearch-resume "$state" \
+    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+    --output "$resumed"
+  mv -- "$resumed" "$state"
+  trap - EXIT
+)
+```
 
 An operator-precondition `INFRA_BLOCKED` suspends without incrementing the
 iteration and without a MemPalace write. The supervisor does not repeatedly

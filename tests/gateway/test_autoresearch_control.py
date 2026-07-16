@@ -17,7 +17,7 @@ from gateway.autoresearch_control import (
     SystemdSupervisorServiceController,
 )
 from gateway.autoresearch_readiness import (
-    READINESS_SCHEMA_VERSION,
+    PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
     canonical_platform_capabilities,
@@ -58,7 +58,7 @@ def _ready_manifest(path: Path) -> PlatformReadinessManifest:
         }
     return PlatformReadinessManifest.from_dict(
         {
-            "schema_version": READINESS_SCHEMA_VERSION,
+            "schema_version": PLATFORM_READINESS_SCHEMA_VERSION,
             "status": "READY",
             "manifest_id": "control-manifest-1",
             "snapshot_id": "control-snapshot-1",

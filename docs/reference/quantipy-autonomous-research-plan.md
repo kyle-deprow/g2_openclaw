@@ -58,11 +58,13 @@ files. No redundant manifest data is stored in campaign state.
 
 ## Platform Readiness
 
-Before dispatch, the runner validates the operator-owned schema-v2 manifest at
-`~/.openclaw/autoresearch/platform-readiness.json`. It pins canonical manifest
-and snapshot identities and verifies SHA-256 receipts for the Quantipy data
-contract and authoritative XNYS calendar evidence. A `READY` manifest exposes
-the canonical capability object injected into every stage prompt.
+Before dispatch, the runner validates the operator-owned schema-v3
+platform-readiness manifest at
+`~/.openclaw/autoresearch/platform-readiness.json`. The separate live campaign
+state remains schema-v2. Readiness pins canonical manifest and snapshot
+identities and verifies SHA-256 receipts for the Quantipy data contract and
+authoritative XNYS calendar evidence. A `READY` manifest exposes the canonical
+capability object injected into every stage prompt.
 
 Control-plane validation reopens the pinned XNYS evidence, verifies its exact
 readiness SHA-256, parses its declared range and closed dates into actual XNYS
@@ -74,8 +76,10 @@ same-day, weekend, holiday, arbitrary later, and out-of-range dates fail closed.
 Stages consume this receipt and do not probe providers, database contents,
 cached symbols, or environment configuration to rediscover capabilities.
 Existing state is initialized with `gateway-cli autoresearch-pin-readiness`.
-After an operator changes a blocked or stale snapshot, only
-`gateway-cli autoresearch-resume` accepts the new READY receipt.
+After an operator changes a blocked or stale snapshot, rebuild readiness with
+`gateway-cli autoresearch-build-readiness` and then use
+`gateway-cli autoresearch-resume` to atomically replace the suspended live
+schema-v2 state with a resumed copy pinned to the new READY receipt.
 
 An operator-precondition `INFRA_BLOCKED` decision suspends without incrementing
 the iteration. The supervisor does not repeatedly wake it. This branch sets
@@ -114,6 +118,8 @@ the iteration. The supervisor does not repeatedly wake it. This branch sets
   an absolute external union-manifest path plus SHA-256 receipt. Reviewer
   execution reopens that manifest, verifies its file SHA, requires exact
   canonical bytes, and recomputes the count and digest.
+- Historical `security_types` filtering is point-in-time certified; use
+  `security_types=("CS",)` when common-stock membership matters.
 - Market cap and shares are not point-in-time certified and market cap is not a
   historical screen criterion.
 - Research OHLCV uses only `qp.prices()`, which hydrates selected-symbol ranges

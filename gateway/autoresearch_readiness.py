@@ -21,7 +21,8 @@ from types import MappingProxyType
 DEFAULT_PLATFORM_READINESS_PATH = (
     Path.home() / ".openclaw" / "autoresearch" / "platform-readiness.json"
 )
-READINESS_SCHEMA_VERSION = 2
+PLATFORM_READINESS_SCHEMA_VERSION = 3
+QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION = 2
 READINESS_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 READINESS_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 DATASET_AVAILABILITY_REASON_MAX_CHARS = 160
@@ -286,6 +287,7 @@ class DatasetAvailability:
 @dataclass(frozen=True, slots=True)
 class SecurityMasterCapabilities:
     historical_snapshots_interface: bool
+    historical_security_type_common_stock_filter_pit_certified: bool
     inactive_listings_interface: bool
     unadjusted_liquidity_screens_interface: bool
     universe_history_api_and_client_interface: bool
@@ -298,6 +300,7 @@ class SecurityMasterCapabilities:
     def __post_init__(self) -> None:
         for field_name in (
             "historical_snapshots_interface",
+            "historical_security_type_common_stock_filter_pit_certified",
             "inactive_listings_interface",
             "unadjusted_liquidity_screens_interface",
             "universe_history_api_and_client_interface",
@@ -319,6 +322,7 @@ class SecurityMasterCapabilities:
         data = _require_mapping(raw, label=label)
         expected = {
             "historical_snapshots_interface",
+            "historical_security_type_common_stock_filter_pit_certified",
             "inactive_listings_interface",
             "unadjusted_liquidity_screens_interface",
             "universe_history_api_and_client_interface",
@@ -343,6 +347,9 @@ class SecurityMasterCapabilities:
         return {
             "dividend_actions_interface": self.dividend_actions_interface,
             "historical_snapshots_interface": self.historical_snapshots_interface,
+            "historical_security_type_common_stock_filter_pit_certified": (
+                self.historical_security_type_common_stock_filter_pit_certified
+            ),
             "inactive_listings_interface": self.inactive_listings_interface,
             "next_session_execution_policy_interface": self.next_session_execution_policy_interface,
             "split_actions_interface": self.split_actions_interface,
@@ -710,7 +717,7 @@ class PlatformReadinessManifest:
         if (
             not isinstance(self.schema_version, int)
             or isinstance(self.schema_version, bool)
-            or self.schema_version != READINESS_SCHEMA_VERSION
+            or self.schema_version != PLATFORM_READINESS_SCHEMA_VERSION
         ):
             raise ReadinessManifestError(
                 f"unsupported platform readiness schema_version: {self.schema_version!r}"
@@ -774,7 +781,7 @@ class PlatformReadinessManifest:
         schema_version = data["schema_version"]
         if not isinstance(schema_version, int) or isinstance(schema_version, bool):
             raise ReadinessManifestError("schema_version must be an integer")
-        if schema_version != READINESS_SCHEMA_VERSION:
+        if schema_version != PLATFORM_READINESS_SCHEMA_VERSION:
             raise ReadinessManifestError(
                 f"unsupported platform readiness schema_version: {schema_version!r}"
             )
@@ -817,7 +824,7 @@ class PlatformReadinessManifest:
         return manifest
 
     def validate(self, *, _evidence_sha256_overrides: Mapping[Path, str] | None = None) -> None:
-        if self.schema_version != READINESS_SCHEMA_VERSION:
+        if self.schema_version != PLATFORM_READINESS_SCHEMA_VERSION:
             raise ReadinessManifestError(
                 f"unsupported platform readiness schema_version: {self.schema_version!r}"
             )
@@ -969,6 +976,7 @@ def canonical_platform_capabilities(
         {
             "security_master": {
                 "historical_snapshots_interface": True,
+                "historical_security_type_common_stock_filter_pit_certified": True,
                 "inactive_listings_interface": True,
                 "unadjusted_liquidity_screens_interface": True,
                 "universe_history_api_and_client_interface": True,
@@ -1072,6 +1080,15 @@ else:
     raise AssertionError("grouped daily schema accepts adjusted data")
 if TickerDetailDTO.model_fields["pit_certified"].default is not False:
     raise AssertionError("ticker market cap is over-attested as PIT")
+profile = UniverseHistoryScreenProfile.model_validate({"security_types": ["cs", "CS"]}, strict=True)
+if profile.security_types != ("CS",):
+    raise AssertionError("historical security-type/common-stock filter is not canonical")
+try:
+    UniverseHistoryScreenProfile.model_validate({"market_cap": Decimal(1_000_000)}, strict=True)
+except ValidationError:
+    pass
+else:
+    raise AssertionError("historical universe profile over-attests market cap")
 for model in (UniverseScreenResponse, UniverseHistoryResponse):
     annotation = str(model.model_fields["execution_policy"].annotation)
     if "next-session-or-later" not in annotation:
@@ -1461,7 +1478,7 @@ def build_quantipy_readiness(
     expected_quantipy_commit: str,
     xnys_calendar_path: Path,
 ) -> PlatformReadinessManifest:
-    """Generate and revalidate deterministic schema-v2 Quantipy readiness evidence."""
+    """Generate a schema-v3 readiness manifest without changing the v2 Quantipy evidence schema."""
     manifest_path, evidence_path, xnys_path = _validate_output_paths(
         manifest_path=manifest_path,
         evidence_path=quantipy_evidence_path,
@@ -1487,7 +1504,7 @@ def build_quantipy_readiness(
         evidence_payload: dict[str, object] = {
             "capabilities": capabilities.to_dict(),
             "quantipy_commit": actual_commit,
-            "schema_version": READINESS_SCHEMA_VERSION,
+            "schema_version": QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION,
             "verification": {
                 "alembic_head": "010_unadjusted_grouped_daily",
                 "committed_contract_tests": list(_CONTRACT_TESTS),
@@ -1515,7 +1532,7 @@ def build_quantipy_readiness(
             },
             "manifest_id": f"quantipy-{actual_commit[:16]}",
             "reason": None,
-            "schema_version": READINESS_SCHEMA_VERSION,
+            "schema_version": PLATFORM_READINESS_SCHEMA_VERSION,
             "snapshot_id": f"snapshot-{snapshot_sha256[:16]}",
             "status": ReadinessStatus.READY.value,
         }
