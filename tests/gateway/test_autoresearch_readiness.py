@@ -299,7 +299,88 @@ def test_stale_pinned_snapshot_is_rejected(tmp_path: Path) -> None:
 
 
 def test_resume_rechecks_changed_readiness_and_increments_explicitly(tmp_path: Path) -> None:
+    prior_manifest = _ready_manifest(tmp_path / "old", manifest_id="manifest-1")
     manifest = _ready_manifest(tmp_path / "new", manifest_id="manifest-2")
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=7,
+        setup=SetupContextArtifact(
+            goal="test",
+            metric_name="OOS Sharpe net",
+            metric_direction=MetricDirection.MAXIMIZE,
+            target_repo="/home/dev/repos/quantipy",
+            writable_scope="src/quantipy/alpha",
+            baseline_summary="0.0",
+            hard_constraints=("test",),
+            data_sources=("fixture",),
+        ),
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-7",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="Evidence is unavailable.",
+            log_summary="Suspended.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Operator must publish evidence.",
+        ),
+        mode=ResearchMode.DATA_INFRA_G0,
+        platform_readiness=prior_manifest.identity(),
+        suspended=True,
+        suspension_reason="Operator must publish evidence.",
+    )
+
+    resumed = resume_suspended_iteration(state, manifest)
+
+    assert resumed.phase is Phase.SETUP_CONTEXT
+    assert resumed.iteration == 8
+    assert resumed.platform_readiness == manifest.identity()
+    assert resumed.suspended is False
+    assert resumed.final_decision is None
+
+
+def test_resume_legacy_g0_suspension_allows_the_same_readiness_identity(tmp_path: Path) -> None:
+    manifest = _ready_manifest(tmp_path / "ready")
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=7,
+        setup=SetupContextArtifact(
+            goal="test",
+            metric_name="OOS Sharpe net",
+            metric_direction=MetricDirection.MAXIMIZE,
+            target_repo="/home/dev/repos/quantipy",
+            writable_scope="src/quantipy/alpha",
+            baseline_summary="0.0",
+            hard_constraints=("test",),
+            data_sources=("fixture",),
+        ),
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-7",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="operator_precondition",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="Evidence is unavailable.",
+            log_summary="Suspended.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Operator must publish evidence.",
+        ),
+        mode=ResearchMode.DATA_INFRA_G0,
+        platform_readiness=manifest.identity(),
+        suspended=True,
+        suspension_reason="Operator must publish evidence.",
+    )
+
+    resumed = resume_suspended_iteration(state, manifest)
+
+    assert resumed.platform_readiness == manifest.identity()
+
+
+def test_resume_legacy_operator_precondition_allows_unpinned_readiness(tmp_path: Path) -> None:
+    manifest = _ready_manifest(tmp_path / "ready")
     state = AutoresearchState(
         phase=Phase.REPEAT,
         iteration=7,
@@ -332,11 +413,7 @@ def test_resume_rechecks_changed_readiness_and_increments_explicitly(tmp_path: P
 
     resumed = resume_suspended_iteration(state, manifest)
 
-    assert resumed.phase is Phase.SETUP_CONTEXT
-    assert resumed.iteration == 8
     assert resumed.platform_readiness == manifest.identity()
-    assert resumed.suspended is False
-    assert resumed.final_decision is None
 
 
 def test_active_state_same_id_repin_preserves_every_other_field(tmp_path: Path) -> None:

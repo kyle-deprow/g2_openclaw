@@ -1008,6 +1008,38 @@ def autoresearch_resume(
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
 
 
+@app.command("autoresearch-suspend-infra")
+def autoresearch_suspend_infra(
+    state_path: Path = _state_path_argument,
+    reason: str = typer.Option(
+        ..., "--reason", help="Exact non-empty operator infrastructure reason."
+    ),
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+) -> None:
+    """Durably suspend an active alpha iteration for operator-owned infrastructure repair."""
+    from gateway.autoresearch_runner import (
+        load_autoresearch_policy,
+        load_state_file,
+        persist_derived_state,
+        suspend_for_infrastructure,
+        validate_state,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        validate_state(state, policy)
+        next_state = suspend_for_infrastructure(state, reason)
+        validate_state(next_state, policy)
+        persist_derived_state(state_path, output_path, state, next_state)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-suspend-infra failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
 # ---------------------------------------------------------------------------
 # Launch helpers
 # ---------------------------------------------------------------------------

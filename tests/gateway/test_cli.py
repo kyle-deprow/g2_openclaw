@@ -964,6 +964,46 @@ class TestAutoresearchCliCommands:
         )
         return result, output_path
 
+    def test_autoresearch_suspend_infra_persists_a_validated_operator_transition(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        readiness = _ready_manifest(tmp_path / "suspend-readiness")
+        state = replace(
+            self._state_for_implementation(git_worktree.target_checkout),
+            platform_readiness=readiness.identity(),
+        )
+        state_path = tmp_path / "active-state.json"
+        output_path = tmp_path / "suspended-state.json"
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-suspend-infra",
+                str(state_path),
+                "--reason",
+                "Operator is repairing historical market-data infrastructure.",
+                "--output",
+                str(output_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        suspended = AutoresearchState.from_dict(json.loads(output_path.read_text(encoding="utf-8")))
+        assert suspended.phase is Phase.REPEAT
+        assert suspended.suspended is True
+        assert suspended.suspension_reason == (
+            "Operator is repairing historical market-data infrastructure."
+        )
+        assert suspended.final_decision is not None
+        assert suspended.final_decision.decision is FinalDecision.INFRA_BLOCKED
+        assert suspended.final_decision.memory_write_required is False
+        assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+
     def test_autoresearch_advance_validates_and_accepts_implementation_worktree(
         self,
         tmp_path: Path,

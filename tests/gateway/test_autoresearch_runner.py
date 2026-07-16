@@ -40,6 +40,9 @@ from gateway.autoresearch_runner import (
     MEMPALACE_READONLY_SERVER_ID,
     MEMPALACE_READONLY_TOOL_NAMES,
     NEXT_ACTION_PROMPT_TARGET_BYTES,
+    OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
+    OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
+    OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
@@ -99,10 +102,12 @@ from gateway.autoresearch_runner import (
     persist_derived_state,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
+    resume_suspended_iteration,
     save_state_file,
     standardize_mempalace_kg_object,
     standardized_mempalace_kg_facts,
     start_next_iteration,
+    suspend_for_infrastructure,
     validate_artifact_workspace,
     validate_state,
     validate_target_worktree_clean,
@@ -2644,6 +2649,158 @@ def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
         validate_state(persisted, policy)
+
+
+def test_operator_infrastructure_suspension_finalizes_active_alpha_verification(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    suspended = suspend_for_infrastructure(
+        state,
+        "Operator is repairing the historical market-data service.",
+    )
+
+    assert suspended.phase is Phase.REPEAT
+    assert suspended.suspended is True
+    assert suspended.suspension_reason == (
+        "Operator is repairing the historical market-data service."
+    )
+    assert suspended.memory_written is False
+    assert suspended.memory_verification_receipt is None
+    assert suspended.setup == state.setup
+    assert suspended.context_packet == state.context_packet
+    assert suspended.consensus_history == state.consensus_history
+    assert suspended.implementation_result == state.implementation_result
+    assert suspended.final_decision == FinalDecisionArtifact(
+        experiment_id="iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name=OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale=OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
+        log_summary=OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Operator is repairing the historical market-data service.",
+    )
+
+
+def test_operator_infrastructure_suspension_round_trip_validates(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+    suspended = suspend_for_infrastructure(state, "Operator is rotating data credentials.")
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(suspended.to_dict())))
+
+    validate_state(persisted, policy)
+
+
+def test_operator_infrastructure_suspension_uses_latest_reviewer_verdict(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+
+    suspended = suspend_for_infrastructure(state, "Operator is rotating data credentials.")
+
+    assert suspended.final_decision is not None
+    assert suspended.final_decision.reviewer_verdict is FinalReviewerVerdict.PASS
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["", "   "],
+)
+def test_operator_infrastructure_suspension_rejects_empty_reason(
+    policy: AutoresearchPolicy,
+    reason: str,
+) -> None:
+    state = _state_to_decision(policy)
+
+    with pytest.raises(AutoresearchValidationError, match="non-empty reason"):
+        suspend_for_infrastructure(state, reason)
+
+
+def test_operator_infrastructure_suspension_rejects_already_suspended_state(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+    suspended = suspend_for_infrastructure(state, "Operator is repairing infrastructure.")
+
+    with pytest.raises(AutoresearchValidationError, match="already suspended"):
+        suspend_for_infrastructure(suspended, "Operator is repairing infrastructure.")
+
+
+def test_operator_infrastructure_suspension_rejects_finalized_repeat_state(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(_state_to_decision(policy), _final_decision(), policy)
+
+    with pytest.raises(AutoresearchValidationError, match="already finalized or in repeat"):
+        suspend_for_infrastructure(state, "Operator is repairing infrastructure.")
+
+
+@pytest.mark.parametrize(
+    "missing_prerequisite",
+    ["setup", "context_packet", "platform_readiness"],
+)
+def test_operator_infrastructure_suspension_requires_active_alpha_prerequisites(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    missing_prerequisite: str,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+    if missing_prerequisite == "setup":
+        state = replace(state, setup=None)
+    elif missing_prerequisite == "context_packet":
+        state = replace(state, context_packet=None)
+    else:
+        state = replace(state, platform_readiness=None)
+
+    with pytest.raises(AutoresearchValidationError, match="requires setup, context packet"):
+        suspend_for_infrastructure(state, "Operator is repairing infrastructure.")
+
+
+def test_autoresearch_resume_rejects_an_unchanged_readiness_identity(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = suspend_for_infrastructure(
+        _state_to_decision(policy, platform_readiness),
+        "Operator is repairing infrastructure.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="changed READY"):
+        resume_suspended_iteration(state, platform_readiness)
+
+
+def test_agent_final_decision_cannot_create_an_operator_infrastructure_suspension(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_decision(policy, platform_readiness)
+    artifact = FinalDecisionArtifact(
+        experiment_id="iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name=OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
+        rationale=OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
+        log_summary=OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Operator is repairing infrastructure.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="dedicated operator transition"):
+        advance_state(state, artifact, policy)
 
 
 def test_persisted_suspended_g0_infra_blocked_requires_verification_context(

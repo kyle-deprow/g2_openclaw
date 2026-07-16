@@ -177,6 +177,26 @@ class FinalDecision(StrEnum):
     INFRA_BLOCKED = "INFRA_BLOCKED"
 
 
+OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME = "operator-infrastructure-suspension"
+OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE = (
+    "Operator suspended the active iteration for infrastructure repair."
+)
+OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY = (
+    "Active iteration suspended for operator infrastructure repair."
+)
+OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES = frozenset(
+    (
+        Phase.DEBATE,
+        Phase.CONSENSUS,
+        Phase.IMPLEMENTATION,
+        Phase.VERIFICATION,
+        Phase.REVIEW,
+        Phase.FIX_TEST,
+        Phase.DECISION_LOG,
+    )
+)
+
+
 class FixTriggerPhase(StrEnum):
     VERIFICATION = "verification"
     REVIEW = "review"
@@ -4117,11 +4137,15 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
             raise AutoresearchValidationError(
                 "suspended autoresearch state requires final_decision=INFRA_BLOCKED"
             )
-        if not state.suspension_reason:
+        if not state.suspension_reason or not state.suspension_reason.strip():
             raise AutoresearchValidationError(
                 "suspended autoresearch state requires suspension_reason"
             )
-        if decision.memory_write_required or state.memory_written:
+        if (
+            decision.memory_write_required
+            or state.memory_written
+            or state.memory_verification_receipt is not None
+        ):
             raise AutoresearchValidationError(
                 "suspended autoresearch state cannot require or record a memory write"
             )
@@ -4164,6 +4188,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
     if state.final_decision is not None:
         decision = state.final_decision
+        is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
         if decision.decision is FinalDecision.NO_CONSENSUS:
             if decision.memory_write_required:
                 raise AutoresearchValidationError(
@@ -4177,11 +4202,13 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
             not decision.memory_write_required
             and not _is_operator_precondition_no_memory_state(state)
             and not _is_data_infra_g0_blocked_no_memory_state(state)
+            and not is_operator_infrastructure_suspension
         ):
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
             )
-        _validate_final_decision_artifact(decision, state)
+        if not is_operator_infrastructure_suspension:
+            _validate_final_decision_artifact(decision, state)
     if state.implementation_result and (
         state.latest_consensus is None
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
@@ -4698,6 +4725,11 @@ def _validate_final_decision_artifact(
     artifact: FinalDecisionArtifact,
     state: AutoresearchState,
 ) -> None:
+    if artifact.recommended_metric_name == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME:
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires the dedicated operator transition"
+        )
+
     latest_review = state.latest_review
     latest_verification = state.latest_verification
     latest_consensus = state.latest_consensus
@@ -5591,6 +5623,33 @@ def _is_operator_precondition_no_memory_state(state: AutoresearchState) -> bool:
     )
 
 
+def _is_operator_infrastructure_suspension_state(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    return (
+        state.phase is Phase.REPEAT
+        and state.mode is ResearchMode.ALPHA_RESEARCH
+        and state.suspended
+        and state.setup is not None
+        and state.context_packet is not None
+        and state.context_packet.research_mode is ResearchMode.ALPHA_RESEARCH
+        and state.platform_readiness is not None
+        and decision is not None
+        and decision.experiment_id == _canonical_iteration_experiment_id(state.iteration)
+        and decision.decision is FinalDecision.INFRA_BLOCKED
+        and decision.recommended_metric_name == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME
+        and decision.recommended_metric_value is None
+        and decision.rationale == OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE
+        and decision.log_summary == OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY
+        and decision.continue_loop
+        and not decision.memory_write_required
+        and decision.infra_rationale == state.suspension_reason
+        and state.suspension_reason is not None
+        and state.suspension_reason == state.suspension_reason.strip()
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+    )
+
+
 def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
     decision = state.final_decision
     latest_verification = state.latest_verification
@@ -5795,6 +5854,74 @@ def mark_memory_written(
     return replace(state, memory_written=True, memory_verification_receipt=receipt)
 
 
+def _canonical_iteration_experiment_id(iteration: int) -> str:
+    if iteration < 1:
+        raise AutoresearchValidationError("iteration must be >= 1")
+    return f"iteration-{iteration}"
+
+
+def suspend_for_infrastructure(state: AutoresearchState, reason: str) -> AutoresearchState:
+    """Durably suspend an active alpha iteration for operator-owned infra repair."""
+    if not reason or not reason.strip():
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires a non-empty reason"
+        )
+    if reason != reason.strip():
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension reason must not have leading or trailing whitespace"
+        )
+    if state.suspended:
+        raise AutoresearchValidationError("autoresearch state is already suspended")
+    if state.phase is Phase.REPEAT or state.final_decision is not None:
+        raise AutoresearchValidationError(
+            "autoresearch state is already finalized or in repeat phase"
+        )
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires an active ALPHA_RESEARCH iteration"
+        )
+    if state.phase not in OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES:
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires a coherent active ALPHA_RESEARCH phase"
+        )
+    if state.setup is None or state.context_packet is None or state.platform_readiness is None:
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires setup, context packet, and "
+            "pinned platform readiness"
+        )
+    if state.context_packet.research_mode is not ResearchMode.ALPHA_RESEARCH:
+        raise AutoresearchValidationError(
+            "operator infrastructure suspension requires an ALPHA_RESEARCH context packet"
+        )
+
+    decision = FinalDecisionArtifact(
+        experiment_id=_canonical_iteration_experiment_id(state.iteration),
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name=OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
+        recommended_metric_value=None,
+        reviewer_verdict=(
+            FinalReviewerVerdict(state.latest_review.verdict.value)
+            if state.latest_review is not None
+            else FinalReviewerVerdict.NOT_RUN
+        ),
+        rationale=OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
+        log_summary=OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale=reason,
+    )
+    return replace(
+        state,
+        phase=Phase.REPEAT,
+        pending_fix_trigger=None,
+        final_decision=decision,
+        memory_written=False,
+        memory_verification_receipt=None,
+        suspended=True,
+        suspension_reason=reason,
+    )
+
+
 def start_next_iteration(
     state: AutoresearchState,
     *,
@@ -5865,6 +5992,22 @@ def resume_suspended_iteration(
         identity = readiness.require_ready()
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
+    if (
+        state.final_decision.recommended_metric_name
+        == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME
+    ):
+        if not _is_operator_infrastructure_suspension_state(state):
+            raise AutoresearchValidationError(
+                "operator infrastructure suspension state has an invalid contract"
+            )
+        if state.platform_readiness is None:
+            raise AutoresearchValidationError(
+                "operator infrastructure suspension has no pinned readiness identity to replace"
+            )
+        if state.platform_readiness == identity:
+            raise AutoresearchValidationError(
+                "autoresearch-resume requires a changed READY platform readiness manifest"
+            )
     return AutoresearchState(
         phase=Phase.SETUP_CONTEXT,
         iteration=state.iteration + 1,
