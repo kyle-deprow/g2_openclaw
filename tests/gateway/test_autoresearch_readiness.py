@@ -47,15 +47,15 @@ CAMPAIGN_XNYS_START = date(2021, 1, 4)
 CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
-def test_quantipy_readiness_pins_price_coverage_repair_alembic_head() -> None:
+def test_quantipy_readiness_pins_cash_precision_alembic_head() -> None:
     pinned_head = (
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
     )
 
     assert pinned_head == (
-        "014_price_coverage_repair",
-        "014_repair_price_session_coverage_schema.py",
+        "015_cash_precision",
+        "015_widen_corporate_action_cash_precision.py",
     )
 
 
@@ -751,7 +751,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     assert not (tmp_path / "contract.json").exists()
 
 
-def test_operator_builder_rejects_missing_alembic_014_head_file(tmp_path: Path) -> None:
+def test_operator_builder_rejects_missing_alembic_015_head_file(tmp_path: Path) -> None:
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
@@ -778,7 +778,9 @@ def test_contract_probe_injects_exact_alembic_head_revision(
 ) -> None:
     original_probe = autoresearch_readiness._CONTRACT_PROBE
     assert "QUANTIPY_ALEMBIC_HEAD_REVISION" not in original_probe
+    assert "QUANTIPY_ALEMBIC_HEAD_FILENAME" not in original_probe
     assert autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR in original_probe
+    assert autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR in original_probe
 
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
@@ -805,6 +807,7 @@ def test_contract_probe_injects_exact_alembic_head_revision(
         text=True,
     ).stdout.strip()
     head_env_var = autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR
+    filename_env_var = autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR
 
     monkeypatch.setattr(
         autoresearch_readiness,
@@ -815,7 +818,10 @@ def test_contract_probe_injects_exact_alembic_head_revision(
             "print(\n"
             '    "QUANTIPY_READINESS_PROBE="\n'
             "    + json.dumps(\n"
-            f'        {{"alembic_head": os.environ["{head_env_var}"]}},\n'
+            "        {\n"
+            f'            "alembic_head": os.environ["{head_env_var}"],\n'
+            f'            "alembic_filename": os.environ["{filename_env_var}"],\n'
+            "        },\n"
             "        sort_keys=True,\n"
             "    )\n"
             ")\n"
@@ -830,12 +836,13 @@ def test_contract_probe_injects_exact_alembic_head_revision(
     actual_commit, probe = autoresearch_readiness._probe_quantipy_contract(quantipy_root, commit)
 
     assert actual_commit == commit
-    assert probe == {"alembic_head": autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}
+    assert probe == {
+        "alembic_head": autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
+        "alembic_filename": autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
+    }
 
 
-def test_shipped_contract_probe_enforces_exact_alembic_head(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _contract_probe_alembic_segment() -> ast.Module:
     tree = ast.parse(autoresearch_readiness._CONTRACT_PROBE)
     start = next(
         index
@@ -844,7 +851,18 @@ def test_shipped_contract_probe_enforces_exact_alembic_head(
         and isinstance(node.targets[0], ast.Name)
         and node.targets[0].id == "expected_alembic_head"
     )
-    probe_segment = ast.Module(body=tree.body[start : start + 4], type_ignores=[])
+    end = next(
+        index
+        for index, node in enumerate(tree.body[start:], start=start)
+        if isinstance(node, ast.For)
+    )
+    return ast.Module(body=tree.body[start:end], type_ignores=[])
+
+
+def test_shipped_contract_probe_enforces_exact_alembic_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe_segment = _contract_probe_alembic_segment()
 
     class ProbeConfig:
         def __init__(self, path: str) -> None:
@@ -863,12 +881,25 @@ def test_shipped_contract_probe_enforces_exact_alembic_head(
         def get_heads(self) -> list[str]:
             return list(self.heads)
 
+        def get_revision(self, revision: str) -> object:
+            assert revision == autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION
+            return type(
+                "ProbeRevision",
+                (),
+                {"path": str(tmp_path / autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME)},
+            )()
+
     monkeypatch.setenv(
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR,
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
     )
+    monkeypatch.setenv(
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR,
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
+    )
     namespace = {
         "Config": ProbeConfig,
+        "Path": Path,
         "ScriptDirectory": ProbeScriptDirectory,
         "os": os,
         "root": tmp_path,
@@ -879,6 +910,70 @@ def test_shipped_contract_probe_enforces_exact_alembic_head(
     ProbeScriptDirectory.heads = ("unexpected_head",)
     with pytest.raises(AssertionError, match=autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION):
         exec(compiled, namespace)
+
+
+def test_shipped_contract_probe_rejects_revision_resolved_from_wrong_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected_migration = tmp_path / autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME
+    expected_migration.write_text('revision = "different_revision"\n', encoding="utf-8")
+    resolved_migration = tmp_path / "015_split_cash_precision.py"
+    resolved_migration.write_text(
+        f'revision = "{autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}"\n',
+        encoding="utf-8",
+    )
+
+    class ProbeConfig:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def set_main_option(self, key: str, value: str) -> None:
+            pass
+
+    class ProbeScriptDirectory:
+        @classmethod
+        def from_config(cls, config: ProbeConfig) -> ProbeScriptDirectory:
+            return cls()
+
+        def get_heads(self) -> list[str]:
+            return [autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION]
+
+        def get_revision(self, revision: str) -> object:
+            assert revision == autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION
+            return type(
+                "ProbeRevision",
+                (),
+                {"path": str(resolved_migration)},
+            )()
+
+    monkeypatch.setenv(
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR,
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
+    )
+    monkeypatch.setenv(
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR,
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
+    )
+    namespace = {
+        "Config": ProbeConfig,
+        "Path": Path,
+        "ScriptDirectory": ProbeScriptDirectory,
+        "os": os,
+        "root": tmp_path,
+    }
+
+    with pytest.raises(
+        AssertionError,
+        match=autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
+    ):
+        exec(
+            compile(
+                _contract_probe_alembic_segment(),
+                "<contract-probe-alembic-filename-check>",
+                "exec",
+            ),
+            namespace,
+        )
 
 
 @pytest.mark.parametrize("collision", ["evidence", "xnys"])

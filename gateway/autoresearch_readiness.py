@@ -31,9 +31,10 @@ DATASET_AVAILABILITY_REASON_RE = re.compile(
 )
 READINESS_PROMPT_CAPABILITIES_MAX_BYTES = 4096
 XNYS_EVIDENCE_SCHEMA_VERSION = 1
-QUANTIPY_ALEMBIC_HEAD_REVISION = "014_price_coverage_repair"
-QUANTIPY_ALEMBIC_HEAD_FILENAME = "014_repair_price_session_coverage_schema.py"
+QUANTIPY_ALEMBIC_HEAD_REVISION = "015_cash_precision"
+QUANTIPY_ALEMBIC_HEAD_FILENAME = "015_widen_corporate_action_cash_precision.py"
 QUANTIPY_ALEMBIC_HEAD_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_REVISION"
+QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_FILENAME"
 QUANTIPY_CAMPAIGN_XNYS_START = date(2021, 1, 4)
 QUANTIPY_CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
@@ -1095,10 +1096,17 @@ if not {
     raise AssertionError("API interface missing")
 
 expected_alembic_head = os.environ[__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__]
+expected_alembic_filename = os.environ[__QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR__]
 config = Config(str(root / "alembic.ini"))
 config.set_main_option("script_location", str(root / "src/quantipy/migrations"))
-if ScriptDirectory.from_config(config).get_heads() != [expected_alembic_head]:
+script_directory = ScriptDirectory.from_config(config)
+if script_directory.get_heads() != [expected_alembic_head]:
     raise AssertionError(f"Alembic head is not {expected_alembic_head}")
+resolved_alembic_head = script_directory.get_revision(expected_alembic_head)
+if Path(resolved_alembic_head.path).name != expected_alembic_filename:
+    raise AssertionError(
+        f"Alembic head {expected_alembic_head} is not defined by {expected_alembic_filename}"
+    )
 
 for model in (GroupedDailySummaryDTO, TickerDetailDTO, UniverseHistoryRequest):
     if model.model_config.get("strict") is not True:
@@ -1192,7 +1200,10 @@ async def exercise_provider():
 
 asyncio.run(exercise_provider())
 print("QUANTIPY_READINESS_PROBE=" + json.dumps({"contract_verified": True}, sort_keys=True))
-""".replace("__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__", repr(QUANTIPY_ALEMBIC_HEAD_ENV_VAR))
+""".replace("__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__", repr(QUANTIPY_ALEMBIC_HEAD_ENV_VAR)).replace(
+    "__QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR__",
+    repr(QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR),
+)
 
 _DATASET_PROBE = r"""
 import asyncio
@@ -1369,6 +1380,7 @@ def _probe_quantipy_contract(root: Path, expected_commit: str) -> tuple[str, Map
             environment["PYTHONPATH"] = str(worktree / "src")
             environment["QUANTIPY_PROBE_ROOT"] = str(worktree)
             environment[QUANTIPY_ALEMBIC_HEAD_ENV_VAR] = QUANTIPY_ALEMBIC_HEAD_REVISION
+            environment[QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR] = QUANTIPY_ALEMBIC_HEAD_FILENAME
             probe = _run_probe(
                 [str(python), "-c", _CONTRACT_PROBE],
                 cwd=worktree,
