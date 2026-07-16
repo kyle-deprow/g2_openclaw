@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -555,6 +556,9 @@ def test_operator_builder_generates_v3_manifest_without_bumping_v2_contract_evid
     assert manifest.evidence[EvidenceId.QUANTIPY_DATA_CONTRACT].path == str(evidence_path)
     evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert evidence_payload["schema_version"] == QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION
+    verification = evidence_payload["verification"]
+    assert isinstance(verification, dict)
+    assert verification["alembic_head"] == autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION
     assert (
         PlatformReadinessManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
         == manifest
@@ -612,10 +616,17 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     venv_python = quantipy_root / ".venv/bin/python"
     venv_python.parent.mkdir(parents=True)
     venv_python.symlink_to(sys.executable)
-    migration = quantipy_root / "src/quantipy/migrations/versions/010_unadjusted_grouped_daily.py"
-    migration.write_text('revision = "010_unadjusted_grouped_daily"\n', encoding="utf-8")
+    migration = (
+        quantipy_root
+        / "src/quantipy/migrations/versions"
+        / autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME
+    )
+    migration.write_text(
+        f'revision = "{autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}"\n',
+        encoding="utf-8",
+    )
     subprocess.run(["git", "add", "."], cwd=quantipy_root, check=True)
-    subprocess.run(["git", "commit", "-qm", "fake 010"], cwd=quantipy_root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fake 013"], cwd=quantipy_root, check=True)
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=quantipy_root,
@@ -639,14 +650,17 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     assert not (tmp_path / "contract.json").exists()
 
 
-def test_operator_builder_rejects_missing_alembic_010(tmp_path: Path) -> None:
+def test_operator_builder_rejects_missing_alembic_013_head_file(tmp_path: Path) -> None:
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
     xnys = tmp_path / "xnys.json"
     write_xnys_calendar_evidence(xnys)
 
-    with pytest.raises(ReadinessManifestError, match="Alembic head 010"):
+    with pytest.raises(
+        ReadinessManifestError,
+        match=autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
+    ):
         build_quantipy_readiness(
             manifest_path=tmp_path / "manifest.json",
             quantipy_evidence_path=tmp_path / "contract.json",
@@ -654,6 +668,114 @@ def test_operator_builder_rejects_missing_alembic_010(tmp_path: Path) -> None:
             expected_quantipy_commit=commit,
             xnys_calendar_path=xnys,
         )
+
+
+def test_contract_probe_injects_exact_alembic_head_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_probe = autoresearch_readiness._CONTRACT_PROBE
+    assert "QUANTIPY_ALEMBIC_HEAD_REVISION" not in original_probe
+    assert autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR in original_probe
+
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    _write_probe_quantipy_repo(quantipy_root)
+    venv_python = quantipy_root / ".venv/bin/python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(sys.executable)
+    migration = (
+        quantipy_root
+        / "src/quantipy/migrations/versions"
+        / autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME
+    )
+    migration.write_text(
+        f'revision = "{autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}"\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=quantipy_root, check=True)
+    subprocess.run(["git", "commit", "-qm", "add alembic head"], cwd=quantipy_root, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=quantipy_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    head_env_var = autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR
+
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_CONTRACT_PROBE",
+        (
+            "import json\n"
+            "import os\n"
+            "print(\n"
+            '    "QUANTIPY_READINESS_PROBE="\n'
+            "    + json.dumps(\n"
+            f'        {{"alembic_head": os.environ["{head_env_var}"]}},\n'
+            "        sort_keys=True,\n"
+            "    )\n"
+            ")\n"
+        ),
+    )
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_run_committed_contract_tests",
+        lambda python, worktree, environment, *, test_files=(): None,
+    )
+
+    actual_commit, probe = autoresearch_readiness._probe_quantipy_contract(quantipy_root, commit)
+
+    assert actual_commit == commit
+    assert probe == {"alembic_head": autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}
+
+
+def test_shipped_contract_probe_enforces_exact_alembic_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = ast.parse(autoresearch_readiness._CONTRACT_PROBE)
+    start = next(
+        index
+        for index, node in enumerate(tree.body)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "expected_alembic_head"
+    )
+    probe_segment = ast.Module(body=tree.body[start : start + 4], type_ignores=[])
+
+    class ProbeConfig:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def set_main_option(self, key: str, value: str) -> None:
+            pass
+
+    class ProbeScriptDirectory:
+        heads = (autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,)
+
+        @classmethod
+        def from_config(cls, config: ProbeConfig) -> ProbeScriptDirectory:
+            return cls()
+
+        def get_heads(self) -> list[str]:
+            return list(self.heads)
+
+    monkeypatch.setenv(
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_ENV_VAR,
+        autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
+    )
+    namespace = {
+        "Config": ProbeConfig,
+        "ScriptDirectory": ProbeScriptDirectory,
+        "os": os,
+        "root": tmp_path,
+    }
+    compiled = compile(probe_segment, "<contract-probe-alembic-check>", "exec")
+
+    exec(compiled, namespace)
+    ProbeScriptDirectory.heads = ("unexpected_head",)
+    with pytest.raises(AssertionError, match=autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION):
+        exec(compiled, namespace)
 
 
 @pytest.mark.parametrize("collision", ["evidence", "xnys"])

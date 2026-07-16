@@ -31,6 +31,9 @@ DATASET_AVAILABILITY_REASON_RE = re.compile(
 )
 READINESS_PROMPT_CAPABILITIES_MAX_BYTES = 4096
 XNYS_EVIDENCE_SCHEMA_VERSION = 1
+QUANTIPY_ALEMBIC_HEAD_REVISION = "013_history_receipt_seal"
+QUANTIPY_ALEMBIC_HEAD_FILENAME = "013_attest_existing_history_materializations.py"
+QUANTIPY_ALEMBIC_HEAD_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_REVISION"
 
 
 class ReadinessError(ValueError):
@@ -1059,10 +1062,11 @@ if not {
 }.issubset(routes):
     raise AssertionError("API interface missing")
 
+expected_alembic_head = os.environ[__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__]
 config = Config(str(root / "alembic.ini"))
 config.set_main_option("script_location", str(root / "src/quantipy/migrations"))
-if ScriptDirectory.from_config(config).get_heads() != ["010_unadjusted_grouped_daily"]:
-    raise AssertionError("Alembic head is not 010_unadjusted_grouped_daily")
+if ScriptDirectory.from_config(config).get_heads() != [expected_alembic_head]:
+    raise AssertionError(f"Alembic head is not {expected_alembic_head}")
 
 for model in (GroupedDailySummaryDTO, TickerDetailDTO, UniverseHistoryRequest):
     if model.model_config.get("strict") is not True:
@@ -1156,7 +1160,7 @@ async def exercise_provider():
 
 asyncio.run(exercise_provider())
 print("QUANTIPY_READINESS_PROBE=" + json.dumps({"contract_verified": True}, sort_keys=True))
-"""
+""".replace("__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__", repr(QUANTIPY_ALEMBIC_HEAD_ENV_VAR))
 
 _DATASET_PROBE = r"""
 import asyncio
@@ -1315,11 +1319,11 @@ def _probe_quantipy_contract(root: Path, expected_commit: str) -> tuple[str, Map
             root,
             "cat-file",
             "-e",
-            f"{actual_commit}:src/quantipy/migrations/versions/010_unadjusted_grouped_daily.py",
+            (f"{actual_commit}:src/quantipy/migrations/versions/{QUANTIPY_ALEMBIC_HEAD_FILENAME}"),
         )
     except ReadinessManifestError as exc:
         raise ReadinessManifestError(
-            "Quantipy Alembic head 010_unadjusted_grouped_daily is missing"
+            f"Quantipy Alembic head {QUANTIPY_ALEMBIC_HEAD_REVISION} is missing"
         ) from exc
     python = root / ".venv/bin/python"
     if not python.is_file() or not os.access(python, os.X_OK):
@@ -1332,6 +1336,7 @@ def _probe_quantipy_contract(root: Path, expected_commit: str) -> tuple[str, Map
             environment = os.environ.copy()
             environment["PYTHONPATH"] = str(worktree / "src")
             environment["QUANTIPY_PROBE_ROOT"] = str(worktree)
+            environment[QUANTIPY_ALEMBIC_HEAD_ENV_VAR] = QUANTIPY_ALEMBIC_HEAD_REVISION
             probe = _run_probe(
                 [str(python), "-c", _CONTRACT_PROBE],
                 cwd=worktree,
@@ -1506,7 +1511,7 @@ def build_quantipy_readiness(
             "quantipy_commit": actual_commit,
             "schema_version": QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION,
             "verification": {
-                "alembic_head": "010_unadjusted_grouped_daily",
+                "alembic_head": QUANTIPY_ALEMBIC_HEAD_REVISION,
                 "committed_contract_tests": list(_CONTRACT_TESTS),
                 "runtime_probe": dict(contract_probe),
                 "tracked_worktree_clean": True,
