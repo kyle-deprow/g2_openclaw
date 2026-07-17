@@ -69,6 +69,12 @@ providers, databases, cached symbols, or environment configuration.
   selected-symbol/date range into the platform cache and returns from that
   cache only after strict coverage succeeds. Reuse that cache across folds and
   iterations; do not query repositories or the database directly.
+- Before any ALPHA verification command that can call `qp.prices()` for a
+  hydrate/backtest, compute the planned `member_union_count * XNYS
+  session_count` scope. The G2 OpenClaw control-plane hard budget is 600,000
+  symbol-sessions. Over-budget experiments must return a structured
+  `BUG_SIGNAL` named `price_hydration_scope_exceeds_budget` before hydration,
+  not silently launch a multi-day Massive/cache fill.
 - Hydrate only symbols selected by the universe contract and only the required
   experiment range. Do not manually prefetch every date range or a broad symbol
   catalog.

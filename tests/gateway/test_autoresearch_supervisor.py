@@ -28,6 +28,7 @@ from gateway.autoresearch_runner import (
     FinalReviewerVerdict,
     ImplementationResultArtifact,
     Phase,
+    PriceHydrationScopePreflight,
     ResearchMode,
 )
 from gateway.autoresearch_supervisor import (
@@ -427,6 +428,16 @@ def _implementation_result(workspace_path: Path) -> ImplementationResultArtifact
         notebook_path="notebooks/example.ipynb",
         tests_added_or_updated=(),
         commands_run=(),
+        price_hydration_scope_preflight=PriceHydrationScopePreflight(
+            member_union_count=1,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=252,
+            planned_symbol_sessions=252,
+            within_budget=True,
+        ),
     )
 
 

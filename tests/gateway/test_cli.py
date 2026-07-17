@@ -51,6 +51,7 @@ from gateway.autoresearch_runner import (
     MetricDirection,
     Phase,
     PriceHydrationReceipt,
+    PriceHydrationScopePreflight,
     ResearchMode,
     ReviewResultArtifact,
     ReviewVerdict,
@@ -953,6 +954,16 @@ class TestAutoresearchCliCommands:
                 required_dependencies=(),
                 benchmark_plan="Record wall time and peak memory for verification.",
             ),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1,
+                experiment_start="2021-01-04",
+                experiment_end="2021-12-31",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=252,
+                planned_symbol_sessions=252,
+                within_budget=True,
+            ),
         )
 
     @staticmethod
@@ -1553,6 +1564,16 @@ class TestAutoresearchCliCommands:
                 notebook_path="notebooks/experiments/vwap_obv.ipynb",
                 tests_added_or_updated=("tests/test_vwap_obv.py",),
                 commands_run=("uv run pytest tests/test_vwap_obv.py",),
+                price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                    member_union_count=1,
+                    experiment_start="2021-01-04",
+                    experiment_end="2021-12-31",
+                    timeframe="1min",
+                    market_hours="regular",
+                    session_count=252,
+                    planned_symbol_sessions=252,
+                    within_budget=True,
+                ),
             ),
             verification_history=(verification,),
             review_history=(

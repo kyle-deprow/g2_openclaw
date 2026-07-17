@@ -56,6 +56,7 @@ MAX_UNIVERSE_SELECTION_DATES = 2200
 MAX_UNIVERSE_BATCH_DATES = 32
 MAX_UNIVERSE_BATCH_RESULTS = 10_000
 MAX_UNIVERSE_MEMBERS_PER_DATE = 1_000
+MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS = 600_000
 MAX_EXAMPLE_TICKERS = 8
 MAX_FIXED_SLEEVE_SYMBOLS = 32
 NEXT_SESSION_EXECUTION_POLICY = "next-session-or-later"
@@ -69,6 +70,10 @@ _OPERATOR_PRECONDITION_MARKERS = (
 _OPERATOR_PRECONDITION_BRIEF_MARKERS = (
     "do not enter engineer",
     "do not modify quantipy",
+)
+HYDRATE_CAPABLE_COMMAND_RE = re.compile(
+    r"(\bqp\.prices\s*\(|\bquantipy\.prices\s*\(|\bprices\s*\(|"
+    r"generate_[\w.-]*results|nbconvert|papermill|jupyter\s+execute)"
 )
 
 
@@ -1591,6 +1596,81 @@ def _is_operator_precondition_consensus(
 
 
 @dataclass(frozen=True, slots=True)
+class PriceHydrationScopePreflight:
+    member_union_count: int
+    experiment_start: str
+    experiment_end: str
+    timeframe: str
+    market_hours: str
+    session_count: int
+    planned_symbol_sessions: int
+    within_budget: bool
+
+    @classmethod
+    def from_dict(cls, raw: object) -> PriceHydrationScopePreflight:
+        data = _ensure_mapping(raw, label="price_hydration_scope_preflight")
+        _require_exact_keys(
+            data,
+            label="price_hydration_scope_preflight",
+            expected=(
+                "member_union_count",
+                "experiment_start",
+                "experiment_end",
+                "timeframe",
+                "market_hours",
+                "session_count",
+                "planned_symbol_sessions",
+                "within_budget",
+            ),
+        )
+        receipt = cls(
+            member_union_count=_require_int(data, "member_union_count"),
+            experiment_start=_require_iso_date(data, "experiment_start"),
+            experiment_end=_require_iso_date(data, "experiment_end"),
+            timeframe=_require_str(data, "timeframe"),
+            market_hours=_require_str(data, "market_hours"),
+            session_count=_require_int(data, "session_count"),
+            planned_symbol_sessions=_require_int(data, "planned_symbol_sessions"),
+            within_budget=_require_bool(data, "within_budget"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_iso_date_value(self.experiment_start, label="experiment_start")
+        _validate_iso_date_value(self.experiment_end, label="experiment_end")
+        if self.experiment_start > self.experiment_end:
+            raise AutoresearchValidationError("price preflight experiment range is invalid")
+        if self.member_union_count <= 0:
+            raise AutoresearchValidationError("price preflight member_union_count must be positive")
+        if self.session_count <= 0:
+            raise AutoresearchValidationError("price preflight session_count must be positive")
+        expected = self.member_union_count * self.session_count
+        if self.planned_symbol_sessions != expected:
+            raise AutoresearchValidationError(
+                "price preflight planned_symbol_sessions must equal "
+                "member_union_count * session_count"
+            )
+        expected_within_budget = expected <= MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS
+        if self.within_budget is not expected_within_budget:
+            raise AutoresearchValidationError(
+                "price preflight within_budget must match the alpha hydration budget"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "member_union_count": self.member_union_count,
+            "experiment_start": self.experiment_start,
+            "experiment_end": self.experiment_end,
+            "timeframe": self.timeframe,
+            "market_hours": self.market_hours,
+            "session_count": self.session_count,
+            "planned_symbol_sessions": self.planned_symbol_sessions,
+            "within_budget": self.within_budget,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ImplementationResultArtifact:
     summary: str
     workspace_path: str
@@ -1600,6 +1680,7 @@ class ImplementationResultArtifact:
     tests_added_or_updated: tuple[str, ...]
     commands_run: tuple[str, ...]
     compute_fit: ComputeFitArtifact | None = None
+    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> ImplementationResultArtifact:
@@ -1616,9 +1697,11 @@ class ImplementationResultArtifact:
                 "tests_added_or_updated",
                 "commands_run",
                 "compute_fit",
+                "price_hydration_scope_preflight",
             ),
         )
         compute_fit_raw = data.get("compute_fit")
+        preflight_raw = data.get("price_hydration_scope_preflight")
         artifact = cls(
             summary=_require_str(data, "summary"),
             workspace_path=_require_workspace_path(data, "workspace_path"),
@@ -1630,6 +1713,11 @@ class ImplementationResultArtifact:
             compute_fit=(
                 ComputeFitArtifact.from_dict(compute_fit_raw)
                 if compute_fit_raw is not None
+                else None
+            ),
+            price_hydration_scope_preflight=(
+                PriceHydrationScopePreflight.from_dict(preflight_raw)
+                if preflight_raw is not None
                 else None
             ),
         )
@@ -1656,6 +1744,11 @@ class ImplementationResultArtifact:
             "tests_added_or_updated": list(self.tests_added_or_updated),
             "commands_run": list(self.commands_run),
             "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
+            "price_hydration_scope_preflight": (
+                self.price_hydration_scope_preflight.to_dict()
+                if self.price_hydration_scope_preflight is not None
+                else None
+            ),
         }
 
 
@@ -2168,6 +2261,134 @@ def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> None:
     if count != receipt.member_union_count or digest != receipt.member_union_digest:
         raise AutoresearchValidationError(
             "member union manifest must recompute the persisted count and digest"
+        )
+
+
+def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> None:
+    if state.phase is not Phase.VERIFICATION or state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH verification requires implementation_result"
+        )
+    if state.implementation_result.price_hydration_scope_preflight is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH verification requires implementation_result."
+            "price_hydration_scope_preflight before dispatch"
+        )
+
+
+def _validate_alpha_implementation_price_preflight(
+    state: AutoresearchState,
+    artifact: ImplementationResultArtifact,
+) -> None:
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    preflight = artifact.price_hydration_scope_preflight
+    if preflight is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH implementation_result requires price_hydration_scope_preflight"
+        )
+    if preflight.within_budget:
+        return
+    hydrate_commands = tuple(
+        command for command in artifact.commands_run if HYDRATE_CAPABLE_COMMAND_RE.search(command)
+    )
+    if hydrate_commands:
+        raise AutoresearchValidationError(
+            "over-budget ALPHA implementation_result must not include hydrate-capable "
+            f"commands: {', '.join(hydrate_commands)}"
+        )
+
+
+def _validate_alpha_price_preflight_matches_receipts(
+    preflight: PriceHydrationScopePreflight,
+    artifact: VerificationResultArtifact,
+) -> None:
+    if isinstance(artifact.data_coverage, DynamicUniverseCoverageReceipt):
+        for field_name in (
+            "member_union_count",
+            "experiment_start",
+            "experiment_end",
+            "timeframe",
+            "market_hours",
+        ):
+            if getattr(artifact.data_coverage, field_name) != getattr(preflight, field_name):
+                raise AutoresearchValidationError(
+                    f"dynamic coverage {field_name} must match price preflight"
+                )
+        if artifact.data_coverage.expected_symbol_sessions != preflight.planned_symbol_sessions:
+            raise AutoresearchValidationError(
+                "dynamic coverage expected_symbol_sessions must match price preflight"
+            )
+    if artifact.price_hydration_receipt is not None:
+        for field_name in (
+            "member_union_count",
+            "experiment_start",
+            "experiment_end",
+            "timeframe",
+            "market_hours",
+        ):
+            if getattr(artifact.price_hydration_receipt, field_name) != getattr(
+                preflight, field_name
+            ):
+                raise AutoresearchValidationError(
+                    f"price hydration {field_name} must match price preflight"
+                )
+
+
+def _validate_alpha_price_scope_verification(
+    state: AutoresearchState,
+    artifact: VerificationResultArtifact,
+) -> None:
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH verification requires implementation_result"
+        )
+    preflight = state.implementation_result.price_hydration_scope_preflight
+    if preflight is None:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH verification requires implementation_result."
+            "price_hydration_scope_preflight before artifact acceptance"
+        )
+    if preflight.within_budget:
+        _validate_alpha_price_preflight_matches_receipts(preflight, artifact)
+        if (
+            artifact.status is VerificationStatus.PASS
+            and isinstance(artifact.data_coverage, DynamicUniverseCoverageReceipt)
+            and preflight.planned_symbol_sessions > MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS
+        ):
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH PASS dynamic coverage exceeds the alpha price "
+                f"hydration budget of {MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS}"
+            )
+        return
+    if artifact.status is not VerificationStatus.BUG_SIGNAL:
+        raise AutoresearchValidationError(
+            "over-budget ALPHA price hydration preflight requires BUG_SIGNAL verification"
+        )
+    if not any("price_hydration_scope_exceeds_budget" in signal for signal in artifact.bug_signals):
+        raise AutoresearchValidationError(
+            "over-budget ALPHA price hydration preflight requires "
+            "price_hydration_scope_exceeds_budget bug signal"
+        )
+    if (
+        artifact.data_coverage is not None
+        or artifact.universe_verification_receipt is not None
+        or artifact.price_hydration_receipt is not None
+        or artifact.is_walk_forward_sharpe_net is not None
+        or artifact.oos_sharpe_net is not None
+        or artifact.max_drawdown_pct is not None
+        or artifact.win_rate is not None
+        or artifact.trade_count is not None
+        or artifact.trades_per_day is not None
+        or artifact.oos_trading_days is not None
+    ):
+        raise AutoresearchValidationError(
+            "over-budget ALPHA price hydration BUG_SIGNAL must not include "
+            "hydrate-dependent metrics, coverage, or receipts"
         )
 
 
@@ -3344,6 +3565,13 @@ class AutoresearchState:
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
 
+        def _parse_state_implementation(raw_implementation: object) -> ImplementationResultArtifact:
+            implementation_data = dict(
+                _ensure_mapping(raw_implementation, label="implementation_result")
+            )
+            implementation_data.setdefault("price_hydration_scope_preflight", None)
+            return ImplementationResultArtifact.from_dict(implementation_data)
+
         state = cls(
             phase=Phase(_require_str(data, "phase")) if "phase" in data else Phase.SETUP_CONTEXT,
             iteration=_require_int(data, "iteration") if "iteration" in data else 1,
@@ -3359,7 +3587,7 @@ class AutoresearchState:
             else None,
             debate_rounds=_parse_tuple("debate_rounds", DebateResultArtifact.from_dict),
             consensus_history=_parse_tuple("consensus_history", ConsensusResultArtifact.from_dict),
-            implementation_result=ImplementationResultArtifact.from_dict(implementation_raw)
+            implementation_result=_parse_state_implementation(implementation_raw)
             if implementation_raw is not None
             else None,
             verification_history=_parse_tuple(
@@ -3678,6 +3906,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "tests_added_or_updated",
             "commands_run",
             "compute_fit",
+            "price_hydration_scope_preflight",
         ]
     },
     ArtifactType.VERIFICATION_RESULT: {
@@ -4964,7 +5193,15 @@ def _phase_instruction(
             "qp.security_universe_history() operation per batch, form only an in-memory "
             "sorted member union, and call "
             "qp.prices() exactly once for that union and the full experiment "
-            "range/timeframe/market-hours before constructing any fold."
+            "range/timeframe/market-hours before constructing any fold. Before any "
+            "hydrate-capable command, compute price_hydration_scope_preflight with "
+            "member_union_count, experiment range, timeframe, market_hours, XNYS "
+            "session_count, planned_symbol_sessions, and within_budget; include it "
+            "in implementation_result. If within_budget is false, do not run any "
+            "qp.prices(), hydrate, full backtest, or notebook command that would load "
+            "the price panel; commit the scaffold, focused tests, notebook shell, and "
+            "over-budget preflight so verification can emit the structured feasibility "
+            "BUG_SIGNAL without spending the hydrate cost."
         ),
         Phase.VERIFICATION: (
             "Verify the produced experiment deterministically. "
@@ -5006,6 +5243,11 @@ def _phase_instruction(
         phase,
         expected_artifact_type,
         state_path=state_path,
+        price_scope_preflight=(
+            state.implementation_result.price_hydration_scope_preflight
+            if phase is Phase.VERIFICATION and state.implementation_result is not None
+            else None
+        ),
     )
     mempalace_fact_instruction = _mempalace_kg_fact_instruction(state, expected_artifact_type)
     operator_precondition_instruction = _operator_precondition_decision_instruction(
@@ -5121,12 +5363,32 @@ def _verification_handoff_contract(
     expected_artifact_type: ArtifactType,
     *,
     state_path: Path,
+    price_scope_preflight: PriceHydrationScopePreflight | None = None,
 ) -> str:
     if (
         phase is not Phase.VERIFICATION
         or expected_artifact_type is not ArtifactType.VERIFICATION_RESULT
     ):
         return ""
+    scope_gate = ""
+    if price_scope_preflight is not None:
+        scope_gate = (
+            "- Runner-bound price hydration scope preflight: "
+            f"{_json_block(price_scope_preflight.to_dict(), compact=True)}. "
+        )
+        if price_scope_preflight.within_budget:
+            scope_gate += (
+                "This is within budget; verification may run the hydrate/backtest command "
+                "after tests and notebook smoke checks pass.\n"
+            )
+        else:
+            scope_gate += (
+                "This exceeds budget. Do not run any command that can call qp.prices() "
+                "for the hydrate/backtest. Emit status=BUG_SIGNAL with bug_signals "
+                "containing price_hydration_scope_exceeds_budget and the exact "
+                "preflight values, set hydrate-dependent metrics/coverage/receipts to "
+                "null, and advance the artifact.\n"
+            )
     return (
         "Verification handoff contract:\n"
         "- Every verification attempt must terminate by writing a structured JSON "
@@ -5158,12 +5420,26 @@ def _verification_handoff_contract(
         "price hydration receipt and compact dynamic data_coverage bound to the same union, range, "
         "timeframe, and market-hours. PASS requires missing_symbol_count=0, "
         "missing_symbol_sessions=0, and covered_symbol_sessions=expected_symbol_sessions. "
+        "Before running any command that can call qp.prices(), generate a price hydration "
+        "scope preflight from the planned member-union count and XNYS experiment session "
+        f"count. The hard budget is {MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS} "
+        "symbol-sessions. If the planned member_union_count * session_count exceeds "
+        "that budget, do not run the hydrate/backtest command; emit status=BUG_SIGNAL, "
+        "tests_passed=true when focused unit/notebook checks already passed, null "
+        "metrics/coverage/receipts that require the skipped hydrate, and include a "
+        "nonempty bug_signals entry named price_hydration_scope_exceeds_budget with "
+        "the computed count, limit, member_union_count, date range, and session_count. "
+        "This is an experiment feasibility signal for fixer, not an operator "
+        "infrastructure repair.\n"
+        "- Dynamic coverage accepted by the control plane must stay within the same "
+        f"{MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS} symbol-session budget. "
         "Dynamic coverage must include member_union_count, member_union_digest, "
         "experiment_start, experiment_end, oos_start, oos_end, timeframe, market_hours, "
         "expected_symbol_sessions, covered_symbol_sessions, missing_symbol_count, "
         "missing_symbol_sessions, default_fold_count, and fallback_fold_count. "
         "TEST_FAILURE or BUG_SIGNAL may set all three receipts to null when unavailable, "
         "but must never emit a partial receipt chain or a partial PASS.\n"
+        f"{scope_gate}"
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
         "REMEDIATION_REQUIRED. status and tests_passed describe verifier command, "
@@ -5315,6 +5591,7 @@ def next_action(
         validation_context.validate_for_state(state)
         if state.phase is not Phase.REVIEW:
             _revalidate_accepted_member_union_manifests(state)
+        _validate_alpha_verification_price_preflight(state)
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
     target = _select_phase_target(state, policy)
@@ -5490,6 +5767,7 @@ def advance_state(
                 "cannot advance implementation without consensus majority"
             )
         _validate_implementation_workspace(state, artifact, require_compute_fit=True)
+        _validate_alpha_implementation_price_preflight(state, artifact)
         next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
         _validate_alpha_universe_chain(next_state)
         return next_state
@@ -5500,6 +5778,7 @@ def advance_state(
         if state.implementation_result is None:
             raise AutoresearchValidationError("verification requires implementation_result")
         artifact.validate(mode=state.mode)
+        _validate_alpha_price_scope_verification(state, artifact)
         next_verification_history = (*state.verification_history, artifact)
         if artifact.status is VerificationStatus.PASS:
             next_state = replace(

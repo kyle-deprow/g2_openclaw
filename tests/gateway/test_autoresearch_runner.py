@@ -30,6 +30,7 @@ from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
     INSTRUCTION_SOURCE_MANIFEST_VERSION,
+    MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
     MAX_ARTIFACT_FILE_BYTES,
     MAX_NEXT_ACTION_PROMPT_BYTES,
     MEMBER_UNION_DIGEST_ALGORITHM,
@@ -77,6 +78,7 @@ from gateway.autoresearch_runner import (
     MetricDirection,
     Phase,
     PriceHydrationReceipt,
+    PriceHydrationScopePreflight,
     ReceiptCatalog,
     ResearchMode,
     ReviewResultArtifact,
@@ -1163,6 +1165,16 @@ def _implementation_result() -> ImplementationResultArtifact:
             ),
             required_dependencies=(),
             benchmark_plan="Record wall time and peak memory for the full walk-forward run.",
+        ),
+        price_hydration_scope_preflight=PriceHydrationScopePreflight(
+            member_union_count=1,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=2400,
+            planned_symbol_sessions=2400,
+            within_budget=True,
         ),
     )
 
@@ -4095,7 +4107,72 @@ def test_alpha_implementation_prompt_batches_history_and_hydrates_union_once(
     assert "one qp.security_universe_history() operation per batch" in prompt
     assert "qp.prices() exactly once for that union" in prompt
     assert "qp.security_universe_history() exactly once for all dates" not in prompt
+
+
+def test_alpha_implementation_prompt_stops_over_budget_hydration(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "compute price_hydration_scope_preflight" in prompt
+    assert "If within_budget is false" in prompt
+    assert "do not run any qp.prices(), hydrate, full backtest" in prompt
+    assert "structured feasibility BUG_SIGNAL" in prompt
     assert "qp.security_universe_history() exactly once over all dates" not in prompt
+
+
+def test_alpha_implementation_rejects_missing_price_scope_preflight(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="implementation_result requires price_hydration_scope_preflight",
+    ):
+        advance_state(
+            state,
+            replace(_implementation_result(), price_hydration_scope_preflight=None),
+            policy,
+        )
+
+
+def test_over_budget_implementation_rejects_hydrate_commands(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="must not include hydrate-capable commands",
+    ):
+        advance_state(
+            state,
+            replace(
+                _implementation_result(),
+                commands_run=("uv run python notebooks/experiments/generate_t107_oarc_results.py",),
+                price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                    member_union_count=1_551,
+                    experiment_start="2022-01-03",
+                    experiment_end="2025-11-28",
+                    timeframe="1min",
+                    market_hours="regular",
+                    session_count=981,
+                    planned_symbol_sessions=1_521_531,
+                    within_budget=False,
+                ),
+            ),
+            policy,
+        )
 
 
 def test_next_action_rejects_legacy_tmp_persisted_implementation_workspace(
@@ -4192,6 +4269,240 @@ def test_verification_prompt_uses_recorded_workspace(
     assert "implementation_result.commit_sha" in prompt
 
 
+def test_alpha_verification_rejects_missing_price_scope_preflight(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(
+        state,
+        phase=Phase.VERIFICATION,
+        implementation_result=replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=None,
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"price_hydration_scope_preflight before dispatch",
+    ):
+        next_action(state, policy, receipts, platform_readiness)
+
+
+def test_legacy_v2_state_loads_missing_price_scope_then_blocks_verification(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    raw = state.to_dict()
+    implementation = cast(dict[str, object], raw["implementation_result"])
+    implementation.pop("price_hydration_scope_preflight")
+
+    loaded = AutoresearchState.from_dict(raw)
+
+    assert loaded.implementation_result is not None
+    assert loaded.implementation_result.price_hydration_scope_preflight is None
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"price_hydration_scope_preflight before dispatch",
+    ):
+        next_action(loaded, policy, receipts, platform_readiness)
+
+
+def test_over_budget_price_scope_verification_prompt_forbids_hydrate(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1_551,
+                experiment_start="2022-01-03",
+                experiment_end="2025-11-28",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=981,
+                planned_symbol_sessions=1_521_531,
+                within_budget=False,
+            ),
+        ),
+        policy,
+    )
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "Runner-bound price hydration scope preflight" in prompt
+    assert '"planned_symbol_sessions":1521531' in prompt
+    assert "This exceeds budget" in prompt
+    assert "Do not run any command that can call qp.prices()" in prompt
+    assert "price_hydration_scope_exceeds_budget" in prompt
+
+
+def test_over_budget_price_scope_rejects_non_budget_bug_verification(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1_551,
+                experiment_start="2022-01-03",
+                experiment_end="2025-11-28",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=981,
+                planned_symbol_sessions=1_521_531,
+                within_budget=False,
+            ),
+        ),
+        policy,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="over-budget ALPHA price hydration preflight requires BUG_SIGNAL",
+    ):
+        advance_state(state, _verification_result(VerificationStatus.PASS), policy)
+
+
+def test_over_budget_price_scope_accepts_budget_bug_signal(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1_551,
+                experiment_start="2022-01-03",
+                experiment_end="2025-11-28",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=981,
+                planned_symbol_sessions=1_521_531,
+                within_budget=False,
+            ),
+        ),
+        policy,
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        bug_signals=("price_hydration_scope_exceeds_budget: 1521531 > 600000",),
+        data_coverage=None,
+        universe_verification_receipt=None,
+        price_hydration_receipt=None,
+    )
+
+    next_state = advance_state(state, artifact, policy)
+
+    assert next_state.phase is Phase.FIX_TEST
+    assert next_state.pending_fix_trigger is FixTriggerPhase.VERIFICATION
+
+
+def test_price_scope_pass_rejects_underreported_dynamic_coverage(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1_551,
+                experiment_start="2022-01-03",
+                experiment_end="2025-11-28",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=981,
+                planned_symbol_sessions=1_521_531,
+                within_budget=False,
+            ),
+        ),
+        policy,
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        data_coverage=replace(
+            _dynamic_coverage_receipt(),
+            member_union_count=1,
+            expected_symbol_sessions=2400,
+            covered_symbol_sessions=2400,
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="over-budget ALPHA price hydration preflight requires BUG_SIGNAL",
+    ):
+        advance_state(state, artifact, policy)
+
+
+def test_price_scope_pass_requires_coverage_identity_match(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1,
+                experiment_start="2021-01-04",
+                experiment_end="2021-12-31",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=2400,
+                planned_symbol_sessions=2400,
+                within_budget=True,
+            ),
+        ),
+        policy,
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        data_coverage=replace(
+            _dynamic_coverage_receipt(),
+            experiment_start="2021-01-05",
+            oos_start="2021-10-02",
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="dynamic coverage experiment_start must match price hydration",
+    ):
+        advance_state(state, artifact, policy)
+
+
 def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     tmp_path: Path,
     policy: AutoresearchPolicy,
@@ -4200,7 +4511,23 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
 ) -> None:
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _implementation_result(),
+            price_hydration_scope_preflight=PriceHydrationScopePreflight(
+                member_union_count=1,
+                experiment_start="2021-01-04",
+                experiment_end="2021-12-31",
+                timeframe="1min",
+                market_hours="regular",
+                session_count=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+                planned_symbol_sessions=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+                within_budget=False,
+            ),
+        ),
+        policy,
+    )
     state_path = tmp_path / "verification-state.json"
     state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
 
@@ -4245,6 +4572,10 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
         "For ALPHA_RESEARCH PASS, require complete alpha metrics, compact dynamic "
         "data_coverage, and paired universe and price hydration receipts"
     ) in prompt
+    assert "price hydration scope preflight" in prompt
+    assert str(MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS) in prompt
+    assert "price_hydration_scope_exceeds_budget" in prompt
+    assert "do not run the hydrate/backtest command" in prompt
     for field_name in (
         "member_union_count",
         "member_union_digest",
@@ -4260,6 +4591,51 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
         "fallback_fold_count",
     ):
         assert field_name in prompt
+
+
+def test_alpha_pass_rejects_dynamic_coverage_over_price_scope_budget(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        data_coverage=replace(
+            _dynamic_coverage_receipt(),
+            expected_symbol_sessions=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+            covered_symbol_sessions=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="dynamic coverage expected_symbol_sessions must match price preflight",
+    ):
+        advance_state(state, artifact, policy)
+
+
+def test_data_infra_dynamic_coverage_can_exceed_alpha_price_scope_budget() -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        data_coverage=replace(
+            _dynamic_coverage_receipt(),
+            expected_symbol_sessions=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+            covered_symbol_sessions=MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS + 1,
+        ),
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+        infra_rationale="The infrastructure gate uses its own deterministic audit.",
+    )
+
+    artifact.validate(mode=ResearchMode.DATA_INFRA_G0)
 
 
 def test_g0_verification_prompt_requires_infra_gate_rationale(

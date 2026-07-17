@@ -534,6 +534,17 @@ Implementation requirements:
   engineering, tuning, walk-forward backtest, transaction costs, OOS evaluation,
   null tests, and conclusion.
 - Backtest holding period must match prediction horizon.
+- Before any hydrate-capable command, compute
+  `price_hydration_scope_preflight` from the planned member-union count,
+  experiment date range, timeframe, market-hours policy, and pinned XNYS
+  session count. Include this object in `implementation_result` with
+  `planned_symbol_sessions = member_union_count * session_count` and
+  `within_budget` evaluated against the 600,000 symbol-session ALPHA budget.
+  ALPHA verification will not dispatch without it. If `within_budget=false`,
+  do not run `qp.prices()`, hydrate, the full backtest, or notebook commands
+  that load the price panel. Commit the scaffold, focused tests, notebook
+  shell, and over-budget preflight so verification can emit the structured
+  feasibility `BUG_SIGNAL` without spending the hydrate cost.
 - Commit only after tests and notebook execution pass.
 
 ## 5. Verify
@@ -558,6 +569,18 @@ Verify them against the consensus plan/profile identity and batch order. Follow
 the compact `quantipy-data-contract` rules for exact source receipt fields,
 pinned-XNYS next-session validation, canonical union bytes, and the external
 union-manifest path/SHA receipt; never place the member array in state.
+
+Before running any command that can call `qp.prices()` for the implemented
+experiment, perform a price-hydration scope preflight from the planned
+member-union count and XNYS experiment session count. The hard ALPHA budget is
+600,000 symbol-sessions. If `member_union_count * session_count` exceeds that
+budget, do not run the hydrate/backtest command. Emit a structured
+`verification_result` with `status=BUG_SIGNAL`, a nonempty
+`bug_signals` entry named `price_hydration_scope_exceeds_budget`, the computed
+scope and limit, and `null` for metrics, coverage, and receipts that require
+the skipped hydrate. This is an experiment feasibility signal for `fixer`, not
+an operator infrastructure repair and not a reason to use direct SQL, provider
+access, cache-derived universes, or a shorter unapproved range.
 
 Failure classification is mandatory:
 

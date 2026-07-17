@@ -23,6 +23,7 @@ from gateway.autoresearch_runner import (
     ImplementationResultArtifact,
     InfraGateOutcome,
     MemoryVerificationReceipt,
+    PriceHydrationScopePreflight,
     ResearchMode,
     VerificationResultArtifact,
     VerificationStatus,
@@ -263,6 +264,16 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
             ),
             required_dependencies=(),
             benchmark_plan="Record wall time and peak memory during verification.",
+        ),
+        price_hydration_scope_preflight=PriceHydrationScopePreflight(
+            member_union_count=1,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=252,
+            planned_symbol_sessions=252,
+            within_budget=True,
         ),
     )
     final_decision = FinalDecisionArtifact(
