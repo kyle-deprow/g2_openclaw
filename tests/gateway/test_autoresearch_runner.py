@@ -3383,7 +3383,7 @@ def test_test_failure_persists_without_fabricating_unavailable_metrics(
     assert next_state.latest_verification.oos_sharpe_net is None
 
 
-def test_pass_rejects_unavailable_metrics_or_coverage(
+def test_alpha_pass_rejects_unavailable_metrics_or_coverage(
     policy: AutoresearchPolicy,
 ) -> None:
     artifact = replace(
@@ -3397,6 +3397,93 @@ def test_pass_rejects_unavailable_metrics_or_coverage(
         match="PASS verification requires complete metrics and data_coverage",
     ):
         artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_mode_none_pass_rejects_unavailable_metrics_or_coverage() -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=None,
+        data_coverage=None,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="PASS verification requires complete metrics and data_coverage",
+    ):
+        artifact.validate()
+
+
+def test_g0_pass_with_null_alpha_metrics_and_coverage_parses() -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        data_coverage=None,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+        infra_rationale="Shared provider entitlement requires operator remediation.",
+        universe_verification_receipt=None,
+        price_hydration_receipt=None,
+    )
+
+    parsed = VerificationResultArtifact.from_dict(
+        artifact.to_dict(), mode=ResearchMode.DATA_INFRA_G0
+    )
+
+    assert parsed.status is VerificationStatus.PASS
+    assert parsed.data_coverage is None
+    assert parsed.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
+
+
+def test_g0_pass_rejects_partial_universe_and_hydration_receipts() -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        data_coverage=None,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+        infra_rationale="Shared provider entitlement requires operator remediation.",
+        price_hydration_receipt=None,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="universe and price hydration receipts must both be present or both be null",
+    ):
+        artifact.validate(mode=ResearchMode.DATA_INFRA_G0)
+
+
+@pytest.mark.parametrize(
+    ("infra_gate_outcome", "infra_rationale"),
+    (
+        (None, "Shared provider entitlement requires operator remediation."),
+        (InfraGateOutcome.REMEDIATION_REQUIRED, None),
+    ),
+)
+def test_g0_pass_requires_gate_outcome_and_rationale(
+    infra_gate_outcome: InfraGateOutcome | None,
+    infra_rationale: str | None,
+) -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        infra_gate_outcome=infra_gate_outcome,
+        infra_rationale=infra_rationale,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale",
+    ):
+        artifact.validate(mode=ResearchMode.DATA_INFRA_G0)
 
 
 def test_verification_requires_explicit_data_coverage_key() -> None:
@@ -4151,6 +4238,10 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
     assert "status TEST_FAILURE with tests_passed=false" in prompt
     assert "status BUG_SIGNAL with nonempty bug_signals" in prompt
     assert "PASS only when tests passed" in prompt
+    assert (
+        "For ALPHA_RESEARCH PASS, require complete alpha metrics, compact dynamic "
+        "data_coverage, and paired universe and price hydration receipts"
+    ) in prompt
     for field_name in (
         "member_union_count",
         "member_union_digest",
@@ -4203,12 +4294,18 @@ def test_g0_verification_prompt_requires_infra_gate_rationale(
         "REMEDIATION_REQUIRED is a valid completed verification outcome: emit PASS with "
         "tests_passed=true when commands, tests, and notebook execution succeeded"
     ) in prompt
+    assert (
+        "A DATA_INFRA_G0 PASS may set alpha metrics, data_coverage, and both universe "
+        "and price hydration receipts to null when unavailable; never fabricate them"
+    ) in prompt
 
 
-def test_g0_remediation_receipt_advances_to_review(
+def test_g0_remediation_with_null_alpha_metrics_and_coverage_advances_to_review(
     policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = AutoresearchState()
+    state = AutoresearchState(platform_readiness=platform_readiness.identity())
     state = advance_state(state, _setup_artifact(), policy)
     state = advance_state(
         state,
@@ -4227,13 +4324,48 @@ def test_g0_remediation_receipt_advances_to_review(
         state,
         replace(
             _verification_result(VerificationStatus.PASS),
+            is_walk_forward_sharpe_net=None,
+            oos_sharpe_net=None,
+            max_drawdown_pct=None,
+            win_rate=None,
+            trade_count=None,
+            trades_per_day=None,
+            oos_trading_days=None,
+            data_coverage=None,
             infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
             infra_rationale="Shared provider entitlement requires operator remediation.",
+            universe_verification_receipt=None,
+            price_hydration_receipt=None,
         ),
         policy,
     )
 
     assert next_state.phase is Phase.REVIEW
+
+    decision_state = advance_state(next_state, _review_result(ReviewVerdict.PASS, policy), policy)
+    suspended = advance_state(
+        decision_state,
+        FinalDecisionArtifact(
+            experiment_id="g0-null-evidence-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data infrastructure remains blocked.",
+            log_summary="G0 gate still requires remediation.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Shared provider entitlement requires operator remediation.",
+        ),
+        policy,
+    )
+
+    assert suspended.final_decision is not None
+    assert suspended.final_decision.decision is FinalDecision.INFRA_BLOCKED
+    assert suspended.suspended is True
+    assert can_write_memory(suspended) is False
+    with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
+        next_action(suspended, policy, receipts, platform_readiness)
 
 
 def _load_config() -> dict[str, object]:

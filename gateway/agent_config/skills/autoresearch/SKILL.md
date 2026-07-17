@@ -546,12 +546,12 @@ Failure classification is mandatory:
 - If commands ran but metrics are impossible, leaky, internally inconsistent,
   or match a bug signal, set `status` to `BUG_SIGNAL`, keep `bug_signals`
   nonempty, and include the exact command and evidence that exposed it.
-- Use `PASS` only when tests passed, `bug_signals` is empty, all required
-  metrics are present, and the coverage receipt is complete.
+- Use `PASS` only when tests passed and `bug_signals` is empty. `ALPHA_RESEARCH`
+  `PASS` requires complete alpha metrics, compact dynamic coverage, and paired
+  universe and price-hydration receipts.
 - Every required JSON key must still be present for failures. For `TEST_FAILURE`
   or `BUG_SIGNAL`, unavailable metrics or coverage must be `null`; do not use
-  fabricated or zero-valued placeholders. `PASS` requires complete metrics and
-  coverage.
+  fabricated or zero-valued placeholders.
 
 In `DATA_INFRA_G0`, `status` and `tests_passed` describe verification command,
 test, and notebook execution plus experiment correctness; they do not describe
@@ -562,6 +562,11 @@ that gate outcome. This is a completed verification that proceeds to review
 and final `INFRA_BLOCKED`, not a fixer task. Use `TEST_FAILURE` only for an
 actual nonzero command or failed test, a malformed or missing required receipt,
 an experiment defect, or inability to execute verification.
+
+A `DATA_INFRA_G0` `PASS`, including one with
+`infra_gate_outcome=REMEDIATION_REQUIRED`, may leave alpha metrics,
+`data_coverage`, and the paired universe and price-hydration receipts as `null`
+when unavailable. Never fabricate those artifacts.
 
 Required metrics:
 

@@ -2896,15 +2896,19 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError(
                 "TEST_FAILURE verification cannot mark tests_passed=true"
             )
-        if self.status is VerificationStatus.PASS and (
-            self.is_walk_forward_sharpe_net is None
-            or self.oos_sharpe_net is None
-            or self.max_drawdown_pct is None
-            or self.win_rate is None
-            or self.trade_count is None
-            or self.trades_per_day is None
-            or self.oos_trading_days is None
-            or self.data_coverage is None
+        if (
+            self.status is VerificationStatus.PASS
+            and mode is not ResearchMode.DATA_INFRA_G0
+            and (
+                self.is_walk_forward_sharpe_net is None
+                or self.oos_sharpe_net is None
+                or self.max_drawdown_pct is None
+                or self.win_rate is None
+                or self.trade_count is None
+                or self.trades_per_day is None
+                or self.oos_trading_days is None
+                or self.data_coverage is None
+            )
         ):
             raise AutoresearchValidationError(
                 "PASS verification requires complete metrics and data_coverage"
@@ -5139,15 +5143,15 @@ def _verification_handoff_contract(
         "- Classify failures mechanically: any nonzero or failed test command is "
         "status TEST_FAILURE with tests_passed=false; impossible, leaky, or "
         "anomalous metrics are status BUG_SIGNAL with nonempty bug_signals; use "
-        "PASS only when tests passed, bug_signals is empty, and every required "
-        "metric and coverage field is complete. Every required JSON key must be "
-        "present; for TEST_FAILURE or BUG_SIGNAL, unavailable metrics or coverage "
+        "PASS only when tests passed and bug_signals is empty. Every required JSON key "
+        "must be present; for TEST_FAILURE or BUG_SIGNAL, unavailable metrics or coverage "
         "must be null rather than fabricated or zero-valued.\n"
         "- Verification owns all factual receipts; implementation_result must not contain "
-        "them. For ALPHA_RESEARCH PASS, construct deterministic contiguous universe history "
-        "batches from the canonical plan, with one operation per batch and authoritative "
-        "contract/source/calendar evidence for every date. Include one canonical price "
-        "hydration receipt and compact dynamic data_coverage bound to the same union, range, "
+        "them. For ALPHA_RESEARCH PASS, require complete alpha metrics, compact dynamic "
+        "data_coverage, and paired universe and price hydration receipts. Construct deterministic "
+        "contiguous universe history batches from the canonical plan, with one operation per batch "
+        "and authoritative contract/source/calendar evidence for every date. Include one canonical "
+        "price hydration receipt and compact dynamic data_coverage bound to the same union, range, "
         "timeframe, and market-hours. PASS requires missing_symbol_count=0, "
         "missing_symbol_sessions=0, and covered_symbol_sessions=expected_symbol_sessions. "
         "Dynamic coverage must include member_union_count, member_union_digest, "
@@ -5162,8 +5166,10 @@ def _verification_handoff_contract(
         "test, and notebook execution plus experiment correctness, never whether "
         "the infrastructure gate passed. REMEDIATION_REQUIRED is a valid completed "
         "verification outcome: emit PASS with tests_passed=true when commands, tests, "
-        "and notebook execution succeeded. It advances to review and then final "
-        "INFRA_BLOCKED; do not send operator-owned remediation to fixer. Use "
+        "and notebook execution succeeded. A DATA_INFRA_G0 PASS may set alpha metrics, "
+        "data_coverage, and both universe and price hydration receipts to null when unavailable; "
+        "never fabricate them. It advances to review and then final INFRA_BLOCKED; do not send "
+        "operator-owned remediation to fixer. Use "
         "TEST_FAILURE only for actual nonzero command or test execution, a malformed "
         "or missing required receipt, an experiment defect, or inability to execute "
         "verification. Do not use Sharpe as the gate rationale.\n\n"
