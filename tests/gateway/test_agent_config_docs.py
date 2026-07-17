@@ -268,6 +268,17 @@ def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     assert "`verification_result`" in protocol
 
 
+def test_runtime_docs_require_absolute_artifact_handoff_paths() -> None:
+    protocol = AUTORESEARCH.read_text(encoding="utf-8")
+    normalized = " ".join(protocol.split())
+
+    assert "artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json" in protocol
+    assert 'jq -e . "$artifact"' in protocol
+    assert 'wc -c "$artifact"' in protocol
+    assert 'autoresearch-advance "$state" "$artifact"' in protocol
+    assert "absolute-path handoff template" in normalized
+
+
 def test_alpha_docs_require_dynamic_coverage_and_explicit_state_migration() -> None:
     alpha_docs = "\n".join(
         path.read_text(encoding="utf-8")

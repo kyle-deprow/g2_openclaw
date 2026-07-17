@@ -157,13 +157,22 @@ must be exactly:
 
 The `artifact` value is the phase-specific structured artifact. Do not add
 extra envelope keys, omit the digest, or pass legacy unwrapped artifacts.
-Pass both dispatch hashes back to `autoresearch-advance`:
+Write production artifacts to an absolute path in the PM workspace, then use
+that exact variable for validation and advancement so repository cwd changes
+cannot make `jq`, `wc`, or `autoresearch-advance` inspect different files:
 
 ```bash
-uv run gateway-cli autoresearch-advance <state> <artifact> \
-  --instruction-manifest-sha256 <source_manifest_sha256 from autoresearch-next> \
-  --state-reference-sha256 <state_reference_sha256 from autoresearch-next> \
-  --output <next-state>
+state=/home/dev/.openclaw/autoresearch/quantipy-state.json
+artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json
+next_state="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
+jq -e . "$artifact" >/dev/null
+wc -c "$artifact"
+cd /home/dev/repos/g2_openclaw
+uv run gateway-cli autoresearch-advance "$state" "$artifact" \
+  --instruction-manifest-sha256 "<source_manifest_sha256 from autoresearch-next>" \
+  --state-reference-sha256 "<state_reference_sha256 from autoresearch-next>" \
+  --output "$next_state"
+mv -- "$next_state" "$state"
 ```
 
 `autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
@@ -535,12 +544,9 @@ read-only commands in the target repo.
 Every verification attempt must end with a structured JSON
 `verification_result` artifact, including attempts where tests fail or the run
 uncovers a bug signal. The PM must write the JSON artifact and run
-`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance
-/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>
---instruction-manifest-sha256 <source_manifest_sha256>
---state-reference-sha256 <state_reference_sha256>` before any prose completion,
-status report, or handoff. A prose-only verification completion is invalid and
-must be treated as no artifact. The artifact file must use the strict
+the absolute-path handoff template above before any prose completion, status
+report, or handoff. A prose-only verification completion is invalid and must be
+treated as no artifact. The artifact file must use the strict
 `instruction_manifest_sha256` and `state_reference_sha256` envelope from the
 active `autoresearch-next` output. Never pass a raw unwrapped
 `verification_result`.
