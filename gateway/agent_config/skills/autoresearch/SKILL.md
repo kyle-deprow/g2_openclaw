@@ -86,8 +86,14 @@ any stage and rejects a blocked, invalid, or stale-pinned state. An
 suspended, does not increment the iteration, and does not write MemPalace. The
 supervisor recognizes the suspended state and does not wake the PM. After the
 operator changes and validates readiness, rebuild the manifest with the
-explicit frozen-campaign XNYS interval `2021-01-04` through `2025-12-31`, then
-resume the same schema-v2 state atomically:
+explicit frozen-campaign XNYS interval `2022-01-03` through `2025-12-31`.
+Reddit begins `2021-12-31`; the configured rolling aggregate entitlement
+rejects January/July 2021 but supports 2022 onward. The readiness command
+strictly probes the campaign start through Quantipy's public
+`security_universe_screen` and daily regular-hours `prices` APIs for `AAPL`.
+This intentional operator prewarm may hydrate/cache data, and any probe failure
+must not produce a READY receipt. Then resume the same schema-v2 state
+atomically:
 
 ```bash
 (
@@ -101,7 +107,7 @@ resume the same schema-v2 state atomically:
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
     --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
-    --campaign-xnys-start 2021-01-04 \
+    --campaign-xnys-start 2022-01-03 \
     --campaign-xnys-end 2025-12-31
   uv run gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \

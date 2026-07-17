@@ -91,7 +91,7 @@ from typer.testing import CliRunner
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
 runner = CliRunner()
-CAMPAIGN_XNYS_START = "2021-01-04"
+CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
 
 
@@ -395,14 +395,14 @@ def test_autoresearch_build_readiness_command_rejects_noncanonical_campaign_xnys
             "--xnys-calendar",
             str(xnys),
             "--campaign-xnys-start",
-            "2021-01-05",
+            "2022-01-04",
             "--campaign-xnys-end",
             CAMPAIGN_XNYS_END,
         ],
     )
 
     assert result.exit_code == 1
-    assert " ".join(result.output.split()).endswith("must be pinned to 2021-01-04..2025-12-31")
+    assert " ".join(result.output.split()).endswith("must be pinned to 2022-01-03..2025-12-31")
     assert not (tmp_path / "manifest.json").exists()
 
 

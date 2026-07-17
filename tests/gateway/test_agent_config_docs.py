@@ -11,7 +11,7 @@ PLAN = REPO_ROOT / "docs" / "reference" / "quantipy-autonomous-research-plan.md"
 DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 METHODOLOGY = AGENT_CONFIG / "skills" / "quantipy-methodology" / "SKILL.md"
 AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
-CAMPAIGN_XNYS_START = "2021-01-04"
+CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
 
 

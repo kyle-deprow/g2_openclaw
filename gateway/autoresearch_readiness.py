@@ -35,8 +35,10 @@ QUANTIPY_ALEMBIC_HEAD_REVISION = "015_cash_precision"
 QUANTIPY_ALEMBIC_HEAD_FILENAME = "015_widen_corporate_action_cash_precision.py"
 QUANTIPY_ALEMBIC_HEAD_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_REVISION"
 QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR = "QUANTIPY_REQUIRED_ALEMBIC_HEAD_FILENAME"
-QUANTIPY_CAMPAIGN_XNYS_START = date(2021, 1, 4)
+QUANTIPY_CAMPAIGN_XNYS_START = date(2022, 1, 3)
 QUANTIPY_CAMPAIGN_XNYS_END = date(2025, 12, 31)
+QUANTIPY_READINESS_PROBE_DATE_ENV_VAR = "QUANTIPY_READINESS_PROBE_DATE"
+QUANTIPY_READINESS_LOCAL_API_URL = "http://127.0.0.1:8000"
 
 
 class ReadinessError(ValueError):
@@ -1247,6 +1249,73 @@ async def main():
 asyncio.run(main())
 """
 
+_CAMPAIGN_START_DATA_ACCESS_PROBE = r"""
+from datetime import datetime
+import json
+import os
+from zoneinfo import ZoneInfo
+
+import quantipy as qp
+
+probe_date = os.environ["QUANTIPY_READINESS_PROBE_DATE"]
+api_url = __QUANTIPY_READINESS_LOCAL_API_URL__
+screen = qp.security_universe_screen(
+    probe_date,
+    security_types=("CS",),
+    active_only=True,
+    limit=1,
+    api_url=api_url,
+)
+if screen.as_of_date.isoformat() != probe_date or not screen.entries:
+    raise AssertionError("universe screen returned no campaign-start entries")
+if any(not entry.active or entry.type != "CS" or not entry.ticker for entry in screen.entries):
+    raise AssertionError("universe screen returned an invalid common-stock entry")
+prices = qp.prices(
+    "AAPL",
+    probe_date,
+    probe_date,
+    timeframe="1d",
+    market_hours="regular",
+    api_url=api_url,
+)
+required_price_columns = {"ticker", "timestamp", "open", "high", "low", "close", "volume"}
+price_columns = sorted(str(column) for column in prices.columns)
+if len(prices) < 1 or not required_price_columns.issubset(price_columns):
+    raise AssertionError("daily regular-hours prices returned no structurally valid rows")
+price_tickers = sorted({str(ticker) for ticker in prices["ticker"]})
+price_xnys_dates = []
+for ticker, timestamp in zip(prices["ticker"], prices["timestamp"], strict=True):
+    if ticker != "AAPL":
+        raise AssertionError("daily regular-hours prices returned an unexpected ticker")
+    if (
+        not isinstance(timestamp, datetime)
+        or timestamp.tzinfo is None
+        or timestamp.utcoffset() is None
+    ):
+        raise AssertionError("daily regular-hours prices returned a timezone-naive timestamp")
+    price_xnys_date = timestamp.astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    if price_xnys_date != probe_date:
+        raise AssertionError(
+            "daily regular-hours prices returned a timestamp outside the requested XNYS date"
+        )
+    price_xnys_dates.append(price_xnys_date)
+price_xnys_dates = sorted(set(price_xnys_dates))
+print(
+    "QUANTIPY_CAMPAIGN_DATA_ACCESS_PROBE="
+    + json.dumps(
+        {
+            "price_columns": price_columns,
+            "price_tickers": price_tickers,
+            "price_xnys_dates": price_xnys_dates,
+            "price_row_count": len(prices),
+            "probe_date": probe_date,
+            "universe_entry_count": len(screen.entries),
+        },
+        sort_keys=True,
+    )
+)
+""".replace("__QUANTIPY_READINESS_LOCAL_API_URL__", repr(QUANTIPY_READINESS_LOCAL_API_URL))
+
 
 def _run_git(root: Path, *args: str) -> str:
     try:
@@ -1419,6 +1488,92 @@ def _probe_dataset_availability(root: Path) -> tuple[DatasetAvailability, Datase
     )
 
 
+def _probe_campaign_start_data_access(root: Path, campaign_start: date) -> Mapping[str, object]:
+    """Require the local Quantipy API to serve the campaign-start data entitlement."""
+    python = root / ".venv/bin/python"
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise ReadinessManifestError("Quantipy own virtualenv Python is unavailable")
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("QUANTIPY_")
+        and key.lower() not in {"all_proxy", "http_proxy", "https_proxy", "no_proxy"}
+    }
+    environment["PYTHONPATH"] = str(root / "src")
+    environment["NO_PROXY"] = "127.0.0.1,localhost"
+    environment["no_proxy"] = "127.0.0.1,localhost"
+    environment[QUANTIPY_READINESS_PROBE_DATE_ENV_VAR] = campaign_start.isoformat()
+    try:
+        raw = _run_probe(
+            [str(python), "-c", _CAMPAIGN_START_DATA_ACCESS_PROBE],
+            cwd=root,
+            environment=environment,
+            marker="QUANTIPY_CAMPAIGN_DATA_ACCESS_PROBE=",
+            timeout=120,
+        )
+        _require_exact_keys(
+            raw,
+            {
+                "price_columns",
+                "price_tickers",
+                "price_xnys_dates",
+                "price_row_count",
+                "probe_date",
+                "universe_entry_count",
+            },
+            label="campaign-start data-access probe",
+        )
+        probe_date = raw["probe_date"]
+        universe_entry_count = raw["universe_entry_count"]
+        price_row_count = raw["price_row_count"]
+        price_columns = raw["price_columns"]
+        price_tickers = raw["price_tickers"]
+        price_xnys_dates = raw["price_xnys_dates"]
+        if probe_date != campaign_start.isoformat():
+            raise ReadinessManifestError("campaign-start probe date is not canonical")
+        if (
+            isinstance(universe_entry_count, bool)
+            or not isinstance(universe_entry_count, int)
+            or universe_entry_count < 1
+        ):
+            raise ReadinessManifestError("campaign-start universe result is empty or malformed")
+        if (
+            isinstance(price_row_count, bool)
+            or not isinstance(price_row_count, int)
+            or price_row_count < 1
+        ):
+            raise ReadinessManifestError("campaign-start price result is empty or malformed")
+        if not isinstance(price_columns, list) or not all(
+            isinstance(column, str) for column in price_columns
+        ):
+            raise ReadinessManifestError("campaign-start price result is malformed")
+        canonical_columns = sorted(set(price_columns))
+        if price_columns != canonical_columns or not {
+            "ticker",
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        }.issubset(canonical_columns):
+            raise ReadinessManifestError("campaign-start price result is malformed")
+        if price_tickers != ["AAPL"]:
+            raise ReadinessManifestError("campaign-start price ticker result is malformed")
+        if price_xnys_dates != [campaign_start.isoformat()]:
+            raise ReadinessManifestError("campaign-start price date result is malformed")
+        return {
+            "price_columns": canonical_columns,
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": [campaign_start.isoformat()],
+            "price_row_count": price_row_count,
+            "probe_date": probe_date,
+            "universe_entry_count": universe_entry_count,
+        }
+    except ReadinessManifestError as exc:
+        raise ReadinessManifestError("campaign-start live data-access probe failed closed") from exc
+
+
 def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     return (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode()
 
@@ -1553,6 +1708,9 @@ def build_quantipy_readiness(
         reddit_dataset, news_dataset = _probe_dataset_availability(
             quantipy_root.expanduser().resolve()
         )
+        campaign_data_access_probe = _probe_campaign_start_data_access(
+            quantipy_root.expanduser().resolve(), campaign_xnys_start
+        )
         capabilities = canonical_platform_capabilities(
             reddit_dataset=reddit_dataset,
             news_dataset=news_dataset,
@@ -1563,6 +1721,7 @@ def build_quantipy_readiness(
             "schema_version": QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION,
             "verification": {
                 "alembic_head": QUANTIPY_ALEMBIC_HEAD_REVISION,
+                "campaign_start_data_access_probe": dict(campaign_data_access_probe),
                 "committed_contract_tests": list(_CONTRACT_TESTS),
                 "runtime_probe": dict(contract_probe),
                 "tracked_worktree_clean": True,

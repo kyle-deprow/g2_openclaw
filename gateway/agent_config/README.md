@@ -83,8 +83,13 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
 
 If a live campaign is suspended on `INFRA_BLOCKED`, rebuild the schema-v3
 platform-readiness manifest first. The frozen Quantipy campaign requires the
-explicit XNYS interval `2021-01-04` through `2025-12-31`. Then atomically
-resume the same schema-v2 state file:
+explicit XNYS interval `2022-01-03` through `2025-12-31`: Reddit begins
+`2021-12-31`, while the configured rolling aggregate entitlement supports 2022
+onward but rejects January/July 2021. The readiness build strictly probes the
+campaign start through Quantipy's public `security_universe_screen` and daily
+regular-hours `prices` APIs for `AAPL`. This may hydrate/cache data as the
+intentional operator prewarm; a failed probe produces no READY receipt. Then
+atomically resume the same schema-v2 state file:
 
 ```bash
 (
@@ -98,7 +103,7 @@ resume the same schema-v2 state file:
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
     --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
-    --campaign-xnys-start 2021-01-04 \
+    --campaign-xnys-start 2022-01-03 \
     --campaign-xnys-end 2025-12-31
   uv run gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \

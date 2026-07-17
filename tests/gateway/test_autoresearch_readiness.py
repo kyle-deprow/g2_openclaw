@@ -6,9 +6,10 @@ import os
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import gateway.autoresearch_readiness as autoresearch_readiness
@@ -43,7 +44,7 @@ from tests.gateway.autoresearch_fixtures import (
     xnys_calendar_payload,
 )
 
-CAMPAIGN_XNYS_START = date(2021, 1, 4)
+CAMPAIGN_XNYS_START = date(2022, 1, 3)
 CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
@@ -56,6 +57,13 @@ def test_quantipy_readiness_pins_cash_precision_alembic_head() -> None:
     assert pinned_head == (
         "015_cash_precision",
         "015_widen_corporate_action_cash_precision.py",
+    )
+
+
+def test_quantipy_readiness_pins_the_entitled_campaign_interval() -> None:
+    assert (date(2022, 1, 3), date(2025, 12, 31)) == (
+        autoresearch_readiness.QUANTIPY_CAMPAIGN_XNYS_START,
+        autoresearch_readiness.QUANTIPY_CAMPAIGN_XNYS_END,
     )
 
 
@@ -560,6 +568,230 @@ def _stub_successful_probes(monkeypatch: pytest.MonkeyPatch, commit: str) -> Non
             DatasetAvailability(False, None, None, None, "live database query unavailable"),
         ),
     )
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_probe_campaign_start_data_access",
+        lambda root, campaign_start: {
+            "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": [campaign_start.isoformat()],
+            "price_row_count": 1,
+            "probe_date": campaign_start.isoformat(),
+            "universe_entry_count": 1,
+        },
+    )
+
+
+def test_campaign_start_data_access_probe_uses_exact_public_client_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    python = quantipy_root / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch(mode=0o755)
+    captured: dict[str, object] = {}
+
+    def successful_probe(
+        command: list[str],
+        *,
+        cwd: Path,
+        environment: dict[str, str],
+        marker: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        captured.update(
+            {
+                "command": command,
+                "cwd": cwd,
+                "environment": environment,
+                "marker": marker,
+                "timeout": timeout,
+            }
+        )
+        return {
+            "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": [CAMPAIGN_XNYS_START.isoformat()],
+            "price_row_count": 1,
+            "probe_date": CAMPAIGN_XNYS_START.isoformat(),
+            "universe_entry_count": 1,
+        }
+
+    monkeypatch.setenv("QUANTIPY_API_URL", "https://redirect.example")
+    monkeypatch.setenv("QUANTIPY_API_HOST", "redirect.example")
+    monkeypatch.setenv("HTTPS_PROXY", "http://redirect.example:8080")
+    monkeypatch.setattr(autoresearch_readiness, "_run_probe", successful_probe)
+
+    result = autoresearch_readiness._probe_campaign_start_data_access(
+        quantipy_root, CAMPAIGN_XNYS_START
+    )
+
+    assert result == {
+        "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+        "price_tickers": ["AAPL"],
+        "price_xnys_dates": ["2022-01-03"],
+        "price_row_count": 1,
+        "probe_date": "2022-01-03",
+        "universe_entry_count": 1,
+    }
+    assert captured["command"] == [
+        str(python),
+        "-c",
+        autoresearch_readiness._CAMPAIGN_START_DATA_ACCESS_PROBE,
+    ]
+    assert captured["cwd"] == quantipy_root
+    environment = captured["environment"]
+    assert isinstance(environment, dict)
+    assert environment[autoresearch_readiness.QUANTIPY_READINESS_PROBE_DATE_ENV_VAR] == "2022-01-03"
+    assert environment["PYTHONPATH"] == str(quantipy_root / "src")
+    assert environment["NO_PROXY"] == "127.0.0.1,localhost"
+    assert "QUANTIPY_API_URL" not in environment
+    assert "QUANTIPY_API_HOST" not in environment
+    assert "HTTPS_PROXY" not in environment
+    assert captured["marker"] == "QUANTIPY_CAMPAIGN_DATA_ACCESS_PROBE="
+    assert captured["timeout"] == 120
+
+    probe = "".join(autoresearch_readiness._CAMPAIGN_START_DATA_ACCESS_PROBE.split())
+    assert (
+        'qp.security_universe_screen(probe_date,security_types=("CS",),active_only=True,'
+        "limit=1,api_url=api_url,)"
+    ) in probe
+    assert (
+        'qp.prices("AAPL",probe_date,probe_date,timeframe="1d",market_hours="regular",'
+        "api_url=api_url,)"
+    ) in probe
+    assert "api_url='http://127.0.0.1:8000'" in probe
+    assert 'os.environ.get("QUANTIPY_API_URL"' not in probe
+    assert "Massive" not in probe
+
+
+class _CampaignProbeFrame:
+    columns = ("ticker", "timestamp", "open", "high", "low", "close", "volume")
+
+    def __init__(self, ticker: str, timestamp: datetime) -> None:
+        self._ticker = ticker
+        self._timestamp = timestamp
+
+    def __len__(self) -> int:
+        return 1
+
+    def __getitem__(self, column: str) -> list[str] | list[datetime]:
+        if column == "ticker":
+            return [self._ticker]
+        if column == "timestamp":
+            return [self._timestamp]
+        raise KeyError(column)
+
+
+def _run_embedded_campaign_probe(
+    monkeypatch: pytest.MonkeyPatch, *, ticker: str, timestamp: datetime
+) -> None:
+    fake_quantipy = ModuleType("quantipy")
+
+    def screen(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            as_of_date=CAMPAIGN_XNYS_START,
+            entries=(SimpleNamespace(active=True, type="CS", ticker="AAPL"),),
+        )
+
+    def prices(*args: object, **kwargs: object) -> _CampaignProbeFrame:
+        return _CampaignProbeFrame(ticker, timestamp)
+
+    fake_quantipy.__dict__["security_universe_screen"] = screen
+    fake_quantipy.__dict__["prices"] = prices
+    monkeypatch.setitem(sys.modules, "quantipy", fake_quantipy)
+    monkeypatch.setenv(
+        autoresearch_readiness.QUANTIPY_READINESS_PROBE_DATE_ENV_VAR,
+        CAMPAIGN_XNYS_START.isoformat(),
+    )
+
+    namespace: dict[str, object] = {"__name__": "__main__"}
+    exec(autoresearch_readiness._CAMPAIGN_START_DATA_ACCESS_PROBE, namespace)
+
+
+def test_embedded_campaign_probe_rejects_wrong_returned_price_ticker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(AssertionError, match="ticker"):
+        _run_embedded_campaign_probe(
+            monkeypatch,
+            ticker="MSFT",
+            timestamp=datetime(2022, 1, 3, 15, tzinfo=UTC),
+        )
+
+
+def test_embedded_campaign_probe_rejects_price_timestamp_outside_requested_xnys_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(AssertionError, match="XNYS"):
+        _run_embedded_campaign_probe(
+            monkeypatch,
+            ticker="AAPL",
+            timestamp=datetime(2022, 1, 4, 15, tzinfo=UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    "probe_result",
+    (
+        {
+            "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": ["2022-01-03"],
+            "price_row_count": 1,
+            "probe_date": "2022-01-03",
+            "universe_entry_count": 0,
+        },
+        {
+            "price_columns": ["close"],
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": ["2022-01-03"],
+            "price_row_count": 1,
+            "probe_date": "2022-01-03",
+            "universe_entry_count": 1,
+        },
+    ),
+    ids=("empty", "malformed"),
+)
+def test_campaign_start_data_access_probe_fails_closed_for_empty_or_malformed_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_result: dict[str, object],
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    python = quantipy_root / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch(mode=0o755)
+    monkeypatch.setattr(
+        autoresearch_readiness, "_run_probe", lambda command, **kwargs: probe_result
+    )
+
+    with pytest.raises(
+        ReadinessManifestError, match="campaign-start live data-access probe failed closed"
+    ):
+        autoresearch_readiness._probe_campaign_start_data_access(quantipy_root, CAMPAIGN_XNYS_START)
+
+
+@pytest.mark.parametrize("failure", ("HTTP 403", "provider entitlement rejected"))
+def test_campaign_start_data_access_probe_sanitizes_provider_and_entitlement_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    python = quantipy_root / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.touch(mode=0o755)
+
+    def failed_probe(command: list[str], **kwargs: object) -> dict[str, object]:
+        raise ReadinessManifestError(failure)
+
+    monkeypatch.setattr(autoresearch_readiness, "_run_probe", failed_probe)
+
+    with pytest.raises(
+        ReadinessManifestError, match="campaign-start live data-access probe failed closed"
+    ) as caught:
+        autoresearch_readiness._probe_campaign_start_data_access(quantipy_root, CAMPAIGN_XNYS_START)
+
+    assert failure not in str(caught.value)
 
 
 def test_committed_contract_tests_run_in_fresh_process_per_file(
@@ -654,6 +886,18 @@ def test_operator_builder_generates_v3_manifest_without_bumping_v2_contract_evid
     verification = evidence_payload["verification"]
     assert isinstance(verification, dict)
     assert verification["alembic_head"] == autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION
+    assert verification["campaign_start_data_access_probe"] == {
+        "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+        "price_tickers": ["AAPL"],
+        "price_xnys_dates": ["2022-01-03"],
+        "price_row_count": 1,
+        "probe_date": "2022-01-03",
+        "universe_entry_count": 1,
+    }
+    assert (
+        manifest.evidence[EvidenceId.QUANTIPY_DATA_CONTRACT].sha256
+        == sha256(evidence_path.read_bytes()).hexdigest()
+    )
     assert (
         PlatformReadinessManifest.from_dict(json.loads(manifest_path.read_text(encoding="utf-8")))
         == manifest
@@ -704,6 +948,38 @@ def test_operator_builder_rejects_dirty_tracked_worktree_without_writes(tmp_path
         )
 
     assert client_path.read_text(encoding="utf-8") == "uncommitted and invalid\n"
+    assert not (tmp_path / "manifest.json").exists()
+    assert not (tmp_path / "contract.json").exists()
+
+
+def test_operator_builder_fails_closed_before_ready_output_for_campaign_data_entitlement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    quantipy_root = tmp_path / "quantipy"
+    quantipy_root.mkdir()
+    commit = _write_probe_quantipy_repo(quantipy_root)
+    xnys = tmp_path / "xnys.json"
+    write_xnys_calendar_evidence(xnys)
+    _stub_successful_probes(monkeypatch, commit)
+
+    def unavailable_probe(root: Path, campaign_start: date) -> dict[str, object]:
+        raise ReadinessManifestError("provider entitlement rejected")
+
+    monkeypatch.setattr(
+        autoresearch_readiness, "_probe_campaign_start_data_access", unavailable_probe
+    )
+
+    with pytest.raises(ReadinessManifestError, match="provider entitlement rejected"):
+        build_quantipy_readiness(
+            manifest_path=tmp_path / "manifest.json",
+            quantipy_evidence_path=tmp_path / "contract.json",
+            quantipy_root=quantipy_root,
+            expected_quantipy_commit=commit,
+            xnys_calendar_path=xnys,
+            campaign_xnys_start=CAMPAIGN_XNYS_START,
+            campaign_xnys_end=CAMPAIGN_XNYS_END,
+        )
+
     assert not (tmp_path / "manifest.json").exists()
     assert not (tmp_path / "contract.json").exists()
 
@@ -1094,6 +1370,18 @@ def test_operator_builder_preserves_outputs_when_xnys_mutates_before_commit(
         return unavailable, unavailable
 
     monkeypatch.setattr(autoresearch_readiness, "_probe_dataset_availability", mutate_xnys)
+    monkeypatch.setattr(
+        autoresearch_readiness,
+        "_probe_campaign_start_data_access",
+        lambda root, campaign_start: {
+            "price_columns": ["close", "high", "low", "open", "ticker", "timestamp", "volume"],
+            "price_tickers": ["AAPL"],
+            "price_xnys_dates": [campaign_start.isoformat()],
+            "price_row_count": 1,
+            "probe_date": campaign_start.isoformat(),
+            "universe_entry_count": 1,
+        },
+    )
 
     with pytest.raises(ReadinessManifestError, match=r"XNYS.*changed"):
         build_quantipy_readiness(
@@ -1125,7 +1413,7 @@ def test_operator_builder_rejects_noncanonical_campaign_bounds_before_probe(
 
     with pytest.raises(
         ReadinessManifestError,
-        match=r"must be pinned to 2021-01-04\.\.2025-12-31",
+        match=r"must be pinned to 2022-01-03\.\.2025-12-31",
     ):
         build_quantipy_readiness(
             manifest_path=tmp_path / "manifest.json",
@@ -1160,7 +1448,7 @@ def test_operator_builder_rejects_xnys_evidence_outside_required_campaign_before
 
     with pytest.raises(
         ReadinessManifestError,
-        match=r"does not cover required campaign interval 2021-01-04\.\.2025-12-31",
+        match=r"does not cover required campaign interval 2022-01-03\.\.2025-12-31",
     ):
         build_quantipy_readiness(
             manifest_path=tmp_path / "manifest.json",

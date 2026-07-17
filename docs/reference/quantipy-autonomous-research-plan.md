@@ -77,10 +77,15 @@ Stages consume this receipt and do not probe providers, database contents,
 cached symbols, or environment configuration to rediscover capabilities.
 Existing state is initialized with `gateway-cli autoresearch-pin-readiness`.
 After an operator changes a blocked or stale snapshot, rebuild readiness with
-`gateway-cli autoresearch-build-readiness --campaign-xnys-start 2021-01-04
+`gateway-cli autoresearch-build-readiness --campaign-xnys-start 2022-01-03
 --campaign-xnys-end 2025-12-31` and then use
 `gateway-cli autoresearch-resume` to atomically replace the suspended live
-schema-v2 state with a resumed copy pinned to the new READY receipt.
+schema-v2 state with a resumed copy pinned to the new READY receipt. The
+campaign starts after Reddit's `2021-12-31` availability boundary because the
+configured rolling aggregate entitlement rejects January/July 2021 and supports
+2022 onward. Building readiness strictly prewarms the campaign-start universe
+screen and daily regular-hours AAPL prices through Quantipy's public client;
+failure produces no READY receipt.
 
 An operator-precondition `INFRA_BLOCKED` decision suspends without incrementing
 the iteration. The supervisor does not repeatedly wake it. This branch sets
