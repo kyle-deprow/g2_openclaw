@@ -716,6 +716,25 @@ def test_status_is_read_only_and_reports_only_owner_scoped_tasks(
     assert all(method != "sessions.delete" for method, _ in fake.rpc_calls)
 
 
+def test_status_tolerates_statusless_stale_owner_session(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    config.owner_sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-session"}}),
+        encoding="utf-8",
+    )
+
+    status = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([], active=False),
+    ).status()
+
+    assert status.owner_lifecycle_status is None
+    assert status.tasks == ()
+
+
 def test_status_normalizes_operator_precondition_implementation_state(
     control_env: tuple[ControlConfig, Path],
 ) -> None:

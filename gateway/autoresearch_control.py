@@ -482,6 +482,8 @@ class AutoresearchControl:
         if not isinstance(lifecycle, Mapping):
             raise ControlError("owner session lifecycle is malformed")
         status = lifecycle.get("status")
+        if status is None:
+            return None
         if not isinstance(status, str) or not status:
             raise ControlError("owner session lifecycle status is malformed")
         return status
