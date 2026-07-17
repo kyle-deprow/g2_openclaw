@@ -3612,6 +3612,57 @@ def test_fix_result_updates_price_hydration_preflight_for_reverification(
     assert fixed.fix_history[-1].price_hydration_scope_preflight == updated_preflight
 
 
+def test_price_scope_bug_fix_rejects_hydrate_capable_commands(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.BUG_SIGNAL),
+            bug_signals=("price_hydration_scope_exceeds_budget: 1521531 > 600000",),
+        ),
+        policy,
+    )
+    fix = replace(
+        _fix_result(FixTriggerPhase.VERIFICATION),
+        tests_rerun=("uv run python notebooks/experiments/generate_t107_oarc_results.py",),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="price-scope BUG_SIGNAL fix_result must not include hydrate-capable commands",
+    ):
+        advance_state(state, fix, policy)
+
+
+def test_price_scope_bug_fix_prompt_forbids_hydrate_capable_commands(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.BUG_SIGNAL),
+            bug_signals=("price_hydration_scope_exceeds_budget: 1521531 > 600000",),
+        ),
+        policy,
+    )
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "price_hydration_scope_exceeds_budget BUG_SIGNAL" in prompt
+    assert "do not run any hydrate-capable command" in prompt
+    assert "generate_*results" in prompt
+    assert "fix_result.tests_rerun" in prompt
+
+
 def test_fix_result_rejects_different_workspace(
     policy: AutoresearchPolicy,
 ) -> None:

@@ -2301,6 +2301,31 @@ def _validate_alpha_implementation_price_preflight(
         )
 
 
+def _latest_verification_is_price_scope_bug_signal(state: AutoresearchState) -> bool:
+    latest = state.latest_verification
+    return (
+        latest is not None
+        and latest.status is VerificationStatus.BUG_SIGNAL
+        and any("price_hydration_scope_exceeds_budget" in signal for signal in latest.bug_signals)
+    )
+
+
+def _validate_price_scope_fix_result_commands(
+    state: AutoresearchState,
+    artifact: FixResultArtifact,
+) -> None:
+    if not _latest_verification_is_price_scope_bug_signal(state):
+        return
+    hydrate_commands = tuple(
+        command for command in artifact.tests_rerun if HYDRATE_CAPABLE_COMMAND_RE.search(command)
+    )
+    if hydrate_commands:
+        raise AutoresearchValidationError(
+            "price-scope BUG_SIGNAL fix_result must not include hydrate-capable "
+            f"commands: {', '.join(hydrate_commands)}"
+        )
+
+
 def _validate_alpha_price_preflight_matches_receipts(
     preflight: PriceHydrationScopePreflight,
     artifact: VerificationResultArtifact,
@@ -4635,6 +4660,7 @@ def _validate_implementation_workspace(
 
 def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifact) -> None:
     artifact.validate()
+    _validate_price_scope_fix_result_commands(state, artifact)
     _validate_persisted_autoresearch_workspace_path(
         artifact.workspace_path,
         label="fix_result workspace_path",
@@ -5519,6 +5545,17 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         raise AutoresearchValidationError(
             "fix_test workspace contract requires implementation_result"
         )
+    price_scope_fix_contract = ""
+    if _latest_verification_is_price_scope_bug_signal(state):
+        price_scope_fix_contract = (
+            "- The latest verification is a price_hydration_scope_exceeds_budget "
+            "BUG_SIGNAL. During Fix/Test, do not run any hydrate-capable command, "
+            "including qp.prices(), generate_*results scripts, nbconvert, papermill, "
+            "or jupyter execute. Fix only the experiment scope/guard/tests and let "
+            "the next verification stage perform any permitted hydrate/backtest. "
+            "The control plane rejects fix_result.tests_rerun entries matching those "
+            "commands.\n"
+        )
     return (
         "Fix/Test workspace continuity contract:\n"
         "- From the verified authoritative state, reuse the exact persisted implementation "
@@ -5539,6 +5576,7 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "the updated price_hydration_scope_preflight in fix_result using the same strict "
         "object shape as implementation_result. If the fix does not change scope, set "
         "price_hydration_scope_preflight to null. Do not omit the key.\n"
+        f"{price_scope_fix_contract}"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
     )

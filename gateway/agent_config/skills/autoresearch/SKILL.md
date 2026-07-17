@@ -684,6 +684,12 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
   experiment worktree is not promoted.
 - Verification `BUG_SIGNAL`: fix up to two times. If the signal persists after
   retries, classify and log DISCARD; do not loop indefinitely.
+- For a `price_hydration_scope_exceeds_budget` BUG_SIGNAL, Fix/Test must not
+  run hydrate-capable commands, including `qp.prices()`, `generate_*results`,
+  `nbconvert`, `papermill`, or `jupyter execute`. Fix only the experiment
+  scope/guard/tests and let the next verification stage perform any permitted
+  hydrate/backtest. The control plane rejects hydrate-capable `tests_rerun`
+  entries for these fixes.
 - No methodology issue: proceed to decide/log.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
   it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
