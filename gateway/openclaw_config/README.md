@@ -265,9 +265,9 @@ control commands communicate with OpenClaw there directly.
 | Default stage model | `openai/gpt-5.4` |
 | G2 interface model | `openai/gpt-5.4` for `main` |
 | Autoresearch PM model | `openai/gpt-5.6-sol` for `autoresearch-pm` |
-| Frontier judgment model | `openai/gpt-5.6-sol` for PM, skeptic, consensus, and review |
+| Frontier judgment model | `openai/gpt-5.6-sol` for PM, consensus, and review |
 | Data debate model | `openai/gpt-5.6-terra` |
-| Microstructure debate model | `openai/gpt-5.5` |
+| Microstructure/skeptic debate model | `openai/gpt-5.5` |
 | Alternate model | `openai/gpt-5-mini` |
 
 ## Azure OpenAI Provider Details

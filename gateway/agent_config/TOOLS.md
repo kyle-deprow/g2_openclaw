@@ -22,7 +22,8 @@ Key rules:
   `mempalace` or `autoresearch`, spawn research stages, mutate MemPalace, or
   receive autonomous completion announcements.
 - The `autoresearch-pm` agent is the autoresearch PM and loop controller on
-  `openai/gpt-5.6-sol` high.
+  `openai/gpt-5.6-sol` high. Reserve `openai/gpt-5.6-sol` for PM,
+  consensus, and review; debate skeptic runs on `openai/gpt-5.5`.
 - `main` handles human G2 requests only by running:
   `cd /home/dev/repos/g2_openclaw && uv run python -m
   gateway.autoresearch_control wake`, `status`, or `stop`.

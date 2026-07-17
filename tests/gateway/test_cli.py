@@ -1102,6 +1102,75 @@ class TestAutoresearchCliCommands:
         assert result.exit_code == 0
         assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
 
+    def test_autoresearch_advance_uses_dispatch_manifest_after_source_drift(
+        self,
+        tmp_path: Path,
+        git_worktree: GitWorktree,
+    ) -> None:
+        readiness = _ready_manifest(tmp_path / "advance-readiness")
+        readiness_path = tmp_path / "advance-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = replace(
+            self._state_for_implementation(git_worktree.target_checkout),
+            platform_readiness=readiness.identity(),
+        )
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        state_path = tmp_path / "state.json"
+        artifact_path = tmp_path / "artifact.json"
+        output_path = tmp_path / "state-out.json"
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+        source_manifest_sha256 = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            build_receipt_catalog(quantipy_root),
+            state_path=state_path,
+        )
+        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+            state,
+            state_path=state_path,
+        ).sha256()
+        artifact_path.write_text(
+            json.dumps(
+                {
+                    "instruction_manifest_sha256": source_manifest_sha256,
+                    "state_reference_sha256": state_reference_sha256,
+                    "artifact": self._implementation_artifact(
+                        git_worktree,
+                        commit_sha=git_worktree.final_commit,
+                    ).to_dict(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        drifted_source = quantipy_root / QUANTIPY_RECEIPT_PATHS["quantipy.agents"]
+        drifted_source.write_text("updated methodology after dispatch\n", encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-advance",
+                str(state_path),
+                str(artifact_path),
+                "--output",
+                str(output_path),
+                "--instruction-manifest-sha256",
+                source_manifest_sha256,
+                "--state-reference-sha256",
+                state_reference_sha256,
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--quantipy-root",
+                str(quantipy_root),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
+
     def test_autoresearch_advance_does_not_publish_output_after_source_changes_before_persistence(
         self,
         tmp_path: Path,

@@ -135,12 +135,14 @@ domain-separated, sorted by `receipt_id`, duplicate-rejecting, and bound to the
 current phase, expected artifact type, ordered target agent IDs, and canonical
 target repo root.
 
-Before dispatching or doing stage work, the PM and every stage agent must read
-every listed live source from disk, recompute SHA-256 over the current bytes,
-and fail closed if any file is missing, unreadable, or hash-mismatched.
-OpenClaw-configured skills remain authoritative; target-repo methodology and
-agent files are read live from `/home/dev/repos/quantipy` using the listed
-canonical paths.
+Before dispatching or doing stage work, the PM and every stage agent treat
+`source_manifest_sha256` and `state_reference_sha256` from `autoresearch-next`
+as immutable dispatch identities. Read listed live sources from disk when their
+current methodology rules are needed, but do not fail solely because a mutable
+live file changed after dispatch. Missing or unreadable files whose rules are
+required for the stage are operator-owned blockers. OpenClaw-configured skills
+remain authoritative; target-repo methodology and agent files are read live from
+`/home/dev/repos/quantipy` using the listed canonical paths.
 
 Every production artifact file passed to `gateway-cli autoresearch-advance`
 must be exactly:
@@ -148,17 +150,27 @@ must be exactly:
 ```json
 {
   "instruction_manifest_sha256": "<source_manifest_sha256 from autoresearch-next>",
+  "state_reference_sha256": "<state_reference_sha256 from autoresearch-next>",
   "artifact": {}
 }
 ```
 
 The `artifact` value is the phase-specific structured artifact. Do not add
 extra envelope keys, omit the digest, or pass legacy unwrapped artifacts.
-`autoresearch-advance` rejects mismatched, missing, extra-key, and unwrapped
-files before state advance. The complete envelope file must be at most 24 KiB;
-compact the artifact rather than truncating it. `autoresearch-next` also has a
-hard 32 KiB prompt budget and fails closed with an actionable error if accepted
-state artifacts would exceed it.
+Pass both dispatch hashes back to `autoresearch-advance`:
+
+```bash
+uv run gateway-cli autoresearch-advance <state> <artifact> \
+  --instruction-manifest-sha256 <source_manifest_sha256 from autoresearch-next> \
+  --state-reference-sha256 <state_reference_sha256 from autoresearch-next> \
+  --output <next-state>
+```
+
+`autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
+unwrapped files before state advance. The complete envelope file must be at most
+24 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
+has a hard 32 KiB prompt budget and fails closed with an actionable error if
+accepted state artifacts would exceed it.
 
 ## Explicit Research Modes
 
@@ -225,8 +237,9 @@ context-curator
 - The PM agent `autoresearch-pm` must run on `openai/gpt-5.6-sol` with high
   reasoning.
 - The five debate agents use the configured mixed-intelligence panel: strongest
-  reasoning for data/skeptic pressure, lower-cost models for bounded theory and
-  implementation feasibility.
+  data-specialist routing for data pressure, `openai/gpt-5.5` for
+  microstructure and skeptic pressure, and lower-cost models for bounded theory
+  and implementation feasibility.
 - The consensus arbiter must run on `openai/gpt-5.6-sol` with high reasoning.
 - The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.6-sol` with high
   reasoning. Do not run a reviewer panel.
@@ -246,7 +259,7 @@ inform prompt content, but they are not OpenClaw stage names.
 | Context | `context-curator` | `openai/gpt-5.4`, high |
 | Debate 1 | `debater-microstructure` | `openai/gpt-5.5`, high |
 | Debate 2 | `debater-data` | `openai/gpt-5.6-terra`, high |
-| Debate 3 | `debater-skeptic` | `openai/gpt-5.6-sol`, high |
+| Debate 3 | `debater-skeptic` | `openai/gpt-5.5`, high |
 | Debate 4 | `debater-theory` | `openai/gpt-5.4`, high |
 | Debate 5 | `debater-implementation` | `openai/gpt-5.4`, high |
 | Consensus | `consensus-arbiter` | `openai/gpt-5.6-sol`, high |
@@ -523,11 +536,14 @@ Every verification attempt must end with a structured JSON
 `verification_result` artifact, including attempts where tests fail or the run
 uncovers a bug signal. The PM must write the JSON artifact and run
 `cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance
-/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>` before
-any prose completion, status report, or handoff. A prose-only verification
-completion is invalid and must be treated as no artifact. The artifact file
-must use the strict `instruction_manifest_sha256` envelope from the active
-`autoresearch-next` output. Never pass a raw unwrapped `verification_result`.
+/home/dev/.openclaw/autoresearch/quantipy-state.json <artifact.json>
+--instruction-manifest-sha256 <source_manifest_sha256>
+--state-reference-sha256 <state_reference_sha256>` before any prose completion,
+status report, or handoff. A prose-only verification completion is invalid and
+must be treated as no artifact. The artifact file must use the strict
+`instruction_manifest_sha256` and `state_reference_sha256` envelope from the
+active `autoresearch-next` output. Never pass a raw unwrapped
+`verification_result`.
 
 Verification is the first stage that records materialization evidence. Capture
 each history batch's contract digest, the per-date snapshot and grouped-daily

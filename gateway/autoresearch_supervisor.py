@@ -89,7 +89,8 @@ MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
     "If existing machine-verifiable terminal outputs prove a valid verification_result, "
     "wrap that exact artifact in the strict production envelope from the active "
     "autoresearch-next output: "
-    '{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}. '
+    '{"instruction_manifest_sha256":"<source_manifest_sha256>",'
+    '"state_reference_sha256":"<state_reference_sha256>","artifact":{...}}. '
     "Never pass a raw unwrapped verification_result. Otherwise rerun "
     "the verification stage from the authoritative state. Do not edit Quantipy experiment "
     "files outside the normal verification/fix workflow. If provider/model/auth/capacity "

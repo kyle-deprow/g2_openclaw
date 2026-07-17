@@ -519,6 +519,16 @@ _output_path_option = typer.Option(
     dir_okay=False,
     help="Path to write the updated autoresearch state JSON.",
 )
+_instruction_manifest_sha256_option = typer.Option(
+    None,
+    "--instruction-manifest-sha256",
+    help="Dispatch source_manifest_sha256 from autoresearch-next.",
+)
+_state_reference_sha256_option = typer.Option(
+    None,
+    "--state-reference-sha256",
+    help="Dispatch state_reference_sha256 from autoresearch-next.",
+)
 _readiness_build_manifest_argument = typer.Argument(
     ..., help="Schema-v3 platform-readiness manifest output."
 )
@@ -820,6 +830,8 @@ def autoresearch_advance(
     openclaw_config: Path = _openclaw_config_option,
     quantipy_root: Path = _quantipy_root_option,
     readiness_manifest: Path = _readiness_manifest_option,
+    instruction_manifest_sha256: str | None = _instruction_manifest_sha256_option,
+    state_reference_sha256: str | None = _state_reference_sha256_option,
 ) -> None:
     """Advance autoresearch state with a validated artifact and persist the result."""
     from gateway.autoresearch_runner import (
@@ -842,18 +854,30 @@ def autoresearch_advance(
         readiness = load_platform_readiness(readiness_manifest)
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
         validation_context.validate_for_state(state)
-        receipts = build_receipt_catalog(quantipy_root)
-        source_manifest_sha256 = expected_instruction_manifest_sha256(
-            state,
-            policy,
-            receipts,
-            state_path=state_path,
-        )
+        if instruction_manifest_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", instruction_manifest_sha256
+        ):
+            raise ValueError("instruction_manifest_sha256 must be a SHA-256 hex digest")
+        if state_reference_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", state_reference_sha256
+        ):
+            raise ValueError("state_reference_sha256 must be a SHA-256 hex digest")
+        if instruction_manifest_sha256 is None:
+            receipts = build_receipt_catalog(quantipy_root)
+            source_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=state_path,
+            )
+        else:
+            source_manifest_sha256 = instruction_manifest_sha256
         artifact = load_artifact_file(
             artifact_path,
             state,
             policy,
             instruction_manifest_sha256=source_manifest_sha256,
+            state_reference_sha256=state_reference_sha256,
             state_path=state_path,
         )
         if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):

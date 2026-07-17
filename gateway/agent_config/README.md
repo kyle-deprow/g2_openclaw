@@ -118,13 +118,16 @@ The next-action output includes compact `required_receipts`, a v2
 instruction contents. The digest is versioned, domain-separated, sorted by
 receipt ID, duplicate-rejecting, and bound to the phase, expected artifact
 type, ordered target agent IDs, and canonical target repo root. Before writing
-a stage artifact, read every listed live source from its canonical path and
-verify its SHA-256. Production artifact files passed to `autoresearch-advance`
-must use the exact strict production envelope and stay at or below 24 KiB:
+a stage artifact, use the dispatch `source_manifest_sha256` and
+`state_reference_sha256` from `autoresearch-next`; read live source files when
+their current methodology rules are needed, not as a mutable freshness gate.
+Production artifact files passed to `autoresearch-advance` must use the exact
+strict production envelope and stay at or below 24 KiB:
 
 ```json
 {
   "instruction_manifest_sha256": "<source_manifest_sha256>",
+  "state_reference_sha256": "<state_reference_sha256>",
   "artifact": {}
 }
 ```

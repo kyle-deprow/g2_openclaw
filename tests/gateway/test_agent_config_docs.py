@@ -263,8 +263,9 @@ def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     assert "Plain KEEP is invalid without a numeric" in protocol
     assert "Decision Sharpe > 0.5: SIGNIFICANT KEEP or STRONG KEEP" in protocol
     assert "Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP" in protocol
-    assert "strict `instruction_manifest_sha256` envelope" in protocol
-    assert "Never pass a raw unwrapped `verification_result`" in protocol
+    assert "`instruction_manifest_sha256` and `state_reference_sha256` envelope" in protocol
+    assert "Never pass a raw unwrapped" in protocol
+    assert "`verification_result`" in protocol
 
 
 def test_alpha_docs_require_dynamic_coverage_and_explicit_state_migration() -> None:

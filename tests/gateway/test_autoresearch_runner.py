@@ -4216,7 +4216,9 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     assert "structured JSON verification_result artifact" in prompt
     assert (
         "uv run gateway-cli autoresearch-advance "
-        f"{json.dumps(str(state_path.resolve()))} <artifact.json>"
+        f"{json.dumps(str(state_path.resolve()))} <artifact.json> "
+        "--instruction-manifest-sha256 <source_manifest_sha256> "
+        "--state-reference-sha256 <state_reference_sha256>"
     ) in prompt
     assert "before any prose completion or status report" in prompt
     assert "prose-only verification completion is invalid" in prompt

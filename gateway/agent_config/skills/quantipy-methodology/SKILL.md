@@ -19,9 +19,12 @@ or Codex agent definitions into G2 OpenClaw.
 Before context, debate, consensus, implementation, review, or fix work:
 
 1. Read every file listed in the runner's `instruction_source_manifest` from
-   its absolute canonical path.
-2. Recompute SHA-256 over each file's current bytes and require exact match to
-   the listed receipt. Missing, unreadable, or mismatched sources are
+   its absolute canonical path when the current methodology content is needed.
+2. Treat the manifest digest as a dispatch identity, not a live-file freshness
+   gate. Do not reject the stage solely because mutable live state, readiness,
+   or methodology files have advanced after dispatch; the runner verifies
+   persisted-state and envelope compatibility before accepting artifacts.
+   Missing or unreadable files whose content is required for the stage are
    operator-owned blockers.
 3. Read `/home/dev/repos/quantipy/AGENTS.md` completely when listed or routed.
 4. Load `quantipy-data-contract` and consume the injected

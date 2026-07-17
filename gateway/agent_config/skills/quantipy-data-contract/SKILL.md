@@ -94,10 +94,12 @@ sample is acceptable only when needed to explain a result and is not the
 authoritative universe.
 
 Do not ask the runner to inject full instruction files. Treat the compact
-`instruction_source_manifest` as the deterministic source identity: read every
-listed live file, verify its SHA-256, and return the exact bound
-`source_manifest_sha256` in the `instruction_manifest_sha256` envelope field
-around the structured artifact. The digest is versioned, domain-separated, and
-bound to phase, artifact type, target agents, target repo root, and sorted
-source receipts. Missing, mismatched, unwrapped, extra-key, or oversized
-artifact envelopes are invalid.
+`instruction_source_manifest` as the deterministic dispatch identity and return
+the exact bound `source_manifest_sha256` in the `instruction_manifest_sha256`
+envelope field around the structured artifact. Read the listed canonical files
+when their current methodology content is needed, but do not fail a stage solely
+because a mutable live state, readiness manifest, or methodology file changed
+after dispatch. The runner, not the stage agent, performs the authoritative
+persisted-state and envelope validation before accepting artifacts. Missing
+required content, unwrapped envelopes, extra envelope keys, or oversized
+artifact envelopes remain invalid.

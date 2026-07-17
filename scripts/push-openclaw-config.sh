@@ -821,7 +821,7 @@ if ! echo "${MERGED}" | jq -e \
     "context-curator": "openai/gpt-5.4",
     "debater-microstructure": "openai/gpt-5.5",
     "debater-data": "openai/gpt-5.6-terra",
-    "debater-skeptic": "openai/gpt-5.6-sol",
+    "debater-skeptic": "openai/gpt-5.5",
     "debater-theory": "openai/gpt-5.4",
     "debater-implementation": "openai/gpt-5.4",
     "consensus-arbiter": "openai/gpt-5.6-sol",

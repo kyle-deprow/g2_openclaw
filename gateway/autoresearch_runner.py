@@ -3917,7 +3917,7 @@ def _validate_policy(
     expected_debate_models = {
         "debater-microstructure": "openai/gpt-5.5",
         "debater-data": "openai/gpt-5.6-terra",
-        "debater-skeptic": "openai/gpt-5.6-sol",
+        "debater-skeptic": "openai/gpt-5.5",
         "debater-theory": "openai/gpt-5.4",
         "debater-implementation": "openai/gpt-5.4",
     }
@@ -5132,7 +5132,9 @@ def _verification_handoff_contract(
         "- Every verification attempt must terminate by writing a structured JSON "
         "verification_result artifact and advancing it with "
         "`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance "
-        f"{_render_literal(str(state_path))} <artifact.json>` "
+        f"{_render_literal(str(state_path))} <artifact.json> "
+        "--instruction-manifest-sha256 <source_manifest_sha256> "
+        "--state-reference-sha256 <state_reference_sha256>` "
         "before any prose completion or status report. A prose-only verification "
         "completion is invalid.\n"
         "- This applies to failing tests and partial runs: do not stop after "
@@ -5270,16 +5272,17 @@ def _build_prompt_text(
         f"state_reference_sha256={state_reference_sha256}\n"
         f"source_manifest_sha256={source_manifest_sha256}\n"
         f"INSTRUCTION_MANIFEST={_render_instruction_source_manifest(instruction_source_manifest)}\n"
-        "Before work, read STATE_REF.path as the complete authoritative state. Parse it with "
-        "the installed autoresearch runner, normalize it, serialize state.to_dict() as sorted "
-        "compact UTF-8 JSON, and verify SHA-256 of STATE_REF.digest_domain + LF + those bytes "
-        "against STATE_REF.state_sha256. Also verify its phase and iteration against STATE_REF. "
-        "Any missing, unreadable, malformed, stale, or mismatched state fails closed; do not "
-        "work from prompt memory or emit an artifact. STATE_REF is lossless by reference: every "
-        "phase artifact required for this dispatch remains only in that verified state file.\n"
-        "Then read every live instruction_source_manifest file at its canonical "
-        "path; configured skills remain authoritative. Recompute SHA-256 from current bytes; "
-        "missing, unreadable, or mismatched files fail. The exact compact manifest's "
+        "STATE_REF is the immutable runner-bound state reference for this dispatch. Use it to "
+        "identify the phase, iteration, and canonical state path, but do not reject the task "
+        "because the live state file has advanced after dispatch; the runner performs the "
+        "authoritative persisted-state match before accepting artifacts. Do not work from "
+        "prompt memory: read the state path when you need phase artifacts, and treat missing or "
+        "malformed required artifact data as a blocker.\n"
+        "Then read every instruction_source_manifest file at its canonical path when its "
+        "current methodology rules are needed. Configured skills remain authoritative for "
+        "current methodology, but do not reject the task solely because a mutable live source "
+        "file or readiness file no longer hashes to the dispatch receipt. The exact compact "
+        "manifest's "
         "versioned, domain-separated digest binds the verified state reference, phase, artifact "
         "type, ordered agent IDs, canonical repo root, and sorted receipts. Artifacts use this "
         'exact JSON envelope: {"instruction_manifest_sha256":"<source_manifest_sha256>",'
@@ -6060,6 +6063,7 @@ def load_artifact_file(
     policy: AutoresearchPolicy,
     *,
     instruction_manifest_sha256: str,
+    state_reference_sha256: str | None = None,
     state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> (
     SetupContextArtifact
@@ -6090,6 +6094,8 @@ def load_artifact_file(
         raise AutoresearchValidationError(f"invalid artifact JSON: {path}") from exc
 
     _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
+    if state_reference_sha256 is not None:
+        _validate_sha256(state_reference_sha256, label="state_reference_sha256")
     data = _ensure_mapping(raw, label="artifact_file")
     _require_exact_keys(
         data,
@@ -6107,6 +6113,13 @@ def load_artifact_file(
         state_path=state_path,
     ).sha256()
     envelope_state_reference_sha256 = _require_sha256(data, "state_reference_sha256")
+    if (
+        state_reference_sha256 is not None
+        and envelope_state_reference_sha256 != state_reference_sha256
+    ):
+        raise AutoresearchValidationError(
+            "artifact state_reference_sha256 does not match dispatched state reference"
+        )
     if envelope_state_reference_sha256 != expected_state_reference_sha256:
         raise AutoresearchValidationError(
             "artifact state_reference_sha256 does not match the current authoritative state"

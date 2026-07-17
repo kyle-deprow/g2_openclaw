@@ -170,7 +170,7 @@ must:
 1. Run the exact focused commands and capture decisive evidence.
 2. Write a complete JSON `verification_result` inside the strict production
    envelope from the active `autoresearch-next` output:
-   `{"instruction_manifest_sha256":"<source_manifest_sha256>","artifact":{...}}`.
+   `{"instruction_manifest_sha256":"<source_manifest_sha256>","state_reference_sha256":"<state_reference_sha256>","artifact":{...}}`.
    Unavailable fields are `null`, never fabricated values. Never write or pass
    a raw unwrapped `verification_result`.
 3. Persist that envelope with `gateway-cli autoresearch-advance` before any
