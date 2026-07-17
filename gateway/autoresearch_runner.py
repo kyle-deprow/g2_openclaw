@@ -5158,7 +5158,15 @@ def _verification_handoff_contract(
         "but must never emit a partial receipt chain or a partial PASS.\n"
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
-        "REMEDIATION_REQUIRED. Do not use Sharpe as the gate rationale.\n\n"
+        "REMEDIATION_REQUIRED. status and tests_passed describe verifier command, "
+        "test, and notebook execution plus experiment correctness, never whether "
+        "the infrastructure gate passed. REMEDIATION_REQUIRED is a valid completed "
+        "verification outcome: emit PASS with tests_passed=true when commands, tests, "
+        "and notebook execution succeeded. It advances to review and then final "
+        "INFRA_BLOCKED; do not send operator-owned remediation to fixer. Use "
+        "TEST_FAILURE only for actual nonzero command or test execution, a malformed "
+        "or missing required receipt, an experiment defect, or inability to execute "
+        "verification. Do not use Sharpe as the gate rationale.\n\n"
     )
 
 

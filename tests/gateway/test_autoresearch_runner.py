@@ -4199,6 +4199,41 @@ def test_g0_verification_prompt_requires_infra_gate_rationale(
     assert "GATE_PASSED" in prompt
     assert "REMEDIATION_REQUIRED" in prompt
     assert "Do not use Sharpe as the gate rationale" in prompt
+    assert (
+        "REMEDIATION_REQUIRED is a valid completed verification outcome: emit PASS with "
+        "tests_passed=true when commands, tests, and notebook execution succeeded"
+    ) in prompt
+
+
+def test_g0_remediation_receipt_advances_to_review(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = AutoresearchState()
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    next_state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+            infra_rationale="Shared provider entitlement requires operator remediation.",
+        ),
+        policy,
+    )
+
+    assert next_state.phase is Phase.REVIEW
 
 
 def _load_config() -> dict[str, object]:

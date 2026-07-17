@@ -553,6 +553,16 @@ Failure classification is mandatory:
   fabricated or zero-valued placeholders. `PASS` requires complete metrics and
   coverage.
 
+In `DATA_INFRA_G0`, `status` and `tests_passed` describe verification command,
+test, and notebook execution plus experiment correctness; they do not describe
+whether the data-infrastructure gate passed. If required commands, tests, and
+the notebook complete successfully and the deterministic audit returns a valid
+`REMEDIATION_REQUIRED` receipt, emit `status=PASS` and `tests_passed=true` with
+that gate outcome. This is a completed verification that proceeds to review
+and final `INFRA_BLOCKED`, not a fixer task. Use `TEST_FAILURE` only for an
+actual nonzero command or failed test, a malformed or missing required receipt,
+an experiment defect, or inability to execute verification.
+
 Required metrics:
 
 - IS walk-forward Sharpe net.
@@ -581,7 +591,10 @@ or manually fixed symbol sleeves are not valid ALPHA universe evidence.
 In `DATA_INFRA_G0`, record `infra_gate_outcome` (`GATE_PASSED` or
 `REMEDIATION_REQUIRED`) plus `infra_rationale`; do not use Sharpe to decide
 whether the infrastructure repair succeeded. Persist the gate rationale in the
-`verification_result` before reporting the stage outcome.
+`verification_result` before reporting the stage outcome. A valid
+`REMEDIATION_REQUIRED` receipt is compatible with `status=PASS` and
+`tests_passed=true`; it is an operator-owned infrastructure blocker, not a test
+failure.
 
 Bug signals:
 
