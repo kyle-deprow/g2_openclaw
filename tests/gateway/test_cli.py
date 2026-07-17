@@ -990,6 +990,7 @@ class TestAutoresearchCliCommands:
         worktree: GitWorktree,
         *,
         workspace_path: str | None = None,
+        price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None,
     ) -> FixResultArtifact:
         return FixResultArtifact(
             trigger_phase=FixTriggerPhase.VERIFICATION,
@@ -1001,6 +1002,7 @@ class TestAutoresearchCliCommands:
             fixes_applied=("Expanded ticker coverage to 5 names",),
             tests_rerun=("uv run pytest",),
             remaining_issues=(),
+            price_hydration_scope_preflight=price_hydration_scope_preflight,
         )
 
     @staticmethod
@@ -1347,14 +1349,33 @@ class TestAutoresearchCliCommands:
             ),
         )
 
+        updated_preflight = PriceHydrationScopePreflight(
+            member_union_count=2,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=252,
+            planned_symbol_sessions=504,
+            within_budget=True,
+        )
+
         result, output_path = self._invoke_autoresearch_advance(
             tmp_path,
             state,
-            self._fix_artifact(git_worktree),
+            self._fix_artifact(
+                git_worktree,
+                price_hydration_scope_preflight=updated_preflight,
+            ),
         )
 
         assert result.exit_code == 0
-        assert json.loads(output_path.read_text(encoding="utf-8"))["phase"] == "verification"
+        saved = json.loads(output_path.read_text(encoding="utf-8"))
+        assert saved["phase"] == "verification"
+        assert (
+            saved["implementation_result"]["price_hydration_scope_preflight"]
+            == updated_preflight.to_dict()
+        )
 
     def test_autoresearch_advance_rejects_noncanonical_fix_worktree(
         self,

@@ -682,6 +682,8 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
   then rerun the single reviewer.
 - Test failure: fix up to two times, then classify and log CRASH. The disposable
   experiment worktree is not promoted.
+- Verification `BUG_SIGNAL`: fix up to two times. If the signal persists after
+  retries, classify and log DISCARD; do not loop indefinitely.
 - No methodology issue: proceed to decide/log.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
   it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
@@ -693,12 +695,17 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
   behavioral guardrails, not mechanical proofs. The artifact-advance boundary
   mechanically requires a clean committed result at that same worktree and
   verifies both prior implementation and current authoritative-target ancestry.
+- If a verification fix changes the planned ALPHA price-hydration scope, include
+  the updated `price_hydration_scope_preflight` in `fix_result` using the same
+  strict object shape as `implementation_result`. If the fix does not change
+  scope, set `price_hydration_scope_preflight` to `null`; do not omit the key.
 
 ## 8. Decide And Log
 
 Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
 
 - Tests fail after retries: CRASH.
+- Verification BUG_SIGNAL persists after retries: DISCARD.
 - Critical review issue remains: DISCARD.
 - Decision Sharpe <= -0.5: DISCARD.
 - Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP.

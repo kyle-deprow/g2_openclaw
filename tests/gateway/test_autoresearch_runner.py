@@ -1308,7 +1308,11 @@ def _review_result(verdict: ReviewVerdict, policy: AutoresearchPolicy) -> Review
     )
 
 
-def _fix_result(trigger_phase: FixTriggerPhase) -> FixResultArtifact:
+def _fix_result(
+    trigger_phase: FixTriggerPhase,
+    *,
+    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None,
+) -> FixResultArtifact:
     return FixResultArtifact(
         trigger_phase=trigger_phase,
         summary="Applied the requested narrow fix.",
@@ -1317,6 +1321,7 @@ def _fix_result(trigger_phase: FixTriggerPhase) -> FixResultArtifact:
         fixes_applied=("Expanded ticker coverage to 5 names",),
         tests_rerun=("uv run pytest",),
         remaining_issues=(),
+        price_hydration_scope_preflight=price_hydration_scope_preflight,
     )
 
 
@@ -3518,6 +3523,7 @@ def test_fix_result_requires_workspace_identity() -> None:
                 "fixes_applied": ["Expanded coverage"],
                 "tests_rerun": ["uv run pytest"],
                 "remaining_issues": [],
+                "price_hydration_scope_preflight": None,
             }
         )
 
@@ -3544,6 +3550,7 @@ def test_fix_result_rejects_invalid_workspace_identity(
                 "fixes_applied": ["Expanded coverage"],
                 "tests_rerun": ["uv run pytest"],
                 "remaining_issues": [],
+                "price_hydration_scope_preflight": None,
             }
         )
 
@@ -3563,7 +3570,46 @@ def test_fix_result_updates_implementation_commit_for_reverification(
     assert fixed.implementation_result is not None
     assert fixed.implementation_result.workspace_path == implementation.workspace_path
     assert fixed.implementation_result.commit_sha == "def5678"
+    assert (
+        fixed.implementation_result.price_hydration_scope_preflight
+        == implementation.price_hydration_scope_preflight
+    )
     assert fixed.fix_history[-1].commit_sha == fixed.implementation_result.commit_sha
+
+
+def test_fix_result_updates_price_hydration_preflight_for_reverification(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    implementation = _implementation_result()
+    state = advance_state(state, implementation, policy)
+    state = advance_state(state, _verification_result(VerificationStatus.BUG_SIGNAL), policy)
+    updated_preflight = PriceHydrationScopePreflight(
+        member_union_count=2,
+        experiment_start="2021-01-04",
+        experiment_end="2021-12-31",
+        timeframe="1min",
+        market_hours="regular",
+        session_count=2400,
+        planned_symbol_sessions=4800,
+        within_budget=True,
+    )
+
+    fixed = advance_state(
+        state,
+        _fix_result(
+            FixTriggerPhase.VERIFICATION,
+            price_hydration_scope_preflight=updated_preflight,
+        ),
+        policy,
+    )
+
+    assert fixed.phase is Phase.VERIFICATION
+    assert fixed.implementation_result is not None
+    assert fixed.implementation_result.commit_sha == "def5678"
+    assert fixed.implementation_result.price_hydration_scope_preflight == updated_preflight
+    assert fixed.fix_history[-1].price_hydration_scope_preflight == updated_preflight
 
 
 def test_fix_result_rejects_different_workspace(
@@ -3705,6 +3751,49 @@ def test_final_decision_rules_enforce_crash_after_test_failures(
             ),
             policy,
         )
+
+
+def test_repeated_bug_signal_routes_to_discard_decision(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    for _ in range(2):
+        state = advance_state(state, _verification_result(VerificationStatus.BUG_SIGNAL), policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+
+    state = advance_state(state, _verification_result(VerificationStatus.BUG_SIGNAL), policy)
+
+    assert state.phase is Phase.DECISION_LOG
+    assert state.verification_fix_attempts == 2
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="bug signals after retries require final_decision=DISCARD",
+    ):
+        advance_state(
+            state,
+            _final_decision_with(
+                decision=FinalDecision.CRASH,
+                metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            ),
+            policy,
+        )
+
+    result = advance_state(
+        state,
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        ),
+        policy,
+    )
+
+    assert result.phase is Phase.REPEAT
+    assert result.final_decision is not None
+    assert result.final_decision.decision is FinalDecision.DISCARD
 
 
 def test_crash_without_review_accepts_the_canonical_not_run_verdict(
@@ -4313,6 +4402,29 @@ def test_legacy_v2_state_loads_missing_price_scope_then_blocks_verification(
         match=r"price_hydration_scope_preflight before dispatch",
     ):
         next_action(loaded, policy, receipts, platform_readiness)
+
+
+def test_legacy_v2_state_loads_missing_fix_price_scope_key(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(state, _verification_result(VerificationStatus.TEST_FAILURE), policy)
+    state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    raw = state.to_dict()
+    fix_history = cast(list[dict[str, object]], raw["fix_history"])
+    fix_history[0].pop("price_hydration_scope_preflight")
+
+    loaded = AutoresearchState.from_dict(raw)
+
+    assert loaded.fix_history
+    assert loaded.fix_history[0].price_hydration_scope_preflight is None
+    assert loaded.implementation_result is not None
+    assert (
+        loaded.implementation_result.price_hydration_scope_preflight
+        == _implementation_result().price_hydration_scope_preflight
+    )
 
 
 def test_over_budget_price_scope_verification_prompt_forbids_hydrate(

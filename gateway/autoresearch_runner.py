@@ -3271,6 +3271,7 @@ class FixResultArtifact:
     fixes_applied: tuple[str, ...]
     tests_rerun: tuple[str, ...]
     remaining_issues: tuple[str, ...]
+    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> FixResultArtifact:
@@ -3286,8 +3287,10 @@ class FixResultArtifact:
                 "fixes_applied",
                 "tests_rerun",
                 "remaining_issues",
+                "price_hydration_scope_preflight",
             ),
         )
+        preflight_raw = data.get("price_hydration_scope_preflight")
         artifact = cls(
             trigger_phase=FixTriggerPhase(_require_str(data, "trigger_phase")),
             summary=_require_str(data, "summary"),
@@ -3296,6 +3299,11 @@ class FixResultArtifact:
             fixes_applied=_require_string_list(data, "fixes_applied"),
             tests_rerun=_require_string_list(data, "tests_rerun"),
             remaining_issues=_require_string_list(data, "remaining_issues"),
+            price_hydration_scope_preflight=(
+                PriceHydrationScopePreflight.from_dict(preflight_raw)
+                if preflight_raw is not None
+                else None
+            ),
         )
         artifact.validate()
         return artifact
@@ -3314,6 +3322,11 @@ class FixResultArtifact:
             "fixes_applied": list(self.fixes_applied),
             "tests_rerun": list(self.tests_rerun),
             "remaining_issues": list(self.remaining_issues),
+            "price_hydration_scope_preflight": (
+                self.price_hydration_scope_preflight.to_dict()
+                if self.price_hydration_scope_preflight is not None
+                else None
+            ),
         }
 
 
@@ -3572,6 +3585,11 @@ class AutoresearchState:
             implementation_data.setdefault("price_hydration_scope_preflight", None)
             return ImplementationResultArtifact.from_dict(implementation_data)
 
+        def _parse_state_fix(raw_fix: object) -> FixResultArtifact:
+            fix_data = dict(_ensure_mapping(raw_fix, label="fix_result"))
+            fix_data.setdefault("price_hydration_scope_preflight", None)
+            return FixResultArtifact.from_dict(fix_data)
+
         state = cls(
             phase=Phase(_require_str(data, "phase")) if "phase" in data else Phase.SETUP_CONTEXT,
             iteration=_require_int(data, "iteration") if "iteration" in data else 1,
@@ -3597,7 +3615,7 @@ class AutoresearchState:
                 ),
             ),
             review_history=_parse_tuple("review_history", ReviewResultArtifact.from_dict),
-            fix_history=_parse_tuple("fix_history", FixResultArtifact.from_dict),
+            fix_history=_parse_tuple("fix_history", _parse_state_fix),
             pending_fix_trigger=FixTriggerPhase(pending_fix_trigger_raw)
             if pending_fix_trigger_raw is not None
             else None,
@@ -3962,6 +3980,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "fixes_applied",
             "tests_rerun",
             "remaining_issues",
+            "price_hydration_scope_preflight",
         ]
     },
     ArtifactType.FINAL_DECISION: {
@@ -4630,12 +4649,18 @@ def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifac
         raise AutoresearchValidationError(
             "fix_result workspace_path must match implementation_result workspace_path"
         )
+    candidate_implementation = replace(
+        state.implementation_result,
+        commit_sha=artifact.commit_sha,
+        price_hydration_scope_preflight=(
+            artifact.price_hydration_scope_preflight
+            if artifact.price_hydration_scope_preflight is not None
+            else state.implementation_result.price_hydration_scope_preflight
+        ),
+    )
     _validate_implementation_workspace(
         state,
-        replace(
-            state.implementation_result,
-            commit_sha=artifact.commit_sha,
-        ),
+        candidate_implementation,
     )
 
 
@@ -5077,6 +5102,17 @@ def _validate_final_decision_artifact(
             )
         return
 
+    if (
+        latest_verification is not None
+        and latest_verification.status is VerificationStatus.BUG_SIGNAL
+        and state.verification_fix_attempts >= 2
+    ):
+        if artifact.decision is not FinalDecision.DISCARD:
+            raise AutoresearchValidationError(
+                "bug signals after retries require final_decision=DISCARD"
+            )
+        return
+
     if latest_review is not None and (
         latest_review.verdict is ReviewVerdict.FAIL or latest_review.critical_issues
     ):
@@ -5499,6 +5535,10 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "processes running after the stage exits.\n"
         "- Finish with a clean, committed result. The fix_result artifact must use the same "
         "verified workspace_path exactly and report its accepted final commit SHA in commit_sha.\n"
+        "- If a verification fix changes the planned ALPHA price-hydration scope, include "
+        "the updated price_hydration_scope_preflight in fix_result using the same strict "
+        "object shape as implementation_result. If the fix does not change scope, set "
+        "price_hydration_scope_preflight to null. Do not omit the key.\n"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
     )
@@ -5790,7 +5830,7 @@ def advance_state(
             _validate_alpha_universe_chain(next_state, validation_context)
             return next_state
         if (
-            artifact.status is VerificationStatus.TEST_FAILURE
+            artifact.status in (VerificationStatus.TEST_FAILURE, VerificationStatus.BUG_SIGNAL)
             and state.verification_fix_attempts >= 2
         ):
             next_state = replace(
@@ -5847,6 +5887,11 @@ def advance_state(
         next_implementation = replace(
             state.implementation_result,
             commit_sha=artifact.commit_sha,
+            price_hydration_scope_preflight=(
+                artifact.price_hydration_scope_preflight
+                if artifact.price_hydration_scope_preflight is not None
+                else state.implementation_result.price_hydration_scope_preflight
+            ),
         )
         return replace(
             state,
