@@ -1105,10 +1105,12 @@ class AutoresearchSupervisor:
             ):
                 return SupervisorResult(SupervisorOutcome.ALERT, "stale_expected_stage_task")
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_expected_stage_task")
-        if not reconciled_tasks.terminal_task_seen:
-            lifecycle_result = self._owner_lifecycle_guard(state)
-            if lifecycle_result is not None:
-                return lifecycle_result
+        lifecycle_result = self._owner_lifecycle_guard(state)
+        if lifecycle_result is not None and (
+            lifecycle_result.reason == "active_owner_session"
+            or not reconciled_tasks.terminal_task_seen
+        ):
+            return lifecycle_result
         fresh = [
             task
             for task in running_tasks

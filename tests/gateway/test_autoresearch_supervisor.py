@@ -615,6 +615,42 @@ def test_active_owner_lifecycle_for_the_exact_session_suppresses_recovery(
     assert result.reason == "active_owner_session"
 
 
+def test_terminal_task_with_fresh_owner_lifecycle_suppresses_duplicate_recovery(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.IMPLEMENTATION)
+    now = supervisor_env.now
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(now * 1000) - 1_000,
+                    "lastInteractionAt": int(now * 1000) - 1_000,
+                    "startedAt": int(now * 1000) - 2_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    task: dict[str, object] = {
+        "taskId": "implementer-terminal",
+        "agentId": "implementer",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "childSessionKey": "agent:implementer:child",
+    }
+    fake = FakeOpenClaw(
+        tasks=[task],
+        shown_tasks={"implementer-terminal": {**task, "status": "failed"}},
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_owner_session"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
 def test_error_detection_reads_only_the_dedicated_owner_transcript(
     supervisor_env: SupervisorEnv,
 ) -> None:
