@@ -208,6 +208,16 @@ def _mempalace_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _openclaw_daemon_env(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Return a daemon environment that keeps Azure preload out of Codex runs."""
+    env = _mempalace_env(base_env)
+    if env.get("OPENCLAW_PROVIDER", "codex") != "azure":
+        node_options = env.get("NODE_OPTIONS")
+        if node_options and "azure-api-version-preload.cjs" in node_options:
+            env.pop("NODE_OPTIONS")
+    return env
+
+
 def _check_mempalace_health() -> bool:
     """Run the strict MemPalace startup healthcheck."""
     if not _MEMPALACE_PYTHON.is_file():
@@ -1155,23 +1165,6 @@ def _find_pid_on_port(port: int) -> int | None:
     return None
 
 
-def _proc_has_env(pid: int, var_name: str) -> bool:
-    """Check whether process *pid* has *var_name* in its environment.
-
-    Reads ``/proc/<pid>/environ``.  Returns *False* on any error
-    (permission denied, non-Linux, etc.).
-    """
-    try:
-        data = Path(f"/proc/{pid}/environ").read_bytes()
-        # environ entries are NUL-separated: KEY=VALUE\x00KEY=VALUE\x00…
-        for entry in data.split(b"\x00"):
-            if entry.startswith(var_name.encode() + b"="):
-                return True
-    except OSError:
-        pass
-    return False
-
-
 def _wait_for_port(
     port: int, label: str, host: str = "127.0.0.1", *, report_interval: float = 10.0
 ) -> None:
@@ -1458,8 +1451,8 @@ def push_config(
     """Push repo OpenClaw config and restart the daemon.
 
     Runs ``scripts/push-openclaw-config.sh`` (merge provider config, resolve
-    API key, copy SOUL.md + preload) then restarts the OpenClaw daemon with
-    the Azure api-version preload injected via NODE_OPTIONS.
+    auth, copy agent bootstrap files, and install managed service drop-ins),
+    then restarts the OpenClaw daemon.
     """
 
     push_script = _PROJECT_ROOT / "scripts" / "push-openclaw-config.sh"
@@ -1495,32 +1488,6 @@ def push_config(
     else:
         console.print("[bold]2/2 Restarting OpenClaw daemon…[/bold]")
 
-        # Ensure NODE_OPTIONS is in the systemd service file
-        service_path = Path.home() / ".config/systemd/user/openclaw-gateway.service"
-        preload_path = Path.home() / ".openclaw" / "azure-api-version-preload.cjs"
-        if service_path.is_file() and preload_path.is_file():
-            service_text = service_path.read_text(encoding="utf-8")
-            node_options_line = f'Environment="NODE_OPTIONS=--require {preload_path}"'
-            if "NODE_OPTIONS" not in service_text:
-                service_text = service_text.replace(
-                    "[Service]\n",
-                    f"[Service]\n{node_options_line}\n",
-                )
-                service_path.write_text(service_text, encoding="utf-8")
-                subprocess.run(
-                    ["systemctl", "--user", "daemon-reload"],
-                    check=False,
-                    capture_output=True,
-                )
-                console.print("  [green]✓[/green] Injected Azure preload into systemd service")
-        elif preload_path.is_file() and not service_path.is_file():
-            console.print(f"  [yellow]⚠[/yellow] Systemd service not found at {service_path}")
-        elif not preload_path.is_file():
-            console.print(
-                "  [yellow]⚠[/yellow] Azure preload not found at "
-                f"{preload_path} — api-version injection disabled"
-            )
-
         # Restart via openclaw CLI
         console.print(
             "  Restarting OpenClaw daemon on port "
@@ -1530,7 +1497,7 @@ def push_config(
             [str(openclaw.path), "daemon", "restart"],
             check=False,
             capture_output=True,
-            env=_mempalace_env(),
+            env=_openclaw_daemon_env(),
         )
         _wait_for_port(openclaw_port, label="OpenClaw daemon")
         daemon_restarted = True
@@ -1684,53 +1651,11 @@ def launch(
                 raise typer.Exit(code=1)
             console.print(f"  [dim]Using {openclaw.path} (version {openclaw.version_text})[/dim]")
             if _is_port_open(openclaw_port):
-                # Check whether the running daemon has NODE_OPTIONS set
-                preload_path = Path.home() / ".openclaw" / "azure-api-version-preload.cjs"
-                _oc_pid = _find_pid_on_port(openclaw_port)
-                if (
-                    preload_path.is_file()
-                    and _oc_pid is not None
-                    and not _proc_has_env(_oc_pid, "NODE_OPTIONS")
-                ):
-                    console.print(
-                        f"  [yellow]⚠[/yellow] OpenClaw (PID {_oc_pid}) running "
-                        "without Azure api-version preload — restarting…"
-                    )
-                    _needs_openclaw_restart = True
-                else:
-                    console.print(f"  [green]✓[/green] Already running on port {openclaw_port}")
+                console.print(f"  [green]✓[/green] Already running on port {openclaw_port}")
             else:
                 _needs_openclaw_start = True
 
         if (_needs_openclaw_start or _needs_openclaw_restart) and not no_openclaw:
-            # Step 1: Ensure NODE_OPTIONS is in the systemd service file
-            service_path = Path.home() / ".config/systemd/user/openclaw-gateway.service"
-            preload_path = Path.home() / ".openclaw" / "azure-api-version-preload.cjs"
-            if service_path.is_file() and preload_path.is_file():
-                service_text = service_path.read_text(encoding="utf-8")
-                # Systemd splits unquoted values at spaces — quote the value
-                node_options_line = f'Environment="NODE_OPTIONS=--require {preload_path}"'
-                if "NODE_OPTIONS" not in service_text:
-                    service_text = service_text.replace(
-                        "[Service]\n",
-                        f"[Service]\n{node_options_line}\n",
-                    )
-                    service_path.write_text(service_text, encoding="utf-8")
-                    subprocess.run(
-                        ["systemctl", "--user", "daemon-reload"],
-                        check=False,
-                        capture_output=True,
-                    )
-                    console.print("  [green]✓[/green] Injected Azure preload into systemd service")
-            elif preload_path.is_file() and not service_path.is_file():
-                console.print(f"  [yellow]⚠[/yellow] Systemd service not found at {service_path}")
-            elif not preload_path.is_file():
-                console.print(
-                    "  [yellow]⚠[/yellow] Azure preload not found at "
-                    f"{preload_path} — api-version injection disabled"
-                )
-
-            # Step 2: Start or restart via systemd
             if openclaw is None:
                 raise typer.Exit(code=1)
             if _needs_openclaw_restart:
@@ -1742,7 +1667,7 @@ def launch(
                     [str(openclaw.path), "daemon", "restart"],
                     check=False,
                     capture_output=True,
-                    env=_mempalace_env(),
+                    env=_openclaw_daemon_env(),
                 )
             else:
                 console.print(
@@ -1753,7 +1678,7 @@ def launch(
                     [str(openclaw.path), "daemon", "start"],
                     check=False,
                     capture_output=True,
-                    env=_mempalace_env(),
+                    env=_openclaw_daemon_env(),
                 )
             _wait_for_port(openclaw_port, label="OpenClaw daemon")
 

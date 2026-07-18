@@ -74,6 +74,7 @@ from gateway.cli import (
     _choose_whisper_model,
     _detect_gpu,
     _get_local_ip,
+    _openclaw_daemon_env,
     _parse_gpu_output,
     _read_openclaw_config,
     _render_env,
@@ -1963,6 +1964,34 @@ class TestSimulatorLaunchCommand:
 
 def test_vite_launch_uses_the_loopback_simulator_mode() -> None:
     assert _vite_launch_command() == ["npm", "run", "dev:sim"]
+
+
+def test_openclaw_daemon_env_strips_azure_preload_from_default_codex_route() -> None:
+    env = _openclaw_daemon_env(
+        {
+            "NODE_OPTIONS": "--require /home/dev/.openclaw/azure-api-version-preload.cjs",
+        }
+    )
+
+    assert "NODE_OPTIONS" not in env
+    assert env["MEMPALACE_EMBEDDING_MODEL"]
+
+
+def test_openclaw_daemon_env_preserves_azure_preload_for_explicit_azure_route() -> None:
+    env = _openclaw_daemon_env(
+        {
+            "OPENCLAW_PROVIDER": "azure",
+            "NODE_OPTIONS": "--require /home/dev/.openclaw/azure-api-version-preload.cjs",
+        }
+    )
+
+    assert env["NODE_OPTIONS"] == "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+
+
+def test_openclaw_daemon_env_preserves_unrelated_node_options() -> None:
+    env = _openclaw_daemon_env({"NODE_OPTIONS": "--max-old-space-size=4096"})
+
+    assert env["NODE_OPTIONS"] == "--max-old-space-size=4096"
 
 
 # ---------------------------------------------------------------------------

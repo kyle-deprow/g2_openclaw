@@ -30,6 +30,7 @@ CODEX_RUNTIME_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-codex-ru
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
 CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"
+STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
@@ -207,11 +208,17 @@ OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
 
 run_openclaw_cli() {
+  local -a env_args=(
+    -u OPENCLAW_HOME
+    -u OPENCLAW_PUSH_HOME
+    -u OPENCLAW_STATE_DIR
+    -u OPENCLAW_CONFIG_PATH
+  )
+  if [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" ]]; then
+    env_args+=(-u NODE_OPTIONS)
+  fi
   env \
-    -u OPENCLAW_HOME \
-    -u OPENCLAW_PUSH_HOME \
-    -u OPENCLAW_STATE_DIR \
-    -u OPENCLAW_CONFIG_PATH \
+    "${env_args[@]}" \
     OPENCLAW_STATE_DIR="${OPENCLAW_PUSH_HOME}" \
     OPENCLAW_CONFIG_PATH="${LOCAL_CONFIG}" \
     "${OPENCLAW_BIN_RESOLVED}" "$@"
@@ -275,6 +282,50 @@ prepare_runtime_caps_dropin_dir() {
     return 1
   fi
   chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+}
+
+remove_stale_azure_node_options_for_codex() {
+  local changed=0
+  local path temp
+  local manager_env
+  local service_path="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
+  local -a candidates=()
+
+  if manager_env="$(systemctl --user show-environment 2>/dev/null)"; then
+    if printf '%s\n' "${manager_env}" | grep -Fq "${STALE_AZURE_PRELOAD_PATTERN}"; then
+      systemctl --user unset-environment NODE_OPTIONS
+      changed=1
+      echo "Unset stale Azure NODE_OPTIONS from systemd user manager environment"
+    fi
+  else
+    echo "ERROR: Could not inspect systemd user manager environment for stale Azure NODE_OPTIONS." >&2
+    return 1
+  fi
+
+  if [[ -f "${service_path}" ]]; then
+    candidates+=("${service_path}")
+  fi
+  if [[ -d "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    while IFS= read -r -d '' path; do
+      candidates+=("${path}")
+    done < <(find "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" -maxdepth 1 -type f -name '*.conf' -print0)
+  fi
+
+  for path in "${candidates[@]}"; do
+    if ! grep -Fq "${STALE_AZURE_PRELOAD_PATTERN}" "${path}"; then
+      continue
+    fi
+    temp="$(mktemp "${path}.XXXXXX")"
+    grep -Fv "${STALE_AZURE_PRELOAD_PATTERN}" "${path}" > "${temp}"
+    chmod --reference="${path}" "${temp}"
+    mv "${temp}" "${path}"
+    changed=1
+    echo "Removed stale Azure NODE_OPTIONS preload from ${path}"
+  done
+
+  if [[ "${changed}" -eq 1 ]]; then
+    systemctl --user daemon-reload
+  fi
 }
 
 resolve_openclaw_bin() {
@@ -993,15 +1044,19 @@ if [[ -d "${SKILLS_SRC}" ]]; then
   done
 fi
 
-# ── Copy Azure API-version preload if present ────────────────────────────────
+# ── Manage Azure API-version preload artifact ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
 PRELOAD_DST="${OPENCLAW_PUSH_HOME}/azure-api-version-preload.cjs"
-if [[ -f "${PRELOAD_SRC}" ]]; then
+if [[ "${OPENCLAW_PROVIDER:-codex}" == "azure" && -f "${PRELOAD_SRC}" ]]; then
   cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
+elif [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" && -f "${PRELOAD_DST}" ]]; then
+  rm "${PRELOAD_DST}"
+  echo "Removed Azure preload artifact from Codex/OpenRouter route: ${PRELOAD_DST}"
 fi
 
 if [[ "${PROVIDER}" == "codex" ]]; then
+  remove_stale_azure_node_options_for_codex
   sync_managed_agent_codex_auth
 fi
 

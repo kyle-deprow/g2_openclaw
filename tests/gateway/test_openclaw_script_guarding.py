@@ -138,12 +138,13 @@ if [[ "${OPENCLAW_CONFIG_PATH:-}" != "$EXPECTED_OPENCLAW_CONFIG_PATH" ]]; then
   printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
   exit 69
 fi
-printf '%s %s %s %s %s\n' \
+printf '%s %s %s %s %s %s\n' \
   "openclaw $*" \
   "OPENCLAW_HOME=<unset>" \
   "OPENCLAW_PUSH_HOME=<unset>" \
   "OPENCLAW_STATE_DIR=$OPENCLAW_STATE_DIR" \
-  "OPENCLAW_CONFIG_PATH=$OPENCLAW_CONFIG_PATH" >> "$OPENCLAW_LOG"
+  "OPENCLAW_CONFIG_PATH=$OPENCLAW_CONFIG_PATH" \
+  "NODE_OPTIONS=${NODE_OPTIONS:-<unset>}" >> "$OPENCLAW_LOG"
 case "${1:-}" in
   --version)
     printf 'openclaw 2026.6.11\n'
@@ -198,6 +199,13 @@ esac
 printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
   "--user show-environment")
+    if [[ -n "${{SYSTEMD_MANAGER_NODE_OPTIONS:-}}" ]]; then
+      printf 'NODE_OPTIONS=%s\n' "$SYSTEMD_MANAGER_NODE_OPTIONS"
+    fi
+    exit 0
+    ;;
+  "--user unset-environment NODE_OPTIONS")
+    printf 'unset NODE_OPTIONS\n' >> "$SYSTEMCTL_LOG"
     exit 0
     ;;
   "--user show openclaw-gateway.service --property=LoadState --property=ActiveState")
@@ -466,7 +474,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert "prepare_runtime_caps_dropin_dir" in script
     assert ('chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"') in script
     assert ('validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"') in script
-    assert script.count("systemctl --user daemon-reload") == 1
+    assert script.count("systemctl --user daemon-reload") == 2
     assert "GATEWAY_RUNTIME_CAPS_DROPIN" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_DST" in script
@@ -506,6 +514,7 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     tmp_path: Path,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
+    env["NODE_OPTIONS"] = "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
     home = Path(env["HOME"])
     dropin_dir = _runtime_caps_dropin_dst(home).parent
     dropin_dir.mkdir(parents=True)
@@ -521,6 +530,7 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert _mode(dropin_dir) == 0o755
     assert _mode(dropin) == 0o644
     assert not list(dropin_dir.glob(".10-quantipy-runtime-caps.conf.*"))
+    assert not (Path(env["OPENCLAW_PUSH_HOME"]) / "azure-api-version-preload.cjs").exists()
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
     assert "systemctl --user show openclaw-gateway.service" in systemctl_log
     assert "systemctl --user daemon-reload" in systemctl_log
@@ -533,12 +543,67 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 3
     assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 3
     assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 3
+    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 3
     assert "inherited-openclaw-home" not in openclaw_log
     assert "inherited-state-dir" not in openclaw_log
     assert "inherited-config.json" not in openclaw_log
     assert "env-file-push-home" not in openclaw_log
     assert "env-file-state-dir" not in openclaw_log
     assert "env-file-config.json" not in openclaw_log
+
+
+def test_push_script_codex_removes_stale_azure_node_options_from_gateway_unit(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["SYSTEMD_MANAGER_NODE_OPTIONS"] = (
+        "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+    )
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    service_path.parent.mkdir(parents=True)
+    service_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                'Environment="NODE_OPTIONS=--require '
+                '/home/dev/.openclaw/azure-api-version-preload.cjs"',
+                "ExecStart=/usr/bin/node /tmp/openclaw/dist/index.js gateway --port 18789",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    stale_dropin = service_path.parent / "openclaw-gateway.service.d/05-legacy-azure.conf"
+    stale_dropin.parent.mkdir()
+    stale_dropin.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                'Environment="NODE_OPTIONS=--require '
+                '/home/dev/.openclaw/azure-api-version-preload.cjs"',
+                "Environment=KEEP_ME=1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    service_text = service_path.read_text(encoding="utf-8")
+    assert "azure-api-version-preload.cjs" not in service_text
+    assert "NODE_OPTIONS" not in service_text
+    assert "ExecStart=/usr/bin/node" in service_text
+    stale_dropin_text = stale_dropin.read_text(encoding="utf-8")
+    assert "azure-api-version-preload.cjs" not in stale_dropin_text
+    assert "NODE_OPTIONS" not in stale_dropin_text
+    assert "Environment=KEEP_ME=1" in stale_dropin_text
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" in systemctl_log
+    assert "unset NODE_OPTIONS" in systemctl_log
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
 
 
 def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
@@ -561,6 +626,14 @@ def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     assert systemctl_log.count("systemctl --user daemon-reload") == 2
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 2
+
+
+def test_gateway_cli_does_not_inject_azure_preload_into_codex_daemon() -> None:
+    cli_source = (REPO_ROOT / "gateway/cli.py").read_text(encoding="utf-8")
+
+    assert "Injected Azure preload into systemd service" not in cli_source
+    assert "without Azure api-version preload" not in cli_source
+    assert "NODE_OPTIONS=--require" not in cli_source
 
 
 def test_push_script_daemon_reload_runs_after_dropin_install_and_failure_aborts(

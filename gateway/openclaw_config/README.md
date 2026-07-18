@@ -46,7 +46,8 @@ key rotation. The push step copies OpenClaw's local Codex OAuth profile from
 the `main` agent into each managed autoresearch agent's own auth store; this is
 required because some OpenClaw Codex compaction paths read the per-agent SQLite
 store directly.
-The `launch` command handles `NODE_OPTIONS` for the OpenClaw daemon automatically.
+The default OpenAI/Codex route must not set Azure `NODE_OPTIONS` preload state.
+Azure preload is explicit Azure-only setup.
 
 ## How It Works
 
@@ -201,6 +202,12 @@ The script will:
    runtime-cap drop-in, and the Codex runtime-verifier drop-in, then run
    `systemctl --user daemon-reload`
 
+When `OPENCLAW_PROVIDER=codex`, the script also removes stale systemd
+`NODE_OPTIONS` state that references `azure-api-version-preload.cjs` from the
+systemd user-manager environment, OpenClaw gateway unit, and drop-ins. Codex
+uses OpenClaw-managed OpenAI OAuth; do not keep Azure fetch monkey-patches in
+that route.
+
 The script is idempotent — safe to run repeatedly.
 
 `systemctl --user daemon-reload` only refreshes systemd's view of unit files and
@@ -213,8 +220,8 @@ versions or source layouts instead of falling back to an API-key compactor.
 
 ### 5. Enable the api-version preload for Azure only
 
-The `gateway launch` command sets `NODE_OPTIONS` automatically when spawning the
-OpenClaw daemon. If running OpenClaw standalone:
+`gateway launch` does not inject this preload on the default Codex path. If you
+explicitly select Azure and run OpenClaw standalone:
 
 ```bash
 export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
@@ -337,8 +344,10 @@ export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
 openclaw daemon
 ```
 
-You can add the export to your shell profile (`~/.bashrc`, `~/.zshrc`) so it
-persists across sessions.
+Do not add this export to a shared shell profile used for Codex. Persistent
+Azure `NODE_OPTIONS` in the shell or systemd user manager can leak into later
+Codex runs; `OPENCLAW_PROVIDER=codex` pushes remove it from managed systemd
+state.
 
 ### Debugging
 
