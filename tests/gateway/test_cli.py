@@ -2004,7 +2004,7 @@ class TestPushConfig:
 
     @staticmethod
     def _resolved_openclaw(path: str = "/resolved/openclaw") -> _ResolvedOpenClaw:
-        return _ResolvedOpenClaw(Path(path), "2026.6.11", (2026, 6, 11))
+        return _ResolvedOpenClaw(Path(path), "2026.7.1-2", (2026, 7, 1))
 
     def test_push_script_not_found(self, tmp_path: Path) -> None:
         """Error when the push script does not exist."""
@@ -2103,6 +2103,33 @@ class TestPushConfig:
         restart_calls = [c for c in calls if "restart" in c]
         assert len(restart_calls) == 1
         assert restart_calls[0] == ["/resolved/openclaw", "daemon", "restart"]
+
+    def test_restart_failure_does_not_accept_existing_listener(self, tmp_path: Path) -> None:
+        """A failed restart is fatal even when the old daemon still owns the port."""
+        scripts_dir = tmp_path / "scripts"
+        scripts_dir.mkdir()
+        push_script = scripts_dir / "push-openclaw-config.sh"
+        push_script.write_text("#!/bin/bash\nexit 0\n")
+        push_script.chmod(0o755)
+
+        def _fake_run(cmd: list[str], **kwargs: object) -> MagicMock:
+            return MagicMock(returncode=3 if "restart" in cmd else 0, stderr="rejected")
+
+        with (
+            patch("gateway.cli._PROJECT_ROOT", tmp_path),
+            patch(
+                "gateway.cli._require_openclaw_binary",
+                return_value=self._resolved_openclaw(),
+            ),
+            patch("gateway.cli.subprocess.run", side_effect=_fake_run),
+            patch("gateway.cli._read_openclaw_config", return_value=(None, 18789)),
+            patch("gateway.cli._wait_for_port") as wait_for_port,
+        ):
+            result = runner.invoke(app, ["push-config"])
+
+        assert result.exit_code == 1
+        assert "Daemon restart failed (exit code 3)" in result.output
+        wait_for_port.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

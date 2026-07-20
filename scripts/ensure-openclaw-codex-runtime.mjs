@@ -7,7 +7,7 @@ import { statSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-const REQUIRED_OPENCLAW_VERSION = "2026.6.11";
+const REQUIRED_OPENCLAW_VERSION = "2026.7.1-2";
 const PATCH_MARKER = "g2_openclaw:codex-auto-compaction-no-fallback:v1";
 const PACKAGE_ROOT_OVERRIDE = process.env.OPENCLAW_PACKAGE_ROOT?.trim();
 const VULNERABLE_BRANCH =

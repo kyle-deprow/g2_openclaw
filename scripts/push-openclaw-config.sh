@@ -7,7 +7,7 @@
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
 #   - sqlite3 CLI
-#   - OpenClaw CLI exactly 2026.6.11
+#   - OpenClaw CLI exactly 2026.7.1-2
 #   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai' for main;
 #     this script syncs that OpenClaw-managed Codex OAuth profile into managed
@@ -38,7 +38,7 @@ GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RU
 CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
-REQUIRED_OPENCLAW_VERSION="2026.6.11"
+REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""

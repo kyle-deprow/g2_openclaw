@@ -147,7 +147,7 @@ printf '%s %s %s %s %s %s\n' \
   "NODE_OPTIONS=${NODE_OPTIONS:-<unset>}" >> "$OPENCLAW_LOG"
 case "${1:-}" in
   --version)
-    printf 'openclaw 2026.6.11\n'
+    printf 'openclaw 2026.7.1-2\n'
     ;;
   config)
     [[ "${2:-}" == "validate" ]] || exit 44
@@ -679,7 +679,7 @@ while (($#)); do
   shift
 done
 /usr/bin/mkdir -p "$prefix/bin"
-printf '#!/usr/bin/env bash\nprintf "openclaw 2026.6.11\\\\n"\n' > "$prefix/bin/openclaw"
+printf '#!/usr/bin/env bash\nprintf "openclaw 2026.7.1-2\\\\n"\n' > "$prefix/bin/openclaw"
 /usr/bin/chmod 755 "$prefix/bin/openclaw"
         """.strip(),
     )
@@ -699,9 +699,9 @@ printf '#!/usr/bin/env bash\nprintf "openclaw 2026.6.11\\\\n"\n' > "$prefix/bin/
     expected = tmp_path / "npm-global/bin/openclaw"
     assert result.returncode == 0, result.stderr
     assert f"RESOLVED={expected}" in result.stdout
-    assert "VERSION=2026.6.11" in result.stdout
+    assert "VERSION=2026.7.1-2" in result.stdout
     assert npm_log.read_text(encoding="utf-8").strip() == (
-        f"install -g --prefix {tmp_path / 'npm-global'} openclaw@2026.6.11"
+        f"install -g --prefix {tmp_path / 'npm-global'} openclaw@2026.7.1-2"
     )
     assert not pnpm_log.exists()
 
@@ -714,7 +714,7 @@ def test_bootstrap_pnpm_install_selects_exact_installed_path(tmp_path: Path) -> 
         """
 printf '%s\n' "$*" > "$PNPM_LOG"
 /usr/bin/mkdir -p "$PNPM_HOME"
-printf '#!/usr/bin/env bash\nprintf "openclaw 2026.6.11\\\\n"\n' > "$PNPM_HOME/openclaw"
+printf '#!/usr/bin/env bash\nprintf "openclaw 2026.7.1-2\\\\n"\n' > "$PNPM_HOME/openclaw"
 /usr/bin/chmod 755 "$PNPM_HOME/openclaw"
 """.strip(),
     )
@@ -731,13 +731,13 @@ printf '#!/usr/bin/env bash\nprintf "openclaw 2026.6.11\\\\n"\n' > "$PNPM_HOME/o
     expected = tmp_path / "pnpm-home/openclaw"
     assert result.returncode == 0, result.stderr
     assert f"RESOLVED={expected}" in result.stdout
-    assert "VERSION=2026.6.11" in result.stdout
-    assert pnpm_log.read_text(encoding="utf-8").strip() == "add -g openclaw@2026.6.11"
+    assert "VERSION=2026.7.1-2" in result.stdout
+    assert pnpm_log.read_text(encoding="utf-8").strip() == "add -g openclaw@2026.7.1-2"
 
 
 def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: Path) -> None:
     preferred = tmp_path / ".local/share/pnpm/openclaw"
-    _write_executable(preferred, "printf 'openclaw 2026.6.11\\n'")
+    _write_executable(preferred, "printf 'openclaw 2026.7.1-2\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -758,7 +758,7 @@ def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: 
 
 def test_bootstrap_accepts_exact_explicit_override_without_installing(tmp_path: Path) -> None:
     override = tmp_path / "override/openclaw"
-    _write_executable(override, "printf 'openclaw 2026.6.11\\n'")
+    _write_executable(override, "printf 'openclaw 2026.7.1-2\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -842,7 +842,7 @@ main
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.6.11-beta.1", "2026.6.11+build", "2026.6.11.1"],
+    ["2026.7.1-2-beta.1", "2026.7.1-2+build", "2026.7.1-2.1"],
 )
 def test_bootstrap_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -859,14 +859,14 @@ def test_bootstrap_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.6.11" in result.stdout
+    assert "need exactly 2026.7.1-2" in result.stdout
 
 
 def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> None:
     home = tmp_path / "home"
     openclaw_home = tmp_path / "openclaw-home"
     executable = home / "openclaw"
-    _write_executable(executable, "printf 'openclaw 2026.6.12\\n'")
+    _write_executable(executable, "printf 'openclaw 2026.7.2\\n'")
 
     result = subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
@@ -884,7 +884,7 @@ def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "unsupported; need exactly 2026.6.11" in result.stderr
+    assert "unsupported; need exactly 2026.7.1-2" in result.stderr
     assert not openclaw_home.exists()
 
 
@@ -903,7 +903,7 @@ if [[ -v OPENCLAW_HOME ]]; then
   printf 'leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
   exit 66
 fi
-printf 'openclaw 2026.6.11\n'
+printf 'openclaw 2026.7.1-2\n'
 """.strip(),
     )
 
@@ -931,7 +931,7 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     home = tmp_path / "home"
     openclaw_home = home / "openclaw-home"
     executable = home / "bin/openclaw"
-    _write_executable(executable, "printf 'openclaw 2026.6.11\\n'")
+    _write_executable(executable, "printf 'openclaw 2026.7.1-2\\n'")
 
     result = subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
@@ -949,13 +949,13 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert f"Using OpenClaw: {executable} (version 2026.6.11)" in result.stdout
+    assert f"Using OpenClaw: {executable} (version 2026.7.1-2)" in result.stdout
     assert f"Local OpenClaw config not found at {openclaw_home / 'openclaw.json'}" in result.stderr
 
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.6.11-beta.1", "2026.6.11+build", "2026.6.11.1"],
+    ["2026.7.1-2-beta.1", "2026.7.1-2+build", "2026.7.1-2.1"],
 )
 def test_push_script_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -981,5 +981,5 @@ def test_push_script_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.6.11" in result.stderr
+    assert "need exactly 2026.7.1-2" in result.stderr
     assert not openclaw_home.exists()

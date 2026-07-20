@@ -19,7 +19,7 @@ PATCH_MARKER = "g2_openclaw:codex-auto-compaction-no-fallback:v1"
 
 
 def _fixture(
-    tmp_path: Path, *, version: str = "2026.6.11", source: str = VULNERABLE_BRANCH
+    tmp_path: Path, *, version: str = "2026.7.1-2", source: str = VULNERABLE_BRANCH
 ) -> tuple[Path, Path]:
     package_root = tmp_path / "node_modules/openclaw"
     dist = package_root / "dist"
@@ -29,7 +29,7 @@ def _fixture(
     )
     (dist / "cli-compaction-fixture.js").write_text(source, encoding="utf-8")
     binary = tmp_path / "openclaw"
-    binary.write_text("#!/bin/sh\nprintf 'OpenClaw 2026.6.11\\n'\n", encoding="utf-8")
+    binary.write_text("#!/bin/sh\nprintf 'OpenClaw 2026.7.1-2\\n'\n", encoding="utf-8")
     binary.chmod(0o755)
     return package_root, binary
 
@@ -73,7 +73,7 @@ def test_patcher_follows_explicit_shell_wrapper_to_pnpm_launcher(tmp_path: Path)
     launcher.write_text(
         f"""#!/bin/sh
 # {package_root}/openclaw.mjs
-printf 'OpenClaw 2026.6.11\\n'
+printf 'OpenClaw 2026.7.1-2\\n'
 """,
         encoding="utf-8",
     )
@@ -92,14 +92,14 @@ printf 'OpenClaw 2026.6.11\\n'
 
 
 def test_patcher_rejects_unknown_package_version_without_writing(tmp_path: Path) -> None:
-    package_root, binary = _fixture(tmp_path, version="2026.6.12")
+    package_root, binary = _fixture(tmp_path, version="2026.7.2")
     bundle = package_root / "dist/cli-compaction-fixture.js"
     original = bundle.read_text(encoding="utf-8")
 
     result = _run(package_root, binary)
 
     assert result.returncode == 1
-    assert "does not match CLI 2026.6.11" in result.stderr
+    assert "does not match CLI 2026.7.1-2" in result.stderr
     assert bundle.read_text(encoding="utf-8") == original
 
 

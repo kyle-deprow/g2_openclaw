@@ -18,8 +18,8 @@ configuration used by the G2 Gateway.
 ## Cold-Start Install (Fresh Machine)
 
 ```bash
-# 1. Install OpenClaw globally (Node.js 22+ required)
-sudo npm install -g openclaw
+# 1. Install the supported OpenClaw build globally (Node.js 22+ required)
+sudo npm install -g openclaw@2026.7.1-2
 
 # 2. Create the ~/.openclaw/ scaffold
 openclaw onboard --local
@@ -129,7 +129,7 @@ Codex OAuth, not `OPENAI_API_KEY`.
 
 The managed gateway also installs
 `20-openclaw-codex-runtime.conf`. Its `ExecStartPre` verifier applies the
-repo-owned, version-checked OpenClaw 2026.6.11 fix that treats Codex's
+repo-owned, version-checked OpenClaw 2026.7.1-2 fix that treats Codex's
 automatic-compaction ownership response as a native deferral, never as
 permission to invoke the generic API-key summarizer. The verifier fails closed
 on an unknown OpenClaw version, package layout, or source branch. This keeps a

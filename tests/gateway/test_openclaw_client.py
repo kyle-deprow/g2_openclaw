@@ -188,7 +188,7 @@ class TestHappyPath:
                                 "type": "res",
                                 "id": message["id"],
                                 "ok": True,
-                                "payload": {"server": {"version": "2026.6.11"}},
+                                "payload": {"server": {"version": "2026.7.1-2"}},
                             }
                         )
                     )
@@ -213,7 +213,7 @@ class TestHappyPath:
                 "tasks.list",
                 {"status": "running", "limit": 500},
                 timeout_seconds=1.0,
-                required_server_version="2026.6.11",
+                required_server_version="2026.7.1-2",
             )
 
             assert result == {"tasks": []}
@@ -283,7 +283,7 @@ class TestHappyPath:
                     "tasks.list",
                     {"status": "running"},
                     timeout_seconds=1.0,
-                    required_server_version="2026.6.11",
+                    required_server_version="2026.7.1-2",
                 )
         finally:
             server.close()

@@ -27,7 +27,7 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 
 ```bash
 node --version                 # must be >= 22
-openclaw --version             # expected local install: 2026.6.11 or newer
+openclaw --version             # expected local install: exactly 2026.7.1-2
 openclaw plugins install @openclaw/codex
 openclaw models auth login --provider openai
 openclaw models list --provider openai
@@ -93,13 +93,13 @@ or model.
   portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
   store. Do not replace this with API-key fallback.
 - Keep `agents.defaults.compaction.mode` at `default` for Codex. In OpenClaw
-  2026.6.11, `safeguard` can send automatic CLI-budget compaction through the
+  2026.7.1-2, `safeguard` can send automatic CLI-budget compaction through the
   generic OpenAI API-key path after Codex declines non-manual native
   compaction. This repo uses Codex OAuth only, so `safeguard` causes false
   `No API key found for provider "openai"` failures.
 - The gateway pre-start verifier at
   `scripts/ensure-openclaw-codex-runtime.mjs` is mandatory infrastructure. It
-  patches only the known 2026.6.11 branch that turns Codex's intentional
+  patches only the known 2026.7.1-2 branch that turns Codex's intentional
   automatic-compaction deferral into a generic API-key fallback. It must fail
   closed when the package version or source shape changes; do not replace it
   with a provider fallback or an API key.

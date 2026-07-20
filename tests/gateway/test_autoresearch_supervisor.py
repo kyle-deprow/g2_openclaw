@@ -800,7 +800,7 @@ def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
                 "status": "running",
                 "runtime": "subagent",
                 "agentId": "reviewer",
-                # OpenClaw 2026.6.11 maps TaskRecord.requesterSessionKey here.
+                # OpenClaw 2026.7.1-2 maps TaskRecord.requesterSessionKey here.
                 "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
                 # The normal sessions_spawn path sets ownerKey to that same requester.
                 "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,

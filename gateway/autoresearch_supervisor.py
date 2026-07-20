@@ -60,8 +60,8 @@ DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS = 0.05
 READ_ONLY_TASK_LIST_ATTEMPTS = 3
 READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
-REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
-REQUIRED_OPENCLAW_VERSION_TEXT = ".".join(str(part) for part in REQUIRED_OPENCLAW_VERSION)
+REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
+REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
 DEFAULT_TASK_RPC_TIMEOUT_SECONDS = 30.0
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
@@ -512,7 +512,7 @@ class TaskProvenance(StrEnum):
 
 
 class CanonicalTaskStatus(StrEnum):
-    """OpenClaw 2026.6.11 gateway task-ledger statuses."""
+    """OpenClaw 2026.7.1-2 gateway task-ledger statuses."""
 
     QUEUED = "queued"
     RUNNING = "running"
@@ -566,7 +566,7 @@ def _preferred_recovery_error(
 
 
 def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
-    """Classify the two exact OpenClaw 2026.6.11 task-list projections."""
+    """Classify the two exact OpenClaw 2026.7.1-2 task-list projections."""
     # The CLI emits raw TaskRecord.requesterSessionKey. Gateway tasks.list maps
     # that same field to TaskSummary.sessionKey. If both appear they must agree.
     raw_requester_key = task.get("requesterSessionKey")

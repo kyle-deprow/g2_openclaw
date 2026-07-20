@@ -42,8 +42,8 @@ _MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
 _MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
 _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
-_REQUIRED_OPENCLAW_VERSION = (2026, 6, 11)
-_REQUIRED_OPENCLAW_VERSION_TEXT = ".".join(str(part) for part in _REQUIRED_OPENCLAW_VERSION)
+_REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
+_REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
 _mempalace_kg_path_option = typer.Option(
     None,
     "--mempalace-kg-path",
@@ -1493,12 +1493,17 @@ def push_config(
             "  Restarting OpenClaw daemon on port "
             f"{openclaw_port} via {openclaw.path} (version {openclaw.version_text})…"
         )
-        subprocess.run(
+        restart_result = subprocess.run(
             [str(openclaw.path), "daemon", "restart"],
             check=False,
             capture_output=True,
             env=_openclaw_daemon_env(),
         )
+        if restart_result.returncode != 0:
+            console.print(
+                f"[red]✗[/red] Daemon restart failed (exit code {restart_result.returncode})"
+            )
+            raise typer.Exit(code=1)
         _wait_for_port(openclaw_port, label="OpenClaw daemon")
         daemon_restarted = True
 
