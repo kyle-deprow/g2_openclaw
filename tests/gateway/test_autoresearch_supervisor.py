@@ -665,10 +665,11 @@ def test_supervisor_fails_closed_for_an_invalid_wake_response(
         supervisor.run_once()
 
 
-def test_active_owner_lifecycle_for_the_exact_session_suppresses_recovery(
-    supervisor_env: SupervisorEnv,
+@pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
+def test_fresh_owner_lifecycle_short_circuits_owner_stages_before_task_listing(
+    supervisor_env: SupervisorEnv, phase: Phase
 ) -> None:
-    _prepare_stale_state(supervisor_env)
+    _prepare_stale_state(supervisor_env, phase=phase)
     now = supervisor_env.now
     sessions_path = supervisor_env.sessions_path
     sessions_path.write_text(
@@ -689,9 +690,156 @@ def test_active_owner_lifecycle_for_the_exact_session_suppresses_recovery(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "active_owner_session"
+    assert fake.task_list_calls == 0
+    assert fake.rpc_calls == []
 
 
-def test_terminal_task_with_fresh_owner_lifecycle_suppresses_duplicate_recovery(
+def test_fresh_owner_lifecycle_does_not_short_circuit_setup_context(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.SETUP_CONTEXT)
+    now = supervisor_env.now
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(now * 1000) - 1_000,
+                    "lastInteractionAt": int(now * 1000) - 1_000,
+                    "sessionStartedAt": int(now * 1000) - 2_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_owner_session"
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def test_fresh_updated_at_does_not_hide_stale_owner_interaction(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    now = supervisor_env.now
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(now * 1000) - 1_000,
+                    "lastInteractionAt": int(now * 1000) - 301_000,
+                    "startedAt": int(now * 1000) - 1_000,
+                    "sessionStartedAt": int(now * 1000) - 1_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "stale_running_owner_session")
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+@pytest.mark.parametrize("contents", ["{", '{"owner":'])
+def test_corrupt_owner_session_store_reconciles_before_failing_closed(
+    supervisor_env: SupervisorEnv, contents: str
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text(contents, encoding="utf-8")
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_session_store_unavailable")
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def test_unreadable_owner_session_store_reconciles_before_failing_closed(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.unlink()
+    supervisor_env.sessions_path.mkdir()
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_session_store_unavailable")
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def test_run_forever_does_not_terminate_for_a_corrupt_owner_session_store(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text("{", encoding="utf-8")
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake)
+
+    def request_stop(_seconds: float) -> None:
+        signal_harness.trigger(signal.SIGTERM)
+
+    monkeypatch.setattr(supervisor, "_sleep", request_stop)
+
+    assert supervisor.run_forever() == 0
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def test_stale_running_owner_lifecycle_still_reconciles_and_fails_closed(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    now = supervisor_env.now
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "updatedAt": int(now * 1000) - 301_000,
+                    "lastInteractionAt": int(now * 1000) - 301_000,
+                    "startedAt": int(now * 1000) - 302_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "stale_running_owner_session")
+    assert fake.task_list_calls == 1
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def test_non_running_owner_lifecycle_still_reconciles_and_wakes(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"status": "idle"}}),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert fake.task_list_calls == 2
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list", "tasks.list", "agent"]
+
+
+def test_fresh_owner_lifecycle_still_reconciles_child_agent_stages(
     supervisor_env: SupervisorEnv,
 ) -> None:
     _prepare_stale_state(supervisor_env, phase=Phase.IMPLEMENTATION)
@@ -724,6 +872,8 @@ def test_terminal_task_with_fresh_owner_lifecycle_suppresses_duplicate_recovery(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "active_owner_session"
+    assert fake.task_list_calls == 1
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list", "tasks.get"]
     assert not any(method == "agent" for method, _ in fake.rpc_calls)
 
 

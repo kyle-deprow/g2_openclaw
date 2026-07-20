@@ -99,6 +99,8 @@ MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
 )
 PROVIDER_BLOCKED_ALERT_REASON = "control_plane_provider_blocked"
 MISSING_VERIFICATION_ARTIFACT_REASON = "missing_verification_artifact"
+OWNER_SESSION_STORE_UNAVAILABLE_REASON = "owner_session_store_unavailable"
+EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES = frozenset({Phase.VERIFICATION, Phase.DECISION_LOG})
 
 
 @dataclass(frozen=True, slots=True)
@@ -925,6 +927,10 @@ class AutoresearchSupervisor:
                 SupervisorOutcome.ALERT,
                 f"platform_readiness_blocked: {exc}",
             )
+        if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
+            lifecycle_result = self._owner_lifecycle_guard(state)
+            if lifecycle_result is not None and lifecycle_result.reason == "active_owner_session":
+                return lifecycle_result
         try:
             reconciled_tasks = self._reconciled_running_tasks(shutdown_requested=shutdown_requested)
         except TaskReconciliationError:
@@ -1128,11 +1134,14 @@ class AutoresearchSupervisor:
                 return SupervisorResult(SupervisorOutcome.ALERT, "stale_expected_stage_task")
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_expected_stage_task")
         lifecycle_result = self._owner_lifecycle_guard(state)
-        if lifecycle_result is not None and (
-            lifecycle_result.reason == "active_owner_session"
-            or not reconciled_tasks.terminal_task_seen
-        ):
-            return lifecycle_result
+        if lifecycle_result is not None:
+            if lifecycle_result.reason == OWNER_SESSION_STORE_UNAVAILABLE_REASON:
+                return lifecycle_result
+            if (
+                lifecycle_result.reason == "active_owner_session"
+                or not reconciled_tasks.terminal_task_seen
+            ):
+                return lifecycle_result
         fresh = [
             task
             for task in running_tasks
@@ -1145,7 +1154,10 @@ class AutoresearchSupervisor:
         return None
 
     def _owner_lifecycle_guard(self, state: AutoresearchState) -> SupervisorResult | None:
-        store = self._load_owner_session_store()
+        try:
+            store = self._load_owner_session_store()
+        except SupervisorError:
+            return SupervisorResult(SupervisorOutcome.ALERT, OWNER_SESSION_STORE_UNAVAILABLE_REASON)
         lifecycle = store.get(AUTORESEARCH_OWNER_SESSION_KEY)
         if lifecycle is None:
             return None
@@ -1479,13 +1491,12 @@ def _task_last_event_ms(task: Mapping[str, object]) -> int | None:
 
 
 def _running_lifecycle_last_event_ms(lifecycle: Mapping[str, object]) -> int:
-    values: list[int] = []
-    for field_name in ("updatedAt", "lastInteractionAt", "startedAt"):
-        value = lifecycle.get(field_name)
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise SupervisorError(f"running owner lifecycle entry is missing integer {field_name}")
-        values.append(value)
-    return max(values)
+    # OpenClaw's sessions.json uses updatedAt for record writes; lastInteractionAt
+    # is the only lifecycle field that evidences activity for a running session.
+    value = lifecycle.get("lastInteractionAt")
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SupervisorError("running owner lifecycle entry is missing integer lastInteractionAt")
+    return value
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
