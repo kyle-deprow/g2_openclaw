@@ -28,7 +28,11 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 ```bash
 node --version                 # must be >= 22
 openclaw --version             # expected local install: exactly 2026.7.1-2
-openclaw plugins install @openclaw/codex
+openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
+openclaw plugins update codex
+openclaw plugins enable codex
+openclaw plugins inspect codex --json  # plugin 2026.7.1-1, @openai/codex 0.144.3
+openclaw daemon install --force --port 18789 --json
 openclaw models auth login --provider openai
 openclaw models list --provider openai
 openclaw models status --plain
@@ -74,7 +78,8 @@ or model.
 
 ## Validation Checklist
 
-1. `openclaw plugins list` shows the Codex plugin enabled.
+1. `openclaw plugins inspect codex --json` reports plugin `2026.7.1-1`, enabled
+   and loaded, with embedded `@openai/codex` `0.144.3`.
 2. `openclaw models list --provider openai` lists the selected model.
 3. `openclaw models status --plain` reports a usable OpenAI/Codex route.
 4. `openclaw gateway health` succeeds after restart.
@@ -103,10 +108,19 @@ or model.
   automatic-compaction deferral into a generic API-key fallback. It must fail
   closed when the package version or source shape changes; do not replace it
   with a provider fallback or an API key.
+- Treat core, plugin, and embedded app-server versions as one exact runtime
+  tuple: OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, and
+  `@openai/codex` `0.144.3`. Do not use minimum-version checks or unpinned
+  installs. Bootstrap runs `openclaw plugins update codex` because a core
+  upgrade can leave the tracked plugin stale, then verifies all three versions.
+- After every OpenClaw install or upgrade, run
+  `openclaw daemon install --force --port 18789 --json`. A package upgrade can
+  leave `openclaw-gateway.service` pointing into the old global package. This
+  command rewrites the unit; it does not start or restart the service.
 - Prefer canonical model refs like `openai/gpt-5.4` or `openai/gpt-5.5` in
   OpenClaw config. Legacy Codex-prefixed refs should be repaired with
   `openclaw doctor --fix`.
 - Do not configure legacy external coding-agent runtimes. OpenClaw coding and
   research work goes through Codex subagents.
-- If the Codex plugin command is unavailable after an OpenClaw upgrade, rerun
-  `openclaw plugins install @openclaw/codex` and restart the gateway.
+- If Codex inspection fails after an upgrade, rerun `bash scripts/bootstrap.sh`;
+  do not fall back to another plugin, provider, or app-server binary.

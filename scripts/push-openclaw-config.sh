@@ -39,7 +39,8 @@ CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DRO
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
-REQUIRED_CODEX_APP_SERVER_VERSION="0.144.1"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
@@ -391,6 +392,40 @@ require_openclaw_supported() {
   return 0
 }
 
+require_codex_runtime_exact() {
+  local inspect_json plugin_version app_server_version
+  if ! inspect_json="$(run_openclaw_cli plugins inspect codex --json)"; then
+    echo "ERROR: Could not inspect the required Codex plugin." >&2
+    return 1
+  fi
+  if ! echo "${inspect_json}" | jq -e '
+    .plugin.id == "codex"
+    and .plugin.enabled == true
+    and .plugin.status == "loaded"
+  ' >/dev/null; then
+    echo "ERROR: Required Codex plugin is not installed, enabled, and loaded." >&2
+    echo "       Run bootstrap to reconcile the exact OpenClaw/Codex runtime tuple." >&2
+    return 1
+  fi
+  plugin_version="$(echo "${inspect_json}" | jq -r '.plugin.version // empty')"
+  app_server_version="$(echo "${inspect_json}" | jq -r '
+    .plugin.dependencyStatus.dependencies[]?
+    | select(.name == "@openai/codex")
+    | .spec
+  ' | head -n1)"
+  if [[ "${plugin_version}" != "${REQUIRED_CODEX_PLUGIN_VERSION}" ]]; then
+    echo "ERROR: Codex plugin ${plugin_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_PLUGIN_VERSION}." >&2
+    echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
+    return 1
+  fi
+  if [[ "${app_server_version}" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
+    echo "ERROR: Embedded @openai/codex ${app_server_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_APP_SERVER_VERSION}." >&2
+    echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
+    return 1
+  fi
+  echo "Codex runtime validated: @openclaw/codex ${plugin_version} embeds @openai/codex ${app_server_version}"
+}
+
 ROLLBACK_ARMED=0
 
 rollback_local_config_on_exit() {
@@ -587,6 +622,13 @@ if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_AP
   echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
   echo "       Set it in ${ENV_FILE} or export it before running this script." >&2
   exit 1
+fi
+
+if [[ "${OPENCLAW_PROVIDER:-codex}" == "codex" ]]; then
+  echo "Running preflight: ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
+  if ! require_codex_runtime_exact; then
+    exit 1
+  fi
 fi
 
 # ── Backup ───────────────────────────────────────────────────────────────────
@@ -1067,38 +1109,6 @@ echo "Running: ${OPENCLAW_BIN_RESOLVED} config validate"
 if ! run_openclaw_cli config validate; then
   echo "ERROR: '${OPENCLAW_BIN_RESOLVED} config validate' failed. Restored backup ${BACKUP}." >&2
   exit 1
-fi
-if [[ "${PROVIDER}" == "codex" ]]; then
-  echo "Running: ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
-  CODEX_PLUGIN_INSPECT_JSON="$(run_openclaw_cli plugins inspect codex --json)"
-  if ! echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -e '
-    .plugin.id == "codex"
-    and .plugin.enabled == true
-    and .plugin.status == "loaded"
-  ' >/dev/null; then
-    echo "ERROR: Required Codex plugin is not installed, enabled, and loaded. Restored backup ${BACKUP}." >&2
-    echo "       Run: ${OPENCLAW_BIN_RESOLVED} plugins install @openclaw/codex" >&2
-    exit 1
-  fi
-  CODEX_APP_SERVER_VERSION="$(echo "${CODEX_PLUGIN_INSPECT_JSON}" | jq -r '
-    .. | objects
-    | select(has("dependencyStatus"))
-    | .dependencyStatus.dependencies[]?
-    | select(.name == "@openai/codex")
-    | .spec
-  ' | head -n1)"
-  if [[ -z "${CODEX_APP_SERVER_VERSION}" || "${CODEX_APP_SERVER_VERSION}" == "null" ]]; then
-    echo "ERROR: Could not determine embedded @openai/codex version. Restored backup ${BACKUP}." >&2
-    exit 1
-  fi
-  if [[ "$(printf '%s\n%s\n' "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${CODEX_APP_SERVER_VERSION}" | sort -V | head -n1)" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
-    echo "ERROR: Embedded @openai/codex ${CODEX_APP_SERVER_VERSION} is too old for GPT-5.6. Restored backup ${BACKUP}." >&2
-    echo "       Need @openai/codex >= ${REQUIRED_CODEX_APP_SERVER_VERSION} in the @openclaw/codex plugin project." >&2
-    echo "       First try: ${OPENCLAW_BIN_RESOLVED} plugins install @openclaw/codex --force" >&2
-    echo "       If @openclaw/codex still pins an older Codex package, update the plugin project's nested @openai/codex dependency." >&2
-    exit 1
-  fi
-  echo "Codex app-server version validated: @openai/codex ${CODEX_APP_SERVER_VERSION}"
 fi
 
 # Install the supervisor definition without starting autonomous work. The

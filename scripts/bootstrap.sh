@@ -22,6 +22,9 @@ HAS_GPU=false
 GPU_NAME=""
 SUMMARY_ITEMS=()
 REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"
+OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 OPENCLAW_INSTALLED_PATH=""
@@ -241,6 +244,37 @@ preflight_openclaw_override() {
   fi
 }
 
+require_codex_plugin_exact() {
+  local inspect_json plugin_version app_server_version
+  if ! inspect_json="$("${OPENCLAW_BIN_RESOLVED}" plugins inspect codex --json)"; then
+    fail "Could not inspect the required Codex plugin"
+    return 1
+  fi
+  if ! echo "${inspect_json}" | jq -e '
+    .plugin.id == "codex"
+    and .plugin.enabled == true
+    and .plugin.status == "loaded"
+  ' >/dev/null; then
+    fail "Required Codex plugin is not installed, enabled, and loaded"
+    return 1
+  fi
+  plugin_version="$(echo "${inspect_json}" | jq -r '.plugin.version // empty')"
+  app_server_version="$(echo "${inspect_json}" | jq -r '
+    .plugin.dependencyStatus.dependencies[]?
+    | select(.name == "@openai/codex")
+    | .spec
+  ' | head -n1)"
+  if [[ "${plugin_version}" != "${REQUIRED_CODEX_PLUGIN_VERSION}" ]]; then
+    fail "Codex plugin ${plugin_version:-<unknown>} is unsupported — need exactly ${REQUIRED_CODEX_PLUGIN_VERSION}"
+    return 1
+  fi
+  if [[ "${app_server_version}" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
+    fail "Embedded @openai/codex ${app_server_version:-<unknown>} is unsupported — need exactly ${REQUIRED_CODEX_APP_SERVER_VERSION}"
+    return 1
+  fi
+  ok "Codex plugin ${plugin_version} embeds @openai/codex ${app_server_version}"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Check system prerequisites
 # ══════════════════════════════════════════════════════════════════════════════
@@ -399,18 +433,30 @@ setup_openclaw() {
     ok "OpenClaw config found: $oc_config"
   fi
 
-  # --- Install/enable required Codex plugin and remove Copilot routes ---
+  # --- Reconcile the exact Codex plugin/runtime tuple and remove Copilot routes ---
   info "Using OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
-  if "${OPENCLAW_BIN_RESOLVED}" plugins install @openclaw/codex; then
-    ok "Codex plugin installed/upgraded"
-    summary_add "OpenClaw: Codex plugin installed/upgraded"
-  else
-    fail "Codex plugin install failed — required for OpenAI/Codex routing"
+  if ! "${OPENCLAW_BIN_RESOLVED}" plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin; then
+    fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
+    exit 1
+  fi
+  if ! "${OPENCLAW_BIN_RESOLVED}" plugins update codex; then
+    fail "Codex plugin update reconciliation failed"
     exit 1
   fi
   "${OPENCLAW_BIN_RESOLVED}" plugins enable codex
+  if ! require_codex_plugin_exact; then
+    exit 1
+  fi
+  summary_add "OpenClaw: Codex plugin ${REQUIRED_CODEX_PLUGIN_VERSION} (@openai/codex ${REQUIRED_CODEX_APP_SERVER_VERSION})"
   "${OPENCLAW_BIN_RESOLVED}" plugins disable github-copilot || true
   "${OPENCLAW_BIN_RESOLVED}" plugins disable copilot-proxy || true
+
+  # Core package upgrades can leave the unit's ExecStart on the old package path.
+  if ! "${OPENCLAW_BIN_RESOLVED}" daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json; then
+    fail "OpenClaw gateway service installation failed"
+    exit 1
+  fi
+  ok "OpenClaw gateway service reconciled on port ${OPENCLAW_GATEWAY_PORT} (not started)"
 
   # --- Install required MemPalace MCP server ---
   if make -C "$REPO_ROOT" mempalace-install; then

@@ -103,6 +103,87 @@ fi
     )
 
 
+def _run_mocked_bootstrap_openclaw_flow(
+    tmp_path: Path,
+    *,
+    daemon_install_exit: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    home = tmp_path / "home"
+    flow_log = tmp_path / "bootstrap-flow.log"
+    mock_openclaw = tmp_path / "mock-bin/openclaw"
+    (home / ".openclaw").mkdir(parents=True)
+    (home / ".openclaw/openclaw.json").write_text("{}\n", encoding="utf-8")
+    _write_executable(
+        mock_openclaw,
+        r"""
+printf 'openclaw %s\n' "$*" >> "$FLOW_LOG"
+case "${1:-}" in
+  plugins)
+    if [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]]; then
+      cat <<'JSON'
+{
+  "plugin": {
+    "id": "codex",
+    "version": "2026.7.1-1",
+    "enabled": true,
+    "status": "loaded",
+    "dependencyStatus": {
+      "dependencies": [{"name": "@openai/codex", "spec": "0.144.3"}]
+    }
+  }
+}
+JSON
+    fi
+    ;;
+  daemon)
+    [[ "$*" == "daemon install --force --port 18789 --json" ]] || exit 91
+    exit "$DAEMON_INSTALL_EXIT"
+    ;;
+  *)
+    exit 92
+    ;;
+esac
+""".strip(),
+    )
+    mempalace_python = home / ".local/share/mempalace/venv/bin/python"
+    _write_executable(
+        mempalace_python,
+        'printf \'mempalace %s\\n\' "$*" >> "$FLOW_LOG"',
+    )
+    command = r"""
+bootstrap_script="$1"
+mock_openclaw="$2"
+set --
+source "$bootstrap_script"
+ensure_openclaw_exact_version() {
+  OPENCLAW_BIN_RESOLVED="$mock_openclaw"
+  OPENCLAW_VERSION_RESOLVED="$REQUIRED_OPENCLAW_VERSION"
+  export OPENCLAW_BIN="$OPENCLAW_BIN_RESOLVED"
+}
+make() {
+  printf 'make %s\n' "$*" >> "$FLOW_LOG"
+}
+bash() {
+  printf 'push-config %s\n' "$*" >> "$FLOW_LOG"
+}
+setup_openclaw
+"""
+    result = subprocess.run(
+        ["bash", "-c", command, "bootstrap-flow-test", str(BOOTSTRAP_SCRIPT), str(mock_openclaw)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_base_subprocess_env(
+            home,
+            {
+                "DAEMON_INSTALL_EXIT": str(daemon_install_exit),
+                "FLOW_LOG": str(flow_log),
+            },
+        ),
+    )
+    return result, flow_log
+
+
 def _runtime_caps_dropin_dst(home: Path) -> Path:
     return home / ".config/systemd/user/openclaw-gateway.service.d/10-quantipy-runtime-caps.conf"
 
@@ -155,15 +236,16 @@ case "${1:-}" in
     ;;
   plugins)
     [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 45
-    cat <<'JSON'
+    cat <<JSON
 {
   "plugin": {
     "id": "codex",
+    "version": "${MOCK_CODEX_PLUGIN_VERSION:-2026.7.1-1}",
     "enabled": true,
     "status": "loaded",
     "dependencyStatus": {
       "dependencies": [
-        {"name": "@openai/codex", "spec": "0.144.1"}
+        {"name": "@openai/codex", "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.144.3}"}
       ]
     }
   }
@@ -414,6 +496,87 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
     assert "main interface split, autoresearch-pm model" in script
     assert "main interface restrictions" in script
+
+
+def test_bootstrap_reconciles_exact_codex_runtime_and_reinstalls_daemon() -> None:
+    script = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'REQUIRED_OPENCLAW_VERSION="2026.7.1-2"' in script
+    assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"' in script
+    assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"' in script
+    install = script.index(
+        'plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin'
+    )
+    update = script.index("plugins update codex")
+    inspect = script.index("if ! require_codex_plugin_exact; then", update)
+    daemon_install = script.index('daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json')
+    push = script.index('local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"')
+
+    assert install < update < inspect < daemon_install < push
+    assert "daemon restart" not in script
+    assert "daemon start" not in script
+
+
+def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Path) -> None:
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw plugins inspect codex --json",
+        "openclaw plugins disable github-copilot",
+        "openclaw plugins disable copilot-proxy",
+        "openclaw daemon install --force --port 18789 --json",
+        f"make -C {REPO_ROOT} mempalace-install",
+        f"mempalace {REPO_ROOT}/scripts/check-mempalace-health.py",
+        f"push-config {PUSH_SCRIPT}",
+    ]
+
+
+def test_mocked_bootstrap_daemon_install_failure_aborts_before_push(tmp_path: Path) -> None:
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(tmp_path, daemon_install_exit=73)
+
+    assert result.returncode == 1
+    commands = flow_log.read_text(encoding="utf-8").splitlines()
+    assert commands[-1] == "openclaw daemon install --force --port 18789 --json"
+    assert not any(command.startswith("make ") for command in commands)
+    assert not any(command.startswith("mempalace ") for command in commands)
+    assert not any(command.startswith("push-config ") for command in commands)
+    assert "OpenClaw gateway service installation failed" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("env_name", "actual", "expected_error"),
+    [
+        (
+            "MOCK_CODEX_PLUGIN_VERSION",
+            "2026.7.1-2",
+            "Codex plugin 2026.7.1-2 is unsupported; need exactly 2026.7.1-1",
+        ),
+        (
+            "MOCK_CODEX_APP_SERVER_VERSION",
+            "0.144.4",
+            "Embedded @openai/codex 0.144.4 is unsupported; need exactly 0.144.3",
+        ),
+    ],
+)
+def test_push_script_rejects_non_exact_codex_runtime(
+    tmp_path: Path,
+    env_name: str,
+    actual: str,
+    expected_error: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env[env_name] = actual
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert not Path(env["CP_LOG"]).exists()
 
 
 def test_push_script_installs_but_does_not_start_the_supervisor_service() -> None:

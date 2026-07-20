@@ -24,24 +24,38 @@ sudo npm install -g openclaw@2026.7.1-2
 # 2. Create the ~/.openclaw/ scaffold
 openclaw onboard --local
 
-# 3. Install/enable the Codex plugin, then authenticate OpenAI/Codex
-openclaw plugins install @openclaw/codex
+# 3. Reconcile the exact Codex plugin/runtime tuple, then authenticate
+openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
+openclaw plugins update codex
+openclaw plugins enable codex
+openclaw plugins inspect codex --json  # must embed @openai/codex 0.144.3
 openclaw models auth login --provider openai
 
-# 4. Install/upgrade required MemPalace MCP server
+# 4. Rewrite the user service so ExecStart targets this exact core package
+openclaw daemon install --force --port 18789 --json
+
+# 5. Install/upgrade required MemPalace MCP server
 make mempalace-install
 
-# 5. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
+# 6. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 6. Push config + install the Codex runtime verifier (merges provider/runtime config and copies bootstrap files)
+# 7. Push config + install the Codex runtime verifier (merges provider/runtime config and copies bootstrap files)
 uv run python -m gateway push-config
 
-# 7. Launch everything
+# 8. Launch everything
 uv run python -m gateway launch
 ```
 
-Steps 4 and 6 are idempotent. Re-run the push step after any config change or
+The full path is also available as `bash scripts/bootstrap.sh`. The exact
+supported tuple is OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, and
+embedded `@openai/codex` `0.144.3`; newer and older versions both fail closed.
+The plugin update is intentional even after the exact pinned install because
+OpenClaw upgrades do not reliably reconcile an existing tracked plugin.
+`daemon install --force` rewrites the systemd unit but does not start or restart
+the service.
+
+Steps 3-5 and 7 are idempotent. Re-run the push step after any config change or
 key rotation. The push step copies OpenClaw's local Codex OAuth profile from
 the `main` agent into each managed autoresearch agent's own auth store; this is
 required because some OpenClaw Codex compaction paths read the per-agent SQLite
@@ -105,15 +119,27 @@ these settings into the local config with `jq`, preserving everything else.
 
 > **First time?** See the [Cold-Start Install](#cold-start-install-fresh-machine) section above.
 
-### 1. Install the Codex plugin and authenticate OpenAI/Codex
+### 1. Install or upgrade the exact OpenClaw/Codex runtime
 
 The default provider is `codex`, which uses OpenAI/Codex OAuth auth managed by
 OpenClaw, not an OpenAI API key:
 
 ```bash
-openclaw plugins install @openclaw/codex
+openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
+openclaw plugins update codex
+openclaw plugins enable codex
+openclaw plugins inspect codex --json
+openclaw daemon install --force --port 18789 --json
 openclaw models auth login --provider openai
 ```
+
+The inspect result must report plugin version `2026.7.1-1` and dependency
+`@openai/codex` spec `0.144.3`. Reinstalling the core CLI alone is incomplete:
+an existing plugin can remain stale, and the user systemd unit can retain an
+`ExecStart` path into the old global package. The explicit plugin update and
+forced daemon install repair both forms of upgrade drift without starting or
+restarting the gateway. Run `bash scripts/bootstrap.sh` to execute and validate
+this sequence automatically.
 
 No OpenAI key is stored in this repo. The login populates the local OpenClaw
 auth store. `scripts/push-openclaw-config.sh` then syncs the portable auth
@@ -268,7 +294,7 @@ control commands communicate with OpenClaw there directly.
 |---|---|
 | Auth | `openclaw models auth login --provider openai`, then push config to sync the OAuth profile into managed agent stores |
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
-| Plugin | `codex` plugin enabled; install with `openclaw plugins install @openclaw/codex` if needed |
+| Plugin | `@openclaw/codex` exactly `2026.7.1-1`, enabled, embedding `@openai/codex` exactly `0.144.3` |
 | Default stage model | `openai/gpt-5.4` |
 | G2 interface model | `openai/gpt-5.4` for `main` |
 | Autoresearch PM model | `openai/gpt-5.6-sol` for `autoresearch-pm` |
