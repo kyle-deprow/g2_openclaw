@@ -1,9 +1,10 @@
 [Unit]
 Description=Quantipy Autoresearch Infrastructure Supervisor
 After=openclaw-gateway.service
-Wants=openclaw-gateway.service
-StartLimitIntervalSec=120
-StartLimitBurst=10
+Requires=openclaw-gateway.service
+BindsTo=openclaw-gateway.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -11,8 +12,8 @@ WorkingDirectory=@REPO_ROOT@
 Environment=HOME=@HOME@
 Environment=PATH=@PATH@
 ExecStart=@PYTHON_BIN@ -m gateway.autoresearch_supervisor --interval 60 --grace 120 --log-level INFO
-Restart=always
-RestartSec=10
+Restart=on-failure
+RestartSec=30
 TimeoutStopSec=30
 KillMode=control-group
 

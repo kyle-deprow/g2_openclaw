@@ -22,6 +22,9 @@ GATEWAY_RUNTIME_CAPS_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 )
 CODEX_RUNTIME_DROPIN = REPO_ROOT / "gateway/openclaw_config/openclaw-codex-runtime.conf"
+NATIVE_CRASH_HARDENING_DROPIN = (
+    REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
+)
 
 STAGE_AGENT_IDS = [
     "context-curator",
@@ -52,6 +55,17 @@ EXPECTED_CODEX_RUNTIME_EXECSTARTPRE = (
     "ExecStartPre=/usr/bin/env node "
     "/home/dev/repos/g2_openclaw/scripts/ensure-openclaw-codex-runtime.mjs"
 )
+EXPECTED_NATIVE_CRASH_HARDENING_LINES = [
+    "[Service]",
+    "MemoryHigh=6G",
+    "MemoryMax=7G",
+    "OOMPolicy=kill",
+    (
+        "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV "
+        "SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
+    ),
+]
+EXPECTED_NATIVE_CRASH_HARDENING_TEXT = "\n".join(EXPECTED_NATIVE_CRASH_HARDENING_LINES) + "\n"
 SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM")
 
 
@@ -192,6 +206,18 @@ def _codex_runtime_dropin_dst(home: Path) -> Path:
     return home / ".config/systemd/user/openclaw-gateway.service.d/20-openclaw-codex-runtime.conf"
 
 
+def _native_crash_hardening_dropin_dst(home: Path) -> Path:
+    return (
+        home
+        / ".config/systemd/user/openclaw-gateway.service.d"
+        / "30-openclaw-native-crash-hardening.conf"
+    )
+
+
+def _supervisor_unit_dst(home: Path) -> Path:
+    return home / ".config/systemd/user/quantipy-autoresearch-supervisor.service"
+
+
 def _write_push_script_fixture_bin(
     home: Path,
     *,
@@ -297,12 +323,13 @@ case "$*" in
     exit 0
     ;;
   "--user daemon-reload")
-    dropin="$HOME/.config/systemd/user/openclaw-gateway.service.d"
-    dropin="$dropin/10-quantipy-runtime-caps.conf"
-    if [[ -f "$dropin" ]]; then
-      printf 'daemon-reload saw dropin\n' >> "$SYSTEMCTL_LOG"
+    dropin_dir="$HOME/.config/systemd/user/openclaw-gateway.service.d"
+    if [[ -f "$dropin_dir/10-quantipy-runtime-caps.conf" \
+      && -f "$dropin_dir/20-openclaw-codex-runtime.conf" \
+      && -f "$dropin_dir/30-openclaw-native-crash-hardening.conf" ]]; then
+      printf 'daemon-reload saw managed dropins\n' >> "$SYSTEMCTL_LOG"
     else
-      printf 'daemon-reload missing dropin\n' >> "$SYSTEMCTL_LOG"
+      printf 'daemon-reload missing managed dropin\n' >> "$SYSTEMCTL_LOG"
     fi
     if [[ "${{FAIL_DAEMON_RELOAD:-0}}" == "1" ]]; then
       printf 'daemon-reload failed by test\n' >&2
@@ -594,6 +621,11 @@ def test_push_script_installs_but_does_not_start_the_supervisor_service() -> Non
     assert "Environment=OPENCLAW_BIN=" not in template
     assert "Environment=OPENCLAW_HOME=" not in template
     assert "-m gateway.autoresearch_supervisor" in template
+    assert "After=openclaw-gateway.service" in template
+    assert "Requires=openclaw-gateway.service" in template
+    assert "BindsTo=openclaw-gateway.service" in template
+    assert "Restart=on-failure" in template
+    assert "Restart=always" not in template
 
 
 def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
@@ -609,6 +641,13 @@ def test_codex_runtime_dropin_declares_prestart_verifier() -> None:
     ]
 
 
+def test_native_crash_hardening_dropin_contains_memory_and_restart_policy() -> None:
+    assert NATIVE_CRASH_HARDENING_DROPIN.read_text(encoding="utf-8").splitlines() == (
+        EXPECTED_NATIVE_CRASH_HARDENING_LINES
+    )
+    assert "OOMPolicy=continue" not in NATIVE_CRASH_HARDENING_DROPIN.read_text(encoding="utf-8")
+
+
 def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
@@ -619,6 +658,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert 'GATEWAY_SERVICE_NAME="openclaw-gateway.service"' in script
     assert 'GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"' in script
     assert 'CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"' in script
+    assert 'NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"' in script
     assert (
         'GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"'
     ) in script
@@ -637,12 +677,15 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert "prepare_runtime_caps_dropin_dir" in script
     assert ('chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"') in script
     assert ('validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"') in script
-    assert script.count("systemctl --user daemon-reload") == 2
+    assert script.count("systemctl --user daemon-reload") == 3
     assert "GATEWAY_RUNTIME_CAPS_DROPIN" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_DST" in script
     assert "validate_codex_runtime_dropin_file" in script
     assert "CODEX_RUNTIME_DROPIN_DST" in script
+    assert "validate_native_crash_hardening_dropin_file" in script
+    assert "NATIVE_CRASH_HARDENING_DROPIN_DST" in script
+    assert "validate_supervisor_unit_file" in script
     assert "daemon-reload ||" not in script
     assert (
         'cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" ||'
@@ -690,8 +733,19 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
     codex_dropin = _codex_runtime_dropin_dst(home)
     assert codex_dropin.read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
+    native_crash_hardening = _native_crash_hardening_dropin_dst(home)
+    assert (
+        native_crash_hardening.read_text(encoding="utf-8") == EXPECTED_NATIVE_CRASH_HARDENING_TEXT
+    )
+    supervisor_unit = home / ".config/systemd/user/quantipy-autoresearch-supervisor.service"
+    supervisor_text = supervisor_unit.read_text(encoding="utf-8")
+    assert "Requires=openclaw-gateway.service" in supervisor_text
+    assert "BindsTo=openclaw-gateway.service" in supervisor_text
+    assert "Restart=on-failure" in supervisor_text
+    assert "Restart=always" not in supervisor_text
     assert _mode(dropin_dir) == 0o755
     assert _mode(dropin) == 0o644
+    assert _mode(native_crash_hardening) == 0o644
     assert not list(dropin_dir.glob(".10-quantipy-runtime-caps.conf.*"))
     assert not (Path(env["OPENCLAW_PUSH_HOME"]) / "azure-api-version-preload.cjs").exists()
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
@@ -783,6 +837,10 @@ def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     assert (
         _codex_runtime_dropin_dst(home).read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
     )
+    assert (
+        _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8")
+        == EXPECTED_NATIVE_CRASH_HARDENING_TEXT
+    )
     assert _mode(dropin.parent) == 0o755
     assert _mode(dropin) == 0o644
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
@@ -805,20 +863,58 @@ def test_push_script_daemon_reload_runs_after_dropin_install_and_failure_aborts(
     env = _prepare_push_script_home(tmp_path)
     env["FAIL_DAEMON_RELOAD"] = "1"
     home = Path(env["HOME"])
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
 
     result = _run_push_script(env)
 
     assert result.returncode == 23
     assert "daemon-reload failed by test" in result.stderr
+    assert "Restoring managed systemd files after failed publication." in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
-    assert _runtime_caps_dropin_dst(home).read_text(encoding="utf-8") == (EXPECTED_RUNTIME_CAP_TEXT)
+    assert not _supervisor_unit_dst(home).exists()
+    assert not _runtime_caps_dropin_dst(home).exists()
+    assert not _codex_runtime_dropin_dst(home).exists()
+    assert not _native_crash_hardening_dropin_dst(home).exists()
+    assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
+        initial_config
+    )
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
-    assert "daemon-reload saw dropin" in systemctl_log
+    assert "daemon-reload saw managed dropins" in systemctl_log
     assert systemctl_log.index("systemctl --user show openclaw-gateway.service") < (
         systemctl_log.index("systemctl --user daemon-reload")
     )
     assert "restart openclaw-gateway.service" not in systemctl_log
     assert "start openclaw-gateway.service" not in systemctl_log
+
+
+def test_push_script_managed_systemd_publication_rolls_back_existing_files(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    home = Path(env["HOME"])
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+    prior_files = {
+        _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
+        _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
+        _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
+        _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",
+    }
+    for path, content in prior_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 23
+    assert "Restoring managed systemd files after failed publication." in result.stderr
+    for path, content in prior_files.items():
+        assert path.read_text(encoding="utf-8") == content
+        assert _mode(path) == 0o600
+    assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
+        initial_config
+    )
 
 
 def test_bootstrap_npm_install_bypasses_stale_pnpm_candidate(tmp_path: Path) -> None:

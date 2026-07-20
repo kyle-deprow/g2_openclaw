@@ -27,15 +27,18 @@ SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autorese
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 CODEX_RUNTIME_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-codex-runtime.conf"
+NATIVE_CRASH_HARDENING_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
 CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"
+NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"
 STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DROPIN_NAME}"
+NATIVE_CRASH_HARDENING_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${NATIVE_CRASH_HARDENING_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
@@ -86,6 +89,13 @@ RUNTIME_CAP_ENV_LINES=(
   'Environment="NUMEXPR_NUM_THREADS=1"'
   'Environment="VECLIB_MAXIMUM_THREADS=1"'
   'Environment="PYTHONFAULTHANDLER=1"'
+)
+NATIVE_CRASH_HARDENING_LINES=(
+  "[Service]"
+  "MemoryHigh=6G"
+  "MemoryMax=7G"
+  "OOMPolicy=kill"
+  "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
 )
 
 quote_sqlite_literal() {
@@ -245,6 +255,34 @@ validate_codex_runtime_dropin_file() {
   fi
   if ! diff -u "${CODEX_RUNTIME_DROPIN_SRC}" "${path}" >&2; then
     echo "ERROR: OpenClaw Codex runtime drop-in must match the repo-managed pre-start verifier exactly." >&2
+    return 1
+  fi
+}
+
+validate_native_crash_hardening_dropin_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed OpenClaw native-crash hardening drop-in not found at ${path}" >&2
+    return 1
+  fi
+  if ! diff -u <(printf '%s\n' "${NATIVE_CRASH_HARDENING_LINES[@]}") "${path}" >&2; then
+    echo "ERROR: OpenClaw native-crash hardening drop-in must match the repo-managed memory, OOM, and restart policy exactly." >&2
+    return 1
+  fi
+}
+
+validate_supervisor_unit_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed supervisor unit not found at ${path}" >&2
+    return 1
+  fi
+  if ! grep -Fxq "Requires=${GATEWAY_SERVICE_NAME}" "${path}" \
+    || ! grep -Fxq "BindsTo=${GATEWAY_SERVICE_NAME}" "${path}" \
+    || ! grep -Fxq "After=${GATEWAY_SERVICE_NAME}" "${path}" \
+    || ! grep -Fxq "Restart=on-failure" "${path}" \
+    || grep -Fxq "Restart=always" "${path}"; then
+    echo "ERROR: Supervisor unit must bind to ${GATEWAY_SERVICE_NAME} and must not use Restart=always." >&2
     return 1
   fi
 }
@@ -427,6 +465,70 @@ require_codex_runtime_exact() {
 }
 
 ROLLBACK_ARMED=0
+MANAGED_UNIT_TRANSACTION_ARMED=0
+MANAGED_UNIT_BACKUP_DIR=""
+MANAGED_UNIT_PATHS=(
+  "${SUPERVISOR_UNIT_DST}"
+  "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+  "${CODEX_RUNTIME_DROPIN_DST}"
+  "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+)
+MANAGED_UNIT_WAS_PRESENT=()
+
+begin_managed_unit_transaction() {
+  local index path backup_path
+
+  MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
+  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
+    path="${MANAGED_UNIT_PATHS[${index}]}"
+    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
+    if [[ -f "${path}" ]]; then
+      cp -p "${path}" "${backup_path}"
+      MANAGED_UNIT_WAS_PRESENT[${index}]=1
+    else
+      MANAGED_UNIT_WAS_PRESENT[${index}]=0
+    fi
+  done
+  MANAGED_UNIT_TRANSACTION_ARMED=1
+}
+
+rollback_managed_unit_transaction() {
+  local index path backup_path
+
+  if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+      rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
+    fi
+    return
+  fi
+
+  echo "Restoring managed systemd files after failed publication." >&2
+  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
+    path="${MANAGED_UNIT_PATHS[${index}]}"
+    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
+    if [[ "${MANAGED_UNIT_WAS_PRESENT[${index}]:-0}" -eq 1 ]]; then
+      if ! cp -p "${backup_path}" "${path}"; then
+        echo "ERROR: Failed to restore managed systemd file ${path}." >&2
+      fi
+    elif ! rm -f "${path}"; then
+      echo "ERROR: Failed to remove newly installed managed systemd file ${path}." >&2
+    fi
+  done
+  if ! systemctl --user daemon-reload; then
+    echo "ERROR: Failed to reload user systemd units after managed-file rollback." >&2
+  fi
+  rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
+  MANAGED_UNIT_BACKUP_DIR=""
+  MANAGED_UNIT_TRANSACTION_ARMED=0
+}
+
+commit_managed_unit_transaction() {
+  if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+    rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
+  fi
+  MANAGED_UNIT_BACKUP_DIR=""
+  MANAGED_UNIT_TRANSACTION_ARMED=0
+}
 
 rollback_local_config_on_exit() {
   local exit_status=$?
@@ -434,6 +536,8 @@ rollback_local_config_on_exit() {
   rm -f "${SUPERVISOR_UNIT_TMP:-}"
   rm -f "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"
   rm -f "${CODEX_RUNTIME_DROPIN_TMP:-}"
+  rm -f "${NATIVE_CRASH_HARDENING_DROPIN_TMP:-}"
+  rollback_managed_unit_transaction
   if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
     if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
       echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
@@ -509,6 +613,9 @@ if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
   echo "ERROR: Repo-managed supervisor unit template not found at ${SUPERVISOR_UNIT_TEMPLATE}" >&2
   exit 1
 fi
+if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TEMPLATE}"; then
+  exit 1
+fi
 
 if ! validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}"; then
   exit 1
@@ -518,6 +625,9 @@ if [[ ! -x "${REPO_ROOT}/scripts/ensure-openclaw-codex-runtime.mjs" ]]; then
   exit 1
 fi
 if ! validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_SRC}"; then
+  exit 1
+fi
+if ! validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_SRC}"; then
   exit 1
 fi
 
@@ -1125,7 +1235,11 @@ if grep -q '@[A-Z_][A-Z_]*@' "${SUPERVISOR_UNIT_TMP}"; then
   echo "ERROR: Unresolved placeholder in generated ${SUPERVISOR_SERVICE_NAME}." >&2
   exit 1
 fi
+if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TMP}"; then
+  exit 1
+fi
 chmod 0644 "${SUPERVISOR_UNIT_TMP}"
+begin_managed_unit_transaction
 mv "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"
 SUPERVISOR_UNIT_TMP=""
 echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
@@ -1148,9 +1262,18 @@ validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_TMP}"
 mv "${CODEX_RUNTIME_DROPIN_TMP}" "${CODEX_RUNTIME_DROPIN_DST}"
 CODEX_RUNTIME_DROPIN_TMP=""
 validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_DST}"
+NATIVE_CRASH_HARDENING_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${NATIVE_CRASH_HARDENING_DROPIN_NAME}.XXXXXX")"
+cp "${NATIVE_CRASH_HARDENING_DROPIN_SRC}" "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
+chmod 0644 "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
+validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
+mv "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+NATIVE_CRASH_HARDENING_DROPIN_TMP=""
+validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 systemctl --user daemon-reload
+commit_managed_unit_transaction
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} Codex runtime verifier → ${CODEX_RUNTIME_DROPIN_DST}"
+echo "Installed ${GATEWAY_SERVICE_NAME} native-crash hardening → ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
 
 ROLLBACK_ARMED=0

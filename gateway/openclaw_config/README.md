@@ -12,6 +12,7 @@ configuration used by the G2 Gateway.
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
 | `openclaw-codex-runtime.conf` | User-systemd drop-in source for the fail-closed Codex compaction verifier |
+| `openclaw-gateway-native-crash-hardening.conf` | User-systemd drop-in source for OpenClaw memory and native-crash restart containment |
 | `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for non-PM agents |
 | `README.md` | This file |
 
@@ -107,6 +108,11 @@ these settings into the local config with `jq`, preserving everything else.
   `openclaw-gateway.service.d/10-quantipy-runtime-caps.conf` so
   OpenClaw-launched Quantipy children inherit one-thread BLAS/joblib caps and
   `PYTHONFAULTHANDLER=1` after the gateway is externally restarted.
+- **Native-crash containment** — installs a repo-managed user-systemd drop-in
+  with `MemoryHigh=6G`, `MemoryMax=7G`, `OOMPolicy=kill`, and a no-restart
+  policy for native fatal signals and `SIGKILL`. A memory-limit OOM kills the
+  full gateway cgroup, leaves the gateway failed/stopped, and stops the bound
+  autoresearch supervisor instead of entering an automatic crash loop.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -160,6 +166,13 @@ automatic-compaction ownership response as a native deferral, never as
 permission to invoke the generic API-key summarizer. The verifier fails closed
 on an unknown OpenClaw version, package layout, or source branch. This keeps a
 package reinstall or gateway restart from silently restoring the wrong route.
+
+It also installs `30-openclaw-native-crash-hardening.conf`. The memory limits
+apply to the gateway control group, including its child processes.
+`OOMPolicy=kill` terminates the remaining processes in that cgroup after an OOM
+kill. `RestartPreventExitStatus=SIGKILL` keeps the gateway failed/stopped for
+operator investigation, and the autoresearch supervisor's `BindsTo` then stops
+it instead of polling while the gateway is down.
 
 ### 2. Install/upgrade required MemPalace MCP
 
@@ -225,8 +238,10 @@ The script will:
    `azure-api-version-preload.cjs`
 9. Validate the result with `openclaw config validate` and inspect the Codex plugin
 10. Install the supervisor service definition, the persistent OpenClaw Gateway
-   runtime-cap drop-in, and the Codex runtime-verifier drop-in, then run
-   `systemctl --user daemon-reload`
+   runtime-cap, Codex runtime-verifier, and native-crash hardening drop-ins,
+   then run `systemctl --user daemon-reload`. These four managed systemd files
+   are restored to their prior contents, or removed when previously absent, if
+   any later install, validation, or reload step fails.
 
 When `OPENCLAW_PROVIDER=codex`, the script also removes stale systemd
 `NODE_OPTIONS` state that references `azure-api-version-preload.cjs` from the
@@ -240,9 +255,10 @@ The script is idempotent — safe to run repeatedly.
 drop-ins. It does not update the environment of an already running
 `openclaw-gateway.service` process. The push script intentionally keeps its
 no-restart behavior; operators must restart the gateway externally when they
-want the runtime caps or Codex runtime verifier to take effect. The verifier
-then runs before every gateway start and rejects unknown OpenClaw package
-versions or source layouts instead of falling back to an API-key compactor.
+want the runtime caps, Codex runtime verifier, or native-crash hardening to
+take effect. The verifier then runs before every gateway start and rejects
+unknown OpenClaw package versions or source layouts instead of falling back to
+an API-key compactor.
 
 ### 5. Enable the api-version preload for Azure only
 
