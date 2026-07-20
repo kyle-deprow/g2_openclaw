@@ -164,22 +164,22 @@ cannot make `jq`, `wc`, or `autoresearch-advance` inspect different files:
 ```bash
 state=/home/dev/.openclaw/autoresearch/quantipy-state.json
 artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json
-next_state="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
 jq -e . "$artifact" >/dev/null
 wc -c "$artifact"
 cd /home/dev/repos/g2_openclaw
 uv run gateway-cli autoresearch-advance "$state" "$artifact" \
   --instruction-manifest-sha256 "<source_manifest_sha256 from autoresearch-next>" \
   --state-reference-sha256 "<state_reference_sha256 from autoresearch-next>" \
-  --output "$next_state"
-mv -- "$next_state" "$state"
+  --output "$state"
 ```
 
 `autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
 unwrapped files before state advance. The complete envelope file must be at most
 24 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
 has a hard 32 KiB prompt budget and fails closed with an actionable error if
-accepted state artifacts would exceed it.
+accepted state artifacts would exceed it. The in-place output path uses the
+runner's locked atomic persistence; never replace authoritative state with a
+shell-created temporary file after a failed command.
 
 ## Explicit Research Modes
 

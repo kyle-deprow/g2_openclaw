@@ -35,7 +35,7 @@ from gateway.autoresearch_runner import (
     Phase,
     normalize_autoresearch_state,
 )
-from gateway.openclaw_client import OpenClawClient, OpenClawError
+from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +156,10 @@ class SupervisorError(RuntimeError):
     """Base failure for strict autoresearch supervision."""
 
 
+class OpenClawUnavailableError(SupervisorError):
+    """A transient OpenClaw control-plane operation exhausted bounded retries."""
+
+
 class WorkspaceEvidenceError(SupervisorError):
     """Raised when an active implementation workspace cannot be verified."""
 
@@ -208,6 +212,11 @@ class NativeGatewayRPC:
             raise SupervisorError("Native gateway RPC requests require a synchronous caller")
         try:
             return asyncio.run(self._request(method, params, shutdown_requested))
+        except OpenClawTransportError as exc:
+            detail = f"OpenClaw gateway RPC failed ({method}): {exc}"
+            if shutdown_requested():
+                raise ShutdownInterrupted(detail) from exc
+            raise OpenClawUnavailableError(detail) from exc
         except OpenClawError as exc:
             detail = f"OpenClaw gateway RPC failed ({method}): {exc}"
             if shutdown_requested():
@@ -319,7 +328,7 @@ class OpenClawRPC:
         shutdown_requested: ShutdownRequested = _shutdown_not_requested,
     ) -> Mapping[str, object]:
         """Read OpenClaw running tasks with strict bounded retry for RPC failures."""
-        last_error: SupervisorError | None = None
+        last_error: OpenClawUnavailableError | None = None
         for attempt in range(1, READ_ONLY_TASK_LIST_ATTEMPTS + 1):
             try:
                 return self._request(
@@ -329,12 +338,12 @@ class OpenClawRPC:
                 )
             except ShutdownInterrupted:
                 if last_error is not None:
-                    raise SupervisorError(
+                    raise OpenClawUnavailableError(
                         "OpenClaw running task list failed before shutdown during retry: "
                         f"{last_error}"
                     ) from last_error
                 raise
-            except SupervisorError as exc:
+            except OpenClawUnavailableError as exc:
                 if shutdown_requested():
                     raise ShutdownInterrupted(str(exc)) from exc
                 last_error = exc
@@ -348,11 +357,11 @@ class OpenClawRPC:
                 )
                 time.sleep(READ_ONLY_TASK_LIST_RETRY_SECONDS)
                 if shutdown_requested():
-                    raise SupervisorError(
+                    raise OpenClawUnavailableError(
                         "OpenClaw running task list failed before shutdown during retry: "
                         f"{last_error}"
                     ) from last_error
-        raise SupervisorError(
+        raise OpenClawUnavailableError(
             "OpenClaw running task list failed after "
             f"{READ_ONLY_TASK_LIST_ATTEMPTS} attempts: {last_error}"
         ) from last_error
@@ -1017,6 +1026,19 @@ class AutoresearchSupervisor:
                         detail=str(exc),
                     )
                     return 0
+                except OpenClawUnavailableError as exc:
+                    if stop_requested:
+                        _structured_log(
+                            logging.INFO,
+                            "supervisor.shutdown_interrupted",
+                            detail=str(exc),
+                        )
+                        return 0
+                    _structured_log(
+                        logging.ERROR,
+                        "supervisor.poll_failed",
+                        detail=str(exc),
+                    )
                 deadline = self._now() + self.config.poll_interval_seconds
                 while not stop_requested and self._now() < deadline:
                     self._sleep(min(0.5, deadline - self._now()))
@@ -1417,6 +1439,7 @@ class AutoresearchSupervisor:
                 for path in self.config.autoresearch_dir.iterdir()
                 if path.is_file()
                 and (path.name.startswith(prefix) or path.name == "current-next.json")
+                and path.name != f"iteration-{state.iteration}-context.json"
             )
         latest = 0.0
         latest_path = self.config.state_path

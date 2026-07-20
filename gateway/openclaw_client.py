@@ -72,6 +72,10 @@ class OpenClawError(Exception):
     """Raised when OpenClaw returns an error or communication fails."""
 
 
+class OpenClawTransportError(OpenClawError):
+    """Raised for retryable OpenClaw connection, timeout, or socket failures."""
+
+
 def _process_agent_event(msg: dict[str, object]) -> str | _StopSentinel | None:
     """Extract a delta string from an agent event message.
 
@@ -213,7 +217,7 @@ class OpenClawClient:
                 connect_kwargs["ssl"] = self._ssl_context
             self._ws = await websockets.connect(self.url, **connect_kwargs)  # type: ignore[arg-type]
         except (OSError, websockets.WebSocketException) as exc:
-            raise OpenClawError(f"connection refused: {exc}") from exc
+            raise OpenClawTransportError(f"connection refused: {exc}") from exc
 
         # Phase 1: wait for the server's connect.challenge event containing nonce
         nonce: str | None = None
@@ -223,7 +227,10 @@ class OpenClawClient:
             if challenge.get("type") == "event" and challenge.get("event") == "connect.challenge":
                 payload = challenge.get("payload", {})
                 nonce = payload.get("nonce") if isinstance(payload, dict) else None
-        except (TimeoutError, websockets.WebSocketException, json.JSONDecodeError) as exc:
+        except (TimeoutError, websockets.WebSocketException) as exc:
+            await self._close_ws()
+            raise OpenClawTransportError(f"connect challenge failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
             await self._close_ws()
             raise OpenClawError(f"connect challenge failed: {exc}") from exc
 
@@ -268,7 +275,10 @@ class OpenClawClient:
             await self._ws.send(json.dumps(auth_req))
             raw = await asyncio.wait_for(self._ws.recv(), timeout=10.0)
             resp = json.loads(raw)
-        except (TimeoutError, websockets.WebSocketException, json.JSONDecodeError) as exc:
+        except (TimeoutError, websockets.WebSocketException) as exc:
+            await self._close_ws()
+            raise OpenClawTransportError(f"auth handshake failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
             await self._close_ws()
             raise OpenClawError(f"auth handshake failed: {exc}") from exc
 
@@ -327,7 +337,7 @@ class OpenClawClient:
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
-                    raise OpenClawError(f"timed out waiting for {method} response")
+                    raise OpenClawTransportError(f"timed out waiting for {method} response")
                 raw = await asyncio.wait_for(self._ws.recv(), timeout=remaining)
                 message = json.loads(raw)
                 if not isinstance(message, Mapping) or message.get("type") == "event":
@@ -342,7 +352,9 @@ class OpenClawClient:
                 if not isinstance(result, Mapping):
                     raise OpenClawError(f"{method} response has a non-object payload")
                 return result
-        except (TimeoutError, websockets.WebSocketException, json.JSONDecodeError) as exc:
+        except (TimeoutError, websockets.WebSocketException) as exc:
+            raise OpenClawTransportError(f"{method} request failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
             raise OpenClawError(f"{method} request failed: {exc}") from exc
         finally:
             await self.close()

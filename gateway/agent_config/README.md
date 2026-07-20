@@ -137,8 +137,13 @@ Example advance command:
 ```bash
 cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance \
   /home/dev/.openclaw/autoresearch/quantipy-state.json artifact.json \
-  --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json
+  --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
+  --output /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
+
+The in-place output is serialized by the runner's state lock and published with
+an atomic replace. Do not move a shell-created empty temp file over the
+authoritative state after `autoresearch-advance` fails.
 
 Never run both preparation procedures for the same campaign. Archive
 incompatible state before initialization.

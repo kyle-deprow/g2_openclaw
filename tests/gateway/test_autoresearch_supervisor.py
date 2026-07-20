@@ -36,6 +36,8 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_SESSION_KEY,
     AutoresearchSupervisor,
     NativeGatewayRPC,
+    OpenClawRPC,
+    OpenClawUnavailableError,
     ShutdownInterrupted,
     ShutdownRequested,
     SupervisorConfig,
@@ -44,7 +46,7 @@ from gateway.autoresearch_supervisor import (
     SupervisorResult,
     main,
 )
-from gateway.openclaw_client import OpenClawError
+from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
 SignalHandler = Callable[[int, FrameType | None], None]
 SignalDisposition = SignalHandler | signal.Handlers
@@ -170,7 +172,7 @@ class FakeOpenClaw:
         if method == "tasks.list":
             if self.task_list_calls < self.task_list_failures_before_success:
                 self.task_list_calls += 1
-                raise SupervisorError("poll failed")
+                raise OpenClawUnavailableError("poll failed")
             self.task_list_calls += 1
             return {"tasks": self.tasks}
         if method == "tasks.get":
@@ -208,7 +210,7 @@ class FailingTaskListOpenClaw(FakeOpenClaw):
         if method == "tasks.list":
             if self._before_failure is not None:
                 self._before_failure()
-            raise SupervisorError("poll failed")
+            raise OpenClawUnavailableError("poll failed")
         return super().request(method, params, shutdown_requested=shutdown_requested)
 
 
@@ -353,18 +355,68 @@ def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
         ) -> Mapping[str, object]:
             del method, params, timeout_seconds, required_server_version
             try:
-                raise OpenClawError("timed out waiting for tasks.list response")
+                raise OpenClawTransportError("timed out waiting for tasks.list response")
             finally:
                 TimedOutClient.closed = True
 
     monkeypatch.setattr("gateway.autoresearch_supervisor.OpenClawClient", TimedOutClient)
 
-    with pytest.raises(SupervisorError, match=r"gateway RPC failed.*timed out"):
+    with pytest.raises(OpenClawUnavailableError, match=r"gateway RPC failed.*timed out"):
         NativeGatewayRPC("127.0.0.1", 18789, "test-token").request(
             "tasks.list", {"status": "running"}, shutdown_requested=lambda: False
         )
 
     assert TimedOutClient.closed is True
+
+
+def test_native_gateway_rpc_preserves_permanent_protocol_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RejectedClient:
+        def __init__(self, host: str, port: int, token: str) -> None:
+            del host, port, token
+
+        async def request_once(
+            self,
+            method: str,
+            params: Mapping[str, object],
+            *,
+            timeout_seconds: float,
+            required_server_version: str,
+        ) -> Mapping[str, object]:
+            del method, params, timeout_seconds, required_server_version
+            raise OpenClawError("auth rejected: bad token")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.OpenClawClient", RejectedClient)
+
+    with pytest.raises(SupervisorError, match="auth rejected") as raised:
+        NativeGatewayRPC("127.0.0.1", 18789, "test-token").request(
+            "tasks.list", {"status": "running"}, shutdown_requested=lambda: False
+        )
+
+    assert not isinstance(raised.value, OpenClawUnavailableError)
+
+
+def test_task_listing_does_not_retry_permanent_gateway_failures() -> None:
+    class PermanentlyRejectedGateway(FakeOpenClaw):
+        def request(
+            self,
+            method: str,
+            params: Mapping[str, object],
+            *,
+            shutdown_requested: ShutdownRequested,
+        ) -> Mapping[str, object]:
+            del params, shutdown_requested
+            self.task_list_calls += 1
+            raise SupervisorError(f"{method} request rejected: unauthorized")
+
+    gateway = PermanentlyRejectedGateway()
+
+    with pytest.raises(SupervisorError, match="unauthorized") as raised:
+        OpenClawRPC(gateway).list_running_tasks()
+
+    assert not isinstance(raised.value, OpenClawUnavailableError)
+    assert gateway.task_list_calls == 1
 
 
 def test_native_gateway_rpc_cancels_an_inflight_websocket_request_on_shutdown(
@@ -417,6 +469,19 @@ async def test_native_gateway_rpc_rejects_calls_from_a_running_event_loop() -> N
 def _prepare_stale_state(env: SupervisorEnv, *, phase: Phase = Phase.VERIFICATION) -> None:
     _write_state(env.state_path, phase=phase, platform_readiness=env.readiness_identity)
     _make_stale([env.state_path, *env.marker_paths], now=env.now)
+
+
+def test_stale_iteration_context_residue_does_not_defer_recovery(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    stale_context = supervisor_env.state_path.parent / "iteration-4-context.json"
+    stale_context.write_text("{}", encoding="utf-8")
+    os.utime(stale_context, (supervisor_env.now, supervisor_env.now))
+
+    result = _supervisor(supervisor_env, FakeOpenClaw()).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
 
 
 def _implementation_result(workspace_path: Path) -> ImplementationResultArtifact:
@@ -1179,23 +1244,79 @@ def test_run_forever_treats_a_signal_before_command_failure_detection_as_clean_s
     ]
 
 
-def test_run_forever_reraises_a_command_failure_when_shutdown_was_not_requested(
+def test_run_forever_recovers_after_a_command_failure_when_shutdown_was_not_requested(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    signal_harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", signal_harness.install)
+    now = [supervisor_env.now]
+    poll_count = 0
+    supervisor = AutoresearchSupervisor(
+        SupervisorConfig(
+            state_path=supervisor_env.state_path,
+            readiness_manifest_path=supervisor_env.readiness_manifest_path,
+            checkpoint_path=supervisor_env.checkpoint_path,
+            autoresearch_dir=supervisor_env.state_path.parent,
+            owner_sessions_path=supervisor_env.sessions_path,
+            target_repo=supervisor_env.repo_root,
+            proc_root=supervisor_env.proc_root,
+            poll_interval_seconds=1.0,
+        ),
+        now=lambda: now[0],
+        sleep=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        task_gateway=FakeOpenClaw(),
+    )
+
+    def fail_then_stop(*, shutdown_requested: Callable[[], bool]) -> None:
+        nonlocal poll_count
+        del shutdown_requested
+        poll_count += 1
+        if poll_count == 1:
+            raise OpenClawUnavailableError("poll failed")
+        signal_harness.trigger(signal.SIGTERM)
+
+    monkeypatch.setattr(supervisor, "run_once", fail_then_stop)
+    caplog.set_level(logging.ERROR, logger="gateway.autoresearch_supervisor")
+
+    exit_code = supervisor.run_forever()
+
+    failure_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.poll_failed"
+    ]
+    assert exit_code == 0
+    assert poll_count == 2
+    assert failure_events == [
+        {
+            "detail": "poll failed",
+            "event": "supervisor.poll_failed",
+        }
+    ]
+
+
+def test_run_forever_reraises_a_non_recoverable_supervisor_failure(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     signal_harness = SignalHarness()
     monkeypatch.setattr(signal, "signal", signal_harness.install)
-    _prepare_stale_state(supervisor_env)
-    supervisor = _supervisor(supervisor_env, FailingTaskListOpenClaw())
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
 
-    with pytest.raises(SupervisorError) as raised:
+    def fail_poll(*, shutdown_requested: Callable[[], bool]) -> None:
+        del shutdown_requested
+        raise SupervisorError("malformed authoritative state")
+
+    monkeypatch.setattr(supervisor, "run_once", fail_poll)
+
+    with pytest.raises(SupervisorError, match="malformed authoritative state"):
         supervisor.run_forever()
-
-    assert str(raised.value).endswith(": poll failed")
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
-def test_run_forever_preserves_command_failure_when_signal_follows_it_during_unwinding(
+def test_run_forever_treats_command_failure_followed_by_signal_as_clean_shutdown(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
     signum: int,
@@ -1214,14 +1335,11 @@ def test_run_forever_preserves_command_failure_when_signal_follows_it_during_unw
 
     monkeypatch.setattr(supervisor, "run_once", fail_poll)
 
-    with pytest.raises(SupervisorError) as raised:
-        supervisor.run_forever()
-
-    assert str(raised.value).endswith(": poll failed")
+    assert supervisor.run_forever() == 0
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
-def test_run_forever_preserves_task_list_failure_when_signal_arrives_during_retry_delay(
+def test_run_forever_treats_task_list_failure_during_shutdown_as_clean_shutdown(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
     signum: int,
@@ -1236,11 +1354,7 @@ def test_run_forever_preserves_task_list_failure_when_signal_arrives_during_retr
 
     monkeypatch.setattr("gateway.autoresearch_supervisor.time.sleep", request_shutdown)
 
-    with pytest.raises(SupervisorError) as raised:
-        supervisor.run_forever()
-
-    assert "failed before shutdown during retry" in str(raised.value)
-    assert str(raised.value).endswith(": poll failed")
+    assert supervisor.run_forever() == 0
 
 
 def test_run_forever_keeps_shutdown_classification_after_repeated_mixed_signals(

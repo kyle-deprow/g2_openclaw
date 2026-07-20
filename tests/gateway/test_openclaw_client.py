@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import websockets
 from gateway.device_identity import DeviceIdentity, _generate_identity
-from gateway.openclaw_client import OpenClawClient, OpenClawError
+from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
 from websockets import ServerConnection
 from websockets.asyncio.server import Server
 
@@ -398,8 +398,9 @@ class TestAuthErrors:
         server, port = await _start_mock_server(auth_ok=False)
         try:
             client = _make_client(port, "bad-token")
-            with pytest.raises(OpenClawError, match="auth rejected"):
+            with pytest.raises(OpenClawError, match="auth rejected") as raised:
                 await client.send_message("Hi")
+            assert not isinstance(raised.value, OpenClawTransportError)
             await client.close()
         finally:
             server.close()
@@ -582,7 +583,7 @@ class TestConnectionErrors:
             _s.bind(("127.0.0.1", 0))
             ephemeral_port = _s.getsockname()[1]
         client = _make_client(ephemeral_port)
-        with pytest.raises(OpenClawError, match="connection refused"):
+        with pytest.raises(OpenClawTransportError, match="connection refused"):
             await client.send_message("Hi")
 
     async def test_disconnect_mid_stream(self) -> None:

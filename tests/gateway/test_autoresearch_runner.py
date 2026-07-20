@@ -508,6 +508,42 @@ def test_next_action_exposes_compact_instruction_manifest_without_source_bytes(
         assert re.fullmatch(r"[0-9a-f]{64}", receipt["sha256"])
 
 
+def test_context_prompt_requires_flat_typed_schema_and_ignores_stale_context_files(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = AutoresearchState(
+        setup=_setup_artifact(),
+        platform_readiness=platform_readiness.identity(),
+    )
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    expected_field_types = {
+        "baseline_metric": "string",
+        "current_best_metric": "string",
+        "recent_experiment_outcomes": "array[string]",
+        "prior_findings": "array[string]",
+        "open_proposals": "array[string]",
+        "hard_constraints": "array[string]",
+        "available_data_sources": "array[string]",
+        "loaded_quantipy_sources": "array[string]",
+        "research_mode": "enum[alpha_research,data_infra_g0]",
+        "mode_rationale": "string",
+        "burned_theory_families": "array[string]",
+    }
+    contract = autoresearch_runner.ARTIFACT_CONTRACTS[ArtifactType.CONTEXT_PACKET]
+
+    assert contract["field_types"] == expected_field_types
+    assert set(cast(list[str], contract["required_fields"])) == set(expected_field_types)
+    assert "Do not use nested objects in the context_packet artifact" in prompt
+    assert "exactly the listed keys and no extra keys" in prompt
+    assert "standalone iteration context files are non-authoritative residue" in prompt
+    assert "alpha_research or data_infra_g0" in prompt
+    assert "If the live state no longer matches STATE_REF, do not emit an artifact" in prompt
+
+
 def test_build_receipt_catalog_fails_closed_when_required_source_is_missing(
     quantipy_root: Path,
 ) -> None:

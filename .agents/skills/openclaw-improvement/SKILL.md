@@ -149,6 +149,29 @@ this out of the default Codex path.
 pass in autoresearch. Write failed experiment details to MemPalace only during
 final PM decision logging after DISCARD or CRASH.
 
+### Supervisor repeatedly reports invalid autoresearch state JSON
+**Symptom:** The supervisor restarts repeatedly with `invalid autoresearch state
+JSON`, then systemd start-limits the service. The authoritative state may be an
+empty file while a `.quantipy-state.json.*` temp file remains nearby.
+
+**Root cause:** A shell workflow created an empty temp output, ran
+`autoresearch-advance`, and moved the temp file over authoritative state even
+after advancement failed.
+
+**Fix:** Persist directly to the authoritative path. The runner locks and
+atomically replaces it:
+
+```bash
+uv run gateway-cli autoresearch-advance "$state" "$artifact" \
+  --instruction-manifest-sha256 "$manifest_sha" \
+  --state-reference-sha256 "$state_sha" \
+  --output "$state"
+```
+
+Never use an unconditional shell `mv` to publish autoresearch state. Preserve
+the invalid file as evidence, restore the latest independently validated state,
+then restart supervision.
+
 ### OpenClaw invents strategies from training data
 **Cause:** Violating "Research before invention" principle.
 **Fix:** Tighten SOUL.md principle 5. Add negative examples. Ensure ideation is delegated to `--agent researcher` (which does web research), never done by OpenClaw directly.

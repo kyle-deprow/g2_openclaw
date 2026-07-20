@@ -3909,7 +3909,25 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "research_mode",
             "mode_rationale",
             "burned_theory_families",
-        ]
+        ],
+        "field_types": {
+            "baseline_metric": "string",
+            "current_best_metric": "string",
+            "recent_experiment_outcomes": "array[string]",
+            "prior_findings": "array[string]",
+            "open_proposals": "array[string]",
+            "hard_constraints": "array[string]",
+            "available_data_sources": "array[string]",
+            "loaded_quantipy_sources": "array[string]",
+            "research_mode": "enum[alpha_research,data_infra_g0]",
+            "mode_rationale": "string",
+            "burned_theory_families": "array[string]",
+        },
+        "shape_constraints": [
+            "Use exactly the listed keys and no extra keys",
+            "Do not use nested objects in the context_packet artifact",
+            "Every array item must be a string",
+        ],
     },
     ArtifactType.DEBATE_RESULT: {
         "required_fields": [
@@ -5317,6 +5335,16 @@ def _phase_instruction(
         phase,
         expected_artifact_type,
     )
+    context_source_instruction = ""
+    if expected_artifact_type is ArtifactType.CONTEXT_PACKET:
+        context_source_instruction = (
+            "Context source contract:\n"
+            "- standalone iteration context files are non-authoritative residue. Do not read "
+            "or reuse iteration-<n>-context.json. Rebuild the context packet only from STATE_REF, "
+            "the instruction manifest sources, RESEARCH_LOG, and read-only MemPalace retrieval. "
+            "If the live state no longer matches STATE_REF, do not emit an artifact; report the "
+            "stale dispatch so the PM can rerun autoresearch-next.\n\n"
+        )
     return (
         f"phase={phase.value}\n"
         f"agents={agent_text}\n"
@@ -5328,6 +5356,7 @@ def _phase_instruction(
         f"{verification_handoff_contract}"
         f"{mempalace_fact_instruction}"
         f"{operator_precondition_instruction}"
+        f"{context_source_instruction}"
         f"ARTIFACT_CONTRACT={contract}\n"
     )
 
@@ -5403,7 +5432,7 @@ def _mode_contract(state: AutoresearchState) -> str:
     if state.mode is None:
         return (
             "Mode contract:\n"
-            "- The context packet must choose ALPHA_RESEARCH or DATA_INFRA_G0 and give "
+            "- The context packet must choose exactly alpha_research or data_infra_g0 and give "
             "a nonempty rationale plus burned theory families.\n\n"
         )
     if state.mode is ResearchMode.DATA_INFRA_G0:

@@ -163,6 +163,16 @@ def test_runtime_docs_atomically_prepare_the_authoritative_v2_state() -> None:
         )
 
 
+def test_autoresearch_advance_uses_locked_atomic_in_place_state_persistence() -> None:
+    text = AUTORESEARCH.read_text(encoding="utf-8")
+    readme = (AGENT_CONFIG / "README.md").read_text(encoding="utf-8")
+
+    assert 'next_state="$(mktemp' not in text
+    assert 'mv -- "$next_state" "$state"' not in text
+    assert '--output "$state"' in text
+    assert "--output /home/dev/.openclaw/autoresearch/quantipy-state.json" in readme
+
+
 def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspended_campaigns() -> (
     None
 ):
