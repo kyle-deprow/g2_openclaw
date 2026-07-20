@@ -110,9 +110,10 @@ atomically:
 )
 ```
 
-An operator-precondition `INFRA_BLOCKED` suspends without incrementing the
-iteration and without a MemPalace write. The supervisor does not repeatedly
-wake suspended work.
+`INFRA_BLOCKED` suspends without incrementing the iteration or writing
+MemPalace. It is reserved for an operator precondition or the completed G0
+remediation branch described under Decisions And Memory. The supervisor does
+not repeatedly wake suspended work.
 
 ## Stage Boundaries
 
@@ -199,11 +200,17 @@ The deterministic decision order is:
   no improvement is `DISCARD`. Plain `KEEP` cannot be used without a numeric
   baseline.
 
-`DATA_INFRA_G0` uses only `INFRA_REPAIRED` or `INFRA_BLOCKED` according to its
-explicit gate outcome and never makes an alpha claim. `NO_CONSENSUS` and
-operator-precondition `INFRA_BLOCKED` set `memory_write_required=false` and do
-not write MemPalace. Every other completed final decision follows the runner's
-memory requirement.
+In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
+remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
+`autoresearch-start-next` begins the next iteration with fresh context.
+`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
+completed `DATA_INFRA_G0` implementation and verification whose explicit
+`infra_gate_outcome=REMEDIATION_REQUIRED`. After completed G0 verification,
+`GATE_PASSED` maps to `INFRA_REPAIRED` and `REMEDIATION_REQUIRED` maps to
+`INFRA_BLOCKED`; this gate mapping never overrides consensus handling and never
+makes an alpha claim. Both `NO_CONSENSUS` and `INFRA_BLOCKED` set
+`memory_write_required=false`. Every other completed final decision follows
+the runner's memory requirement.
 
 MemPalace is the only durable autonomous research memory. Stage agents may
 read it only through `mempalace-readonly`; only the PM may write after a final

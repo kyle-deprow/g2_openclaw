@@ -209,6 +209,93 @@ def completed_memory_written_state(
     )
 
 
+@pytest.fixture()
+def g0_verification_state(policy: AutoresearchPolicy) -> AutoresearchState:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    return advance_state(state, _implementation_result(), policy)
+
+
+@pytest.fixture(
+    params=(
+        (VerificationStatus.TEST_FAILURE, FinalDecision.CRASH),
+        (VerificationStatus.BUG_SIGNAL, FinalDecision.DISCARD),
+    ),
+    ids=("test-failure", "bug-signal"),
+)
+def exhausted_g0_verification(
+    request: pytest.FixtureRequest,
+    g0_verification_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+) -> tuple[AutoresearchState, FinalDecision]:
+    verification_status, expected_decision = cast(
+        tuple[VerificationStatus, FinalDecision], request.param
+    )
+    verification = _g0_remediation_verification(verification_status)
+    state = g0_verification_state
+    for _ in range(2):
+        state = advance_state(state, verification, policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    state = advance_state(state, verification, policy)
+    return state, expected_decision
+
+
+@pytest.fixture(
+    params=(ResearchMode.ALPHA_RESEARCH, ResearchMode.DATA_INFRA_G0),
+    ids=("alpha-research", "data-infra-g0"),
+)
+def no_consensus_state(
+    request: pytest.FixtureRequest,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    mode = cast(ResearchMode, request.param)
+    state = advance_state(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        _setup_artifact(),
+        policy,
+    )
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=mode,
+            mode_rationale=f"Exercise the full {mode.value} no-consensus transition.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _no_consensus(round_number=1), policy)
+    state = advance_state(state, _debate_result(policy, round_number=2), policy)
+    state = advance_state(state, _no_consensus(round_number=2), policy)
+
+    return advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id=f"{mode.value.replace('_', '-')}-no-consensus-1",
+            decision=FinalDecision.NO_CONSENSUS,
+            recommended_metric_name="consensus outcome",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="The retry produced no majority and no implementation was created.",
+            log_summary="No consensus after the allowed retry.",
+            continue_loop=True,
+            memory_write_required=False,
+        ),
+        policy,
+    )
+
+
 def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
     evidence: dict[EvidenceId, dict[str, str | None]] = {}
     tmp_path.mkdir(parents=True, exist_ok=True)
@@ -1234,6 +1321,16 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
         data_coverage=_dynamic_coverage_receipt(),
         universe_verification_receipt=_universe_verification_receipt(),
         price_hydration_receipt=_price_hydration_receipt(),
+    )
+
+
+def _g0_remediation_verification(
+    status: VerificationStatus,
+) -> VerificationResultArtifact:
+    return replace(
+        _verification_result(status),
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+        infra_rationale="Verification did not complete successfully.",
     )
 
 
@@ -2563,50 +2660,92 @@ def test_next_action_rejects_operator_precondition_implementation_state(
         next_action(state, policy, receipts, platform_readiness)
 
 
-def test_second_no_consensus_in_g0_skips_memory_with_an_explicit_transition(
+def test_second_no_consensus_is_an_unsuspended_no_memory_research_outcome(
+    no_consensus_state: AutoresearchState,
+) -> None:
+    assert can_write_memory(no_consensus_state) is False
+    assert no_consensus_state.suspended is False
+    assert no_consensus_state.suspension_reason is None
+    assert no_consensus_state.final_decision is not None
+    assert no_consensus_state.final_decision.decision is FinalDecision.NO_CONSENSUS
+    assert no_consensus_state.final_decision.infra_rationale is None
+
+
+def test_persisted_no_consensus_state_retains_its_unsuspended_transition(
+    no_consensus_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+) -> None:
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(no_consensus_state.to_dict())))
+
+    validate_state(persisted, policy)
+
+    assert persisted == no_consensus_state
+
+
+def test_persisted_no_consensus_state_requires_the_mandatory_second_round(
+    no_consensus_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+) -> None:
+    forged = replace(
+        no_consensus_state,
+        debate_rounds=no_consensus_state.debate_rounds[:1],
+        consensus_history=no_consensus_state.consensus_history[:1],
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match="mandatory second round"):
+        validate_state(persisted, policy)
+
+
+def test_no_consensus_next_action_allows_starting_the_next_iteration(
+    no_consensus_state: AutoresearchState,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
-    tmp_path: Path,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    state = advance_state(
-        AutoresearchState(platform_readiness=platform_readiness.identity()),
-        _setup_artifact(),
-        policy,
-    )
-    state = advance_state(
-        state,
-        replace(
-            _context_artifact(),
-            research_mode=ResearchMode.DATA_INFRA_G0,
-            mode_rationale="The data gate must be repaired before alpha work.",
+    action = next_action(no_consensus_state, policy, receipts, platform_readiness)
+
+    assert action.phase is Phase.REPEAT
+    assert action.expected_artifact_type is ArtifactType.NEXT_ITERATION
+    assert action.next_agent_ids == ()
+
+
+def test_persisted_no_consensus_state_rejects_an_infrastructure_rationale(
+    no_consensus_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+) -> None:
+    assert no_consensus_state.final_decision is not None
+    malformed = replace(
+        no_consensus_state,
+        final_decision=replace(
+            no_consensus_state.final_decision,
+            infra_rationale="No majority is a research outcome, not an infrastructure blocker.",
         ),
-        policy,
-    )
-    state = advance_state(state, _debate_result(policy, round_number=1), policy)
-    state = advance_state(state, _no_consensus(round_number=1), policy)
-    state = advance_state(state, _debate_result(policy, round_number=2), policy)
-    state = advance_state(state, _no_consensus(round_number=2), policy)
-    decision = FinalDecisionArtifact(
-        experiment_id="g0-no-consensus-1",
-        decision=FinalDecision.INFRA_BLOCKED,
-        recommended_metric_name="consensus outcome",
-        recommended_metric_value=None,
-        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
-        rationale="The retry produced no majority and no implementation was created.",
-        log_summary="No consensus after the allowed retry.",
-        continue_loop=True,
-        memory_write_required=False,
-        infra_rationale="The G0 panel could not agree on a repair path.",
     )
 
-    state = advance_state(state, decision, policy)
-    readiness = _ready_manifest(tmp_path)
-    state = replace(state, platform_readiness=readiness.identity())
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="NO_CONSENSUS final_decision cannot contain infra_rationale",
+    ):
+        validate_state(malformed, policy)
 
-    assert can_write_memory(state) is False
-    with pytest.raises(AutoresearchValidationError, match="suspended"):
-        next_action(state, policy, receipts, readiness)
+
+def test_no_consensus_starts_the_next_iteration_and_dispatches_setup(
+    no_consensus_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    next_iteration = start_next_iteration(
+        no_consensus_state,
+        readiness=platform_readiness,
+    )
+    action = next_action(next_iteration, policy, receipts, platform_readiness)
+
+    assert next_iteration.iteration == 2
+    assert action.phase is Phase.SETUP_CONTEXT
+    assert action.expected_artifact_type is ArtifactType.CONTEXT_PACKET
+    assert action.next_agent_ids == (policy.context_curator.agent_id,)
 
 
 def test_no_consensus_rejects_a_memory_write_requirement(
@@ -2629,6 +2768,20 @@ def test_no_consensus_rejects_a_memory_write_requirement(
     )
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=false"):
+        advance_state(state, decision, policy)
+
+
+def test_alpha_final_decision_rejects_infra_blocked(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_decision(policy)
+    decision = _final_decision_with(
+        decision=FinalDecision.INFRA_BLOCKED,
+        metric_value=0.18,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="INFRA_BLOCKED requires"):
         advance_state(state, decision, policy)
 
 
@@ -2783,6 +2936,79 @@ def test_persisted_g0_infra_blocked_no_memory_state_validates(
 
     assert persisted.suspended is True
     assert can_write_memory(persisted) is False
+
+
+@pytest.mark.parametrize(
+    "verification_status",
+    (VerificationStatus.TEST_FAILURE, VerificationStatus.BUG_SIGNAL),
+)
+def test_g0_remediation_required_verifier_failure_routes_to_fix_without_suspending(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+    verification_status: VerificationStatus,
+) -> None:
+    result = advance_state(
+        g0_verification_state,
+        _g0_remediation_verification(verification_status),
+        policy,
+    )
+
+    assert result.phase is Phase.FIX_TEST
+    assert result.pending_fix_trigger is FixTriggerPhase.VERIFICATION
+    assert result.suspended is False
+    assert result.final_decision is None
+
+
+def test_exhausted_g0_verifier_failure_rejects_infra_blocked(
+    exhausted_g0_verification: tuple[AutoresearchState, FinalDecision],
+    policy: AutoresearchPolicy,
+) -> None:
+    state, _ = exhausted_g0_verification
+    decision = FinalDecisionArtifact(
+        experiment_id="g0-verification-failure-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="coverage gate",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="Verification failed before the infrastructure gate could complete.",
+        log_summary="G0 verification retries exhausted.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Verification did not complete successfully.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="after retries require"):
+        advance_state(state, decision, policy)
+
+
+def test_exhausted_g0_verifier_failure_finalizes_without_suspending(
+    exhausted_g0_verification: tuple[AutoresearchState, FinalDecision],
+    policy: AutoresearchPolicy,
+) -> None:
+    state, expected_decision = exhausted_g0_verification
+    decision = FinalDecisionArtifact(
+        experiment_id="g0-verification-failure-1",
+        decision=expected_decision,
+        recommended_metric_name="coverage gate",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="Verification failed before the infrastructure gate could complete.",
+        log_summary="G0 verification retries exhausted.",
+        continue_loop=True,
+        memory_write_required=True,
+        infra_rationale="Verification did not complete successfully.",
+    )
+
+    result = advance_state(
+        state,
+        decision,
+        policy,
+    )
+
+    assert result.phase is Phase.REPEAT
+    assert result.suspended is False
+    assert result.final_decision is not None
+    assert result.final_decision.decision is expected_decision
 
 
 def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(

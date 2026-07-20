@@ -4419,6 +4419,25 @@ def _revalidate_accepted_member_union_manifests(state: AutoresearchState) -> Non
             _verify_member_union_manifest(receipt)
 
 
+def _validate_no_consensus_completion(state: AutoresearchState) -> None:
+    decision = state.final_decision
+    if decision is None or decision.decision is not FinalDecision.NO_CONSENSUS:
+        return
+    expected_rounds = (1, 2)
+    debate_rounds = tuple(debate.round_number for debate in state.debate_rounds)
+    consensus_rounds = tuple(consensus.round_number for consensus in state.consensus_history)
+    consensus_statuses = tuple(consensus.status for consensus in state.consensus_history)
+    if (
+        state.consensus_retry_count != 1
+        or debate_rounds != expected_rounds
+        or consensus_rounds != expected_rounds
+        or consensus_statuses != (ConsensusStatus.NO_CONSENSUS, ConsensusStatus.NO_CONSENSUS)
+    ):
+        raise AutoresearchValidationError(
+            "NO_CONSENSUS final state requires the mandatory second round after one retry"
+        )
+
+
 def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:
     if state.iteration < 1:
         raise AutoresearchValidationError("iteration must be >= 1")
@@ -4483,6 +4502,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
     if state.final_decision is not None:
         decision = state.final_decision
+        _validate_no_consensus_completion(state)
         _validate_operator_precondition_infra_blocked_suspension(state)
         is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
         if decision.decision is FinalDecision.NO_CONSENSUS:
@@ -5051,25 +5071,15 @@ def _validate_final_decision_artifact(
         and latest_consensus.status is ConsensusStatus.NO_CONSENSUS
         and state.implementation_result is None
     ):
-        expected_no_consensus = (
-            FinalDecision.INFRA_BLOCKED
-            if state.mode is ResearchMode.DATA_INFRA_G0
-            else FinalDecision.NO_CONSENSUS
-        )
-        if artifact.decision is not expected_no_consensus:
+        if artifact.decision is not FinalDecision.NO_CONSENSUS:
             raise AutoresearchValidationError(
-                f"final_decision must be {expected_no_consensus.value} when consensus "
-                "never reached a majority"
+                "final_decision must be NO_CONSENSUS when consensus never reached a majority"
             )
         if artifact.memory_write_required:
             raise AutoresearchValidationError(
                 "NO_CONSENSUS requires final_decision.memory_write_required=false"
             )
-        if state.mode is ResearchMode.DATA_INFRA_G0 and not artifact.infra_rationale:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 no-consensus final_decision requires infra_rationale"
-            )
-        if state.mode is not ResearchMode.DATA_INFRA_G0 and artifact.infra_rationale is not None:
+        if artifact.infra_rationale is not None:
             raise AutoresearchValidationError(
                 "NO_CONSENSUS final_decision cannot contain infra_rationale"
             )
@@ -5102,39 +5112,6 @@ def _validate_final_decision_artifact(
             )
         return
 
-    if state.mode is ResearchMode.DATA_INFRA_G0:
-        if artifact.decision not in (FinalDecision.INFRA_REPAIRED, FinalDecision.INFRA_BLOCKED):
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision must be INFRA_REPAIRED or INFRA_BLOCKED"
-            )
-        if not artifact.infra_rationale:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision requires infra_rationale"
-            )
-        if latest_verification is None or latest_verification.infra_gate_outcome is None:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision requires an infrastructure verification gate"
-            )
-        expected = (
-            FinalDecision.INFRA_REPAIRED
-            if latest_verification.infra_gate_outcome is InfraGateOutcome.GATE_PASSED
-            else FinalDecision.INFRA_BLOCKED
-        )
-        if artifact.decision is not expected:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision must match infra_gate_outcome"
-            )
-        if artifact.decision is FinalDecision.INFRA_BLOCKED and artifact.memory_write_required:
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 INFRA_BLOCKED requires memory_write_required=false"
-            )
-        return
-
-    if artifact.infra_rationale:
-        raise AutoresearchValidationError(
-            "ALPHA_RESEARCH final_decision cannot contain infra_rationale"
-        )
-
     if (
         latest_verification is not None
         and latest_verification.status is VerificationStatus.TEST_FAILURE
@@ -5156,6 +5133,53 @@ def _validate_final_decision_artifact(
                 "bug signals after retries require final_decision=DISCARD"
             )
         return
+
+    if state.mode is ResearchMode.DATA_INFRA_G0:
+        if artifact.decision not in (FinalDecision.INFRA_REPAIRED, FinalDecision.INFRA_BLOCKED):
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision must be INFRA_REPAIRED or INFRA_BLOCKED"
+            )
+        if not artifact.infra_rationale:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision requires infra_rationale"
+            )
+        if latest_verification is None or latest_verification.infra_gate_outcome is None:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision requires an infrastructure verification gate"
+            )
+        if (
+            latest_verification.status is not VerificationStatus.PASS
+            or not latest_verification.tests_passed
+        ):
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 infrastructure final decisions require a successful completed "
+                "verification assessment with status=PASS and tests_passed=true"
+            )
+        expected = (
+            FinalDecision.INFRA_REPAIRED
+            if latest_verification.infra_gate_outcome is InfraGateOutcome.GATE_PASSED
+            else FinalDecision.INFRA_BLOCKED
+        )
+        if artifact.decision is not expected:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 final_decision must match infra_gate_outcome"
+            )
+        if artifact.decision is FinalDecision.INFRA_BLOCKED and artifact.memory_write_required:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 INFRA_BLOCKED requires memory_write_required=false"
+            )
+        return
+
+    if artifact.decision is FinalDecision.INFRA_BLOCKED:
+        raise AutoresearchValidationError(
+            "INFRA_BLOCKED requires an operator-precondition blocker or completed "
+            "DATA_INFRA_G0 verification with REMEDIATION_REQUIRED"
+        )
+
+    if artifact.infra_rationale:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH final_decision cannot contain infra_rationale"
+        )
 
     if latest_review is not None and (
         latest_review.verdict is ReviewVerdict.FAIL or latest_review.critical_issues
@@ -6088,18 +6112,11 @@ def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
         and not decision.memory_write_required
         and not state.memory_written
         and state.memory_verification_receipt is None
-        and (
-            (
-                state.implementation_result is not None
-                and latest_verification is not None
-                and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
-            )
-            or (
-                state.implementation_result is None
-                and state.latest_consensus is not None
-                and state.latest_consensus.status is ConsensusStatus.NO_CONSENSUS
-            )
-        )
+        and state.implementation_result is not None
+        and latest_verification is not None
+        and latest_verification.status is VerificationStatus.PASS
+        and latest_verification.tests_passed
+        and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
     )
 
 

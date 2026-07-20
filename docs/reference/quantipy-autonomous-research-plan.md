@@ -226,12 +226,18 @@ The runner enforces this order for alpha work:
    KEEP-family; no improvement is `DISCARD`. Plain `KEEP` requires that numeric
    baseline.
 
-G0 decides only `INFRA_REPAIRED` or `INFRA_BLOCKED` from its gate outcome.
-`NO_CONSENSUS` and `INFRA_BLOCKED` set `memory_write_required=false` and do not
-write MemPalace. For every other memory-required final decision, the PM writes
-compact experiment, feature, model, metric, reviewer, decision, failure, and
-receipt facts after the decision artifact is accepted. Full ticker arrays are
-never stored in prompts, `RESEARCH_LOG.md`, or MemPalace.
+In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
+remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
+`autoresearch-start-next` begins the next iteration with fresh context.
+`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
+completed `DATA_INFRA_G0` implementation and verification whose explicit
+`infra_gate_outcome=REMEDIATION_REQUIRED`. At that completed G0 boundary,
+`GATE_PASSED` maps to `INFRA_REPAIRED`; the gate mapping never overrides
+consensus handling. Both no-memory outcomes set
+`memory_write_required=false`. For every other memory-required final decision,
+the PM writes compact experiment, feature, model, metric, reviewer, decision,
+failure, and receipt facts after the decision artifact is accepted. Full ticker
+arrays are never stored in prompts, `RESEARCH_LOG.md`, or MemPalace.
 
 ## Success Criteria
 

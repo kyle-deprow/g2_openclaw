@@ -88,8 +88,18 @@ explicit XNYS interval `2022-01-03` through `2025-12-31`: Reddit begins
 onward but rejects January/July 2021. The readiness build strictly probes the
 campaign start through Quantipy's public `security_universe_screen` and daily
 regular-hours `prices` APIs for `AAPL`. This may hydrate/cache data as the
-intentional operator prewarm; a failed probe produces no READY receipt. Then
-atomically resume the same schema-v2 state file:
+intentional operator prewarm; a failed probe produces no READY receipt.
+
+In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
+remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
+`autoresearch-start-next` begins the next iteration with fresh context.
+`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
+completed `DATA_INFRA_G0` implementation and verification whose explicit
+`infra_gate_outcome=REMEDIATION_REQUIRED`. G0 gate-outcome mapping applies only
+after that implementation and verification; it never overrides consensus
+handling.
+
+Then atomically resume the same schema-v2 state file:
 
 ```bash
 (

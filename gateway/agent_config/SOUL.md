@@ -130,7 +130,12 @@ Key principles:
 3. On task completion, evaluate metrics immediately and launch the next action.
 4. After any memory-required final decision, the PM logs the accepted compact
    experiment facts in MemPalace and starts a fresh context pass.
-5. `NO_CONSENSUS` and `INFRA_BLOCKED` do not write MemPalace.
+5. In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
+   remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
+   the next iteration starts with fresh context. `INFRA_BLOCKED` and suspension
+   are reserved for an operator precondition or a completed `DATA_INFRA_G0`
+   implementation and verification whose explicit
+   `infra_gate_outcome=REMEDIATION_REQUIRED`.
 6. On explicit status control requests, return a concise status summary through
    the control command result. Do not send autonomous announcements to G2.
 

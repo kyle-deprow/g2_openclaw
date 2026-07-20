@@ -125,6 +125,13 @@ required memory write or explicit no-memory transition, `autoresearch-start-next
 may atomically replace the pinned identity with a different validated READY
 receipt. It never changes an active or suspended iteration's receipt.
 
+In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
+remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
+`autoresearch-start-next` begins the next iteration with fresh context.
+`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
+completed `DATA_INFRA_G0` implementation and verification whose explicit
+`infra_gate_outcome=REMEDIATION_REQUIRED`.
+
 ## Instruction Source Manifest
 
 `autoresearch-next` no longer injects full instruction file contents. It emits
@@ -190,9 +197,10 @@ The context packet must select exactly one mode and give a nonempty
   metrics and a KEEP/DISCARD-family decision only after coverage verification.
 - `DATA_INFRA_G0` is for repairing data range, provenance, universe, or fold
   construction. It is not an alpha experiment and must never be presented as
-  Sharpe/performance validation. Its verification returns an explicit
-  infrastructure gate outcome and its final decision is `INFRA_REPAIRED` or
-  `INFRA_BLOCKED`.
+  Sharpe/performance validation. After implementation and verification, its
+  explicit infrastructure gate outcome maps `GATE_PASSED` to `INFRA_REPAIRED`
+  and `REMEDIATION_REQUIRED` to `INFRA_BLOCKED`. This mapping does not apply to
+  a consensus failure.
 
 The context packet also records normalized `burned_theory_families`. In alpha
 mode, a debate submission in a burned family is rejected unless it contains a
@@ -500,8 +508,10 @@ majority. Required output:
 
 If there is no 3-of-5 majority, run one concise debate retry with the same
 context plus the dissent summary. If there is still no majority, log
-`NO_CONSENSUS` to `RESEARCH_LOG.md`, then start a fresh context pass. Do not
-implement without a majority. The final decision must explicitly set
+`NO_CONSENSUS` to `RESEARCH_LOG.md`, then start a fresh context pass. This rule
+is identical in `ALPHA_RESEARCH` and `DATA_INFRA_G0`; a G0 consensus failure
+must not be relabeled `INFRA_BLOCKED`. Do not implement without a majority. The
+final decision must explicitly set
 `reviewer_verdict=NOT_RUN` and `memory_write_required=false`; do not write
 MemPalace facts or fabricate a memory receipt for `NO_CONSENSUS`.
 
@@ -721,10 +731,13 @@ Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
   baseline.
 - Max drawdown >= 30%: DISCARD regardless of Sharpe.
 
-For `DATA_INFRA_G0`, decide `INFRA_REPAIRED` only when its explicit
-infrastructure gate passed; otherwise decide `INFRA_BLOCKED`. A methodology
-`PASS` means the data/process gate was assessed correctly, not that an alpha
-strategy has passed.
+After a `DATA_INFRA_G0` implementation and completed verification, decide
+`INFRA_REPAIRED` only for explicit `infra_gate_outcome=GATE_PASSED`; decide
+`INFRA_BLOCKED` only for explicit
+`infra_gate_outcome=REMEDIATION_REQUIRED`. The latter suspends for operator
+remediation. This gate mapping is not consensus handling. A methodology `PASS`
+means the data/process gate was assessed correctly, not that an alpha strategy
+has passed.
 
 Actions:
 
@@ -733,7 +746,8 @@ Actions:
 - DISCARD/CRASH: do not promote the disposable experiment commit; log why and
   move to the next proposal.
 - NO_CONSENSUS: log the split to `RESEARCH_LOG.md`; set `NOT_RUN` and the
-  explicit no-memory flag, then begin the next context pass.
+  explicit no-memory flag, remain unsuspended, then begin the next iteration's
+  fresh context pass.
 - Always append to the target repo's experiment log and `RESEARCH_LOG.md`.
 - After every memory-required final decision, the PM writes MemPalace drawers
   and KG facts for experiment, feature, model, metric, decision, and failure

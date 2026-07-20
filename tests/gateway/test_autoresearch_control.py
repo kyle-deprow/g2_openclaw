@@ -35,6 +35,7 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
+    OpenClawUnavailableError,
     ShutdownRequested,
     SupervisorError,
 )
@@ -155,7 +156,7 @@ class FakeOpenClaw:
         if method == "tasks.list":
             if self.task_list_calls < self.task_list_failures_before_success:
                 self.task_list_calls += 1
-                raise SupervisorError("poll failed")
+                raise OpenClawUnavailableError("poll failed")
             tasks = (
                 self.tasks
                 if self.task_snapshots is None

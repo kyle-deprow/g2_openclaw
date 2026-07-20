@@ -278,6 +278,29 @@ def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     assert "`verification_result`" in protocol
 
 
+def test_runtime_docs_separate_no_consensus_from_infrastructure_blocking() -> None:
+    paths = (
+        AGENT_CONFIG / "AGENTS.md",
+        AGENT_CONFIG / "SOUL.md",
+        AGENT_CONFIG / "README.md",
+        AUTORESEARCH,
+        PLAN,
+    )
+
+    for path in paths:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert "second-round `NO_CONSENSUS` remains `NO_CONSENSUS`" in text, path
+        assert "`ALPHA_RESEARCH` and `DATA_INFRA_G0`" in text, path
+        assert "does not suspend" in text, path
+        assert "does not write MemPalace" in text, path
+        assert "fresh context" in text, path
+        assert "explicit `infra_gate_outcome=REMEDIATION_REQUIRED`" in text, path
+
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    assert "G0 uses only `INFRA_REPAIRED` or `INFRA_BLOCKED`" not in combined
+    assert "G0 decides only `INFRA_REPAIRED` or `INFRA_BLOCKED`" not in combined
+
+
 def test_runtime_docs_require_absolute_artifact_handoff_paths() -> None:
     protocol = AUTORESEARCH.read_text(encoding="utf-8")
     normalized = " ".join(protocol.split())
