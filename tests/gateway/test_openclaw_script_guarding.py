@@ -495,6 +495,9 @@ def _assert_missing_gateway_left_managed_destinations_untouched(
 
 def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 3
+    assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
+
     agents = {agent["id"]: agent for agent in config["agents"]["list"]}
 
     main = agents["main"]

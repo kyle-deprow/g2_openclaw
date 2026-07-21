@@ -148,7 +148,7 @@
       },
       "maxConcurrent": 4,
       "subagents": {
-        "maxConcurrent": 8
+        "maxConcurrent": 3
       }
     },
     "list": [

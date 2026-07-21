@@ -87,9 +87,11 @@ implementation:
 | fixer | Fixes concrete reviewer/test defects without changing the theory |
 
 Autoresearch uses one bounded debate per iteration. First spawn
-`context-curator`; then run the five debaters; then use `consensus-arbiter`.
-Only implement a theory after 3-of-5 majority. Review with the single
-`reviewer` stage.
+`context-curator`; then dispatch all five configured debaters through the
+global subagent lane. OpenClaw may run up to 3 subagents concurrently and
+queues the remaining debate tasks until capacity frees up; do not switch this
+to `maxChildrenPerAgent`, which hard-rejects spawns. Only implement a theory
+after 3-of-5 majority. Review with the single `reviewer` stage.
 
 Spawn autoresearch stages by configured agent ID only. Do not use generic
 subagents, inherited/default models, or per-spawn model overrides. The repo
