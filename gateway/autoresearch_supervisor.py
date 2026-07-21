@@ -55,7 +55,11 @@ DEFAULT_OWNER_SESSIONS_PATH = (
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
-DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 300.0
+# Implementation, verification, review, and fix stages can spend several
+# minutes running tests and backtests without producing an OpenClaw event.
+# Keep the supervisor responsive while allowing those legitimate long turns to
+# finish before declaring the task stale.
+DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS = 0.05
 READ_ONLY_TASK_LIST_ATTEMPTS = 3

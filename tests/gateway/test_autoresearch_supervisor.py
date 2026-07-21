@@ -34,6 +34,7 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
+    DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
     AutoresearchSupervisor,
     NativeGatewayRPC,
     OpenClawRPC,
@@ -319,7 +320,12 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
     )
 
 
-def _supervisor(env: SupervisorEnv, fake: FakeOpenClaw) -> AutoresearchSupervisor:
+def _supervisor(
+    env: SupervisorEnv,
+    fake: FakeOpenClaw,
+    *,
+    expected_stage_task_stale_seconds: float = 300.0,
+) -> AutoresearchSupervisor:
     return AutoresearchSupervisor(
         SupervisorConfig(
             state_path=env.state_path,
@@ -329,11 +335,16 @@ def _supervisor(env: SupervisorEnv, fake: FakeOpenClaw) -> AutoresearchSuperviso
             owner_sessions_path=env.sessions_path,
             target_repo=env.repo_root,
             proc_root=env.proc_root,
+            expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
         ),
         now=lambda: env.now,
         sleep=lambda _: None,
         task_gateway=fake,
     )
+
+
+def test_expected_stage_task_stale_default_allows_long_stage_turns() -> None:
+    assert DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS == 900.0
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(

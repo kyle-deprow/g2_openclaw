@@ -20,6 +20,14 @@ Durable research memory is MemPalace only. Do not use `memory_search`,
 loop memory for research continuity. Only the PM loads the write-capable
 `mempalace` skill; all stage agents load `mempalace-readonly`.
 
+The owner-only supervisor polls the authoritative state and OpenClaw task
+records every 60 seconds. Its default stale-task threshold is 15 minutes so
+long implementation, verification, review, and fix turns are not interrupted
+while running tests or backtests. A task is still stale when it exceeds that
+threshold without an OpenClaw event, and recovery must use the owner control
+commands; do not interact with G2 or kill a live stage merely because it is
+quiet for a few minutes.
+
 ## Platform Readiness Preflight
 
 Before any stage dispatch, the runner validates the operator-owned manifest at
