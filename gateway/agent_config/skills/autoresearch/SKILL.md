@@ -324,6 +324,17 @@ guardrails exist only to keep execution clean:
   `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
   iteration/stage/round/attempt tuple must map to exactly one label, and any
   retry or recovery that changes round or attempt must change the label.
+  OpenClaw session labels remain globally occupied after a task reaches a
+  terminal state; uniqueness is therefore checked against the complete task
+  ledger, not only currently running tasks.
+- An owner-session stop, restart, supervisor recovery wake, gateway restart,
+  or interrupted dispatch is a retry even when the authoritative state file
+  still names the same phase. Before spawning, parse every prior matching
+  label from the task ledger and choose the next unused attempt number. Never
+  reuse `r1-a1` (or any prior attempt) after such an event. A label collision
+  (`label already in use`) is a failed dispatch precondition: do not wait for
+  the announcement, do not silently rename a task after spawning, and retry
+  with the next unused attempt label while preserving the terminal artifact.
 - On recovery, reconcile every expected label against the task ledger and its
   child-session transcript before waiting. Consume terminal outputs even if the
   completion announcement was missed. Relaunch only a task with no recoverable

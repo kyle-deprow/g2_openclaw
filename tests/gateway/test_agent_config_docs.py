@@ -266,6 +266,18 @@ def test_ownership_memory_and_config_guidance_remain_explicit() -> None:
     assert "restart the OpenClaw gateway service" in readme
 
 
+def test_dispatch_recovery_requires_task_ledger_unique_labels() -> None:
+    agents = " ".join(AGENT_CONFIG.joinpath("AGENTS.md").read_text(encoding="utf-8").split())
+    autoresearch = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    for text in (agents.lower(), autoresearch.lower()):
+        assert "complete task ledger" in text
+        assert "owner session stop" in text or "owner-session stop" in text
+        assert "never reuse `r1-a1`" in text
+        assert "label already in use" in text
+        assert "next unused attempt" in text
+
+
 def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     protocol = AUTORESEARCH.read_text(encoding="utf-8")
 
