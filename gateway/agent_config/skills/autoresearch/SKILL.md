@@ -30,11 +30,13 @@ quiet for a few minutes.
 
 Long hydrate-capable, backtest, notebook, and similar commands must not sit in
 an unbounded foreground tool call. Use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
-<absolute-run-dir> -- ...` or an equivalent detached process plus bounded
-polling so stdout/stderr, PID, start time, terminal exit code, and terminal
-status remain recoverable under the watchdog. Do not reduce scope simply to
-avoid this requirement; launch the real command safely, surface progress
-markers, and clean up stale processes and run directories when the stage ends.
+<absolute-run-dir> -- ...` with bounded polling so stdout/stderr, PID, start
+time, terminal exit code, and terminal status remain recoverable under the
+watchdog. Direct foreground execution is invalid. If the launcher cannot be
+used, fail closed and report the infrastructure blocker without emitting a
+stage artifact. Do not reduce scope simply to avoid this requirement; launch
+the real command safely, surface progress markers, and clean up stale
+processes and run directories when the stage ends.
 The launcher status ledger is intentionally narrow: `status.json` emits only
 `running`, `succeeded`, or `failed`. `[TASK:blocked]` is a PM-owned
 classification derived from bounded polling plus logs and receipts; it is not a
@@ -589,9 +591,11 @@ Implementation requirements:
 - Commit only after tests and notebook execution pass.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
-  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`
-  (or an equivalent detached launcher with bounded polling). Record the run
-  directory in stage notes and use its status files for progress and recovery.
+  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with bounded polling.
+  Direct foreground execution is invalid. If the launcher cannot be used, fail
+  closed and report the infrastructure blocker without emitting a fix artifact.
+  Record the run directory in stage notes and use its status files for progress
+  and recovery.
 
 ## 5. Verify
 

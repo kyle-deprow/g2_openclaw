@@ -5321,8 +5321,12 @@ def _phase_instruction(
         ),
         Phase.FIX_TEST: (
             "Apply a narrow fix against the latest verification or review failure. "
-            "After a fix, the next step "
-            "is always verification."
+            "After a fix, the next step is always verification. Any notebook, "
+            "hydrate, backtest, or similarly long test command MUST be launched "
+            "through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh with a "
+            "unique absolute --run-dir and bounded polling; direct foreground "
+            "execution is invalid. If the launcher cannot be used, fail closed "
+            "and report the infrastructure blocker without emitting a fix_result."
         ),
         Phase.DECISION_LOG: (
             "Decide and log the completed iteration. "
@@ -5623,6 +5627,11 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "independently edit shared infrastructure.\n"
         "- Do not leave background experiment, notebook, pytest, or data-generation "
         "processes running after the stage exits.\n"
+        "- Any notebook, hydrate, backtest, or similarly long test command must be "
+        "launched through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh with a "
+        "unique absolute --run-dir and bounded polling. Direct foreground execution "
+        "is invalid; if the launcher cannot be used, fail closed and report the "
+        "infrastructure blocker without emitting a fix_result.\n"
         "- Finish with a clean, committed result. The fix_result artifact must use the same "
         "verified workspace_path exactly and report its accepted final commit SHA in commit_sha.\n"
         "- If a verification fix changes the planned ALPHA price-hydration scope, include "

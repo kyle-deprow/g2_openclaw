@@ -4638,6 +4638,12 @@ def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
     assert implementation.workspace_path not in prompt
     assert implementation.commit_sha not in prompt
     assert "Never create another worktree" in prompt
+    assert (
+        "Any notebook, hydrate, backtest, or similarly long test command MUST be launched "
+        "through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh"
+    ) in prompt
+    assert "direct foreground execution is invalid" in prompt
+    assert "without emitting a fix_result" in prompt
     assert fixed.implementation_result is not None
     assert fixed.implementation_result.workspace_path == implementation.workspace_path
 
