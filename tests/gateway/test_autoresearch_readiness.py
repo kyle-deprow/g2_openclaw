@@ -48,14 +48,14 @@ CAMPAIGN_XNYS_START = date(2022, 1, 3)
 CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
-def test_quantipy_readiness_pins_price_bar_portable_constraints_alembic_head() -> None:
+def test_quantipy_readiness_pins_current_quantipy_alembic_head() -> None:
     pinned_head = (
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
     )
 
     assert pinned_head == (
-        "020_align_price_bar_portable_constraints",
+        "020_price_bar_constraint_align",
         "020_align_price_bar_portable_constraints.py",
     )
 
@@ -1031,7 +1031,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     assert not (tmp_path / "contract.json").exists()
 
 
-def test_operator_builder_rejects_missing_alembic_020_head_file(tmp_path: Path) -> None:
+def test_operator_builder_rejects_missing_pinned_alembic_head_file(tmp_path: Path) -> None:
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
