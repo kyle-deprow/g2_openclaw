@@ -28,6 +28,18 @@ threshold without an OpenClaw event, and recovery must use the owner control
 commands; do not interact with G2 or kill a live stage merely because it is
 quiet for a few minutes.
 
+Long hydrate-capable, backtest, notebook, and similar commands must not sit in
+an unbounded foreground tool call. Use `scripts/run-long-task.sh --run-dir
+<absolute-run-dir> -- ...` or an equivalent detached process plus bounded
+polling so stdout/stderr, PID, start time, terminal exit code, and terminal
+status remain recoverable under the watchdog. Do not reduce scope simply to
+avoid this requirement; launch the real command safely, surface progress
+markers, and clean up stale processes and run directories when the stage ends.
+The launcher status ledger is intentionally narrow: `status.json` emits only
+`running`, `succeeded`, or `failed`. `[TASK:blocked]` is a PM-owned
+classification derived from bounded polling plus logs and receipts; it is not a
+literal launcher status.
+
 ## Platform Readiness Preflight
 
 Before any stage dispatch, the runner validates the operator-owned manifest at
@@ -575,6 +587,10 @@ Implementation requirements:
   shell, and over-budget preflight so verification can emit the structured
   feasibility `BUG_SIGNAL` without spending the hydrate cost.
 - Commit only after tests and notebook execution pass.
+- Any notebook execution, hydrate-capable run, or backtest expected to outlive
+  the watchdog must be launched detached through `scripts/run-long-task.sh`
+  (or an equivalent detached launcher with bounded polling). Record the run
+  directory in stage notes and use its status files for progress and recovery.
 
 ## 5. Verify
 
@@ -617,6 +633,9 @@ Failure classification is mandatory:
   set `status` to `TEST_FAILURE`, set `tests_passed` to `false`, and include
   the exact command in `commands_run` plus the decisive failure evidence in the
   artifact summaries.
+- Any hydrate, backtest, notebook, or similarly long verification command must
+  run detached with bounded polling and durable run artifacts. Foreground tool
+  calls beyond the watchdog are unsafe and invalid for these commands.
 - If commands ran but metrics are impossible, leaky, internally inconsistent,
   or match a bug signal, set `status` to `BUG_SIGNAL`, keep `bug_signals`
   nonempty, and include the exact command and evidence that exposed it.
@@ -709,6 +728,9 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 
 - Critical reviewer issue: send a narrow fix to `fixer`, rerun tests/notebook,
   then rerun the single reviewer.
+- Any long fix/test notebook, hydrate, or backtest rerun must use the detached
+  launcher pattern and preserve run-directory status until the rerun is
+  accepted or explicitly cleaned up.
 - Test failure: fix up to two times, then classify and log CRASH. The disposable
   experiment worktree is not promoted.
 - Verification `BUG_SIGNAL`: fix up to two times. If the signal persists after
@@ -777,8 +799,16 @@ Actions:
 ## Recovery And Status
 
 - On resume, read `RESEARCH_LOG.md`, git status, active background tasks, and
-  MemPalace. Re-enter the first incomplete stage.
-- Post `[TASK:running] autoresearch iteration N` after each launch.
+  MemPalace. Re-enter the first incomplete stage and inspect detached run
+  directories before relaunching anything.
+- Post `[TASK:started] autoresearch iteration N` after each detached launch
+  publishes launcher status `running`.
+- Post `[TASK:progress]` markers from bounded polling during long detached
+  hydration, backtest, notebook, review, and fix commands.
+- Post `[TASK:done]` when bounded polling reaches launcher status
+  `succeeded`, and preserve the exit code in the recorded status.
+- Post `[TASK:blocked]` only when bounded polling, logs, or receipts show an
+  actionable blocker. The launcher never emits a literal `blocked` status.
 - Post progress every 10 iterations.
 - Monitoring is read-only. On confirmed shared-infrastructure failure, report
   the exact blocker evidence and await human/Codex operator action. The PM
@@ -786,3 +816,5 @@ Actions:
 - Do not stop after one experiment. If a declared finite goal is satisfied, the
   PM may report that status but must continue the loop until an explicit
   human/Codex control-command `stop` halts it.
+- Do not reduce experiment or verification scope to dodge the launcher,
+  watchdog, or cleanup requirements.

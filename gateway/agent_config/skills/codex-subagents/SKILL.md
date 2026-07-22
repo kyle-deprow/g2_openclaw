@@ -56,6 +56,33 @@ repo config binds each stage to its model.
 5. Repeat review/fix until the reviewer reports no must-fix issues.
 6. Run final verification from the parent context.
 
+## Detached Long Tasks
+
+Any hydration, backtest, notebook execution, or similarly long verification
+command must use `scripts/run-long-task.sh --run-dir <absolute-run-dir> -- ...`
+or an equivalent detached launcher with bounded polling and the same durable
+run artifacts. Foreground tool calls that can outlive the OpenClaw watchdog are
+unsafe because the PM can lose status and recovery evidence while the tool is
+still blocked in the foreground.
+
+Requirements:
+
+1. Use a unique absolute run directory per launched command.
+2. Record and read `pid`, `started_at`, `stdout.log`, `stderr.log`,
+   `exit_code`, and `status.json`.
+3. Treat launcher `status.json` as a narrow process ledger: it emits only
+   `running`, `succeeded`, or `failed`.
+4. Poll status on a bounded interval; do not wait forever on a foreground tool
+   call.
+5. Derive PM markers from that ledger and the logs. `[TASK:blocked]` is a
+   PM-level bounded-polling classification for actionable blockers; it is not a
+   literal launcher status.
+6. Emit concise progress and completion markers tied to the launched run.
+7. Clean up stale processes and stale run directories when they are no longer
+   needed.
+8. Do not reduce scope just to avoid detached execution. If the task requires a
+   long command, launch it safely and report the real status.
+
 ## Status Markers
 
 Long-running tasks should report concise markers that the gateway can surface
@@ -68,12 +95,16 @@ back to the G2 glasses:
 [TASK:done] <summary and verification>
 ```
 
+`[TASK:blocked]` comes from PM interpretation of bounded polling, logs, and
+recovery evidence. The launcher itself never writes `blocked` into
+`status.json`.
+
 ## Recovery
 
 - If a subagent exits after planning only, resume with: "Skip exploration.
   Execute the implementation plan now."
 - If auth fails, run `openclaw models auth login --provider openai` for
   OpenClaw-routed Codex work, or `codex login` for direct local Codex CLI work.
-- If a session is silent for several minutes, inspect process state and logs
-  before killing it.
+- If a session is silent for several minutes, inspect the detached run
+  directory, process state, and logs before killing it.
 - Do not retry through another runtime.

@@ -11,6 +11,7 @@ PLAN = REPO_ROOT / "docs" / "reference" / "quantipy-autonomous-research-plan.md"
 DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 METHODOLOGY = AGENT_CONFIG / "skills" / "quantipy-methodology" / "SKILL.md"
 AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
+CODEX_SUBAGENTS = AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md"
 CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
 
@@ -264,6 +265,32 @@ def test_ownership_memory_and_config_guidance_remain_explicit() -> None:
     assert "Never write or pass a raw unwrapped `verification_result`" in agents
     assert "bash scripts/push-openclaw-config.sh" in readme
     assert "restart the OpenClaw gateway service" in readme
+
+
+def test_long_task_docs_require_detached_launch_and_cleanup() -> None:
+    for path in (AUTORESEARCH, CODEX_SUBAGENTS):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        lowered = text.lower()
+        assert "scripts/run-long-task.sh --run-dir <absolute-run-dir> --" in text
+        assert "bounded polling" in lowered
+        assert "foreground tool call" in lowered
+        assert "unsafe" in lowered
+        assert "progress" in lowered
+        assert "clean up" in lowered or "cleanup" in lowered
+        assert (
+            "do not reduce scope" in lowered
+            or "do not reduce experiment or verification scope" in lowered
+        )
+
+
+def test_long_task_docs_distinguish_launcher_status_from_pm_blocking() -> None:
+    for path in (AUTORESEARCH, CODEX_SUBAGENTS):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        lowered = text.lower()
+        assert "`running`, `succeeded`, or `failed`" in text
+        assert "[TASK:blocked]" in text
+        assert "not a literal launcher status" in lowered
+        assert "bounded polling" in lowered
 
 
 def test_dispatch_recovery_requires_task_ledger_unique_labels() -> None:
