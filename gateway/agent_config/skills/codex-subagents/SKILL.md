@@ -61,7 +61,9 @@ repo config binds each stage to its model.
 Any hydration, backtest, notebook execution, or similarly long verification
 command must use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
 <absolute-run-dir> -- ...` with bounded polling and the same durable run
-artifacts. Direct foreground execution is invalid. If the launcher cannot be
+artifacts. The launcher places the worker in a dedicated transient user-systemd
+service with explicit memory bounds, outside the OpenClaw gateway cgroup. Direct
+foreground execution is invalid. If `systemd-run` or the launcher cannot be
 used, fail closed and report the infrastructure blocker without emitting a
 stage artifact. Foreground tool calls that can outlive the OpenClaw watchdog are
 unsafe because the PM can lose status and recovery evidence while the tool is

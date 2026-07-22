@@ -32,8 +32,10 @@ Long hydrate-capable, backtest, notebook, and similar commands must not sit in
 an unbounded foreground tool call. Use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
 <absolute-run-dir> -- ...` with bounded polling so stdout/stderr, PID, start
 time, terminal exit code, and terminal status remain recoverable under the
-watchdog. Direct foreground execution is invalid. If the launcher cannot be
-used, fail closed and report the infrastructure blocker without emitting a
+watchdog. The launcher runs the worker in a dedicated transient user-systemd
+service with explicit memory bounds, outside the OpenClaw gateway cgroup.
+Direct foreground execution is invalid. If `systemd-run` or the launcher cannot
+be used, fail closed and report the infrastructure blocker without emitting a
 stage artifact. Do not reduce scope simply to avoid this requirement; launch
 the real command safely, surface progress markers, and clean up stale
 processes and run directories when the stage ends.

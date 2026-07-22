@@ -85,6 +85,9 @@ def test_run_long_task_detaches_and_records_artifacts(tmp_path: Path) -> None:
     assert pid > 0
     assert pid == running["pid"]
     os.kill(pid, 0)
+    cgroup = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8")
+    assert "openclaw-gateway.service" not in cgroup
+    assert "openclaw-long-task-" in cgroup
 
     terminal_status = _wait_for_terminal_status(run_dir)
     assert terminal_status == {
@@ -217,4 +220,43 @@ def test_run_long_task_fails_closed_without_setsid(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "setsid is required for detached launch" in result.stderr
+    assert not (run_dir / "status.json").exists()
+
+
+def test_run_long_task_fails_closed_without_systemd_run(tmp_path: Path) -> None:
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+
+    for command_path in (
+        "/bin/bash",
+        "/usr/bin/basename",
+        "/usr/bin/date",
+        "/usr/bin/mkdir",
+        "/usr/bin/mktemp",
+        "/usr/bin/mv",
+        "/usr/bin/python3",
+        "/usr/bin/setsid",
+    ):
+        source = Path(command_path)
+        if source.exists():
+            (shim_dir / source.name).symlink_to(source)
+
+    run_dir = tmp_path / "missing-systemd-run"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--",
+            "true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(shim_dir)},
+    )
+
+    assert result.returncode != 0
+    assert "systemd-run is required for isolated detached launch" in result.stderr
     assert not (run_dir / "status.json").exists()
