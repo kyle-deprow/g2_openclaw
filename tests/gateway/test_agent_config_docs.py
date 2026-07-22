@@ -366,3 +366,43 @@ def test_alpha_docs_require_dynamic_coverage_and_explicit_state_migration() -> N
     assert "AggregateCoverageReceipt" in alpha_docs
     assert "DATA_INFRA_G0`-only" in alpha_docs
     assert "per-symbol and aggregate common-calendar coverage" not in alpha_docs
+
+
+def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+    tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())
+
+    for text in (skill, tools):
+        assert "completion-required child handoff" in text
+        assert "non-empty normal assistant acknowledgement" in text
+        assert "while waiting for remaining required children" in text or (
+            "even while other required children are still pending" in text
+        )
+        assert (
+            "[TASK:progress] <stage> completion recorded; waiting for <N> required completion(s)."
+            in text
+        )
+
+
+def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+    tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())
+
+    for text in (skill, tools):
+        assert "`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn" in text
+        assert "Do not silently wait" in text or "must not use `sessions_yield`" in text
+        assert "internal PM transcript replies" in text
+        assert "Do not use the message tool to send autonomous updates to G2" in text or (
+            "Do not substitute the message tool or send an autonomous update to G2" in text
+        )
+        assert "persist the authoritative artifact" in text
+        assert "non-empty completion summary" in text
+
+
+def test_autoresearch_docs_treat_delivery_failure_as_a_hard_blocker() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    assert "OpenClaw `2026.7.1-2` records a delivery failure" in skill
+    assert "child's structured output exists" in skill
+    assert "Treat that failure as a hard infrastructure blocker for recovery" in skill
+    assert "not accepted merely because its trajectory has output" in skill

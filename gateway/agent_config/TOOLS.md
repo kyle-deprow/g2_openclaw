@@ -35,6 +35,18 @@ Key rules:
 - Run long implementation and review tasks in the background.
 - Do not silently fall back to another runtime, provider, or model if Codex auth
   or runtime selection fails.
+- In `autoresearch-pm`, every completion-required child handoff must produce a
+  non-empty normal assistant acknowledgement in the PM transcript, even while
+  other required children are still pending.
+- Waiting acknowledgements must stay concise and truthful, for example
+  `[TASK:progress] <stage> completion recorded; waiting for <N> required
+  completion(s).`
+- While waiting on any required child, the PM must not use `sessions_yield`,
+  `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
+- These acknowledgements are internal PM transcript replies only. Do not use
+  the message tool to send autonomous updates to G2.
+- After the last required child arrives, the PM must persist the authoritative
+  artifact and emit a non-empty completion summary.
 
 ## Built-in Tools
 

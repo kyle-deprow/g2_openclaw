@@ -454,6 +454,29 @@ PM and stage-agent conduct:
 - Non-PM agents do not write MemPalace. Stage agents use readonly retrieval
   only; the PM writes MemPalace only at the allowed final decision points.
 
+### Completion Delivery Protocol
+
+OpenClaw `2026.7.1-2` records a delivery failure if a completion-required child
+handoff lands without a visible PM assistant reply, even when the child's
+structured output exists. Treat that failure as a hard infrastructure blocker
+for recovery; a child completion is not accepted merely because its trajectory
+has output.
+
+For every completion-required child handoff, `autoresearch-pm` must emit a
+non-empty normal assistant acknowledgement in its own transcript, including
+while waiting for remaining required children. Waiting acknowledgements must be
+concise and truthful, for example `[TASK:progress] <stage> completion recorded;
+waiting for <N> required completion(s).`
+
+While any required child completion is still outstanding, the PM must not use
+`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
+handoff. Do not substitute the message tool or send an autonomous update to G2;
+these acknowledgements are internal PM transcript replies only.
+
+Once all required children arrive, the PM must persist the authoritative
+artifact and emit a non-empty completion summary. Do not silently wait between
+child completion receipt and final summary emission.
+
 ## Setup
 
 Do once before the first iteration:
