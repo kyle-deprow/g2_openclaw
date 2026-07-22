@@ -29,7 +29,7 @@ commands; do not interact with G2 or kill a live stage merely because it is
 quiet for a few minutes.
 
 Long hydrate-capable, backtest, notebook, and similar commands must not sit in
-an unbounded foreground tool call. Use `scripts/run-long-task.sh --run-dir
+an unbounded foreground tool call. Use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
 <absolute-run-dir> -- ...` or an equivalent detached process plus bounded
 polling so stdout/stderr, PID, start time, terminal exit code, and terminal
 status remain recoverable under the watchdog. Do not reduce scope simply to
@@ -588,7 +588,8 @@ Implementation requirements:
   feasibility `BUG_SIGNAL` without spending the hydrate cost.
 - Commit only after tests and notebook execution pass.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
-  the watchdog must be launched detached through `scripts/run-long-task.sh`
+  the watchdog must be launched detached through
+  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`
   (or an equivalent detached launcher with bounded polling). Record the run
   directory in stage notes and use its status files for progress and recovery.
 
@@ -729,7 +730,8 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 - Critical reviewer issue: send a narrow fix to `fixer`, rerun tests/notebook,
   then rerun the single reviewer.
 - Any long fix/test notebook, hydrate, or backtest rerun must use the detached
-  launcher pattern and preserve run-directory status until the rerun is
+  launcher at `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` and
+  preserve run-directory status until the rerun is
   accepted or explicitly cleaned up.
 - Test failure: fix up to two times, then classify and log CRASH. The disposable
   experiment worktree is not promoted.

@@ -59,7 +59,8 @@ repo config binds each stage to its model.
 ## Detached Long Tasks
 
 Any hydration, backtest, notebook execution, or similarly long verification
-command must use `scripts/run-long-task.sh --run-dir <absolute-run-dir> -- ...`
+command must use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
+<absolute-run-dir> -- ...`
 or an equivalent detached launcher with bounded polling and the same durable
 run artifacts. Foreground tool calls that can outlive the OpenClaw watchdog are
 unsafe because the PM can lose status and recovery evidence while the tool is
