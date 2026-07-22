@@ -48,15 +48,15 @@ CAMPAIGN_XNYS_START = date(2022, 1, 3)
 CAMPAIGN_XNYS_END = date(2025, 12, 31)
 
 
-def test_quantipy_readiness_pins_lossless_price_volume_alembic_head() -> None:
+def test_quantipy_readiness_pins_price_bar_canonical_guards_alembic_head() -> None:
     pinned_head = (
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
     )
 
     assert pinned_head == (
-        "017_lossless_price_volume",
-        "017_make_price_volume_lossless.py",
+        "019_price_bar_canonical_guards",
+        "019_add_price_bar_canonical_integrity_guards.py",
     )
 
 
@@ -1001,7 +1001,11 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
         encoding="utf-8",
     )
     subprocess.run(["git", "add", "."], cwd=quantipy_root, check=True)
-    subprocess.run(["git", "commit", "-qm", "fake 016"], cwd=quantipy_root, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "fake stale alembic head"],
+        cwd=quantipy_root,
+        check=True,
+    )
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=quantipy_root,
@@ -1027,7 +1031,7 @@ def test_operator_builder_rejects_string_only_fake_contract(tmp_path: Path) -> N
     assert not (tmp_path / "contract.json").exists()
 
 
-def test_operator_builder_rejects_missing_alembic_017_head_file(tmp_path: Path) -> None:
+def test_operator_builder_rejects_missing_alembic_019_head_file(tmp_path: Path) -> None:
     quantipy_root = tmp_path / "quantipy"
     quantipy_root.mkdir()
     commit = _write_probe_quantipy_repo(quantipy_root)
@@ -1193,7 +1197,7 @@ def test_shipped_contract_probe_rejects_revision_resolved_from_wrong_filename(
 ) -> None:
     expected_migration = tmp_path / autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME
     expected_migration.write_text('revision = "different_revision"\n', encoding="utf-8")
-    resolved_migration = tmp_path / "017_unexpected_lossless_price_volume.py"
+    resolved_migration = tmp_path / "019_unexpected_price_bar_canonical_guards.py"
     resolved_migration.write_text(
         f'revision = "{autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION}"\n',
         encoding="utf-8",
