@@ -55,6 +55,9 @@ done
 command -v setsid >/dev/null 2>&1 || die "setsid is required for detached launch"
 command -v python3 >/dev/null 2>&1 || die "python3 is required for detached status validation"
 command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for isolated detached launch"
+uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launch"
+uv_bin_dir="$(dirname -- "$uv_path")"
+transient_path="${PATH}:${uv_bin_dir}"
 
 if [[ -L "$RUN_DIR" ]]; then
   die "--run-dir must not be a symlink"
@@ -157,6 +160,7 @@ setsid systemd-run \
   --collect \
   --unit="$unit_name" \
   --service-type=exec \
+  --setenv=PATH="$transient_path" \
   --working-directory="$working_directory" \
   --property=MemoryHigh=16G \
   --property=MemoryMax=24G \

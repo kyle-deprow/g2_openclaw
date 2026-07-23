@@ -134,6 +134,103 @@ def test_run_long_task_preserves_nonzero_exit_code_in_status(tmp_path: Path) -> 
     assert (run_dir / "stderr.log").read_text(encoding="utf-8") == "bad\n"
 
 
+def test_run_long_task_propagates_caller_path_and_uv_directory(tmp_path: Path) -> None:
+    shim_dir = tmp_path / "caller-bin"
+    shim_dir.mkdir()
+
+    uv_path = shim_dir / "uv"
+    uv_path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    uv_path.chmod(0o755)
+
+    captured_path = tmp_path / "transient-path"
+    systemd_run_path = shim_dir / "systemd-run"
+    systemd_run_path.write_text(
+        """#!/bin/bash
+set -euo pipefail
+
+transient_path=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --setenv=PATH=*)
+      transient_path="${1#--setenv=PATH=}"
+      ;;
+    --)
+      shift
+      break
+      ;;
+  esac
+  shift
+done
+
+[[ -n "$transient_path" ]]
+printf '%s\\n' "$transient_path" > "$CAPTURE_PATH"
+PATH="$transient_path" exec "$@"
+""",
+        encoding="utf-8",
+    )
+    systemd_run_path.chmod(0o755)
+
+    caller_path = f"{shim_dir}:/usr/bin:/bin"
+    run_dir = tmp_path / "path-task"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--",
+            "true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": caller_path,
+            "CAPTURE_PATH": str(captured_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured_path.read_text(encoding="utf-8").strip() == f"{caller_path}:{shim_dir}"
+    assert _wait_for_terminal_status(run_dir)["status"] == "succeeded"
+
+
+def test_run_long_task_fails_closed_without_uv(tmp_path: Path) -> None:
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+
+    for command_path in (
+        "/bin/bash",
+        "/usr/bin/python3",
+        "/usr/bin/setsid",
+        "/usr/bin/systemd-run",
+    ):
+        source = Path(command_path)
+        if source.exists():
+            (shim_dir / source.name).symlink_to(source)
+
+    run_dir = tmp_path / "missing-uv"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--",
+            "true",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": str(shim_dir)},
+    )
+
+    assert result.returncode != 0
+    assert "uv is required for detached launch" in result.stderr
+    assert not (run_dir / "status.json").exists()
+
+
 def test_run_long_task_rejects_malformed_args(tmp_path: Path) -> None:
     relative_result = subprocess.run(
         [
