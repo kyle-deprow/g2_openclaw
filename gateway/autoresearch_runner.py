@@ -4409,6 +4409,20 @@ def _validate_alpha_universe_chain(
         )
 
 
+def _validate_consensus_history_universe_plans(state: AutoresearchState) -> None:
+    """Require a frozen plan for every persisted non-operator majority."""
+    for index, consensus in enumerate(state.consensus_history, start=1):
+        if consensus.status is ConsensusStatus.MAJORITY and not _is_operator_precondition_consensus(
+            consensus
+        ):
+            if consensus.universe_plan is None:
+                raise AutoresearchValidationError(
+                    "non-operator majority consensus at history index "
+                    f"{index} requires a frozen universe_plan"
+                )
+            consensus.universe_plan.validate()
+
+
 def _revalidate_accepted_member_union_manifests(state: AutoresearchState) -> None:
     if state.mode is not ResearchMode.ALPHA_RESEARCH:
         return
@@ -4477,6 +4491,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("debate history requires a context_packet")
     if state.consensus_history and state.latest_debate is None:
         raise AutoresearchValidationError("consensus history requires a debate_result")
+    _validate_consensus_history_universe_plans(state)
     _validate_alpha_universe_chain(state)
     if state.memory_written and state.final_decision is None:
         raise AutoresearchValidationError("memory_written cannot be true before final_decision")
@@ -5282,8 +5297,9 @@ def _phase_instruction(
         ),
         Phase.CONSENSUS: (
             "Decide whether the latest debate has a 3-of-5 majority; return MAJORITY or "
-            "NO_CONSENSUS only. The first NO_CONSENSUS gets exactly one retry. For an "
-            "ALPHA_RESEARCH MAJORITY, freeze one compact universe_plan with profile "
+            "NO_CONSENSUS only. The first NO_CONSENSUS gets exactly one retry. For every "
+            "non-operator-precondition MAJORITY in both ALPHA_RESEARCH and DATA_INFRA_G0, "
+            "freeze one compact universe_plan with profile "
             "identity/digests, sorted unique explicit selection dates, and "
             "next-session-or-later execution policy."
         ),
@@ -5872,10 +5888,11 @@ def advance_state(
                     consensus_history=next_consensus_history,
                     phase=Phase.DECISION_LOG,
                 )
-            if state.mode is ResearchMode.ALPHA_RESEARCH and artifact.universe_plan is None:
+            if artifact.universe_plan is None:
                 raise AutoresearchValidationError(
-                    "ALPHA_RESEARCH majority consensus requires a frozen universe_plan"
+                    "non-operator majority consensus requires a frozen universe_plan"
                 )
+            artifact.universe_plan.validate()
             return replace(
                 state,
                 consensus_history=next_consensus_history,

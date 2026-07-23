@@ -2408,6 +2408,117 @@ def test_no_majority_allows_one_retry_then_routes_to_decision(
     assert state.phase is Phase.DECISION_LOG
 
 
+def test_data_infra_majority_without_universe_plan_fails_at_consensus(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = AutoresearchState()
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    consensus = replace(_majority_consensus(round_number=1, policy=policy), universe_plan=None)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="majority consensus requires a frozen universe_plan",
+    ):
+        advance_state(state, consensus, policy)
+
+
+def test_persisted_data_infra_current_majority_requires_a_universe_plan(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = AutoresearchState()
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    assert state.latest_consensus is not None
+    forged = replace(
+        state,
+        consensus_history=(replace(state.latest_consensus, universe_plan=None),),
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+    ):
+        validate_state(persisted, policy)
+
+
+def test_persisted_history_cannot_hide_an_earlier_planless_majority(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    assert state.latest_consensus is not None
+    forged = replace(
+        state,
+        consensus_history=(
+            replace(state.latest_consensus, universe_plan=None),
+            replace(state.latest_consensus, round_number=2),
+        ),
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+    ):
+        validate_state(persisted, policy)
+
+
+def test_data_infra_operator_precondition_without_plan_routes_to_decision_log(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = AutoresearchState()
+    state = advance_state(state, _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+
+    advanced = advance_state(state, _operator_precondition_consensus(1, policy), policy)
+
+    assert advanced.phase is Phase.DECISION_LOG
+
+
+def test_consensus_prompt_requires_universe_plan_for_both_modes(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+
+    prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
+
+    assert "both ALPHA_RESEARCH and DATA_INFRA_G0" in prompt
+
+
 def test_operator_precondition_majority_routes_to_decision_log(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
