@@ -34,6 +34,17 @@ an unbounded foreground tool call. Use `/home/dev/repos/g2_openclaw/scripts/run-
 time, terminal exit code, and terminal status remain recoverable under the
 watchdog. The launcher runs the worker in a dedicated transient user-systemd
 service with explicit memory bounds, outside the OpenClaw gateway cgroup.
+It submits that unit with `systemd-run --no-block`, validates the unit start,
+and waits only for coherent startup metadata; it does not retain a
+`systemd-run --wait` client in the caller lifecycle. Once the launcher returns,
+the caller may exit while the transient unit continues. To control an active
+run, resolve its exact unit with
+`systemctl --user whoami "$(cat <absolute-run-dir>/pid)"` and use
+`systemctl --user stop <unit>` when required;
+the worker records a signal stop as terminal failure and preserves the child's
+actual exit status: an ordinary uncaught `SIGTERM` commonly yields `143`, while
+a child that handles or delays `SIGTERM` may yield its own code (for example,
+`7`).
 Direct foreground execution is invalid. If `systemd-run` or the launcher cannot
 be used, fail closed and report the infrastructure blocker without emitting a
 stage artifact. Do not reduce scope simply to avoid this requirement; launch

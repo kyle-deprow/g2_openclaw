@@ -50,9 +50,40 @@ publish_startup() {
 JSON
 }
 
+child_pid=""
+termination_requested=0
+
+handle_termination() {
+  termination_requested=1
+  if [[ -n "$child_pid" ]]; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+  fi
+}
+
+trap handle_termination TERM INT HUP
+
+wait_for_child() {
+  local wait_status
+
+  # A trapped signal interrupts Bash's wait before the child has terminated.
+  # Re-wait while the child is still live so that terminal metadata reflects
+  # the child's actual exit status rather than the interrupted wait status.
+  while true; do
+    wait "$child_pid"
+    wait_status=$?
+    if ! kill -0 "$child_pid" 2>/dev/null; then
+      return "$wait_status"
+    fi
+  done
+}
+
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "$@" >"$stdout_file" 2>"$stderr_file" &
 child_pid=$!
+
+if (( termination_requested )); then
+  kill -TERM "$child_pid" 2>/dev/null || true
+fi
 
 printf '%s\n' "$child_pid" | atomic_write "$pid_file"
 printf '%s\n' "$started_at" | atomic_write "$started_at_file"
@@ -60,7 +91,7 @@ write_status "running" "$child_pid" "$started_at" "null"
 publish_startup "$child_pid" "$started_at"
 
 set +e
-wait "$child_pid"
+wait_for_child
 child_exit_code=$?
 set -e
 

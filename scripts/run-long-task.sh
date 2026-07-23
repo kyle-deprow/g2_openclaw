@@ -55,6 +55,7 @@ done
 command -v setsid >/dev/null 2>&1 || die "setsid is required for detached launch"
 command -v python3 >/dev/null 2>&1 || die "python3 is required for detached status validation"
 command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for isolated detached launch"
+command -v systemctl >/dev/null 2>&1 || die "systemctl is required for detached launch validation"
 uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launch"
 uv_bin_dir="$(dirname -- "$uv_path")"
 transient_path="${PATH}:${uv_bin_dir}"
@@ -149,14 +150,41 @@ cleanup_startup_marker() {
 
 trap cleanup_startup_marker EXIT
 
+unit_start_failed() {
+  local properties
+  local property
+  local value
+  local load_state=""
+  local active_state=""
+  local result=""
+
+  properties="$(systemctl --user show "$unit_name" --no-pager \
+    --property=LoadState --property=ActiveState --property=SubState --property=Result \
+    2>/dev/null)" || return 1
+
+  while IFS='=' read -r property value; do
+    case "$property" in
+      LoadState) load_state="$value" ;;
+      ActiveState) active_state="$value" ;;
+      Result) result="$value" ;;
+    esac
+  done <<<"$properties"
+
+  [[ "$load_state" == "not-found" || "$active_state" == "failed" || "$result" == "failed" ]]
+}
+
+stop_transient_unit() {
+  systemctl --user stop "$unit_name" >/dev/null 2>&1 || true
+}
+
 working_directory="$PWD"
 unit_name="openclaw-long-task-$(date +%s%N)-$$.service"
 worker_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run-long-task-worker.sh"
 [[ -x "$worker_script" ]] || die "long-task worker is missing or not executable: $worker_script"
 
-setsid systemd-run \
+if ! setsid systemd-run \
   --user \
-  --wait \
+  --no-block \
   --collect \
   --unit="$unit_name" \
   --service-type=exec \
@@ -166,19 +194,20 @@ setsid systemd-run \
   --property=MemoryMax=24G \
   --property=KillMode=control-group \
   -- "$worker_script" "$RUN_DIR" "$STARTUP_MARKER_FILE" "$@" \
-  </dev/null >/dev/null 2>&1 &
-launcher_pid=$!
-disown "$launcher_pid" 2>/dev/null || true
+  </dev/null >/dev/null 2>&1; then
+  die "detached systemd unit could not be enqueued: $unit_name"
+fi
 
 for _ in $(seq 1 40); do
   if [[ -s "$STARTUP_MARKER_FILE" ]] && startup_metadata_is_coherent; then
     exit 0
   fi
-  if ! kill -0 "$launcher_pid" 2>/dev/null; then
-    break
+  if unit_start_failed; then
+    stop_transient_unit
+    die "detached systemd unit failed before publishing startup metadata: $unit_name"
   fi
   sleep 0.05
 done
 
-kill -TERM -- "-$launcher_pid" 2>/dev/null || true
+stop_transient_unit
 die "detached launch did not publish coherent startup metadata in time"
