@@ -50,6 +50,9 @@ MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 MEMPALACE_FULL_AGENT_IDS=(
   "autoresearch-pm"
 )
+PM_SILENT_HANDOFF_DENY_TOOL_IDS=(
+  "sessions_yield"
+)
 MEMPALACE_READONLY_AGENT_IDS=(
   "context-curator"
   "debater-microstructure"
@@ -561,6 +564,7 @@ MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_policy_ids_json)"
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON="$(build_mempalace_obsolete_mutation_alias_ids_json)"
 MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
 MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
+PM_SILENT_HANDOFF_DENY_IDS_JSON="$(build_string_array_json "${PM_SILENT_HANDOFF_DENY_TOOL_IDS[@]}")"
 
 if [[ ! -f "${REPO_CONFIG}" ]]; then
   echo "ERROR: Repo config not found at ${REPO_CONFIG}" >&2
@@ -981,11 +985,14 @@ echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model
 # Dotted names are Codex-facing display/docs ids only, and historical bare/mcp__
 # aliases are rejected instead of accepted as compatibility forms.
 if ! echo "${MERGED}" | jq -e \
+  --argjson pm_silent_handoff_denies "${PM_SILENT_HANDOFF_DENY_IDS_JSON}" \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
   --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" \
   --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
   def denies: (.tools.deny // []);
   def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
+  ([.agents.list[] | select(.id == "autoresearch-pm") | select(denies == $pm_silent_handoff_denies)] | length) == 1
+  and
   ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
     .agents.list[] | denies[]?
@@ -997,7 +1004,7 @@ if ! echo "${MERGED}" | jq -e \
   echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
   echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
   echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       autoresearch-pm must retain MemPalace mutator access for final experiment logging." >&2
+  echo "       autoresearch-pm must deny exactly sessions_yield while retaining MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
 
@@ -1014,6 +1021,7 @@ if ! echo "${MERGED}" | jq -e \
   --arg offline "${HF_HUB_OFFLINE}" \
   --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
   --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" \
+  --argjson pm_silent_handoff_denies "${PM_SILENT_HANDOFF_DENY_IDS_JSON}" \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
   --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
   def denies: (.tools.deny // []);
@@ -1065,6 +1073,7 @@ if ! echo "${MERGED}" | jq -e \
     and .model.primary == $pm
     and .thinkingDefault == "high"
     and ((.skills // []) | contains(["mempalace", "autoresearch"]))
+    and denies == $pm_silent_handoff_denies
   )] | length) == 1
   and ([.agents.list[] | select(
     .id == "main"
@@ -1088,10 +1097,10 @@ if ! echo "${MERGED}" | jq -e \
   ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, autoresearch-pm model/skills, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, autoresearch-pm model/skills/sessions_yield deny, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface split, autoresearch-pm model, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface split, autoresearch-pm model and sessions_yield deny, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"

@@ -391,6 +391,7 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
     for text in (skill, tools):
         assert "`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn" in text
         assert "Do not silently wait" in text or "must not use `sessions_yield`" in text
+        assert "Repo-managed PM config denies `sessions_yield` exactly" in text
         assert "internal PM transcript replies" in text
         assert "Do not use the message tool to send autonomous updates to G2" in text or (
             "Do not substitute the message tool or send an autonomous update to G2" in text

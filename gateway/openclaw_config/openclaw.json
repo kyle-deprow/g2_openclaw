@@ -170,6 +170,11 @@
           "primary": "openai/gpt-5.6-sol"
         },
         "thinkingDefault": "high",
+        "tools": {
+          "deny": [
+            "sessions_yield"
+          ]
+        },
         "subagents": {
           "allowAgents": [
             "context-curator",

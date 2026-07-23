@@ -295,6 +295,7 @@ def _compile_mempalace_alias_tool_ids(
 
 
 MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
+PM_SILENT_HANDOFF_DENY_TOOL_IDS = ("sessions_yield",)
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
     MEMPALACE_MUTATION_TOOLS
 )
@@ -4253,6 +4254,12 @@ def _validate_policy(
     if tuple(policy.pm.skills) != ("mempalace", "autoresearch"):
         raise AutoresearchConfigError("PM must load exactly mempalace and autoresearch")
     pm_raw = agent_map["autoresearch-pm"]
+    pm_tools = _ensure_mapping(pm_raw.get("tools"), label="autoresearch-pm.tools")
+    pm_denied_tool_list = _require_string_list(pm_tools, "deny")
+    if tuple(pm_denied_tool_list) != PM_SILENT_HANDOFF_DENY_TOOL_IDS:
+        raise AutoresearchConfigError(
+            "PM must deny exactly sessions_yield to force visible completion acknowledgements"
+        )
     subagents = _ensure_mapping(pm_raw.get("subagents"), label="autoresearch-pm.subagents")
     allow_agents = _require_string_list(subagents, "allowAgents")
     if tuple(allow_agents) != policy.all_stage_agent_ids:

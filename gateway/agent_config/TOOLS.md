@@ -43,6 +43,10 @@ Key rules:
   completion(s).`
 - While waiting on any required child, the PM must not use `sessions_yield`,
   `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
+- Repo-managed PM config denies `sessions_yield` exactly. Do not remove that
+  guard or add PM denies for `sessions_spawn`, MemPalace write tools, or
+  `mempalace__*`; the PM still must spawn stages and write final MemPalace
+  experiment records.
 - These acknowledgements are internal PM transcript replies only. Do not use
   the message tool to send autonomous updates to G2.
 - After the last required child arrives, the PM must persist the authoritative

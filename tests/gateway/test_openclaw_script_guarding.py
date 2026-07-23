@@ -512,6 +512,7 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
     assert pm["thinkingDefault"] == "high"
     assert pm["skills"] == ["mempalace", "autoresearch"]
+    assert pm["tools"]["deny"] == ["sessions_yield"]
     assert pm["subagents"]["allowAgents"] == STAGE_AGENT_IDS
 
     servers = config["mcp"]["servers"]
@@ -526,6 +527,8 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert 'select(.id == "autoresearch-pm") | .model.primary' in script
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
     assert "main interface split, autoresearch-pm model" in script
+    assert "PM_SILENT_HANDOFF_DENY_TOOL_IDS" in script
+    assert "autoresearch-pm model/skills/sessions_yield deny" in script
     assert ".agents.defaults.maxConcurrent == 2" in script
     assert ".agents.defaults.subagents.maxConcurrent == 1" in script
     assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" in script

@@ -483,6 +483,9 @@ While any required child completion is still outstanding, the PM must not use
 `sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
 handoff. Do not substitute the message tool or send an autonomous update to G2;
 these acknowledgements are internal PM transcript replies only.
+Repo-managed PM config denies `sessions_yield` exactly so this fails closed in
+tool policy. Do not broaden that PM deny-list to `sessions_spawn` or MemPalace
+write tools; the PM must still spawn stages and write final experiment records.
 
 Once all required children arrive, the PM must persist the authoritative
 artifact and emit a non-empty completion summary. Do not silently wait between
