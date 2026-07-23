@@ -4133,6 +4133,21 @@ def load_autoresearch_policy(
         raise AutoresearchConfigError(
             "agents.defaults.compaction.mode must be default for the Codex OAuth route"
         )
+    if defaults.get("maxConcurrent") != 2:
+        raise AutoresearchConfigError(
+            "agents.defaults.maxConcurrent must be 2 to cap the main lane with PM headroom"
+        )
+    default_subagents = _ensure_mapping(
+        defaults.get("subagents"), label="agents.defaults.subagents"
+    )
+    if default_subagents.get("maxConcurrent") != 1:
+        raise AutoresearchConfigError(
+            "agents.defaults.subagents.maxConcurrent must be 1 to serialize heavy Codex stages"
+        )
+    if "maxChildrenPerAgent" in default_subagents:
+        raise AutoresearchConfigError(
+            "agents.defaults.subagents.maxChildrenPerAgent must not be configured"
+        )
     models = _ensure_mapping(config.get("models"), label="models")
     providers = _ensure_mapping(models.get("providers"), label="providers")
     openai_provider = _ensure_mapping(providers.get("openai"), label="providers.openai")

@@ -88,8 +88,8 @@ implementation:
 
 Autoresearch uses one bounded debate per iteration. First spawn
 `context-curator`; then dispatch all five configured debaters through the
-global subagent lane. OpenClaw may run up to 3 subagents concurrently and
-queues the remaining debate tasks until capacity frees up; do not switch this
+global subagent lane. OpenClaw may run 1 subagent concurrently and queues the
+remaining debate tasks until capacity frees up; do not switch this
 to `maxChildrenPerAgent`, which hard-rejects spawns. Only implement a theory
 after 3-of-5 majority. Review with the single `reviewer` stage.
 

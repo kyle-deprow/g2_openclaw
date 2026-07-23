@@ -151,8 +151,8 @@ Use the `autoresearch` skill for the complete protocol:
 1. `context-curator` summarizes receipts, baseline, recent outcomes,
    `RESEARCH_LOG.md`, and read-only MemPalace findings.
 2. Five configured debaters remain configured for each debate. The global
-   subagent lane is bounded to 3 concurrent runs, so up to three debaters run
-   at once and the remaining debate tasks queue in OpenClaw; a 3-of-5
+   subagent lane is bounded to 1 concurrent run, so debaters run sequentially
+   and the remaining debate tasks queue in OpenClaw; a 3-of-5
    theory-family majority is required. Do not replace this bounded lane with
    `maxChildrenPerAgent`, which rejects spawns instead of queueing them.
 3. `consensus-arbiter` freezes canonical plan/profile inputs and the sorted

@@ -1034,6 +1034,9 @@ if ! echo "${MERGED}" | jq -e \
   };
   (.agents.defaults.thinkingDefault == "high")
   and ((.plugins.allow // []) | contains(["codex"]))
+  and (.agents.defaults.maxConcurrent == 2)
+  and (.agents.defaults.subagents.maxConcurrent == 1)
+  and (.agents.defaults.subagents.maxChildrenPerAgent? == null)
   and (.agents.defaults.memorySearch.enabled == false)
   and (.agents.defaults.compaction.mode == "default")
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
@@ -1085,10 +1088,10 @@ if ! echo "${MERGED}" | jq -e \
   ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, autoresearch-pm model/skills, main interface restrictions, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, autoresearch-pm model/skills, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface split, autoresearch-pm model, exact stage models, high reasoning, MemPalace split, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface split, autoresearch-pm model, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"

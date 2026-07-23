@@ -495,7 +495,8 @@ def _assert_missing_gateway_left_managed_destinations_untouched(
 
 def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
-    assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 3
+    assert config["agents"]["defaults"]["maxConcurrent"] == 2
+    assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 1
     assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
 
     agents = {agent["id"]: agent for agent in config["agents"]["list"]}
@@ -525,6 +526,10 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert 'select(.id == "autoresearch-pm") | .model.primary' in script
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
     assert "main interface split, autoresearch-pm model" in script
+    assert ".agents.defaults.maxConcurrent == 2" in script
+    assert ".agents.defaults.subagents.maxConcurrent == 1" in script
+    assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" in script
+    assert "strict concurrency caps" in script
     assert "main interface restrictions" in script
 
 

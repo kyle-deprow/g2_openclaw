@@ -5451,6 +5451,26 @@ def _set_safeguard_compaction(config: dict[str, object]) -> None:
     compaction["mode"] = "safeguard"
 
 
+def _raise_agent_run_concurrency(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    defaults["maxConcurrent"] = 4
+
+
+def _raise_subagent_concurrency(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    subagents = cast(dict[str, object], defaults["subagents"])
+    subagents["maxConcurrent"] = 3
+
+
+def _set_rejecting_subagent_child_cap(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    subagents = cast(dict[str, object], defaults["subagents"])
+    subagents["maxChildrenPerAgent"] = 1
+
+
 def _agent(config: dict[str, object], agent_id: str) -> dict[str, object]:
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
@@ -5520,6 +5540,18 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (
             _set_safeguard_compaction,
             "agents.defaults.compaction.mode must be default for the Codex OAuth route",
+        ),
+        (
+            _raise_agent_run_concurrency,
+            "agents.defaults.maxConcurrent must be 2 to cap the main lane with PM headroom",
+        ),
+        (
+            _raise_subagent_concurrency,
+            "agents.defaults.subagents.maxConcurrent must be 1 to serialize heavy Codex stages",
+        ),
+        (
+            _set_rejecting_subagent_child_cap,
+            "agents.defaults.subagents.maxChildrenPerAgent must not be configured",
         ),
         (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
         (_give_main_a_pm_skill, "main must load no skills"),

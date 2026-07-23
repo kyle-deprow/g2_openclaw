@@ -146,9 +146,9 @@
           "softThresholdTokens": 4000
         }
       },
-      "maxConcurrent": 4,
+      "maxConcurrent": 2,
       "subagents": {
-        "maxConcurrent": 3
+        "maxConcurrent": 1
       }
     },
     "list": [
