@@ -4416,6 +4416,10 @@ def _validate_consensus_history_universe_plans(state: AutoresearchState) -> None
             consensus
         ):
             if consensus.universe_plan is None:
+                if index == len(
+                    state.consensus_history
+                ) and _is_data_infra_g0_blocked_no_memory_state(state):
+                    continue
                 raise AutoresearchValidationError(
                     "non-operator majority consensus at history index "
                     f"{index} requires a frozen universe_plan"

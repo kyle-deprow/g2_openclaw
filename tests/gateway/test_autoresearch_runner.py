@@ -226,6 +226,34 @@ def g0_verification_state(policy: AutoresearchPolicy) -> AutoresearchState:
     return advance_state(state, _implementation_result(), policy)
 
 
+@pytest.fixture()
+def suspended_g0_remediation_state(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    state = _state_to_g0_decision(
+        policy,
+        readiness=platform_readiness,
+        infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+    )
+    return advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data infrastructure remains blocked.",
+            log_summary="G0 gate still requires remediation.",
+            continue_loop=True,
+            memory_write_required=False,
+            infra_rationale="Cap/source provenance still needs operator remediation.",
+        ),
+        policy,
+    )
+
+
 @pytest.fixture(
     params=(
         (VerificationStatus.TEST_FAILURE, FinalDecision.CRASH),
@@ -3047,6 +3075,108 @@ def test_persisted_g0_infra_blocked_no_memory_state_validates(
 
     assert persisted.suspended is True
     assert can_write_memory(persisted) is False
+
+
+def test_persisted_planless_g0_remediation_state_validates_and_resumes(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    assert suspended_g0_remediation_state.latest_consensus is not None
+    forged = replace(
+        suspended_g0_remediation_state,
+        consensus_history=(
+            replace(suspended_g0_remediation_state.latest_consensus, universe_plan=None),
+        ),
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+    validate_state(persisted, policy)
+    resumed = resume_suspended_iteration(persisted, platform_readiness)
+
+    assert resumed == AutoresearchState(
+        iteration=persisted.iteration + 1,
+        setup=persisted.setup,
+        platform_readiness=platform_readiness.identity(),
+    )
+
+
+def test_persisted_planless_g0_remediation_state_rejects_an_earlier_majority(
+    policy: AutoresearchPolicy,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    assert suspended_g0_remediation_state.latest_consensus is not None
+    latest_consensus = replace(
+        suspended_g0_remediation_state.latest_consensus,
+        round_number=2,
+        universe_plan=None,
+    )
+    forged = replace(
+        suspended_g0_remediation_state,
+        consensus_history=(
+            replace(latest_consensus, round_number=1),
+            latest_consensus,
+        ),
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+    ):
+        validate_state(persisted, policy)
+
+
+def test_persisted_planless_g0_remediation_state_rejects_an_unsuspended_state(
+    policy: AutoresearchPolicy,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    assert suspended_g0_remediation_state.latest_consensus is not None
+    forged = replace(
+        suspended_g0_remediation_state,
+        consensus_history=(
+            replace(suspended_g0_remediation_state.latest_consensus, universe_plan=None),
+        ),
+        suspended=False,
+        suspension_reason=None,
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+    ):
+        validate_state(persisted, policy)
+
+
+def test_persisted_planless_g0_remediation_state_rejects_a_near_miss(
+    policy: AutoresearchPolicy,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    assert suspended_g0_remediation_state.latest_consensus is not None
+    assert suspended_g0_remediation_state.latest_verification is not None
+    forged = replace(
+        suspended_g0_remediation_state,
+        consensus_history=(
+            replace(suspended_g0_remediation_state.latest_consensus, universe_plan=None),
+        ),
+        verification_history=(
+            replace(
+                suspended_g0_remediation_state.latest_verification,
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            ),
+        ),
+    )
+
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+    ):
+        validate_state(persisted, policy)
 
 
 @pytest.mark.parametrize(
