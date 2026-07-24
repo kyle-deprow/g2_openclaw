@@ -1530,6 +1530,19 @@ def _g0_remediation_verification(
     )
 
 
+def _g0_platform_contract_mismatch_bug_signal() -> VerificationResultArtifact:
+    return replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        bug_signals=("platform_coverage_contract_mismatch",),
+        infra_gate_outcome=None,
+        infra_rationale=None,
+        data_coverage=None,
+        platform_coverage_validation=None,
+        universe_verification_receipt=None,
+        price_hydration_receipt=None,
+    )
+
+
 def test_gpu_compute_fit_fails_closed_when_dependency_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3533,6 +3546,65 @@ def test_nonlegacy_g0_state_serialization_includes_platform_coverage_validation(
     assert "platform_coverage_validation" in history[0]
 
 
+@pytest.fixture()
+def iteration_45_legacy_g0_bug_signal_terminal_raw(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> dict[str, object]:
+    state = advance_state(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        _setup_artifact(),
+        policy,
+    )
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="The initial coverage proof passed before review found defects.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
+    state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+    for _ in range(2):
+        state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+
+    terminal = replace(
+        state,
+        iteration=45,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="g0-iteration-45",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=0.0,
+            reviewer_verdict=FinalReviewerVerdict.FAIL,
+            rationale="Coverage contract proof stayed unverifiable after the bounded fix path.",
+            log_summary="Discarded after repeated platform coverage contract mismatch.",
+            continue_loop=True,
+            memory_write_required=True,
+        ),
+        memory_written=False,
+        memory_verification_receipt=None,
+    )
+    return terminal.to_dict()
+
+
 def test_persist_derived_state_replaces_legacy_suspended_g0_state_after_resume(
     tmp_path: Path,
     platform_readiness: PlatformReadinessManifest,
@@ -3548,6 +3620,64 @@ def test_persist_derived_state_replaces_legacy_suspended_g0_state_after_resume(
     persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
 
     assert persisted == resumed
+
+
+def test_iteration_45_legacy_g0_bug_signal_terminal_normalizes_to_no_memory_and_starts_next(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    iteration_45_legacy_g0_bug_signal_terminal_raw: dict[str, object],
+) -> None:
+    legacy = AutoresearchState.from_dict(iteration_45_legacy_g0_bug_signal_terminal_raw)
+    assert legacy.final_decision is not None
+
+    normalized = normalize_autoresearch_state(legacy)
+    validate_state(normalized, policy)
+    advanced = start_next_iteration(normalized, readiness=platform_readiness)
+    expected = replace(
+        legacy,
+        final_decision=replace(legacy.final_decision, memory_write_required=False),
+        memory_written=False,
+        memory_verification_receipt=None,
+    )
+
+    assert legacy.final_decision.memory_write_required is True
+    assert normalized == expected
+    assert can_write_memory(normalized) is False
+    assert advanced.iteration == 46
+    assert advanced.phase is Phase.SETUP_CONTEXT
+
+
+def test_migrate_state_file_rewrites_iteration_45_legacy_g0_bug_signal_terminal(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    iteration_45_legacy_g0_bug_signal_terminal_raw: dict[str, object],
+) -> None:
+    source_path = tmp_path / "legacy-i45.json"
+    output_path = tmp_path / "migrated-i45.json"
+    legacy = AutoresearchState.from_dict(iteration_45_legacy_g0_bug_signal_terminal_raw)
+    assert legacy.final_decision is not None
+    expected = replace(
+        legacy,
+        final_decision=replace(legacy.final_decision, memory_write_required=False),
+        memory_written=False,
+        memory_verification_receipt=None,
+    )
+    source_path.write_text(
+        json.dumps(iteration_45_legacy_g0_bug_signal_terminal_raw),
+        encoding="utf-8",
+    )
+
+    migrated = migrate_state_file(source_path, output_path)
+    validate_state(migrated, policy)
+    reloaded = AutoresearchState.from_dict(json.loads(output_path.read_text(encoding="utf-8")))
+    validate_state(reloaded, policy)
+    advanced = start_next_iteration(reloaded, readiness=platform_readiness)
+
+    assert migrated == expected
+    assert reloaded == expected
+    assert can_write_memory(reloaded) is False
+    assert advanced.iteration == 46
 
 
 @pytest.mark.parametrize(
@@ -3749,6 +3879,127 @@ def test_exhausted_g0_verifier_failure_finalizes_without_suspending(
     assert result.suspended is False
     assert result.final_decision is not None
     assert result.final_decision.decision is expected_decision
+
+
+def test_exhausted_g0_platform_contract_mismatch_discard_rejects_memory_write(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="The initial coverage proof passed before review found defects.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
+    state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+    for _ in range(2):
+        state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=(
+            "platform_coverage_contract_mismatch BUG_SIGNAL discard requires "
+            "memory_write_required=false"
+        ),
+    ):
+        advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="g0-iteration-45",
+                decision=FinalDecision.DISCARD,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=0.0,
+                reviewer_verdict=FinalReviewerVerdict.FAIL,
+                rationale="Coverage contract proof stayed unverifiable after the bounded fix path.",
+                log_summary="Discarded after repeated platform coverage contract mismatch.",
+                continue_loop=True,
+                memory_write_required=True,
+            ),
+            policy,
+        )
+
+
+def test_exhausted_g0_platform_contract_mismatch_discard_without_memory_starts_next_iteration(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = advance_state(
+        AutoresearchState(platform_readiness=platform_readiness.identity()),
+        _setup_artifact(),
+        policy,
+    )
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="The initial coverage proof passed before review found defects.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
+    state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+    for _ in range(2):
+        state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
+    state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
+
+    result = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-45",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=0.0,
+            reviewer_verdict=FinalReviewerVerdict.FAIL,
+            rationale="Coverage contract proof stayed unverifiable after the bounded fix path.",
+            log_summary="Discarded after repeated platform coverage contract mismatch.",
+            continue_loop=True,
+            memory_write_required=False,
+        ),
+        policy,
+    )
+    action = next_action(result, policy, receipts, platform_readiness)
+
+    assert result.phase is Phase.REPEAT
+    assert result.final_decision is not None
+    assert result.final_decision.decision is FinalDecision.DISCARD
+    assert result.final_decision.memory_write_required is False
+    assert can_write_memory(result) is False
+    assert action.phase is Phase.REPEAT
+    assert action.expected_artifact_type is ArtifactType.NEXT_ITERATION
+    assert action.next_agent_ids == ()
 
 
 def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(

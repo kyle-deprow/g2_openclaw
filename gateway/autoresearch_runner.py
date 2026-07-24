@@ -4098,6 +4098,19 @@ def _recognizes_legacy_unsubmitted_g0_terminal(
     return True
 
 
+def _is_fail_closed_g0_platform_contract_bug_signal(
+    verification: VerificationResultArtifact | None,
+) -> bool:
+    return (
+        verification is not None
+        and verification.status is VerificationStatus.BUG_SIGNAL
+        and verification.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
+        and verification.infra_gate_outcome is None
+        and verification.infra_rationale is None
+        and verification.platform_coverage_validation is None
+    )
+
+
 def build_authoritative_state_reference(
     state: AutoresearchState,
     *,
@@ -5589,6 +5602,15 @@ def _validate_final_decision_artifact(
             raise AutoresearchValidationError(
                 "bug signals after retries require final_decision=DISCARD"
             )
+        if (
+            state.mode is ResearchMode.DATA_INFRA_G0
+            and _is_fail_closed_g0_platform_contract_bug_signal(latest_verification)
+            and artifact.memory_write_required
+        ):
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 platform_coverage_contract_mismatch BUG_SIGNAL discard "
+                "requires memory_write_required=false"
+            )
         return
 
     if state.mode is ResearchMode.DATA_INFRA_G0:
@@ -6564,8 +6586,25 @@ def can_write_memory(state: AutoresearchState) -> bool:
     )
 
 
+def _is_g0_fail_closed_bug_signal_no_memory_state(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    return (
+        state.phase is Phase.REPEAT
+        and state.mode is ResearchMode.DATA_INFRA_G0
+        and decision is not None
+        and decision.decision is FinalDecision.DISCARD
+        and state.verification_fix_attempts >= 2
+        and _is_fail_closed_g0_platform_contract_bug_signal(state.latest_verification)
+        and not decision.memory_write_required
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+    )
+
+
 def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
     if _is_operator_precondition_no_memory_state(state):
+        return True
+    if _is_g0_fail_closed_bug_signal_no_memory_state(state):
         return True
     decision = state.final_decision
     return (
@@ -7197,8 +7236,9 @@ def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchStat
             migrated = dict(data)
             migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
             state = AutoresearchState.from_dict(migrated)
-        _atomic_save_state_file(resolved_output_path, state)
-        return state
+        normalized_state = normalize_autoresearch_state(state)
+        _atomic_save_state_file(resolved_output_path, normalized_state)
+        return normalized_state
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
@@ -7405,4 +7445,43 @@ def normalize_autoresearch_state(state: AutoresearchState) -> AutoresearchState:
         and _is_operator_precondition_consensus(state.latest_consensus)
     ):
         return replace(state, phase=Phase.DECISION_LOG)
+    if _is_legacy_i45_g0_bug_signal_terminal(state):
+        assert state.final_decision is not None
+        return replace(
+            state,
+            final_decision=replace(state.final_decision, memory_write_required=False),
+            memory_written=False,
+            memory_verification_receipt=None,
+        )
     return state
+
+
+def _is_legacy_i45_g0_bug_signal_terminal(state: AutoresearchState) -> bool:
+    decision = state.final_decision
+    latest_review = state.latest_review
+    latest_verification = state.latest_verification
+    return (
+        state.iteration == 45
+        and state.phase is Phase.REPEAT
+        and state.mode is ResearchMode.DATA_INFRA_G0
+        and not state.suspended
+        and decision is not None
+        and decision.decision is FinalDecision.DISCARD
+        and decision.continue_loop
+        and decision.reviewer_verdict is FinalReviewerVerdict.FAIL
+        and decision.recommended_metric_value == 0.0
+        and decision.memory_write_required
+        and latest_review is not None
+        and latest_review.verdict is ReviewVerdict.FAIL
+        and state.verification_fix_attempts == 2
+        and latest_verification is not None
+        and latest_verification.status is VerificationStatus.BUG_SIGNAL
+        and latest_verification.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
+        and latest_verification.infra_gate_outcome is None
+        and latest_verification.infra_rationale is None
+        and latest_verification.platform_coverage_validation is None
+        and latest_verification.universe_verification_receipt is None
+        and latest_verification.price_hydration_receipt is None
+        and not state.memory_written
+        and state.memory_verification_receipt is None
+    )
