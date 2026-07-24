@@ -3875,6 +3875,10 @@ class AutoresearchState:
             data,
             mode_raw=mode_raw,
             verification_history_raw=verification_history_raw,
+        ) or _recognizes_legacy_unsubmitted_g0_terminal(
+            data,
+            mode_raw=mode_raw,
+            verification_history_raw=verification_history_raw,
         )
 
         def _parse_state_implementation(raw_implementation: object) -> ImplementationResultArtifact:
@@ -4042,6 +4046,55 @@ def _recognizes_legacy_suspended_g0_history(
         ):
             if verification.get(field_name) is not None:
                 return False
+    return True
+
+
+def _recognizes_legacy_unsubmitted_g0_terminal(
+    data: Mapping[str, object],
+    *,
+    mode_raw: object,
+    verification_history_raw: object,
+) -> bool:
+    """Recognize the exact pre-cap-fix G0 terminal that could not submit receipts."""
+    if (
+        mode_raw != ResearchMode.DATA_INFRA_G0.value
+        or data.get("phase") != Phase.REPEAT.value
+        or data.get("suspended") is not False
+        or data.get("memory_written") is not False
+        or data.get("memory_verification_receipt") is not None
+    ):
+        return False
+    final_decision = data.get("final_decision")
+    if not isinstance(final_decision, Mapping) or (
+        final_decision.get("decision") != FinalDecision.DISCARD.value
+        or final_decision.get("continue_loop") is not True
+        or final_decision.get("reviewer_verdict") != FinalReviewerVerdict.NOT_RUN.value
+        or final_decision.get("recommended_metric_value") is not None
+        or not isinstance(final_decision.get("infra_rationale"), str)
+        or "24,576" not in final_decision["infra_rationale"]
+        or final_decision.get("memory_write_required") not in (True, False)
+    ):
+        return False
+    if not isinstance(verification_history_raw, Sequence) or isinstance(
+        verification_history_raw, str | bytes
+    ):
+        return False
+    if not verification_history_raw:
+        return False
+    for verification in verification_history_raw:
+        if not isinstance(verification, Mapping):
+            return False
+        if (
+            verification.get("status") != VerificationStatus.BUG_SIGNAL.value
+            or "platform_coverage_contract_mismatch" not in verification.get("bug_signals", ())
+            or verification.get("infra_gate_outcome") is not None
+            or verification.get("infra_rationale") is not None
+            or verification.get("platform_coverage_validation") is not None
+            or verification.get("data_coverage") is not None
+            or verification.get("universe_verification_receipt") is not None
+            or verification.get("price_hydration_receipt") is not None
+        ):
+            return False
     return True
 
 
@@ -6527,6 +6580,13 @@ def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
                 and state.latest_verification.infra_gate_outcome
                 is InfraGateOutcome.REMEDIATION_REQUIRED
             )
+            or (
+                state.mode is ResearchMode.DATA_INFRA_G0
+                and state.legacy_platform_coverage_omission
+                and decision.decision is FinalDecision.DISCARD
+                and state.latest_verification is not None
+                and state.latest_verification.status is VerificationStatus.BUG_SIGNAL
+            )
         )
         and not decision.memory_write_required
         and not state.memory_written
@@ -7067,7 +7127,7 @@ def load_state_file(path: Path) -> AutoresearchState:
 
 
 def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchState:
-    """Explicitly migrate the sole lossless schema-less live-state shape to v2."""
+    """Migrate known lossless live-state shapes to the current schema."""
     resolved_source_path = source_path.expanduser().resolve(strict=False)
     resolved_output_path = output_path.expanduser().resolve(strict=False)
     with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
@@ -7083,7 +7143,24 @@ def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchStat
             ) from exc
         data = _ensure_mapping(raw, label="autoresearch_state")
         if "schema_version" in data:
-            state = AutoresearchState.from_dict(data)
+            mode_raw = data.get("mode")
+            verification_history_raw = data.get("verification_history", [])
+            if _recognizes_legacy_unsubmitted_g0_terminal(
+                data,
+                mode_raw=mode_raw,
+                verification_history_raw=verification_history_raw,
+            ):
+                migrated = dict(data)
+                final_decision = dict(
+                    _ensure_mapping(data["final_decision"], label="final_decision")
+                )
+                final_decision["memory_write_required"] = False
+                migrated["final_decision"] = final_decision
+                migrated["memory_written"] = False
+                migrated["memory_verification_receipt"] = None
+                state = AutoresearchState.from_dict(migrated)
+            else:
+                state = AutoresearchState.from_dict(data)
         else:
             expected_schema_less = set(AutoresearchState().to_dict()) - {"schema_version"}
             pristine_values: dict[str, object] = {

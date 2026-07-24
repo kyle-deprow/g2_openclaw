@@ -168,6 +168,12 @@ readiness suspension, plus exact legacy iteration-40 compatibility. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
 `DISCARD`.
 
+For a stale pre-64 KiB G0 terminal with
+`platform_coverage_contract_mismatch`, `DISCARD`, and
+`memory_write_required=true`, do not write MemPalace facts. Use the explicit
+`autoresearch-migrate-state` procedure first; it recognizes only that exact
+persisted shape and converts it to the no-memory G0 transition.
+
 ## Instruction Source Manifest
 
 `autoresearch-next` no longer injects full instruction file contents. It emits

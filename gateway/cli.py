@@ -570,7 +570,7 @@ def autoresearch_migrate_state(
     state_path: Path = _state_path_argument,
     output_path: Path = _output_path_option,
 ) -> None:
-    """Explicitly migrate a lossless schema-less pristine live state to schema v2."""
+    """Explicitly migrate a known live-state shape to the current schema."""
     from gateway.autoresearch_runner import migrate_state_file
 
     try:

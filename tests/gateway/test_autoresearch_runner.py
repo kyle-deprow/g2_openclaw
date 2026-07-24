@@ -799,6 +799,50 @@ def test_expanded_universe_receipt_fits_local_artifact_budget() -> None:
     assert len(payload) <= MAX_ARTIFACT_FILE_BYTES
 
 
+def test_legacy_unsubmitted_g0_terminal_requires_exact_blocker_shape() -> None:
+    payload = {
+        "mode": ResearchMode.DATA_INFRA_G0.value,
+        "phase": Phase.REPEAT.value,
+        "suspended": False,
+        "memory_written": False,
+        "memory_verification_receipt": None,
+        "final_decision": {
+            "decision": FinalDecision.DISCARD.value,
+            "continue_loop": True,
+            "reviewer_verdict": FinalReviewerVerdict.NOT_RUN.value,
+            "recommended_metric_value": None,
+            "infra_rationale": "The 24,576-byte artifact cap blocked the receipt.",
+            "memory_write_required": True,
+        },
+        "verification_history": [
+            {
+                "status": VerificationStatus.BUG_SIGNAL.value,
+                "bug_signals": ["platform_coverage_contract_mismatch"],
+                "infra_gate_outcome": None,
+                "infra_rationale": None,
+                "platform_coverage_validation": None,
+                "data_coverage": None,
+                "universe_verification_receipt": None,
+                "price_hydration_receipt": None,
+            }
+        ],
+    }
+    final_decision = cast(dict[str, object], payload["final_decision"])
+
+    assert autoresearch_runner._recognizes_legacy_unsubmitted_g0_terminal(
+        payload,
+        mode_raw=payload["mode"],
+        verification_history_raw=payload["verification_history"],
+    )
+
+    final_decision["infra_rationale"] = "A different infrastructure blocker."
+    assert not autoresearch_runner._recognizes_legacy_unsubmitted_g0_terminal(
+        payload,
+        mode_raw=payload["mode"],
+        verification_history_raw=payload["verification_history"],
+    )
+
+
 def test_load_artifact_file_rejects_a_tampered_persisted_state(
     tmp_path: Path,
     policy: AutoresearchPolicy,

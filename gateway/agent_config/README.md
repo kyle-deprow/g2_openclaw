@@ -101,6 +101,13 @@ After G0 implementation and verification, `GATE_PASSED` requires a full-union
 counts and maps to non-suspending `INFRA_REPAIRED`. `REMEDIATION_REQUIRED` is
 stage evidence only and maps to non-suspending `DISCARD`.
 
+If a pre-64 KiB campaign is already in `repeat` with
+`platform_coverage_contract_mismatch`, `DISCARD`, and
+`memory_write_required=true`, do not write MemPalace facts. Stop the owner task
+and run `autoresearch-migrate-state` against the authoritative state; the
+explicit migration converts only that exact stale terminal shape to the
+no-memory G0 transition before `autoresearch-start-next`.
+
 Then atomically resume the same schema-v2 state file:
 
 ```bash
