@@ -93,11 +93,13 @@ intentional operator prewarm; a failed probe produces no READY receipt.
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
-`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
-completed `DATA_INFRA_G0` implementation and verification whose explicit
-`infra_gate_outcome=REMEDIATION_REQUIRED`. G0 gate-outcome mapping applies only
-after that implementation and verification; it never overrides consensus
-handling.
+An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
+Suspension remains explicit operator-owned readiness suspension only, plus exact
+legacy iteration-40 compatibility.
+After G0 implementation and verification, `GATE_PASSED` requires a full-union
+`COMPLETE` receipt cross-checked against runner-owned preflight identity and
+counts and maps to non-suspending `INFRA_REPAIRED`. `REMEDIATION_REQUIRED` is
+stage evidence only and maps to non-suspending `DISCARD`.
 
 Then atomically resume the same schema-v2 state file:
 

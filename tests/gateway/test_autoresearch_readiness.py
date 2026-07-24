@@ -53,11 +53,57 @@ def test_quantipy_readiness_pins_current_quantipy_alembic_head() -> None:
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_REVISION,
         autoresearch_readiness.QUANTIPY_ALEMBIC_HEAD_FILENAME,
     )
-
     assert pinned_head == (
         "020_price_bar_constraint_align",
         "020_align_price_bar_portable_constraints.py",
     )
+
+
+def test_quantipy_readiness_requires_the_shared_dynamic_price_coverage_validator() -> None:
+    probe = autoresearch_readiness._CONTRACT_PROBE
+    tree = ast.parse(probe)
+    assert QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION == 3
+    assert '"validate_dynamic_price_coverage"' in probe
+    assert "tests/unit/test_dynamic_price_coverage.py" in autoresearch_readiness._CONTRACT_TESTS
+    validate_coverage_function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "validate_coverage"
+    )
+    wrapper_calls = [
+        node
+        for node in ast.walk(validate_coverage_function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "qp"
+        and node.func.attr == "validate_dynamic_price_coverage"
+    ]
+    assert len(wrapper_calls) == 1
+    call = wrapper_calls[0]
+    assert len(call.args) == 1
+    assert isinstance(call.args[0], ast.Name)
+    assert call.args[0].id == "coverage_response"
+    assert {keyword.arg for keyword in call.keywords} == {
+        "canonical_member_union",
+        "requested_sessions",
+        "requested_start_date",
+        "requested_end_date",
+        "timeframe",
+        "market_hours",
+        "active_roster_by_session",
+        "scope",
+        "expected_symbol_session_count",
+    }
+    assert "PriceCoverageResponse(" in probe
+    assert "PriceCoverageTickerReceipt(" in probe
+    assert "PriceCoverageSessionReceipt(" in probe
+    assert "PriceDataService(repository=object())" in probe
+    assert "session.all_open" in probe
+    assert "session.all_close - timedelta(microseconds=1)" in probe
+    assert "DynamicPriceCoverageScope.FULL_UNION, 4" in probe
+    assert "DynamicPriceCoverageScope.POINT_IN_TIME, 2" in probe
+    assert "DynamicPriceCoverageContractMismatchError" in probe
 
 
 def test_quantipy_readiness_pins_the_entitled_campaign_interval() -> None:

@@ -22,7 +22,7 @@ DEFAULT_PLATFORM_READINESS_PATH = (
     Path.home() / ".openclaw" / "autoresearch" / "platform-readiness.json"
 )
 PLATFORM_READINESS_SCHEMA_VERSION = 3
-QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION = 2
+QUANTIPY_DATA_CONTRACT_EVIDENCE_SCHEMA_VERSION = 3
 READINESS_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 READINESS_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 DATASET_AVAILABILITY_REASON_MAX_CHARS = 160
@@ -1043,6 +1043,7 @@ _CONTRACT_TESTS = (
     "tests/unit/test_client.py",
     "tests/unit/test_price_data_service.py",
     "tests/unit/test_price_data_schemas.py",
+    "tests/unit/test_dynamic_price_coverage.py",
 )
 
 _CONTRACT_PROBE = r"""
@@ -1050,7 +1051,7 @@ import asyncio
 import inspect
 import json
 import os
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -1059,8 +1060,25 @@ from alembic.script import ScriptDirectory
 from pydantic import ValidationError
 
 import quantipy
+import quantipy as qp
 from quantipy import client
 from quantipy.api.main import create_app
+from quantipy.price_data.dynamic_coverage import (
+    DynamicPriceCoverageContractMismatchError,
+    DynamicPriceCoverageScope,
+    DynamicPriceCoverageStatus,
+    dynamic_price_coverage_requested_sessions_digest,
+)
+from quantipy.price_data.integrity import PriceDataSource
+from quantipy.price_data.schemas import (
+    MarketHours,
+    PriceCoverageResponse,
+    PriceCoverageSessionReceipt,
+    PriceCoverageTickerReceipt,
+    SessionCoverageState,
+    Timeframe,
+)
+from quantipy.price_data.service import PriceDataService
 from quantipy.security_master.providers.massive import MassiveSecurityMasterProvider
 from quantipy.security_master.schemas import (
     CorporateActionType,
@@ -1089,6 +1107,10 @@ if not required.issubset(set(quantipy.__all__)):
     raise AssertionError("public exports missing")
 if not all(callable(getattr(client, name, None)) for name in required):
     raise AssertionError("client interface missing")
+if "validate_dynamic_price_coverage" not in quantipy.__all__:
+    raise AssertionError("dynamic price coverage validator is not publicly exported")
+if not callable(getattr(qp, "validate_dynamic_price_coverage", None)):
+    raise AssertionError("dynamic price coverage validator is missing")
 routes = {route.path for route in create_app().routes}
 if not {
     "/security-master/universe/history",
@@ -1201,7 +1223,133 @@ async def exercise_provider():
         raise AssertionError("dividend interface invalid")
 
 asyncio.run(exercise_provider())
-print("QUANTIPY_READINESS_PROBE=" + json.dumps({"contract_verified": True}, sort_keys=True))
+
+coverage_sessions = (date(2024, 1, 2), date(2024, 1, 3))
+member_union = ("AAPL", "MSFT")
+active_roster = {session: ("AAPL",) for session in coverage_sessions}
+price_service = PriceDataService(repository=object())
+expected_session_bounds = {
+    session.session_date: (
+        session.all_open,
+        session.all_close - timedelta(microseconds=1),
+    )
+    for session in price_service._expected_sessions(coverage_sessions[0], coverage_sessions[-1])
+}
+if tuple(expected_session_bounds) != coverage_sessions:
+    raise AssertionError("synthetic dynamic coverage sessions are not canonical XNYS sessions")
+coverage_response = PriceCoverageResponse(
+    requested_start_date=coverage_sessions[0],
+    requested_end_date=coverage_sessions[-1],
+    timeframe=Timeframe.ONE_MIN,
+    market_hours=MarketHours.REGULAR,
+    provider_source=PriceDataSource.MASSIVE,
+    tickers=tuple(
+        PriceCoverageTickerReceipt(
+            ticker=ticker,
+            sessions=tuple(
+                PriceCoverageSessionReceipt(
+                    session_date=session,
+                    coverage_state=SessionCoverageState.OBSERVED,
+                    mode_bar_count=1,
+                    provider_request_id=f"probe-{ticker}-{session.isoformat()}",
+                    provider_http_status=200,
+                    provider_query_count=1,
+                    provider_results_count=1,
+                    provider_requested_start=expected_session_bounds[session][0],
+                    provider_requested_end=expected_session_bounds[session][1],
+                    hydrated_at=expected_session_bounds[session][1],
+                )
+                for session in coverage_sessions
+            ),
+        )
+        for ticker in member_union
+    ),
+)
+
+def validate_coverage(scope, expected_symbol_session_count):
+    return qp.validate_dynamic_price_coverage(
+        coverage_response,
+        canonical_member_union=member_union,
+        requested_sessions=coverage_sessions,
+        requested_start_date=coverage_sessions[0],
+        requested_end_date=coverage_sessions[-1],
+        timeframe=Timeframe.ONE_MIN,
+        market_hours=MarketHours.REGULAR,
+        active_roster_by_session=active_roster,
+        scope=scope,
+        expected_symbol_session_count=expected_symbol_session_count,
+    )
+
+full_union_receipt = validate_coverage(DynamicPriceCoverageScope.FULL_UNION, 4)
+pit_receipt = validate_coverage(DynamicPriceCoverageScope.POINT_IN_TIME, 2)
+for receipt in (full_union_receipt, pit_receipt):
+    if receipt.status is not DynamicPriceCoverageStatus.COMPLETE:
+        raise AssertionError("synthetic dynamic coverage must be complete")
+    if (
+        receipt.hydrated_symbol_sessions,
+        receipt.active_symbol_sessions,
+        receipt.inactive_union_symbol_sessions,
+    ) != (4, 2, 2):
+        raise AssertionError("synthetic dynamic coverage geometry is invalid")
+    if (
+        receipt.source_requested_start_date,
+        receipt.source_requested_end_date,
+        receipt.source_timeframe,
+        receipt.source_market_hours,
+        receipt.source_provider,
+    ) != (
+        coverage_sessions[0],
+        coverage_sessions[-1],
+        Timeframe.ONE_MIN,
+        MarketHours.REGULAR,
+        PriceDataSource.MASSIVE,
+    ):
+        raise AssertionError("dynamic coverage source identity/provider is invalid")
+    if receipt.requested_sessions_digest != dynamic_price_coverage_requested_sessions_digest(
+        coverage_sessions
+    ):
+        raise AssertionError("dynamic coverage XNYS session digest is invalid")
+    for field_name in (
+        "member_union_digest",
+        "requested_sessions_digest",
+        "pit_active_roster_digest",
+        "source_price_coverage_response_digest",
+        "receipt_digest",
+    ):
+        value = getattr(receipt, field_name)
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise AssertionError(f"{field_name} is not a lowercase SHA-256")
+try:
+    validate_coverage(DynamicPriceCoverageScope.FULL_UNION, 2)
+except DynamicPriceCoverageContractMismatchError:
+    pass
+else:
+    raise AssertionError("wrong full-union asserted count was accepted")
+wrong_identity_response = coverage_response.model_copy(
+    update={"requested_end_date": date(2024, 1, 4)}
+)
+try:
+    qp.validate_dynamic_price_coverage(
+        wrong_identity_response,
+        canonical_member_union=member_union,
+        requested_sessions=coverage_sessions,
+        requested_start_date=coverage_sessions[0],
+        requested_end_date=coverage_sessions[-1],
+        timeframe=Timeframe.ONE_MIN,
+        market_hours=MarketHours.REGULAR,
+        active_roster_by_session=active_roster,
+        scope=DynamicPriceCoverageScope.FULL_UNION,
+        expected_symbol_session_count=4,
+    )
+except DynamicPriceCoverageContractMismatchError:
+    pass
+else:
+    raise AssertionError("source request identity mismatch was accepted")
+
+print("QUANTIPY_READINESS_PROBE=" + json.dumps({
+    "contract_verified": True,
+    "dynamic_price_coverage_validator_verified": True,
+}, sort_keys=True))
 """.replace("__QUANTIPY_ALEMBIC_HEAD_ENV_VAR__", repr(QUANTIPY_ALEMBIC_HEAD_ENV_VAR)).replace(
     "__QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR__",
     repr(QUANTIPY_ALEMBIC_HEAD_FILENAME_ENV_VAR),
@@ -1684,7 +1832,7 @@ def build_quantipy_readiness(
     campaign_xnys_start: date,
     campaign_xnys_end: date,
 ) -> PlatformReadinessManifest:
-    """Generate a schema-v3 readiness manifest without changing the v2 Quantipy evidence schema."""
+    """Generate a schema-v3 readiness manifest with schema-v3 Quantipy contract evidence."""
     manifest_path, evidence_path, xnys_path = _validate_output_paths(
         manifest_path=manifest_path,
         evidence_path=quantipy_evidence_path,

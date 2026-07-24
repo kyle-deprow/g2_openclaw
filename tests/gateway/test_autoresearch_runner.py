@@ -18,6 +18,13 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch_platform_validation import (
+    DynamicPriceCoverageReceipt,
+    PlatformCoverageScope,
+    PlatformCoverageStatus,
+    PlatformCoverageViolationCode,
+    canonical_dynamic_price_coverage_digest,
+)
 from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
@@ -128,6 +135,7 @@ _MEMBER_UNION_SHA256 = sha256(_MEMBER_UNION_PATH.read_bytes()).hexdigest()
 _MEMBER_UNION_DIGEST = (
     "549c815538959493fe913ff6e4514bb52cd37cec360a9908c9795cd303f743e6"  # pragma: allowlist secret
 )
+_SOURCE_PRICE_COVERAGE_RESPONSE_DIGEST = "d" * 64
 
 
 def advance_state(
@@ -144,9 +152,11 @@ def advance_state(
     policy: AutoresearchPolicy,
 ) -> AutoresearchState:
     context: AutoresearchValidationContext | None = None
-    if (
+    if state.mode in (ResearchMode.ALPHA_RESEARCH, ResearchMode.DATA_INFRA_G0) and (
         isinstance(artifact, VerificationResultArtifact)
-        and state.mode is ResearchMode.ALPHA_RESEARCH
+        or (
+            state.mode is ResearchMode.DATA_INFRA_G0 and isinstance(artifact, FinalDecisionArtifact)
+        )
     ):
         context = AutoresearchValidationContext(
             state.platform_readiness,
@@ -237,21 +247,24 @@ def suspended_g0_remediation_state(
         readiness=platform_readiness,
         infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
     )
-    return advance_state(
+    decision = FinalDecisionArtifact(
+        experiment_id="g0-iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="coverage gate",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
+        rationale="Data infrastructure remains blocked.",
+        log_summary="G0 gate still requires remediation.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Cap/source provenance still needs operator remediation.",
+    )
+    return replace(
         state,
-        FinalDecisionArtifact(
-            experiment_id="g0-iteration-1",
-            decision=FinalDecision.INFRA_BLOCKED,
-            recommended_metric_name="coverage gate",
-            recommended_metric_value=None,
-            reviewer_verdict=FinalReviewerVerdict.PASS,
-            rationale="Data infrastructure remains blocked.",
-            log_summary="G0 gate still requires remediation.",
-            continue_loop=True,
-            memory_write_required=False,
-            infra_rationale="Cap/source provenance still needs operator remediation.",
-        ),
-        policy,
+        final_decision=decision,
+        phase=Phase.REPEAT,
+        suspended=True,
+        suspension_reason=decision.infra_rationale,
     )
 
 
@@ -1114,8 +1127,8 @@ def _price_hydration_receipt() -> PriceHydrationReceipt:
     request_digest = price_hydration_request_digest(
         member_union_count=1,
         member_union_digest=_MEMBER_UNION_DIGEST,
-        experiment_start="2021-01-04",
-        experiment_end="2021-12-31",
+        experiment_start="2021-01-05",
+        experiment_end="2021-01-05",
         timeframe="1min",
         market_hours="regular",
     )
@@ -1123,8 +1136,8 @@ def _price_hydration_receipt() -> PriceHydrationReceipt:
     return PriceHydrationReceipt(
         member_union_count=1,
         member_union_digest=_MEMBER_UNION_DIGEST,
-        experiment_start="2021-01-04",
-        experiment_end="2021-12-31",
+        experiment_start="2021-01-05",
+        experiment_end="2021-01-05",
         timeframe="1min",
         market_hours="regular",
         operation_count=1,
@@ -1132,6 +1145,7 @@ def _price_hydration_receipt() -> PriceHydrationReceipt:
         coverage_receipt_digest=price_hydration_coverage_digest(
             request_digest=request_digest, operation_count=1, completed_at=completed_at
         ),
+        source_price_coverage_response_digest=_SOURCE_PRICE_COVERAGE_RESPONSE_DIGEST,
         completed_at=completed_at,
         folds_started_at="2026-07-15T12:01:00+00:00",
     )
@@ -1141,14 +1155,14 @@ def _dynamic_coverage_receipt() -> DynamicUniverseCoverageReceipt:
     return DynamicUniverseCoverageReceipt(
         member_union_count=1,
         member_union_digest=_MEMBER_UNION_DIGEST,
-        experiment_start="2021-01-04",
-        experiment_end="2021-12-31",
-        oos_start="2021-10-01",
-        oos_end="2021-12-31",
+        experiment_start="2021-01-05",
+        experiment_end="2021-01-05",
+        oos_start="2021-01-05",
+        oos_end="2021-01-05",
         timeframe="1min",
         market_hours="regular",
-        expected_symbol_sessions=2400,
-        covered_symbol_sessions=2400,
+        expected_symbol_sessions=1,
+        covered_symbol_sessions=1,
         missing_symbol_count=0,
         missing_symbol_sessions=0,
         default_fold_count=24,
@@ -1320,15 +1334,77 @@ def _implementation_result() -> ImplementationResultArtifact:
         ),
         price_hydration_scope_preflight=PriceHydrationScopePreflight(
             member_union_count=1,
-            experiment_start="2021-01-04",
-            experiment_end="2021-12-31",
+            experiment_start="2021-01-05",
+            experiment_end="2021-01-05",
             timeframe="1min",
             market_hours="regular",
-            session_count=2400,
-            planned_symbol_sessions=2400,
+            session_count=1,
+            planned_symbol_sessions=1,
             within_budget=True,
         ),
     )
+
+
+def _platform_coverage_receipt(
+    *,
+    status: PlatformCoverageStatus = PlatformCoverageStatus.COMPLETE,
+    scope: PlatformCoverageScope = PlatformCoverageScope.FULL_UNION_HYDRATION,
+    source_contract_version: str = "price-coverage-v1",
+    member_union_digest: str | None = None,
+    requested_sessions_digest: str | None = None,
+    pit_active_roster_digest: str | None = None,
+    source_price_coverage_response_digest: str | None = None,
+) -> DynamicPriceCoverageReceipt:
+    preflight = _implementation_result().price_hydration_scope_preflight
+    assert preflight is not None
+    missing = 1 if status is PlatformCoverageStatus.REMEDIATION_REQUIRED else 0
+    raw: dict[str, object] = {
+        "contract_version": "dynamic-price-coverage-v1",
+        "source_contract_version": source_contract_version,
+        "scope": scope.value,
+        "status": status.value,
+        "requested_start_date": preflight.experiment_start,
+        "requested_end_date": preflight.experiment_end,
+        "timeframe": preflight.timeframe,
+        "market_hours": preflight.market_hours,
+        "source_requested_start_date": preflight.experiment_start,
+        "source_requested_end_date": preflight.experiment_end,
+        "source_timeframe": preflight.timeframe,
+        "source_market_hours": preflight.market_hours,
+        "source_provider": "massive",
+        "member_union_digest": member_union_digest
+        or autoresearch_runner.quantipy_member_union_digest(("AMD",))[1],
+        "requested_sessions_digest": requested_sessions_digest
+        or autoresearch_runner.platform_requested_sessions_digest((date(2021, 1, 5),)),
+        "pit_active_roster_digest": pit_active_roster_digest or "c" * 64,
+        "source_price_coverage_response_digest": (
+            source_price_coverage_response_digest
+            or _price_hydration_receipt().source_price_coverage_response_digest
+        ),
+        "member_union_count": preflight.member_union_count,
+        "requested_session_count": preflight.session_count,
+        "hydrated_symbol_sessions": preflight.planned_symbol_sessions,
+        "observed_hydrated_symbol_sessions": preflight.planned_symbol_sessions - missing,
+        "provider_empty_hydrated_symbol_sessions": 0,
+        "missing_hydrated_symbol_sessions": missing,
+        "active_symbol_sessions": preflight.planned_symbol_sessions,
+        "observed_active_symbol_sessions": preflight.planned_symbol_sessions - missing,
+        "provider_empty_active_symbol_sessions": 0,
+        "missing_active_symbol_sessions": missing,
+        "inactive_union_symbol_sessions": 0,
+        "unexpected_ticker_count": 0,
+        "unexpected_session_count": 0,
+        "violation_codes": (
+            [
+                PlatformCoverageViolationCode.MISSING_ACTIVE_SYMBOL_SESSION.value,
+                PlatformCoverageViolationCode.MISSING_HYDRATED_SYMBOL_SESSION.value,
+            ]
+            if missing
+            else []
+        ),
+    }
+    raw["receipt_digest"] = canonical_dynamic_price_coverage_digest(raw)
+    return DynamicPriceCoverageReceipt.from_dict(raw)
 
 
 def _verification_result(status: VerificationStatus) -> VerificationResultArtifact:
@@ -1348,6 +1424,7 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
         tests_passed=status is not VerificationStatus.TEST_FAILURE,
         commands_run=("uv run pytest", "uv run jupyter execute notebook.ipynb"),
         data_coverage=_dynamic_coverage_receipt(),
+        platform_coverage_validation=_platform_coverage_receipt(),
         universe_verification_receipt=_universe_verification_receipt(),
         price_hydration_receipt=_price_hydration_receipt(),
     )
@@ -1360,6 +1437,9 @@ def _g0_remediation_verification(
         _verification_result(status),
         infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
         infra_rationale="Verification did not complete successfully.",
+        platform_coverage_validation=_platform_coverage_receipt(
+            status=PlatformCoverageStatus.REMEDIATION_REQUIRED
+        ),
     )
 
 
@@ -1577,6 +1657,13 @@ def _state_to_g0_decision(
             _verification_result(VerificationStatus.PASS),
             infra_gate_outcome=infra_gate_outcome,
             infra_rationale="Cap/source provenance still needs operator remediation.",
+            platform_coverage_validation=_platform_coverage_receipt(
+                status=(
+                    PlatformCoverageStatus.COMPLETE
+                    if infra_gate_outcome is InfraGateOutcome.GATE_PASSED
+                    else PlatformCoverageStatus.REMEDIATION_REQUIRED
+                )
+            ),
         ),
         policy,
     )
@@ -2921,7 +3008,7 @@ def test_alpha_final_decision_rejects_infra_blocked(
         reviewer_verdict=FinalReviewerVerdict.PASS,
     )
 
-    with pytest.raises(AutoresearchValidationError, match="INFRA_BLOCKED requires"):
+    with pytest.raises(AutoresearchValidationError, match="operator-owned"):
         advance_state(state, decision, policy)
 
 
@@ -2984,7 +3071,188 @@ def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
     assert result.final_decision.decision is FinalDecision.INFRA_REPAIRED
 
 
-def test_g0_infra_blocked_rejects_memory_write_requirement(
+def test_g0_verification_requires_strict_readiness_validation_context(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+
+    with pytest.raises(AutoresearchValidationError, match=r"DATA_INFRA_G0.*validation context"):
+        _runner_advance_state(
+            state,
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+                infra_rationale="Every source and cap record has auditable provenance.",
+            ),
+            policy,
+        )
+
+
+def test_g0_final_decision_requires_validation_context_for_accepted_provenance(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_g0_decision(
+        policy,
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match=r"DATA_INFRA_G0.*validation context"):
+        _runner_advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="g0-iteration-1",
+                decision=FinalDecision.INFRA_REPAIRED,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+                rationale="Data repair completed.",
+                log_summary="G0 gate passed.",
+                continue_loop=True,
+                memory_write_required=True,
+                infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+            ),
+            policy,
+        )
+
+
+def test_g0_platform_receipt_rejects_old_hydration_metadata_digest_binding(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    stale_metadata_digest = _price_hydration_receipt().coverage_receipt_digest
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="platform_coverage_contract_mismatch BUG_SIGNAL",
+    ):
+        advance_state(
+            state,
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+                infra_rationale="Every source and cap record has auditable provenance.",
+                platform_coverage_validation=_platform_coverage_receipt(
+                    source_price_coverage_response_digest=stale_metadata_digest
+                ),
+            ),
+            policy,
+        )
+
+
+def test_g0_platform_receipt_rejects_universe_newline_member_union_digest(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+) -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+        infra_rationale="Every source and cap record has auditable provenance.",
+        platform_coverage_validation=_platform_coverage_receipt(
+            member_union_digest=_MEMBER_UNION_DIGEST
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="platform_coverage_contract_mismatch BUG_SIGNAL",
+    ):
+        advance_state(g0_verification_state, artifact, policy)
+
+
+def test_platform_preflight_rejects_weekend_endpoint() -> None:
+    preflight = PriceHydrationScopePreflight(
+        member_union_count=1,
+        experiment_start="2021-07-03",
+        experiment_end="2021-07-06",
+        timeframe="1min",
+        market_hours="regular",
+        session_count=1,
+        planned_symbol_sessions=1,
+        within_budget=True,
+    )
+    context = AutoresearchValidationContext(
+        None,
+        "d" * 64,
+        (date(2021, 7, 2), date(2021, 7, 6)),
+        date(2021, 7, 2),
+        date(2021, 7, 6),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="actual XNYS session labels"):
+        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+
+
+def test_platform_preflight_rejects_range_outside_pinned_xnys_evidence() -> None:
+    preflight = PriceHydrationScopePreflight(
+        member_union_count=1,
+        experiment_start="2021-01-04",
+        experiment_end="2021-01-05",
+        timeframe="1min",
+        market_hours="regular",
+        session_count=1,
+        planned_symbol_sessions=1,
+        within_budget=True,
+    )
+    context = AutoresearchValidationContext(
+        None,
+        "d" * 64,
+        (date(2021, 1, 5),),
+        date(2021, 1, 5),
+        date(2021, 1, 5),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
+        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+
+
+def test_platform_preflight_rejects_truncated_xnys_session_evidence() -> None:
+    preflight = PriceHydrationScopePreflight(
+        member_union_count=1,
+        experiment_start="2021-01-05",
+        experiment_end="2021-01-06",
+        timeframe="1min",
+        market_hours="regular",
+        session_count=2,
+        planned_symbol_sessions=2,
+        within_budget=True,
+    )
+    context = AutoresearchValidationContext(
+        None,
+        "d" * 64,
+        (date(2021, 1, 5),),
+        date(2021, 1, 5),
+        date(2021, 1, 5),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
+        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+
+
+def test_g0_remediation_rejects_stage_authored_infra_blocked(
     policy: AutoresearchPolicy,
 ) -> None:
     state = _state_to_g0_decision(
@@ -2992,7 +3260,7 @@ def test_g0_infra_blocked_rejects_memory_write_requirement(
         infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
     )
 
-    with pytest.raises(AutoresearchValidationError, match="memory_write_required=false"):
+    with pytest.raises(AutoresearchValidationError, match="non-suspending DISCARD"):
         advance_state(
             state,
             FinalDecisionArtifact(
@@ -3011,9 +3279,8 @@ def test_g0_infra_blocked_rejects_memory_write_requirement(
         )
 
 
-def test_g0_infra_blocked_false_memory_suspends_without_memory_transition(
+def test_g0_remediation_discards_without_suspending(
     policy: AutoresearchPolicy,
-    receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
     state = _state_to_g0_decision(
@@ -3026,7 +3293,7 @@ def test_g0_infra_blocked_false_memory_suspends_without_memory_transition(
         state,
         FinalDecisionArtifact(
             experiment_id="g0-iteration-1",
-            decision=FinalDecision.INFRA_BLOCKED,
+            decision=FinalDecision.DISCARD,
             recommended_metric_name="coverage gate",
             recommended_metric_value=None,
             reviewer_verdict=FinalReviewerVerdict.PASS,
@@ -3039,13 +3306,12 @@ def test_g0_infra_blocked_false_memory_suspends_without_memory_transition(
         policy,
     )
 
-    assert state.suspended is True
+    assert state.suspended is False
     assert can_write_memory(state) is False
-    with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
-        next_action(state, policy, receipts, platform_readiness)
+    assert state.phase is Phase.REPEAT
 
 
-def test_persisted_g0_infra_blocked_no_memory_state_validates(
+def test_persisted_g0_remediation_discard_no_memory_state_validates(
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
@@ -3058,7 +3324,7 @@ def test_persisted_g0_infra_blocked_no_memory_state_validates(
         state,
         FinalDecisionArtifact(
             experiment_id="g0-iteration-1",
-            decision=FinalDecision.INFRA_BLOCKED,
+            decision=FinalDecision.DISCARD,
             recommended_metric_name="coverage gate",
             recommended_metric_value=None,
             reviewer_verdict=FinalReviewerVerdict.PASS,
@@ -3074,32 +3340,71 @@ def test_persisted_g0_infra_blocked_no_memory_state_validates(
 
     validate_state(persisted, policy)
 
-    assert persisted.suspended is True
+    assert persisted.suspended is False
     assert can_write_memory(persisted) is False
 
 
-def test_persisted_planless_g0_remediation_state_validates_and_resumes(
+def test_persisted_nonlegacy_g0_remediation_suspension_is_rejected(
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
     suspended_g0_remediation_state: AutoresearchState,
 ) -> None:
-    assert suspended_g0_remediation_state.latest_consensus is not None
-    forged = replace(
-        suspended_g0_remediation_state,
-        consensus_history=(
-            replace(suspended_g0_remediation_state.latest_consensus, universe_plan=None),
-        ),
+    persisted = AutoresearchState.from_dict(
+        json.loads(json.dumps(suspended_g0_remediation_state.to_dict()))
     )
 
-    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
-    validate_state(persisted, policy)
-    resumed = resume_suspended_iteration(persisted, platform_readiness)
+    with pytest.raises(AutoresearchValidationError, match="non-suspending DISCARD"):
+        validate_state(persisted, policy)
 
-    assert resumed == AutoresearchState(
-        iteration=persisted.iteration + 1,
-        setup=persisted.setup,
-        platform_readiness=platform_readiness.identity(),
-    )
+
+def test_generic_legacy_suspended_g0_receipt_omission_is_rejected(
+    policy: AutoresearchPolicy,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    raw = suspended_g0_remediation_state.to_dict()
+    history = raw["verification_history"]
+    assert isinstance(history, list)
+    for verification in history:
+        assert isinstance(verification, dict)
+        del verification["platform_coverage_validation"]
+
+    with pytest.raises(AutoresearchValidationError, match="platform_coverage_validation"):
+        AutoresearchState.from_dict(raw)
+
+
+def test_iteration_40_legacy_suspended_g0_state_with_null_metrics_loads_and_resumes(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    raw = suspended_g0_remediation_state.to_dict()
+    raw["iteration"] = 40
+    history = raw["verification_history"]
+    assert isinstance(history, list)
+    for verification in history:
+        assert isinstance(verification, dict)
+        del verification["platform_coverage_validation"]
+        for field_name in (
+            "is_walk_forward_sharpe_net",
+            "oos_sharpe_net",
+            "max_drawdown_pct",
+            "win_rate",
+            "trade_count",
+            "trades_per_day",
+            "oos_trading_days",
+        ):
+            verification[field_name] = None
+        verification["data_coverage"] = None
+
+    legacy = AutoresearchState.from_dict(raw)
+    validate_state(legacy, policy)
+    resumed = resume_suspended_iteration(legacy, platform_readiness)
+
+    assert legacy.iteration == 40
+    assert legacy.suspended is True
+    assert legacy.legacy_platform_coverage_omission is True
+    assert resumed.iteration == 41
+    assert resumed.phase is Phase.SETUP_CONTEXT
 
 
 def test_persisted_planless_g0_remediation_state_rejects_an_earlier_majority(
@@ -3171,13 +3476,11 @@ def test_persisted_planless_g0_remediation_state_rejects_a_near_miss(
         ),
     )
 
-    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
-
     with pytest.raises(
         AutoresearchValidationError,
-        match="non-operator majority consensus at history index 1 requires a frozen universe_plan",
+        match="platform coverage receipt status",
     ):
-        validate_state(persisted, policy)
+        AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
 
 
 @pytest.mark.parametrize(
@@ -3433,7 +3736,7 @@ def test_agent_final_decision_cannot_create_an_operator_infrastructure_suspensio
         advance_state(state, artifact, policy)
 
 
-def test_persisted_suspended_g0_infra_blocked_requires_verification_context(
+def test_g0_stage_receipt_cannot_create_a_suspended_infra_blocked_state(
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
@@ -3442,27 +3745,21 @@ def test_persisted_suspended_g0_infra_blocked_requires_verification_context(
         readiness=platform_readiness,
         infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
     )
-    state = advance_state(
-        state,
-        FinalDecisionArtifact(
-            experiment_id="g0-iteration-1",
-            decision=FinalDecision.INFRA_BLOCKED,
-            recommended_metric_name="coverage gate",
-            recommended_metric_value=None,
-            reviewer_verdict=FinalReviewerVerdict.PASS,
-            rationale="Data infrastructure remains blocked.",
-            log_summary="G0 gate still requires remediation.",
-            continue_loop=True,
-            memory_write_required=False,
-            infra_rationale="Cap/source provenance still needs operator remediation.",
-        ),
-        policy,
+    artifact = FinalDecisionArtifact(
+        experiment_id="g0-iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="coverage gate",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
+        rationale="Data infrastructure remains blocked.",
+        log_summary="G0 gate still requires remediation.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Cap/source provenance still needs operator remediation.",
     )
-    malformed = replace(state, verification_history=(), review_history=())
-    persisted = AutoresearchState.from_dict(json.loads(json.dumps(malformed.to_dict())))
 
-    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
-        validate_state(persisted, policy)
+    with pytest.raises(AutoresearchValidationError, match="non-suspending DISCARD"):
+        advance_state(state, artifact, policy)
 
 
 def test_persisted_g0_infra_repaired_retains_memory_write_contract(
@@ -3947,8 +4244,9 @@ def test_g0_pass_with_null_alpha_metrics_and_coverage_parses() -> None:
         data_coverage=None,
         infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
         infra_rationale="Shared provider entitlement requires operator remediation.",
-        universe_verification_receipt=None,
-        price_hydration_receipt=None,
+        platform_coverage_validation=_platform_coverage_receipt(
+            status=PlatformCoverageStatus.REMEDIATION_REQUIRED
+        ),
     )
 
     parsed = VerificationResultArtifact.from_dict(
@@ -3979,6 +4277,21 @@ def test_g0_pass_rejects_partial_universe_and_hydration_receipts() -> None:
     with pytest.raises(
         AutoresearchValidationError,
         match="universe and price hydration receipts must both be present or both be null",
+    ):
+        artifact.validate(mode=ResearchMode.DATA_INFRA_G0)
+
+
+def test_g0_pass_requires_paired_platform_universe_and_hydration_receipts() -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+        infra_rationale="Every source and cap record has auditable provenance.",
+        platform_coverage_validation=None,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="platform_coverage_contract_mismatch BUG_SIGNAL",
     ):
         artifact.validate(mode=ResearchMode.DATA_INFRA_G0)
 
@@ -5164,8 +5477,7 @@ def test_price_scope_pass_requires_coverage_identity_match(
         _verification_result(VerificationStatus.PASS),
         data_coverage=replace(
             _dynamic_coverage_receipt(),
-            experiment_start="2021-01-05",
-            oos_start="2021-10-02",
+            experiment_start="2021-01-04",
         ),
     )
 
@@ -5347,9 +5659,11 @@ def test_g0_verification_prompt_requires_infra_gate_rationale(
         "tests_passed=true when commands, tests, and notebook execution succeeded"
     ) in prompt
     assert (
-        "A DATA_INFRA_G0 PASS may set alpha metrics, data_coverage, and both universe "
-        "and price hydration receipts to null when unavailable; never fabricate them"
+        "A DATA_INFRA_G0 PASS may set alpha metrics and data_coverage to null when "
+        "unavailable, but the platform gate requires runner-checkable implementation "
+        "preflight plus paired universe, price hydration, and platform coverage receipts"
     ) in prompt
+    assert "PriceCoverageResponse; it is not the hydration coverage_receipt_digest" in prompt
 
 
 def test_g0_remediation_with_null_alpha_metrics_and_coverage_advances_to_review(
@@ -5386,8 +5700,9 @@ def test_g0_remediation_with_null_alpha_metrics_and_coverage_advances_to_review(
             data_coverage=None,
             infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
             infra_rationale="Shared provider entitlement requires operator remediation.",
-            universe_verification_receipt=None,
-            price_hydration_receipt=None,
+            platform_coverage_validation=_platform_coverage_receipt(
+                status=PlatformCoverageStatus.REMEDIATION_REQUIRED
+            ),
         ),
         policy,
     )
@@ -5395,11 +5710,11 @@ def test_g0_remediation_with_null_alpha_metrics_and_coverage_advances_to_review(
     assert next_state.phase is Phase.REVIEW
 
     decision_state = advance_state(next_state, _review_result(ReviewVerdict.PASS, policy), policy)
-    suspended = advance_state(
+    discarded = advance_state(
         decision_state,
         FinalDecisionArtifact(
             experiment_id="g0-null-evidence-1",
-            decision=FinalDecision.INFRA_BLOCKED,
+            decision=FinalDecision.DISCARD,
             recommended_metric_name="coverage gate",
             recommended_metric_value=None,
             reviewer_verdict=FinalReviewerVerdict.PASS,
@@ -5412,12 +5727,112 @@ def test_g0_remediation_with_null_alpha_metrics_and_coverage_advances_to_review(
         policy,
     )
 
-    assert suspended.final_decision is not None
-    assert suspended.final_decision.decision is FinalDecision.INFRA_BLOCKED
-    assert suspended.suspended is True
-    assert can_write_memory(suspended) is False
-    with pytest.raises(AutoresearchValidationError, match="autoresearch-resume"):
-        next_action(suspended, policy, receipts, platform_readiness)
+    assert discarded.final_decision is not None
+    assert discarded.final_decision.decision is FinalDecision.DISCARD
+    assert discarded.suspended is False
+    assert can_write_memory(discarded) is False
+    assert next_action(discarded, policy, receipts, platform_readiness).phase is Phase.REPEAT
+
+
+def test_g0_platform_contract_mismatch_routes_to_fixer_as_canonical_bug_signal(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+) -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        bug_signals=("platform_coverage_contract_mismatch",),
+        infra_gate_outcome=None,
+        infra_rationale=None,
+        platform_coverage_validation=None,
+    )
+
+    result = advance_state(g0_verification_state, artifact, policy)
+
+    assert result.phase is Phase.FIX_TEST
+    assert result.pending_fix_trigger is FixTriggerPhase.VERIFICATION
+
+
+def test_g0_wrong_scope_receipt_is_rejected_without_state_mutation(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+) -> None:
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        platform_coverage_validation=_platform_coverage_receipt(
+            scope=PlatformCoverageScope.PIT_ACTIVE_ROSTER
+        ),
+    )
+    original = g0_verification_state
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="canonical BUG_SIGNAL artifact",
+    ):
+        advance_state(g0_verification_state, artifact, policy)
+
+    assert g0_verification_state == original
+
+
+def test_digest_valid_remediation_receipt_cannot_authorize_suspension(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+) -> None:
+    verified = advance_state(
+        g0_verification_state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.REMEDIATION_REQUIRED,
+            infra_rationale="Provider entitlement needs remediation.",
+            platform_coverage_validation=_platform_coverage_receipt(
+                status=PlatformCoverageStatus.REMEDIATION_REQUIRED
+            ),
+        ),
+        policy,
+    )
+    decision_state = advance_state(verified, _review_result(ReviewVerdict.PASS, policy), policy)
+    decision = FinalDecisionArtifact(
+        experiment_id="g0-forged-remediation-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="coverage gate",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.PASS,
+        rationale="Data infrastructure remains blocked.",
+        log_summary="G0 gate still requires remediation.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale="Provider entitlement needs remediation.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="non-suspending DISCARD"):
+        advance_state(decision_state, decision, policy)
+
+
+def test_g0_complete_receipt_with_preflight_identity_mismatch_fails_closed(
+    policy: AutoresearchPolicy,
+    g0_verification_state: AutoresearchState,
+) -> None:
+    implementation = g0_verification_state.implementation_result
+    assert implementation is not None
+    preflight = implementation.price_hydration_scope_preflight
+    assert preflight is not None
+    mismatched = replace(
+        g0_verification_state,
+        implementation_result=replace(
+            implementation,
+            price_hydration_scope_preflight=replace(
+                preflight,
+                experiment_start="2021-01-04",
+            ),
+        ),
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+        infra_rationale="Coverage is complete.",
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
+        advance_state(mismatched, artifact, policy)
 
 
 def _load_config() -> dict[str, object]:

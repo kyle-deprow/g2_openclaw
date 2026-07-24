@@ -163,9 +163,10 @@ receipt. It never changes an active or suspended iteration's receipt.
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
-`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
-completed `DATA_INFRA_G0` implementation and verification whose explicit
-`infra_gate_outcome=REMEDIATION_REQUIRED`.
+`INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
+readiness suspension, plus exact legacy iteration-40 compatibility. Completed
+`DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
+`DISCARD`.
 
 ## Instruction Source Manifest
 
@@ -233,9 +234,10 @@ The context packet must select exactly one mode and give a nonempty
 - `DATA_INFRA_G0` is for repairing data range, provenance, universe, or fold
   construction. It is not an alpha experiment and must never be presented as
   Sharpe/performance validation. After implementation and verification, its
-  explicit infrastructure gate outcome maps `GATE_PASSED` to `INFRA_REPAIRED`
-  and `REMEDIATION_REQUIRED` to `INFRA_BLOCKED`. This mapping does not apply to
-  a consensus failure.
+  explicit infrastructure gate outcome maps `GATE_PASSED` to non-suspending
+  `INFRA_REPAIRED` only after runner preflight identity/count checks.
+  `REMEDIATION_REQUIRED` is stage evidence only and maps to non-suspending
+  `DISCARD`; it cannot authorize suspension.
 
 The context packet also records normalized `burned_theory_families`. In alpha
 mode, a debate submission in a burned family is rejected unless it contains a
@@ -695,15 +697,18 @@ test, and notebook execution plus experiment correctness; they do not describe
 whether the data-infrastructure gate passed. If required commands, tests, and
 the notebook complete successfully and the deterministic audit returns a valid
 `REMEDIATION_REQUIRED` receipt, emit `status=PASS` and `tests_passed=true` with
-that gate outcome. This is a completed verification that proceeds to review
-and final `INFRA_BLOCKED`, not a fixer task. Use `TEST_FAILURE` only for an
+that gate outcome. This is a completed verification that proceeds to review and
+non-suspending `DISCARD`, not a fixer task and never `INFRA_BLOCKED`. Use
+`TEST_FAILURE` only for an
 actual nonzero command or failed test, a malformed or missing required receipt,
 an experiment defect, or inability to execute verification.
 
 A `DATA_INFRA_G0` `PASS`, including one with
-`infra_gate_outcome=REMEDIATION_REQUIRED`, may leave alpha metrics,
-`data_coverage`, and the paired universe and price-hydration receipts as `null`
-when unavailable. Never fabricate those artifacts.
+`infra_gate_outcome=REMEDIATION_REQUIRED`, may leave alpha metrics and
+`data_coverage` as `null` when unavailable, but paired universe,
+price-hydration, and platform coverage receipts are mandatory. If any are
+unavailable or mismatched, emit the exact contract-mismatch `BUG_SIGNAL`
+artifact. Never fabricate those artifacts.
 
 Required metrics:
 
@@ -735,8 +740,43 @@ In `DATA_INFRA_G0`, record `infra_gate_outcome` (`GATE_PASSED` or
 whether the infrastructure repair succeeded. Persist the gate rationale in the
 `verification_result` before reporting the stage outcome. A valid
 `REMEDIATION_REQUIRED` receipt is compatible with `status=PASS` and
-`tests_passed=true`; it is an operator-owned infrastructure blocker, not a test
-failure.
+`tests_passed=true`; it proceeds to review and non-suspending `DISCARD`, not a
+test failure or operator-owned suspension.
+
+Every new G0 envelope must include `platform_coverage_validation`, the canonical
+output of Quantipy's shared `qp.validate_dynamic_price_coverage` validator. Its
+canonical digest proves only receipt self-consistency. The runner trusts the
+gate only when the receipt is mechanically bound to the exact implementation
+preflight, universe verification receipt, price hydration receipt, and digest
+source request identity/provider and fields `member_union_digest`,
+`requested_sessions_digest`, `pit_active_roster_digest`, and
+`source_price_coverage_response_digest`. G2 recomputes Quantipy's compact
+JSON-array `member_union_digest` from the verified member-union manifest, while
+separately requiring the universe and hydration newline-manifest digests to
+match. It keeps `pit_active_roster_digest` as an intrinsic Quantipy receipt
+field but does not claim independent exact PIT roster identity. The price
+hydration receipt must carry the required `source_price_coverage_response_digest`
+from the actual Quantipy `PriceCoverageResponse`; it is not the hydration
+`coverage_receipt_digest` metadata digest. The accepted
+contract is `contract_version=dynamic-price-coverage-v1`,
+`source_contract_version=price-coverage-v1`, `timeframe=1min`, and
+`market_hours=regular`. Use
+`scope=full_union_hydration`: `hydrated_symbol_sessions` equals
+`member_union_count * requested_session_count`, and
+`inactive_union_symbol_sessions` equals hydrated sessions minus PIT-active
+sessions for both scopes; scope selects the asserted upstream count semantics,
+but every receipt reports both geometries. `pit_active_roster` is a useful
+diagnostic scope but cannot prove full-union coverage. Provider-empty inactive
+union sessions are valid and are not violation codes. `unexpected_session_count`
+counts distinct unexpected dates. `GATE_PASSED` requires a `COMPLETE` receipt
+cross-checked against runner-owned preflight identity and counts.
+`REMEDIATION_REQUIRED` requires corresponding nonempty, real violation codes
+but remains non-authorizing stage evidence. Unavailable or mismatched
+provenance is always
+`status=BUG_SIGNAL`, with the sole signal
+`platform_coverage_contract_mismatch` and null infrastructure outcome,
+rationale, and receipt; it goes to `fixer`. A stage agent must never self-author
+a receipt as proof of infrastructure.
 
 Bug signals:
 
@@ -818,10 +858,13 @@ Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
 - Max drawdown >= 30%: DISCARD regardless of Sharpe.
 
 After a `DATA_INFRA_G0` implementation and completed verification, decide
-`INFRA_REPAIRED` only for explicit `infra_gate_outcome=GATE_PASSED`; decide
-`INFRA_BLOCKED` only for explicit
-`infra_gate_outcome=REMEDIATION_REQUIRED`. The latter suspends for operator
-remediation. This gate mapping is not consensus handling. A methodology `PASS`
+`INFRA_REPAIRED` only for explicit `infra_gate_outcome=GATE_PASSED` backed by
+a `COMPLETE` platform coverage receipt cross-checked against runner-owned
+preflight identity and counts. For `REMEDIATION_REQUIRED`, decide
+non-suspending `DISCARD`. A remediation receipt never authorizes
+`INFRA_BLOCKED`; suspension is explicit operator-owned readiness suspension only,
+plus exact legacy iteration-40 compatibility. This gate mapping is not consensus
+handling. A methodology `PASS`
 means the data/process gate was assessed correctly, not that an alpha strategy
 has passed.
 

@@ -205,6 +205,7 @@ def _hydration_receipt() -> PriceHydrationReceipt:
         coverage_receipt_digest=price_hydration_coverage_digest(
             request_digest=request_digest, operation_count=1, completed_at=completed_at
         ),
+        source_price_coverage_response_digest="d" * 64,
         completed_at=completed_at,
         folds_started_at="2026-07-15T12:01:00+00:00",
     )

@@ -335,11 +335,13 @@ def test_runtime_docs_separate_no_consensus_from_infrastructure_blocking() -> No
         assert "does not suspend" in text, path
         assert "does not write MemPalace" in text, path
         assert "fresh context" in text, path
-        assert "explicit `infra_gate_outcome=REMEDIATION_REQUIRED`" in text, path
+        assert "non-suspending `DISCARD`" in text, path
+        assert "operator-owned readiness suspension" in text, path
 
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     assert "G0 uses only `INFRA_REPAIRED` or `INFRA_BLOCKED`" not in combined
     assert "G0 decides only `INFRA_REPAIRED` or `INFRA_BLOCKED`" not in combined
+    assert "final `INFRA_BLOCKED`" not in combined
 
 
 def test_runtime_docs_require_absolute_artifact_handoff_paths() -> None:

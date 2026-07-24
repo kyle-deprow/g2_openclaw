@@ -111,8 +111,8 @@ atomically:
 ```
 
 `INFRA_BLOCKED` suspends without incrementing the iteration or writing
-MemPalace. It is reserved for an operator precondition or the completed G0
-remediation branch described under Decisions And Memory. The supervisor does
+MemPalace. It is reserved only for an explicit operator-owned readiness
+suspension, plus exact legacy iteration-40 compatibility. The supervisor does
 not repeatedly wake suspended work.
 
 ### Dispatch Label Recovery
@@ -203,6 +203,13 @@ and aggregate common-calendar coverage receipts are `DATA_INFRA_G0`-only. A
 failed experiment is classified and logged; the PM does not revert, promote,
 or repair code.
 
+Every new `DATA_INFRA_G0` `PASS` requires paired universe, price hydration, and
+platform coverage receipts. The price hydration receipt includes the required
+`source_price_coverage_response_digest` from the actual Quantipy
+`PriceCoverageResponse`; it is not the hydration `coverage_receipt_digest`
+metadata digest. Missing or mismatched paired provenance is the exact
+`platform_coverage_contract_mismatch` `BUG_SIGNAL`.
+
 ## Decisions And Memory
 
 The deterministic decision order is:
@@ -219,12 +226,13 @@ The deterministic decision order is:
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
-`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
-completed `DATA_INFRA_G0` implementation and verification whose explicit
-`infra_gate_outcome=REMEDIATION_REQUIRED`. After completed G0 verification,
-`GATE_PASSED` maps to `INFRA_REPAIRED` and `REMEDIATION_REQUIRED` maps to
-`INFRA_BLOCKED`; this gate mapping never overrides consensus handling and never
-makes an alpha claim. Both `NO_CONSENSUS` and `INFRA_BLOCKED` set
+An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
+Suspension is explicit operator-owned readiness suspension only, plus exact
+legacy iteration-40 compatibility. After
+completed G0 verification, `GATE_PASSED` with a full-union `COMPLETE` receipt
+cross-checked against runner-owned preflight identity and counts maps to
+non-suspending `INFRA_REPAIRED`; `REMEDIATION_REQUIRED` is stage evidence only
+and maps to non-suspending `DISCARD`. Both `NO_CONSENSUS` and that G0 `DISCARD` set
 `memory_write_required=false`. Every other completed final decision follows
 the runner's memory requirement.
 

@@ -87,9 +87,11 @@ configured rolling aggregate entitlement rejects January/July 2021 and supports
 screen and daily regular-hours AAPL prices through Quantipy's public client;
 failure produces no READY receipt.
 
-An operator-precondition `INFRA_BLOCKED` decision suspends without incrementing
-the iteration. The supervisor does not repeatedly wake it. This branch sets
-`memory_write_required=false` and writes nothing to MemPalace.
+An explicit operator-owned readiness-precondition `INFRA_BLOCKED` decision
+suspends without incrementing the iteration. The supervisor does not repeatedly
+wake it. This branch sets `memory_write_required=false` and writes nothing to
+MemPalace. Exact legacy iteration-40 compatibility is the only other supported
+suspended G0 shape.
 
 ## Quantipy Data Contract
 
@@ -209,6 +211,45 @@ the compact `DynamicUniverseCoverageReceipt`; legacy per-symbol
 `DATA_INFRA_G0`-only. Nonzero tests are `TEST_FAILURE`; impossible, leaky, or
 internally inconsistent metrics are `BUG_SIGNAL`.
 
+For every new `DATA_INFRA_G0` envelope, include
+`platform_coverage_validation` emitted by Quantipy's shared
+`qp.validate_dynamic_price_coverage` validator; a self-authored JSON receipt
+cannot prove infrastructure. The canonical receipt digest proves only
+self-consistency and never grants suspension authority. The receipt includes
+source request identity and provider plus `member_union_digest`,
+`requested_sessions_digest`, `pit_active_roster_digest`, and
+`source_price_coverage_response_digest`. The price hydration receipt must carry
+the required `source_price_coverage_response_digest` from the actual Quantipy
+`PriceCoverageResponse`; it is not the hydration `coverage_receipt_digest`
+metadata digest. The receipt contract is
+`dynamic-price-coverage-v1` over source contract `price-coverage-v1` and native
+regular-hours `1min` data. G2 recomputes Quantipy's compact JSON-array
+`member_union_digest` from the verified universe member-union manifest, while
+separately requiring the established universe and hydration newline-manifest
+digests to match each other. Full-union proof uses `full_union_hydration`, where
+hydrated symbol-sessions equal `member_union_count * requested_session_count`
+and inactive-union sessions are hydrated minus active sessions for both scopes.
+Scope selects asserted upstream count semantics, while every receipt reports
+both geometries. G2 keeps `pit_active_roster_digest` as an intrinsic Quantipy
+receipt field but does not claim independent exact PIT roster identity, because
+the compact universe receipt does not contain Quantipy's per-session ticker
+arrays. A `pit_active_roster` receipt is not equivalent proof for the G0
+full-union gate. Provider-empty inactive union sessions are valid and are not
+violations. `unexpected_session_count` counts distinct unexpected dates.
+The finite violation codes are
+`unexpected_ticker`, `unexpected_symbol_session`, `missing_hydrated_symbol_session`,
+`provider_empty_active_symbol_session`, and `missing_active_symbol_session`.
+`GATE_PASSED` requires a `COMPLETE` receipt cross-checked against runner-owned
+preflight identity and counts before non-suspending `INFRA_REPAIRED`.
+`REMEDIATION_REQUIRED` requires matching nonempty violation codes, is stage
+evidence only, and ends in non-suspending `DISCARD`. It cannot authorize
+`INFRA_BLOCKED` or suspend the loop; suspension is explicit operator-owned
+readiness suspension only, plus exact legacy iteration-40 compatibility. A
+missing paired universe, hydration, or platform receipt, or any scope, contract,
+provenance, or digest mismatch is the canonical `BUG_SIGNAL`
+`platform_coverage_contract_mismatch`, with null infrastructure outcome,
+rationale, and receipt, and routes to `fixer`.
+
 The single reviewer checks implementation fidelity, receipt-bounded range and
 universe use, leakage, overlapping holds, costs, tuning, null tests, OOS
 independence, compute-fit consistency, and reproducibility.
@@ -229,11 +270,12 @@ The runner enforces this order for alpha work:
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
-`INFRA_BLOCKED` and suspension are reserved for an operator precondition or a
-completed `DATA_INFRA_G0` implementation and verification whose explicit
-`infra_gate_outcome=REMEDIATION_REQUIRED`. At that completed G0 boundary,
-`GATE_PASSED` maps to `INFRA_REPAIRED`; the gate mapping never overrides
-consensus handling. Both no-memory outcomes set
+`INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
+readiness suspension, plus exact legacy iteration-40 compatibility. Completed
+`DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
+`DISCARD`; `GATE_PASSED` with a runner-bound `COMPLETE` receipt maps to
+`INFRA_REPAIRED`. The gate mapping never overrides consensus handling. Both
+no-memory outcomes set
 `memory_write_required=false`. For every other memory-required final decision,
 the PM writes compact experiment, feature, model, metric, reviewer, decision,
 failure, and receipt facts after the decision artifact is accepted. Full ticker

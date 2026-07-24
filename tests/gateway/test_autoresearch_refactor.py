@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 from typing import cast
 
 import pytest
+from gateway.autoresearch_platform_validation import (
+    canonical_dynamic_price_coverage_digest,
+    canonical_requested_sessions_digest,
+)
 from gateway.autoresearch_runner import (
     ARTIFACT_CONTRACTS,
+    MEMBER_UNION_DIGEST_ALGORITHM,
     AggregateCoverageReceipt,
     ArtifactType,
+    AuthoritativeSnapshotReceipt,
     AutoresearchState,
     AutoresearchValidationError,
     ComputeFitArtifact,
@@ -20,13 +27,21 @@ from gateway.autoresearch_runner import (
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
+    GroupedSummaryReceipt,
     ImplementationResultArtifact,
     InfraGateOutcome,
+    MemberUnionManifestReceipt,
     MemoryVerificationReceipt,
+    PriceHydrationReceipt,
     PriceHydrationScopePreflight,
     ResearchMode,
+    UniverseDateVerificationReceipt,
+    UniverseHistoryBatchReceipt,
+    UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
     verify_mempalace_final_decision,
 )
 
@@ -85,6 +100,128 @@ def _alpha_verification() -> VerificationResultArtifact:
         commands_run=("uv run pytest",),
         data_coverage=_coverage(),
     )
+
+
+@pytest.fixture
+def g0_pass_verification_raw() -> dict[str, object]:
+    member_union_digest = "f" * 64
+    source_coverage_digest = "c" * 64
+    completed_at = "2026-07-15T12:00:00+00:00"
+    universe = UniverseVerificationReceipt(
+        profile_id="liquid-common-stocks-v1",
+        profile_digest="a" * 64,
+        execution_policy="next-session-or-later",
+        max_members_per_date=300,
+        batches=(
+            UniverseHistoryBatchReceipt(
+                contract_digest="b" * 64,
+                operation_count=1,
+                dates=(
+                    UniverseDateVerificationReceipt(
+                        selection_date="2021-01-04",
+                        earliest_execution_date="2021-01-05",
+                        calendar_identity="XNYS",
+                        calendar_digest="c" * 64,
+                        selected_member_count=1,
+                        snapshot=AuthoritativeSnapshotReceipt(
+                            as_of_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="d" * 64,
+                            content_digest="d" * 64,
+                            completed_at=completed_at,
+                        ),
+                        summary=GroupedSummaryReceipt(
+                            summary_date="2021-01-04",
+                            source="massive",
+                            result_count=17,
+                            identity_digest="e" * 64,
+                            content_digest="e" * 64,
+                            completed_at=completed_at,
+                            adjusted=False,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        member_union_digest_algorithm=MEMBER_UNION_DIGEST_ALGORITHM,
+        member_union_count=1,
+        member_union_digest=member_union_digest,
+        member_union_manifest=MemberUnionManifestReceipt(
+            path="/tmp/member-union.txt", sha256="b" * 64
+        ),
+    )
+    request_digest = price_hydration_request_digest(
+        member_union_count=1,
+        member_union_digest=member_union_digest,
+        experiment_start="2021-01-04",
+        experiment_end="2021-01-04",
+        timeframe="1min",
+        market_hours="regular",
+    )
+    hydration = PriceHydrationReceipt(
+        member_union_count=1,
+        member_union_digest=member_union_digest,
+        experiment_start="2021-01-04",
+        experiment_end="2021-01-04",
+        timeframe="1min",
+        market_hours="regular",
+        operation_count=1,
+        request_digest=request_digest,
+        coverage_receipt_digest=price_hydration_coverage_digest(
+            request_digest=request_digest,
+            operation_count=1,
+            completed_at=completed_at,
+        ),
+        source_price_coverage_response_digest=source_coverage_digest,
+        completed_at=completed_at,
+        folds_started_at="2026-07-15T12:01:00+00:00",
+    )
+    platform_coverage_validation: dict[str, object] = {
+        "contract_version": "dynamic-price-coverage-v1",
+        "source_contract_version": "price-coverage-v1",
+        "scope": "full_union_hydration",
+        "status": "COMPLETE",
+        "requested_start_date": "2021-01-04",
+        "requested_end_date": "2021-01-04",
+        "timeframe": "1min",
+        "market_hours": "regular",
+        "source_requested_start_date": "2021-01-04",
+        "source_requested_end_date": "2021-01-04",
+        "source_timeframe": "1min",
+        "source_market_hours": "regular",
+        "source_provider": "massive",
+        "member_union_digest": member_union_digest,
+        "requested_sessions_digest": canonical_requested_sessions_digest((date(2021, 1, 4),)),
+        "pit_active_roster_digest": "d" * 64,
+        "source_price_coverage_response_digest": source_coverage_digest,
+        "member_union_count": 1,
+        "requested_session_count": 1,
+        "hydrated_symbol_sessions": 1,
+        "observed_hydrated_symbol_sessions": 1,
+        "provider_empty_hydrated_symbol_sessions": 0,
+        "missing_hydrated_symbol_sessions": 0,
+        "active_symbol_sessions": 1,
+        "observed_active_symbol_sessions": 1,
+        "provider_empty_active_symbol_sessions": 0,
+        "missing_active_symbol_sessions": 0,
+        "inactive_union_symbol_sessions": 0,
+        "unexpected_ticker_count": 0,
+        "unexpected_session_count": 0,
+        "violation_codes": [],
+    }
+    platform_coverage_validation["receipt_digest"] = canonical_dynamic_price_coverage_digest(
+        platform_coverage_validation
+    )
+    raw = _alpha_verification().to_dict()
+    raw.update(
+        {
+            "platform_coverage_validation": platform_coverage_validation,
+            "universe_verification_receipt": universe.to_dict(),
+            "price_hydration_receipt": hydration.to_dict(),
+        }
+    )
+    return raw
 
 
 def test_context_packet_roundtrip_requires_explicit_mode_and_rationale() -> None:
@@ -229,8 +366,10 @@ def test_aggregate_coverage_rejects_non_common_day_counts_and_fold_counts() -> N
         aggregate.validate()
 
 
-def test_g0_verification_requires_an_explicit_infrastructure_outcome() -> None:
-    raw = _alpha_verification().to_dict()
+def test_g0_verification_requires_an_explicit_infrastructure_outcome(
+    g0_pass_verification_raw: dict[str, object],
+) -> None:
+    raw = g0_pass_verification_raw
     raw["infra_gate_outcome"] = None
     raw["infra_rationale"] = None
 

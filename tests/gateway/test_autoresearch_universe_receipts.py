@@ -29,6 +29,7 @@ from gateway.autoresearch_runner import (
     migrate_state_file,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
+    quantipy_member_union_digest,
 )
 
 _A = "a" * 64
@@ -153,6 +154,7 @@ def _hydration_receipt() -> PriceHydrationReceipt:
             operation_count=1,
             completed_at=completed_at,
         ),
+        source_price_coverage_response_digest="d" * 64,
         completed_at=completed_at,
         folds_started_at="2026-07-15T12:01:00+00:00",
     )
@@ -302,6 +304,16 @@ def test_union_digest_algorithm_is_sorted_unique_and_shape_checked() -> None:
         replace(_universe_receipt(), member_union_digest_algorithm="unknown").validate()
 
 
+def test_quantipy_member_union_digest_uses_compact_json_array_fixture() -> None:
+    newline_count, newline_digest = canonical_member_union_digest(("smci", "AMD", "AMD"))
+    quantipy_count, quantipy_digest = quantipy_member_union_digest(("smci", "AMD", "AMD"))
+
+    assert newline_count == quantipy_count == 2
+    assert newline_digest == _CANONICAL_TWO_MEMBER_DIGEST
+    assert quantipy_digest == hashlib.sha256(b'["AMD","SMCI"]').hexdigest()
+    assert quantipy_digest != newline_digest
+
+
 def test_external_union_manifest_recomputes_compact_receipt(tmp_path: Path) -> None:
     content = canonical_member_union_manifest(("smci", "AMD", "AMD"))
     manifest = tmp_path / "member-union.txt"
@@ -436,6 +448,14 @@ def test_compact_receipts_reject_unknown_or_membership_keys() -> None:
     _assert_rejects_membership_key(
         DynamicUniverseCoverageReceipt.from_dict, _coverage_receipt().to_dict()
     )
+
+
+def test_price_hydration_receipt_requires_source_price_coverage_response_digest() -> None:
+    raw = _hydration_receipt().to_dict()
+    raw.pop("source_price_coverage_response_digest")
+
+    with pytest.raises(AutoresearchValidationError, match="source_price_coverage_response_digest"):
+        PriceHydrationReceipt.from_dict(raw)
 
 
 def test_schema_less_pristine_pinned_live_state_migrates_losslessly(tmp_path: Path) -> None:

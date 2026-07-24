@@ -27,6 +27,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
+from gateway.autoresearch_platform_validation import (
+    PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,
+    DynamicPriceCoverageReceipt,
+    PlatformCoverageStatus,
+)
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
@@ -468,7 +473,7 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _canonical_json_digest(value: Mapping[str, object]) -> str:
+def _canonical_json_digest(value: object) -> str:
     return _sha256_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
@@ -487,6 +492,14 @@ def canonical_member_union_manifest(tickers: Sequence[str]) -> bytes:
     if not canonical:
         raise AutoresearchValidationError("member union must contain at least one ticker")
     return "".join(f"{ticker}\n" for ticker in canonical).encode("utf-8")
+
+
+def quantipy_member_union_digest(tickers: Sequence[str]) -> tuple[int, str]:
+    """SHA-256 over Quantipy's canonical compact JSON array member-union body."""
+    canonical = sorted({ticker.strip().upper() for ticker in tickers if ticker.strip()})
+    if not canonical:
+        raise AutoresearchValidationError("member union must contain at least one ticker")
+    return len(canonical), _canonical_json_digest(canonical)
 
 
 def price_hydration_request_digest(
@@ -519,6 +532,76 @@ def price_hydration_coverage_digest(
             "operation_count": operation_count,
             "completed_at": completed_at,
         }
+    )
+
+
+def platform_requested_sessions_digest(requested_sessions: Sequence[date]) -> str:
+    """Mirror Quantipy's digest of the ordered XNYS session-label sequence."""
+    if not requested_sessions or any(type(session) is not date for session in requested_sessions):
+        raise AutoresearchValidationError(
+            "requested sessions must be a non-empty sequence of plain dates"
+        )
+    canonical = tuple(requested_sessions)
+    if canonical != tuple(sorted(set(canonical))):
+        raise AutoresearchValidationError(
+            "requested sessions must be unique and canonically ordered"
+        )
+    return _canonical_json_digest([session.isoformat() for session in canonical])
+
+
+def _platform_receipt_has_expected_runner_provenance(
+    receipt: DynamicPriceCoverageReceipt,
+    *,
+    preflight: PriceHydrationScopePreflight,
+    universe: UniverseVerificationReceipt,
+    hydration: PriceHydrationReceipt,
+    requested_sessions: Sequence[date] | None = None,
+) -> bool:
+    """Return whether a canonical receipt is independently bound to runner evidence."""
+    try:
+        receipt.validate()
+        preflight.validate()
+        hydration.validate_against_universe(universe)
+        member_union_symbols = _verify_member_union_manifest(universe)
+    except ValueError:
+        return False
+    try:
+        quantipy_member_union_count, quantipy_member_union_sha256 = quantipy_member_union_digest(
+            member_union_symbols
+        )
+    except ValueError:
+        return False
+    sessions_match = True
+    if requested_sessions is not None:
+        sessions = tuple(requested_sessions)
+        try:
+            receipt.validate_requested_sessions(sessions)
+        except ValueError:
+            sessions_match = False
+    return (
+        receipt.matches_shared_contract
+        and receipt.timeframe == "1min"
+        and receipt.source_timeframe == "1min"
+        and receipt.requested_start_date == preflight.experiment_start
+        and receipt.requested_end_date == preflight.experiment_end
+        and receipt.source_requested_start_date == preflight.experiment_start
+        and receipt.source_requested_end_date == preflight.experiment_end
+        and receipt.timeframe == preflight.timeframe == hydration.timeframe
+        and receipt.market_hours.value == preflight.market_hours == hydration.market_hours
+        and receipt.source_timeframe == preflight.timeframe
+        and receipt.source_market_hours.value == preflight.market_hours
+        and receipt.member_union_count
+        == preflight.member_union_count
+        == universe.member_union_count
+        == hydration.member_union_count
+        == quantipy_member_union_count
+        and receipt.requested_session_count == preflight.session_count
+        and receipt.hydrated_symbol_sessions == preflight.planned_symbol_sessions
+        and universe.member_union_digest == hydration.member_union_digest
+        and receipt.member_union_digest == quantipy_member_union_sha256
+        and receipt.source_price_coverage_response_digest
+        == hydration.source_price_coverage_response_digest
+        and sessions_match
     )
 
 
@@ -1764,6 +1847,8 @@ class AutoresearchValidationContext:
     readiness_identity: ReadinessIdentity | None
     xnys_evidence_digest: str
     xnys_sessions: tuple[date, ...]
+    xnys_range_start: date | None = None
+    xnys_range_end: date | None = None
 
     @classmethod
     def from_readiness(cls, readiness: PlatformReadinessManifest) -> AutoresearchValidationContext:
@@ -1775,7 +1860,7 @@ class AutoresearchValidationContext:
         sessions = evidence.sessions
         if not sessions:
             raise AutoresearchValidationError("XNYS calendar evidence contains no sessions")
-        return cls(identity, digest, sessions)
+        return cls(identity, digest, sessions, evidence.range_start, evidence.range_end)
 
     def validate_for_state(self, state: AutoresearchState) -> None:
         if state.platform_readiness != self.readiness_identity:
@@ -2222,7 +2307,7 @@ class UniverseVerificationReceipt:
         }
 
 
-def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> None:
+def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> tuple[str, ...]:
     manifest = receipt.member_union_manifest
     descriptor: int | None = None
     try:
@@ -2263,6 +2348,7 @@ def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> None:
         raise AutoresearchValidationError(
             "member union manifest must recompute the persisted count and digest"
         )
+    return tuple(symbols)
 
 
 def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> None:
@@ -2418,6 +2504,84 @@ def _validate_alpha_price_scope_verification(
         )
 
 
+def _require_g0_platform_provenance(
+    state: AutoresearchState,
+    artifact: VerificationResultArtifact,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    if state.mode is not ResearchMode.DATA_INFRA_G0:
+        return
+    is_contract_mismatch = (
+        artifact.status is VerificationStatus.BUG_SIGNAL
+        and artifact.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
+    )
+    if is_contract_mismatch or artifact.status is not VerificationStatus.PASS:
+        return
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform coverage requires implementation_result"
+        )
+    preflight = state.implementation_result.price_hydration_scope_preflight
+    receipt = artifact.platform_coverage_validation
+    universe = artifact.universe_verification_receipt
+    hydration = artifact.price_hydration_receipt
+    if preflight is None or receipt is None or universe is None or hydration is None:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform coverage requires runner-checkable preflight, "
+            "universe, price hydration, and platform coverage provenance; use "
+            "platform_coverage_contract_mismatch BUG_SIGNAL when unavailable or mismatched"
+        )
+    if validation_context is not None:
+        validation_context.validate_universe_receipt(universe)
+    requested_sessions = _requested_sessions_for_preflight(preflight, validation_context)
+    if not _platform_receipt_has_expected_runner_provenance(
+        receipt,
+        preflight=preflight,
+        universe=universe,
+        hydration=hydration,
+        requested_sessions=requested_sessions,
+    ):
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform coverage receipt is not bound to the exact runner "
+            "preflight, universe, and price hydration evidence; use "
+            "platform_coverage_contract_mismatch BUG_SIGNAL"
+        )
+
+
+def _requested_sessions_for_preflight(
+    preflight: PriceHydrationScopePreflight,
+    validation_context: AutoresearchValidationContext | None,
+) -> tuple[date, ...]:
+    if validation_context is None:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform coverage requires a strict readiness validation context"
+        )
+    start = date.fromisoformat(preflight.experiment_start)
+    end = date.fromisoformat(preflight.experiment_end)
+    if not validation_context.xnys_sessions:
+        raise AutoresearchValidationError("XNYS calendar evidence contains no sessions")
+    evidence_start = validation_context.xnys_range_start or validation_context.xnys_sessions[0]
+    evidence_end = validation_context.xnys_range_end or validation_context.xnys_sessions[-1]
+    if start < evidence_start or end > evidence_end:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform preflight range extends outside pinned XNYS evidence"
+        )
+    session_labels = set(validation_context.xnys_sessions)
+    if start not in session_labels or end not in session_labels:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform preflight start/end must be actual XNYS session labels "
+            "in pinned evidence"
+        )
+    sessions = tuple(
+        session for session in validation_context.xnys_sessions if start <= session <= end
+    )
+    if len(sessions) != preflight.session_count:
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 platform preflight session_count must match pinned XNYS sessions"
+        )
+    return sessions
+
+
 @dataclass(frozen=True, slots=True)
 class PriceHydrationReceipt:
     member_union_count: int
@@ -2429,6 +2593,7 @@ class PriceHydrationReceipt:
     operation_count: int
     request_digest: str
     coverage_receipt_digest: str
+    source_price_coverage_response_digest: str
     completed_at: str
     folds_started_at: str
 
@@ -2465,6 +2630,7 @@ class PriceHydrationReceipt:
                 "operation_count",
                 "request_digest",
                 "coverage_receipt_digest",
+                "source_price_coverage_response_digest",
                 "completed_at",
                 "folds_started_at",
             ),
@@ -2479,6 +2645,9 @@ class PriceHydrationReceipt:
             operation_count=_require_int(data, "operation_count"),
             request_digest=_require_sha256(data, "request_digest"),
             coverage_receipt_digest=_require_sha256(data, "coverage_receipt_digest"),
+            source_price_coverage_response_digest=_require_sha256(
+                data, "source_price_coverage_response_digest"
+            ),
             completed_at=_require_str(data, "completed_at"),
             folds_started_at=_require_str(data, "folds_started_at"),
         )
@@ -2512,6 +2681,10 @@ class PriceHydrationReceipt:
             raise AutoresearchValidationError(
                 "price hydration coverage_receipt_digest is not canonical"
             )
+        _validate_sha256(
+            self.source_price_coverage_response_digest,
+            label="source_price_coverage_response_digest",
+        )
         completed_at = _parse_timestamp(self.completed_at, label="completed_at")
         folds_started_at = _parse_timestamp(self.folds_started_at, label="folds_started_at")
         if completed_at >= folds_started_at:
@@ -2553,6 +2726,7 @@ class PriceHydrationReceipt:
             "operation_count": self.operation_count,
             "request_digest": self.request_digest,
             "coverage_receipt_digest": self.coverage_receipt_digest,
+            "source_price_coverage_response_digest": self.source_price_coverage_response_digest,
             "completed_at": self.completed_at,
             "folds_started_at": self.folds_started_at,
         }
@@ -3012,6 +3186,7 @@ class VerificationResultArtifact:
     tests_passed: bool
     commands_run: tuple[str, ...]
     data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
+    platform_coverage_validation: DynamicPriceCoverageReceipt | None = None
     infra_gate_outcome: InfraGateOutcome | None = None
     infra_rationale: str | None = None
     universe_verification_receipt: UniverseVerificationReceipt | None = None
@@ -3019,32 +3194,44 @@ class VerificationResultArtifact:
 
     @classmethod
     def from_dict(
-        cls, raw: object, *, mode: ResearchMode | None = None
+        cls,
+        raw: object,
+        *,
+        mode: ResearchMode | None = None,
+        allow_legacy_platform_coverage_omission: bool = False,
     ) -> VerificationResultArtifact:
         data = _ensure_mapping(raw, label="verification_result")
+        expected_fields: tuple[str, ...] = (
+            "status",
+            "is_walk_forward_sharpe_net",
+            "oos_sharpe_net",
+            "max_drawdown_pct",
+            "win_rate",
+            "trade_count",
+            "trades_per_day",
+            "oos_trading_days",
+            "feature_importances_summary",
+            "null_test_summary",
+            "bug_signals",
+            "tests_passed",
+            "commands_run",
+            "data_coverage",
+            "platform_coverage_validation",
+            "infra_gate_outcome",
+            "infra_rationale",
+            "universe_verification_receipt",
+            "price_hydration_receipt",
+        )
+        if allow_legacy_platform_coverage_omission and "platform_coverage_validation" not in data:
+            expected_fields = tuple(
+                field_name
+                for field_name in expected_fields
+                if field_name != "platform_coverage_validation"
+            )
         _require_exact_keys(
             data,
             label="verification_result",
-            expected=(
-                "status",
-                "is_walk_forward_sharpe_net",
-                "oos_sharpe_net",
-                "max_drawdown_pct",
-                "win_rate",
-                "trade_count",
-                "trades_per_day",
-                "oos_trading_days",
-                "feature_importances_summary",
-                "null_test_summary",
-                "bug_signals",
-                "tests_passed",
-                "commands_run",
-                "data_coverage",
-                "infra_gate_outcome",
-                "infra_rationale",
-                "universe_verification_receipt",
-                "price_hydration_receipt",
-            ),
+            expected=expected_fields,
         )
         infra_gate_raw = data.get("infra_gate_outcome")
         infra_rationale = data.get("infra_rationale")
@@ -3092,6 +3279,11 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError("price_hydration_receipt must be an object or null")
         universe_receipt_raw = data["universe_verification_receipt"]
         hydration_receipt_raw = data["price_hydration_receipt"]
+        platform_coverage_raw = data.get("platform_coverage_validation")
+        if platform_coverage_raw is not None and not isinstance(platform_coverage_raw, Mapping):
+            raise AutoresearchValidationError(
+                "platform_coverage_validation must be an object or null"
+            )
         artifact = cls(
             status=VerificationStatus(_require_str(data, "status")),
             is_walk_forward_sharpe_net=_optional_float(data, "is_walk_forward_sharpe_net"),
@@ -3107,6 +3299,11 @@ class VerificationResultArtifact:
             tests_passed=_require_bool(data, "tests_passed"),
             commands_run=_require_string_list(data, "commands_run"),
             data_coverage=data_coverage,
+            platform_coverage_validation=(
+                DynamicPriceCoverageReceipt.from_dict(platform_coverage_raw)
+                if platform_coverage_raw is not None
+                else None
+            ),
             infra_gate_outcome=InfraGateOutcome(infra_gate_raw)
             if infra_gate_raw is not None
             else None,
@@ -3122,7 +3319,10 @@ class VerificationResultArtifact:
                 else None
             ),
         )
-        artifact.validate(mode=mode)
+        artifact.validate(
+            mode=ResearchMode.DATA_INFRA_G0 if allow_legacy_platform_coverage_omission else mode,
+            allow_legacy_platform_coverage_omission=allow_legacy_platform_coverage_omission,
+        )
         return artifact
 
     def validate(
@@ -3130,6 +3330,7 @@ class VerificationResultArtifact:
         *,
         mode: ResearchMode | None = None,
         infra_gate_outcome: InfraGateOutcome | None = None,
+        allow_legacy_platform_coverage_omission: bool = False,
     ) -> None:
         if self.status is VerificationStatus.PASS and (self.bug_signals or not self.tests_passed):
             raise AutoresearchValidationError(
@@ -3162,6 +3363,8 @@ class VerificationResultArtifact:
             )
         if self.data_coverage is not None:
             self.data_coverage.validate()
+        if self.platform_coverage_validation is not None:
+            self.platform_coverage_validation.validate()
         if (self.universe_verification_receipt is None) != (self.price_hydration_receipt is None):
             raise AutoresearchValidationError(
                 "universe and price hydration receipts must both be present or both be null"
@@ -3187,10 +3390,63 @@ class VerificationResultArtifact:
                     "ALPHA_RESEARCH PASS requires compact dynamic universe coverage"
                 )
         outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
-        if mode is ResearchMode.DATA_INFRA_G0 and (outcome is None or not self.infra_rationale):
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale"
+        if mode is ResearchMode.DATA_INFRA_G0:
+            is_contract_mismatch = (
+                self.status is VerificationStatus.BUG_SIGNAL
+                and self.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
             )
+            if is_contract_mismatch:
+                if (
+                    outcome is not None
+                    or self.infra_rationale is not None
+                    or self.platform_coverage_validation is not None
+                ):
+                    raise AutoresearchValidationError(
+                        "platform coverage contract mismatch must have null infrastructure "
+                        "outcome, rationale, and receipt"
+                    )
+            else:
+                receipt = self.platform_coverage_validation
+                if (
+                    self.status is VerificationStatus.PASS
+                    and not allow_legacy_platform_coverage_omission
+                    and (
+                        receipt is None
+                        or self.universe_verification_receipt is None
+                        or self.price_hydration_receipt is None
+                    )
+                ):
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 PASS requires paired universe, price hydration, "
+                        "and platform coverage receipts; use "
+                        "platform_coverage_contract_mismatch BUG_SIGNAL when unavailable "
+                        "or mismatched"
+                    )
+                if receipt is None:
+                    if not allow_legacy_platform_coverage_omission:
+                        raise AutoresearchValidationError(
+                            "DATA_INFRA_G0 verification requires platform_coverage_validation"
+                        )
+                elif not receipt.matches_shared_contract:
+                    raise AutoresearchValidationError(
+                        "Quantipy platform coverage scope or source contract mismatch requires "
+                        "the canonical BUG_SIGNAL artifact"
+                    )
+                if outcome is None or not self.infra_rationale:
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale"
+                    )
+                if self.status is VerificationStatus.PASS and receipt is not None:
+                    expected_status = (
+                        PlatformCoverageStatus.COMPLETE
+                        if outcome is InfraGateOutcome.GATE_PASSED
+                        else PlatformCoverageStatus.REMEDIATION_REQUIRED
+                    )
+                    if receipt.status is not expected_status:
+                        raise AutoresearchValidationError(
+                            "DATA_INFRA_G0 PASS gate outcome must match platform coverage "
+                            "receipt status"
+                        )
         if mode is ResearchMode.ALPHA_RESEARCH and (outcome is not None or self.infra_rationale):
             raise AutoresearchValidationError(
                 "ALPHA_RESEARCH verification cannot contain infrastructure gate outcomes"
@@ -3213,6 +3469,9 @@ class VerificationResultArtifact:
             "commands_run": list(self.commands_run),
             "data_coverage": self.data_coverage.to_dict()
             if self.data_coverage is not None
+            else None,
+            "platform_coverage_validation": self.platform_coverage_validation.to_dict()
+            if self.platform_coverage_validation is not None
             else None,
             "infra_gate_outcome": self.infra_gate_outcome.value
             if self.infra_gate_outcome is not None
@@ -3514,6 +3773,11 @@ class AutoresearchState:
     platform_readiness: ReadinessIdentity | None = None
     suspended: bool = False
     suspension_reason: str | None = None
+    legacy_platform_coverage_omission: bool = field(
+        default=False,
+        compare=False,
+        repr=False,
+    )
 
     @property
     def latest_debate(self) -> DebateResultArtifact | None:
@@ -3603,6 +3867,12 @@ class AutoresearchState:
         mode_raw = data.get("mode")
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
+        verification_history_raw = data.get("verification_history", [])
+        legacy_platform_coverage_omission = _recognizes_legacy_suspended_g0_history(
+            data,
+            mode_raw=mode_raw,
+            verification_history_raw=verification_history_raw,
+        )
 
         def _parse_state_implementation(raw_implementation: object) -> ImplementationResultArtifact:
             implementation_data = dict(
@@ -3637,7 +3907,9 @@ class AutoresearchState:
             verification_history=_parse_tuple(
                 "verification_history",
                 lambda item: VerificationResultArtifact.from_dict(
-                    item, mode=ResearchMode(mode_raw) if mode_raw is not None else None
+                    item,
+                    mode=ResearchMode(mode_raw) if mode_raw is not None else None,
+                    allow_legacy_platform_coverage_omission=legacy_platform_coverage_omission,
                 ),
             ),
             review_history=_parse_tuple("review_history", ReviewResultArtifact.from_dict),
@@ -3664,6 +3936,7 @@ class AutoresearchState:
                 if data.get("suspension_reason") is not None
                 else None
             ),
+            legacy_platform_coverage_omission=legacy_platform_coverage_omission,
         )
         return state
 
@@ -3699,6 +3972,59 @@ class AutoresearchState:
             "suspended": self.suspended,
             "suspension_reason": self.suspension_reason,
         }
+
+
+def _recognizes_legacy_suspended_g0_history(
+    data: Mapping[str, object],
+    *,
+    mode_raw: object,
+    verification_history_raw: object,
+) -> bool:
+    """Allow the omitted v2 field only for the known suspended G0 completion shape."""
+    if (
+        mode_raw != ResearchMode.DATA_INFRA_G0.value
+        or data.get("iteration") != 40
+        or data.get("phase") != Phase.REPEAT.value
+        or data.get("suspended") is not True
+        or data.get("memory_written") is not False
+        or data.get("memory_verification_receipt") is not None
+        or not isinstance(data.get("suspension_reason"), str)
+        or not data.get("suspension_reason")
+    ):
+        return False
+    final_decision = data.get("final_decision")
+    if not isinstance(final_decision, Mapping) or (
+        final_decision.get("decision") != FinalDecision.INFRA_BLOCKED.value
+        or final_decision.get("memory_write_required") is not False
+    ):
+        return False
+    if not isinstance(verification_history_raw, Sequence) or isinstance(
+        verification_history_raw, str | bytes
+    ):
+        return False
+    if len(verification_history_raw) != 1:
+        return False
+    for verification in verification_history_raw:
+        if not isinstance(verification, Mapping) or "platform_coverage_validation" in verification:
+            return False
+        if verification.get("status") != VerificationStatus.PASS.value:
+            return False
+        if verification.get("infra_gate_outcome") != InfraGateOutcome.REMEDIATION_REQUIRED.value:
+            return False
+        if verification.get("data_coverage") is not None:
+            return False
+        for field_name in (
+            "is_walk_forward_sharpe_net",
+            "oos_sharpe_net",
+            "max_drawdown_pct",
+            "win_rate",
+            "trade_count",
+            "trades_per_day",
+            "oos_trading_days",
+        ):
+            if verification.get(field_name) is not None:
+                return False
+    return True
 
 
 def build_authoritative_state_reference(
@@ -3987,6 +4313,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "tests_passed",
             "commands_run",
             "data_coverage",
+            "platform_coverage_validation",
             "infra_gate_outcome",
             "infra_rationale",
             "universe_verification_receipt",
@@ -4518,6 +4845,15 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
     if state.consensus_history and state.latest_debate is None:
         raise AutoresearchValidationError("consensus history requires a debate_result")
     _validate_consensus_history_universe_plans(state)
+    if (
+        state.suspended
+        and state.mode is ResearchMode.DATA_INFRA_G0
+        and not state.legacy_platform_coverage_omission
+        and state.latest_verification is not None
+    ):
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 remediation must end in non-suspending DISCARD"
+        )
     _validate_alpha_universe_chain(state)
     if state.memory_written and state.final_decision is None:
         raise AutoresearchValidationError("memory_written cannot be true before final_decision")
@@ -4557,14 +4893,17 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
                 )
         elif (
             not decision.memory_write_required
-            and not _is_operator_precondition_no_memory_state(state)
+            and not _is_explicit_no_memory_transition(state)
             and not _is_data_infra_g0_blocked_no_memory_state(state)
             and not is_operator_infrastructure_suspension
         ):
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
             )
-        if not is_operator_infrastructure_suspension:
+        if (
+            not is_operator_infrastructure_suspension
+            and not state.legacy_platform_coverage_omission
+        ):
             _validate_final_decision_artifact(decision, state)
     if state.implementation_result and (
         state.latest_consensus is None
@@ -4602,7 +4941,12 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
     for debate in state.debate_rounds:
         _validate_debate_result(debate, policy, mode=state.mode, context=state.context_packet)
     for verification in state.verification_history:
-        verification.validate(mode=state.mode)
+        verification.validate(
+            mode=ResearchMode.DATA_INFRA_G0
+            if state.legacy_platform_coverage_omission
+            else state.mode,
+            allow_legacy_platform_coverage_omission=state.legacy_platform_coverage_omission,
+        )
     for review in state.review_history:
         _validate_review_result(review, policy)
     if state.phase is Phase.DEBATE and state.context_packet is None:
@@ -5088,6 +5432,7 @@ def _baseline_metric(state: AutoresearchState) -> float | None:
 def _validate_final_decision_artifact(
     artifact: FinalDecisionArtifact,
     state: AutoresearchState,
+    validation_context: AutoresearchValidationContext | None = None,
 ) -> None:
     if artifact.recommended_metric_name == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME:
         raise AutoresearchValidationError(
@@ -5176,10 +5521,6 @@ def _validate_final_decision_artifact(
         return
 
     if state.mode is ResearchMode.DATA_INFRA_G0:
-        if artifact.decision not in (FinalDecision.INFRA_REPAIRED, FinalDecision.INFRA_BLOCKED):
-            raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision must be INFRA_REPAIRED or INFRA_BLOCKED"
-            )
         if not artifact.infra_rationale:
             raise AutoresearchValidationError(
                 "DATA_INFRA_G0 final_decision requires infra_rationale"
@@ -5199,22 +5540,52 @@ def _validate_final_decision_artifact(
         expected = (
             FinalDecision.INFRA_REPAIRED
             if latest_verification.infra_gate_outcome is InfraGateOutcome.GATE_PASSED
-            else FinalDecision.INFRA_BLOCKED
+            else FinalDecision.DISCARD
         )
         if artifact.decision is not expected:
             raise AutoresearchValidationError(
-                "DATA_INFRA_G0 final_decision must match infra_gate_outcome"
+                "DATA_INFRA_G0 final_decision must be INFRA_REPAIRED for GATE_PASSED "
+                "or non-suspending DISCARD for REMEDIATION_REQUIRED"
             )
-        if artifact.decision is FinalDecision.INFRA_BLOCKED and artifact.memory_write_required:
+        receipt = latest_verification.platform_coverage_validation
+        preflight = (
+            state.implementation_result.price_hydration_scope_preflight
+            if state.implementation_result is not None
+            else None
+        )
+        receipt_is_trusted = (
+            receipt is not None
+            and receipt.matches_shared_contract
+            and receipt.status is PlatformCoverageStatus.COMPLETE
+            and preflight is not None
+            and latest_verification.universe_verification_receipt is not None
+            and latest_verification.price_hydration_receipt is not None
+            and _platform_receipt_has_expected_runner_provenance(
+                receipt,
+                preflight=preflight,
+                universe=latest_verification.universe_verification_receipt,
+                hydration=latest_verification.price_hydration_receipt,
+                requested_sessions=_requested_sessions_for_preflight(
+                    preflight,
+                    validation_context,
+                ),
+            )
+        )
+        if expected is FinalDecision.INFRA_REPAIRED and not receipt_is_trusted:
             raise AutoresearchValidationError(
-                "DATA_INFRA_G0 INFRA_BLOCKED requires memory_write_required=false"
+                "DATA_INFRA_G0 INFRA_REPAIRED requires a COMPLETE receipt cross-checked "
+                "against runner-owned preflight identity and counts"
+            )
+        if expected is FinalDecision.DISCARD and artifact.memory_write_required:
+            raise AutoresearchValidationError(
+                "DATA_INFRA_G0 remediation DISCARD requires memory_write_required=false"
             )
         return
 
     if artifact.decision is FinalDecision.INFRA_BLOCKED:
         raise AutoresearchValidationError(
-            "INFRA_BLOCKED requires an operator-precondition blocker or completed "
-            "DATA_INFRA_G0 verification with REMEDIATION_REQUIRED"
+            "INFRA_BLOCKED requires the explicit operator-owned readiness suspension "
+            "transition and cannot be emitted by a stage artifact"
         )
 
     if artifact.infra_rationale:
@@ -5607,13 +5978,52 @@ def _verification_handoff_contract(
         "test, and notebook execution plus experiment correctness, never whether "
         "the infrastructure gate passed. REMEDIATION_REQUIRED is a valid completed "
         "verification outcome: emit PASS with tests_passed=true when commands, tests, "
-        "and notebook execution succeeded. A DATA_INFRA_G0 PASS may set alpha metrics, "
-        "data_coverage, and both universe and price hydration receipts to null when unavailable; "
-        "never fabricate them. It advances to review and then final INFRA_BLOCKED; do not send "
-        "operator-owned remediation to fixer. Use "
+        "and notebook execution succeeded. A DATA_INFRA_G0 PASS may set alpha metrics "
+        "and data_coverage to null when unavailable, but the platform gate requires "
+        "runner-checkable implementation preflight plus paired universe, price hydration, "
+        "and platform coverage receipts. If that provenance is unavailable or mismatched, emit "
+        "BUG_SIGNAL with the sole bug signal platform_coverage_contract_mismatch and null "
+        "infrastructure outcome, rationale, and receipt. A remediation PASS is stage evidence "
+        "only: it advances to review and then non-suspending DISCARD. It can never authorize "
+        "INFRA_BLOCKED or suspend the loop; only explicit operator-owned readiness suspension "
+        "or exact legacy iteration-40 compatibility may suspend. Do not send remediation "
+        "to fixer. Use "
         "TEST_FAILURE only for actual nonzero command or test execution, a malformed "
         "or missing required receipt, an experiment defect, or inability to execute "
-        "verification. Do not use Sharpe as the gate rationale.\n\n"
+        "verification. Do not use Sharpe as the gate rationale. Every new G0 "
+        "envelope must include platform_coverage_validation from Quantipy's shared "
+        "qp.validate_dynamic_price_coverage validator. Its canonical digest proves only "
+        "self-consistency; the runner trusts it only when it matches the exact "
+        "implementation preflight, universe verification receipt, price hydration receipt, "
+        "verified member-union manifest, requested XNYS sessions, source response digest, "
+        "and count identity fields. The accepted contract is "
+        "contract_version=dynamic-price-coverage-v1, "
+        "source_contract_version=price-coverage-v1, timeframe=1min, market_hours=regular, "
+        "scope=full_union_hydration, "
+        "source request identity/provider fields and digest fields member_union_digest, "
+        "requested_sessions_digest, pit_active_roster_digest, and "
+        "source_price_coverage_response_digest. The member_union_digest is Quantipy's "
+        "compact JSON-array digest; do not compare it directly to the universe or "
+        "hydration newline-manifest digest. The price hydration receipt must carry "
+        "the required source_price_coverage_response_digest from the actual Quantipy "
+        "PriceCoverageResponse; it is not the hydration coverage_receipt_digest metadata "
+        "digest. Treat pit_active_roster_digest as intrinsic Quantipy receipt data, not "
+        "as independently reproducible exact PIT identity. "
+        "hydrated_symbol_sessions must equal "
+        "member_union_count * requested_session_count, while inactive union sessions "
+        "are hydrated minus active sessions for both receipt scopes. Scope selects the "
+        "upstream assertion semantics; every receipt reports both geometries. "
+        "pit_active_roster is not proof of full-union coverage. Provider-empty inactive "
+        "union sessions are valid and are not violation codes. GATE_PASSED requires a "
+        "COMPLETE receipt cross-checked against runner-owned preflight identity and counts "
+        "before non-suspending INFRA_REPAIRED. REMEDIATION_REQUIRED requires matching "
+        "nonempty violation codes but remains non-authorizing stage evidence. "
+        "unexpected_session_count counts distinct unexpected dates. A "
+        "missing paired receipt or Quantipy scope, contract, provenance, or digest "
+        "mismatch becomes BUG_SIGNAL "
+        "platform_coverage_contract_mismatch with null infrastructure outcome, rationale, "
+        "and receipt, then routes to fixer. Never self-author a receipt as infrastructure "
+        "proof.\n\n"
     )
 
 
@@ -5849,10 +6259,14 @@ def advance_state(
     if state_path is not None:
         state = _validate_persisted_state_matches(state, state_path=state_path)
     _validate_state(state, policy)
-    if state.mode is ResearchMode.ALPHA_RESEARCH and state.phase is Phase.VERIFICATION:
+    if state.mode in (ResearchMode.ALPHA_RESEARCH, ResearchMode.DATA_INFRA_G0) and (
+        state.phase is Phase.VERIFICATION
+        or (state.mode is ResearchMode.DATA_INFRA_G0 and state.phase is Phase.DECISION_LOG)
+    ):
         if validation_context is None:
             raise AutoresearchValidationError(
-                "ALPHA_RESEARCH artifact advancement requires a strict readiness validation context"
+                f"{state.mode.name} artifact advancement requires a strict readiness "
+                "validation context"
             )
         validation_context.validate_for_state(state)
 
@@ -5962,6 +6376,7 @@ def advance_state(
             raise AutoresearchValidationError("verification requires implementation_result")
         artifact.validate(mode=state.mode)
         _validate_alpha_price_scope_verification(state, artifact)
+        _require_g0_platform_provenance(state, artifact, validation_context)
         next_verification_history = (*state.verification_history, artifact)
         if artifact.status is VerificationStatus.PASS:
             next_state = replace(
@@ -6054,7 +6469,7 @@ def advance_state(
             and state.latest_verification is None
         ):
             raise AutoresearchValidationError("final_decision requires prior artifacts")
-        _validate_final_decision_artifact(artifact, state)
+        _validate_final_decision_artifact(artifact, state, validation_context)
         if artifact.decision is FinalDecision.INFRA_BLOCKED:
             return replace(
                 state,
@@ -6085,7 +6500,16 @@ def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
     return (
         state.phase is Phase.REPEAT
         and decision is not None
-        and decision.decision is FinalDecision.NO_CONSENSUS
+        and (
+            decision.decision is FinalDecision.NO_CONSENSUS
+            or (
+                state.mode is ResearchMode.DATA_INFRA_G0
+                and decision.decision is FinalDecision.DISCARD
+                and state.latest_verification is not None
+                and state.latest_verification.infra_gate_outcome
+                is InfraGateOutcome.REMEDIATION_REQUIRED
+            )
+        )
         and not decision.memory_write_required
         and not state.memory_written
         and state.memory_verification_receipt is None
@@ -6158,6 +6582,7 @@ def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
         state.phase is Phase.REPEAT
         and state.mode is ResearchMode.DATA_INFRA_G0
         and state.suspended
+        and state.legacy_platform_coverage_omission
         and decision is not None
         and decision.decision is FinalDecision.INFRA_BLOCKED
         and bool(decision.infra_rationale)

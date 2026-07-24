@@ -69,6 +69,36 @@ providers, databases, cached symbols, or environment configuration.
   selected-symbol/date range into the platform cache and returns from that
   cache only after strict coverage succeeds. Reuse that cache across folds and
   iterations; do not query repositories or the database directly.
+- For `DATA_INFRA_G0`, create `platform_coverage_validation` only through
+  Quantipy's shared `qp.validate_dynamic_price_coverage` validator. The native
+  receipt is `dynamic-price-coverage-v1` / `price-coverage-v1` at regular-hours
+  `1min` and includes source request identity/provider plus
+  `member_union_digest`, `requested_sessions_digest`, `pit_active_roster_digest`,
+  and `source_price_coverage_response_digest`. The price hydration receipt must
+  carry that required source digest from the actual Quantipy
+  `PriceCoverageResponse`; it is not the hydration `coverage_receipt_digest`
+  metadata digest. A canonical receipt digest is not independent provenance and
+  never authorizes suspension. The G2 runner recomputes Quantipy's compact
+  JSON-array member-union digest from the verified universe manifest, separately
+  requires universe/hydration newline-manifest digests to match, and treats
+  `pit_active_roster_digest` as intrinsic Quantipy receipt data rather than
+  independently reproducible PIT identity. The runner cross-checks a `COMPLETE`
+  receipt against runner-owned preflight identity and counts before
+  `INFRA_REPAIRED`.
+  `full_union_hydration` proves every union
+  member/session was checked: hydrated sessions equal union count times
+  requested sessions, and inactive union sessions equal hydrated minus active
+  sessions for both scopes. Scope selects asserted upstream count semantics while
+  both geometries remain in the receipt. Provider-empty inactive union sessions
+  are valid, not violation codes; `unexpected_session_count` counts distinct
+  unexpected dates. Never substitute `pit_active_roster` as full-union proof or
+  self-author a receipt. `REMEDIATION_REQUIRED` is stage evidence only: it
+  proceeds to review and then non-suspending `DISCARD`, never `INFRA_BLOCKED`.
+  Actual suspension is explicit operator-owned readiness suspension only, plus
+  exact legacy iteration-40 compatibility. A missing paired universe, hydration,
+  or platform receipt, or any scope, contract, provenance, or digest mismatch is
+  the exact `platform_coverage_contract_mismatch` `BUG_SIGNAL` for `fixer`, not
+  infrastructure evidence.
 - Before any ALPHA verification command that can call `qp.prices()` for a
   hydrate/backtest, compute the planned `member_union_count * XNYS
   session_count` scope. The G2 OpenClaw control-plane hard budget is 600,000
