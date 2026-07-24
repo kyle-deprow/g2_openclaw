@@ -3941,6 +3941,10 @@ class AutoresearchState:
         return state
 
     def to_dict(self) -> dict[str, object]:
+        verification_history = [artifact.to_dict() for artifact in self.verification_history]
+        if self.legacy_platform_coverage_omission:
+            for verification in verification_history:
+                del verification["platform_coverage_validation"]
         return {
             "schema_version": AUTORESEARCH_STATE_SCHEMA_VERSION,
             "phase": self.phase.value,
@@ -3954,7 +3958,7 @@ class AutoresearchState:
             "implementation_result": self.implementation_result.to_dict()
             if self.implementation_result
             else None,
-            "verification_history": [artifact.to_dict() for artifact in self.verification_history],
+            "verification_history": verification_history,
             "review_history": [artifact.to_dict() for artifact in self.review_history],
             "fix_history": [artifact.to_dict() for artifact in self.fix_history],
             "pending_fix_trigger": self.pending_fix_trigger.value

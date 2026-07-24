@@ -3426,6 +3426,43 @@ def test_iteration_40_legacy_suspended_g0_state_with_two_attempts_loads_and_resu
     assert resumed.phase is Phase.SETUP_CONTEXT
 
 
+def test_authoritative_state_reference_builds_for_legacy_suspended_g0_state(
+    iteration_40_legacy_suspended_g0_raw: dict[str, object],
+) -> None:
+    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
+
+    reference = autoresearch_runner.build_authoritative_state_reference(legacy)
+
+    assert (reference.phase, reference.iteration) == (Phase.REPEAT.value, 40)
+
+
+def test_nonlegacy_g0_state_serialization_includes_platform_coverage_validation(
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    history = suspended_g0_remediation_state.to_dict()["verification_history"]
+
+    assert isinstance(history, list)
+    assert isinstance(history[0], dict)
+    assert "platform_coverage_validation" in history[0]
+
+
+def test_persist_derived_state_replaces_legacy_suspended_g0_state_after_resume(
+    tmp_path: Path,
+    platform_readiness: PlatformReadinessManifest,
+    iteration_40_legacy_suspended_g0_raw: dict[str, object],
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
+    resumed = resume_suspended_iteration(legacy, platform_readiness)
+    state_path.write_text(json.dumps(iteration_40_legacy_suspended_g0_raw), encoding="utf-8")
+
+    persist_derived_state(state_path, state_path, legacy, resumed)
+
+    persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+
+    assert persisted == resumed
+
+
 @pytest.mark.parametrize(
     "outcomes",
     (
