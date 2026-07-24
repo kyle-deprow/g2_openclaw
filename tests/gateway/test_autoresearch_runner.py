@@ -3372,18 +3372,30 @@ def test_generic_legacy_suspended_g0_receipt_omission_is_rejected(
         AutoresearchState.from_dict(raw)
 
 
-def test_iteration_40_legacy_suspended_g0_state_with_null_metrics_loads_and_resumes(
-    policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
+@pytest.fixture()
+def iteration_40_legacy_suspended_g0_raw(
     suspended_g0_remediation_state: AutoresearchState,
-) -> None:
+) -> dict[str, object]:
     raw = suspended_g0_remediation_state.to_dict()
     raw["iteration"] = 40
     history = raw["verification_history"]
     assert isinstance(history, list)
-    for verification in history:
-        assert isinstance(verification, dict)
-        del verification["platform_coverage_validation"]
+    assert len(history) == 1
+    assert isinstance(history[0], dict)
+    attempts = [dict(history[0]), dict(history[0])]
+    for attempt, outcome in zip(
+        attempts,
+        (
+            InfraGateOutcome.GATE_PASSED.value,
+            InfraGateOutcome.REMEDIATION_REQUIRED.value,
+        ),
+        strict=True,
+    ):
+        del attempt["platform_coverage_validation"]
+        attempt["infra_gate_outcome"] = outcome
+        attempt["data_coverage"] = None
+        attempt["universe_verification_receipt"] = None
+        attempt["price_hydration_receipt"] = None
         for field_name in (
             "is_walk_forward_sharpe_net",
             "oos_sharpe_net",
@@ -3393,10 +3405,17 @@ def test_iteration_40_legacy_suspended_g0_state_with_null_metrics_loads_and_resu
             "trades_per_day",
             "oos_trading_days",
         ):
-            verification[field_name] = None
-        verification["data_coverage"] = None
+            attempt[field_name] = None
+    raw["verification_history"] = attempts
+    return raw
 
-    legacy = AutoresearchState.from_dict(raw)
+
+def test_iteration_40_legacy_suspended_g0_state_with_two_attempts_loads_and_resumes(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    iteration_40_legacy_suspended_g0_raw: dict[str, object],
+) -> None:
+    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
     validate_state(legacy, policy)
     resumed = resume_suspended_iteration(legacy, platform_readiness)
 
@@ -3405,6 +3424,58 @@ def test_iteration_40_legacy_suspended_g0_state_with_null_metrics_loads_and_resu
     assert legacy.legacy_platform_coverage_omission is True
     assert resumed.iteration == 41
     assert resumed.phase is Phase.SETUP_CONTEXT
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    (
+        (InfraGateOutcome.REMEDIATION_REQUIRED.value,),
+        (
+            InfraGateOutcome.GATE_PASSED.value,
+            InfraGateOutcome.REMEDIATION_REQUIRED.value,
+            InfraGateOutcome.REMEDIATION_REQUIRED.value,
+        ),
+        (
+            InfraGateOutcome.REMEDIATION_REQUIRED.value,
+            InfraGateOutcome.GATE_PASSED.value,
+        ),
+        (
+            InfraGateOutcome.GATE_PASSED.value,
+            InfraGateOutcome.GATE_PASSED.value,
+        ),
+    ),
+    ids=("one-attempt", "three-attempts", "reversed-order", "wrong-outcome"),
+)
+def test_iteration_40_legacy_suspended_g0_state_rejects_noncanonical_attempt_history(
+    iteration_40_legacy_suspended_g0_raw: dict[str, object],
+    outcomes: tuple[str, ...],
+) -> None:
+    history = iteration_40_legacy_suspended_g0_raw["verification_history"]
+    assert isinstance(history, list)
+    assert isinstance(history[0], dict)
+    iteration_40_legacy_suspended_g0_raw["verification_history"] = [
+        {**history[0], "infra_gate_outcome": outcome} for outcome in outcomes
+    ]
+
+    with pytest.raises(AutoresearchValidationError, match="platform_coverage_validation"):
+        AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
+
+
+def test_iteration_40_legacy_suspended_g0_state_rejects_nonnull_receipts(
+    iteration_40_legacy_suspended_g0_raw: dict[str, object],
+    suspended_g0_remediation_state: AutoresearchState,
+) -> None:
+    history = iteration_40_legacy_suspended_g0_raw["verification_history"]
+    source_history = suspended_g0_remediation_state.to_dict()["verification_history"]
+    assert isinstance(history, list)
+    assert isinstance(source_history, list)
+    assert isinstance(history[0], dict)
+    assert isinstance(source_history[0], dict)
+    history[0]["universe_verification_receipt"] = source_history[0]["universe_verification_receipt"]
+    history[0]["price_hydration_receipt"] = source_history[0]["price_hydration_receipt"]
+
+    with pytest.raises(AutoresearchValidationError, match="platform_coverage_validation"):
+        AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
 
 
 def test_persisted_planless_g0_remediation_state_rejects_an_earlier_majority(

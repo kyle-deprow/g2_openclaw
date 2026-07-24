@@ -4002,16 +4002,27 @@ def _recognizes_legacy_suspended_g0_history(
         verification_history_raw, str | bytes
     ):
         return False
-    if len(verification_history_raw) != 1:
+    expected_outcomes = (
+        InfraGateOutcome.GATE_PASSED.value,
+        InfraGateOutcome.REMEDIATION_REQUIRED.value,
+    )
+    if len(verification_history_raw) != len(expected_outcomes):
         return False
-    for verification in verification_history_raw:
+    for verification, expected_outcome in zip(
+        verification_history_raw, expected_outcomes, strict=True
+    ):
         if not isinstance(verification, Mapping) or "platform_coverage_validation" in verification:
             return False
         if verification.get("status") != VerificationStatus.PASS.value:
             return False
-        if verification.get("infra_gate_outcome") != InfraGateOutcome.REMEDIATION_REQUIRED.value:
+        if verification.get("infra_gate_outcome") != expected_outcome:
             return False
         if verification.get("data_coverage") is not None:
+            return False
+        if (
+            verification.get("universe_verification_receipt") is not None
+            or verification.get("price_hydration_receipt") is not None
+        ):
             return False
         for field_name in (
             "is_walk_forward_sharpe_net",
