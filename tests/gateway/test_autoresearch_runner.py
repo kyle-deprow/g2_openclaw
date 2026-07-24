@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 from hashlib import sha256
 from pathlib import Path
 from threading import Barrier, Event, Thread
@@ -754,6 +754,49 @@ def test_load_artifact_file_accepts_exact_instruction_envelope(
 
     assert isinstance(artifact, SetupContextArtifact)
     assert artifact.metric_name == "OOS Sharpe net"
+
+
+def test_expanded_universe_receipt_fits_local_artifact_budget() -> None:
+    base = _universe_verification_receipt()
+    template = base.batches[0].dates[0]
+    dates = tuple(
+        replace(
+            template,
+            selection_date=(date(2021, 1, 4) + timedelta(days=index)).isoformat(),
+            earliest_execution_date=(date(2021, 1, 5) + timedelta(days=index)).isoformat(),
+            snapshot=replace(
+                template.snapshot,
+                as_of_date=(date(2021, 1, 4) + timedelta(days=index)).isoformat(),
+            ),
+            summary=replace(
+                template.summary,
+                summary_date=(date(2021, 1, 4) + timedelta(days=index)).isoformat(),
+            ),
+        )
+        for index in range(48)
+    )
+    receipt = replace(
+        base,
+        batches=(
+            replace(base.batches[0], dates=dates[:32]),
+            replace(base.batches[0], dates=dates[32:]),
+        ),
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        universe_verification_receipt=receipt,
+    )
+    payload = json.dumps(
+        {
+            "instruction_manifest_sha256": "0" * 64,
+            "state_reference_sha256": "1" * 64,
+            "artifact": artifact.to_dict(),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(payload) > 24 * 1024
+    assert len(payload) <= MAX_ARTIFACT_FILE_BYTES
 
 
 def test_load_artifact_file_rejects_a_tampered_persisted_state(

@@ -134,7 +134,9 @@ a stage artifact, use the dispatch `source_manifest_sha256` and
 `state_reference_sha256` from `autoresearch-next`; read live source files when
 their current methodology rules are needed, not as a mutable freshness gate.
 Production artifact files passed to `autoresearch-advance` must use the exact
-strict production envelope and stay at or below 24 KiB:
+strict production envelope and stay at or below 64 KiB. This local artifact
+budget accommodates complete expanded universe receipts; the separate
+`autoresearch-next` prompt remains capped at 32 KiB:
 
 ```json
 {
@@ -156,6 +158,12 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance \
 The in-place output is serialized by the runner's state lock and published with
 an atomic replace. Do not move a shell-created empty temp file over the
 authoritative state after `autoresearch-advance` fails.
+
+`autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
+unwrapped files before state advance. The complete envelope file must be at most
+64 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
+has a hard 32 KiB prompt budget and fails closed with an actionable error if
+accepted state artifacts would exceed it.
 
 Never run both preparation procedures for the same campaign. Archive
 incompatible state before initialization.

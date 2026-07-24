@@ -198,9 +198,10 @@ when commands fail or expose a bug signal:
    status, review, or handoff. The artifact file must be exactly
    `{"instruction_manifest_sha256": "<source_manifest_sha256>", "artifact": {...}}`;
    legacy unwrapped artifacts, missing digests, digest mismatches, and extra
-   envelope keys fail before state advance. The complete envelope is capped at
-   24 KiB, below the 32 KiB hard prompt budget; compact artifacts rather than
-   truncating.
+   envelope keys fail before state advance. The local complete envelope is
+   capped at 64 KiB so expanded universe receipts remain complete; the next
+   action prompt is separately capped at 32 KiB. Compact artifacts rather than
+   truncating them.
 6. Route accepted fixes only to `fixer` in the same workspace, then repeat the
    structured verification/review sequence directed by the runner.
 

@@ -218,7 +218,7 @@ uv run gateway-cli autoresearch-advance "$state" "$artifact" \
 
 `autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
 unwrapped files before state advance. The complete envelope file must be at most
-24 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
+64 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
 has a hard 32 KiB prompt budget and fails closed with an actionable error if
 accepted state artifacts would exceed it. The in-place output path uses the
 runner's locked atomic persistence; never replace authoritative state with a

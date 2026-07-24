@@ -1296,7 +1296,7 @@ class TestAutoresearchCliCommands:
                             metric_direction=MetricDirection.MAXIMIZE,
                             target_repo="/home/dev/repos/quantipy",
                             writable_scope="src/quantipy/alpha",
-                            baseline_summary="reviewer baseline " + ("x" * 40_000),
+                            baseline_summary="reviewer baseline " + ("x" * 80_000),
                             hard_constraints=("No overnight holds",),
                             data_sources=("qp.prices()",),
                         ).to_dict(),

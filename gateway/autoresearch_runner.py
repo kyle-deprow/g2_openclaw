@@ -56,7 +56,10 @@ MAX_NEXT_ACTION_PROMPT_BYTES = 32 * 1024
 # Keep one KiB of headroom below the immutable transport maximum for path and
 # host-probe variation. The hard maximum remains the final fail-closed bound.
 NEXT_ACTION_PROMPT_TARGET_BYTES = 31 * 1024
-MAX_ARTIFACT_FILE_BYTES = 24 * 1024
+# Artifact files are local control-plane inputs rather than prompt payloads.
+# Expanded universe receipts need more than 24 KiB while the next-action prompt
+# remains bounded separately by MAX_NEXT_ACTION_PROMPT_BYTES.
+MAX_ARTIFACT_FILE_BYTES = 64 * 1024
 MAX_UNIVERSE_SELECTION_DATES = 2200
 MAX_UNIVERSE_BATCH_DATES = 32
 MAX_UNIVERSE_BATCH_RESULTS = 10_000
