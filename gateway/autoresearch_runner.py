@@ -4889,7 +4889,13 @@ def _validate_no_consensus_completion(state: AutoresearchState) -> None:
         )
 
 
-def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:
+def _validate_state(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    if validation_context is not None:
+        validation_context.validate_for_state(state)
     if state.iteration < 1:
         raise AutoresearchValidationError("iteration must be >= 1")
     if state.suspended:
@@ -4988,7 +4994,7 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
             not is_operator_infrastructure_suspension
             and not state.legacy_platform_coverage_omission
         ):
-            _validate_final_decision_artifact(decision, state)
+            _validate_final_decision_artifact(decision, state, validation_context)
     if state.implementation_result and (
         state.latest_consensus is None
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
@@ -5087,8 +5093,12 @@ def _validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> Non
         raise AutoresearchValidationError("repeat phase requires final_decision")
 
 
-def validate_state(state: AutoresearchState, policy: AutoresearchPolicy) -> None:
-    _validate_state(state, policy)
+def validate_state(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    _validate_state(state, policy, validation_context)
 
 
 def _validate_debate_result(
@@ -6264,21 +6274,20 @@ def next_action(
     *,
     state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> NextAction:
-    _validate_state(state, policy)
+    try:
+        validate_state_readiness(state.platform_readiness, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        _validate_state(state, policy, validation_context)
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
     if state.suspended:
         raise AutoresearchValidationError(
             "autoresearch is suspended on an infrastructure blocker; "
             "run autoresearch-resume after platform readiness changes"
         )
-    try:
-        validate_state_readiness(state.platform_readiness, readiness)
-        validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        validation_context.validate_for_state(state)
-        if state.phase is not Phase.REVIEW:
-            _revalidate_accepted_member_union_manifests(state)
-        _validate_alpha_verification_price_preflight(state)
-    except ValueError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
+    if state.phase is not Phase.REVIEW:
+        _revalidate_accepted_member_union_manifests(state)
+    _validate_alpha_verification_price_preflight(state)
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
     instruction_source_manifest = build_instruction_source_manifest(

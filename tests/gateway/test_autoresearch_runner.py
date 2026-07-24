@@ -1770,6 +1770,69 @@ def _state_to_g0_decision(
     return advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
 
 
+def _bind_universe_receipt_to_validation_context(
+    receipt: UniverseVerificationReceipt,
+    context: AutoresearchValidationContext,
+) -> UniverseVerificationReceipt:
+    return replace(
+        receipt,
+        batches=tuple(
+            replace(
+                batch,
+                dates=tuple(
+                    replace(date_receipt, calendar_digest=context.xnys_evidence_digest)
+                    for date_receipt in batch.dates
+                ),
+            )
+            for batch in receipt.batches
+        ),
+    )
+
+
+def _persisted_g0_infra_repaired_repeat_state(
+    policy: AutoresearchPolicy,
+    readiness: PlatformReadinessManifest,
+) -> tuple[AutoresearchState, AutoresearchValidationContext]:
+    state = _state_to_g0_decision(
+        policy,
+        readiness=readiness,
+        infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+    )
+    state = advance_state(
+        state,
+        FinalDecisionArtifact(
+            experiment_id="g0-iteration-1",
+            decision=FinalDecision.INFRA_REPAIRED,
+            recommended_metric_name="coverage gate",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Data repair completed.",
+            log_summary="G0 gate passed.",
+            continue_loop=True,
+            memory_write_required=True,
+            infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+        ),
+        policy,
+    )
+    context = AutoresearchValidationContext.from_readiness(readiness)
+    verification = state.latest_verification
+    assert verification is not None
+    universe = verification.universe_verification_receipt
+    assert universe is not None
+    bound_verification = replace(
+        verification,
+        universe_verification_receipt=_bind_universe_receipt_to_validation_context(
+            universe,
+            context,
+        ),
+    )
+    persisted = replace(
+        state,
+        verification_history=(*state.verification_history[:-1], bound_verification),
+    )
+    return persisted, context
+
+
 def _git(cwd: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -4235,6 +4298,45 @@ def test_persisted_g0_infra_repaired_retains_memory_write_contract(
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
         validate_state(persisted, policy)
+
+
+def test_persisted_g0_infra_repaired_state_fails_closed_without_readiness_context(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state, _ = _persisted_g0_infra_repaired_repeat_state(policy, platform_readiness)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="DATA_INFRA_G0 platform coverage requires a strict readiness validation context",
+    ):
+        validate_state(state, policy)
+
+
+def test_persisted_g0_infra_repaired_state_validates_and_routes_with_readiness_context(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state, context = _persisted_g0_infra_repaired_repeat_state(policy, platform_readiness)
+
+    validate_state(state, policy, context)
+
+    action = next_action(state, policy, receipts, platform_readiness)
+
+    assert action.phase is Phase.REPEAT
+    assert action.expected_artifact_type.value == "memory_write"
+
+
+def test_persisted_alpha_state_validation_ignores_readiness_calendar_binding(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_review(policy, platform_readiness)
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(state.to_dict())))
+    context = AutoresearchValidationContext.from_readiness(platform_readiness)
+
+    validate_state(persisted, policy, context)
 
 
 def test_standardize_mempalace_kg_object_preserves_short_normalized_objects() -> None:

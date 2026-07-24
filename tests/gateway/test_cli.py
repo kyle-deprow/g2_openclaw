@@ -18,6 +18,12 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
+from gateway.autoresearch_platform_validation import (
+    DynamicPriceCoverageReceipt,
+    PlatformCoverageScope,
+    PlatformCoverageStatus,
+    canonical_dynamic_price_coverage_digest,
+)
 from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
@@ -47,6 +53,7 @@ from gateway.autoresearch_runner import (
     FixTriggerPhase,
     GroupedSummaryReceipt,
     ImplementationResultArtifact,
+    InfraGateOutcome,
     MemberUnionManifestReceipt,
     MetricDirection,
     Phase,
@@ -68,6 +75,7 @@ from gateway.autoresearch_runner import (
     load_autoresearch_policy,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
+    standardized_mempalace_kg_facts,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -95,6 +103,12 @@ from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 runner = CliRunner()
 CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
+_MEMBER_UNION_PATH = Path("tests/fixtures/autoresearch-member-union.txt").resolve()
+_MEMBER_UNION_SYMBOLS = _MEMBER_UNION_PATH.read_text(encoding="utf-8").splitlines()
+_MEMBER_UNION_COUNT, _MEMBER_UNION_DIGEST = autoresearch_runner.canonical_member_union_digest(
+    _MEMBER_UNION_SYMBOLS
+)
+_MEMBER_UNION_SHA256 = sha256(_MEMBER_UNION_PATH.read_bytes()).hexdigest()
 
 
 @pytest.fixture(autouse=True)
@@ -152,7 +166,7 @@ def _universe_receipt() -> UniverseVerificationReceipt:
                         earliest_execution_date="2021-01-05",
                         calendar_identity="XNYS",
                         calendar_digest="f" * 64,
-                        selected_member_count=17,
+                        selected_member_count=_MEMBER_UNION_COUNT,
                         snapshot=AuthoritativeSnapshotReceipt(
                             as_of_date="2021-01-04",
                             source="massive",
@@ -175,18 +189,18 @@ def _universe_receipt() -> UniverseVerificationReceipt:
             ),
         ),
         member_union_digest_algorithm=MEMBER_UNION_DIGEST_ALGORITHM,
-        member_union_count=17,
-        member_union_digest="e" * 64,
+        member_union_count=_MEMBER_UNION_COUNT,
+        member_union_digest=_MEMBER_UNION_DIGEST,
         member_union_manifest=MemberUnionManifestReceipt(
-            path="/tmp/quantipy-member-union.txt", sha256="e" * 64
+            path=str(_MEMBER_UNION_PATH), sha256=_MEMBER_UNION_SHA256
         ),
     )
 
 
 def _hydration_receipt() -> PriceHydrationReceipt:
     request_digest = price_hydration_request_digest(
-        member_union_count=17,
-        member_union_digest="e" * 64,
+        member_union_count=_MEMBER_UNION_COUNT,
+        member_union_digest=_MEMBER_UNION_DIGEST,
         experiment_start="2021-01-04",
         experiment_end="2021-12-31",
         timeframe="1min",
@@ -194,8 +208,8 @@ def _hydration_receipt() -> PriceHydrationReceipt:
     )
     completed_at = "2026-07-15T12:00:00+00:00"
     return PriceHydrationReceipt(
-        member_union_count=17,
-        member_union_digest="e" * 64,
+        member_union_count=_MEMBER_UNION_COUNT,
+        member_union_digest=_MEMBER_UNION_DIGEST,
         experiment_start="2021-01-04",
         experiment_end="2021-12-31",
         timeframe="1min",
@@ -213,20 +227,94 @@ def _hydration_receipt() -> PriceHydrationReceipt:
 
 def _dynamic_coverage() -> DynamicUniverseCoverageReceipt:
     return DynamicUniverseCoverageReceipt(
-        member_union_count=17,
-        member_union_digest="e" * 64,
+        member_union_count=_MEMBER_UNION_COUNT,
+        member_union_digest=_MEMBER_UNION_DIGEST,
         experiment_start="2021-01-04",
         experiment_end="2021-12-31",
         oos_start="2021-10-01",
         oos_end="2021-12-31",
         timeframe="1min",
         market_hours="regular",
-        expected_symbol_sessions=2400,
-        covered_symbol_sessions=2400,
+        expected_symbol_sessions=252,
+        covered_symbol_sessions=252,
         missing_symbol_count=0,
         missing_symbol_sessions=0,
         default_fold_count=24,
         fallback_fold_count=0,
+    )
+
+
+def _platform_coverage_receipt(
+    *,
+    context: AutoresearchValidationContext,
+    preflight: PriceHydrationScopePreflight,
+) -> DynamicPriceCoverageReceipt:
+    requested_sessions = tuple(
+        session
+        for session in context.xnys_sessions
+        if date.fromisoformat(preflight.experiment_start)
+        <= session
+        <= date.fromisoformat(preflight.experiment_end)
+    )
+    raw: dict[str, object] = {
+        "contract_version": "dynamic-price-coverage-v1",
+        "source_contract_version": "price-coverage-v1",
+        "scope": PlatformCoverageScope.FULL_UNION_HYDRATION.value,
+        "status": PlatformCoverageStatus.COMPLETE.value,
+        "requested_start_date": preflight.experiment_start,
+        "requested_end_date": preflight.experiment_end,
+        "timeframe": preflight.timeframe,
+        "market_hours": preflight.market_hours,
+        "source_requested_start_date": preflight.experiment_start,
+        "source_requested_end_date": preflight.experiment_end,
+        "source_timeframe": preflight.timeframe,
+        "source_market_hours": preflight.market_hours,
+        "source_provider": "massive",
+        "member_union_digest": autoresearch_runner.quantipy_member_union_digest(
+            _MEMBER_UNION_SYMBOLS
+        )[1],
+        "requested_sessions_digest": autoresearch_runner.platform_requested_sessions_digest(
+            requested_sessions
+        ),
+        "pit_active_roster_digest": "c" * 64,
+        "source_price_coverage_response_digest": (
+            _hydration_receipt().source_price_coverage_response_digest
+        ),
+        "member_union_count": preflight.member_union_count,
+        "requested_session_count": preflight.session_count,
+        "hydrated_symbol_sessions": preflight.planned_symbol_sessions,
+        "observed_hydrated_symbol_sessions": preflight.planned_symbol_sessions,
+        "provider_empty_hydrated_symbol_sessions": 0,
+        "missing_hydrated_symbol_sessions": 0,
+        "active_symbol_sessions": preflight.planned_symbol_sessions,
+        "observed_active_symbol_sessions": preflight.planned_symbol_sessions,
+        "provider_empty_active_symbol_sessions": 0,
+        "missing_active_symbol_sessions": 0,
+        "inactive_union_symbol_sessions": 0,
+        "unexpected_ticker_count": 0,
+        "unexpected_session_count": 0,
+        "violation_codes": [],
+    }
+    raw["receipt_digest"] = canonical_dynamic_price_coverage_digest(raw)
+    return DynamicPriceCoverageReceipt.from_dict(raw)
+
+
+def _bind_universe_receipt_to_validation_context(
+    receipt: UniverseVerificationReceipt,
+    context: AutoresearchValidationContext,
+) -> UniverseVerificationReceipt:
+    return replace(
+        receipt,
+        batches=tuple(
+            replace(
+                batch,
+                dates=tuple(
+                    replace(date_receipt, calendar_digest=context.xnys_evidence_digest)
+                    for date_receipt in batch.dates
+                ),
+            )
+            for batch in receipt.batches
+        ),
     )
 
 
@@ -1551,6 +1639,14 @@ class TestAutoresearchCliCommands:
         readiness = _ready_manifest(tmp_path / "readiness")
         readiness_path = tmp_path / "platform-readiness.json"
         _write_readiness_manifest(readiness_path, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        verification = replace(
+            verification,
+            universe_verification_receipt=_bind_universe_receipt_to_validation_context(
+                _universe_receipt(),
+                validation_context,
+            ),
+        )
         repeat_state = AutoresearchState(
             phase=Phase.REPEAT,
             iteration=3,
@@ -1675,6 +1771,8 @@ class TestAutoresearchCliCommands:
                 str(memory_state_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
                 "--mempalace-kg-path",
                 str(kg_path),
             ],
@@ -1702,6 +1800,563 @@ class TestAutoresearchCliCommands:
         assert next_state["phase"] == "setup_context"
         assert next_state["iteration"] == 4
         assert next_state["setup"]["metric_name"] == "OOS Sharpe net"
+
+    def test_autoresearch_mark_memory_accepts_valid_g0_infra_repaired_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        debate_agent_ids = (
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation",
+        )
+        readiness = _ready_manifest(tmp_path / "g0-readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        requested_sessions = tuple(
+            session
+            for session in validation_context.xnys_sessions
+            if date(2021, 1, 4) <= session <= date(2021, 12, 31)
+        )
+        preflight = PriceHydrationScopePreflight(
+            member_union_count=_MEMBER_UNION_COUNT,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=len(requested_sessions),
+            planned_symbol_sessions=_MEMBER_UNION_COUNT * len(requested_sessions),
+            within_budget=True,
+        )
+        state = AutoresearchState(platform_readiness=readiness.identity())
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        state = advance_state(
+            state,
+            SetupContextArtifact(
+                goal="Repair platform coverage provenance for the next alpha run",
+                metric_name="coverage gate",
+                metric_direction=MetricDirection.MAXIMIZE,
+                target_repo="/home/dev/repos/quantipy",
+                writable_scope="src/quantipy/alpha",
+                baseline_summary="Coverage gate is currently blocked.",
+                hard_constraints=("Do not modify Quantipy",),
+                data_sources=("qp.prices()",),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ContextPacketArtifact(
+                baseline_metric="Coverage gate blocked",
+                current_best_metric="Coverage gate blocked",
+                recent_experiment_outcomes=(),
+                prior_findings=(),
+                open_proposals=(),
+                hard_constraints=("Do not modify Quantipy",),
+                available_data_sources=("qp.prices()",),
+                loaded_quantipy_sources=("AGENTS.md",),
+                research_mode=ResearchMode.DATA_INFRA_G0,
+                mode_rationale="Repair cap and source provenance before an alpha rerun.",
+                burned_theory_families=(),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            DebateResultArtifact(
+                round_number=1,
+                submissions=tuple(
+                    DebateSubmission(
+                        agent_id=agent_id,
+                        theory_id=f"theory-{index}",
+                        theory_family="platform-coverage",
+                        vote_family="platform-coverage",
+                        hypothesis="Repair cap/source provenance before resuming alpha research.",
+                        universe="Declared liquid-common stocks sleeve",
+                        example_tickers=("AMD", "SMCI"),
+                        feature_pipeline="Readiness evidence to platform coverage reconciliation",
+                        model_plan="No model change",
+                        walk_forward_plan="No walk-forward run in G0",
+                        transaction_cost_model="N/A",
+                        data_coverage_plan="Use the pinned XNYS readiness evidence.",
+                        rejection_criteria="Discard if provenance remains incomplete.",
+                        objections=(),
+                        compute_fit=ComputeFitArtifact(
+                            target=ComputeTarget.CPU,
+                            rationale=(
+                                "The repair path is an evidence reconciliation workflow "
+                                "that runs comfortably on CPU."
+                            ),
+                            required_dependencies=(),
+                            benchmark_plan=(
+                                "Record wall time and peak memory for the provenance "
+                                "repair validation."
+                            ),
+                        ),
+                    )
+                    for index, agent_id in enumerate(debate_agent_ids, start=1)
+                ),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ConsensusResultArtifact(
+                round_number=1,
+                status=ConsensusStatus.MAJORITY,
+                winner_theory_id="theory-1",
+                winner_theory_family="platform-coverage",
+                majority_count=5,
+                majority_agent_ids=debate_agent_ids,
+                dissenting_positions=(),
+                novelty_score=0.6,
+                theory_score=0.8,
+                implementation_risk_score=0.2,
+                data_adequacy_score=0.9,
+                overfit_risk_score=0.1,
+                expected_net_sharpe=0.0,
+                rejection_reasons=(),
+                implementation_brief="Audit and restore platform provenance bindings.",
+                dissent_summary="The panel reached consensus.",
+                universe_plan=_universe_plan(),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ImplementationResultArtifact(
+                summary="Validated the platform provenance repair path.",
+                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "g0-iteration-1"),
+                commit_sha="abc1234",
+                module_path="src/quantipy/alpha/vwap_obv/",
+                notebook_path="notebooks/experiments/vwap_obv.ipynb",
+                tests_added_or_updated=("tests/test_platform_coverage.py",),
+                commands_run=("uv run pytest tests/test_platform_coverage.py",),
+                compute_fit=ComputeFitArtifact(
+                    target=ComputeTarget.CPU,
+                    rationale=(
+                        "The provenance reconciliation workload is deterministic and small."
+                    ),
+                    required_dependencies=(),
+                    benchmark_plan="Record wall time and peak memory for the repair run.",
+                ),
+                price_hydration_scope_preflight=preflight,
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            VerificationResultArtifact(
+                status=VerificationStatus.PASS,
+                is_walk_forward_sharpe_net=0.0,
+                oos_sharpe_net=0.0,
+                max_drawdown_pct=0.0,
+                win_rate=0.0,
+                trade_count=0,
+                trades_per_day=0.0,
+                oos_trading_days=0,
+                feature_importances_summary="Not applicable to G0 coverage remediation.",
+                null_test_summary="Not applicable to G0 coverage remediation.",
+                bug_signals=(),
+                tests_passed=True,
+                commands_run=("uv run pytest tests/test_platform_coverage.py",),
+                data_coverage=_dynamic_coverage(),
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+                infra_rationale="Every source and cap record has auditable provenance.",
+                platform_coverage_validation=_platform_coverage_receipt(
+                    context=validation_context,
+                    preflight=preflight,
+                ),
+                universe_verification_receipt=_bind_universe_receipt_to_validation_context(
+                    _universe_receipt(),
+                    validation_context,
+                ),
+                price_hydration_receipt=_hydration_receipt(),
+            ),
+            policy,
+            validation_context=validation_context,
+        )
+        state = advance_state(
+            state,
+            ReviewResultArtifact(
+                reviewer_agent_id="reviewer",
+                verdict=ReviewVerdict.PASS,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=0.0,
+                critical_issues=(),
+                noncritical_issues=(),
+                fix_requests=(),
+                summary="Methodology review passed.",
+            ),
+            policy,
+        )
+        repeat_state = advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="g0-iteration-1",
+                decision=FinalDecision.INFRA_REPAIRED,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+                rationale="Data repair completed.",
+                log_summary="G0 gate passed.",
+                continue_loop=True,
+                memory_write_required=True,
+                infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+            ),
+            policy,
+            validation_context=validation_context,
+        )
+        state_path = tmp_path / "g0-repeat-state.json"
+        output_path = tmp_path / "g0-memory-state.json"
+        kg_path = tmp_path / "knowledge_graph.sqlite3"
+        facts = standardized_mempalace_kg_facts(repeat_state)
+        connection = sqlite3.connect(kg_path)
+        connection.executescript(
+            """
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
+                source_file TEXT, source_drawer_id TEXT
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+            [
+                (str(index), "g0-iteration-1", predicate, object_value, "result.json")
+                for index, (predicate, object_value) in enumerate(facts.items(), start=1)
+            ],
+        )
+        connection.commit()
+        connection.close()
+        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-mark-memory",
+                str(state_path),
+                "--output",
+                str(output_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--mempalace-kg-path",
+                str(kg_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        saved = json.loads(output_path.read_text(encoding="utf-8"))
+        assert saved["memory_written"] is True
+        assert saved["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
+
+    def test_autoresearch_mark_memory_then_start_next_accepts_valid_g0_handoff(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        debate_agent_ids = (
+            "debater-microstructure",
+            "debater-data",
+            "debater-skeptic",
+            "debater-theory",
+            "debater-implementation",
+        )
+        readiness = _ready_manifest(tmp_path / "g0-readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        stale_readiness_path = tmp_path / "stale-platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        requested_sessions = tuple(
+            session
+            for session in validation_context.xnys_sessions
+            if date(2021, 1, 4) <= session <= date(2021, 12, 31)
+        )
+        preflight = PriceHydrationScopePreflight(
+            member_union_count=_MEMBER_UNION_COUNT,
+            experiment_start="2021-01-04",
+            experiment_end="2021-12-31",
+            timeframe="1min",
+            market_hours="regular",
+            session_count=len(requested_sessions),
+            planned_symbol_sessions=_MEMBER_UNION_COUNT * len(requested_sessions),
+            within_budget=True,
+        )
+        state = AutoresearchState(platform_readiness=readiness.identity())
+        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+        state = advance_state(
+            state,
+            SetupContextArtifact(
+                goal="Repair platform coverage provenance for the next alpha run",
+                metric_name="coverage gate",
+                metric_direction=MetricDirection.MAXIMIZE,
+                target_repo="/home/dev/repos/quantipy",
+                writable_scope="src/quantipy/alpha",
+                baseline_summary="Coverage gate is currently blocked.",
+                hard_constraints=("Do not modify Quantipy",),
+                data_sources=("qp.prices()",),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ContextPacketArtifact(
+                baseline_metric="Coverage gate blocked",
+                current_best_metric="Coverage gate blocked",
+                recent_experiment_outcomes=(),
+                prior_findings=(),
+                open_proposals=(),
+                hard_constraints=("Do not modify Quantipy",),
+                available_data_sources=("qp.prices()",),
+                loaded_quantipy_sources=("AGENTS.md",),
+                research_mode=ResearchMode.DATA_INFRA_G0,
+                mode_rationale="Repair cap and source provenance before an alpha rerun.",
+                burned_theory_families=(),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            DebateResultArtifact(
+                round_number=1,
+                submissions=tuple(
+                    DebateSubmission(
+                        agent_id=agent_id,
+                        theory_id=f"theory-{index}",
+                        theory_family="platform-coverage",
+                        vote_family="platform-coverage",
+                        hypothesis="Repair cap/source provenance before resuming alpha research.",
+                        universe="Declared liquid-common stocks sleeve",
+                        example_tickers=("AMD", "SMCI"),
+                        feature_pipeline="Readiness evidence to platform coverage reconciliation",
+                        model_plan="No model change",
+                        walk_forward_plan="No walk-forward run in G0",
+                        transaction_cost_model="N/A",
+                        data_coverage_plan="Use the pinned XNYS readiness evidence.",
+                        rejection_criteria="Discard if provenance remains incomplete.",
+                        objections=(),
+                        compute_fit=ComputeFitArtifact(
+                            target=ComputeTarget.CPU,
+                            rationale=(
+                                "The repair path is an evidence reconciliation workflow "
+                                "that runs comfortably on CPU."
+                            ),
+                            required_dependencies=(),
+                            benchmark_plan=(
+                                "Record wall time and peak memory for the provenance "
+                                "repair validation."
+                            ),
+                        ),
+                    )
+                    for index, agent_id in enumerate(debate_agent_ids, start=1)
+                ),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ConsensusResultArtifact(
+                round_number=1,
+                status=ConsensusStatus.MAJORITY,
+                winner_theory_id="theory-1",
+                winner_theory_family="platform-coverage",
+                majority_count=5,
+                majority_agent_ids=debate_agent_ids,
+                dissenting_positions=(),
+                novelty_score=0.6,
+                theory_score=0.8,
+                implementation_risk_score=0.2,
+                data_adequacy_score=0.9,
+                overfit_risk_score=0.1,
+                expected_net_sharpe=0.0,
+                rejection_reasons=(),
+                implementation_brief="Audit and restore platform provenance bindings.",
+                dissent_summary="The panel reached consensus.",
+                universe_plan=_universe_plan(),
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            ImplementationResultArtifact(
+                summary="Validated the platform provenance repair path.",
+                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "g0-iteration-1"),
+                commit_sha="abc1234",
+                module_path="src/quantipy/alpha/vwap_obv/",
+                notebook_path="notebooks/experiments/vwap_obv.ipynb",
+                tests_added_or_updated=("tests/test_platform_coverage.py",),
+                commands_run=("uv run pytest tests/test_platform_coverage.py",),
+                compute_fit=ComputeFitArtifact(
+                    target=ComputeTarget.CPU,
+                    rationale=(
+                        "The provenance reconciliation workload is deterministic and small."
+                    ),
+                    required_dependencies=(),
+                    benchmark_plan="Record wall time and peak memory for the repair run.",
+                ),
+                price_hydration_scope_preflight=preflight,
+            ),
+            policy,
+        )
+        state = advance_state(
+            state,
+            VerificationResultArtifact(
+                status=VerificationStatus.PASS,
+                is_walk_forward_sharpe_net=0.0,
+                oos_sharpe_net=0.0,
+                max_drawdown_pct=0.0,
+                win_rate=0.0,
+                trade_count=0,
+                trades_per_day=0.0,
+                oos_trading_days=0,
+                feature_importances_summary="Not applicable to G0 coverage remediation.",
+                null_test_summary="Not applicable to G0 coverage remediation.",
+                bug_signals=(),
+                tests_passed=True,
+                commands_run=("uv run pytest tests/test_platform_coverage.py",),
+                data_coverage=_dynamic_coverage(),
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+                infra_rationale="Every source and cap record has auditable provenance.",
+                platform_coverage_validation=_platform_coverage_receipt(
+                    context=validation_context,
+                    preflight=preflight,
+                ),
+                universe_verification_receipt=_bind_universe_receipt_to_validation_context(
+                    _universe_receipt(),
+                    validation_context,
+                ),
+                price_hydration_receipt=_hydration_receipt(),
+            ),
+            policy,
+            validation_context=validation_context,
+        )
+        state = advance_state(
+            state,
+            ReviewResultArtifact(
+                reviewer_agent_id="reviewer",
+                verdict=ReviewVerdict.PASS,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=0.0,
+                critical_issues=(),
+                noncritical_issues=(),
+                fix_requests=(),
+                summary="Methodology review passed.",
+            ),
+            policy,
+        )
+        repeat_state = advance_state(
+            state,
+            FinalDecisionArtifact(
+                experiment_id="g0-iteration-1",
+                decision=FinalDecision.INFRA_REPAIRED,
+                recommended_metric_name="coverage gate",
+                recommended_metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+                rationale="Data repair completed.",
+                log_summary="G0 gate passed.",
+                continue_loop=True,
+                memory_write_required=True,
+                infra_rationale="Cap/source provenance is now present for the declared sleeve.",
+            ),
+            policy,
+            validation_context=validation_context,
+        )
+        state_path = tmp_path / "g0-repeat-state.json"
+        memory_state_path = tmp_path / "g0-memory-state.json"
+        next_state_path = tmp_path / "g0-next-state.json"
+        kg_path = tmp_path / "knowledge_graph.sqlite3"
+        facts = standardized_mempalace_kg_facts(repeat_state)
+        connection = sqlite3.connect(kg_path)
+        connection.executescript(
+            """
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
+                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
+                source_file TEXT, source_drawer_id TEXT
+            );
+            """
+        )
+        connection.executemany(
+            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+            [
+                (str(index), "g0-iteration-1", predicate, object_value, "result.json")
+                for index, (predicate, object_value) in enumerate(facts.items(), start=1)
+            ],
+        )
+        connection.commit()
+        connection.close()
+        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
+
+        mark_result = runner.invoke(
+            app,
+            [
+                "autoresearch-mark-memory",
+                str(state_path),
+                "--output",
+                str(memory_state_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--mempalace-kg-path",
+                str(kg_path),
+            ],
+        )
+
+        assert mark_result.exit_code == 0, mark_result.output
+        marked = json.loads(memory_state_path.read_text(encoding="utf-8"))
+        assert marked["memory_written"] is True
+        assert marked["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
+
+        stale_readiness = replace(
+            readiness,
+            manifest_id="manifest-cli-test-2",
+            snapshot_id="snapshot-cli-test-2",
+        )
+        _write_readiness_manifest(stale_readiness_path, stale_readiness)
+
+        stale_result = runner.invoke(
+            app,
+            [
+                "autoresearch-start-next",
+                str(memory_state_path),
+                "--output",
+                str(next_state_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(stale_readiness_path),
+            ],
+        )
+
+        assert stale_result.exit_code == 1
+        assert "platform readiness receipt is" in stale_result.output
+        assert "stale; run autoresearch-resume explicitly" in stale_result.output
+
+        next_result = runner.invoke(
+            app,
+            [
+                "autoresearch-start-next",
+                str(memory_state_path),
+                "--output",
+                str(next_state_path),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+        assert next_result.exit_code == 0, next_result.output
+        next_state = json.loads(next_state_path.read_text(encoding="utf-8"))
+        assert next_state["phase"] == "setup_context"
+        assert next_state["iteration"] == 2
+        assert next_state["setup"]["metric_name"] == "coverage gate"
 
     def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"

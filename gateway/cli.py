@@ -28,7 +28,11 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from gateway.autoresearch_readiness import DEFAULT_PLATFORM_READINESS_PATH, load_platform_readiness
+from gateway.autoresearch_readiness import (
+    DEFAULT_PLATFORM_READINESS_PATH,
+    load_platform_readiness,
+    validate_state_readiness,
+)
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
 console = Console()
@@ -912,10 +916,12 @@ def autoresearch_mark_memory(
     state_path: Path = _state_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
     mempalace_kg_path: Path | None = _mempalace_kg_path_option,
 ) -> None:
     """Verify MemPalace facts and persist its receipt for a finished iteration."""
     from gateway.autoresearch_runner import (
+        AutoresearchValidationContext,
         load_autoresearch_policy,
         load_state_file,
         mark_memory_written,
@@ -927,9 +933,13 @@ def autoresearch_mark_memory(
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
-        validate_state(state, policy)
+        readiness = load_platform_readiness(readiness_manifest)
+        validate_state_readiness(state.platform_readiness, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        validate_state(state, policy, validation_context)
         receipt = verify_mempalace_final_decision(state, mempalace_kg_path)
         next_state = mark_memory_written(state, receipt)
+        validate_state(next_state, policy, validation_context)
         persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")
@@ -947,6 +957,7 @@ def autoresearch_start_next(
 ) -> None:
     """Start the next persisted autoresearch iteration after memory is written."""
     from gateway.autoresearch_runner import (
+        AutoresearchValidationContext,
         load_autoresearch_policy,
         load_state_file,
         persist_derived_state,
@@ -957,8 +968,10 @@ def autoresearch_start_next(
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
-        validate_state(state, policy)
         readiness = load_platform_readiness(readiness_manifest)
+        validate_state_readiness(state.platform_readiness, readiness)
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        validate_state(state, policy, validation_context)
         next_state = start_next_iteration(state, readiness=readiness)
         persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
