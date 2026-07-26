@@ -1310,6 +1310,7 @@ class AutoresearchSupervisor:
                     unit,
                     "--no-pager",
                     "--property=Result",
+                    "--property=ActiveState",
                     "--property=ExecMainStatus",
                     "--property=MemoryPeak",
                 ],
@@ -1321,14 +1322,26 @@ class AutoresearchSupervisor:
         except (OSError, subprocess.TimeoutExpired):
             return record
         if properties.returncode != 0:
-            return record
+            if self._detached_run_process_alive(record.status.pid):
+                return record
+            return self._terminalize_disappeared_detached_run(record)
         parsed: dict[str, str] = {}
         for line in properties.stdout.splitlines():
             key, separator, value = line.partition("=")
             if separator:
                 parsed[key] = value
         if parsed.get("Result") != "oom-kill":
-            return record
+            active_state = parsed.get("ActiveState")
+            if active_state not in {"inactive", "failed"}:
+                return record
+            if self._detached_run_process_alive(record.status.pid):
+                return record
+            return self._terminalize_disappeared_detached_run(
+                record,
+                peak_rss_bytes=(
+                    int(parsed["MemoryPeak"]) if parsed.get("MemoryPeak", "").isdigit() else None
+                ),
+            )
         peak_rss_bytes = None
         if parsed.get("MemoryPeak", "").isdigit():
             peak_rss_bytes = int(parsed["MemoryPeak"])
@@ -1342,6 +1355,43 @@ class AutoresearchSupervisor:
             signal_number=signal_number,
             peak_rss_bytes=peak_rss_bytes,
             failure_classification=RunFailureClassification.RESOURCE_EXHAUSTED,
+        )
+        return read_run_record(run_dir=record.run_directory, runs_root=self.config.runs_root)
+
+    def _detached_run_process_alive(self, pid: int | None) -> bool:
+        """Return whether the recorded child is still a non-zombie process."""
+        if pid is None or pid < 1:
+            return False
+        try:
+            raw = (self.config.proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise SupervisorError(f"failed to inspect detached run process {pid}: {exc}") from exc
+        closing = raw.rfind(")")
+        fields = raw[closing + 1 :].split() if closing >= 0 else []
+        if not fields:
+            raise SupervisorError(f"malformed process stat for detached run pid {pid}")
+        return fields[0] != "Z"
+
+    def _terminalize_disappeared_detached_run(
+        self, record: RunRecord, *, peak_rss_bytes: int | None = None
+    ) -> RunRecord:
+        """Close a running record after its worker and systemd unit disappeared."""
+        _structured_log(
+            logging.WARNING,
+            "supervisor.terminalized_disappeared_detached_run",
+            pid=record.status.pid,
+            run_directory=str(record.run_directory),
+            systemd_unit=record.status.systemd_unit,
+        )
+        complete_run(
+            run_dir=record.run_directory,
+            runs_root=self.config.runs_root,
+            exit_code=1,
+            signal_number=None,
+            peak_rss_bytes=peak_rss_bytes,
+            failure_classification=RunFailureClassification.PROCESS_ERROR,
         )
         return read_run_record(run_dir=record.run_directory, runs_root=self.config.runs_root)
 

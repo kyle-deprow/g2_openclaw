@@ -850,6 +850,169 @@ def test_running_detached_run_with_systemd_oom_result_terminalizes_as_resource_e
     assert records[0].status.resource_usage.peak_rss_bytes == 2048
 
 
+def test_running_detached_run_with_collected_systemd_unit_terminalizes_as_process_error(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collected transient unit must not leave verification permanently running."""
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest-collected.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verify-collected",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    start_run(
+        run_dir=run_dir,
+        pid=123,
+        systemd_unit="collected-openclaw-long-task.service",
+        runs_root=supervisor_env.runs_root,
+    )
+
+    def fake_systemctl_run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del args, check, capture_output, text, timeout
+        return subprocess.CompletedProcess(
+            args=["systemctl"],
+            returncode=1,
+            stdout="",
+            stderr="Unit collected-openclaw-long-task.service not found.\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_systemctl_run)
+
+    records = supervisor._matching_verification_runs(
+        iteration=state.iteration,
+        state_reference_sha256=state_reference_sha256,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+    )
+
+    assert records[0].status.state is RunState.FAILED
+    assert records[0].status.failure_classification is RunFailureClassification.PROCESS_ERROR
+    assert records[0].status.exit_code == 1
+    assert records[0].status.signal_number is None
+
+
+def test_running_detached_run_with_collected_systemd_unit_preserves_live_process(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing unit must not close a worker whose recorded PID is still live."""
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest-live.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verify-live",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    start_run(
+        run_dir=run_dir,
+        pid=123,
+        systemd_unit="collected-openclaw-long-task.service",
+        runs_root=supervisor_env.runs_root,
+    )
+    process_dir = supervisor_env.proc_root / "123"
+    process_dir.mkdir()
+    (process_dir / "stat").write_text("123 (worker) S 1 2 3\n", encoding="utf-8")
+
+    def fake_systemctl_run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del args, check, capture_output, text, timeout
+        return subprocess.CompletedProcess(
+            args=["systemctl"],
+            returncode=1,
+            stdout="",
+            stderr="Unit collected-openclaw-long-task.service not found.\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_systemctl_run)
+
+    records = supervisor._matching_verification_runs(
+        iteration=state.iteration,
+        state_reference_sha256=state_reference_sha256,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+    )
+
+    assert records[0].status.state is RunState.RUNNING
+    assert records[0].status.failure_classification is None
+
+
 def _implementation_result(workspace_path: Path) -> ImplementationResultArtifact:
     return ImplementationResultArtifact(
         summary="implementation complete",
