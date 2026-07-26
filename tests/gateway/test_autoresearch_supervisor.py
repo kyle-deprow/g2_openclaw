@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -20,6 +21,8 @@ from gateway.autoresearch_readiness import (
     canonical_platform_capabilities,
 )
 from gateway.autoresearch_runner import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    DEFAULT_QUANTIPY_ROOT,
     AutoresearchState,
     ConsensusResultArtifact,
     ConsensusStatus,
@@ -30,6 +33,18 @@ from gateway.autoresearch_runner import (
     Phase,
     PriceHydrationScopePreflight,
     ResearchMode,
+    build_authoritative_state_reference,
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+    load_autoresearch_policy,
+)
+from gateway.autoresearch_runs import (
+    RunFailureClassification,
+    RunState,
+    command_sha256,
+    complete_run,
+    prepare_run,
+    start_run,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -269,6 +284,7 @@ class SupervisorEnv:
     checkpoint_path: Path
     readiness_manifest_path: Path
     readiness_identity: ReadinessIdentity
+    runs_root: Path
 
 
 @pytest.fixture()
@@ -317,6 +333,7 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         checkpoint_path=tmp_path / "autoresearch" / "owner-recovery.json",
         readiness_manifest_path=readiness_manifest_path,
         readiness_identity=readiness.identity(),
+        runs_root=tmp_path / "runs",
     )
 
 
@@ -335,6 +352,7 @@ def _supervisor(
             owner_sessions_path=env.sessions_path,
             target_repo=env.repo_root,
             proc_root=env.proc_root,
+            runs_root=env.runs_root,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
         ),
         now=lambda: env.now,
@@ -482,6 +500,15 @@ def _prepare_stale_state(env: SupervisorEnv, *, phase: Phase = Phase.VERIFICATIO
     _make_stale([env.state_path, *env.marker_paths], now=env.now)
 
 
+def _current_instruction_manifest_sha256(state: AutoresearchState, state_path: Path) -> str:
+    return expected_instruction_manifest_sha256(
+        state,
+        load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH),
+        build_receipt_catalog(DEFAULT_QUANTIPY_ROOT),
+        state_path=state_path,
+    )
+
+
 def test_stale_iteration_context_residue_does_not_defer_recovery(
     supervisor_env: SupervisorEnv,
 ) -> None:
@@ -493,6 +520,334 @@ def test_stale_iteration_context_residue_does_not_defer_recovery(
     result = _supervisor(supervisor_env, FakeOpenClaw()).run_once()
 
     assert result.outcome is SupervisorOutcome.NUDGED
+
+
+def test_future_dated_git_marker_does_not_suppress_stale_recovery(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    future = supervisor_env.now + 86_400.0
+    os.utime(supervisor_env.marker_paths[0], (future, future))
+
+    result = _supervisor(supervisor_env, FakeOpenClaw()).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+
+
+def test_current_git_marker_mtime_does_not_suppress_stale_recovery(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    os.utime(
+        supervisor_env.marker_paths[0],
+        (supervisor_env.now, supervisor_env.now),
+    )
+
+    result = _supervisor(supervisor_env, FakeOpenClaw()).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+
+
+def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake)
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    (run_dir / "status.json").symlink_to(source_manifest)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason.startswith("invalid_detached_run_record:")
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_newer_succeeded_detached_attempt_prevents_an_older_failure_from_advancing_state(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+
+    for attempt, exit_code in ((1, 1), (2, 0)):
+        run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / f"attempt-{attempt}"
+        command = ("verify", f"attempt-{attempt}")
+        source_manifest = supervisor_env.state_path.parent / f"detached-manifest-{attempt}.json"
+        source_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "iteration": 4,
+                    "phase": "verification",
+                    "attempt": attempt,
+                    "task_label": "verification",
+                    "state_reference_sha256": state_reference_sha256,
+                    "instruction_manifest_sha256": instruction_manifest_sha256,
+                    "run_directory": str(run_dir),
+                    "working_directory": str(supervisor_env.repo_root),
+                    "command_sha256": command_sha256(command),
+                    "expected_artifact_path": None,
+                    "timeout_seconds": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        prepare_run(
+            manifest_path=source_manifest,
+            run_dir=run_dir,
+            runs_root=supervisor_env.runs_root,
+            command=command,
+        )
+        start_run(run_dir=run_dir, pid=attempt, runs_root=supervisor_env.runs_root)
+        complete_run(
+            run_dir=run_dir,
+            exit_code=exit_code,
+            signal_number=None,
+            peak_rss_bytes=None,
+            runs_root=supervisor_env.runs_root,
+        )
+
+    result = supervisor._consume_terminal_verification_run(state)
+
+    assert result is None
+
+
+def test_detached_verification_instruction_digest_mismatch_is_ignored_as_stale_history(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake)
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest-mismatch.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": "b" * 64,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    start_run(run_dir=run_dir, pid=123, runs_root=supervisor_env.runs_root)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert result.reason == "recovery_message_sent"
+    assert any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_newest_matching_detached_run_ignores_older_well_formed_stale_retry_history(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+
+    for attempt, instruction_digest in ((1, "b" * 64), (2, instruction_manifest_sha256)):
+        run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / f"attempt-{attempt}"
+        command = ("verify", f"attempt-{attempt}")
+        source_manifest = supervisor_env.state_path.parent / f"detached-stale-{attempt}.json"
+        source_manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "iteration": 4,
+                    "phase": "verification",
+                    "attempt": attempt,
+                    "task_label": "verification",
+                    "state_reference_sha256": state_reference_sha256,
+                    "instruction_manifest_sha256": instruction_digest,
+                    "run_directory": str(run_dir),
+                    "working_directory": str(supervisor_env.repo_root),
+                    "command_sha256": command_sha256(command),
+                    "expected_artifact_path": None,
+                    "timeout_seconds": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        prepare_run(
+            manifest_path=source_manifest,
+            run_dir=run_dir,
+            runs_root=supervisor_env.runs_root,
+            command=command,
+        )
+        start_run(run_dir=run_dir, pid=attempt, runs_root=supervisor_env.runs_root)
+        complete_run(
+            run_dir=run_dir,
+            exit_code=0,
+            signal_number=None,
+            peak_rss_bytes=None,
+            runs_root=supervisor_env.runs_root,
+        )
+
+    records = supervisor._matching_verification_runs(
+        iteration=state.iteration,
+        state_reference_sha256=state_reference_sha256,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+    )
+
+    assert [record.manifest.attempt for record in records] == [2]
+
+
+def test_running_detached_run_with_systemd_oom_result_terminalizes_as_resource_exhausted(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest-oom.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    start_run(
+        run_dir=run_dir,
+        pid=123,
+        systemd_unit="openclaw-long-task-test.service",
+        runs_root=supervisor_env.runs_root,
+    )
+
+    def fake_systemctl_run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        del args, check, capture_output, text, timeout
+        return subprocess.CompletedProcess(
+            args=["systemctl"],
+            returncode=0,
+            stdout=(
+                "Result=oom-kill\nExecMainStatus=9\nMemoryPeak=2048\n"  # pragma: allowlist secret
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_systemctl_run)
+
+    records = supervisor._matching_verification_runs(
+        iteration=state.iteration,
+        state_reference_sha256=state_reference_sha256,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+    )
+
+    assert records[0].status.state is RunState.FAILED
+    assert records[0].status.failure_classification is RunFailureClassification.RESOURCE_EXHAUSTED
+    assert records[0].status.signal_number == 9
+    assert records[0].status.resource_usage.peak_rss_bytes == 2048
 
 
 def _implementation_result(workspace_path: Path) -> ImplementationResultArtifact:
@@ -1094,7 +1449,7 @@ def test_recovery_attempts_remain_bounded_after_repeated_wake_failures(
 
     result = supervisor.run_once()
 
-    assert result.reason == "recovery_attempts_exhausted"
+    assert result.reason.startswith("recovery_attempts_exhausted:")
 
 
 def test_provider_auth_wake_failures_alert_as_control_plane_blockers(
@@ -1117,7 +1472,7 @@ def test_provider_auth_wake_failures_alert_as_control_plane_blockers(
     result = supervisor.run_once()
 
     assert result.outcome is SupervisorOutcome.ALERT
-    assert result.reason == "control_plane_provider_blocked"
+    assert result.reason.startswith("control_plane_provider_blocked:")
 
 
 def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
@@ -1168,7 +1523,7 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
     assert first.outcome is SupervisorOutcome.NUDGED
     assert second.outcome is SupervisorOutcome.NUDGED
     assert third.outcome is SupervisorOutcome.ALERT
-    assert third.reason == "control_plane_provider_blocked"
+    assert third.reason.startswith("control_plane_provider_blocked:")
 
 
 def test_active_target_writer_process_suppresses_owner_wake(

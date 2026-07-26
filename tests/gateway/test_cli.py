@@ -2395,6 +2395,30 @@ class TestAutoresearchCliCommands:
         assert "active experiment/test writer" in result.output
         assert "processes" in result.output
 
+    def test_autoresearch_create_command_file_reads_secure_stdin_protocol(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        command_file = tmp_path / "command.json"
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-create-command-file",
+                "--output",
+                str(command_file),
+            ],
+            input=json.dumps(
+                {"schema_version": 1, "command": ["verify-command", "--opaque-value"]}
+            ),
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(command_file.read_text(encoding="utf-8")) == {
+            "command": ["verify-command", "--opaque-value"]
+        }
+        assert "verify-command" not in result.output
+
     @pytest.mark.parametrize(
         ("cmdline", "touches_root", "expected_count"),
         [

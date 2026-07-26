@@ -7265,6 +7265,62 @@ def save_state_file(path: Path, state: AutoresearchState) -> None:
         _atomic_save_state_file(resolved_path, state)
 
 
+def advance_infrastructure_verification_failure(
+    *,
+    state_path: Path,
+    state_reference_sha256: str,
+    instruction_manifest_sha256: str,
+    artifact: VerificationResultArtifact,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    validation_context: AutoresearchValidationContext | None,
+) -> AutoresearchState:
+    """Atomically advance only a manifest-bound infrastructure verification failure."""
+    _validate_sha256(state_reference_sha256, label="state_reference_sha256")
+    _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
+    resolved_path = state_path.expanduser().resolve(strict=False)
+    with _exclusive_state_locks((resolved_path,)):
+        state = load_state_file(resolved_path)
+        current_reference = build_authoritative_state_reference(
+            state,
+            state_path=resolved_path,
+        ).sha256()
+        if current_reference != state_reference_sha256:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure state reference is stale"
+            )
+        current_instruction_manifest = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            receipts,
+            state_path=resolved_path,
+        )
+        if current_instruction_manifest != instruction_manifest_sha256:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure instruction manifest is stale"
+            )
+        if state.phase is not Phase.VERIFICATION:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure requires verification phase"
+            )
+        if state.mode is not ResearchMode.ALPHA_RESEARCH:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure is valid only for ALPHA_RESEARCH"
+            )
+        if artifact.status is not VerificationStatus.TEST_FAILURE:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure requires TEST_FAILURE status"
+            )
+        advanced = advance_state(
+            state,
+            artifact,
+            policy,
+            validation_context=validation_context,
+        )
+        _atomic_save_state_file(resolved_path, advanced)
+        return advanced
+
+
 def _canonical_state_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
     canonical_paths = {path.expanduser().resolve(strict=False) for path in paths}
     lock_namespace = _prepare_lock_namespace()

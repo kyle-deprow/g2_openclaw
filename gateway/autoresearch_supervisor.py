@@ -12,6 +12,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -29,11 +30,31 @@ from gateway.autoresearch_readiness import (
     validate_state_readiness,
 )
 from gateway.autoresearch_runner import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_ROOT,
     AutoresearchState,
+    AutoresearchValidationContext,
     AutoresearchValidationError,
     Phase,
+    ResearchMode,
+    VerificationResultArtifact,
+    VerificationStatus,
+    advance_infrastructure_verification_failure,
+    build_authoritative_state_reference,
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+    load_autoresearch_policy,
     normalize_autoresearch_state,
+)
+from gateway.autoresearch_runs import (
+    DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    AutoresearchRunRecordError,
+    RunFailureClassification,
+    RunManifest,
+    RunRecord,
+    RunState,
+    complete_run,
+    read_run_record,
 )
 from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
 
@@ -506,6 +527,7 @@ class RecoveryStatus(StrEnum):
     IN_FLIGHT = "in_flight"
     FAILED = "failed"
     SUCCEEDED = "succeeded"
+    EXHAUSTED = "exhausted"
 
 
 class TaskProvenance(StrEnum):
@@ -734,6 +756,7 @@ class SupervisorConfig:
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
     expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
+    runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
 
     def __post_init__(self) -> None:
         _require_finite_positive(self.poll_interval_seconds, field_name="poll_interval_seconds")
@@ -773,6 +796,13 @@ class RecoveryPlan:
 class RecoveryClaim:
     recovery_key: str
     token: str
+
+
+@dataclass(frozen=True, slots=True)
+class MalformedRunRecord:
+    run_directory: Path
+    attempt: int | None
+    error: AutoresearchRunRecordError
 
 
 @dataclass(slots=True)
@@ -931,6 +961,9 @@ class AutoresearchSupervisor:
                 SupervisorOutcome.ALERT,
                 f"platform_readiness_blocked: {exc}",
             )
+        run_record_result = self._consume_terminal_verification_run(state)
+        if run_record_result is not None:
+            return run_record_result
         if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
             lifecycle_result = self._owner_lifecycle_guard(state)
             if lifecycle_result is not None and lifecycle_result.reason == "active_owner_session":
@@ -942,7 +975,10 @@ class AutoresearchSupervisor:
         activity = self._activity_guard(state, reconciled_tasks)
         if activity is not None:
             return activity
-        probe = self._build_state_probe(state)
+        try:
+            probe = self._build_state_probe(state)
+        except SupervisorError as exc:
+            return SupervisorResult(SupervisorOutcome.ALERT, f"invalid_progress_evidence: {exc}")
         if self._now() - probe.latest_update_ts < self.config.grace_period_seconds:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
         try:
@@ -1083,6 +1119,277 @@ class AutoresearchSupervisor:
             validate_state_readiness(state.platform_readiness, readiness)
         except ValueError as exc:
             raise SupervisorError(f"cannot wake autoresearch: {exc}") from exc
+
+    def _consume_terminal_verification_run(
+        self, state: AutoresearchState
+    ) -> SupervisorResult | None:
+        if state.phase is not Phase.VERIFICATION:
+            return None
+        state_reference_sha256 = build_authoritative_state_reference(
+            state,
+            state_path=self.config.state_path,
+        ).sha256()
+        try:
+            policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+            quantipy_root = (
+                Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
+            )
+            receipts = build_receipt_catalog(quantipy_root)
+            instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=self.config.state_path,
+            )
+        except (AutoresearchValidationError, ValueError, OSError) as exc:
+            return self._persistent_control_plane_alert(
+                key=f"run-record-current-instruction:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
+                reason=f"cannot_compute_current_instruction_manifest: {exc}",
+            )
+        try:
+            matching = self._matching_verification_runs(
+                iteration=state.iteration,
+                state_reference_sha256=state_reference_sha256,
+                instruction_manifest_sha256=instruction_manifest_sha256,
+            )
+        except AutoresearchRunRecordError as exc:
+            return self._persistent_control_plane_alert(
+                key=f"run-record:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
+                reason=f"invalid_detached_run_record: {exc}",
+            )
+        if not matching:
+            return None
+        latest = matching[-1]
+        if latest.status.state is RunState.RUNNING:
+            return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_matching_detached_run")
+        if latest.status.state is RunState.SUCCEEDED:
+            return None
+        if state.mode is not ResearchMode.ALPHA_RESEARCH:
+            return self._persistent_control_plane_alert(
+                key=f"run-record-mode:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
+                reason=(
+                    "detached_verification_failure_cannot_form_strict_artifact: "
+                    f"mode={state.mode.value if state.mode is not None else 'null'}"
+                ),
+            )
+        artifact = self._verification_failure_artifact(latest)
+        try:
+            readiness = load_platform_readiness(self.config.readiness_manifest_path)
+            context = AutoresearchValidationContext.from_readiness(readiness)
+            advance_infrastructure_verification_failure(
+                state_path=self.config.state_path,
+                state_reference_sha256=state_reference_sha256,
+                instruction_manifest_sha256=instruction_manifest_sha256,
+                artifact=artifact,
+                policy=policy,
+                receipts=receipts,
+                validation_context=context,
+            )
+        except (AutoresearchValidationError, ValueError, OSError) as exc:
+            return self._persistent_control_plane_alert(
+                key=f"run-record-advance:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
+                reason=f"detached_verification_failure_not_advanced: {exc}",
+            )
+        return SupervisorResult(
+            SupervisorOutcome.NUDGED,
+            "detached_verification_failure_advanced",
+        )
+
+    def _matching_verification_runs(
+        self,
+        *,
+        iteration: int,
+        state_reference_sha256: str,
+        instruction_manifest_sha256: str,
+    ) -> tuple[RunRecord, ...]:
+        root = self.config.runs_root
+        try:
+            root_metadata = root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise AutoresearchRunRecordError(f"cannot inspect runs root: {exc}") from exc
+        if not root_metadata:
+            return ()
+        if root.is_symlink() or not root.is_dir():
+            raise AutoresearchRunRecordError("runs root must be a non-symlink directory")
+        records: list[RunRecord] = []
+        stale_records: list[RunRecord] = []
+        malformed_records: list[MalformedRunRecord] = []
+        attempts: set[int] = set()
+        for directory, child_directories, files in os.walk(root, followlinks=False):
+            child_directories.sort()
+            files.sort()
+            parent = Path(directory)
+            for child_directory in child_directories:
+                if (parent / child_directory).is_symlink():
+                    raise AutoresearchRunRecordError("symlinked detached run directory")
+            if "manifest.json" not in files:
+                continue
+            try:
+                record = read_run_record(run_dir=parent, runs_root=root)
+            except AutoresearchRunRecordError as exc:
+                malformed = self._malformed_relevant_verification_run(
+                    parent,
+                    iteration=iteration,
+                    error=exc,
+                )
+                if malformed is not None:
+                    malformed_records.append(malformed)
+                continue
+            manifest = record.manifest
+            if manifest.phase is not Phase.VERIFICATION or manifest.iteration != iteration:
+                continue
+            if manifest.state_reference_sha256 != state_reference_sha256:
+                stale_records.append(record)
+                continue
+            if manifest.instruction_manifest_sha256 != instruction_manifest_sha256:
+                stale_records.append(record)
+                continue
+            if manifest.attempt in attempts:
+                raise AutoresearchRunRecordError("duplicate detached run attempt")
+            if record.status.state is RunState.RUNNING:
+                record = self._recover_terminal_systemd_run(record)
+            attempts.add(manifest.attempt)
+            records.append(record)
+        latest_matching_attempt = max((record.manifest.attempt for record in records), default=0)
+        latest_stale_attempt = max((record.manifest.attempt for record in stale_records), default=0)
+        latest_malformed = max(
+            malformed_records,
+            key=lambda malformed: malformed.attempt if malformed.attempt is not None else 10**12,
+            default=None,
+        )
+        if latest_malformed is not None:
+            malformed_attempt = latest_malformed.attempt
+            if malformed_attempt is None or malformed_attempt >= max(
+                latest_matching_attempt,
+                latest_stale_attempt,
+            ):
+                raise AutoresearchRunRecordError(
+                    f"malformed latest detached run record: {latest_malformed.error}"
+                )
+        if latest_stale_attempt > latest_matching_attempt:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.ignored_stale_detached_run_history",
+                iteration=iteration,
+                phase=Phase.VERIFICATION.value,
+                latest_stale_attempt=latest_stale_attempt,
+                latest_matching_attempt=latest_matching_attempt,
+            )
+        return tuple(sorted(records, key=lambda record: record.manifest.attempt))
+
+    def _malformed_relevant_verification_run(
+        self,
+        run_dir: Path,
+        *,
+        iteration: int,
+        error: AutoresearchRunRecordError,
+    ) -> MalformedRunRecord | None:
+        try:
+            raw = json.loads(
+                (run_dir / "manifest.json").read_text(encoding="utf-8"),
+                object_pairs_hook=_strict_json_object,
+            )
+            manifest = RunManifest.from_dict(raw)
+        except (OSError, json.JSONDecodeError, AutoresearchRunRecordError):
+            return MalformedRunRecord(run_dir, None, error)
+        if manifest.phase is not Phase.VERIFICATION or manifest.iteration != iteration:
+            return None
+        return MalformedRunRecord(run_dir, manifest.attempt, error)
+
+    def _recover_terminal_systemd_run(self, record: RunRecord) -> RunRecord:
+        unit = record.status.systemd_unit
+        if unit is None:
+            return record
+        try:
+            properties = subprocess.run(
+                [
+                    "systemctl",
+                    "--user",
+                    "show",
+                    unit,
+                    "--no-pager",
+                    "--property=Result",
+                    "--property=ExecMainStatus",
+                    "--property=MemoryPeak",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return record
+        if properties.returncode != 0:
+            return record
+        parsed: dict[str, str] = {}
+        for line in properties.stdout.splitlines():
+            key, separator, value = line.partition("=")
+            if separator:
+                parsed[key] = value
+        if parsed.get("Result") != "oom-kill":
+            return record
+        peak_rss_bytes = None
+        if parsed.get("MemoryPeak", "").isdigit():
+            peak_rss_bytes = int(parsed["MemoryPeak"])
+        status_value = parsed.get("ExecMainStatus", "")
+        signal_number = int(status_value) if status_value.isdigit() and int(status_value) > 0 else 9
+        exit_code = 128 + signal_number
+        complete_run(
+            run_dir=record.run_directory,
+            runs_root=self.config.runs_root,
+            exit_code=exit_code,
+            signal_number=signal_number,
+            peak_rss_bytes=peak_rss_bytes,
+            failure_classification=RunFailureClassification.RESOURCE_EXHAUSTED,
+        )
+        return read_run_record(run_dir=record.run_directory, runs_root=self.config.runs_root)
+
+    def _verification_failure_artifact(self, record: RunRecord) -> VerificationResultArtifact:
+        evidence = json.dumps(
+            {
+                "exit_code": record.status.exit_code,
+                "failure_classification": record.status.failure_classification.value
+                if record.status.failure_classification is not None
+                else None,
+                "finished_at": record.status.finished_at,
+                "peak_rss_bytes": record.status.resource_usage.peak_rss_bytes,
+                "run_directory": str(record.run_directory),
+                "signal_number": record.status.signal_number,
+                "started_at": record.status.started_at,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return VerificationResultArtifact(
+            status=VerificationStatus.TEST_FAILURE,
+            is_walk_forward_sharpe_net=None,
+            oos_sharpe_net=None,
+            max_drawdown_pct=None,
+            win_rate=None,
+            trade_count=None,
+            trades_per_day=None,
+            oos_trading_days=None,
+            feature_importances_summary=evidence,
+            null_test_summary=evidence,
+            bug_signals=(),
+            tests_passed=False,
+            commands_run=(),
+            data_coverage=None,
+        )
+
+    def _persistent_control_plane_alert(self, *, key: str, reason: str) -> SupervisorResult:
+        with self._checkpoint_lock():
+            checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+            record = checkpoint.recovery_records.setdefault(key, RecoveryRecord())
+            if record.alerted:
+                return SupervisorResult(SupervisorOutcome.NO_ACTION, "alert_already_emitted", key)
+            record.status = RecoveryStatus.EXHAUSTED
+            record.last_error = reason[:1000]
+            record.alerted = True
+            checkpoint.save(self.config.checkpoint_path)
+        return SupervisorResult(SupervisorOutcome.ALERT, reason, key)
 
     def _is_terminal_state(self, state: AutoresearchState) -> bool:
         decision = state.final_decision
@@ -1226,11 +1533,17 @@ class AutoresearchSupervisor:
                         checkpoint, record, recovery_key, "stale_recovery_claim_owner_alive"
                     )
             if record.attempt_count >= self.config.max_recovery_attempts:
+                record.status = RecoveryStatus.EXHAUSTED
                 return self._alert(
                     checkpoint,
                     record,
                     recovery_key,
-                    self._exhausted_recovery_reason(record, detected_error),
+                    (
+                        f"{self._exhausted_recovery_reason(record, detected_error)}: "
+                        f"iteration={state.iteration}; phase={state.phase.value}; "
+                        f"recovery_key={recovery_key}; "
+                        f"last_failure_reason={record.last_error or 'none'}"
+                    ),
                 )
             pid = os.getpid()
             identity = self._process_identity(pid)
@@ -1447,19 +1760,14 @@ class AutoresearchSupervisor:
         return (repo_root,) if workspace_root == repo_root else (repo_root, workspace_root)
 
     def _build_state_probe(self, state: AutoresearchState) -> StateProbe:
-        paths = [self.config.state_path, *self._git_marker_paths(self._target_repo_root(state))]
-        if self.config.autoresearch_dir.exists():
-            prefix = f"iteration-{state.iteration}-"
-            paths.extend(
-                path
-                for path in self.config.autoresearch_dir.iterdir()
-                if path.is_file()
-                and (path.name.startswith(prefix) or path.name == "current-next.json")
-                and path.name != f"iteration-{state.iteration}-context.json"
-            )
+        # The authoritative state was parsed and normalized by _load_state. Repository
+        # mtimes are neither signed nor bound to this iteration, so a stray touch must
+        # not postpone recovery.
+        paths = [self.config.state_path]
         latest = 0.0
         latest_path = self.config.state_path
         parts: list[str] = []
+        now = self._now()
         for path in paths:
             try:
                 metadata = path.stat()
@@ -1467,6 +1775,10 @@ class AutoresearchSupervisor:
                 continue
             except OSError as exc:
                 raise SupervisorError(f"failed to stat supervision path {path}: {exc}") from exc
+            if metadata.st_mtime > now:
+                if path == self.config.state_path:
+                    raise SupervisorError("state progress evidence is future-dated")
+                continue
             parts.append(f"{path}:{metadata.st_mtime_ns}:{metadata.st_size}")
             if metadata.st_mtime > latest:
                 latest, latest_path = metadata.st_mtime, path

@@ -4,15 +4,15 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/run-long-task.sh --run-dir ABSOLUTE_DIR -- COMMAND [ARGS...]
+Usage: scripts/run-long-task.sh --run-dir ABSOLUTE_DIR --manifest MANIFEST.json [--runs-root ROOT] --command-file COMMAND.json
 
-Starts COMMAND detached and records run metadata in ABSOLUTE_DIR:
-  stdout.log
-  stderr.log
-  pid
-  started_at
-  exit_code
-  status.json
+The manifest is copied verbatim in canonical JSON form and contains only the
+command digest, never command arguments. Production ROOT is fixed at
+/home/dev/.openclaw/autoresearch/runs; tests may inject a root explicitly.
+The command input must be an already-created one-time 0600 JSON file:
+{"command":["program","arg"]}. Create it with gateway-cli
+autoresearch-create-command-file. Do not pass secrets in command arguments; use
+credential files, env references, or inherited authentication.
 EOF
 }
 
@@ -21,147 +21,82 @@ die() {
   exit 1
 }
 
-RUN_DIR=""
+run_dir=""
+manifest=""
+command_file=""
+runs_root="${AUTORESEARCH_RUNS_ROOT:-/home/dev/.openclaw/autoresearch/runs}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --run-dir)
       [[ $# -ge 2 ]] || die "--run-dir requires a value"
-      RUN_DIR="$2"
+      run_dir="$2"
       shift 2
       ;;
-    --)
-      shift
-      break
+    --manifest)
+      [[ $# -ge 2 ]] || die "--manifest requires a value"
+      manifest="$2"
+      shift 2
       ;;
-    -*)
-      die "unknown option: $1"
+    --command-file)
+      [[ $# -ge 2 ]] || die "--command-file requires a value"
+      command_file="$2"
+      shift 2
       ;;
-    *)
-      die "unexpected positional argument before --: $1"
+    --runs-root)
+      [[ $# -ge 2 ]] || die "--runs-root requires a value"
+      runs_root="$2"
+      shift 2
       ;;
+    --) die "positional command payloads are not supported; use --command-file" ;;
+    *) die "unknown option: $1" ;;
   esac
 done
 
-[[ -n "$RUN_DIR" ]] || {
-  usage
-  die "--run-dir is required"
-}
-[[ "$RUN_DIR" = /* ]] || die "--run-dir must be an absolute path"
-[[ $# -gt 0 ]] || {
-  usage
-  die "command is required after --"
-}
+[[ "$run_dir" = /* ]] || die "--run-dir must be absolute"
+[[ "$runs_root" = /* ]] || die "--runs-root must be absolute"
+[[ -n "$manifest" ]] || die "--manifest is required"
+[[ -n "$command_file" ]] || { usage; die "--command-file is required"; }
+[[ "$command_file" = /* ]] || die "--command-file must be absolute"
+[[ $# -eq 0 ]] || die "unexpected positional arguments; use --command-file"
 command -v setsid >/dev/null 2>&1 || die "setsid is required for detached launch"
-command -v python3 >/dev/null 2>&1 || die "python3 is required for detached status validation"
 command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for isolated detached launch"
 command -v systemctl >/dev/null 2>&1 || die "systemctl is required for detached launch validation"
 uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launch"
 uv_bin_dir="$(dirname -- "$uv_path")"
 transient_path="${PATH}:${uv_bin_dir}"
+timeout_term_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
 
-if [[ -L "$RUN_DIR" ]]; then
-  die "--run-dir must not be a symlink"
+if [[ -L "$run_dir" || -L "$manifest" || ( -n "$command_file" && -L "$command_file" ) ]]; then
+  die "run directory, manifest, and command input must not be symlinks"
 fi
 
 umask 077
-mkdir -p -- "$RUN_DIR"
-[[ -d "$RUN_DIR" ]] || die "--run-dir is not a directory: $RUN_DIR"
+uv run python -m gateway.autoresearch_runs prepare-with-command-file \
+  --manifest "$manifest" \
+  --run-dir "$run_dir" \
+  --runs-root "$runs_root" \
+  --command-file "$command_file" || die "immutable manifest and protected command handoff preparation failed"
 
-readonly PID_FILE="${RUN_DIR}/pid"
-readonly STARTED_AT_FILE="${RUN_DIR}/started_at"
-readonly EXIT_CODE_FILE="${RUN_DIR}/exit_code"
-readonly STATUS_FILE="${RUN_DIR}/status.json"
-readonly STDOUT_FILE="${RUN_DIR}/stdout.log"
-readonly STDERR_FILE="${RUN_DIR}/stderr.log"
-readonly STARTUP_MARKER_FILE="${RUN_DIR}/.startup-published.json"
+working_directory="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["working_directory"])' "${run_dir}/manifest.json")"
 
-for required_path in \
-  "$PID_FILE" \
-  "$STARTED_AT_FILE" \
-  "$EXIT_CODE_FILE" \
-  "$STATUS_FILE" \
-  "$STDOUT_FILE" \
-  "$STDERR_FILE" \
-  "$STARTUP_MARKER_FILE"; do
-  [[ ! -e "$required_path" ]] || die "run directory already contains $(basename "$required_path")"
-done
-
-: >"$STDOUT_FILE"
-: >"$STDERR_FILE"
-
-startup_metadata_is_coherent() {
-  python3 - "$STARTUP_MARKER_FILE" "$STATUS_FILE" "$PID_FILE" "$STARTED_AT_FILE" <<'PY'
-from __future__ import annotations
-
-import json
-import re
-import sys
-from pathlib import Path
-
-startup_path = Path(sys.argv[1])
-status_path = Path(sys.argv[2])
-pid_path = Path(sys.argv[3])
-started_at_path = Path(sys.argv[4])
-
-
-def load_json(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-startup = load_json(startup_path)
-status = load_json(status_path)
-pid_text = pid_path.read_text(encoding="utf-8").strip()
-started_at_text = started_at_path.read_text(encoding="utf-8").strip()
-
-pid = startup.get("pid")
-started_at = startup.get("started_at")
-
-if startup.get("status") != "running":
-    raise SystemExit(1)
-if not isinstance(pid, int) or pid <= 0:
-    raise SystemExit(1)
-if not isinstance(started_at, str):
-    raise SystemExit(1)
-if re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", started_at) is None:
-    raise SystemExit(1)
-if pid_text != str(pid):
-    raise SystemExit(1)
-if started_at_text != started_at:
-    raise SystemExit(1)
-if status.get("pid") != pid:
-    raise SystemExit(1)
-if status.get("started_at") != started_at:
-    raise SystemExit(1)
-if status.get("status") == "running":
-    if status.get("exit_code") is not None:
-        raise SystemExit(1)
-elif status.get("status") in {"succeeded", "failed"}:
-    if not isinstance(status.get("exit_code"), int):
-        raise SystemExit(1)
-else:
-    raise SystemExit(1)
-PY
-}
+readonly startup_marker_file="${run_dir}/.startup-published.json"
+readonly command_handoff_file="${run_dir}/.command-handoff.json"
+unit_name="openclaw-long-task-$(date +%s%N)-$$.service"
+worker_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run-long-task-worker.sh"
+[[ -x "$worker_script" ]] || die "long-task worker is missing or not executable: $worker_script"
 
 cleanup_startup_marker() {
-  rm -f -- "$STARTUP_MARKER_FILE"
+  rm -f -- "$startup_marker_file"
+  rm -f -- "$command_handoff_file"
 }
 
 trap cleanup_startup_marker EXIT
 
 unit_start_failed() {
-  local properties
-  local property
-  local value
-  local load_state=""
-  local active_state=""
-  local result=""
-
+  local properties load_state="" active_state="" result="" property value
   properties="$(systemctl --user show "$unit_name" --no-pager \
-    --property=LoadState --property=ActiveState --property=SubState --property=Result \
-    2>/dev/null)" || return 1
-
+    --property=LoadState --property=ActiveState --property=Result 2>/dev/null)" || return 1
   while IFS='=' read -r property value; do
     case "$property" in
       LoadState) load_state="$value" ;;
@@ -169,7 +104,6 @@ unit_start_failed() {
       Result) result="$value" ;;
     esac
   done <<<"$properties"
-
   [[ "$load_state" == "not-found" || "$active_state" == "failed" || "$result" == "failed" ]]
 }
 
@@ -177,30 +111,25 @@ stop_transient_unit() {
   systemctl --user stop "$unit_name" >/dev/null 2>&1 || true
 }
 
-working_directory="$PWD"
-unit_name="openclaw-long-task-$(date +%s%N)-$$.service"
-worker_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run-long-task-worker.sh"
-[[ -x "$worker_script" ]] || die "long-task worker is missing or not executable: $worker_script"
-
 if ! setsid systemd-run \
-  --user \
-  --no-block \
-  --collect \
-  --unit="$unit_name" \
-  --service-type=exec \
-  --setenv=PATH="$transient_path" \
-  --working-directory="$working_directory" \
-  --property=MemoryHigh=16G \
-  --property=MemoryMax=24G \
-  --property=KillMode=control-group \
-  -- "$worker_script" "$RUN_DIR" "$STARTUP_MARKER_FILE" "$@" \
+  --user --no-block --collect --unit="$unit_name" --service-type=exec \
+  --setenv=PATH="$transient_path" --working-directory="$working_directory" \
+  --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
+  --property=MemoryHigh=16G --property=MemoryMax=24G --property=KillMode=control-group \
+  -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
   </dev/null >/dev/null 2>&1; then
   die "detached systemd unit could not be enqueued: $unit_name"
 fi
 
 for _ in $(seq 1 40); do
-  if [[ -s "$STARTUP_MARKER_FILE" ]] && startup_metadata_is_coherent; then
-    exit 0
+  if [[ -s "$startup_marker_file" ]]; then
+    if uv run python -m gateway.autoresearch_runs validate-startup \
+      --run-dir "$run_dir" --runs-root "$runs_root" --marker "$startup_marker_file" \
+      >/dev/null 2>&1; then
+      exit 0
+    fi
+    stop_transient_unit
+    die "detached launch published incoherent startup metadata: $unit_name"
   fi
   if unit_start_failed; then
     stop_transient_unit
@@ -210,4 +139,4 @@ for _ in $(seq 1 40); do
 done
 
 stop_transient_unit
-die "detached launch did not publish coherent startup metadata in time"
+die "detached launch did not publish startup metadata in time"

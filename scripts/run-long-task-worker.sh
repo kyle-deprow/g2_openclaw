@@ -7,100 +7,148 @@ die() {
   exit 1
 }
 
-[[ $# -ge 3 ]] || die "worker requires run directory, startup marker, and command"
-
+[[ $# -eq 4 ]] || die "worker requires run directory, runs root, startup marker, and unit name"
 run_dir="$1"
-startup_marker_file="$2"
-shift 2
+runs_root="$2"
+startup_marker_file="$3"
+unit_name="$4"
+[[ "$run_dir" = /* && "$runs_root" = /* ]] || die "worker paths must be absolute"
 
-[[ "$run_dir" = /* ]] || die "worker run directory must be absolute"
-[[ -n "$startup_marker_file" ]] || die "worker startup marker is required"
-[[ $# -gt 0 ]] || die "worker command is required"
-
-pid_file="${run_dir}/pid"
-started_at_file="${run_dir}/started_at"
-exit_code_file="${run_dir}/exit_code"
-status_file="${run_dir}/status.json"
-stdout_file="${run_dir}/stdout.log"
-stderr_file="${run_dir}/stderr.log"
-
-atomic_write() {
-  local target_file="$1"
-  local tmp_file
-  tmp_file="$(mktemp "${run_dir}/.$(basename "$target_file").tmp.XXXXXX")"
-  cat >"$tmp_file"
-  mv -f -- "$tmp_file" "$target_file"
-}
-
-write_status() {
-  local state="$1"
-  local pid="$2"
-  local started_at="$3"
-  local exit_code_json="$4"
-  atomic_write "$status_file" <<JSON
-{"status":"${state}","pid":${pid},"started_at":"${started_at}","exit_code":${exit_code_json}}
-JSON
-}
-
-publish_startup() {
-  local pid="$1"
-  local started_at="$2"
-  atomic_write "$startup_marker_file" <<JSON
-{"status":"running","pid":${pid},"started_at":"${started_at}"}
-JSON
-}
-
+runtime_python=(uv run python -m gateway.autoresearch_runs)
 child_pid=""
+monitor_pid=""
+timeout_pid=""
 termination_requested=0
+timeout_marker_file="${run_dir}/.timeout-fired"
+operator_stop_marker_file="${run_dir}/.operator-stop-fired"
+timeout_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
+
+mapfile -d '' -t command < <(
+  "${runtime_python[@]}" consume-command-handoff --run-dir "$run_dir" --runs-root "$runs_root"
+)
+[[ ${#command[@]} -gt 0 ]] || die "protected command handoff was empty"
+
+peak_rss_bytes() {
+  local peak
+  peak="$(systemctl --user show "$unit_name" --no-pager --property=MemoryPeak --value 2>/dev/null || true)"
+  if [[ "$peak" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$peak"
+  fi
+}
+
+publish_heartbeat() {
+  local peak
+  peak="$(peak_rss_bytes)"
+  local heartbeat_args=(heartbeat --run-dir "$run_dir" --runs-root "$runs_root")
+  if [[ -n "$peak" ]]; then
+    heartbeat_args+=(--peak-rss-bytes "$peak")
+  fi
+  "${runtime_python[@]}" "${heartbeat_args[@]}" >/dev/null 2>&1 || true
+}
+
+terminate_child_bounded() {
+  [[ -n "$child_pid" ]] || return 0
+  kill -TERM "$child_pid" 2>/dev/null || true
+  deadline="$(python3 -c 'import sys, time; print(time.monotonic() + float(sys.argv[1]))' "$timeout_grace_seconds")"
+  while kill -0 "$child_pid" 2>/dev/null; do
+    if python3 -c 'import sys, time; raise SystemExit(0 if time.monotonic() >= float(sys.argv[1]) else 1)' "$deadline"; then
+      kill -KILL "$child_pid" 2>/dev/null || true
+      break
+    fi
+    sleep 0.05
+  done
+}
 
 handle_termination() {
   termination_requested=1
+  umask 077
+  : > "$operator_stop_marker_file"
   if [[ -n "$child_pid" ]]; then
-    kill -TERM "$child_pid" 2>/dev/null || true
+    terminate_child_bounded
   fi
 }
 
 trap handle_termination TERM INT HUP
 
-wait_for_child() {
-  local wait_status
+timeout_seconds="$(python3 -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8"))["timeout_seconds"]; print("" if value is None else value)' "${run_dir}/manifest.json")"
 
-  # A trapped signal interrupts Bash's wait before the child has terminated.
-  # Re-wait while the child is still live so that terminal metadata reflects
-  # the child's actual exit status rather than the interrupted wait status.
-  while true; do
-    wait "$child_pid"
-    wait_status=$?
-    if ! kill -0 "$child_pid" 2>/dev/null; then
-      return "$wait_status"
-    fi
-  done
-}
-
-started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-"$@" >"$stdout_file" 2>"$stderr_file" &
+"${command[@]}" </dev/null >/dev/null 2>&1 &
 child_pid=$!
+"${runtime_python[@]}" start \
+  --run-dir "$run_dir" \
+  --runs-root "$runs_root" \
+  --pid "$child_pid" \
+  --systemd-unit "$unit_name" >/dev/null
+cp -- "${run_dir}/status.json" "$startup_marker_file"
 
-if (( termination_requested )); then
-  kill -TERM "$child_pid" 2>/dev/null || true
+if [[ -n "$timeout_seconds" ]]; then
+  (
+    sleep "$timeout_seconds"
+    if kill -0 "$child_pid" 2>/dev/null; then
+      umask 077
+      : > "$timeout_marker_file"
+      terminate_child_bounded
+    fi
+  ) &
+  timeout_pid=$!
 fi
 
-printf '%s\n' "$child_pid" | atomic_write "$pid_file"
-printf '%s\n' "$started_at" | atomic_write "$started_at_file"
-write_status "running" "$child_pid" "$started_at" "null"
-publish_startup "$child_pid" "$started_at"
+while kill -0 "$child_pid" 2>/dev/null; do
+  publish_heartbeat
+  sleep 1
+done &
+monitor_pid=$!
 
-set +e
-wait_for_child
-child_exit_code=$?
-set -e
+# A trapped signal interrupts bash's wait before the child necessarily exits.
+# Keep waiting until the child has been reaped, then stop the heartbeat writer
+# before publishing the one terminal record.
+while :; do
+  set +e
+  wait "$child_pid"
+  child_exit_code=$?
+  set -e
+  if kill -0 "$child_pid" 2>/dev/null; then
+    continue
+  fi
+  break
+done
 
-printf '%s\n' "$child_exit_code" | atomic_write "$exit_code_file"
-
-if [[ "$child_exit_code" -eq 0 ]]; then
-  terminal_state="succeeded"
-else
-  terminal_state="failed"
+if [[ -n "$timeout_pid" ]]; then
+  kill "$timeout_pid" 2>/dev/null || true
+  wait "$timeout_pid" 2>/dev/null || true
 fi
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+trap '' TERM INT HUP
 
-write_status "$terminal_state" "$child_pid" "$started_at" "$child_exit_code"
+signal_number=""
+if (( child_exit_code >= 128 )); then
+  signal_number=$((child_exit_code - 128))
+fi
+artifact_missing=0
+expected_artifact_path="$(python3 -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8"))["expected_artifact_path"]; print("" if value is None else value)' "${run_dir}/manifest.json")"
+if [[ "$child_exit_code" -eq 0 && -n "$expected_artifact_path" && ! -f "$expected_artifact_path" ]]; then
+  artifact_missing=1
+fi
+complete_args=(complete --run-dir "$run_dir" --runs-root "$runs_root" --exit-code "$child_exit_code")
+peak="$(peak_rss_bytes)"
+if [[ -n "$peak" ]]; then
+  complete_args+=(--peak-rss-bytes "$peak")
+fi
+if [[ -n "$signal_number" ]]; then
+  complete_args+=(--signal-number "$signal_number")
+fi
+if [[ -f "$timeout_marker_file" ]]; then
+  complete_args+=(--timed-out)
+elif (( termination_requested )) || [[ -f "$operator_stop_marker_file" ]]; then
+  complete_args+=(--operator-stopped)
+elif [[ "$(systemctl --user show "$unit_name" --no-pager --property=Result --value 2>/dev/null || true)" == "oom-kill" ]]; then
+  complete_args+=(--resource-exhausted)
+fi
+if (( artifact_missing )); then
+  complete_args+=(--artifact-missing)
+fi
+rm -f -- "$timeout_marker_file"
+rm -f -- "$operator_stop_marker_file"
+"${runtime_python[@]}" "${complete_args[@]}" >/dev/null
+exit 0

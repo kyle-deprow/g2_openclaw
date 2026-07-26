@@ -271,9 +271,10 @@ def test_long_task_docs_require_detached_launch_and_cleanup() -> None:
     for path in (AUTORESEARCH, CODEX_SUBAGENTS):
         text = " ".join(path.read_text(encoding="utf-8").split())
         lowered = text.lower()
-        assert (
-            "/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir <absolute-run-dir> --"
-        ) in text
+        assert ("/home/dev/repos/g2_openclaw/scripts/run-long-task.sh") in text
+        assert "--command-file" in text
+        assert "autoresearch-create-command-file" in text
+        assert "positional command payloads" in lowered
         assert "bounded polling" in lowered
         assert "foreground tool call" in lowered
         assert "unsafe" in lowered

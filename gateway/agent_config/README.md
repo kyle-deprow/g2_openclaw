@@ -172,5 +172,33 @@ unwrapped files before state advance. The complete envelope file must be at most
 has a hard 32 KiB prompt budget and fails closed with an actionable error if
 accepted state artifacts would exceed it.
 
+Long verification, notebook, hydrate, and backtest commands must use
+`scripts/run-long-task.sh` with an immutable run manifest and a one-time private
+command input file. Create the command file through the repo-owned helper, which
+reads the schema-v1 stdin protocol and atomically creates a non-symlink 0600
+JSON file with `O_EXCL`/`O_NOFOLLOW`:
+
+```json
+{"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
+```
+
+Invoke the launcher from this repo with:
+
+```bash
+command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
+uv run gateway-cli autoresearch-create-command-file --output "$command_file"
+/home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
+  --run-dir <absolute-run-dir> \
+  --manifest <absolute-manifest.json> \
+  --command-file "$command_file"
+```
+
+The manifest stores `command_sha256`, `instruction_manifest_sha256`, and
+`state_reference_sha256`; it never stores command arguments. The command input
+is consumed exactly once, is not passed to `systemd-run`, and cannot be supplied
+positionally. Do not pass API keys, tokens, passwords, client secrets, or
+private keys as command arguments; use credential files, environment
+references, or inherited authentication.
+
 Never run both preparation procedures for the same campaign. Archive
 incompatible state before initialization.

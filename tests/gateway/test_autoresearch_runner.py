@@ -99,6 +99,7 @@ from gateway.autoresearch_runner import (
     UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
+    advance_infrastructure_verification_failure,
     build_instruction_source_manifest,
     build_receipt_catalog,
     can_write_memory,
@@ -164,6 +165,142 @@ def advance_state(
             (date(2021, 1, 5),),
         )
     return _runner_advance_state(state, artifact, policy, validation_context=context)
+
+
+def test_infrastructure_verification_failure_rejects_a_stale_state_reference_before_write(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    state = AutoresearchState(phase=Phase.VERIFICATION, iteration=11)
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    original = state_path.read_bytes()
+    artifact = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="detached run failed",
+        null_test_summary="detached run failed",
+        bug_signals=(),
+        tests_passed=False,
+        commands_run=(),
+        data_coverage=None,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="state reference"):
+        advance_infrastructure_verification_failure(
+            state_path=state_path,
+            state_reference_sha256="0" * 64,
+            instruction_manifest_sha256="1" * 64,
+            artifact=artifact,
+            policy=policy,
+            receipts=receipts,
+            validation_context=None,
+        )
+
+    assert state_path.read_bytes() == original
+
+
+def test_infrastructure_verification_failure_advances_to_fix_test_atomically(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state_path = tmp_path / "quantipy-state.json"
+    save_state_file(state_path, state)
+    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
+    instruction_manifest_sha256 = autoresearch_runner.expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    artifact = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="detached run failed",
+        null_test_summary="detached run failed",
+        bug_signals=(),
+        tests_passed=False,
+        commands_run=(),
+        data_coverage=None,
+    )
+
+    advanced = advance_infrastructure_verification_failure(
+        state_path=state_path,
+        state_reference_sha256=state_reference_sha256,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+        artifact=artifact,
+        policy=policy,
+        receipts=receipts,
+        validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
+    )
+
+    assert advanced.phase is Phase.FIX_TEST
+    assert advanced.latest_verification == artifact
+
+
+def test_infrastructure_verification_failure_rejects_instruction_digest_mismatch(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state_path = tmp_path / "quantipy-state.json"
+    save_state_file(state_path, state)
+    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
+    artifact = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="detached run failed",
+        null_test_summary="detached run failed",
+        bug_signals=(),
+        tests_passed=False,
+        commands_run=(),
+        data_coverage=None,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="instruction manifest"):
+        advance_infrastructure_verification_failure(
+            state_path=state_path,
+            state_reference_sha256=state_reference_sha256,
+            instruction_manifest_sha256="1" * 64,
+            artifact=artifact,
+            policy=policy,
+            receipts=receipts,
+            validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
+        )
 
 
 @pytest.fixture()

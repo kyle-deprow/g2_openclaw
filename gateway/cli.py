@@ -567,6 +567,11 @@ _readiness_evidence_output_option = typer.Option(
     "--quantipy-evidence",
     help="Quantipy data-contract evidence output; defaults beside the manifest.",
 )
+_command_output_path_option = typer.Option(
+    ...,
+    "--output",
+    help="Absolute output path for the one-time private command file.",
+)
 
 
 @app.command("autoresearch-migrate-state")
@@ -604,6 +609,27 @@ def autoresearch_init_state(
         console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
     console.print(f"[green]wrote pristine autoresearch state v2:[/green] {output_path}")
+
+
+@app.command("autoresearch-create-command-file")
+def autoresearch_create_command_file(
+    output_path: Path = _command_output_path_option,
+) -> None:
+    """Create a private detached-command file from the schema-v1 stdin protocol."""
+    from gateway.autoresearch_runs import (
+        AutoresearchRunRecordError,
+        create_command_input_file_from_stdin,
+    )
+
+    try:
+        create_command_input_file_from_stdin(
+            output_path=output_path,
+            payload=sys.stdin.buffer.read(),
+        )
+    except AutoresearchRunRecordError as exc:
+        console.print(f"[red]autoresearch-create-command-file failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(str(output_path))
 
 
 @app.command()

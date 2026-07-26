@@ -29,10 +29,29 @@ commands; do not interact with G2 or kill a live stage merely because it is
 quiet for a few minutes.
 
 Long hydrate-capable, backtest, notebook, and similar commands must not sit in
-an unbounded foreground tool call. Use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
-<absolute-run-dir> -- ...` with bounded polling so stdout/stderr, PID, start
-time, terminal exit code, and terminal status remain recoverable under the
-watchdog. The launcher runs the worker in a dedicated transient user-systemd
+an unbounded foreground tool call. Use the detached launcher with an immutable
+run manifest and a one-time private command input file:
+
+```bash
+cd /home/dev/repos/g2_openclaw
+command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
+uv run gateway-cli autoresearch-create-command-file --output "$command_file"
+# stdin protocol for the helper:
+# {"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
+/home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
+  --run-dir <absolute-run-dir> \
+  --manifest <absolute-manifest.json> \
+  --command-file "$command_file"
+```
+
+The helper reads only the schema-v1 stdin protocol and creates the command
+input file atomically with `O_EXCL`, `O_NOFOLLOW`, and mode 0600 under an
+operator-owned private directory. The manifest must already exist and its
+`command_sha256` must match the command file. The launcher consumes the command
+file exactly once and never accepts positional command payloads. Never pass API
+keys, tokens, passwords, client secrets, or private keys as command arguments.
+Use credential files, environment references, or inherited authentication
+instead. The launcher runs the worker in a dedicated transient user-systemd
 service with explicit memory bounds, outside the OpenClaw gateway cgroup.
 It submits that unit with `systemd-run --no-block`, validates the unit start,
 and waits only for coherent startup metadata; it does not retain a
@@ -638,11 +657,12 @@ Implementation requirements:
 - Commit only after tests and notebook execution pass.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
-  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with bounded polling.
-  Direct foreground execution is invalid. If the launcher cannot be used, fail
-  closed and report the infrastructure blocker without emitting a fix artifact.
-  Record the run directory in stage notes and use its status files for progress
-  and recovery.
+  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--manifest` and
+  `--command-file`, then bounded polling. Direct foreground execution is
+  invalid. Secret-bearing command arguments are invalid; use credential files
+  or inherited auth. If the launcher cannot be used, fail closed and report the
+  infrastructure blocker without emitting a fix artifact. Record the run
+  directory in stage notes and use its status files for progress and recovery.
 
 ## 5. Verify
 
@@ -819,8 +839,8 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 - Critical reviewer issue: send a narrow fix to `fixer`, rerun tests/notebook,
   then rerun the single reviewer.
 - Any long fix/test notebook, hydrate, or backtest rerun must use the detached
-  launcher at `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` and
-  preserve run-directory status until the rerun is
+  launcher at `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with
+  `--manifest` and a one-time `--command-file`, and preserve run-directory status until the rerun is
   accepted or explicitly cleaned up.
 - Test failure: fix up to two times, then classify and log CRASH. The disposable
   experiment worktree is not promoted.
