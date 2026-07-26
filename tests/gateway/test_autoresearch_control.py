@@ -736,7 +736,7 @@ def test_status_tolerates_statusless_stale_owner_session(
     assert status.tasks == ()
 
 
-def test_status_normalizes_operator_precondition_implementation_state(
+def test_status_preserves_operator_precondition_implementation_state(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -748,7 +748,7 @@ def test_status_normalizes_operator_precondition_implementation_state(
         service_controller=FakeSupervisorService([], active=False),
     ).status()
 
-    assert status.phase == "decision_log"
+    assert status.phase == "implementation"
 
 
 def test_status_retries_a_transient_empty_task_list_failure(

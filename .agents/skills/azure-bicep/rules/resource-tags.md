@@ -68,7 +68,7 @@ param tags = {
   environment: 'prod'
   owner: 'platform-team'
   costCenter: 'CC-4200'
-  project: 'SpineSense'
+  project: 'G2OpenClaw'
 }
 ```
 

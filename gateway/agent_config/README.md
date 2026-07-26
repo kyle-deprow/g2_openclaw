@@ -37,27 +37,14 @@ interactions. Autonomous research runs only in
 
 ## State Preparation
 
-Stop the supervisor before preparing state. Before any `autoresearch-next`, use
-exactly one procedure. The campaign uses schema-v2 state. The separate
+Stop the supervisor before preparing state. The campaign uses schema-v2 state. The separate
 schema-v3 platform-readiness manifest writes to
-`~/.openclaw/autoresearch/platform-readiness.json`. Each state procedure writes
-a temporary file, validates the command result, and atomically replaces the
-authoritative state path.
+`~/.openclaw/autoresearch/platform-readiness.json`. State missing
+`schema_version` is unsupported; archive it and initialize a fresh schema-v2 state. The state
+procedure writes a temporary file, validates the command result, and atomically
+replaces the authoritative state path.
 
 ```bash
-# Losslessly migratable schema-less pristine state only.
-(
-  set -e
-  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
-  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
-  trap 'rm -f "$tmp"' EXIT
-  cd /home/dev/repos/g2_openclaw
-  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
-  mv -- "$tmp" "$state"
-  trap - EXIT
-)
-
-# New campaign, or after archiving an incompatible historical state.
 (
   set -e
   state=/home/dev/.openclaw/autoresearch/quantipy-state.json
@@ -92,21 +79,14 @@ intentional operator prewarm; a failed probe produces no READY receipt.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` begins the next iteration with fresh context.
+`autoresearch-start-next` persists the immutable decision receipt, then begins
+the next iteration with fresh context.
 An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
-Suspension remains explicit operator-owned readiness suspension only, plus exact
-legacy iteration-40 compatibility.
+Suspension remains explicit operator-owned readiness suspension only.
 After G0 implementation and verification, `GATE_PASSED` requires a full-union
 `COMPLETE` receipt cross-checked against runner-owned preflight identity and
 counts and maps to non-suspending `INFRA_REPAIRED`. `REMEDIATION_REQUIRED` is
 stage evidence only and maps to non-suspending `DISCARD`.
-
-If a pre-64 KiB campaign is already in `repeat` with
-`platform_coverage_contract_mismatch`, `DISCARD`, and
-`memory_write_required=true`, do not write MemPalace facts. Stop the owner task
-and run `autoresearch-migrate-state` against the authoritative state; the
-explicit migration converts only that exact stale terminal shape to the
-no-memory G0 transition before `autoresearch-start-next`.
 
 Then atomically resume the same schema-v2 state file:
 

@@ -368,7 +368,7 @@ rules that don't fit elsewhere:
 ```markdown
 # Bootstrap
 ## Current Projects
-- SpineSense backend (Python, FastAPI, PostgreSQL)
+- G2 OpenClaw gateway (Python, TypeScript, OpenClaw)
 - Infrastructure (Azure Bicep, managed identity)
 
 ## Environment

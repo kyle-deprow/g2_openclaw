@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from gateway.autoresearch_runner import (
-    AUTORESEARCH_STATE_SCHEMA_VERSION,
     MEMBER_UNION_DIGEST_ALGORITHM,
     AuthoritativeSnapshotReceipt,
     AutoresearchState,
@@ -26,7 +25,6 @@ from gateway.autoresearch_runner import (
     canonical_member_union_digest,
     canonical_member_union_manifest,
     load_state_file,
-    migrate_state_file,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
     quantipy_member_union_digest,
@@ -458,7 +456,7 @@ def test_price_hydration_receipt_requires_source_price_coverage_response_digest(
         PriceHydrationReceipt.from_dict(raw)
 
 
-def test_schema_less_pristine_pinned_live_state_migrates_losslessly(tmp_path: Path) -> None:
+def test_schema_less_pristine_pinned_live_state_is_rejected(tmp_path: Path) -> None:
     raw: dict[str, object] = {
         "consensus_history": [],
         "consensus_retry_count": 0,
@@ -486,27 +484,23 @@ def test_schema_less_pristine_pinned_live_state_migrates_losslessly(tmp_path: Pa
         "verification_history": [],
     }
     source = tmp_path / "live-v1.json"
-    output = tmp_path / "live-v2.json"
     source.write_text(json.dumps(raw), encoding="utf-8")
 
-    state = migrate_state_file(source, output)
-
-    persisted = json.loads(output.read_text(encoding="utf-8"))
-    assert persisted == {**raw, "schema_version": AUTORESEARCH_STATE_SCHEMA_VERSION}
-    assert state.platform_readiness is not None
+    with pytest.raises(AutoresearchValidationError, match="missing schema_version"):
+        load_state_file(source)
 
 
-def test_schema_less_live_state_must_migrate_before_next_load(tmp_path: Path) -> None:
+def test_schema_less_live_state_requires_init_before_next_load(tmp_path: Path) -> None:
     raw = AutoresearchState().to_dict()
     del raw["schema_version"]
     state_path = tmp_path / "live.json"
     state_path.write_text(json.dumps(raw), encoding="utf-8")
 
-    with pytest.raises(AutoresearchValidationError, match="autoresearch-migrate-state"):
+    with pytest.raises(AutoresearchValidationError, match="autoresearch-init-state"):
         load_state_file(state_path)
 
 
-def test_historical_schema_less_state_requires_archive_and_new_campaign(
+def test_historical_schema_less_state_requires_new_campaign(
     tmp_path: Path,
 ) -> None:
     raw = AutoresearchState(iteration=2).to_dict()
@@ -514,5 +508,5 @@ def test_historical_schema_less_state_requires_archive_and_new_campaign(
     source = tmp_path / "historical.json"
     source.write_text(json.dumps(raw), encoding="utf-8")
 
-    with pytest.raises(AutoresearchValidationError, match=r"Archive.*autoresearch-init-state"):
-        migrate_state_file(source, tmp_path / "unused.json")
+    with pytest.raises(AutoresearchValidationError, match="autoresearch-init-state"):
+        load_state_file(source)

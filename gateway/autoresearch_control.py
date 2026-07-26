@@ -25,7 +25,6 @@ from gateway.autoresearch_runner import (
     AutoresearchState,
     AutoresearchValidationContext,
     AutoresearchValidationError,
-    normalize_autoresearch_state,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -400,9 +399,7 @@ class AutoresearchControl:
 
     def _parse_state_material(self, state_material: str) -> AutoresearchState:
         try:
-            return normalize_autoresearch_state(
-                AutoresearchState.from_dict(json.loads(state_material))
-            )
+            return AutoresearchState.from_dict(json.loads(state_material))
         except json.JSONDecodeError as exc:
             raise ControlError(
                 f"invalid autoresearch state JSON: {self.config.state_path}"

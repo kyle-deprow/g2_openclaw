@@ -115,8 +115,9 @@ conflicts with an emitted exact object. If a failed write must be superseded,
 invalidate that old fact before retrying; do not leave conflicting active facts.
 
 ### Do NOT Store
-- Ephemeral status updates (use `[TASK:status]` conventions)
-- Raw data (experiments write notebooks + RESEARCH_LOG.md)
+- Ephemeral status updates; the reconnect ledger uses only
+  `[TASK:running|complete|failed]`
+- Raw data (experiments write notebooks; `RESEARCH_LOG.md` is historical only)
 - Duplicates of existing drawers or KG facts; search before writing
 
 ## Tool Reference

@@ -146,14 +146,14 @@ def test_mode_specific_coverage_docs_do_not_contradict_runtime_contract() -> Non
 def test_runtime_docs_atomically_prepare_the_authoritative_v2_state() -> None:
     for path in (AGENT_CONFIG / "AGENTS.md", AGENT_CONFIG / "README.md", AUTORESEARCH):
         text = path.read_text(encoding="utf-8")
-        migrate_index = text.index("autoresearch-migrate-state")
         init_index = text.index("autoresearch-init-state")
-        next_index = text.find("autoresearch-next", max(migrate_index, init_index))
-        assert next_index > max(migrate_index, init_index)
+        next_index = text.find("autoresearch-next", init_index)
+        assert next_index > init_index
+        assert "autoresearch-migrate-state" not in text
         assert "quantipy-state-v2.json" not in text
-        assert text.count("state=/home/dev/.openclaw/autoresearch/quantipy-state.json") >= 2
-        assert text.count("mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.") >= 2
-        assert text.count('mv -- "$tmp" "$state"') == 2
+        assert text.count("state=/home/dev/.openclaw/autoresearch/quantipy-state.json") >= 1
+        assert text.count("mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.") >= 1
+        assert text.count('mv -- "$tmp" "$state"') >= 1
         assert re.search(
             r"autoresearch-next\s+\\\n\s+"
             r"/home/dev/\.openclaw/autoresearch/quantipy-state\.json",
@@ -162,6 +162,24 @@ def test_runtime_docs_atomically_prepare_the_authoritative_v2_state() -> None:
         assert (
             "--readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json" in text
         )
+
+
+def test_runtime_docs_define_canonical_decision_receipt_authority() -> None:
+    docs = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            AGENT_CONFIG / "AGENTS.md",
+            AGENT_CONFIG / "BOOTSTRAP.md",
+            AUTORESEARCH,
+            PLAN,
+        )
+    )
+    normalized = " ".join(docs.split()).lower()
+
+    assert "canonical decision receipts" in normalized
+    assert "platform decision authority" in normalized
+    assert "autoresearch-start-next" in normalized
+    assert "memPalace".lower() in normalized
 
 
 def test_autoresearch_advance_uses_locked_atomic_in_place_state_persistence() -> None:
@@ -291,8 +309,8 @@ def test_long_task_docs_distinguish_launcher_status_from_pm_blocking() -> None:
         text = " ".join(path.read_text(encoding="utf-8").split())
         lowered = text.lower()
         assert "`running`, `succeeded`, or `failed`" in text
-        assert "[TASK:blocked]" in text
-        assert "not a literal launcher status" in lowered
+        assert "[TASK:blocked]" not in text
+        assert "literal launcher status" in lowered
         assert "bounded polling" in lowered
 
 
@@ -356,15 +374,15 @@ def test_runtime_docs_require_absolute_artifact_handoff_paths() -> None:
     assert "absolute-path handoff template" in normalized
 
 
-def test_alpha_docs_require_dynamic_coverage_and_explicit_state_migration() -> None:
+def test_alpha_docs_require_dynamic_coverage_and_strict_state_initialization() -> None:
     alpha_docs = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (AGENT_CONFIG / "AGENTS.md", AUTORESEARCH, METHODOLOGY, PLAN)
     )
 
     assert "DynamicUniverseCoverageReceipt" in alpha_docs
-    assert "autoresearch-migrate-state" in alpha_docs
-    assert "Never run `autoresearch-next` against schema-less state" in " ".join(alpha_docs.split())
+    assert "autoresearch-migrate-state" not in alpha_docs
+    assert "state missing `schema_version` is unsupported" in " ".join(alpha_docs.split()).lower()
     assert "ALPHA_RESEARCH" in alpha_docs
     assert "AggregateCoverageReceipt" in alpha_docs
     assert "DATA_INFRA_G0`-only" in alpha_docs
@@ -381,10 +399,7 @@ def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_complet
         assert "while waiting for remaining required children" in text or (
             "even while other required children are still pending" in text
         )
-        assert (
-            "[TASK:progress] <stage> completion recorded; waiting for <N> required completion(s)."
-            in text
-        )
+        assert "[TASK:progress]" not in text
 
 
 def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -> None:

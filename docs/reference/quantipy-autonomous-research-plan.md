@@ -90,8 +90,7 @@ failure produces no READY receipt.
 An explicit operator-owned readiness-precondition `INFRA_BLOCKED` decision
 suspends without incrementing the iteration. The supervisor does not repeatedly
 wake it. This branch sets `memory_write_required=false` and writes nothing to
-MemPalace. Exact legacy iteration-40 compatibility is the only other supported
-suspended G0 shape.
+MemPalace. No missing-schema or legacy G0 suspension shape is accepted.
 
 ## Quantipy Data Contract
 
@@ -245,8 +244,8 @@ preflight identity and counts before non-suspending `INFRA_REPAIRED`.
 `REMEDIATION_REQUIRED` requires matching nonempty violation codes, is stage
 evidence only, and ends in non-suspending `DISCARD`. It cannot authorize
 `INFRA_BLOCKED` or suspend the loop; suspension is explicit operator-owned
-readiness suspension only, plus exact legacy iteration-40 compatibility. A
-missing paired universe, hydration, or platform receipt, or any scope, contract,
+readiness suspension only. A missing paired universe, hydration, or platform receipt,
+or any scope, contract,
 provenance, or digest mismatch is the canonical `BUG_SIGNAL`
 `platform_coverage_contract_mismatch`, with null infrastructure outcome,
 rationale, and receipt, and routes to `fixer`.
@@ -272,7 +271,7 @@ In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
 `INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
-readiness suspension, plus exact legacy iteration-40 compatibility. Completed
+readiness suspension. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
 `DISCARD`; `GATE_PASSED` with a runner-bound `COMPLETE` receipt maps to
 `INFRA_REPAIRED`. The gate mapping never overrides consensus handling. Both
@@ -280,7 +279,9 @@ no-memory outcomes set
 `memory_write_required=false`. For every other memory-required final decision,
 the PM writes compact experiment, feature, model, metric, reviewer, decision,
 failure, and receipt facts after the decision artifact is accepted. Full ticker
-arrays are never stored in prompts, `RESEARCH_LOG.md`, or MemPalace.
+arrays are never stored in prompts, historical logs, or MemPalace. Canonical
+decision receipts under the autoresearch state directory replace
+the read-only historical `RESEARCH_LOG.md` as platform decision authority.
 
 ## Success Criteria
 

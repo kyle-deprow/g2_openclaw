@@ -433,7 +433,7 @@ setup_openclaw() {
     ok "OpenClaw config found: $oc_config"
   fi
 
-  # --- Reconcile the exact Codex plugin/runtime tuple and remove Copilot routes ---
+  # --- Reconcile the exact Codex plugin/runtime tuple ---
   info "Using OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
   if ! "${OPENCLAW_BIN_RESOLVED}" plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin; then
     fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
@@ -448,8 +448,6 @@ setup_openclaw() {
     exit 1
   fi
   summary_add "OpenClaw: Codex plugin ${REQUIRED_CODEX_PLUGIN_VERSION} (@openai/codex ${REQUIRED_CODEX_APP_SERVER_VERSION})"
-  "${OPENCLAW_BIN_RESOLVED}" plugins disable github-copilot || true
-  "${OPENCLAW_BIN_RESOLVED}" plugins disable copilot-proxy || true
 
   # Core package upgrades can leave the unit's ExecStart on the old package path.
   if ! "${OPENCLAW_BIN_RESOLVED}" daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json; then

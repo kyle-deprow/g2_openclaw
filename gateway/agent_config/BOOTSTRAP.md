@@ -11,7 +11,8 @@ Key paths:
 - `src/quantipy/`: async Python services and research modules.
 - `src/quantipy/alpha/`: experiment-owned strategy modules.
 - `notebooks/experiments/`: experiment notebooks.
-- `RESEARCH_LOG.md`: human-readable experiment record.
+- `RESEARCH_LOG.md`: read-only historical experiment record when present; it
+  is not platform decision authority.
 - `.agents/skills/` and `.codex/agents/`: current Quantipy instructions.
 
 ## Runtime Contracts
@@ -79,10 +80,10 @@ the persisted disposable worktree. Shared platform, runtime, loader, harness,
 or orchestration changes belong to the human/Codex operator. Preserve those
 boundaries even when a shared change exposes an experiment defect.
 
-MemPalace is the only durable autonomous research memory and only
-`autoresearch-pm` may mutate it. Stage agents have read-only access. Store
-compact receipt references and experiment facts, never full universe symbol
-arrays.
+MemPalace and canonical per-iteration decision receipts are the durable
+autonomous research authorities, and only `autoresearch-pm` may mutate
+MemPalace. Stage agents have read-only access. Store compact receipt references
+and experiment facts, never full universe symbol arrays.
 
 ## Commands
 

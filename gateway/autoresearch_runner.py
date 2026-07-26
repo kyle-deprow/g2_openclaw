@@ -3201,7 +3201,6 @@ class VerificationResultArtifact:
         raw: object,
         *,
         mode: ResearchMode | None = None,
-        allow_legacy_platform_coverage_omission: bool = False,
     ) -> VerificationResultArtifact:
         data = _ensure_mapping(raw, label="verification_result")
         expected_fields: tuple[str, ...] = (
@@ -3225,12 +3224,6 @@ class VerificationResultArtifact:
             "universe_verification_receipt",
             "price_hydration_receipt",
         )
-        if allow_legacy_platform_coverage_omission and "platform_coverage_validation" not in data:
-            expected_fields = tuple(
-                field_name
-                for field_name in expected_fields
-                if field_name != "platform_coverage_validation"
-            )
         _require_exact_keys(
             data,
             label="verification_result",
@@ -3323,8 +3316,7 @@ class VerificationResultArtifact:
             ),
         )
         artifact.validate(
-            mode=ResearchMode.DATA_INFRA_G0 if allow_legacy_platform_coverage_omission else mode,
-            allow_legacy_platform_coverage_omission=allow_legacy_platform_coverage_omission,
+            mode=mode,
         )
         return artifact
 
@@ -3333,7 +3325,6 @@ class VerificationResultArtifact:
         *,
         mode: ResearchMode | None = None,
         infra_gate_outcome: InfraGateOutcome | None = None,
-        allow_legacy_platform_coverage_omission: bool = False,
     ) -> None:
         if self.status is VerificationStatus.PASS and (self.bug_signals or not self.tests_passed):
             raise AutoresearchValidationError(
@@ -3410,14 +3401,10 @@ class VerificationResultArtifact:
                     )
             else:
                 receipt = self.platform_coverage_validation
-                if (
-                    self.status is VerificationStatus.PASS
-                    and not allow_legacy_platform_coverage_omission
-                    and (
-                        receipt is None
-                        or self.universe_verification_receipt is None
-                        or self.price_hydration_receipt is None
-                    )
+                if self.status is VerificationStatus.PASS and (
+                    receipt is None
+                    or self.universe_verification_receipt is None
+                    or self.price_hydration_receipt is None
                 ):
                     raise AutoresearchValidationError(
                         "DATA_INFRA_G0 PASS requires paired universe, price hydration, "
@@ -3426,10 +3413,9 @@ class VerificationResultArtifact:
                         "or mismatched"
                     )
                 if receipt is None:
-                    if not allow_legacy_platform_coverage_omission:
-                        raise AutoresearchValidationError(
-                            "DATA_INFRA_G0 verification requires platform_coverage_validation"
-                        )
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 verification requires platform_coverage_validation"
+                    )
                 elif not receipt.matches_shared_contract:
                     raise AutoresearchValidationError(
                         "Quantipy platform coverage scope or source contract mismatch requires "
@@ -3776,11 +3762,6 @@ class AutoresearchState:
     platform_readiness: ReadinessIdentity | None = None
     suspended: bool = False
     suspension_reason: str | None = None
-    legacy_platform_coverage_omission: bool = field(
-        default=False,
-        compare=False,
-        repr=False,
-    )
 
     @property
     def latest_debate(self) -> DebateResultArtifact | None:
@@ -3807,8 +3788,8 @@ class AutoresearchState:
         data = _ensure_mapping(raw, label="autoresearch_state")
         if "schema_version" not in data:
             raise AutoresearchValidationError(
-                "schema-less live state must run `gateway-cli autoresearch-migrate-state` "
-                "before `gateway-cli autoresearch-next`; "
+                "autoresearch state missing schema_version is unsupported; archive it and "
+                "initialize a schema-v2 state with `gateway-cli autoresearch-init-state`; "
                 f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
             )
         schema_version = _require_int(data, "schema_version")
@@ -3870,16 +3851,6 @@ class AutoresearchState:
         mode_raw = data.get("mode")
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
-        verification_history_raw = data.get("verification_history", [])
-        legacy_platform_coverage_omission = _recognizes_legacy_suspended_g0_history(
-            data,
-            mode_raw=mode_raw,
-            verification_history_raw=verification_history_raw,
-        ) or _recognizes_legacy_unsubmitted_g0_terminal(
-            data,
-            mode_raw=mode_raw,
-            verification_history_raw=verification_history_raw,
-        )
 
         def _parse_state_implementation(raw_implementation: object) -> ImplementationResultArtifact:
             implementation_data = dict(
@@ -3916,7 +3887,6 @@ class AutoresearchState:
                 lambda item: VerificationResultArtifact.from_dict(
                     item,
                     mode=ResearchMode(mode_raw) if mode_raw is not None else None,
-                    allow_legacy_platform_coverage_omission=legacy_platform_coverage_omission,
                 ),
             ),
             review_history=_parse_tuple("review_history", ReviewResultArtifact.from_dict),
@@ -3943,15 +3913,11 @@ class AutoresearchState:
                 if data.get("suspension_reason") is not None
                 else None
             ),
-            legacy_platform_coverage_omission=legacy_platform_coverage_omission,
         )
         return state
 
     def to_dict(self) -> dict[str, object]:
         verification_history = [artifact.to_dict() for artifact in self.verification_history]
-        if self.legacy_platform_coverage_omission:
-            for verification in verification_history:
-                del verification["platform_coverage_validation"]
         return {
             "schema_version": AUTORESEARCH_STATE_SCHEMA_VERSION,
             "phase": self.phase.value,
@@ -3985,119 +3951,6 @@ class AutoresearchState:
         }
 
 
-def _recognizes_legacy_suspended_g0_history(
-    data: Mapping[str, object],
-    *,
-    mode_raw: object,
-    verification_history_raw: object,
-) -> bool:
-    """Allow the omitted v2 field only for the known suspended G0 completion shape."""
-    if (
-        mode_raw != ResearchMode.DATA_INFRA_G0.value
-        or data.get("iteration") != 40
-        or data.get("phase") != Phase.REPEAT.value
-        or data.get("suspended") is not True
-        or data.get("memory_written") is not False
-        or data.get("memory_verification_receipt") is not None
-        or not isinstance(data.get("suspension_reason"), str)
-        or not data.get("suspension_reason")
-    ):
-        return False
-    final_decision = data.get("final_decision")
-    if not isinstance(final_decision, Mapping) or (
-        final_decision.get("decision") != FinalDecision.INFRA_BLOCKED.value
-        or final_decision.get("memory_write_required") is not False
-    ):
-        return False
-    if not isinstance(verification_history_raw, Sequence) or isinstance(
-        verification_history_raw, str | bytes
-    ):
-        return False
-    expected_outcomes = (
-        InfraGateOutcome.GATE_PASSED.value,
-        InfraGateOutcome.REMEDIATION_REQUIRED.value,
-    )
-    if len(verification_history_raw) != len(expected_outcomes):
-        return False
-    for verification, expected_outcome in zip(
-        verification_history_raw, expected_outcomes, strict=True
-    ):
-        if not isinstance(verification, Mapping) or "platform_coverage_validation" in verification:
-            return False
-        if verification.get("status") != VerificationStatus.PASS.value:
-            return False
-        if verification.get("infra_gate_outcome") != expected_outcome:
-            return False
-        if verification.get("data_coverage") is not None:
-            return False
-        if (
-            verification.get("universe_verification_receipt") is not None
-            or verification.get("price_hydration_receipt") is not None
-        ):
-            return False
-        for field_name in (
-            "is_walk_forward_sharpe_net",
-            "oos_sharpe_net",
-            "max_drawdown_pct",
-            "win_rate",
-            "trade_count",
-            "trades_per_day",
-            "oos_trading_days",
-        ):
-            if verification.get(field_name) is not None:
-                return False
-    return True
-
-
-def _recognizes_legacy_unsubmitted_g0_terminal(
-    data: Mapping[str, object],
-    *,
-    mode_raw: object,
-    verification_history_raw: object,
-) -> bool:
-    """Recognize the exact pre-cap-fix G0 terminal that could not submit receipts."""
-    if (
-        mode_raw != ResearchMode.DATA_INFRA_G0.value
-        or data.get("phase") != Phase.REPEAT.value
-        or data.get("suspended") is not False
-        or data.get("memory_written") is not False
-        or data.get("memory_verification_receipt") is not None
-    ):
-        return False
-    final_decision = data.get("final_decision")
-    if not isinstance(final_decision, Mapping) or (
-        final_decision.get("decision") != FinalDecision.DISCARD.value
-        or final_decision.get("continue_loop") is not True
-        or final_decision.get("reviewer_verdict") != FinalReviewerVerdict.NOT_RUN.value
-        or final_decision.get("recommended_metric_value") is not None
-        or not isinstance(final_decision.get("infra_rationale"), str)
-        or "24,576" not in final_decision["infra_rationale"]
-        or final_decision.get("memory_write_required") not in (True, False)
-    ):
-        return False
-    if not isinstance(verification_history_raw, Sequence) or isinstance(
-        verification_history_raw, str | bytes
-    ):
-        return False
-    if not verification_history_raw:
-        return False
-    for verification in verification_history_raw:
-        if not isinstance(verification, Mapping):
-            return False
-        if (
-            verification.get("status") != VerificationStatus.BUG_SIGNAL.value
-            or "platform_coverage_contract_mismatch" not in verification.get("bug_signals", ())
-            or verification.get("infra_gate_outcome") is not None
-            or verification.get("infra_rationale") is not None
-            or verification.get("platform_coverage_validation") is not None
-            or verification.get("data_coverage") is not None
-            or verification.get("universe_verification_receipt") is not None
-            or verification.get("price_hydration_receipt") is not None
-        ):
-            return False
-    return True
-
-
 def _is_fail_closed_g0_platform_contract_bug_signal(
     verification: VerificationResultArtifact | None,
 ) -> bool:
@@ -4117,9 +3970,7 @@ def build_authoritative_state_reference(
     state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
 ) -> AuthoritativeStateReference:
     """Bind a stage dispatch to one canonical, complete persisted state."""
-    canonical_state_model = normalize_autoresearch_state(
-        AutoresearchState.from_dict(state.to_dict())
-    )
+    canonical_state_model = AutoresearchState.from_dict(state.to_dict())
     canonical_state = _compact_json_block(canonical_state_model.to_dict())
     state_sha256 = _sha256_text("\n".join((AUTHORITATIVE_STATE_DIGEST_DOMAIN, canonical_state)))
     return AuthoritativeStateReference(
@@ -4938,7 +4789,6 @@ def _validate_state(
     if (
         state.suspended
         and state.mode is ResearchMode.DATA_INFRA_G0
-        and not state.legacy_platform_coverage_omission
         and state.latest_verification is not None
     ):
         raise AutoresearchValidationError(
@@ -4990,10 +4840,7 @@ def _validate_state(
             raise AutoresearchValidationError(
                 "completed final decisions require memory_write_required=true"
             )
-        if (
-            not is_operator_infrastructure_suspension
-            and not state.legacy_platform_coverage_omission
-        ):
+        if not is_operator_infrastructure_suspension:
             _validate_final_decision_artifact(decision, state, validation_context)
     if state.implementation_result and (
         state.latest_consensus is None
@@ -5032,10 +4879,7 @@ def _validate_state(
         _validate_debate_result(debate, policy, mode=state.mode, context=state.context_packet)
     for verification in state.verification_history:
         verification.validate(
-            mode=ResearchMode.DATA_INFRA_G0
-            if state.legacy_platform_coverage_omission
-            else state.mode,
-            allow_legacy_platform_coverage_omission=state.legacy_platform_coverage_omission,
+            mode=state.mode,
         )
     for review in state.review_history:
         _validate_review_result(review, policy)
@@ -5885,7 +5729,8 @@ def _phase_instruction(
             "Context source contract:\n"
             "- standalone iteration context files are non-authoritative residue. Do not read "
             "or reuse iteration-<n>-context.json. Rebuild the context packet only from STATE_REF, "
-            "the instruction manifest sources, RESEARCH_LOG, and read-only MemPalace retrieval. "
+            "the instruction manifest sources, canonical decision receipts, and read-only "
+            "MemPalace retrieval. "
             "If the live state no longer matches STATE_REF, do not emit an artifact; report the "
             "stale dispatch so the PM can rerun autoresearch-next.\n\n"
         )
@@ -6089,8 +5934,7 @@ def _verification_handoff_contract(
         "infrastructure outcome, rationale, and receipt. A remediation PASS is stage evidence "
         "only: it advances to review and then non-suspending DISCARD. It can never authorize "
         "INFRA_BLOCKED or suspend the loop; only explicit operator-owned readiness suspension "
-        "or exact legacy iteration-40 compatibility may suspend. Do not send remediation "
-        "to fixer. Use "
+        "may suspend. Do not send remediation to fixer. Use "
         "TEST_FAILURE only for actual nonzero command or test execution, a malformed "
         "or missing required receipt, an experiment defect, or inability to execute "
         "verification. Do not use Sharpe as the gate rationale. Every new G0 "
@@ -6628,13 +6472,6 @@ def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
                 and state.latest_verification.infra_gate_outcome
                 is InfraGateOutcome.REMEDIATION_REQUIRED
             )
-            or (
-                state.mode is ResearchMode.DATA_INFRA_G0
-                and state.legacy_platform_coverage_omission
-                and decision.decision is FinalDecision.DISCARD
-                and state.latest_verification is not None
-                and state.latest_verification.status is VerificationStatus.BUG_SIGNAL
-            )
         )
         and not decision.memory_write_required
         and not state.memory_written
@@ -6708,7 +6545,6 @@ def _is_data_infra_g0_blocked_no_memory_state(state: AutoresearchState) -> bool:
         state.phase is Phase.REPEAT
         and state.mode is ResearchMode.DATA_INFRA_G0
         and state.suspended
-        and state.legacy_platform_coverage_omission
         and decision is not None
         and decision.decision is FinalDecision.INFRA_BLOCKED
         and bool(decision.infra_rationale)
@@ -7171,83 +7007,7 @@ def load_state_file(path: Path) -> AutoresearchState:
         raise AutoresearchValidationError(f"missing state file: {path}") from exc
     except json.JSONDecodeError as exc:
         raise AutoresearchValidationError(f"invalid state JSON: {path}") from exc
-    return normalize_autoresearch_state(AutoresearchState.from_dict(raw))
-
-
-def migrate_state_file(source_path: Path, output_path: Path) -> AutoresearchState:
-    """Migrate known lossless live-state shapes to the current schema."""
-    resolved_source_path = source_path.expanduser().resolve(strict=False)
-    resolved_output_path = output_path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
-        try:
-            raw = json.loads(resolved_source_path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise AutoresearchValidationError(
-                f"missing state file: {resolved_source_path}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise AutoresearchValidationError(
-                f"invalid state JSON: {resolved_source_path}"
-            ) from exc
-        data = _ensure_mapping(raw, label="autoresearch_state")
-        if "schema_version" in data:
-            mode_raw = data.get("mode")
-            verification_history_raw = data.get("verification_history", [])
-            if _recognizes_legacy_unsubmitted_g0_terminal(
-                data,
-                mode_raw=mode_raw,
-                verification_history_raw=verification_history_raw,
-            ):
-                migrated = dict(data)
-                final_decision = dict(
-                    _ensure_mapping(data["final_decision"], label="final_decision")
-                )
-                final_decision["memory_write_required"] = False
-                migrated["final_decision"] = final_decision
-                migrated["memory_written"] = False
-                migrated["memory_verification_receipt"] = None
-                state = AutoresearchState.from_dict(migrated)
-            else:
-                state = AutoresearchState.from_dict(data)
-        else:
-            expected_schema_less = set(AutoresearchState().to_dict()) - {"schema_version"}
-            pristine_values: dict[str, object] = {
-                "phase": Phase.SETUP_CONTEXT.value,
-                "iteration": 1,
-                "consensus_retry_count": 0,
-                "verification_fix_attempts": 0,
-                "setup": None,
-                "context_packet": None,
-                "debate_rounds": [],
-                "consensus_history": [],
-                "implementation_result": None,
-                "verification_history": [],
-                "review_history": [],
-                "fix_history": [],
-                "pending_fix_trigger": None,
-                "final_decision": None,
-                "memory_written": False,
-                "mode": None,
-                "memory_verification_receipt": None,
-                "suspended": False,
-                "suspension_reason": None,
-            }
-            is_pristine = set(data) == expected_schema_less and all(
-                data.get(key) == value for key, value in pristine_values.items()
-            )
-            if not is_pristine or data.get("platform_readiness") is None:
-                raise AutoresearchValidationError(
-                    "schema-less historical state is incompatible with lossless v2 migration. "
-                    "Archive it, then start a new campaign with `gateway-cli "
-                    "autoresearch-init-state --output <new-state.json> "
-                    "--readiness-manifest <platform-readiness.json>`."
-                )
-            migrated = dict(data)
-            migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
-            state = AutoresearchState.from_dict(migrated)
-        normalized_state = normalize_autoresearch_state(state)
-        _atomic_save_state_file(resolved_output_path, normalized_state)
-        return normalized_state
+    return AutoresearchState.from_dict(raw)
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
@@ -7480,6 +7240,51 @@ def persist_derived_state(
         _atomic_save_state_file(resolved_output_path, derived_state)
 
 
+def persist_next_iteration_state(
+    source_path: Path,
+    output_path: Path,
+    source_state: AutoresearchState,
+    derived_state: AutoresearchState,
+    *,
+    instruction_manifest_sha256: str,
+    policy: AutoresearchPolicy,
+    receipt_catalog_factory: Callable[[], ReceiptCatalog],
+) -> None:
+    """Publish a next-iteration state only after persisting its decision receipt."""
+    resolved_source_path = source_path.expanduser().resolve(strict=False)
+    resolved_output_path = output_path.expanduser().resolve(strict=False)
+    expected_reference = build_authoritative_state_reference(
+        source_state,
+        state_path=resolved_source_path,
+    )
+    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
+        persisted_state = load_state_file(resolved_source_path)
+        persisted_reference = build_authoritative_state_reference(
+            persisted_state,
+            state_path=resolved_source_path,
+        )
+        if persisted_reference != expected_reference:
+            raise AutoresearchValidationError(
+                "persisted state does not match the supplied authoritative state"
+            )
+        current_instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+            persisted_state,
+            policy,
+            receipt_catalog_factory(),
+            state_path=resolved_source_path,
+        )
+        if current_instruction_manifest_sha256 != instruction_manifest_sha256:
+            raise AutoresearchValidationError("decision receipt instruction manifest is stale")
+        from gateway.autoresearch_decision_receipts import persist_decision_receipt
+
+        persist_decision_receipt(
+            persisted_state,
+            state_path=source_path,
+            instruction_manifest_sha256=instruction_manifest_sha256,
+        )
+        _atomic_save_state_file(resolved_output_path, derived_state)
+
+
 def _atomic_save_state_file(path: Path, state: AutoresearchState) -> None:
     serialized_state = json.dumps(state.to_dict(), indent=2, sort_keys=True)
     temporary_path: Path | None = None
@@ -7500,53 +7305,3 @@ def _atomic_save_state_file(path: Path, state: AutoresearchState) -> None:
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
-
-
-def normalize_autoresearch_state(state: AutoresearchState) -> AutoresearchState:
-    """Repair persisted states whose deterministic routing was tightened."""
-    if (
-        state.phase is Phase.IMPLEMENTATION
-        and state.implementation_result is None
-        and _is_operator_precondition_consensus(state.latest_consensus)
-    ):
-        return replace(state, phase=Phase.DECISION_LOG)
-    if _is_legacy_i45_g0_bug_signal_terminal(state):
-        assert state.final_decision is not None
-        return replace(
-            state,
-            final_decision=replace(state.final_decision, memory_write_required=False),
-            memory_written=False,
-            memory_verification_receipt=None,
-        )
-    return state
-
-
-def _is_legacy_i45_g0_bug_signal_terminal(state: AutoresearchState) -> bool:
-    decision = state.final_decision
-    latest_review = state.latest_review
-    latest_verification = state.latest_verification
-    return (
-        state.iteration == 45
-        and state.phase is Phase.REPEAT
-        and state.mode is ResearchMode.DATA_INFRA_G0
-        and not state.suspended
-        and decision is not None
-        and decision.decision is FinalDecision.DISCARD
-        and decision.continue_loop
-        and decision.reviewer_verdict is FinalReviewerVerdict.FAIL
-        and decision.recommended_metric_value == 0.0
-        and decision.memory_write_required
-        and latest_review is not None
-        and latest_review.verdict is ReviewVerdict.FAIL
-        and state.verification_fix_attempts == 2
-        and latest_verification is not None
-        and latest_verification.status is VerificationStatus.BUG_SIGNAL
-        and latest_verification.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
-        and latest_verification.infra_gate_outcome is None
-        and latest_verification.infra_rationale is None
-        and latest_verification.platform_coverage_validation is None
-        and latest_verification.universe_verification_receipt is None
-        and latest_verification.price_hydration_receipt is None
-        and not state.memory_written
-        and state.memory_verification_receipt is None
-    )

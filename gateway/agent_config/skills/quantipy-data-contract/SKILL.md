@@ -94,10 +94,10 @@ providers, databases, cached symbols, or environment configuration.
   unexpected dates. Never substitute `pit_active_roster` as full-union proof or
   self-author a receipt. `REMEDIATION_REQUIRED` is stage evidence only: it
   proceeds to review and then non-suspending `DISCARD`, never `INFRA_BLOCKED`.
-  Actual suspension is explicit operator-owned readiness suspension only, plus
-  exact legacy iteration-40 compatibility. A missing paired universe, hydration,
-  or platform receipt, or any scope, contract, provenance, or digest mismatch is
-  the exact `platform_coverage_contract_mismatch` `BUG_SIGNAL` for `fixer`, not
+  Actual suspension is explicit operator-owned readiness suspension only. A
+  missing paired universe, hydration, or platform receipt, or any scope,
+  contract, provenance, or digest mismatch is the exact
+  `platform_coverage_contract_mismatch` `BUG_SIGNAL` for `fixer`, not
   infrastructure evidence.
 - Before any ALPHA verification command that can call `qp.prices()` for a
   hydrate/backtest, compute the planned `member_union_count * XNYS
@@ -123,7 +123,7 @@ approximated with another field.
 
 ## Prompt Hygiene
 
-Do not place full ticker arrays in prompts, transcripts, `RESEARCH_LOG.md`, or
+Do not place full ticker arrays in prompts, transcripts, historical logs, or
 MemPalace. Persist or reference compact universe receipts, dates, screen
 criteria, counts, digests, and artifact paths. A small illustrative symbol
 sample is acceptable only when needed to explain a result and is not the

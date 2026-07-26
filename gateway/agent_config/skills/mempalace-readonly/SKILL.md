@@ -54,7 +54,7 @@ calling it.
 Build a compact packet for debate:
 
 - Current best metrics and baseline.
-- Last 10 experiment outcomes from MemPalace and `RESEARCH_LOG.md`.
+- Last 10 experiment outcomes from MemPalace and canonical decision receipts.
 - Prior failures, reviewer objections, data coverage issues, and feature/model
   families already tried.
 - Any prior KEEP decisions that should shape the next proposal.

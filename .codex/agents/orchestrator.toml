@@ -1,5 +1,7 @@
 name = "orchestrator"
 description = "Coordinates complex tasks by delegating to specialized subagents"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
 developer_instructions = '''
 # Orchestrator Agent
 

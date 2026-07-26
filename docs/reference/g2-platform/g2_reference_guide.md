@@ -1064,21 +1064,28 @@ Every Even Hub app needs an `app.json` at the project root. This describes the a
   "edition": "202601",
   "name": "My app",
   "version": "1.0.0",
-  "min_app_version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.11",
   "tagline": "Short description shown in Even Hub",
   "description": "Longer description of what the app does",
   "author": "Your Name",
   "entrypoint": "index.html",
-  "permissions": {
-    "network": ["api.example.com"],
-    "fs": ["./assets"]
-  }
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connect to the application's network service.",
+      "whitelist": []
+    }
+  ],
+  "supported_languages": ["en"]
 }
 ```
 
 **`package_id` rules:** Must be a valid reverse-domain name where each segment starts with a lowercase letter and contains only lowercase letters or numbers. No hyphens. Example: `com.myname.myapp` (valid), `com.my-name.my-app` (invalid).
 
-**`permissions.network`:** List domains your app needs to access. Use `["*"]` for unrestricted network access (e.g. apps that connect to user-configured servers).
+**`permissions`:** Array of permission objects with a supported `name` and a
+non-empty `desc`. Network permissions may also include a `whitelist`. Use `[]`
+when the app does not need extra host permissions.
 
 #### Recommended npm Scripts
 

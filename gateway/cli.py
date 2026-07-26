@@ -574,25 +574,6 @@ _command_output_path_option = typer.Option(
 )
 
 
-@app.command("autoresearch-migrate-state")
-def autoresearch_migrate_state(
-    state_path: Path = _state_path_argument,
-    output_path: Path = _output_path_option,
-) -> None:
-    """Explicitly migrate a known live-state shape to the current schema."""
-    from gateway.autoresearch_runner import migrate_state_file
-
-    try:
-        state = migrate_state_file(state_path, output_path)
-    except ValueError as exc:
-        console.print(f"[red]autoresearch-migrate-state failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-    console.print(
-        f"[green]wrote autoresearch state v{state.to_dict()['schema_version']}:[/green] "
-        f"{output_path}"
-    )
-
-
 @app.command("autoresearch-init-state")
 def autoresearch_init_state(
     output_path: Path = _output_path_option,
@@ -979,14 +960,17 @@ def autoresearch_start_next(
     state_path: Path = _state_path_argument,
     output_path: Path = _output_path_option,
     openclaw_config: Path = _openclaw_config_option,
+    quantipy_root: Path = _quantipy_root_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Start the next persisted autoresearch iteration after memory is written."""
     from gateway.autoresearch_runner import (
         AutoresearchValidationContext,
+        build_receipt_catalog,
+        expected_instruction_manifest_sha256,
         load_autoresearch_policy,
         load_state_file,
-        persist_derived_state,
+        persist_next_iteration_state,
         start_next_iteration,
         validate_state,
     )
@@ -998,8 +982,23 @@ def autoresearch_start_next(
         validate_state_readiness(state.platform_readiness, readiness)
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
         validate_state(state, policy, validation_context)
+        receipts = build_receipt_catalog(quantipy_root)
+        instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+            state,
+            policy,
+            receipts,
+            state_path=state_path,
+        )
         next_state = start_next_iteration(state, readiness=readiness)
-        persist_derived_state(state_path, output_path, state, next_state)
+        persist_next_iteration_state(
+            state_path,
+            output_path,
+            state,
+            next_state,
+            instruction_manifest_sha256=instruction_manifest_sha256,
+            policy=policy,
+            receipt_catalog_factory=lambda: build_receipt_catalog(quantipy_root),
+        )
     except ValueError as exc:
         console.print(f"[red]autoresearch-start-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

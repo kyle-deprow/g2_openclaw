@@ -32,23 +32,11 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-Before `autoresearch-next`, an operator must prepare schema-v2 state
-using exactly one of these procedures while the supervisor is stopped:
+Before `autoresearch-next`, an operator must prepare schema-v2 state while the
+supervisor is stopped. State missing `schema_version` is unsupported; archive
+it and initialize a fresh schema-v2 state:
 
 ```bash
-# Only for a losslessly migratable schema-less pristine state.
-(
-  set -e
-  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
-  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
-  trap 'rm -f "$tmp"' EXIT
-  cd /home/dev/repos/g2_openclaw
-  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
-  mv -- "$tmp" "$state"
-  trap - EXIT
-)
-
-# For a new campaign, or after archiving an incompatible historical state.
 (
   set -e
   state=/home/dev/.openclaw/autoresearch/quantipy-state.json
@@ -63,10 +51,9 @@ using exactly one of these procedures while the supervisor is stopped:
 )
 ```
 
-Both procedures leave schema-v2 state at the authoritative path used by
+This procedure leaves schema-v2 state at the authoritative path used by
 `autoresearch-next`, control, and the supervisor. Never run
-`autoresearch-next` against schema-less state, and never run both preparation
-procedures for one campaign.
+`autoresearch-next` against state missing `schema_version`.
 
 Do not maintain phase, retries, or completion state in prompt memory. Before
 dispatch, the runner validates the schema-v3 platform-readiness manifest at
@@ -74,8 +61,9 @@ dispatch, the runner validates the schema-v3 platform-readiness manifest at
 contract and XNYS evidence receipts. Existing active state is pinned explicitly
 with `autoresearch-pin-readiness`. At a completed repeat boundary, only after
 the runner's memory or explicit no-memory obligation passes,
-`autoresearch-start-next` may atomically adopt a different validated READY
-receipt. A suspended `INFRA_BLOCKED` state instead resumes explicitly with
+`autoresearch-start-next` persists the immutable per-iteration canonical
+decision receipt and may atomically adopt a different validated READY receipt.
+A suspended `INFRA_BLOCKED` state instead resumes explicitly with
 `autoresearch-resume`.
 
 For a suspended live campaign, rebuild readiness first. The frozen Quantipy
@@ -112,8 +100,7 @@ atomically:
 
 `INFRA_BLOCKED` suspends without incrementing the iteration or writing
 MemPalace. It is reserved only for an explicit operator-owned readiness
-suspension, plus exact legacy iteration-40 compatibility. The supervisor does
-not repeatedly wake suspended work.
+suspension. The supervisor does not repeatedly wake suspended work.
 
 ### Dispatch Label Recovery
 
@@ -149,7 +136,7 @@ operator-infrastructure blocker.
 Use the `autoresearch` skill for the complete protocol:
 
 1. `context-curator` summarizes receipts, baseline, recent outcomes,
-   `RESEARCH_LOG.md`, and read-only MemPalace findings.
+   canonical decision receipts, and read-only MemPalace findings.
 2. Five configured debaters remain configured for each debate. The global
    subagent lane is bounded to 1 concurrent run, so debaters run sequentially
    and the remaining debate tasks queue in OpenClaw; a 3-of-5
@@ -225,10 +212,10 @@ The deterministic decision order is:
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` begins the next iteration with fresh context.
+`autoresearch-start-next` persists the immutable decision receipt, then begins
+the next iteration with fresh context.
 An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
-Suspension is explicit operator-owned readiness suspension only, plus exact
-legacy iteration-40 compatibility. After
+Suspension is explicit operator-owned readiness suspension only. After
 completed G0 verification, `GATE_PASSED` with a full-union `COMPLETE` receipt
 cross-checked against runner-owned preflight identity and counts maps to
 non-suspending `INFRA_REPAIRED`; `REMEDIATION_REQUIRED` is stage evidence only
@@ -240,4 +227,6 @@ MemPalace is the only durable autonomous research memory. Stage agents may
 read it only through `mempalace-readonly`; only the PM may write after a final
 memory-required decision. Search before writing, record compact experiment and
 receipt facts, and never store full ticker arrays. Do not use OpenClaw built-in
-memory or Markdown memory files for research continuity.
+memory or Markdown memory files for research continuity. Canonical decision
+receipts under the autoresearch state directory are the platform decision
+authority alongside MemPalace.

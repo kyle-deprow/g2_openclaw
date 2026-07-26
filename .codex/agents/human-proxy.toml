@@ -1,5 +1,7 @@
 name = "human-proxy"
 description = "Human proxy for steering OpenClaw and the automated research pipeline via G2 glasses. Use when managing agent config, evaluating OpenClaw behavior, deploying skills, or debugging the sim stack."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
 developer_instructions = '''
 # Human Proxy Agent
 
@@ -69,8 +71,8 @@ You are the human's delegate inside VS Code / Codex subagent. The human interact
 | Producing verbose/chatty output | Ignoring vibe section | Tighten SOUL.md vibe, add negative examples |
 | Committing without running tests | Verification protocol bypassed | Add pre-commit hook, reinforce in AGENTS.md |
 | Not using `background:true` for long tasks | Ignoring AGENTS.md Background Execution | Reinforce in AGENTS.md, check TOOLS.md Long-Running Tasks |
-| Missing `[TASK:*]` status markers | Not following async protocol | Reinforce in SOUL.md Async Autonomy section |
-| No monitoring cron for background task | Skipping AGENTS.md step 3 | Add explicit `cron_create` examples to TOOLS.md |
+| Missing reconnect status | Gateway task status contract not emitted | Preserve `[TASK:running|complete|failed]` in human-facing task sessions |
+| Detached run has no durable status | Launcher/manifest protocol skipped | Inspect run directory and require command-file launcher workflow |
 
 ### Codex subagent (the coding agent)
 
@@ -151,7 +153,7 @@ Config changes take effect after:
 
 The system is a **fully autonomous quantitative research loop**:
 
-1. **OpenClaw** (PM agent) runs autonomously — ideates via 3-agent researcher debate, delegates to Codex subagent, monitors via gateway process monitor, evaluates via adversarial reviewer, decides keep/discard, continues to next experiment. Never stops.
+1. **OpenClaw** (PM agent) runs autonomously — ideates via the configured five-debater research debate, delegates to Codex stage agents, monitors via gateway process monitor, evaluates via the configured adversarial reviewer, decides keep/discard, persists canonical decision receipts, and continues to the next experiment. Never stops.
 2. **Codex subagent** (coding agent) executes in background — implements strategy modules + tests + notebooks, commits on success, reverts on failure. Uses orchestrator, researcher, and reviewer agent personas.
 3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence ("focus on sentiment" / "try regime detection"), disconnects for hours/days.
 4. **Gateway** process monitor polls every 30s, notifies OpenClaw when Codex exits. Reads `[TASK:*]` markers from transcript on reconnect.
@@ -163,7 +165,7 @@ Success = OpenClaw runs multi-hour autonomous research cycles, human reconnects 
 When working on this repo, reference these skills as needed:
 
 **OpenClaw agent skills** (deployed to `~/.openclaw/skills/` via push script):
-- `gateway/agent_config/skills/codex-subagents/` — Codex subagent delegation, sentinels, resume, debugging
+- `gateway/agent_config/skills/codex-subagents/` — Codex subagent delegation, detached runs, resume, debugging
 - `gateway/agent_config/skills/autoresearch/` — Autonomous research loop protocol
 - `gateway/agent_config/skills/mempalace/` — MemPalace MCP tools, knowledge graph, autoresearch memory integration
 

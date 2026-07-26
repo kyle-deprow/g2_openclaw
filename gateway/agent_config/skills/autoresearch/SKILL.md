@@ -67,12 +67,12 @@ a child that handles or delays `SIGTERM` may yield its own code (for example,
 Direct foreground execution is invalid. If `systemd-run` or the launcher cannot
 be used, fail closed and report the infrastructure blocker without emitting a
 stage artifact. Do not reduce scope simply to avoid this requirement; launch
-the real command safely, surface progress markers, and clean up stale
+the real command safely, surface concise status, and clean up stale
 processes and run directories when the stage ends.
 The launcher status ledger is intentionally narrow: `status.json` emits only
-`running`, `succeeded`, or `failed`. `[TASK:blocked]` is a PM-owned
-classification derived from bounded polling plus logs and receipts; it is not a
-literal launcher status.
+`running`, `succeeded`, or `failed`. Any blocker is a PM-owned classification
+derived from bounded polling plus logs and receipts; it is not a literal
+launcher status.
 
 ## Platform Readiness Preflight
 
@@ -87,25 +87,9 @@ capability object injected into every stage. `BLOCKED` states the concrete
 operator action required. The runner never downloads, infers, substitutes, or
 repairs evidence.
 
-Before `autoresearch-next`, stop the supervisor and prepare schema-v2
-state with exactly one procedure. Losslessly migrate only a schema-less
-pristine state:
-
-```bash
-(
-  set -e
-  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
-  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
-  trap 'rm -f "$tmp"' EXIT
-  cd /home/dev/repos/g2_openclaw
-  uv run gateway-cli autoresearch-migrate-state "$state" --output "$tmp"
-  mv -- "$tmp" "$state"
-  trap - EXIT
-)
-```
-
-For a new campaign, or after archiving state that cannot migrate losslessly,
-initialize a pristine state from the READY manifest:
+Before `autoresearch-next`, stop the supervisor and prepare schema-v2 state by
+initializing a pristine state from the READY manifest. State missing
+`schema_version` is unsupported and must be archived, not migrated or repaired:
 
 ```bash
 (
@@ -122,16 +106,16 @@ initialize a pristine state from the READY manifest:
 )
 ```
 
-Both procedures atomically leave schema-v2 state at the authoritative path
-used by control and the supervisor. Use that path for the first dispatch:
+This procedure atomically leaves schema-v2 state at the authoritative path used
+by control and the supervisor. Use that path for the first dispatch:
 
 ```bash
 cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-Never run both preparation procedures for one campaign. An existing
-incompatible state must be archived, not rewritten or silently pinned.
+An existing incompatible state or state missing `schema_version` must be
+archived, not rewritten or silently pinned.
 
 `autoresearch-next` checks the current schema-v3 platform-readiness manifest
 before selecting or dispatching
@@ -183,20 +167,14 @@ In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
 `autoresearch-start-next` begins the next iteration with fresh context.
 `INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
-readiness suspension, plus exact legacy iteration-40 compatibility. Completed
+readiness suspension. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
 `DISCARD`.
-
-For a stale pre-64 KiB G0 terminal with
-`platform_coverage_contract_mismatch`, `DISCARD`, and
-`memory_write_required=true`, do not write MemPalace facts. Use the explicit
-`autoresearch-migrate-state` procedure first; it recognizes only that exact
-persisted shape and converts it to the no-memory G0 transition.
 
 ## Instruction Source Manifest
 
 `autoresearch-next` no longer injects full instruction file contents. It emits
-only `required_receipts`, a canonical v2 `instruction_source_manifest`, and
+only `required_receipts`, a canonical v3 `instruction_source_manifest`, and
 `source_manifest_sha256`. Each listed source has exactly `receipt_id`, absolute
 canonical `path`, and `sha256`. The manifest is versioned,
 domain-separated, sorted by `receipt_id`, duplicate-rejecting, and bound to the
@@ -503,8 +481,8 @@ has output.
 For every completion-required child handoff, `autoresearch-pm` must emit a
 non-empty normal assistant acknowledgement in its own transcript, including
 while waiting for remaining required children. Waiting acknowledgements must be
-concise and truthful, for example `[TASK:progress] <stage> completion recorded;
-waiting for <N> required completion(s).`
+concise and truthful, for example: `<stage> completion recorded; waiting for
+<N> required completion(s).`
 
 While any required child completion is still outstanding, the PM must not use
 `sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
@@ -525,8 +503,8 @@ Do once before the first iteration:
 1. Define the mechanical goal, metric, metric direction, target repo, and
    writable scope.
 2. Establish the baseline and record iteration 0.
-3. As PM, read `RESEARCH_LOG.md`, recent git history, current in-scope files,
-   and MemPalace prior experiments with `mempalace_status`,
+3. As PM, read recent git history, current in-scope files, canonical decision
+   receipts, and MemPalace prior experiments with `mempalace_status`,
    `mempalace_diary_read`, `mempalace_search`, and `mempalace_kg_query`.
 4. Confirm MemPalace tools are available. If unavailable, fail closed:
    report/block with exact evidence and await human/Codex operator action. The
@@ -540,7 +518,7 @@ packet for the debate:
 - Current best metric, baseline, and last 10 experiment outcomes.
 - Prior MemPalace findings: failures, keeps, feature families, model families,
   data coverage issues, and reviewer objections.
-- Open proposals from `RESEARCH_LOG.md`, marked as prior context only.
+- Prior proposals from MemPalace and canonical decision receipts.
 - The pinned readiness receipt, capability summary, and compact references to
   relevant universe/coverage receipts. Do not include full ticker arrays.
 - Hard constraints and supported data sources from those receipts.
@@ -606,11 +584,11 @@ majority. Required output:
   not contain snapshot, summary, or member-union materialization digests.
 
 If there is no 3-of-5 majority, run one concise debate retry with the same
-context plus the dissent summary. If there is still no majority, log
-`NO_CONSENSUS` to `RESEARCH_LOG.md`, then start a fresh context pass. This rule
-is identical in `ALPHA_RESEARCH` and `DATA_INFRA_G0`; a G0 consensus failure
-must not be relabeled `INFRA_BLOCKED`. Do not implement without a majority. The
-final decision must explicitly set
+context plus the dissent summary. If there is still no majority, emit the
+structured `NO_CONSENSUS` final decision and start a fresh context pass. This
+rule is identical in `ALPHA_RESEARCH` and `DATA_INFRA_G0`; a G0 consensus
+failure must not be relabeled `INFRA_BLOCKED`. Do not implement without a
+majority. The final decision must explicitly set
 `reviewer_verdict=NOT_RUN` and `memory_write_required=false`; do not write
 MemPalace facts or fabricate a memory receipt for `NO_CONSENSUS`.
 
@@ -619,9 +597,8 @@ An operator-precondition consensus may also terminate before implementation as
 and `memory_write_required=false`. This is a separate auditable no-memory path
 for shared infrastructure prerequisites, not an experiment result.
 
-The PM writes the winning theory and dissent summary to `RESEARCH_LOG.md`
-before implementation. Do not write theories, debate notes, or consensus drafts
-to MemPalace before an experiment is completed and decided.
+Do not write theories, debate notes, or consensus drafts to MemPalace before an
+experiment is completed and decided.
 
 ## 4. Implement
 
@@ -888,9 +865,8 @@ After a `DATA_INFRA_G0` implementation and completed verification, decide
 a `COMPLETE` platform coverage receipt cross-checked against runner-owned
 preflight identity and counts. For `REMEDIATION_REQUIRED`, decide
 non-suspending `DISCARD`. A remediation receipt never authorizes
-`INFRA_BLOCKED`; suspension is explicit operator-owned readiness suspension only,
-plus exact legacy iteration-40 compatibility. This gate mapping is not consensus
-handling. A methodology `PASS`
+`INFRA_BLOCKED`; suspension is explicit operator-owned readiness suspension
+only. This gate mapping is not consensus handling. A methodology `PASS`
 means the data/process gate was assessed correctly, not that an alpha strategy
 has passed.
 
@@ -900,29 +876,26 @@ Actions:
   baseline when the decision artifact requires it, and log the metrics.
 - DISCARD/CRASH: do not promote the disposable experiment commit; log why and
   move to the next proposal.
-- NO_CONSENSUS: log the split to `RESEARCH_LOG.md`; set `NOT_RUN` and the
-  explicit no-memory flag, remain unsuspended, then begin the next iteration's
-  fresh context pass.
-- Always append to the target repo's experiment log and `RESEARCH_LOG.md`.
+- NO_CONSENSUS: set `NOT_RUN` and the explicit no-memory flag, remain
+  unsuspended, then begin the next iteration's fresh context pass.
 - After every memory-required final decision, the PM writes MemPalace drawers
   and KG facts for experiment, feature, model, metric, decision, and failure
   mode. `NO_CONSENSUS` and `INFRA_BLOCKED` never enter MemPalace.
 - Write a MemPalace diary entry only as part of memory-required final experiment
   logging.
+- `autoresearch-start-next` persists the immutable per-iteration canonical
+  decision receipt under the autoresearch state directory before replacing a
+  completed state. That receipt, bound to the state reference, final decision,
+  verification artifact, memory receipt, and instruction manifest digest, is
+  the platform decision authority with MemPalace.
 
 ## Recovery And Status
 
-- On resume, read `RESEARCH_LOG.md`, git status, active background tasks, and
-  MemPalace. Re-enter the first incomplete stage and inspect detached run
-  directories before relaunching anything.
-- Post `[TASK:started] autoresearch iteration N` after each detached launch
-  publishes launcher status `running`.
-- Post `[TASK:progress]` markers from bounded polling during long detached
-  hydration, backtest, notebook, review, and fix commands.
-- Post `[TASK:done]` when bounded polling reaches launcher status
-  `succeeded`, and preserve the exit code in the recorded status.
-- Post `[TASK:blocked]` only when bounded polling, logs, or receipts show an
-  actionable blocker. The launcher never emits a literal `blocked` status.
+- On resume, read git status, active background tasks, canonical decision
+  receipts, and MemPalace. Re-enter the first incomplete stage and inspect
+  detached run directories before relaunching anything.
+- Report detached-run status in ordinary concise PM transcript prose derived
+  from bounded polling, logs, receipts, and the launcher status ledger.
 - Post progress every 10 iterations.
 - Monitoring is read-only. On confirmed shared-infrastructure failure, report
   the exact blocker evidence and await human/Codex operator action. The PM

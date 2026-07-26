@@ -1,5 +1,7 @@
 name = "azure-bicep"
 description = "Azure Bicep and infrastructure-as-code specialist for ARM deployments, module design, security hardening, and cloud resource patterns. Use when authoring Bicep templates, designing module hierarchies, configuring Azure resources, managing deployments, or reviewing IaC for security and compliance."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
 developer_instructions = '''
 # Azure Bicep Agent
 

@@ -243,7 +243,7 @@ A catch-all file for additional context the user wants injected:
 # Bootstrap
 
 ## Current Projects
-- Working on SpineSense backend (Python, FastAPI)
+- Working on G2 OpenClaw gateway (Python, TypeScript)
 - Side project: Home automation with Home Assistant
 
 ## Environment

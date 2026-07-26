@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
+from gateway.autoresearch_decision_receipts import decision_receipt_path
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -316,24 +317,6 @@ def _bind_universe_receipt_to_validation_context(
             for batch in receipt.batches
         ),
     )
-
-
-@pytest.mark.parametrize("in_place", [False, True], ids=("distinct-output", "in-place"))
-def test_autoresearch_migrate_state_smoke(tmp_path: Path, *, in_place: bool) -> None:
-    readiness = _ready_manifest(tmp_path / "migration-readiness")
-    raw = AutoresearchState(platform_readiness=readiness.identity()).to_dict()
-    del raw["schema_version"]
-    source = tmp_path / "live-schema-less.json"
-    output = source if in_place else tmp_path / "live-v2.json"
-    source.write_text(json.dumps(raw), encoding="utf-8")
-
-    result = runner.invoke(
-        app,
-        ["autoresearch-migrate-state", str(source), "--output", str(output)],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
 
 
 def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
@@ -1800,6 +1783,11 @@ class TestAutoresearchCliCommands:
         assert next_state["phase"] == "setup_context"
         assert next_state["iteration"] == 4
         assert next_state["setup"]["metric_name"] == "OOS Sharpe net"
+        receipt_path = decision_receipt_path(memory_state_path, 3)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["iteration"] == 3
+        assert receipt["final_decision"]["decision"] == "KEEP"
+        assert receipt["memory_verification_receipt"]["experiment_id"] == "iteration-3"
 
     def test_autoresearch_mark_memory_accepts_valid_g0_infra_repaired_state(
         self,
@@ -2357,6 +2345,11 @@ class TestAutoresearchCliCommands:
         assert next_state["phase"] == "setup_context"
         assert next_state["iteration"] == 2
         assert next_state["setup"]["metric_name"] == "coverage gate"
+        receipt_path = decision_receipt_path(memory_state_path, 1)
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert receipt["iteration"] == 1
+        assert receipt["final_decision"]["decision"] == "INFRA_REPAIRED"
+        assert receipt["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
 
     def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"

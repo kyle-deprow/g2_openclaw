@@ -52,7 +52,6 @@ _cli_commands = {
     "autoresearch-pin-readiness",
     "autoresearch-build-readiness",
     "autoresearch-resume",
-    "autoresearch-migrate-state",
     "autoresearch-init-state",
 }
 if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:

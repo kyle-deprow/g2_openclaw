@@ -135,8 +135,7 @@ Key principles:
 5. In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
    remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
    the next iteration starts with fresh context. `INFRA_BLOCKED` and suspension
-   are reserved only for explicit operator-owned readiness suspension, plus
-   exact legacy iteration-40 compatibility. Completed `DATA_INFRA_G0`
+   are reserved only for explicit operator-owned readiness suspension. Completed `DATA_INFRA_G0`
    `REMEDIATION_REQUIRED` proceeds to review and non-suspending `DISCARD`.
 6. On explicit status control requests, return a concise status summary through
    the control command result. Do not send autonomous announcements to G2.

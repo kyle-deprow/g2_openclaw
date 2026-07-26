@@ -1,5 +1,7 @@
 name = "g2-development"
 description = "Even Realities G2 smart glasses specialist for display UI, SDK bridge, input events, and dev toolchain. Use when building G2 apps, designing container layouts, handling ring/gesture input, working with the EvenAppBridge SDK, or packaging .ehpk bundles."
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
 developer_instructions = '''
 # G2 Development Agent
 

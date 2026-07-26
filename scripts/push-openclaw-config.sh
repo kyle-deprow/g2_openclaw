@@ -100,6 +100,11 @@ NATIVE_CRASH_HARDENING_LINES=(
   "OOMPolicy=kill"
   "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
 )
+STALE_CODING_PROVIDER_KEYS=(
+  "github-copilot"
+  "copilot-proxy"
+  "copilot-cli"
+)
 
 quote_sqlite_literal() {
   local value="$1"
@@ -203,6 +208,21 @@ build_mempalace_obsolete_mutation_alias_ids_json() {
 
 build_string_array_json() {
   printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
+}
+
+sanitize_stale_coding_provider_keys() {
+  local stale_keys_json
+  stale_keys_json="$(build_string_array_json "${STALE_CODING_PROVIDER_KEYS[@]}")"
+  MERGED=$(echo "${MERGED}" | jq --argjson stale_keys "${stale_keys_json}" '
+    walk(
+      if type == "object" then
+        with_entries(select((.key as $key | $stale_keys | index($key)) | not))
+      else
+        .
+      end
+    )
+  ')
+  echo "Sanitized stale coding-provider config keys: ${STALE_CODING_PROVIDER_KEYS[*]}"
 }
 
 escape_sed_replacement() {
@@ -979,6 +999,8 @@ MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
   | (.agents.list[] | select(.id == "autoresearch-pm") | .thinkingDefault) = "high"
 ')
 
+sanitize_stale_coding_provider_keys
+
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 
 # Read-only stage agents must deny exactly the internal OpenClaw MCP tool.name ids.
@@ -1185,16 +1207,6 @@ done
 
 # ── Copy repo skills ─────────────────────────────────────────────────────────
 SKILLS_DST="${OPENCLAW_PUSH_HOME}/skills"
-STALE_SKILLS=(
-  "copilot-cli"
-)
-for SKILL_NAME in "${STALE_SKILLS[@]}"; do
-  if [[ -d "${SKILLS_DST}/${SKILL_NAME}" ]]; then
-    rm -rf "${SKILLS_DST:?}/${SKILL_NAME}"
-    echo "Removed stale skill ${SKILL_NAME} from ${SKILLS_DST}"
-  fi
-done
-
 if [[ -d "${SKILLS_SRC}" ]]; then
   # Copy repo skills to local
   for SKILL_DIR in "${SKILLS_SRC}"/*/; do

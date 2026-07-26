@@ -18,6 +18,11 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch_decision_receipts import (
+    decision_receipt_content,
+    decision_receipt_path,
+    persist_decision_receipt,
+)
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -108,10 +113,9 @@ from gateway.autoresearch_runner import (
     load_artifact_file,
     load_autoresearch_policy,
     mark_memory_written,
-    migrate_state_file,
     next_action,
-    normalize_autoresearch_state,
     persist_derived_state,
+    persist_next_iteration_state,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
     resume_suspended_iteration,
@@ -934,50 +938,6 @@ def test_expanded_universe_receipt_fits_local_artifact_budget() -> None:
 
     assert len(payload) > 24 * 1024
     assert len(payload) <= MAX_ARTIFACT_FILE_BYTES
-
-
-def test_legacy_unsubmitted_g0_terminal_requires_exact_blocker_shape() -> None:
-    payload = {
-        "mode": ResearchMode.DATA_INFRA_G0.value,
-        "phase": Phase.REPEAT.value,
-        "suspended": False,
-        "memory_written": False,
-        "memory_verification_receipt": None,
-        "final_decision": {
-            "decision": FinalDecision.DISCARD.value,
-            "continue_loop": True,
-            "reviewer_verdict": FinalReviewerVerdict.NOT_RUN.value,
-            "recommended_metric_value": None,
-            "infra_rationale": "The 24,576-byte artifact cap blocked the receipt.",
-            "memory_write_required": True,
-        },
-        "verification_history": [
-            {
-                "status": VerificationStatus.BUG_SIGNAL.value,
-                "bug_signals": ["platform_coverage_contract_mismatch"],
-                "infra_gate_outcome": None,
-                "infra_rationale": None,
-                "platform_coverage_validation": None,
-                "data_coverage": None,
-                "universe_verification_receipt": None,
-                "price_hydration_receipt": None,
-            }
-        ],
-    }
-    final_decision = cast(dict[str, object], payload["final_decision"])
-
-    assert autoresearch_runner._recognizes_legacy_unsubmitted_g0_terminal(
-        payload,
-        mode_raw=payload["mode"],
-        verification_history_raw=payload["verification_history"],
-    )
-
-    final_decision["infra_rationale"] = "A different infrastructure blocker."
-    assert not autoresearch_runner._recognizes_legacy_unsubmitted_g0_terminal(
-        payload,
-        mode_raw=payload["mode"],
-        verification_history_raw=payload["verification_history"],
-    )
 
 
 def test_load_artifact_file_rejects_a_tampered_persisted_state(
@@ -2703,35 +2663,6 @@ def test_save_state_file_waits_for_an_active_destination_writer(
     assert completed.is_set()
 
 
-def test_migrate_state_file_reads_source_only_after_source_and_destination_are_locked(
-    tmp_path: Path,
-    platform_readiness: PlatformReadinessManifest,
-) -> None:
-    source_path = tmp_path / "migration-source.json"
-    output_path = tmp_path / "migration-output.json"
-    initial_state = AutoresearchState(platform_readiness=platform_readiness.identity())
-    changed_state = replace(initial_state, iteration=2)
-    source_path.write_text(json.dumps(initial_state.to_dict()), encoding="utf-8")
-    completed = Event()
-
-    def migrate() -> None:
-        migrate_state_file(source_path, output_path)
-        completed.set()
-
-    with autoresearch_runner._exclusive_state_locks((source_path,)):
-        worker = Thread(target=migrate)
-        worker.start()
-        assert not completed.wait(timeout=0.1)
-        source_path.write_text(json.dumps(changed_state.to_dict()), encoding="utf-8")
-
-    worker.join(timeout=2)
-    migrated_state = AutoresearchState.from_dict(
-        json.loads(output_path.read_text(encoding="utf-8"))
-    )
-
-    assert migrated_state == changed_state
-
-
 def test_next_action_fails_closed_when_accepted_union_manifest_is_deleted(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -3156,20 +3087,6 @@ def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
 
     with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
         next_action(malformed, policy, receipts, platform_readiness)
-
-
-def test_normalize_operator_precondition_implementation_state_routes_to_decision_log(
-    policy: AutoresearchPolicy,
-) -> None:
-    state = replace(
-        _state_to_consensus(policy),
-        consensus_history=(_operator_precondition_consensus(1, policy),),
-        phase=Phase.IMPLEMENTATION,
-    )
-
-    normalized = normalize_autoresearch_state(state)
-
-    assert normalized.phase is Phase.DECISION_LOG
 
 
 def test_next_action_rejects_operator_precondition_implementation_state(
@@ -3657,7 +3574,7 @@ def test_persisted_nonlegacy_g0_remediation_suspension_is_rejected(
         validate_state(persisted, policy)
 
 
-def test_generic_legacy_suspended_g0_receipt_omission_is_rejected(
+def test_g0_suspended_receipt_omission_is_rejected(
     policy: AutoresearchPolicy,
     suspended_g0_remediation_state: AutoresearchState,
 ) -> None:
@@ -3672,70 +3589,6 @@ def test_generic_legacy_suspended_g0_receipt_omission_is_rejected(
         AutoresearchState.from_dict(raw)
 
 
-@pytest.fixture()
-def iteration_40_legacy_suspended_g0_raw(
-    suspended_g0_remediation_state: AutoresearchState,
-) -> dict[str, object]:
-    raw = suspended_g0_remediation_state.to_dict()
-    raw["iteration"] = 40
-    history = raw["verification_history"]
-    assert isinstance(history, list)
-    assert len(history) == 1
-    assert isinstance(history[0], dict)
-    attempts = [dict(history[0]), dict(history[0])]
-    for attempt, outcome in zip(
-        attempts,
-        (
-            InfraGateOutcome.GATE_PASSED.value,
-            InfraGateOutcome.REMEDIATION_REQUIRED.value,
-        ),
-        strict=True,
-    ):
-        del attempt["platform_coverage_validation"]
-        attempt["infra_gate_outcome"] = outcome
-        attempt["data_coverage"] = None
-        attempt["universe_verification_receipt"] = None
-        attempt["price_hydration_receipt"] = None
-        for field_name in (
-            "is_walk_forward_sharpe_net",
-            "oos_sharpe_net",
-            "max_drawdown_pct",
-            "win_rate",
-            "trade_count",
-            "trades_per_day",
-            "oos_trading_days",
-        ):
-            attempt[field_name] = None
-    raw["verification_history"] = attempts
-    return raw
-
-
-def test_iteration_40_legacy_suspended_g0_state_with_two_attempts_loads_and_resumes(
-    policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
-    iteration_40_legacy_suspended_g0_raw: dict[str, object],
-) -> None:
-    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
-    validate_state(legacy, policy)
-    resumed = resume_suspended_iteration(legacy, platform_readiness)
-
-    assert legacy.iteration == 40
-    assert legacy.suspended is True
-    assert legacy.legacy_platform_coverage_omission is True
-    assert resumed.iteration == 41
-    assert resumed.phase is Phase.SETUP_CONTEXT
-
-
-def test_authoritative_state_reference_builds_for_legacy_suspended_g0_state(
-    iteration_40_legacy_suspended_g0_raw: dict[str, object],
-) -> None:
-    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
-
-    reference = autoresearch_runner.build_authoritative_state_reference(legacy)
-
-    assert (reference.phase, reference.iteration) == (Phase.REPEAT.value, 40)
-
-
 def test_nonlegacy_g0_state_serialization_includes_platform_coverage_validation(
     suspended_g0_remediation_state: AutoresearchState,
 ) -> None:
@@ -3744,192 +3597,6 @@ def test_nonlegacy_g0_state_serialization_includes_platform_coverage_validation(
     assert isinstance(history, list)
     assert isinstance(history[0], dict)
     assert "platform_coverage_validation" in history[0]
-
-
-@pytest.fixture()
-def iteration_45_legacy_g0_bug_signal_terminal_raw(
-    policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
-) -> dict[str, object]:
-    state = advance_state(
-        AutoresearchState(platform_readiness=platform_readiness.identity()),
-        _setup_artifact(),
-        policy,
-    )
-    state = advance_state(
-        state,
-        replace(
-            _context_artifact(),
-            research_mode=ResearchMode.DATA_INFRA_G0,
-            mode_rationale="Repair cap and source provenance before an alpha rerun.",
-        ),
-        policy,
-    )
-    state = advance_state(state, _debate_result(policy, round_number=1), policy)
-    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    state = advance_state(state, _implementation_result(), policy)
-    state = advance_state(
-        state,
-        replace(
-            _verification_result(VerificationStatus.PASS),
-            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
-            infra_rationale="The initial coverage proof passed before review found defects.",
-        ),
-        policy,
-    )
-    state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
-    state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
-    for _ in range(2):
-        state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
-        state = advance_state(state, _fix_result(FixTriggerPhase.VERIFICATION), policy)
-    state = advance_state(state, _g0_platform_contract_mismatch_bug_signal(), policy)
-
-    terminal = replace(
-        state,
-        iteration=45,
-        phase=Phase.REPEAT,
-        final_decision=FinalDecisionArtifact(
-            experiment_id="g0-iteration-45",
-            decision=FinalDecision.DISCARD,
-            recommended_metric_name="coverage gate",
-            recommended_metric_value=0.0,
-            reviewer_verdict=FinalReviewerVerdict.FAIL,
-            rationale="Coverage contract proof stayed unverifiable after the bounded fix path.",
-            log_summary="Discarded after repeated platform coverage contract mismatch.",
-            continue_loop=True,
-            memory_write_required=True,
-        ),
-        memory_written=False,
-        memory_verification_receipt=None,
-    )
-    return terminal.to_dict()
-
-
-def test_persist_derived_state_replaces_legacy_suspended_g0_state_after_resume(
-    tmp_path: Path,
-    platform_readiness: PlatformReadinessManifest,
-    iteration_40_legacy_suspended_g0_raw: dict[str, object],
-) -> None:
-    state_path = tmp_path / "quantipy-state.json"
-    legacy = AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
-    resumed = resume_suspended_iteration(legacy, platform_readiness)
-    state_path.write_text(json.dumps(iteration_40_legacy_suspended_g0_raw), encoding="utf-8")
-
-    persist_derived_state(state_path, state_path, legacy, resumed)
-
-    persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
-
-    assert persisted == resumed
-
-
-def test_iteration_45_legacy_g0_bug_signal_terminal_normalizes_to_no_memory_and_starts_next(
-    policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
-    iteration_45_legacy_g0_bug_signal_terminal_raw: dict[str, object],
-) -> None:
-    legacy = AutoresearchState.from_dict(iteration_45_legacy_g0_bug_signal_terminal_raw)
-    assert legacy.final_decision is not None
-
-    normalized = normalize_autoresearch_state(legacy)
-    validate_state(normalized, policy)
-    advanced = start_next_iteration(normalized, readiness=platform_readiness)
-    expected = replace(
-        legacy,
-        final_decision=replace(legacy.final_decision, memory_write_required=False),
-        memory_written=False,
-        memory_verification_receipt=None,
-    )
-
-    assert legacy.final_decision.memory_write_required is True
-    assert normalized == expected
-    assert can_write_memory(normalized) is False
-    assert advanced.iteration == 46
-    assert advanced.phase is Phase.SETUP_CONTEXT
-
-
-def test_migrate_state_file_rewrites_iteration_45_legacy_g0_bug_signal_terminal(
-    tmp_path: Path,
-    policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
-    iteration_45_legacy_g0_bug_signal_terminal_raw: dict[str, object],
-) -> None:
-    source_path = tmp_path / "legacy-i45.json"
-    output_path = tmp_path / "migrated-i45.json"
-    legacy = AutoresearchState.from_dict(iteration_45_legacy_g0_bug_signal_terminal_raw)
-    assert legacy.final_decision is not None
-    expected = replace(
-        legacy,
-        final_decision=replace(legacy.final_decision, memory_write_required=False),
-        memory_written=False,
-        memory_verification_receipt=None,
-    )
-    source_path.write_text(
-        json.dumps(iteration_45_legacy_g0_bug_signal_terminal_raw),
-        encoding="utf-8",
-    )
-
-    migrated = migrate_state_file(source_path, output_path)
-    validate_state(migrated, policy)
-    reloaded = AutoresearchState.from_dict(json.loads(output_path.read_text(encoding="utf-8")))
-    validate_state(reloaded, policy)
-    advanced = start_next_iteration(reloaded, readiness=platform_readiness)
-
-    assert migrated == expected
-    assert reloaded == expected
-    assert can_write_memory(reloaded) is False
-    assert advanced.iteration == 46
-
-
-@pytest.mark.parametrize(
-    "outcomes",
-    (
-        (InfraGateOutcome.REMEDIATION_REQUIRED.value,),
-        (
-            InfraGateOutcome.GATE_PASSED.value,
-            InfraGateOutcome.REMEDIATION_REQUIRED.value,
-            InfraGateOutcome.REMEDIATION_REQUIRED.value,
-        ),
-        (
-            InfraGateOutcome.REMEDIATION_REQUIRED.value,
-            InfraGateOutcome.GATE_PASSED.value,
-        ),
-        (
-            InfraGateOutcome.GATE_PASSED.value,
-            InfraGateOutcome.GATE_PASSED.value,
-        ),
-    ),
-    ids=("one-attempt", "three-attempts", "reversed-order", "wrong-outcome"),
-)
-def test_iteration_40_legacy_suspended_g0_state_rejects_noncanonical_attempt_history(
-    iteration_40_legacy_suspended_g0_raw: dict[str, object],
-    outcomes: tuple[str, ...],
-) -> None:
-    history = iteration_40_legacy_suspended_g0_raw["verification_history"]
-    assert isinstance(history, list)
-    assert isinstance(history[0], dict)
-    iteration_40_legacy_suspended_g0_raw["verification_history"] = [
-        {**history[0], "infra_gate_outcome": outcome} for outcome in outcomes
-    ]
-
-    with pytest.raises(AutoresearchValidationError, match="platform_coverage_validation"):
-        AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
-
-
-def test_iteration_40_legacy_suspended_g0_state_rejects_nonnull_receipts(
-    iteration_40_legacy_suspended_g0_raw: dict[str, object],
-    suspended_g0_remediation_state: AutoresearchState,
-) -> None:
-    history = iteration_40_legacy_suspended_g0_raw["verification_history"]
-    source_history = suspended_g0_remediation_state.to_dict()["verification_history"]
-    assert isinstance(history, list)
-    assert isinstance(source_history, list)
-    assert isinstance(history[0], dict)
-    assert isinstance(source_history[0], dict)
-    history[0]["universe_verification_receipt"] = source_history[0]["universe_verification_receipt"]
-    history[0]["price_hydration_receipt"] = source_history[0]["price_hydration_receipt"]
-
-    with pytest.raises(AutoresearchValidationError, match="platform_coverage_validation"):
-        AutoresearchState.from_dict(iteration_40_legacy_suspended_g0_raw)
 
 
 def test_persisted_planless_g0_remediation_state_rejects_an_earlier_majority(
@@ -4745,6 +4412,284 @@ def test_memory_write_gated_until_final_decision(
     next_iteration = start_next_iteration(state, readiness=readiness)
     assert next_iteration.phase is Phase.SETUP_CONTEXT
     assert next_iteration.iteration == 2
+
+
+def test_persist_next_iteration_state_writes_canonical_decision_receipt(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(
+        json.dumps(completed_memory_written_state.to_dict(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    next_state = start_next_iteration(completed_memory_written_state, readiness=platform_readiness)
+
+    persist_next_iteration_state(
+        state_path,
+        state_path,
+        completed_memory_written_state,
+        next_state,
+        instruction_manifest_sha256=instruction_digest,
+        policy=policy,
+        receipt_catalog_factory=lambda: receipts,
+    )
+
+    receipt_path = decision_receipt_path(state_path, completed_memory_written_state.iteration)
+    receipt_content = receipt_path.read_bytes()
+    receipt_payload = json.loads(receipt_content)
+    persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+
+    assert persisted.phase is Phase.SETUP_CONTEXT
+    assert persisted.iteration == completed_memory_written_state.iteration + 1
+    assert stat.S_IMODE(receipt_path.stat().st_mode) == 0o600
+    assert receipt_content == json.dumps(
+        receipt_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert receipt_payload["instruction_manifest_sha256"] == instruction_digest
+    assert receipt_payload["state_reference"]["phase"] == Phase.REPEAT.value
+    assert completed_memory_written_state.final_decision is not None
+    assert completed_memory_written_state.memory_verification_receipt is not None
+    assert (
+        receipt_payload["final_decision"] == completed_memory_written_state.final_decision.to_dict()
+    )
+    assert (
+        receipt_payload["memory_verification_receipt"]
+        == completed_memory_written_state.memory_verification_receipt.to_dict()
+    )
+
+
+def test_decision_receipt_is_idempotent_for_same_content(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+
+    first = persist_decision_receipt(
+        completed_memory_written_state,
+        state_path=state_path,
+        instruction_manifest_sha256=instruction_digest,
+    )
+    second = persist_decision_receipt(
+        completed_memory_written_state,
+        state_path=state_path,
+        instruction_manifest_sha256=instruction_digest,
+    )
+
+    assert second.path == first.path
+    assert second.sha256 == first.sha256
+    assert second.content == first.content
+
+
+def test_decision_receipt_conflict_fails_without_replacing_state(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(completed_memory_written_state.to_dict()), encoding="utf-8")
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    receipt_path = decision_receipt_path(state_path, completed_memory_written_state.iteration)
+    receipt_path.write_bytes(b"{}")
+    receipt_path.chmod(0o600)
+    next_state = start_next_iteration(completed_memory_written_state, readiness=platform_readiness)
+
+    with pytest.raises(AutoresearchValidationError, match="decision receipt conflict"):
+        persist_next_iteration_state(
+            state_path,
+            state_path,
+            completed_memory_written_state,
+            next_state,
+            instruction_manifest_sha256=instruction_digest,
+            policy=policy,
+            receipt_catalog_factory=lambda: receipts,
+        )
+
+    persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+    assert persisted == completed_memory_written_state
+
+
+def test_next_iteration_recomputes_instruction_manifest_under_state_lock(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    quantipy_root: Path,
+    completed_memory_written_state: AutoresearchState,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(completed_memory_written_state.to_dict()), encoding="utf-8")
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    drift_path = quantipy_root / QUANTIPY_RECEIPT_PATHS["quantipy.agents"]
+    drift_path.write_text("changed after dispatch\n", encoding="utf-8")
+    next_state = start_next_iteration(completed_memory_written_state, readiness=platform_readiness)
+
+    with pytest.raises(AutoresearchValidationError, match="instruction manifest is stale"):
+        persist_next_iteration_state(
+            state_path,
+            state_path,
+            completed_memory_written_state,
+            next_state,
+            instruction_manifest_sha256=instruction_digest,
+            policy=policy,
+            receipt_catalog_factory=lambda: build_receipt_catalog(quantipy_root),
+        )
+
+    persisted = AutoresearchState.from_dict(json.loads(state_path.read_text(encoding="utf-8")))
+    assert persisted == completed_memory_written_state
+    assert not (state_path.parent / "decision-receipts").exists()
+
+
+def test_decision_receipt_rejects_symlink_path(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    receipt_path = decision_receipt_path(state_path, completed_memory_written_state.iteration)
+    receipt_path.symlink_to(tmp_path / "outside.json")
+
+    with pytest.raises(AutoresearchValidationError, match="must not be a symlink"):
+        persist_decision_receipt(
+            completed_memory_written_state,
+            state_path=state_path,
+            instruction_manifest_sha256=instruction_digest,
+        )
+
+
+def test_decision_receipt_rejects_symlinked_state_parent(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+) -> None:
+    real_parent = tmp_path / "real-state"
+    real_parent.mkdir()
+    linked_parent = tmp_path / "linked-state"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    state_path = linked_parent / "quantipy-state.json"
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match=r"symlinks|canonical no-symlink"):
+        persist_decision_receipt(
+            completed_memory_written_state,
+            state_path=state_path,
+            instruction_manifest_sha256=instruction_digest,
+        )
+
+    assert not (real_parent / "decision-receipts").exists()
+
+
+def test_decision_receipt_full_write_loop_handles_partial_writes(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    real_write: Callable[[int, bytes], int] = os.write
+    partial_writes = 0
+
+    def write_partial(fd: int, data: bytes) -> int:
+        nonlocal partial_writes
+        if len(data) > 1:
+            partial_writes += 1
+            return real_write(fd, data[: max(1, len(data) // 3)])
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", write_partial)
+
+    persisted = persist_decision_receipt(
+        completed_memory_written_state,
+        state_path=state_path,
+        instruction_manifest_sha256=instruction_digest,
+    )
+
+    assert partial_writes > 0
+    assert persisted.path.read_bytes() == persisted.content
+
+
+def test_decision_receipt_existing_file_revalidates_internal_digest_bindings(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    completed_memory_written_state: AutoresearchState,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    instruction_digest = expected_instruction_manifest_sha256(
+        completed_memory_written_state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    receipt_path = decision_receipt_path(state_path, completed_memory_written_state.iteration)
+    payload = json.loads(
+        decision_receipt_content(
+            completed_memory_written_state,
+            state_path=state_path,
+            instruction_manifest_sha256=instruction_digest,
+        ).decode("utf-8")
+    )
+    payload["final_decision_sha256"] = "0" * 64
+    receipt_path.write_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+    receipt_path.chmod(0o600)
+
+    with pytest.raises(AutoresearchValidationError, match="decision receipt conflict"):
+        persist_decision_receipt(
+            completed_memory_written_state,
+            state_path=state_path,
+            instruction_manifest_sha256=instruction_digest,
+        )
 
 
 def test_start_next_adopts_changed_ready_identity_at_completed_boundary(

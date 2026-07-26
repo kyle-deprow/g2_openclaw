@@ -47,28 +47,28 @@ that doesn't overlap with others:
       "claw": {
         "name": "Claw",
         "emoji": "🦞",
-        "model": "sonnet",
+        "model": "openai/gpt-5.5",
         "skills": ["general"],
         "description": "General coordinator — routes and synthesizes"
       },
       "researcher": {
         "name": "Atlas",
         "emoji": "🦉",
-        "model": "opus",
+        "model": "openai/gpt-5.6-sol",
         "skills": ["web-research", "deep-research"],
         "description": "Deep research and source verification"
       },
       "coder": {
         "name": "Forge",
         "emoji": "⚒️",
-        "model": "sonnet",
+        "model": "openai/gpt-5.5",
         "skills": ["coding", "git", "code-review"],
         "description": "Code writing, review, and infrastructure"
       },
       "writer": {
         "name": "Quill",
         "emoji": "✍️",
-        "model": "opus",
+        "model": "openai/gpt-5.6-sol",
         "skills": ["writing", "editing"],
         "description": "Content creation and editing"
       }
@@ -81,15 +81,9 @@ that doesn't overlap with others:
 routing and waste resources duplicating effort.
 
 ### `agent-model-per-role`
-Match model to role complexity:
-
-| Role                    | Recommended Model | Reasoning                     |
-| ----------------------- | ----------------- | ----------------------------- |
-| General coordinator     | Sonnet            | Fast routing, light synthesis |
-| Deep researcher         | Opus              | Complex analysis, long context|
-| Coder                   | Sonnet            | Fast, accurate code generation|
-| Routine summarizer      | Haiku             | Cheap, sufficient for digests |
-| Creative writer         | Opus              | Nuance, style, creativity    |
+Preserve explicit repo-managed model selections for each role. Change model
+refs only through reviewed config updates; do not substitute generic aliases in
+prompts or per-spawn overrides.
 
 ### `agent-per-agent-identity`
 Each agent should have its own IDENTITY.md and SOUL.md overrides:
@@ -116,14 +110,14 @@ Configure shared defaults, then override per agent:
 {
   "agents": {
     "defaults": {
-      "model": "sonnet",
+      "model": "openai/gpt-5.5",
       "thinking": true,
       "timeoutSeconds": 600,
       "tools": { "profile": "full" }
     },
     "agents": {
       "researcher": {
-        "model": "opus",
+        "model": "openai/gpt-5.6-sol",
         "tools": { "profile": "full", "deny": ["exec", "process"] }
       },
       "coder": {
@@ -454,17 +448,17 @@ Implement with chained sessions_send or sequential spawns. Each agent's output
 becomes the next agent's input.
 
 ### `orch-escalation`
-Agents escalate to more capable peers when stuck:
+Agents escalate to designated peers when stuck:
 
 ```
-Haiku agent attempts task
+Configured lower-cost agent attempts task
   → Fails or is uncertain
-  → sessions_send to Sonnet agent with context
-  → Sonnet resolves
+  → sessions_send to configured escalation agent with context
+  → Escalation agent resolves
   → Result returned to conversation
 ```
 
-Use model cost as the escalation dimension: Haiku → Sonnet → Opus.
+Use explicit config and send policy as the escalation authority.
 
 ---
 
@@ -476,7 +470,7 @@ Use model cost as the escalation dimension: Haiku → Sonnet → Opus.
 | Subagents with full tool access | Overprivileged, security risk | Minimal tools per spawn |
 | Deep spawn nesting (3+ levels) | Hard to debug, timeout risk | Sequential spawns from coordinator |
 | No send policy | Agents communicate in loops | Hub-and-spoke with allowlists |
-| All agents using Opus | Expensive for routine tasks | Match model to role complexity |
+| Ad hoc model aliases | Drift from audited config | Preserve explicit model refs |
 | Sandbox visibility: all by default | Subagents reading unrelated sessions | Default: own |
 | No agent descriptions | Coordinator can't route intelligently | Clear, distinct descriptions per agent |
 | Direct specialist-to-specialist comms | Bypasses coordinator, loses oversight | Route through the hub agent |
@@ -489,7 +483,7 @@ Use model cost as the escalation dimension: Haiku → Sonnet → Opus.
 {
   "agents": {
     "defaults": {
-      "model": "sonnet",
+      "model": "openai/gpt-5.5",
       "thinking": true,
       "timeoutSeconds": 600
     },
@@ -505,7 +499,7 @@ Use model cost as the escalation dimension: Haiku → Sonnet → Opus.
       "researcher": {
         "name": "Atlas",
         "emoji": "🦉",
-        "model": "opus",
+        "model": "openai/gpt-5.6-sol",
         "description": "Deep research and analysis",
         "skills": ["web-research"],
         "allowSpawn": [],

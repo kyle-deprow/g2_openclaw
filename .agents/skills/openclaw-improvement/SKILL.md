@@ -68,9 +68,9 @@ wc -c gateway/agent_config/TOOLS.md
 
 **Fix:** Move detailed content to a skill. Replace with a 1-2 line reference: "Read the `X` skill for details."
 
-## Process Monitor (replaced cron sentinels)
+## Process Monitor
 
-The gateway's built-in process monitor polls every 30s for Codex PID exit, then notifies OpenClaw via WebSocket. This replaced the earlier cron-based sentinel approach.
+The gateway's built-in process monitor polls every 30s for Codex PID exit, then notifies OpenClaw via WebSocket.
 
 Monitoring is read-only unless you have confirmed an infrastructure issue that
 requires operator intervention. Only the human operator or Codex touches G2,
@@ -138,8 +138,8 @@ this out of the default Codex path.
 
 ### OpenClaw forgets what it was doing
 **Cause:** New session started (previous context lost).
-**Fix:** Make the autoresearch skill self-contained — it reads
-`RESEARCH_LOG.md` and rebuilds context from MemPalace readonly retrieval with
+**Fix:** Make the autoresearch skill self-contained — it rebuilds context from
+canonical decision receipts and MemPalace readonly retrieval with
 `mempalace_status`, `mempalace_diary_read`, `mempalace_search`, and
 `mempalace_kg_query`. Every iteration should be independently resumable.
 
@@ -180,7 +180,7 @@ then restart supervision.
 
 When you observe a failure or suboptimal behavior:
 
-1. **Diagnose** — Check logs, session telemetry, git state, sentinel output
+1. **Diagnose** — Check logs, session telemetry, git state, and process-monitor output
 2. **Document** — Add the failure pattern + root cause + fix to the relevant skill (or create a new one)
 3. **Fix** — If it's a behavioral issue, update the skill. If it's a structural gate, update AGENTS.md (minimally).
 4. **Deploy** — Push config → restart daemon
@@ -294,7 +294,7 @@ after cleanup with `df -h /tmp /home/dev`.
 
 | Skill | Location | Purpose |
 |-------|----------|---------|
-| codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, sentinels, resume, debugging |
+| codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, detached runs, resume, debugging |
 | autoresearch | `gateway/agent_config/skills/autoresearch/` | Autonomous research loop protocol |
 | quantipy-methodology | `gateway/agent_config/skills/quantipy-methodology/` | Stage-agent preflight for loading live Quantipy AGENTS, skills, and Codex agent definitions |
 | *(this skill)* | `.agents/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |

@@ -163,7 +163,7 @@ const headerContainer: TextContainerProperty = {
   borderRdaius: 0, // SDK typo — must use this spelling
   paddingLength: 4,
   isEventCapture: 0,
-  content: "SpineSense — Patient Overview",
+  content: "OpenClaw — Session Overview",
 };
 
 const bodyContainer: TextContainerProperty = {

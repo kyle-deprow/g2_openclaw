@@ -45,7 +45,7 @@ param tags = {
   environment: 'dev'
   owner: 'platform-team'
   costCenter: 'CC-4200'
-  project: 'SpineSense'
+  project: 'G2OpenClaw'
 }
 ```
 
@@ -61,7 +61,7 @@ param tags = {
   environment: 'prod'
   owner: 'platform-team'
   costCenter: 'CC-4200'
-  project: 'SpineSense'
+  project: 'G2OpenClaw'
 }
 ```
 

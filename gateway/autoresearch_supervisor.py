@@ -44,7 +44,6 @@ from gateway.autoresearch_runner import (
     build_receipt_catalog,
     expected_instruction_manifest_sha256,
     load_autoresearch_policy,
-    normalize_autoresearch_state,
 )
 from gateway.autoresearch_runs import (
     DEFAULT_AUTORESEARCH_RUNS_ROOT,
@@ -1096,7 +1095,7 @@ class AutoresearchSupervisor:
     def _load_state(self) -> AutoresearchState:
         try:
             raw = json.loads(self.config.state_path.read_text(encoding="utf-8"))
-            return normalize_autoresearch_state(AutoresearchState.from_dict(raw))
+            return AutoresearchState.from_dict(raw)
         except FileNotFoundError as exc:
             raise SupervisorError(
                 f"missing autoresearch state file: {self.config.state_path}"

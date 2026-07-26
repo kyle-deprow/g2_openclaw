@@ -113,21 +113,21 @@ Use `none` for frequent checks — announce only when there's something to repor
 Let the agent decide when to escalate by instructing it in the prompt.
 
 ### `cron-model-override`
-Use cheaper models for routine scheduled tasks:
+Use explicit configured models for scheduled tasks:
 
 ```json
 {
   "daily-digest": {
     "schedule": { "at": "18:00" },
-    "model": "haiku",
+    "model": "openai/gpt-5-mini",
     "thinking": false,
     "prompt": "Summarize today's activity from memory files."
   }
 }
 ```
 
-Haiku without thinking is ideal for summarization and monitoring cron jobs.
-Reserve Sonnet/Opus for jobs requiring complex reasoning.
+Preserve repo-managed model selections unless an operator explicitly changes
+the scheduled job model.
 
 ### `cron-agent-binding`
 Bind cron jobs to specific agents in multi-agent setups:
@@ -437,7 +437,7 @@ Frequent silent monitoring with selective alerting:
     "jobs": {
       "service-health": {
         "schedule": { "every": "5m" },
-        "model": "haiku",
+        "model": "openai/gpt-5-mini",
         "delivery": "none",
         "prompt": "Check service endpoints. Only alert if something is down."
       }
@@ -482,7 +482,7 @@ Combine hooks and webhooks for escalation workflows:
 | Anti-Pattern | Why It's Wrong | Correct Approach |
 | --- | --- | --- |
 | Cron with delivery: announce every 5m | Spam the user's chat channel | Use delivery: none for frequent checks |
-| All cron jobs using Opus model | Expensive for routine tasks | Use Haiku for summaries, Sonnet for reasoning |
+| Ad hoc model aliases in cron jobs | Drift from audited config | Use explicit repo-managed model refs |
 | Cron in main session for independent tasks | Pollutes conversational context | Use isolated execution for standalone jobs |
 | No webhook auth in production | Arbitrary agent triggering | Set OPENCLAW_GATEWAY_TOKEN always |
 | Unique session key for related events | Agent loses context between events | Use mapped hooks with stable session keys |

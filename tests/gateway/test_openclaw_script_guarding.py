@@ -473,6 +473,17 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def _contains_forbidden_key(value: object, forbidden: set[str]) -> bool:
+    if isinstance(value, dict):
+        return any(
+            key in forbidden or _contains_forbidden_key(child, forbidden)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_key(item, forbidden) for item in value)
+    return False
+
+
 def _assert_missing_gateway_left_managed_destinations_untouched(
     env: dict[str, str],
     initial_config: str,
@@ -523,6 +534,11 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
 def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
+    assert "STALE_CODING_PROVIDER_KEYS" in script
+    assert '"github-copilot"' in script
+    assert '"copilot-proxy"' in script
+    assert '"copilot-cli"' in script
+    assert "sanitize_stale_coding_provider_keys" in script
     assert '  "autoresearch-pm"\n)' in script
     assert 'select(.id == "autoresearch-pm") | .model.primary' in script
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
@@ -564,8 +580,6 @@ def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Pa
         "openclaw plugins update codex",
         "openclaw plugins enable codex",
         "openclaw plugins inspect codex --json",
-        "openclaw plugins disable github-copilot",
-        "openclaw plugins disable copilot-proxy",
         "openclaw daemon install --force --port 18789 --json",
         f"make -C {REPO_ROOT} mempalace-install",
         f"mempalace {REPO_ROOT}/scripts/check-mempalace-health.py",
@@ -778,6 +792,51 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert "env-file-push-home" not in openclaw_log
     assert "env-file-state-dir" not in openclaw_log
     assert "env-file-config.json" not in openclaw_log
+
+
+def test_push_script_removes_stale_copilot_provider_keys_from_local_config(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    stale_config = {
+        "models": {
+            "providers": {
+                "github-copilot": {
+                    "enabled": True,
+                    "models": [{"id": "legacy", "reasoning": False}],
+                },
+                "copilot-proxy": {
+                    "enabled": True,
+                    "models": [{"id": "legacy", "reasoning": False}],
+                },
+                "copilot-cli": {
+                    "enabled": True,
+                    "models": [{"id": "legacy", "reasoning": False}],
+                },
+            }
+        },
+        "agents": {
+            "defaults": {
+                "models": {
+                    "github-copilot/legacy": {},
+                    "copilot-proxy/legacy": {},
+                    "copilot-cli/legacy": {},
+                },
+                "legacy": {"github-copilot": {"enabled": True}},
+            }
+        },
+    }
+    openclaw_config.write_text(json.dumps(stale_config), encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    published = json.loads(openclaw_config.read_text(encoding="utf-8"))
+    forbidden = {"github-copilot", "copilot-proxy", "copilot-cli"}
+    assert _contains_forbidden_key(published, forbidden) is False
+    assert set(published["models"]["providers"]) >= {"openai", "azure-oai-g2", "openrouter"}
+    assert "Sanitized stale coding-provider config keys" in result.stdout
 
 
 def test_push_script_codex_removes_stale_azure_node_options_from_gateway_unit(

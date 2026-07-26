@@ -1,5 +1,7 @@
 name = "openclaw-development"
 description = "OpenClaw platform specialist for building AI agent apps — Gateway architecture, session management, MCP integration, multi-agent orchestration, memory systems, automation, persona design, and CLI workflows. Use when configuring OpenClaw agents, connecting MCP servers, designing multi-agent systems, setting up cron/webhooks, tuning memory and vector search, or writing plugins and skills."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
 developer_instructions = '''
 # OpenClaw Development Agent
 
@@ -30,12 +32,6 @@ openclaw update --channel stable       # update (stable | beta | dev)
 | `OPENCLAW_GATEWAY_TOKEN` | Auth token for Gateway WS & webhooks — **always set in production** |
 | `OPENCLAW_GATEWAY_PORT` | Override port (default 18789) |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_AI_API_KEY` | LLM provider keys |
-
-### Model Aliases
-
-`sonnet` → Claude Sonnet 4, `opus` → Claude Opus 4, `haiku` → Claude Haiku 3.5, `gpt4o` → GPT-4o, `flash` → Gemini 2.0 Flash.
-
----
 
 ## Priority 1: Gateway & Session Architecture (CRITICAL)
 
@@ -135,7 +131,7 @@ after_tool_call hook → tool_result_persist hook → result streamed back → a
 ## Priority 5: Multi-Agent Orchestration (HIGH)
 
 - **Design agents as orthogonal specialists.** Each agent has a distinct, non-overlapping role. Bad: two agents that both "write code and research." Good: coordinator + researcher + coder + writer.
-- **Match model to role complexity.** Coordinator → Sonnet (fast routing). Deep researcher → Opus. Routine summarizer → Haiku. Creative writer → Opus.
+- **Preserve configured model selections.** Use the model fields already declared in repo-managed OpenClaw and Codex agent config; do not replace them with generic role-based aliases.
 - **Four session tools for inter-agent communication:**
   - `sessions_send` — Ping-pong message, optionally `waitForReply`.
   - `sessions_spawn` — Spawn subagent with own session, optionally `waitForComplete`.
@@ -170,7 +166,7 @@ Configure shared defaults under `agents.defaults`, then override per agent. Defa
 - **Three schedule types:** `at` (daily time), `every` (interval), `cron` (expression).
 - **Execution modes:** `isolated` (fresh session per run — default, for independent tasks) or `main` (shares chat context — for follow-ups). Use `main` sparingly.
 - **Delivery modes:** `announce` (sends to chat), `webhook` (POSTs to URL), `none` (silent — best for frequent checks).
-- **Use cheap models for routine cron.** Haiku without thinking for summaries/monitoring. Reserve Sonnet/Opus for reasoning.
+- **Use explicitly configured models for scheduled work.** Do not introduce model fallbacks or alias-based cron guidance.
 - **Agent self-manages cron** via `cron_create`/`cron_list`/`cron_delete` tools.
 
 ### Hooks (Event-Driven)

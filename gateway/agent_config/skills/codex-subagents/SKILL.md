@@ -35,7 +35,7 @@ repo config binds each stage to its model.
 
 | OpenClaw stage | Role |
 |---|---|
-| `context-curator` | Read-only MemPalace and `RESEARCH_LOG.md` context packet |
+| `context-curator` | Read-only MemPalace and canonical decision-receipt context packet |
 | `debater-microstructure` | Market mechanics theory |
 | `debater-data` | Data availability, coverage, and target construction |
 | `debater-skeptic` | Leakage, overfit, and cherry-picking pressure |
@@ -59,10 +59,17 @@ repo config binds each stage to its model.
 ## Detached Long Tasks
 
 Any hydration, backtest, notebook execution, or similarly long verification
-command must use `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
-<absolute-run-dir> -- ...` with bounded polling and the same durable run
-artifacts. The launcher places the worker in a dedicated transient user-systemd
-service with explicit memory bounds, outside the OpenClaw gateway cgroup.
+command must create a one-time private command file with
+`uv run gateway-cli autoresearch-create-command-file --output
+<absolute-command-file>` and then use
+`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
+<absolute-run-dir> --manifest <absolute-manifest.json> --command-file
+<absolute-command-file>` with bounded polling and the same durable run artifacts.
+The command-file helper reads the schema-v1 stdin protocol, creates the file
+atomically with `O_EXCL`/`O_NOFOLLOW` mode 0600, and the launcher rejects all
+positional command payloads. The launcher places the worker in a dedicated
+transient user-systemd service with explicit memory bounds, outside the OpenClaw
+gateway cgroup.
 It submits that unit with `systemd-run --no-block`, validates the unit start,
 and waits only for coherent startup metadata; it does not retain a
 `systemd-run --wait` client in the caller lifecycle. Once the launcher returns,
@@ -70,10 +77,9 @@ the caller may exit while the transient unit continues. To control an active
 run, resolve its exact unit with
 `systemctl --user whoami "$(cat <absolute-run-dir>/pid)"` and use
 `systemctl --user stop <unit>` when required;
-the worker records a signal stop as terminal failure and preserves the child's
-actual exit status: an ordinary uncaught `SIGTERM` commonly yields `143`, while
-a child that handles or delays `SIGTERM` may yield its own code (for example,
-`7`).
+the worker records a signal stop as terminal failure after a bounded
+TERM/grace/KILL sequence. An ordinary uncaught `SIGTERM` commonly yields `143`;
+a TERM-resistant child is killed after grace and records signal `9`.
 Direct foreground execution is invalid. If `systemd-run` or the launcher cannot be
 used, fail closed and report the infrastructure blocker without emitting a
 stage artifact. Foreground tool calls that can outlive the OpenClaw watchdog are
@@ -87,32 +93,16 @@ Requirements:
    `exit_code`, and `status.json`.
 3. Treat launcher `status.json` as a narrow process ledger: it emits only
    `running`, `succeeded`, or `failed`.
+   Any actionable blocker is inferred from bounded polling, logs, and recovery
+   evidence; it is not a literal launcher status.
 4. Poll status on a bounded interval; do not wait forever on a foreground tool
    call.
-5. Derive PM markers from that ledger and the logs. `[TASK:blocked]` is a
-   PM-level bounded-polling classification for actionable blockers; it is not a
-   literal launcher status.
-6. Emit concise progress and completion markers tied to the launched run.
+5. Derive concise PM status from that ledger and the logs.
+6. Emit concise progress and completion prose tied to the launched run.
 7. Clean up stale processes and stale run directories when they are no longer
    needed.
 8. Do not reduce scope just to avoid detached execution. If the task requires a
    long command, launch it safely and report the real status.
-
-## Status Markers
-
-Long-running tasks should report concise markers that the gateway can surface
-back to the G2 glasses:
-
-```text
-[TASK:started] <short objective>
-[TASK:progress] <current phase>
-[TASK:blocked] <blocking condition and needed action>
-[TASK:done] <summary and verification>
-```
-
-`[TASK:blocked]` comes from PM interpretation of bounded polling, logs, and
-recovery evidence. The launcher itself never writes `blocked` into
-`status.json`.
 
 ## Recovery
 

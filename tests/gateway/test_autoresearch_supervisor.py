@@ -936,7 +936,7 @@ def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
     assert "Never pass a raw unwrapped verification_result" in message
 
 
-def test_supervisor_normalizes_operator_precondition_implementation_state(
+def test_supervisor_preserves_operator_precondition_implementation_state(
     supervisor_env: SupervisorEnv,
 ) -> None:
     supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -944,7 +944,7 @@ def test_supervisor_normalizes_operator_precondition_implementation_state(
 
     state = _supervisor(supervisor_env, FakeOpenClaw())._load_state()
 
-    assert state.phase is Phase.DECISION_LOG
+    assert state.phase is Phase.IMPLEMENTATION
 
 
 def test_supervisor_does_not_wake_a_suspended_state(supervisor_env: SupervisorEnv) -> None:

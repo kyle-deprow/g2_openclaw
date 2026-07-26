@@ -321,7 +321,52 @@ The packing is handled via a WebAssembly module (`ehpk_pack.js` in the `ehpk/pkg
 
 ### `app.json`
 
-Created by `evenhub init`. This is the project metadata file required by `evenhub pack`. It describes the app for the EvenHub platform (app ID, name, description, etc.). The CLI uses `js-yaml` as a dependency and `zod` for validation, suggesting the config may be validated against a schema.
+Created by `evenhub init`. This is the project metadata file required by
+`evenhub pack`. The installed `@evenrealities/evenhub-cli@0.1.13` validates it
+with a Zod schema before packaging.
+
+The 0.1.13 template is:
+
+```json
+{
+  "package_id": "com.example.g2demo",
+  "edition": "202601",
+  "name": "G2 Demo",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.7",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "This app needs to access the network in order to ...",
+      "whitelist": ["https://example.com"]
+    },
+    {
+      "name": "location",
+      "desc": "This app needs to access the location in order to ..."
+    }
+  ],
+  "supported_languages": ["en"]
+}
+```
+
+Validation rules derived from the installed CLI:
+
+| Field | Rule |
+|---|---|
+| `package_id` | Required reverse-domain ID matching `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$`. |
+| `edition` | Required enum; 0.1.13 accepts only `"202601"`. |
+| `name` | Required string, max 20 characters. |
+| `version` | Required semver-like `x.y.z`. |
+| `min_app_version` | Required string. |
+| `min_sdk_version` | Required string. |
+| `entrypoint` | Required string. |
+| `permissions` | Required array of objects. Valid `name` values are `g2-microphone`, `phone-microphone`, `album`, `location`, `network`, and `camera`; every entry needs `desc` with 1-300 chars. `network` may also include `whitelist`. |
+| `supported_languages` | Required array; values are lowercased then validated as `en`, `de`, `fr`, `es`, `it`, `zh`, `ja`, or `ko`. |
+
+Do not use the older array-of-strings permission syntax with EvenHub CLI
+0.1.13; `evenhub pack` rejects it.
 
 ### Cached QR Settings
 

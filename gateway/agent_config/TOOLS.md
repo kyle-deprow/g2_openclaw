@@ -38,9 +38,8 @@ Key rules:
 - In `autoresearch-pm`, every completion-required child handoff must produce a
   non-empty normal assistant acknowledgement in the PM transcript, even while
   other required children are still pending.
-- Waiting acknowledgements must stay concise and truthful, for example
-  `[TASK:progress] <stage> completion recorded; waiting for <N> required
-  completion(s).`
+- Waiting acknowledgements must stay concise and truthful without using
+  autoresearch-only task markers.
 - While waiting on any required child, the PM must not use `sessions_yield`,
   `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
 - Repo-managed PM config denies `sessions_yield` exactly. Do not remove that
@@ -126,9 +125,7 @@ repo HEAD before delegating implementation so completion can be evaluated.
 |-------|--------|
 | Launch | `[TASK:running] <description> | started: <HH:MM UTC>` |
 | Complete | `[TASK:complete] <description> | duration: <Xm> | result: <1-line>` |
-| Incomplete | `[TASK:incomplete] <description> | session: <uuid>` |
 | Failure | `[TASK:failed] <description> | error: <1-line reason>` |
-| Timeout | `[TASK:timeout] <description> | exceeded 2h TTL` |
 
 These markers are for the dedicated PM session. G2 receives status only when a
 human asks `main` to run the deterministic status control command.

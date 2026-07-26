@@ -11,7 +11,7 @@ from gateway.session_history import extract_text, resolve_session_file
 
 logger = logging.getLogger(__name__)
 
-# Match [TASK:status] markers in assistant messages
+# Match reconnect status markers in assistant messages.
 _TASK_PATTERN = re.compile(
     r"\[TASK:(running|complete|failed)\]\s*(.+)",
     re.IGNORECASE,
@@ -23,14 +23,14 @@ class TaskInfo:
     """A parsed task status from the transcript."""
 
     status: str  # "running", "complete", "failed"
-    description: str  # Everything after the [TASK:status] marker
+    description: str  # Everything after the reconnect status marker
 
 
 def read_task_status(
     session_key: str,
     agent_id: str = "claw",
 ) -> TaskInfo | None:
-    """Read the most recent [TASK:*] marker from the session transcript.
+    """Read the most recent [TASK:running|complete|failed] marker from the transcript.
 
     Returns the latest TaskInfo or None if no task markers found.
     Reads from the tail of the JSONL file for performance.

@@ -585,12 +585,6 @@
     "entries": {
       "codex": {
         "enabled": true
-      },
-      "github-copilot": {
-        "enabled": false
-      },
-      "copilot-proxy": {
-        "enabled": false
       }
     }
   },
