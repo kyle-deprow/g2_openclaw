@@ -323,6 +323,9 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
     assert "unique-launch-payload" not in argv_text
     assert str(command_file) not in argv_text
     assert str(run_dir) in argv_text
+    assert "--property=MemoryHigh=20G" in argv_text
+    assert "--property=MemoryMax=24G" in argv_text
+    assert "--property=KillMode=control-group" in argv_text
 
 
 def test_run_long_task_does_not_misclassify_a_child_exit_124_as_timeout(tmp_path: Path) -> None:

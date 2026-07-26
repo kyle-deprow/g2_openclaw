@@ -115,7 +115,7 @@ if ! setsid systemd-run \
   --user --no-block --collect --unit="$unit_name" --service-type=exec \
   --setenv=PATH="$transient_path" --working-directory="$working_directory" \
   --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
-  --property=MemoryHigh=16G --property=MemoryMax=24G --property=KillMode=control-group \
+  --property=MemoryHigh=20G --property=MemoryMax=24G --property=KillMode=control-group \
   -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
   </dev/null >/dev/null 2>&1; then
   die "detached systemd unit could not be enqueued: $unit_name"

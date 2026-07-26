@@ -640,6 +640,9 @@ Implementation requirements:
   or inherited auth. If the launcher cannot be used, fail closed and report the
   infrastructure blocker without emitting a fix artifact. Record the run
   directory in stage notes and use its status files for progress and recovery.
+  The launcher gives the detached worker a `MemoryHigh=20G` soft limit and a
+  `MemoryMax=24G` hard limit; these are separate from the OpenClaw gateway's
+  native-crash containment limits.
 
 ## 5. Verify
 

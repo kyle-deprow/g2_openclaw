@@ -180,5 +180,9 @@ positionally. Do not pass API keys, tokens, passwords, client secrets, or
 private keys as command arguments; use credential files, environment
 references, or inherited authentication.
 
+The detached worker uses a `MemoryHigh=20G` soft limit and a `MemoryMax=24G`
+hard limit. These limits apply only to the long-running research command and
+are separate from the OpenClaw gateway's own native-crash containment limits.
+
 Never run both preparation procedures for the same campaign. Archive
 incompatible state before initialization.
