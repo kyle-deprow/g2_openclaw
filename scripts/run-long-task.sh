@@ -66,13 +66,15 @@ uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launc
 uv_bin_dir="$(dirname -- "$uv_path")"
 transient_path="${PATH}:${uv_bin_dir}"
 timeout_term_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+runtime_python=(uv run --project "$repo_root" --directory "$repo_root" python -m gateway.autoresearch_runs)
 
 if [[ -L "$run_dir" || -L "$manifest" || ( -n "$command_file" && -L "$command_file" ) ]]; then
   die "run directory, manifest, and command input must not be symlinks"
 fi
 
 umask 077
-uv run python -m gateway.autoresearch_runs prepare-with-command-file \
+"${runtime_python[@]}" prepare-with-command-file \
   --manifest "$manifest" \
   --run-dir "$run_dir" \
   --runs-root "$runs_root" \
@@ -123,7 +125,7 @@ fi
 
 for _ in $(seq 1 40); do
   if [[ -s "$startup_marker_file" ]]; then
-    if uv run python -m gateway.autoresearch_runs validate-startup \
+    if "${runtime_python[@]}" validate-startup \
       --run-dir "$run_dir" --runs-root "$runs_root" --marker "$startup_marker_file" \
       >/dev/null 2>&1; then
       exit 0

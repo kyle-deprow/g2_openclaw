@@ -22,7 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_LONG_TASK = REPO_ROOT / "scripts" / "run-long-task.sh"
 
 
-def _manifest(run_dir: Path, command: tuple[str, ...]) -> dict[str, object]:
+def _manifest(
+    run_dir: Path,
+    command: tuple[str, ...],
+    *,
+    working_directory: Path = REPO_ROOT,
+) -> dict[str, object]:
     return {
         "schema_version": 1,
         "iteration": 3,
@@ -32,7 +37,7 @@ def _manifest(run_dir: Path, command: tuple[str, ...]) -> dict[str, object]:
         "state_reference_sha256": "a" * 64,
         "instruction_manifest_sha256": "b" * 64,
         "run_directory": str(run_dir),
-        "working_directory": str(REPO_ROOT),
+        "working_directory": str(working_directory),
         "command_sha256": command_sha256(command),
         "expected_artifact_path": None,
         "timeout_seconds": None,
@@ -90,6 +95,50 @@ def test_run_long_task_writes_a_secret_free_terminal_record(tmp_path: Path) -> N
     assert status["failure_classification"] is None
     assert "-lc" not in (run_dir / "manifest.json").read_text(encoding="utf-8")
     assert not command_file.exists()
+
+
+def test_run_long_task_binds_control_plane_to_g2_project_from_target_worktree(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    target_worktree = tmp_path / "quantipy-worktree"
+    target_worktree.mkdir()
+    command = (
+        sys.executable,
+        "-c",
+        f"import os; assert os.getcwd() == {str(target_worktree)!r}",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(run_dir, command, working_directory=target_worktree)),
+        encoding="utf-8",
+    )
+    _write_command_file(command_file, command)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=target_worktree,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    status = _wait_for_terminal_status(run_dir)
+    assert status["state"] == RunState.SUCCEEDED.value
 
 
 def test_run_long_task_preserves_an_unattributed_kill_as_a_process_error(tmp_path: Path) -> None:

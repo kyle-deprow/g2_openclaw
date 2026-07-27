@@ -14,7 +14,8 @@ startup_marker_file="$3"
 unit_name="$4"
 [[ "$run_dir" = /* && "$runs_root" = /* ]] || die "worker paths must be absolute"
 
-runtime_python=(uv run python -m gateway.autoresearch_runs)
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+runtime_python=(uv run --project "$repo_root" --directory "$repo_root" python -m gateway.autoresearch_runs)
 child_pid=""
 monitor_pid=""
 timeout_pid=""
