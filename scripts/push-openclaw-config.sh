@@ -1255,6 +1255,22 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
 done
 echo "Local workspace files such as USER.md and IDENTITY.md were left untouched."
 
+# Native Codex resolves agent definitions from the app-server's scoped
+# CODEX_HOME, not from the OpenClaw workspace. Keep that runtime source
+# synchronized for the PM and every configured stage agent.
+CODEX_NATIVE_RUNTIME_AGENT_IDS=("autoresearch-pm" "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}")
+echo "Copying native Codex stage agents to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
+for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
+  CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
+  CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
+  mkdir -p "${CODEX_RUNTIME_AGENTS_DST}"
+  for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
+    cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
+  done
+  validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"
+  echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_AGENTS_DST}"
+done
+
 # Clean stale copies from wrong bootstrap locations without touching local
 # per-workspace files such as USER.md, IDENTITY.md, or other notes.
 STALE_BOOTSTRAP_DIRS=(

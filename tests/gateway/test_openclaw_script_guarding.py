@@ -814,6 +814,13 @@ def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspac
             source = REPO_ROOT / ".codex/agents" / f"{agent_id}.toml"
             assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     assert not (openclaw_home / "workspace/.codex/agents").exists()
+    for agent_id in ["autoresearch-pm", *STAGE_AGENT_IDS]:
+        agents_dir = openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
+        assert agents_dir.is_dir()
+        for stage_id in STAGE_AGENT_IDS:
+            copied = agents_dir / f"{stage_id}.toml"
+            source = REPO_ROOT / ".codex/agents" / f"{stage_id}.toml"
+            assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
 def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> None:
@@ -823,6 +830,8 @@ def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> No
     assert "validate_codex_native_stage_agents_dir" in script
     assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"' in script
     assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"' in script
+    assert '"${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"' in script
+    assert 'validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"' in script
     for agent_id in STAGE_AGENT_IDS:
         assert f'"{agent_id}"' in script
 
