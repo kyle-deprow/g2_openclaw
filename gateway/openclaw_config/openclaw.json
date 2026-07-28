@@ -172,21 +172,8 @@
         "thinkingDefault": "high",
         "tools": {
           "deny": [
+            "sessions_spawn",
             "sessions_yield"
-          ]
-        },
-        "subagents": {
-          "allowAgents": [
-            "context-curator",
-            "debater-microstructure",
-            "debater-data",
-            "debater-skeptic",
-            "debater-theory",
-            "debater-implementation",
-            "consensus-arbiter",
-            "implementer",
-            "reviewer",
-            "fixer"
           ]
         }
       },
@@ -393,15 +380,6 @@
           "quantipy-methodology",
           "quantipy-data-contract"
         ],
-        "subagents": {
-          "allowAgents": [
-            "debater-microstructure",
-            "debater-data",
-            "debater-skeptic",
-            "debater-theory",
-            "debater-implementation"
-          ]
-        },
         "tools": {
           "deny": [
             "mempalace__mempalace_add_drawer",

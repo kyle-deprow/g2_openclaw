@@ -6,34 +6,37 @@ description:
 
 # Codex Subagent Delegation
 
-OpenClaw is the PM and conversation surface. Codex subagents are the execution
-surface for target-repo research, implementation, review, and fixes.
+OpenClaw is the PM and conversation surface. Native Codex `spawn_agent` is the
+execution surface for target-repo research, implementation, review, and fixes.
+OpenClaw `sessions_spawn` is not a valid substitute for autoresearch stages.
 
 ## Delegation Contract
 
 Every delegated Codex task needs:
 
 1. Target repo and working directory.
-2. OpenClaw stage agent name.
+2. Native Codex stage agent name from `.codex/agents/*.toml`.
 3. Exact task objective.
 4. Files or directories to inspect first.
 5. Verification commands.
 6. Expected return summary.
 
-Use Codex subagents only when a task benefits from isolated context or parallel
-work. For small edits in this repo, a single Codex turn is usually enough.
+Use native Codex stage agents only when a task benefits from isolated context
+or parallel work. For small edits in this repo, a single Codex turn is usually
+enough.
 
 ## Quantipy Loop
 
-Use the OpenClaw stage agents from the `autoresearch` skill. Existing target
-repo Codex instructions can inform prompt content, but the stage names below
-are authoritative:
+Use the native Codex stage agents from the `autoresearch` skill. Existing
+target repo Codex instructions can inform prompt content, but the stage names
+below are authoritative:
 
-Spawn these configured agent IDs directly. Do not use generic/default subagents,
-inherited models, or per-spawn model overrides for autoresearch stages; the
-repo config binds each stage to its model.
+Call `spawn_agent` with these configured agent names directly. Do not use
+OpenClaw `sessions_spawn`, generic/default agents, inherited models, or
+per-spawn model overrides for autoresearch stages; the repo config and native
+Codex TOMLs bind each stage to its model.
 
-| OpenClaw stage | Role |
+| Native Codex stage | Role |
 |---|---|
 | `context-curator` | Read-only MemPalace and canonical decision-receipt context packet |
 | `debater-microstructure` | Market mechanics theory |
@@ -48,11 +51,11 @@ repo config binds each stage to its model.
 
 ## Implementation/Review/Fix Pattern
 
-1. Spawn the configured `implementer` agent with a narrow prompt and required tests.
+1. Call native `spawn_agent` for the configured `implementer` agent with a narrow prompt and required tests.
 2. Wait for completion and inspect the returned summary, changed files, and
    verification output.
-3. Spawn exactly one configured `reviewer` agent against the diff.
-4. If findings exist, spawn the configured `fixer` agent with only those findings.
+3. Call native `spawn_agent` for exactly one configured `reviewer` agent against the diff.
+4. If findings exist, call native `spawn_agent` for the configured `fixer` agent with only those findings.
 5. Repeat review/fix until the reviewer reports no must-fix issues.
 6. Run final verification from the parent context.
 

@@ -18,7 +18,7 @@ and repeat until the human says `stop`.
 Durable research memory is MemPalace only. Do not use `memory_search`,
 `memory_get`, flat daily memory files, OpenClaw memory flush, or prompt-only
 loop memory for research continuity. Only the PM loads the write-capable
-`mempalace` skill; all stage agents load `mempalace-readonly`.
+`mempalace` skill; all native Codex stage agents remain read-only.
 
 The owner-only supervisor polls the authoritative state and OpenClaw task
 records every 60 seconds. Its default stale-task threshold is 15 minutes so
@@ -306,16 +306,18 @@ context-curator
 - The consensus arbiter must run on `openai/gpt-5.6-sol` with high reasoning.
 - The reviewer is exactly one stage: `reviewer` on `openai/gpt-5.6-sol` with high
   reasoning. Do not run a reviewer panel.
-- Spawn by configured agent ID only. Do not use generic/default agents,
+- Delegate by native Codex `spawn_agent` using the configured stage agent name
+  only. Do not use OpenClaw `sessions_spawn`, generic/default agents,
   inherited parent models, or per-spawn model overrides for autoresearch stages.
 - Do not silently switch provider, runtime, model, or reasoning level. If the
   configured route is unavailable, fail closed and report the blocker.
 
 ## Stage Agents
 
-Use the configured agents by ID. Their model bindings are part of the repo
-config and are validated by the push script. Prior target-repo Codex roles may
-inform prompt content, but they are not OpenClaw stage names.
+Use native Codex `spawn_agent` with the configured agents by name. Their model
+bindings are part of the repo config and `.codex/agents/*.toml`, and are
+validated by the push script and runner. Prior target-repo Codex roles may
+inform prompt content, but they are not autoresearch stage names.
 
 | Stage | Agent | Model intent |
 |-------|-------|--------------|
@@ -330,8 +332,8 @@ inform prompt content, but they are not OpenClaw stage names.
 | Review | `reviewer` | `openai/gpt-5.6-sol`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
 
-Every stage agent except `autoresearch-pm` loads `mempalace-readonly`,
-`quantipy-methodology`, and `quantipy-data-contract`. The methodology skill
+Every stage agent except `autoresearch-pm` stays read-only for MemPalace and
+uses `quantipy-methodology` and `quantipy-data-contract`. The methodology skill
 routes stage agents to current Quantipy source-of-truth files from
 `/home/dev/repos/quantipy`
 (`AGENTS.md`, relevant `.agents/skills`, and relevant `.codex/agents`) before
@@ -365,14 +367,14 @@ guardrails exist only to keep execution clean:
   or route status, timestamps, and any decisive log lines. Then wait for the
   human operator or Codex. The PM never stops or relaunches the loop, repairs
   shared infrastructure, promotes shared-infrastructure patches, or touches G2.
-- Every spawned stage must use a deterministic unique label derived from
+- Every spawned native Codex stage must use a deterministic unique label derived from
   persisted state, never a generic reused stage name. Format:
   `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
   iteration/stage/round/attempt tuple must map to exactly one label, and any
   retry or recovery that changes round or attempt must change the label.
-  OpenClaw session labels remain globally occupied after a task reaches a
-  terminal state; uniqueness is therefore checked against the complete task
-  ledger, not only currently running tasks.
+  Codex-native task rows remain part of the complete task ledger after a task
+  reaches a terminal state; uniqueness is therefore checked against the
+  complete task ledger, not only currently running tasks.
 - An owner-session stop, restart, supervisor recovery wake, gateway restart,
   or interrupted dispatch is a retry even when the authoritative state file
   still names the same phase. Before spawning, parse every prior matching
@@ -382,10 +384,10 @@ guardrails exist only to keep execution clean:
   the announcement, do not silently rename a task after spawning, and retry
   with the next unused attempt label while preserving the terminal artifact.
 - On recovery, reconcile every expected label against the task ledger and its
-  child-session transcript before waiting. Consume terminal outputs even if the
-  completion announcement was missed. Relaunch only a task with no recoverable
-  terminal output, using the next attempt label; never wait indefinitely for an
-  announcement from a terminal task.
+  native Codex thread transcript before waiting. Consume terminal outputs even
+  if the completion announcement was missed. Relaunch only a task with no
+  recoverable terminal output, using the next attempt label; never wait
+  indefinitely for an announcement from a terminal task.
 - `gateway-cli autoresearch-next` fails closed if the Quantipy worktree contains
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only
@@ -478,13 +480,12 @@ PM and stage-agent conduct:
 
 ### Completion Delivery Protocol
 
-OpenClaw `2026.7.1-2` records a delivery failure if a completion-required child
-handoff lands without a visible PM assistant reply, even when the child's
-structured output exists. Treat that failure as a hard infrastructure blocker
-for recovery; a child completion is not accepted merely because its trajectory
-has output.
+OpenClaw `2026.7.1-2` with `@openclaw/codex` `2026.7.1-1` exposes native
+Codex `spawn_agent` and forbids substituting OpenClaw `sessions_spawn` for
+autoresearch stages. Treat any attempt to use `sessions_spawn` as a hard
+infrastructure blocker for recovery.
 
-For every completion-required child handoff, `autoresearch-pm` must emit a
+For every completion-required native Codex child handoff, `autoresearch-pm` must emit a
 non-empty normal assistant acknowledgement in its own transcript, including
 while waiting for remaining required children. Waiting acknowledgements must be
 concise and truthful, for example: `<stage> completion recorded; waiting for
@@ -494,9 +495,10 @@ While any required child completion is still outstanding, the PM must not use
 `sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
 handoff. Do not substitute the message tool or send an autonomous update to G2;
 these acknowledgements are internal PM transcript replies only.
-Repo-managed PM config denies `sessions_yield` exactly so this fails closed in
-tool policy. Do not broaden that PM deny-list to `sessions_spawn` or MemPalace
-write tools; the PM must still spawn stages and write final experiment records.
+Repo-managed PM config denies `sessions_spawn` and `sessions_yield` exactly so
+this fails closed in tool policy. Do not broaden that PM deny-list to MemPalace
+write tools; the PM must still use native Codex `spawn_agent` and write final
+experiment records.
 
 Once all required children arrive, the PM must persist the authoritative
 artifact and emit a non-empty completion summary. Do not silently wait between
@@ -518,7 +520,7 @@ Do once before the first iteration:
 
 ## 1. Context Curator
 
-Spawn `context-curator` with read-only MemPalace access to produce a compact
+Call native `spawn_agent` for `context-curator` with read-only MemPalace access to produce a compact
 packet for the debate:
 
 - Current best metric, baseline, and last 10 experiment outcomes.
@@ -537,10 +539,10 @@ single next theory.
 
 ## 2. Five-Agent Debate
 
-Spawn the five configured debate agent IDs with the same context packet and ask
-each for one theory, a vote on the strongest theory family, and objections to
-likely failure modes. Do not substitute a generic debater or override the
-configured model.
+Call native Codex `spawn_agent` for the five configured debate agent names with
+the same context packet and ask each for one theory, a vote on the strongest
+theory family, and objections to likely failure modes. Do not substitute a
+generic debater or override the configured model.
 
 Every proposal must include:
 
@@ -573,7 +575,7 @@ Quantipy constraints:
 
 ## 3. Consensus
 
-Spawn `consensus-arbiter` to determine whether one theory has a 3-of-5
+Call native Codex `spawn_agent` for `consensus-arbiter` to determine whether one theory has a 3-of-5
 majority. Required output:
 
 - Winner, majority count, dissenting positions, or `NO_CONSENSUS`.
@@ -608,7 +610,7 @@ experiment is completed and decided.
 
 ## 4. Implement
 
-Spawn `implementer` with the final implementation brief.
+Call native Codex `spawn_agent` for `implementer` with the final implementation brief.
 
 Implementation requirements:
 
@@ -890,8 +892,8 @@ If a bug signal appears, send a targeted fix to `fixer`, then rerun verification
 
 ## 6. Single Reviewer
 
-Spawn exactly one `reviewer` on its configured `openai/gpt-5.6-sol` high-reasoning
-binding.
+Call native Codex `spawn_agent` for exactly one `reviewer` on its configured
+`openai/gpt-5.6-sol` high-reasoning binding.
 
 Reviewer focus:
 

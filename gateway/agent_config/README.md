@@ -9,8 +9,10 @@ The push script copies `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and `BOOTSTRAP.md`
 to every configured agent workspace derived from
 `gateway/openclaw_config/openclaw.json`. The `main` G2 interface agent lands in
 the default OpenClaw workspace at `~/.openclaw/workspace`; `autoresearch-pm`
-and stage agents default to `~/.openclaw/workspace-{id}` unless an explicit
-`.workspace` is configured. The script does not copy or overwrite local
+and audited stage-agent workspaces default to `~/.openclaw/workspace-{id}`
+unless an explicit `.workspace` is configured. Autoresearch launches stages
+through native Codex `spawn_agent` using `.codex/agents/*.toml`, not OpenClaw
+`sessions_spawn`. The script does not copy or overwrite local
 workspace files such as `USER.md`, `IDENTITY.md`, or personal notes.
 
 ## Files

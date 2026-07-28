@@ -2,9 +2,9 @@
 
 ## Primary: OpenClaw Codex Runtime
 
-Delegate coding, research, and review work through OpenClaw's Codex runtime and
-subagent mechanism. The repo-managed config enables the `codex` plugin and pins
-the OpenAI provider runtime to `codex`.
+Delegate coding, research, and review work through OpenClaw's Codex runtime
+using native Codex `spawn_agent`. The repo-managed config enables the `codex`
+plugin and pins the OpenAI provider runtime to `codex`.
 
 Auth requirement for the host:
 
@@ -17,7 +17,8 @@ Model references use configured OpenAI IDs such as `openai/gpt-5.4`,
 
 Key rules:
 
-- Use OpenClaw subagents for target-repo coding and review work.
+- Use native Codex `spawn_agent` for target-repo coding and review work.
+- Never use OpenClaw `sessions_spawn` as a substitute for autoresearch stages.
 - The `main` agent is the G2 human interface only. It must not load
   `mempalace` or `autoresearch`, spawn research stages, mutate MemPalace, or
   receive autonomous completion announcements.
@@ -27,11 +28,12 @@ Key rules:
 - `main` handles human G2 requests only by running:
   `cd /home/dev/repos/g2_openclaw && uv run python -m
   gateway.autoresearch_control wake`, `status`, or `stop`.
-- Use `context-curator`, the five `debater-*` agents, `consensus-arbiter`,
-  `implementer`, `reviewer`, and `fixer` for the autoresearch stages described
-  in the autoresearch skill.
-- Spawn configured stage agents by ID. Do not spawn generic/default agents for
-  autoresearch stages, and do not pass ad hoc model overrides.
+- Use the native Codex agents `context-curator`, the five `debater-*` agents,
+  `consensus-arbiter`, `implementer`, `reviewer`, and `fixer` for the
+  autoresearch stages described in the autoresearch skill.
+- Call `spawn_agent` with the configured stage agent name. Do not spawn
+  generic/default agents for autoresearch stages, and do not pass ad hoc model
+  overrides.
 - Run long implementation and review tasks in the background.
 - Do not silently fall back to another runtime, provider, or model if Codex auth
   or runtime selection fails.
@@ -42,10 +44,10 @@ Key rules:
   autoresearch-only task markers.
 - While waiting on any required child, the PM must not use `sessions_yield`,
   `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
-- Repo-managed PM config denies `sessions_yield` exactly. Do not remove that
-  guard or add PM denies for `sessions_spawn`, MemPalace write tools, or
-  `mempalace__*`; the PM still must spawn stages and write final MemPalace
-  experiment records.
+- Repo-managed PM config denies `sessions_spawn` and `sessions_yield` exactly.
+  Do not remove that guard or add PM denies for MemPalace write tools or
+  `mempalace__*`; the PM still must use native Codex `spawn_agent` and write
+  final MemPalace experiment records.
 - These acknowledgements are internal PM transcript replies only. Do not use
   the message tool to send autonomous updates to G2.
 - After the last required child arrives, the PM must persist the authoritative
@@ -69,7 +71,7 @@ To inspect target repo files, use `exec` with read-only commands such as `ls`,
 `cat`, `rg`, `git log`, and `pytest`.
 
 Critical: never use `exec` to create, modify, or delete code files in target
-repos. Implementation changes go through OpenClaw Codex subagents so the work
+repos. Implementation changes go through native Codex stage agents so the work
 has a plan, verification, commits, and recoverable history.
 
 OpenClaw built-in memory tools (`memory_search`, `memory_get`) are denied by

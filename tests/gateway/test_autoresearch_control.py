@@ -717,6 +717,74 @@ def test_status_is_read_only_and_reports_only_owner_scoped_tasks(
     assert all(method != "sessions.delete" for method, _ in fake.rpc_calls)
 
 
+def test_status_reports_codex_native_subagent_tasks_under_pm_owner(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "native-review",
+                "id": "native-review",
+                "status": "running",
+                "runtime": "subagent",
+                "taskKind": "codex-native",
+                "runId": "codex-thread:review-1",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            },
+            {
+                "taskId": "other-native",
+                "status": "running",
+                "runtime": "subagent",
+                "taskKind": "codex-native",
+                "runId": "codex-thread:other",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": "agent:other:session",
+                "ownerKey": "agent:other:session",
+            },
+        ]
+    )
+
+    status = AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService([], active=True),
+    ).status()
+
+    assert [task.task_id for task in status.tasks] == ["native-review"]
+
+
+def test_stop_cancels_codex_native_subagent_tasks_under_pm_owner(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "native-review",
+                "id": "native-review",
+                "status": "running",
+                "runtime": "subagent",
+                "taskKind": "codex-native",
+                "runId": "codex-thread:review-1",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            }
+        ]
+    )
+
+    result = AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService([]),
+    ).stop()
+
+    assert result.cancelled_task_ids == ("native-review",)
+
+
 def test_status_tolerates_statusless_stale_owner_session(
     control_env: tuple[ControlConfig, Path],
 ) -> None:

@@ -22,6 +22,7 @@ REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 ENV_FILE="${OPENCLAW_PUSH_ENV_FILE:-${REPO_ROOT}/gateway/openclaw_config/.env}"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
+CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"
 MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
 SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
@@ -50,7 +51,8 @@ MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 MEMPALACE_FULL_AGENT_IDS=(
   "autoresearch-pm"
 )
-PM_SILENT_HANDOFF_DENY_TOOL_IDS=(
+PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS=(
+  "sessions_spawn"
   "sessions_yield"
 )
 MEMPALACE_READONLY_AGENT_IDS=(
@@ -65,6 +67,7 @@ MEMPALACE_READONLY_AGENT_IDS=(
   "reviewer"
   "fixer"
 )
+CODEX_NATIVE_STAGE_AGENT_IDS=("${MEMPALACE_READONLY_AGENT_IDS[@]}")
 MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_add_drawer"
   "mempalace_check_duplicate"
@@ -584,7 +587,7 @@ MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_policy_ids_json)"
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON="$(build_mempalace_obsolete_mutation_alias_ids_json)"
 MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
 MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
-PM_SILENT_HANDOFF_DENY_IDS_JSON="$(build_string_array_json "${PM_SILENT_HANDOFF_DENY_TOOL_IDS[@]}")"
+PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON="$(build_string_array_json "${PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS[@]}")"
 
 if [[ ! -f "${REPO_CONFIG}" ]]; then
   echo "ERROR: Repo config not found at ${REPO_CONFIG}" >&2
@@ -895,7 +898,7 @@ if [[ -n "${REPO_AGENT_MEMORY_FLUSH}" ]]; then
 fi
 
 # ── Force-set managed agent roster ──────────────────────────────────────────
-# Autoresearch stage models, skills, subagent allowlists, and tool denies are
+# Autoresearch stage models, skills, native Codex delegation guards, and tool denies are
 # repo-owned. Replace the local roster so hand edits in ~/.openclaw cannot alter
 # the loop topology or silently change stage models.
 REPO_AGENTS_LIST=$(jq '.agents.list // empty' "${REPO_CONFIG}")
@@ -1007,13 +1010,13 @@ echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model
 # Dotted names are Codex-facing display/docs ids only, and historical bare/mcp__
 # aliases are rejected instead of accepted as compatibility forms.
 if ! echo "${MERGED}" | jq -e \
-  --argjson pm_silent_handoff_denies "${PM_SILENT_HANDOFF_DENY_IDS_JSON}" \
+  --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
   --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" \
   --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
   def denies: (.tools.deny // []);
   def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
-  ([.agents.list[] | select(.id == "autoresearch-pm") | select(denies == $pm_silent_handoff_denies)] | length) == 1
+  ([.agents.list[] | select(.id == "autoresearch-pm") | select(denies == $pm_native_codex_denies)] | length) == 1
   and
   ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
   and (([
@@ -1026,7 +1029,7 @@ if ! echo "${MERGED}" | jq -e \
   echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
   echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
   echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       autoresearch-pm must deny exactly sessions_yield while retaining MemPalace mutator access for final experiment logging." >&2
+  echo "       autoresearch-pm must deny exactly sessions_spawn and sessions_yield while retaining MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
 
@@ -1043,7 +1046,7 @@ if ! echo "${MERGED}" | jq -e \
   --arg offline "${HF_HUB_OFFLINE}" \
   --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
   --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" \
-  --argjson pm_silent_handoff_denies "${PM_SILENT_HANDOFF_DENY_IDS_JSON}" \
+  --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
   --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
   --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
   def denies: (.tools.deny // []);
@@ -1095,7 +1098,8 @@ if ! echo "${MERGED}" | jq -e \
     and .model.primary == $pm
     and .thinkingDefault == "high"
     and ((.skills // []) | contains(["mempalace", "autoresearch"]))
-    and denies == $pm_silent_handoff_denies
+    and denies == $pm_native_codex_denies
+    and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
   and ([.agents.list[] | select(
     .id == "main"
@@ -1106,6 +1110,7 @@ if ! echo "${MERGED}" | jq -e \
     and (((.skills // []) | index("mempalace-readonly")) == null)
     and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
+  and ([.agents.list[] | select((.subagents.allowAgents? // []) | length > 0)] | length) == 0
   and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
   and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("autoresearch")) != null)] | length) == 0
   and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
@@ -1119,10 +1124,10 @@ if ! echo "${MERGED}" | jq -e \
   ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, autoresearch-pm model/skills/sessions_yield deny, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface split, autoresearch-pm model and sessions_yield deny, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface split, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
@@ -1151,6 +1156,59 @@ workspace_dir_for_target() {
     printf '%s/%s\n' "${OPENCLAW_PUSH_HOME}" "${workspace_target}"
   fi
 }
+
+workspace_has_autoresearch_agent() {
+  local agents_csv="$1"
+  local agent
+  IFS=',' read -ra agent_names <<< "${agents_csv}"
+  for agent in "${agent_names[@]}"; do
+    if [[ "${agent}" != "main" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_codex_native_stage_agents_dir() {
+  local agents_dir="$1"
+  "${PYTHON_BIN}" - "${agents_dir}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+agents_dir = Path(sys.argv[1])
+expected = {
+    "context-curator": "gpt-5.4",
+    "debater-microstructure": "gpt-5.5",
+    "debater-data": "gpt-5.6-terra",
+    "debater-skeptic": "gpt-5.5",
+    "debater-theory": "gpt-5.4",
+    "debater-implementation": "gpt-5.4",
+    "consensus-arbiter": "gpt-5.6-sol",
+    "implementer": "gpt-5.4",
+    "reviewer": "gpt-5.6-sol",
+    "fixer": "gpt-5.4",
+}
+if not agents_dir.is_dir():
+    raise SystemExit(f"missing native Codex agents directory: {agents_dir}")
+for name, model in expected.items():
+    path = agents_dir / f"{name}.toml"
+    if not path.is_file():
+        raise SystemExit(f"missing native Codex stage agent: {path}")
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"invalid native Codex stage agent TOML {path}: {exc}") from exc
+    if data.get("name") != name:
+        raise SystemExit(f"native Codex stage agent {path} must be named {name}")
+    if data.get("model") != model:
+        raise SystemExit(f"native Codex stage agent {name} must use {model}")
+    if data.get("model_reasoning_effort") != "high":
+        raise SystemExit(f"native Codex stage agent {name} must use high reasoning")
+PY
+}
+
+validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"
 
 mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
   def workspace_target:
@@ -1185,6 +1243,14 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
   for FILE in "${BOOTSTRAP_FILES[@]}"; do
     cp "${REPO_ROOT}/gateway/agent_config/${FILE}" "${BOOTSTRAP_DST}/${FILE}"
   done
+  if workspace_has_autoresearch_agent "${AGENTS}"; then
+    CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
+    mkdir -p "${CODEX_AGENTS_DST}"
+    for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
+      cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_AGENTS_DST}/${AGENT_ID}.toml"
+    done
+    validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"
+  fi
   echo "  ${AGENTS} → ${BOOTSTRAP_DST} (${BOOTSTRAP_FILES[*]})"
 done
 echo "Local workspace files such as USER.md and IDENTITY.md were left untouched."

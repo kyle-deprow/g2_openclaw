@@ -1,6 +1,7 @@
 """Contract tests for repo-managed OpenClaw runtime documentation."""
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,19 @@ AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
 CODEX_SUBAGENTS = AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md"
 CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
+CODEX_AGENTS = REPO_ROOT / ".codex" / "agents"
+NATIVE_CODEX_STAGE_MODELS = {
+    "context-curator": "gpt-5.4",
+    "debater-microstructure": "gpt-5.5",
+    "debater-data": "gpt-5.6-terra",
+    "debater-skeptic": "gpt-5.5",
+    "debater-theory": "gpt-5.4",
+    "debater-implementation": "gpt-5.4",
+    "consensus-arbiter": "gpt-5.6-sol",
+    "implementer": "gpt-5.4",
+    "reviewer": "gpt-5.6-sol",
+    "fixer": "gpt-5.4",
+}
 
 
 def _runtime_docs() -> tuple[Path, ...]:
@@ -23,6 +37,34 @@ def _runtime_docs() -> tuple[Path, ...]:
 @pytest.mark.parametrize("name", ("AGENTS.md", "BOOTSTRAP.md", "SOUL.md", "TOOLS.md"))
 def test_bootstrap_file_stays_within_openclaw_character_limit(name: str) -> None:
     assert len((AGENT_CONFIG / name).read_text(encoding="utf-8")) <= 20_000
+
+
+def test_native_codex_stage_agents_match_autoresearch_model_contract() -> None:
+    for agent_name, model in NATIVE_CODEX_STAGE_MODELS.items():
+        path = CODEX_AGENTS / f"{agent_name}.toml"
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+
+        assert data["name"] == agent_name
+        assert data["model"] == model
+        assert data["model_reasoning_effort"] == "high"
+
+
+def test_runtime_docs_require_native_codex_stage_delegation() -> None:
+    docs = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            AGENT_CONFIG / "AGENTS.md",
+            AGENT_CONFIG / "SOUL.md",
+            AGENT_CONFIG / "TOOLS.md",
+            AUTORESEARCH,
+            CODEX_SUBAGENTS,
+        )
+    )
+    normalized = " ".join(docs.split())
+
+    assert "native Codex `spawn_agent`" in normalized
+    assert "OpenClaw `sessions_spawn` is not a valid substitute" in normalized
+    assert "PM config denies `sessions_spawn` and `sessions_yield`" in normalized
 
 
 def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
@@ -454,7 +496,7 @@ def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_complet
     tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())
 
     for text in (skill, tools):
-        assert "completion-required child handoff" in text
+        assert "completion-required" in text and "child handoff" in text
         assert "non-empty normal assistant acknowledgement" in text
         assert "while waiting for remaining required children" in text or (
             "even while other required children are still pending" in text
@@ -469,7 +511,7 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
     for text in (skill, tools):
         assert "`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn" in text
         assert "Do not silently wait" in text or "must not use `sessions_yield`" in text
-        assert "Repo-managed PM config denies `sessions_yield` exactly" in text
+        assert "PM config denies `sessions_spawn` and `sessions_yield`" in text
         assert "internal PM transcript replies" in text
         assert "Do not use the message tool to send autonomous updates to G2" in text or (
             "Do not substitute the message tool or send an autonomous update to G2" in text
@@ -481,7 +523,7 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
 def test_autoresearch_docs_treat_delivery_failure_as_a_hard_blocker() -> None:
     skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
 
-    assert "OpenClaw `2026.7.1-2` records a delivery failure" in skill
-    assert "child's structured output exists" in skill
-    assert "Treat that failure as a hard infrastructure blocker for recovery" in skill
-    assert "not accepted merely because its trajectory has output" in skill
+    assert "OpenClaw `2026.7.1-2` with `@openclaw/codex` `2026.7.1-1`" in skill
+    assert "native Codex `spawn_agent`" in skill
+    assert "forbids substituting OpenClaw `sessions_spawn`" in skill
+    assert "Treat any attempt to use `sessions_spawn` as a hard infrastructure blocker" in skill

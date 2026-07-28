@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import tomllib
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
@@ -115,7 +116,7 @@ class AutoresearchError(ValueError):
 
 
 class AutoresearchConfigError(AutoresearchError):
-    """Raised when the OpenClaw stage-agent config deviates from policy."""
+    """Raised when autoresearch runtime config deviates from policy."""
 
 
 class AutoresearchReceiptError(AutoresearchError):
@@ -328,7 +329,7 @@ def _compile_mempalace_alias_tool_ids(
 
 
 MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
-PM_SILENT_HANDOFF_DENY_TOOL_IDS = ("sessions_yield",)
+PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = ("sessions_spawn", "sessions_yield")
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
     MEMPALACE_MUTATION_TOOLS
 )
@@ -4743,6 +4744,48 @@ def _agent_policy_from_json(
     )
 
 
+def _codex_agent_model(model: str) -> str:
+    prefix = "openai/"
+    if not model.startswith(prefix):
+        raise AutoresearchConfigError(f"stage model must use OpenAI provider ref: {model}")
+    return model.removeprefix(prefix)
+
+
+def _load_codex_agent_toml(path: Path) -> Mapping[str, object]:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AutoresearchConfigError(f"missing native Codex stage agent file: {path}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise AutoresearchConfigError(f"invalid native Codex stage agent TOML: {path}") from exc
+    return _ensure_mapping(data, label=str(path))
+
+
+def _validate_codex_native_stage_agents(policy: AutoresearchPolicy) -> None:
+    for stage in (
+        policy.context_curator,
+        *policy.debate_agents,
+        policy.consensus,
+        policy.implementer,
+        policy.reviewer,
+        policy.fixer,
+    ):
+        path = G2_OPENCLAW_REPO_ROOT / ".codex" / "agents" / f"{stage.agent_id}.toml"
+        data = _load_codex_agent_toml(path)
+        if _require_str(data, "name") != stage.agent_id:
+            raise AutoresearchConfigError(
+                f"native Codex stage agent {path} must be named {stage.agent_id}"
+            )
+        if _require_str(data, "model") != _codex_agent_model(stage.model):
+            raise AutoresearchConfigError(
+                f"native Codex stage agent {stage.agent_id} must use {stage.model}"
+            )
+        if _require_str(data, "model_reasoning_effort") != stage.reasoning:
+            raise AutoresearchConfigError(
+                f"native Codex stage agent {stage.agent_id} must use {stage.reasoning} reasoning"
+            )
+
+
 def load_autoresearch_policy(
     config_path: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
 ) -> AutoresearchPolicy:
@@ -4883,17 +4926,14 @@ def _validate_policy(
     pm_raw = agent_map["autoresearch-pm"]
     pm_tools = _ensure_mapping(pm_raw.get("tools"), label="autoresearch-pm.tools")
     pm_denied_tool_list = _require_string_list(pm_tools, "deny")
-    if tuple(pm_denied_tool_list) != PM_SILENT_HANDOFF_DENY_TOOL_IDS:
+    if tuple(pm_denied_tool_list) != PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS:
         raise AutoresearchConfigError(
-            "PM must deny exactly sessions_yield to force visible completion acknowledgements"
+            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation"
         )
-    subagents = _ensure_mapping(pm_raw.get("subagents"), label="autoresearch-pm.subagents")
-    allow_agents = _require_string_list(subagents, "allowAgents")
-    if tuple(allow_agents) != policy.all_stage_agent_ids:
-        raise AutoresearchConfigError(
-            "PM allowAgents must exactly match the autoresearch stage roster"
-        )
+    if pm_raw.get("subagents") is not None:
+        raise AutoresearchConfigError("PM must not declare OpenClaw subagents")
     _validate_mempalace_server_split(config, policy)
+    _validate_codex_native_stage_agents(policy)
     for agent in (
         policy.context_curator,
         *policy.debate_agents,
@@ -4913,6 +4953,8 @@ def _validate_policy(
             )
         if "mempalace" in agent.skills:
             raise AutoresearchConfigError(f"{agent.agent_id} must not load mempalace")
+        if agent_map[agent.agent_id].get("subagents") is not None:
+            raise AutoresearchConfigError(f"{agent.agent_id} must not declare OpenClaw subagents")
         tools = _ensure_mapping(
             agent_map[agent.agent_id].get("tools"),
             label=f"{agent.agent_id}.tools",

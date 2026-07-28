@@ -59,7 +59,7 @@ from gateway.autoresearch_runner import (
     OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
     OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
     OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
-    PM_SILENT_HANDOFF_DENY_TOOL_IDS,
+    PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS,
     QUANTIPY_RECEIPT_PATHS,
     AggregateCoverageReceipt,
     ArtifactType,
@@ -9424,7 +9424,7 @@ def _drop_pm_mempalace_skill(config: dict[str, object]) -> None:
     _agent(config, "autoresearch-pm")["skills"] = ["autoresearch"]
 
 
-def _remove_pm_silent_handoff_deny(config: dict[str, object]) -> None:
+def _remove_pm_native_codex_delegation_deny(config: dict[str, object]) -> None:
     tools = cast(dict[str, object], _agent(config, "autoresearch-pm")["tools"])
     tools["deny"] = []
 
@@ -9433,6 +9433,14 @@ def _deny_pm_mempalace_mutation_tool(config: dict[str, object]) -> None:
     tools = cast(dict[str, object], _agent(config, "autoresearch-pm")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = [*deny, "mempalace__mempalace_kg_add"]
+
+
+def _add_pm_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
+    _agent(config, "autoresearch-pm")["subagents"] = {"allowAgents": ["reviewer"]}
+
+
+def _add_stage_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
+    _agent(config, "consensus-arbiter")["subagents"] = {"allowAgents": ["reviewer"]}
 
 
 def _give_main_a_pm_skill(config: dict[str, object]) -> None:
@@ -9509,12 +9517,17 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         ),
         (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
         (
-            _remove_pm_silent_handoff_deny,
-            "PM must deny exactly sessions_yield to force visible completion acknowledgements",
+            _remove_pm_native_codex_delegation_deny,
+            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation",
         ),
         (
             _deny_pm_mempalace_mutation_tool,
-            "PM must deny exactly sessions_yield to force visible completion acknowledgements",
+            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation",
+        ),
+        (_add_pm_openclaw_subagent_allowlist, "PM must not declare OpenClaw subagents"),
+        (
+            _add_stage_openclaw_subagent_allowlist,
+            "consensus-arbiter must not declare OpenClaw subagents",
         ),
         (_give_main_a_pm_skill, "main must load no skills"),
         (
@@ -9661,7 +9674,7 @@ def test_default_openclaw_config_denies_exact_canonical_mempalace_policy_ids() -
         if agent_id == "autoresearch-pm":
             tools = cast(dict[str, object], agent["tools"])
             denied_tools = cast(list[str], tools["deny"])
-            assert denied_tools == list(PM_SILENT_HANDOFF_DENY_TOOL_IDS)
+            assert denied_tools == list(PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS)
             assert "sessions_yield" in denied_tools
             assert not any(tool_id.startswith("mempalace__") for tool_id in denied_tools)
             continue

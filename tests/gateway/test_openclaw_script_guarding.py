@@ -523,8 +523,9 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
     assert pm["thinkingDefault"] == "high"
     assert pm["skills"] == ["mempalace", "autoresearch"]
-    assert pm["tools"]["deny"] == ["sessions_yield"]
-    assert pm["subagents"]["allowAgents"] == STAGE_AGENT_IDS
+    assert pm["tools"]["deny"] == ["sessions_spawn", "sessions_yield"]
+    assert "subagents" not in pm
+    assert all(agent.get("subagents", {}).get("allowAgents", []) == [] for agent in agents.values())
 
     servers = config["mcp"]["servers"]
     assert servers["mempalace"]["codex"]["agents"] == ["autoresearch-pm"]
@@ -543,11 +544,13 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert 'select(.id == "autoresearch-pm") | .model.primary' in script
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
     assert "main interface split, autoresearch-pm model" in script
-    assert "PM_SILENT_HANDOFF_DENY_TOOL_IDS" in script
-    assert "autoresearch-pm model/skills/sessions_yield deny" in script
+    assert "PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS" in script
+    assert "autoresearch-pm model/skills/native Codex delegation denies" in script
     assert ".agents.defaults.maxConcurrent == 2" in script
     assert ".agents.defaults.subagents.maxConcurrent == 1" in script
     assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" in script
+    assert "sessions_spawn" in script
+    assert ".subagents.allowAgents?" in script
     assert "strict concurrency caps" in script
     assert "main interface restrictions" in script
 
@@ -792,6 +795,36 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert "env-file-push-home" not in openclaw_log
     assert "env-file-state-dir" not in openclaw_log
     assert "env-file-config.json" not in openclaw_log
+
+
+def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspaces(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    for workspace_name in ("workspace-autoresearch-pm", "workspace-reviewer"):
+        agents_dir = openclaw_home / workspace_name / ".codex/agents"
+        assert agents_dir.is_dir()
+        for agent_id in STAGE_AGENT_IDS:
+            copied = agents_dir / f"{agent_id}.toml"
+            source = REPO_ROOT / ".codex/agents" / f"{agent_id}.toml"
+            assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    assert not (openclaw_home / "workspace/.codex/agents").exists()
+
+
+def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"' in script
+    assert "validate_codex_native_stage_agents_dir" in script
+    assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"' in script
+    assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"' in script
+    for agent_id in STAGE_AGENT_IDS:
+        assert f'"{agent_id}"' in script
 
 
 def test_push_script_removes_stale_copilot_provider_keys_from_local_config(

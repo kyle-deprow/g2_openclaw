@@ -6,8 +6,8 @@ version: 2.0.0
 
 # Quantipy Methodology
 
-This skill routes OpenClaw stage agents to the minimum current Quantipy
-methodology needed for their task. Every stage also loads
+This skill routes native Codex stage agents to the minimum current Quantipy
+methodology needed for their task. Every stage also uses
 `quantipy-data-contract`; that compact runtime skill and the injected readiness
 receipt define platform capabilities, so stages do not rediscover them.
 

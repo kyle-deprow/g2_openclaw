@@ -91,13 +91,15 @@ these settings into the local config with `jq`, preserving everything else.
   app-server native compaction owns Codex sessions, denies
   `memory_search`/`memory_get`, and requires the MemPalace MCP server split:
   full `mempalace` for `autoresearch-pm`, no MemPalace access for `main`, and
-  filtered `mempalace-readonly` for every read-only stage agent.
+  filtered `mempalace-readonly` for every native Codex stage agent.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent roster** — exact `main` interface agent, `autoresearch-pm`, and
-  autoresearch stage-agent IDs, model assignments, high reasoning, MemPalace
-  skill split, Quantipy methodology loading, tool denies, disabled built-in
-  memory search/flush, and strict concurrency limits.
+  audited autoresearch stage-agent IDs, model assignments, high reasoning,
+  MemPalace skill split, Quantipy methodology loading, tool denies, disabled
+  built-in memory search/flush, and native Codex delegation guards. The actual
+  stage launches use `.codex/agents/*.toml` through native Codex `spawn_agent`;
+  OpenClaw `sessions_spawn` is forbidden.
 - **Managed bootstrap files** — `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and
   `BOOTSTRAP.md` are copied to every configured OpenClaw agent workspace derived
   from `agents.list`; `main` uses `~/.openclaw/workspace`, `autoresearch-pm`
@@ -168,11 +170,10 @@ on an unknown OpenClaw version, package layout, or source branch. This keeps a
 package reinstall or gateway restart from silently restoring the wrong route.
 
 The repo-managed agent defaults intentionally set `maxConcurrent=2` to cap the
-main lane while preserving headroom for `autoresearch-pm`. Separately,
-`subagents.maxConcurrent=1` serializes the subagent lane, so five-debater phases
-queue inside OpenClaw instead of saturating the gateway with parallel Codex
-workers. Do not replace this queueing cap with `maxChildrenPerAgent`, which
-rejects spawns instead of back-pressuring them.
+main lane while preserving headroom for `autoresearch-pm`. Autoresearch stage
+delegation is native Codex `spawn_agent`, governed by the `.codex/agents/*.toml`
+stage roster and PM task supervision. Do not configure OpenClaw
+`subagents.allowAgents` as a sessions-based replacement.
 
 It also installs `30-openclaw-native-crash-hardening.conf`. The memory limits
 apply to the gateway control group, including its child processes.

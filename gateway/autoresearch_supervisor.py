@@ -96,7 +96,7 @@ RECOVERY_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile terminal stage "
-    "outputs from task and child-session records before waiting or relaunching; "
+    "outputs from task records and native Codex thread transcripts before waiting or relaunching; "
     "infrastructure recovery only; no research steering. Do not silently switch "
     "provider, runtime, or model. If provider/model/auth/capacity is blocked, "
     "surface the control-plane blocker exactly and do not edit Quantipy experiment "
@@ -109,7 +109,7 @@ MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. This is artifact recovery, "
     "not research steering. Do not fabricate verification_result metrics, commands, "
     "coverage, status, or provenance from prose. Inspect the authoritative state, "
-    "implementation_result workspace, task records, and child-session transcripts. "
+    "implementation_result workspace, task records, and native Codex thread transcripts. "
     "If existing machine-verifiable terminal outputs prove a valid verification_result, "
     "wrap that exact artifact in the strict production envelope from the active "
     "autoresearch-next output: "
@@ -535,6 +535,7 @@ class TaskProvenance(StrEnum):
     UNRELATED = "unrelated"
     OWNER_TURN = "owner_turn"
     STAGE_CHILD = "stage_child"
+    CODEX_NATIVE_SUBAGENT = "codex_native_subagent"
     AMBIGUOUS = "ambiguous"
 
 
@@ -610,16 +611,31 @@ def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
         requester_key == AUTORESEARCH_OWNER_SESSION_KEY
         or owner_key == AUTORESEARCH_OWNER_SESSION_KEY
     )
+    has_native_codex_marker = task.get("taskKind") is not None
     if (
         requester_key != AUTORESEARCH_OWNER_SESSION_KEY
         or owner_key != AUTORESEARCH_OWNER_SESSION_KEY
     ):
+        if has_native_codex_marker and not owns_one_key:
+            return TaskProvenance.UNRELATED
         if owns_one_key or task.get("agentId") == AUTORESEARCH_OWNER_AGENT_ID:
             return TaskProvenance.AMBIGUOUS
         return TaskProvenance.UNRELATED
 
     agent_id = task.get("agentId")
     if not isinstance(agent_id, str) or not agent_id:
+        return TaskProvenance.AMBIGUOUS
+    runtime = task.get("runtime")
+    task_kind = task.get("taskKind")
+    run_id = task.get("runId")
+    if has_native_codex_marker:
+        if (
+            runtime == "subagent"
+            and task_kind == "codex-native"
+            and isinstance(run_id, str)
+            and run_id.startswith("codex-thread:")
+        ):
+            return TaskProvenance.CODEX_NATIVE_SUBAGENT
         return TaskProvenance.AMBIGUOUS
     child_session_key = task.get("childSessionKey")
     if agent_id == AUTORESEARCH_OWNER_AGENT_ID:
@@ -657,7 +673,11 @@ def _task_id_for_reconciliation(task: Mapping[str, object], *, source: str) -> s
 
 def _task_provenance_fingerprint(task: Mapping[str, object]) -> tuple[object, ...]:
     provenance = classify_autoresearch_task(task)
-    if provenance not in {TaskProvenance.OWNER_TURN, TaskProvenance.STAGE_CHILD}:
+    if provenance not in {
+        TaskProvenance.OWNER_TURN,
+        TaskProvenance.STAGE_CHILD,
+        TaskProvenance.CODEX_NATIVE_SUBAGENT,
+    }:
         raise TaskReconciliationError("canonical task has invalid autoresearch provenance")
     requester_key = task.get("requesterSessionKey")
     if requester_key is None:
@@ -668,6 +688,9 @@ def _task_provenance_fingerprint(task: Mapping[str, object]) -> tuple[object, ..
         requester_key,
         task.get("ownerKey"),
         task.get("childSessionKey"),
+        task.get("runtime"),
+        task.get("taskKind"),
+        task.get("runId"),
     )
 
 
@@ -1481,7 +1504,10 @@ class AutoresearchSupervisor:
         expected = [
             task
             for task in running_tasks
-            if task.get("agentId") in self._expected_stage_agent_ids(state)
+            if (
+                classify_autoresearch_task(task) is TaskProvenance.CODEX_NATIVE_SUBAGENT
+                or task.get("agentId") in self._expected_stage_agent_ids(state)
+            )
             and self._is_relevant_task(task)
         ]
         if expected:
@@ -1549,6 +1575,7 @@ class AutoresearchSupervisor:
         return classify_autoresearch_task(task) in {
             TaskProvenance.OWNER_TURN,
             TaskProvenance.STAGE_CHILD,
+            TaskProvenance.CODEX_NATIVE_SUBAGENT,
         }
 
     def _claim_recovery(

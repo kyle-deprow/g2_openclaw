@@ -123,11 +123,12 @@ announcement or silently relabeling a live task.
 
 ## Stage Boundaries
 
-All target-repo code changes are delegated to configured OpenClaw Codex stage
-agents. Every stage agent loads exactly the configured read-only MemPalace
-skill plus `quantipy-methodology` and `quantipy-data-contract`. It consumes the
-runner-provided readiness receipt and the platform's universe receipts instead
-of probing or rediscovering capabilities.
+All target-repo code changes are delegated with native Codex `spawn_agent` to
+the configured `.codex/agents/*.toml` stage agents. OpenClaw `sessions_spawn`
+is not a valid substitute. Every stage agent uses the configured read-only
+MemPalace boundary plus `quantipy-methodology` and `quantipy-data-contract`.
+It consumes the runner-provided readiness receipt and the platform's universe
+receipts instead of probing or rediscovering capabilities.
 
 Stages report to the PM and never mutate MemPalace, choose loop state, contact
 G2, or edit shared platform/runtime/orchestration infrastructure. Implementer
@@ -143,11 +144,9 @@ Use the `autoresearch` skill for the complete protocol:
 
 1. `context-curator` summarizes receipts, baseline, recent outcomes,
    canonical decision receipts, and read-only MemPalace findings.
-2. Five configured debaters remain configured for each debate. The global
-   subagent lane is bounded to 1 concurrent run, so debaters run sequentially
-   and the remaining debate tasks queue in OpenClaw; a 3-of-5
-   theory-family majority is required. Do not replace this bounded lane with
-   `maxChildrenPerAgent`, which rejects spawns instead of queueing them.
+2. Five configured debaters remain configured for each debate. Dispatch them
+   with native Codex `spawn_agent` using the exact stage names; a 3-of-5
+   theory-family majority is required.
 3. `consensus-arbiter` freezes canonical plan/profile inputs and the sorted
    selection schedule, but no redundant batch boundaries or materialization
    digests; the runner derives deterministic contiguous history batches.

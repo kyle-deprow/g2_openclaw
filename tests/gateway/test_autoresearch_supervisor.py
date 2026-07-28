@@ -1496,6 +1496,109 @@ def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
     assert [method for method, _ in fake.rpc_calls] == ["tasks.list", "tasks.get"]
 
 
+def test_codex_native_subagent_task_under_pm_owner_is_active(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    now = supervisor_env.now
+    task = {
+        "id": "native-review-1",
+        "taskId": "native-review-1",
+        "status": "running",
+        "runtime": "subagent",
+        "taskKind": "codex-native",
+        "runId": "codex-thread:review-1",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "task": "reviewer via native Codex spawn_agent",
+        "updatedAt": int(now * 1000) - 1_000,
+    }
+    fake = FakeOpenClaw(tasks=[task])
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_expected_stage_task"
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list", "tasks.get"]
+
+
+def test_ordinary_stage_task_run_id_without_native_kind_stays_stage_child(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    now = supervisor_env.now
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "id": "review-openclaw-run",
+                "taskId": "review-openclaw-run",
+                "status": "running",
+                "runtime": "subagent",
+                "runId": "openclaw-run-1",
+                "agentId": "reviewer",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+                "updatedAt": int(now * 1000) - 1_000,
+            }
+        ]
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason == "active_expected_stage_task"
+
+
+def test_stale_codex_native_subagent_task_under_pm_owner_alerts(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    stale_ms = int((supervisor_env.now - 1_000) * 1000)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "native-review-stale",
+                "status": "running",
+                "runtime": "subagent",
+                "taskKind": "codex-native",
+                "runId": "codex-thread:review-stale",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "updatedAt": stale_ms,
+            }
+        ]
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "stale_expected_stage_task")
+
+
+def test_codex_native_subagent_task_requires_complete_native_markers(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "native-review-ambiguous",
+                "status": "running",
+                "runtime": "subagent",
+                "taskKind": "codex-native",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "updatedAt": int(supervisor_env.now * 1000) - 1_000,
+            }
+        ]
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "task_reconciliation_failed")
+
+
 def test_supervisor_retries_a_transient_empty_task_list_failure(
     supervisor_env: SupervisorEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
