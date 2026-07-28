@@ -328,14 +328,19 @@ def test_dispatch_recovery_requires_task_ledger_unique_labels() -> None:
 
 def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
     protocol = AUTORESEARCH.read_text(encoding="utf-8")
+    readme = AGENT_CONFIG.joinpath("README.md").read_text(encoding="utf-8")
+    soul = AGENT_CONFIG.joinpath("SOUL.md").read_text(encoding="utf-8")
 
-    assert "`NO_CONSENSUS` and `INFRA_BLOCKED` never enter MemPalace" in protocol
+    assert "Every policy-approved no-memory outcome bypasses MemPalace" in protocol
     assert "Plain KEEP is invalid without a numeric" in protocol
     assert "Decision Sharpe > 0.5: SIGNIFICANT KEEP or STRONG KEEP" in protocol
     assert "Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP" in protocol
     assert "`instruction_manifest_sha256` and `state_reference_sha256` envelope" in protocol
     assert "Never pass a raw unwrapped" in protocol
     assert "`verification_result`" in protocol
+    assert "`status=PASS` and `tests_passed=true`" in readme
+    assert "`status=PASS` and `tests_passed=true`" in soul
+    assert "memory-required decisions such as `INFRA_REPAIRED`" not in protocol
 
 
 def test_runtime_docs_separate_no_consensus_from_infrastructure_blocking() -> None:

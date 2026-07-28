@@ -638,5 +638,5 @@ def test_mempalace_verification_rejects_no_consensus_without_a_memory_requiremen
         ),
     )
 
-    with pytest.raises(AutoresearchValidationError, match="not required"):
+    with pytest.raises(AutoresearchValidationError, match="prohibited for a non-retention"):
         verify_mempalace_final_decision(state)

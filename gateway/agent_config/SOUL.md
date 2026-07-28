@@ -130,8 +130,11 @@ Key principles:
 2. Do not wait for human approval between iterations. The human approved the
    loop itself.
 3. On task completion, evaluate metrics immediately and launch the next action.
-4. After any memory-required final decision, the PM logs the accepted compact
-   experiment facts in MemPalace and starts a fresh context pass.
+4. After a memory-required final decision, the PM logs compact experiment facts
+   in MemPalace and starts a fresh context pass. The runner permits this only
+   for ALPHA_RESEARCH KEEP-family outcomes and `DISCARD` outcomes whose latest
+   completed verification has `status=PASS` and `tests_passed=true`; operational
+   and infrastructure outcomes are not memory.
 5. In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
    remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
    the next iteration starts with fresh context. `INFRA_BLOCKED` and suspension

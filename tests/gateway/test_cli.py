@@ -77,7 +77,6 @@ from gateway.autoresearch_runner import (
     load_autoresearch_policy,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
-    standardized_mempalace_kg_facts,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -2099,7 +2098,7 @@ class TestAutoresearchCliCommands:
         assert receipt["final_decision"]["decision"] == "KEEP"
         assert receipt["memory_verification_receipt"]["experiment_id"] == "iteration-3"
 
-    def test_autoresearch_mark_memory_accepts_valid_g0_infra_repaired_state(
+    def test_autoresearch_mark_memory_rejects_valid_g0_infra_repaired_state(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2302,7 +2301,7 @@ class TestAutoresearchCliCommands:
                 rationale="Data repair completed.",
                 log_summary="G0 gate passed.",
                 continue_loop=True,
-                memory_write_required=True,
+                memory_write_required=False,
                 infra_rationale="Cap/source provenance is now present for the declared sleeve.",
             ),
             policy,
@@ -2310,27 +2309,6 @@ class TestAutoresearchCliCommands:
         )
         state_path = tmp_path / "g0-repeat-state.json"
         output_path = tmp_path / "g0-memory-state.json"
-        kg_path = tmp_path / "knowledge_graph.sqlite3"
-        facts = standardized_mempalace_kg_facts(repeat_state)
-        connection = sqlite3.connect(kg_path)
-        connection.executescript(
-            """
-            CREATE TABLE triples (
-                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
-                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
-                source_file TEXT, source_drawer_id TEXT
-            );
-            """
-        )
-        connection.executemany(
-            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
-            [
-                (str(index), "g0-iteration-1", predicate, object_value, "result.json")
-                for index, (predicate, object_value) in enumerate(facts.items(), start=1)
-            ],
-        )
-        connection.commit()
-        connection.close()
         state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
 
         result = runner.invoke(
@@ -2344,17 +2322,16 @@ class TestAutoresearchCliCommands:
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
                 "--readiness-manifest",
                 str(readiness_path),
-                "--mempalace-kg-path",
-                str(kg_path),
             ],
         )
 
-        assert result.exit_code == 0, result.output
-        saved = json.loads(output_path.read_text(encoding="utf-8"))
-        assert saved["memory_written"] is True
-        assert saved["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
+        assert repeat_state.final_decision is not None
+        assert repeat_state.final_decision.memory_write_required is False
+        assert result.exit_code == 1
+        assert "MemPalace verification is prohibited for a" in result.output
+        assert not output_path.exists()
 
-    def test_autoresearch_mark_memory_then_start_next_accepts_valid_g0_handoff(
+    def test_autoresearch_start_next_accepts_valid_g0_no_memory_handoff(
         self,
         tmp_path: Path,
     ) -> None:
@@ -2558,36 +2535,14 @@ class TestAutoresearchCliCommands:
                 rationale="Data repair completed.",
                 log_summary="G0 gate passed.",
                 continue_loop=True,
-                memory_write_required=True,
+                memory_write_required=False,
                 infra_rationale="Cap/source provenance is now present for the declared sleeve.",
             ),
             policy,
             validation_context=validation_context,
         )
         state_path = tmp_path / "g0-repeat-state.json"
-        memory_state_path = tmp_path / "g0-memory-state.json"
         next_state_path = tmp_path / "g0-next-state.json"
-        kg_path = tmp_path / "knowledge_graph.sqlite3"
-        facts = standardized_mempalace_kg_facts(repeat_state)
-        connection = sqlite3.connect(kg_path)
-        connection.executescript(
-            """
-            CREATE TABLE triples (
-                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
-                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
-                source_file TEXT, source_drawer_id TEXT
-            );
-            """
-        )
-        connection.executemany(
-            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
-            [
-                (str(index), "g0-iteration-1", predicate, object_value, "result.json")
-                for index, (predicate, object_value) in enumerate(facts.items(), start=1)
-            ],
-        )
-        connection.commit()
-        connection.close()
         state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
 
         mark_result = runner.invoke(
@@ -2596,20 +2551,19 @@ class TestAutoresearchCliCommands:
                 "autoresearch-mark-memory",
                 str(state_path),
                 "--output",
-                str(memory_state_path),
+                str(next_state_path),
                 "--openclaw-config",
                 str(DEFAULT_OPENCLAW_CONFIG_PATH),
                 "--readiness-manifest",
                 str(readiness_path),
-                "--mempalace-kg-path",
-                str(kg_path),
             ],
         )
 
-        assert mark_result.exit_code == 0, mark_result.output
-        marked = json.loads(memory_state_path.read_text(encoding="utf-8"))
-        assert marked["memory_written"] is True
-        assert marked["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
+        assert repeat_state.final_decision is not None
+        assert repeat_state.final_decision.memory_write_required is False
+        assert mark_result.exit_code == 1
+        assert "MemPalace verification is prohibited for a" in mark_result.output
+        assert not next_state_path.exists()
 
         stale_readiness = replace(
             readiness,
@@ -2622,7 +2576,7 @@ class TestAutoresearchCliCommands:
             app,
             [
                 "autoresearch-start-next",
-                str(memory_state_path),
+                str(state_path),
                 "--output",
                 str(next_state_path),
                 "--openclaw-config",
@@ -2640,7 +2594,7 @@ class TestAutoresearchCliCommands:
             app,
             [
                 "autoresearch-start-next",
-                str(memory_state_path),
+                str(state_path),
                 "--output",
                 str(next_state_path),
                 "--openclaw-config",
@@ -2655,11 +2609,11 @@ class TestAutoresearchCliCommands:
         assert next_state["phase"] == "setup_context"
         assert next_state["iteration"] == 2
         assert next_state["setup"]["metric_name"] == "coverage gate"
-        receipt_path = decision_receipt_path(memory_state_path, 1)
+        receipt_path = decision_receipt_path(state_path, 1)
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         assert receipt["iteration"] == 1
         assert receipt["final_decision"]["decision"] == "INFRA_REPAIRED"
-        assert receipt["memory_verification_receipt"]["experiment_id"] == "g0-iteration-1"
+        assert receipt["memory_verification_receipt"] is None
 
     def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"

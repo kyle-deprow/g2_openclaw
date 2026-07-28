@@ -5105,6 +5105,104 @@ def _validate_no_consensus_completion(state: AutoresearchState) -> None:
         )
 
 
+def _final_decision_requires_memory_write(
+    state: AutoresearchState,
+    decision: FinalDecisionArtifact,
+) -> bool:
+    """Return the sole final-decision class eligible for MemPalace retention."""
+    latest_verification = state.latest_verification
+    return (
+        state.mode is ResearchMode.ALPHA_RESEARCH
+        and decision.decision in (*KEEP_DECISIONS, FinalDecision.DISCARD)
+        and latest_verification is not None
+        and latest_verification.status is VerificationStatus.PASS
+        and latest_verification.tests_passed
+    )
+
+
+def _validate_final_decision_memory_requirement(
+    state: AutoresearchState,
+    decision: FinalDecisionArtifact,
+) -> None:
+    """Fail closed when a PM-selected memory flag disagrees with retention policy."""
+    memory_write_required = _final_decision_requires_memory_write(state, decision)
+    if decision.memory_write_required is memory_write_required:
+        return
+    if memory_write_required:
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH completed PASS final decisions require memory_write_required=true"
+        )
+    raise AutoresearchValidationError(
+        f"{decision.decision.value} final decision is not eligible for MemPalace retention; "
+        "memory_write_required=false"
+    )
+
+
+def _is_authorized_no_memory_final_decision(state: AutoresearchState) -> bool:
+    """Return whether a non-retained final decision completed a valid terminal path."""
+    decision = state.final_decision
+    if (
+        decision is None
+        or decision.memory_write_required
+        or _final_decision_requires_memory_write(state, decision)
+    ):
+        return False
+
+    latest_verification = state.latest_verification
+    if decision.decision is FinalDecision.NO_CONSENSUS:
+        return (
+            state.implementation_result is None
+            and state.consensus_retry_count == 1
+            and tuple(debate.round_number for debate in state.debate_rounds) == (1, 2)
+            and tuple(consensus.round_number for consensus in state.consensus_history) == (1, 2)
+            and tuple(consensus.status for consensus in state.consensus_history)
+            == (ConsensusStatus.NO_CONSENSUS, ConsensusStatus.NO_CONSENSUS)
+        )
+
+    if decision.decision is FinalDecision.INFRA_BLOCKED:
+        return state.suspended and (
+            _is_operator_infrastructure_suspension_state(state)
+            or (
+                _is_operator_precondition_consensus(state.latest_consensus)
+                and state.implementation_result is None
+                and latest_verification is None
+                and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
+                and decision.recommended_metric_value is None
+                and bool(decision.infra_rationale)
+            )
+        )
+
+    if (
+        decision.decision is FinalDecision.CRASH
+        and latest_verification is not None
+        and latest_verification.status is VerificationStatus.TEST_FAILURE
+        and state.verification_fix_attempts >= 2
+    ):
+        return True
+
+    if (
+        decision.decision is FinalDecision.DISCARD
+        and latest_verification is not None
+        and latest_verification.status is VerificationStatus.BUG_SIGNAL
+        and state.verification_fix_attempts >= 2
+    ):
+        return True
+
+    if state.mode is not ResearchMode.DATA_INFRA_G0 or latest_verification is None:
+        return False
+    if (
+        latest_verification.status is not VerificationStatus.PASS
+        or not latest_verification.tests_passed
+    ):
+        return False
+    if decision.decision is FinalDecision.INFRA_REPAIRED:
+        return latest_verification.infra_gate_outcome is InfraGateOutcome.GATE_PASSED
+    return (
+        decision.decision is FinalDecision.DISCARD
+        and latest_verification.infra_gate_outcome is InfraGateOutcome.REMEDIATION_REQUIRED
+    )
+
+
 def _validate_state(
     state: AutoresearchState,
     policy: AutoresearchPolicy,
@@ -5184,6 +5282,7 @@ def _validate_state(
         raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
     if state.final_decision is not None:
         decision = state.final_decision
+        _validate_final_decision_memory_requirement(state, decision)
         _validate_no_consensus_completion(state)
         _validate_operator_precondition_infra_blocked_suspension(state)
         is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
@@ -5196,17 +5295,15 @@ def _validate_state(
                 raise AutoresearchValidationError(
                     "NO_CONSENSUS must not have a memory_verification_receipt"
                 )
-        elif (
-            not decision.memory_write_required
-            and not _is_explicit_no_memory_transition(state)
-            and not _is_data_infra_g0_blocked_no_memory_state(state)
-            and not is_operator_infrastructure_suspension
-        ):
-            raise AutoresearchValidationError(
-                "completed final decisions require memory_write_required=true"
-            )
         if not is_operator_infrastructure_suspension:
             _validate_final_decision_artifact(decision, state, validation_context)
+        if not decision.memory_write_required and not _is_authorized_no_memory_final_decision(
+            state
+        ):
+            raise AutoresearchValidationError(
+                "final_decision.memory_write_required=false requires an authorized "
+                "no-memory terminal path"
+            )
     if state.implementation_result and (
         state.latest_consensus is None
         or state.latest_consensus.status is not ConsensusStatus.MAJORITY
@@ -7734,6 +7831,7 @@ def _validate_final_decision_artifact(
     state: AutoresearchState,
     validation_context: AutoresearchValidationContext | None = None,
 ) -> None:
+    _validate_final_decision_memory_requirement(state, artifact)
     if artifact.recommended_metric_name == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME:
         raise AutoresearchValidationError(
             "operator infrastructure suspension requires the dedicated operator transition"
@@ -8059,8 +8157,11 @@ def _phase_instruction(
         ),
         Phase.DECISION_LOG: (
             "Decide and log the completed iteration. "
-            "Memory writes are forbidden before this final decision "
-            "artifact exists."
+            "Memory writes are forbidden before this final decision artifact exists. "
+            "Set memory_write_required=true only for ALPHA_RESEARCH KEEP, SIGNIFICANT KEEP, "
+            "STRONG KEEP, or DISCARD with a latest completed verification status=PASS and "
+            "tests_passed=true. Set it false for every other outcome; the runner enforces "
+            "this retention rule mechanically."
         ),
         Phase.REPEAT: (
             "The iteration is complete. Do not start the next loop from prompt memory. "
@@ -8826,14 +8927,17 @@ def advance_state(
             raise AutoresearchValidationError("final_decision requires prior artifacts")
         _validate_final_decision_artifact(artifact, state, validation_context)
         if artifact.decision is FinalDecision.INFRA_BLOCKED:
-            return replace(
+            next_state = replace(
                 state,
                 final_decision=artifact,
                 phase=Phase.REPEAT,
                 suspended=True,
                 suspension_reason=artifact.infra_rationale,
             )
-        return replace(state, final_decision=artifact, phase=Phase.REPEAT)
+        else:
+            next_state = replace(state, final_decision=artifact, phase=Phase.REPEAT)
+        _validate_state(next_state, policy, validation_context)
+        return next_state
 
     raise AutoresearchValidationError(
         "repeat phase does not accept artifacts; mark memory or start next iteration"
@@ -8845,44 +8949,16 @@ def can_write_memory(state: AutoresearchState) -> bool:
         state.phase is Phase.REPEAT
         and state.final_decision is not None
         and state.final_decision.memory_write_required
-    )
-
-
-def _is_g0_fail_closed_bug_signal_no_memory_state(state: AutoresearchState) -> bool:
-    decision = state.final_decision
-    return (
-        state.phase is Phase.REPEAT
-        and state.mode is ResearchMode.DATA_INFRA_G0
-        and decision is not None
-        and decision.decision is FinalDecision.DISCARD
-        and state.verification_fix_attempts >= 2
-        and _is_fail_closed_g0_platform_contract_bug_signal(state.latest_verification)
-        and not decision.memory_write_required
-        and not state.memory_written
-        and state.memory_verification_receipt is None
+        and _final_decision_requires_memory_write(state, state.final_decision)
     )
 
 
 def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
-    if _is_operator_precondition_no_memory_state(state):
-        return True
-    if _is_g0_fail_closed_bug_signal_no_memory_state(state):
-        return True
     decision = state.final_decision
     return (
         state.phase is Phase.REPEAT
         and decision is not None
-        and (
-            decision.decision is FinalDecision.NO_CONSENSUS
-            or (
-                state.mode is ResearchMode.DATA_INFRA_G0
-                and decision.decision is FinalDecision.DISCARD
-                and state.latest_verification is not None
-                and state.latest_verification.infra_gate_outcome
-                is InfraGateOutcome.REMEDIATION_REQUIRED
-            )
-        )
-        and not decision.memory_write_required
+        and _is_authorized_no_memory_final_decision(state)
         and not state.memory_written
         and state.memory_verification_receipt is None
     )
@@ -8899,25 +8975,6 @@ def _validate_operator_precondition_infra_blocked_suspension(state: Autoresearch
         raise AutoresearchValidationError(
             "operator-precondition INFRA_BLOCKED state must be suspended"
         )
-
-
-def _is_operator_precondition_no_memory_state(state: AutoresearchState) -> bool:
-    decision = state.final_decision
-    return (
-        state.phase is Phase.REPEAT
-        and state.suspended
-        and decision is not None
-        and decision.decision is FinalDecision.INFRA_BLOCKED
-        and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
-        and decision.recommended_metric_value is None
-        and bool(decision.infra_rationale)
-        and not decision.memory_write_required
-        and _is_operator_precondition_consensus(state.latest_consensus)
-        and state.implementation_result is None
-        and state.latest_verification is None
-        and not state.memory_written
-        and state.memory_verification_receipt is None
-    )
 
 
 def _is_operator_infrastructure_suspension_state(state: AutoresearchState) -> bool:
@@ -9003,6 +9060,10 @@ def standardized_mempalace_kg_facts(state: AutoresearchState) -> dict[str, str]:
         raise AutoresearchValidationError(
             "standardized MemPalace facts require final_decision and mode"
         )
+    if not _final_decision_requires_memory_write(state, state.final_decision):
+        raise AutoresearchValidationError(
+            "standardized MemPalace facts are allowed only for retention-eligible final decisions"
+        )
     verification = state.latest_verification
     if verification is None:
         raise AutoresearchValidationError(
@@ -9044,6 +9105,10 @@ def verify_mempalace_final_decision(
     """Read and attest KG facts; this function never mutates MemPalace."""
     if state.final_decision is None or state.mode is None:
         raise AutoresearchValidationError("MemPalace verification requires final_decision and mode")
+    if not _final_decision_requires_memory_write(state, state.final_decision):
+        raise AutoresearchValidationError(
+            "MemPalace verification is prohibited for a non-retention final decision"
+        )
     if not state.final_decision.memory_write_required:
         raise AutoresearchValidationError(
             "MemPalace verification is not required for this final decision"
@@ -9238,8 +9303,8 @@ def start_next_iteration(
         )
     if not state.memory_written and not _is_explicit_no_memory_transition(state):
         raise AutoresearchValidationError(
-            "cannot start next iteration before memory is written or an explicit "
-            "NO_CONSENSUS no-memory transition"
+            "cannot start next iteration before a verified MemPalace write or a "
+            "policy-approved no-memory final decision"
         )
     try:
         readiness_identity = readiness.require_ready()

@@ -265,8 +265,14 @@ completed G0 verification, `GATE_PASSED` with a full-union `COMPLETE` receipt
 cross-checked against runner-owned preflight identity and counts maps to
 non-suspending `INFRA_REPAIRED`; `REMEDIATION_REQUIRED` is stage evidence only
 and maps to non-suspending `DISCARD`. Both `NO_CONSENSUS` and that G0 `DISCARD` set
-`memory_write_required=false`. Every other completed final decision follows
-the runner's memory requirement.
+`memory_write_required=false`. The runner, not the PM, sets the retention
+obligation mechanically: memory is required only for `ALPHA_RESEARCH` `KEEP`,
+`SIGNIFICANT KEEP`, `STRONG KEEP`, and `DISCARD` outcomes backed by the latest
+completed `PASS` verification with `tests_passed=true`. This includes reviewed
+durable negative or methodology results. `CRASH`, exhausted `TEST_FAILURE` or
+`BUG_SIGNAL`, every `DATA_INFRA_G0` outcome (including `INFRA_REPAIRED`),
+`NO_CONSENSUS`, and operator `INFRA_BLOCKED` always set
+`memory_write_required=false`.
 
 MemPalace is the only durable autonomous research memory. Stage agents may
 read it only through `mempalace-readonly`; only the PM may write after a final

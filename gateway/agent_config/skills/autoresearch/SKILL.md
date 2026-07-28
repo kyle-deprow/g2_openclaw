@@ -162,12 +162,12 @@ atomically:
 ```
 
 Resume accepts the new READY receipt, clears the suspension, and starts the next
-iteration. Normal completed transitions, including memory-required decisions
-such as `INFRA_REPAIRED`, and explicit no-memory `NO_CONSENSUS` transitions
-still use `autoresearch-start-next`. Only at that completed boundary, after the
-required memory write or explicit no-memory transition, `autoresearch-start-next`
-may atomically replace the pinned identity with a different validated READY
-receipt. It never changes an active or suspended iteration's receipt.
+iteration. Normal completed transitions, including no-memory `INFRA_REPAIRED`
+and `NO_CONSENSUS` outcomes, still use `autoresearch-start-next`. Only at that
+completed boundary, after the required memory write or policy-approved
+no-memory transition, `autoresearch-start-next` may atomically replace the
+pinned identity with a different validated READY receipt. It never changes an
+active or suspended iteration's receipt.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
@@ -974,9 +974,16 @@ Actions:
   move to the next proposal.
 - NO_CONSENSUS: set `NOT_RUN` and the explicit no-memory flag, remain
   unsuspended, then begin the next iteration's fresh context pass.
-- After every memory-required final decision, the PM writes MemPalace drawers
-  and KG facts for experiment, feature, model, metric, decision, and failure
-  mode. `NO_CONSENSUS` and `INFRA_BLOCKED` never enter MemPalace.
+- The PM cannot choose the memory flag. It is `true` only for `ALPHA_RESEARCH`
+  `KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, or `DISCARD` with the latest
+  completed verification `PASS` and `tests_passed=true`, including reviewed
+  durable negative or methodology results. It is `false` for `CRASH`, exhausted
+  `TEST_FAILURE`/`BUG_SIGNAL`, every `DATA_INFRA_G0` outcome (including
+  `INFRA_REPAIRED` and remediation `DISCARD`), `NO_CONSENSUS`, and operator
+  `INFRA_BLOCKED`.
+- After a runner-required memory decision, the PM writes MemPalace drawers and
+  KG facts for experiment, feature, model, metric, decision, and failure mode.
+  Every policy-approved no-memory outcome bypasses MemPalace.
 - Write a MemPalace diary entry only as part of memory-required final experiment
   logging.
 - `autoresearch-start-next` persists the immutable per-iteration canonical

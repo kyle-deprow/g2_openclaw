@@ -1987,7 +1987,7 @@ def _persisted_g0_infra_repaired_repeat_state(
             rationale="Data repair completed.",
             log_summary="G0 gate passed.",
             continue_loop=True,
-            memory_write_required=True,
+            memory_write_required=False,
             infra_rationale="Cap/source provenance is now present for the declared sleeve.",
         ),
         policy,
@@ -4804,29 +4804,18 @@ def test_implementation_parses_complete_quantipy_v2_manifest_schema(
 
 
 @pytest.fixture()
-def g0_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
-    long_rationale = (
-        "Auditable cap and source provenance is present for every declared sleeve. " * 5
-    )
-    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
-    state = advance_state(
-        state,
-        replace(
-            _context_artifact(),
-            research_mode=ResearchMode.DATA_INFRA_G0,
-            mode_rationale="Repair cap and source provenance before an alpha rerun.",
-        ),
-        policy,
-    )
-    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+def alpha_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
+    long_rationale = "The completed experiment has a durable methodology limitation. " * 5
+    state = _state_to_consensus(policy)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
     state = advance_state(
         state,
         replace(
             _verification_result(VerificationStatus.PASS),
-            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
-            infra_rationale=long_rationale,
+            max_drawdown_pct=34.0,
+            oos_sharpe_net=0.92,
+            is_walk_forward_sharpe_net=0.84,
         ),
         policy,
     )
@@ -4835,13 +4824,11 @@ def g0_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
         state,
         replace(
             _final_decision(),
-            experiment_id="g0-iteration-1",
-            decision=FinalDecision.INFRA_REPAIRED,
-            recommended_metric_name="coverage gate",
-            recommended_metric_value=None,
-            rationale="Data repair completed.",
-            log_summary="G0 gate passed.",
-            infra_rationale=long_rationale,
+            experiment_id="alpha-discard-1",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_value=0.92,
+            rationale=long_rationale,
+            log_summary="Discarded after a durable methodology limitation.",
         ),
         policy,
     )
@@ -5883,7 +5870,7 @@ def test_persisted_operator_precondition_no_memory_state_requires_full_contract(
         suspension_reason="Missing operator-supplied first-party evidence bundle.",
     )
 
-    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+    with pytest.raises(AutoresearchValidationError, match="recommended_metric_value=null"):
         next_action(malformed, policy, receipts, platform_readiness)
 
 
@@ -6017,10 +6004,13 @@ def test_alpha_final_decision_rejects_infra_blocked(
     policy: AutoresearchPolicy,
 ) -> None:
     state = _state_to_decision(policy)
-    decision = _final_decision_with(
-        decision=FinalDecision.INFRA_BLOCKED,
-        metric_value=0.18,
-        reviewer_verdict=FinalReviewerVerdict.PASS,
+    decision = replace(
+        _final_decision_with(
+            decision=FinalDecision.INFRA_BLOCKED,
+            metric_value=0.18,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        memory_write_required=False,
     )
 
     with pytest.raises(AutoresearchValidationError, match="operator-owned"):
@@ -6076,7 +6066,7 @@ def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
             rationale="Data repair completed.",
             log_summary="G0 gate passed.",
             continue_loop=True,
-            memory_write_required=True,
+            memory_write_required=False,
             infra_rationale="Cap/source provenance is now present for the declared sleeve.",
         ),
         policy,
@@ -6135,7 +6125,7 @@ def test_g0_final_decision_requires_validation_context_for_accepted_provenance(
                 rationale="Data repair completed.",
                 log_summary="G0 gate passed.",
                 continue_loop=True,
-                memory_write_required=True,
+                memory_write_required=False,
                 infra_rationale="Cap/source provenance is now present for the declared sleeve.",
             ),
             policy,
@@ -6287,7 +6277,7 @@ def test_g0_remediation_rejects_stage_authored_infra_blocked(
                 rationale="Data infrastructure remains blocked.",
                 log_summary="G0 gate still requires remediation.",
                 continue_loop=True,
-                memory_write_required=True,
+                memory_write_required=False,
                 infra_rationale="Cap/source provenance still needs operator remediation.",
             ),
             policy,
@@ -6530,7 +6520,7 @@ def test_exhausted_g0_verifier_failure_finalizes_without_suspending(
         rationale="Verification failed before the infrastructure gate could complete.",
         log_summary="G0 verification retries exhausted.",
         continue_loop=True,
-        memory_write_required=True,
+        memory_write_required=False,
         infra_rationale="Verification did not complete successfully.",
     )
 
@@ -6544,6 +6534,7 @@ def test_exhausted_g0_verifier_failure_finalizes_without_suspending(
     assert result.suspended is False
     assert result.final_decision is not None
     assert result.final_decision.decision is expected_decision
+    assert result.final_decision.memory_write_required is False
 
 
 def test_exhausted_g0_platform_contract_mismatch_discard_rejects_memory_write(
@@ -6580,10 +6571,7 @@ def test_exhausted_g0_platform_contract_mismatch_discard_rejects_memory_write(
 
     with pytest.raises(
         AutoresearchValidationError,
-        match=(
-            "platform_coverage_contract_mismatch BUG_SIGNAL discard requires "
-            "memory_write_required=false"
-        ),
+        match="DISCARD final decision is not eligible for MemPalace retention",
     ):
         advance_state(
             state,
@@ -6667,6 +6655,66 @@ def test_exhausted_g0_platform_contract_mismatch_discard_without_memory_starts_n
     assert action.next_agent_ids == ()
 
 
+def test_persisted_alpha_discard_without_verification_is_not_an_authorized_no_memory_terminal(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    unverified_discard = replace(
+        state,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="alpha-unverified-discard-1",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=-0.6,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="No completed verification exists for this proposed discard.",
+            log_summary="Forged unverified alpha discard.",
+            continue_loop=True,
+            memory_write_required=False,
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="authorized no-memory terminal",
+    ):
+        validate_state(unverified_discard, policy)
+
+
+def test_start_next_rejects_unverified_alpha_discard_no_memory_terminal(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    unverified_discard = replace(
+        state,
+        phase=Phase.REPEAT,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="alpha-unverified-discard-1",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=-0.6,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale="No completed verification exists for this proposed discard.",
+            log_summary="Forged unverified alpha discard.",
+            continue_loop=True,
+            memory_write_required=False,
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="policy-approved no-memory final decision",
+    ):
+        start_next_iteration(unverified_discard, readiness=platform_readiness)
+
+
 def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(
     policy: AutoresearchPolicy,
 ) -> None:
@@ -6691,7 +6739,7 @@ def test_persisted_suspended_alpha_infra_blocked_no_memory_state_is_rejected(
     )
     persisted = AutoresearchState.from_dict(json.loads(json.dumps(impossible.to_dict())))
 
-    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+    with pytest.raises(AutoresearchValidationError, match="explicit operator-owned"):
         validate_state(persisted, policy)
 
 
@@ -6873,7 +6921,7 @@ def test_g0_stage_receipt_cannot_create_a_suspended_infra_blocked_state(
         advance_state(state, artifact, policy)
 
 
-def test_persisted_g0_infra_repaired_retains_memory_write_contract(
+def test_persisted_g0_infra_repaired_rejects_memory_write_contract(
     policy: AutoresearchPolicy,
 ) -> None:
     state = _state_to_g0_decision(
@@ -6892,13 +6940,16 @@ def test_persisted_g0_infra_repaired_retains_memory_write_contract(
             rationale="Data repair completed.",
             log_summary="G0 gate passed.",
             continue_loop=True,
-            memory_write_required=False,
+            memory_write_required=True,
             infra_rationale="Cap/source provenance is now present for the declared sleeve.",
         ),
     )
     persisted = AutoresearchState.from_dict(json.loads(json.dumps(invalid.to_dict())))
 
-    with pytest.raises(AutoresearchValidationError, match="memory_write_required=true"):
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="INFRA_REPAIRED final decision is not eligible for MemPalace retention",
+    ):
         validate_state(persisted, policy)
 
 
@@ -6927,7 +6978,7 @@ def test_persisted_g0_infra_repaired_state_validates_and_routes_with_readiness_c
     action = next_action(state, policy, receipts, platform_readiness)
 
     assert action.phase is Phase.REPEAT
-    assert action.expected_artifact_type.value == "memory_write"
+    assert action.expected_artifact_type.value == "next_iteration"
 
 
 def test_persisted_alpha_state_validation_ignores_readiness_calendar_binding(
@@ -6978,14 +7029,14 @@ def test_repeat_prompt_requires_standardized_mempalace_kg_facts_from_verified_st
     assert "alpha_decision_metric" not in prompt
 
 
-def test_verify_mempalace_final_decision_accepts_compacted_long_g0_infra_rationale(
-    g0_memory_state: AutoresearchState,
+def test_verify_mempalace_final_decision_accepts_compacted_alpha_discard_rationale(
+    alpha_memory_state: AutoresearchState,
     mempalace_kg_path: Path,
 ) -> None:
-    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    facts = standardized_mempalace_kg_facts(alpha_memory_state)
     _write_active_mempalace_facts(
         mempalace_kg_path,
-        subject="g0-iteration-1",
+        subject="alpha-discard-1",
         facts=facts,
     )
     connection = sqlite3.connect(mempalace_kg_path)
@@ -6993,8 +7044,8 @@ def test_verify_mempalace_final_decision_accepts_compacted_long_g0_infra_rationa
         "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)",
         (
             "inactive-rationale",
-            "g0-iteration-1",
-            "infra_rationale",
+            "alpha-discard-1",
+            "failed_due_to",
             "shortened_retry_rationale",
             "2026-07-10T00:00:00Z",
             "result.json",
@@ -7003,19 +7054,19 @@ def test_verify_mempalace_final_decision_accepts_compacted_long_g0_infra_rationa
     connection.commit()
     connection.close()
 
-    receipt = verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+    receipt = verify_mempalace_final_decision(alpha_memory_state, mempalace_kg_path)
 
     assert receipt.predicates == tuple(sorted(facts))
 
 
-def test_verify_mempalace_final_decision_rejects_conflicting_active_g0_fact(
-    g0_memory_state: AutoresearchState,
+def test_verify_mempalace_final_decision_rejects_conflicting_active_alpha_fact(
+    alpha_memory_state: AutoresearchState,
     mempalace_kg_path: Path,
 ) -> None:
-    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    facts = standardized_mempalace_kg_facts(alpha_memory_state)
     _write_active_mempalace_facts(
         mempalace_kg_path,
-        subject="g0-iteration-1",
+        subject="alpha-discard-1",
         facts=facts,
     )
     connection = sqlite3.connect(mempalace_kg_path)
@@ -7023,8 +7074,8 @@ def test_verify_mempalace_final_decision_rejects_conflicting_active_g0_fact(
         "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
         (
             "conflicting-rationale",
-            "g0-iteration-1",
-            "infra_rationale",
+            "alpha-discard-1",
+            "failed_due_to",
             "shortened_retry_rationale",
             "result.json",
         ),
@@ -7034,53 +7085,53 @@ def test_verify_mempalace_final_decision_rejects_conflicting_active_g0_fact(
 
     with pytest.raises(
         AutoresearchValidationError,
-        match="MemPalace infra_rationale fact does not match final decision artifact",
+        match="MemPalace failed_due_to fact does not match final decision artifact",
     ):
-        verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+        verify_mempalace_final_decision(alpha_memory_state, mempalace_kg_path)
 
 
 def test_verify_mempalace_final_decision_rejects_normalized_but_not_exact_active_object(
-    g0_memory_state: AutoresearchState,
+    alpha_memory_state: AutoresearchState,
     mempalace_kg_path: Path,
 ) -> None:
-    facts = standardized_mempalace_kg_facts(g0_memory_state)
+    facts = standardized_mempalace_kg_facts(alpha_memory_state)
     _write_active_mempalace_facts(
         mempalace_kg_path,
-        subject="g0-iteration-1",
+        subject="alpha-discard-1",
         facts=facts,
-        object_overrides={"decision": " INFRA---REPAIRED "},
+        object_overrides={"decision": " DISC---ARD "},
     )
 
     with pytest.raises(
         AutoresearchValidationError,
         match="MemPalace decision fact does not match final decision artifact",
     ):
-        verify_mempalace_final_decision(g0_memory_state, mempalace_kg_path)
+        verify_mempalace_final_decision(alpha_memory_state, mempalace_kg_path)
 
 
-def test_mempalace_incident_replay_accepts_emitted_compacted_g0_infra_rationale(
-    g0_memory_state: AutoresearchState,
+def test_mempalace_incident_replay_accepts_emitted_compacted_alpha_discard_rationale(
+    alpha_memory_state: AutoresearchState,
     mempalace_kg_path: Path,
 ) -> None:
-    final_decision = g0_memory_state.final_decision
+    final_decision = alpha_memory_state.final_decision
     assert final_decision is not None
     incident_state = replace(
-        g0_memory_state,
+        alpha_memory_state,
         final_decision=replace(
             final_decision,
-            infra_rationale="r" * 268,
+            rationale="r" * 268,
         ),
     )
     facts = standardized_mempalace_kg_facts(incident_state)
-    emitted_rationale = facts["infra_rationale"]
+    emitted_rationale = facts["failed_due_to"]
     partial_facts = {
         predicate: object_value
         for predicate, object_value in facts.items()
-        if predicate != "infra_rationale"
+        if predicate != "failed_due_to"
     }
     _write_active_mempalace_facts(
         mempalace_kg_path,
-        subject="g0-iteration-1",
+        subject="alpha-discard-1",
         facts=partial_facts,
     )
     connection = sqlite3.connect(mempalace_kg_path)
@@ -7088,8 +7139,8 @@ def test_mempalace_incident_replay_accepts_emitted_compacted_g0_infra_rationale(
         "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
         (
             "emitted-infra-rationale",
-            "g0-iteration-1",
-            "infra_rationale",
+            "alpha-discard-1",
+            "failed_due_to",
             emitted_rationale,
             "result.json",
         ),
@@ -8021,6 +8072,19 @@ def test_final_decision_rules_enforce_drawdown_discard(
         )
 
 
+def test_final_decision_requires_memory_for_completed_alpha_verification(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_decision(policy)
+    decision = replace(_final_decision(), memory_write_required=False)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="ALPHA_RESEARCH completed PASS final decisions require memory_write_required=true",
+    ):
+        advance_state(state, decision, policy)
+
+
 def test_final_decision_rules_enforce_crash_after_test_failures(
     policy: AutoresearchPolicy,
 ) -> None:
@@ -8040,10 +8104,13 @@ def test_final_decision_rules_enforce_crash_after_test_failures(
     ):
         advance_state(
             state,
-            _final_decision_with(
-                decision=FinalDecision.DISCARD,
-                metric_value=None,
-                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            replace(
+                _final_decision_with(
+                    decision=FinalDecision.DISCARD,
+                    metric_value=None,
+                    reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+                ),
+                memory_write_required=False,
             ),
             policy,
         )
@@ -8069,20 +8136,26 @@ def test_repeated_bug_signal_routes_to_discard_decision(
     ):
         advance_state(
             state,
-            _final_decision_with(
-                decision=FinalDecision.CRASH,
-                metric_value=None,
-                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            replace(
+                _final_decision_with(
+                    decision=FinalDecision.CRASH,
+                    metric_value=None,
+                    reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+                ),
+                memory_write_required=False,
             ),
             policy,
         )
 
     result = advance_state(
         state,
-        _final_decision_with(
-            decision=FinalDecision.DISCARD,
-            metric_value=None,
-            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        replace(
+            _final_decision_with(
+                decision=FinalDecision.DISCARD,
+                metric_value=None,
+                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            ),
+            memory_write_required=False,
         ),
         policy,
     )
@@ -8090,6 +8163,7 @@ def test_repeated_bug_signal_routes_to_discard_decision(
     assert result.phase is Phase.REPEAT
     assert result.final_decision is not None
     assert result.final_decision.decision is FinalDecision.DISCARD
+    assert result.final_decision.memory_write_required is False
 
 
 def test_crash_without_review_accepts_the_canonical_not_run_verdict(
@@ -8107,6 +8181,7 @@ def test_crash_without_review_accepts_the_canonical_not_run_verdict(
         metric_value=None,
         reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
     )
+    decision = replace(decision, memory_write_required=False)
 
     result = advance_state(state, decision, policy)
 
@@ -8199,10 +8274,13 @@ def test_final_decision_no_consensus_requires_no_consensus_artifact(
     ):
         advance_state(
             state,
-            _final_decision_with(
-                decision=FinalDecision.DISCARD,
-                metric_value=None,
-                reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            replace(
+                _final_decision_with(
+                    decision=FinalDecision.DISCARD,
+                    metric_value=None,
+                    reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+                ),
+                memory_write_required=False,
             ),
             policy,
         )

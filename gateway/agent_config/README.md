@@ -91,7 +91,12 @@ Suspension remains explicit operator-owned readiness suspension only.
 After G0 implementation and verification, `GATE_PASSED` requires a full-union
 `COMPLETE` receipt cross-checked against runner-owned preflight identity and
 counts and maps to non-suspending `INFRA_REPAIRED`. `REMEDIATION_REQUIRED` is
-stage evidence only and maps to non-suspending `DISCARD`.
+stage evidence only and maps to non-suspending `DISCARD`. Neither G0 outcome is
+research memory. MemPalace retains only ALPHA_RESEARCH KEEP-family outcomes and
+ALPHA_RESEARCH `DISCARD` outcomes backed by completed verification with
+`status=PASS` and `tests_passed=true`.
+Crashes, exhausted verification failures, consensus failures, and
+infrastructure control-plane outcomes proceed without a memory write.
 
 Then atomically resume the same schema-v3 state file:
 

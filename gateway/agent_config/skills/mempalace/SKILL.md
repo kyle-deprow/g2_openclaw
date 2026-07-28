@@ -30,13 +30,17 @@ structured, auditable, and queryable through MemPalace.
 **On every research iteration:**
 1. **Context setup** — PM reads prior experiments with `mempalace_search` and `mempalace_kg_query`, then delegates a read-only context packet to `context-curator`
 2. **Debate/review/implementation/fix stages** — non-PM agents use only `mempalace-readonly` plus denied mutation tools in config
-3. **Final log stage only** — after implementation, verification, review, fixes, and decision, the PM writes experiment results with `mempalace_add_drawer`, `mempalace_kg_add`, and `mempalace_diary_write`
+3. **Final log stage only** — after implementation, verification, review, fixes, and a runner-required final decision, the PM writes experiment results with `mempalace_add_drawer`, `mempalace_kg_add`, and `mempalace_diary_write`; policy-approved no-memory outcomes skip this stage
 
-Only the PM may write to MemPalace, and only after a memory-required final
-decision (`KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, `DISCARD`, `CRASH`,
-`INFRA_REPAIRED`, or `INFRA_BLOCKED`). Debate notes, consensus drafts, winning
-theories, `NO_CONSENSUS` outcomes, implementation plans, and in-progress review
-findings are not MemPalace writes.
+Only the PM may write to MemPalace, and only when the runner requires it:
+an `ALPHA_RESEARCH` `KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, or `DISCARD`
+whose latest completed verification is `PASS` with `tests_passed=true`. This
+includes reviewed durable negative or methodology results. The PM cannot elect
+to retain another outcome. `CRASH`, exhausted `TEST_FAILURE`/`BUG_SIGNAL`, all
+`DATA_INFRA_G0` outcomes (including `INFRA_REPAIRED` and remediation
+`DISCARD`), `NO_CONSENSUS`, and operator `INFRA_BLOCKED` are no-memory
+transitions. Debate notes, consensus drafts, winning theories, implementation
+plans, and in-progress review findings are not MemPalace writes.
 
 Non-PM stage agents are structurally read-only: they should not receive this
 skill and should deny every MemPalace mutation/operation tool in config.
@@ -78,24 +82,22 @@ the repeat-phase memory write, `autoresearch-next` emits the exact standardized
 predicate/object facts. Copy those emitted objects verbatim into
 `mempalace_kg_add`; never re-normalize, shorten, or reconstruct them.
 
-For every memory-required final decision, write these facts with the experiment
+For every runner-required memory decision, write these facts with the experiment
 ID as subject:
 
 | Predicate | Required object |
 |---|---|
 | `decision` | exact final decision, normalized (for example `keep`) |
-| `research_mode` | `alpha_research` or `data_infra_g0` |
+| `research_mode` | `alpha_research` |
 | `data_window` | normalized aggregate common/OOS token defined above |
 | `reviewer_verdict` | exact reviewer verdict, normalized; `not_run` only when no review ran |
 | `alpha_decision_metric` | alpha mode only: normalized `<metric_name>_<value>` |
 | `keeper_rationale` | alpha KEEP-family decision only; exact normalized final rationale |
 | `failed_due_to` | alpha non-KEEP decision only; exact normalized final rationale |
-| `infra_gate_outcome` | G0 only: `gate_passed` or `remediation_required` |
-| `infra_rationale` | G0 only; exact normalized final infra rationale |
 
-`NO_CONSENSUS` has `memory_write_required=false`, `reviewer_verdict=NOT_RUN`,
-and is not written or verified in MemPalace. Do not invoke
-`autoresearch-mark-memory` for it.
+Every policy-approved no-memory final decision has
+`memory_write_required=false` and is not written or verified in MemPalace. Do
+not invoke `autoresearch-mark-memory` for it.
 
 Write sequence is mandatory:
 
@@ -105,8 +107,7 @@ Write sequence is mandatory:
 3. Run `gateway-cli autoresearch-mark-memory`; it opens the KG read-only,
    verifies the facts against the final artifact, and persists a digest receipt.
 4. Only after that receipt is persisted may `autoresearch-start-next` run.
-   The sole exception is the explicit `NO_CONSENSUS` no-memory transition
-   above, which has no receipt.
+   Every policy-approved no-memory transition bypasses this receipt.
 
 `autoresearch-mark-memory` never writes or repairs MemPalace. Missing facts,
 noncanonical IDs, source-less facts, and mismatched final decisions fail closed.
