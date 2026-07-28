@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import sqlite3
 import subprocess
@@ -323,22 +324,169 @@ def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
     readiness = _ready_manifest(tmp_path / "init-readiness")
     readiness_path = tmp_path / "platform-readiness.json"
     _write_readiness_manifest(readiness_path, readiness)
-    output = tmp_path / "pristine-v2.json"
-
-    result = runner.invoke(
-        app,
-        [
-            "autoresearch-init-state",
-            "--output",
-            str(output),
-            "--readiness-manifest",
-            str(readiness_path),
-        ],
-    )
+    output = tmp_path / "pristine-v3.json"
+    runs_root = tmp_path / "openclaw" / "autoresearch" / "quantipy-experiment-runs"
+    with patch.object(
+        autoresearch_runner,
+        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+        runs_root,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(output),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
 
     assert result.exit_code == 0, result.output
+    assert "state v3" in result.output
     state = AutoresearchState.from_dict(json.loads(output.read_text(encoding="utf-8")))
+    assert state.to_dict()["schema_version"] == 3
     assert state.platform_readiness == readiness.identity()
+    assert runs_root.is_dir()
+    assert runs_root.stat().st_mode & 0o777 == 0o700
+
+
+def test_autoresearch_init_state_help_names_schema_v3() -> None:
+    result = runner.invoke(app, ["autoresearch-init-state", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "schema-v3" in result.output
+    assert "schema-v2" not in result.output
+
+
+def test_autoresearch_init_state_rejects_existing_nonprivate_quantipy_runs_root(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    runs_root = tmp_path / "openclaw" / "autoresearch" / "quantipy-experiment-runs"
+    runs_root.mkdir(parents=True, mode=0o755)
+    runs_root.chmod(0o755)
+
+    with patch.object(
+        autoresearch_runner,
+        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+        runs_root,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "mode-0700" in result.output
+
+
+def test_autoresearch_init_state_rejects_symlink_quantipy_runs_root(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    private_target = tmp_path / "private-target"
+    private_target.mkdir(mode=0o700)
+    runs_root = tmp_path / "quantipy-experiment-runs"
+    runs_root.symlink_to(private_target, target_is_directory=True)
+
+    with patch.object(
+        autoresearch_runner,
+        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+        runs_root,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "symlink path components" in result.output
+
+
+def test_autoresearch_init_state_rejects_symlinked_quantipy_runs_parent(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    private_target = tmp_path / "private-target"
+    private_target.mkdir(mode=0o700)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(private_target, target_is_directory=True)
+    runs_root = linked_parent / "quantipy-experiment-runs"
+
+    with patch.object(
+        autoresearch_runner,
+        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+        runs_root,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "symlink path components" in result.output
+    assert not (private_target / "quantipy-experiment-runs").exists()
+
+
+def test_autoresearch_init_state_rejects_wrong_owner_quantipy_runs_root(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    runs_root = tmp_path / "quantipy-experiment-runs"
+    runs_root.mkdir(mode=0o700)
+
+    with (
+        patch.object(
+            autoresearch_runner,
+            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+            runs_root,
+        ),
+        patch(
+            "gateway.autoresearch_runner.os.getuid",
+            return_value=os.getuid() + 1,
+        ),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "owned" in result.output
+    assert "non-symlink directory" in result.output
 
 
 def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
@@ -562,8 +710,38 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     _git(target_checkout, "add", "README.md")
     _git(target_checkout, "commit", "-m", "baseline")
     _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    manifest = {
+        "schema_version": "quantipy-experiment-v2",
+        "experiment_id": "cli-runtime-audit",
+        "package_path": "experiment",
+        "stage_files": [
+            {
+                "name": stage,
+                "file_path": f"{stage}.py",
+                "entrypoint": f"experiment.{stage}:run",
+            }
+            for stage in ("prepare", "smoke", "feasibility", "model")
+        ],
+    }
+    manifest_path = workspace / "experiment-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")), encoding="utf-8"
+    )
+    manifest_path.chmod(0o644)
+    experiment_package = workspace / "experiment"
+    experiment_package.mkdir()
+    experiment_package.chmod(0o755)
+    (experiment_package / "__init__.py").write_text("", encoding="utf-8")
+    (experiment_package / "__init__.py").chmod(0o644)
+    for stage in ("prepare", "smoke", "feasibility", "model"):
+        stage_path = experiment_package / f"{stage}.py"
+        stage_path.write_text(
+            "def run(context):\n    return context.accept('accepted')\n",
+            encoding="utf-8",
+        )
+        stage_path.chmod(0o644)
     (workspace / "experiment.txt").write_text("implementation\n", encoding="utf-8")
-    _git(workspace, "add", "experiment.txt")
+    _git(workspace, "add", "experiment", "experiment.txt", "experiment-manifest.json")
     _git(workspace, "commit", "-m", "implementation")
     implementation_commit = _git(workspace, "rev-parse", "HEAD")
     (workspace / "experiment.txt").write_text("fixed\n", encoding="utf-8")
@@ -1009,6 +1187,10 @@ class TestAutoresearchCliCommands:
         commit_sha: str,
         workspace_path: str | None = None,
     ) -> ImplementationResultArtifact:
+        resolved_workspace = (
+            Path(workspace_path) if workspace_path is not None else worktree.workspace
+        )
+        manifest_path = resolved_workspace / "experiment-manifest.json"
         return ImplementationResultArtifact(
             summary="Implemented the narrow VWAP and OBV experiment.",
             workspace_path=workspace_path
@@ -1019,6 +1201,26 @@ class TestAutoresearchCliCommands:
             notebook_path="notebooks/experiments/vwap_obv.ipynb",
             tests_added_or_updated=("tests/test_vwap_obv.py",),
             commands_run=("uv run pytest tests/test_vwap_obv.py",),
+            experiment_manifest_path=str(manifest_path),
+            experiment_manifest_sha256=sha256(
+                json.dumps(
+                    {
+                        "schema_version": "quantipy-experiment-v2",
+                        "experiment_id": "cli-runtime-audit",
+                        "package_path": "experiment",
+                        "stage_files": [
+                            {
+                                "name": stage,
+                                "file_path": f"{stage}.py",
+                                "entrypoint": f"experiment.{stage}:run",
+                            }
+                            for stage in ("prepare", "smoke", "feasibility", "model")
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
             compute_fit=ComputeFitArtifact(
                 target=ComputeTarget.CPU,
                 rationale=(
@@ -2387,6 +2589,51 @@ class TestAutoresearchCliCommands:
         assert result.exit_code == 1
         assert "active experiment/test writer" in result.output
         assert "processes" in result.output
+
+    def test_autoresearch_next_provisions_fixed_runs_root_before_verification_dispatch(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        state = MagicMock()
+        state.phase = Phase.VERIFICATION
+        action = MagicMock()
+        action.to_dict.return_value = {"phase": "verification"}
+        state_path = tmp_path / "state.json"
+        config_path = tmp_path / "openclaw.json"
+        readiness_path = tmp_path / "readiness.json"
+        quantipy_root = tmp_path / "quantipy"
+        for path in (state_path, config_path, readiness_path):
+            path.write_text("{}\n", encoding="utf-8")
+        quantipy_root.mkdir()
+
+        with (
+            patch("gateway.autoresearch_runner.load_state_file", return_value=state),
+            patch("gateway.autoresearch_runner.load_autoresearch_policy"),
+            patch("gateway.cli.load_platform_readiness"),
+            patch("gateway.autoresearch_runner.build_receipt_catalog"),
+            patch("gateway.autoresearch_runner.next_action", return_value=action),
+            patch(
+                "gateway.autoresearch_runner.provision_quantipy_experiment_runs_root"
+            ) as provision,
+            patch("gateway.cli._git_status_short", return_value=None),
+            patch("gateway.cli._active_target_writer_processes", return_value=()),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "autoresearch-next",
+                    str(state_path),
+                    "--quantipy-root",
+                    str(quantipy_root),
+                    "--openclaw-config",
+                    str(config_path),
+                    "--readiness-manifest",
+                    str(readiness_path),
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        provision.assert_called_once_with()
 
     def test_autoresearch_create_command_file_reads_secure_stdin_protocol(
         self,

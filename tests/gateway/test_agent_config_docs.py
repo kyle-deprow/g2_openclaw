@@ -192,7 +192,7 @@ def test_autoresearch_advance_uses_locked_atomic_in_place_state_persistence() ->
     assert "--output /home/dev/.openclaw/autoresearch/quantipy-state.json" in readme
 
 
-def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspended_campaigns() -> (
+def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspended_campaigns() -> (
     None
 ):
     runtime_paths = (
@@ -202,7 +202,7 @@ def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspende
     )
     for path in runtime_paths:
         text = path.read_text(encoding="utf-8")
-        assert "schema-v2 state" in text
+        assert "schema-v3 state" in text
         assert "schema-v3 platform-readiness manifest" in text or "schema version 3" in text
         rebuild_index = text.index("autoresearch-build-readiness")
         resume_index = text.index("autoresearch-resume", rebuild_index)
@@ -216,7 +216,7 @@ def test_runtime_docs_distinguish_v2_state_from_v3_readiness_and_resume_suspende
 
     plan_text = " ".join(PLAN.read_text(encoding="utf-8").split())
     assert "schema-v3 platform-readiness manifest" in plan_text
-    assert "schema-v2 state" in plan_text
+    assert "schema-v3 state" in plan_text
     assert "autoresearch-build-readiness" in plan_text
     assert "autoresearch-resume" in plan_text
     assert "--campaign-xnys-start" in plan_text
@@ -382,11 +382,64 @@ def test_alpha_docs_require_dynamic_coverage_and_strict_state_initialization() -
 
     assert "DynamicUniverseCoverageReceipt" in alpha_docs
     assert "autoresearch-migrate-state" not in alpha_docs
-    assert "state missing `schema_version` is unsupported" in " ".join(alpha_docs.split()).lower()
+    normalized = " ".join(alpha_docs.split()).lower()
+    assert "schema-v2 state" in normalized
+    assert "archive" in normalized
+    assert "before restarting the supervisor" in normalized
     assert "ALPHA_RESEARCH" in alpha_docs
     assert "AggregateCoverageReceipt" in alpha_docs
     assert "DATA_INFRA_G0`-only" in alpha_docs
     assert "per-symbol and aggregate common-calendar coverage" not in alpha_docs
+
+
+def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
+    runtime_docs = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            AGENT_CONFIG / "AGENTS.md",
+            AGENT_CONFIG / "README.md",
+            AUTORESEARCH,
+            PLAN,
+        )
+    )
+    normalized = " ".join(runtime_docs.split())
+
+    assert "fixed private" in normalized
+    assert "quantipy_execution_not_started" in normalized
+    assert "focused_tests_failed" in normalized
+    assert "preflight_failed" in normalized
+    assert "expected `run.json` must be absent" in normalized
+    assert "private identity-bound tombstone" in normalized
+    assert "new deterministic commit-bound run id" in normalized.lower()
+    assert "manifest parent" in normalized.lower()
+    assert "8 MiB" in normalized
+    assert "1 MiB per source file" in normalized
+    assert "8 MiB for the notebook" in normalized
+    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight" in normalized
+    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment run" in normalized
+    assert "scripts/run-long-task.sh" in normalized
+    assert "expected_artifact_path" in normalized
+    assert "direct foreground" in normalized.lower()
+    assert "verifier" in normalized.lower() and "attestation" in normalized.lower()
+    assert "detached run directory" in normalized.lower()
+    assert "worker attestation" in normalized.lower()
+    assert "hash" in normalized.lower() and "not sufficient by itself" in normalized.lower()
+    assert "schema-v5 `status.json`" in normalized
+    assert "mode 0400" in normalized
+    assert "mode 0500" in normalized
+    assert "bounded 64 KiB retained log tail" in normalized
+    assert "truthful truncation metadata" in normalized
+    assert "malicious same-UID process" in normalized
+    assert "outside the local control-plane threat model" in normalized
+    assert "chmod 0700 <exact-detached-run-dir>" in normalized
+    assert "exit 0 iff `run.success=true`" in normalized
+    assert "exit 1 iff `run.success=false`" in normalized
+    assert "ordinary `process_error`" in normalized
+    assert "exit 2+" in normalized
+    assert "/home/dev/.openclaw/autoresearch/quantipy-experiment-runs" in normalized
+    assert "mode-0700 non-symlink directory" in normalized
+    assert "Generated `__pycache__` directories, `*.pyc`" in normalized
+    assert "never substitutes" in normalized
 
 
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:

@@ -16,18 +16,50 @@ unit_name="$4"
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 runtime_python=(uv run --project "$repo_root" --directory "$repo_root" python -m gateway.autoresearch_runs)
-child_pid=""
+supervisor_pid=""
 monitor_pid=""
 timeout_pid=""
+stdout_capture_pid=""
+stderr_capture_pid=""
 termination_requested=0
+capture_incomplete=0
 timeout_marker_file="${run_dir}/.timeout-fired"
 operator_stop_marker_file="${run_dir}/.operator-stop-fired"
+stdout_capture_fifo="${run_dir}/.stdout.capture.pipe"
+stderr_capture_fifo="${run_dir}/.stderr.capture.pipe"
+capture_completion_marker="${run_dir}/.capture-completion"
 timeout_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
+readonly capture_incomplete_exit_code=3
 
-mapfile -d '' -t command < <(
-  "${runtime_python[@]}" consume-command-handoff --run-dir "$run_dir" --runs-root "$runs_root"
-)
-[[ ${#command[@]} -gt 0 ]] || die "protected command handoff was empty"
+[[ "$startup_marker_file" == "${run_dir}/.startup-published.json" ]] ||
+  die "startup marker must use the fixed run-local path"
+"${runtime_python[@]}" prepare-output-capture --run-dir "$run_dir" --runs-root "$runs_root"
+
+cleanup_capture_fifos() {
+  rm -f -- "$stdout_capture_fifo" "$stderr_capture_fifo"
+  rm -f -- "$capture_completion_marker"
+}
+
+trap cleanup_capture_fifos EXIT
+
+for capture_fifo in "$stdout_capture_fifo" "$stderr_capture_fifo"; do
+  [[ ! -L "$capture_fifo" && ! -e "$capture_fifo" ]] || die "capture fifo already exists: $capture_fifo"
+  umask 077
+  mkfifo -m 600 -- "$capture_fifo"
+done
+
+(
+  trap '' TERM INT HUP
+  exec "${runtime_python[@]}" capture-output-stream \
+    --run-dir "$run_dir" --runs-root "$runs_root" --stream stdout
+) <"$stdout_capture_fifo" &
+stdout_capture_pid=$!
+(
+  trap '' TERM INT HUP
+  exec "${runtime_python[@]}" capture-output-stream \
+    --run-dir "$run_dir" --runs-root "$runs_root" --stream stderr
+) <"$stderr_capture_fifo" &
+stderr_capture_pid=$!
 
 peak_rss_bytes() {
   local peak
@@ -47,72 +79,98 @@ publish_heartbeat() {
   "${runtime_python[@]}" "${heartbeat_args[@]}" >/dev/null 2>&1 || true
 }
 
-terminate_child_bounded() {
-  [[ -n "$child_pid" ]] || return 0
-  kill -TERM "$child_pid" 2>/dev/null || true
-  deadline="$(python3 -c 'import sys, time; print(time.monotonic() + float(sys.argv[1]))' "$timeout_grace_seconds")"
-  while kill -0 "$child_pid" 2>/dev/null; do
-    if python3 -c 'import sys, time; raise SystemExit(0 if time.monotonic() >= float(sys.argv[1]) else 1)' "$deadline"; then
-      kill -KILL "$child_pid" 2>/dev/null || true
-      break
-    fi
-    sleep 0.05
-  done
-}
-
 handle_termination() {
   termination_requested=1
   umask 077
   : > "$operator_stop_marker_file"
-  if [[ -n "$child_pid" ]]; then
-    terminate_child_bounded
-  fi
 }
 
 trap handle_termination TERM INT HUP
 
 timeout_seconds="$(python3 -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8"))["timeout_seconds"]; print("" if value is None else value)' "${run_dir}/manifest.json")"
 
-"${command[@]}" </dev/null >/dev/null 2>&1 &
-child_pid=$!
-"${runtime_python[@]}" start \
-  --run-dir "$run_dir" \
-  --runs-root "$runs_root" \
-  --pid "$child_pid" \
-  --systemd-unit "$unit_name" >/dev/null
-cp -- "${run_dir}/status.json" "$startup_marker_file"
+(
+  trap '' TERM INT HUP
+  exec "${runtime_python[@]}" supervise-command \
+    --run-dir "$run_dir" \
+    --runs-root "$runs_root" \
+    --systemd-unit "$unit_name" \
+    --termination-grace-seconds "$timeout_grace_seconds" \
+    3>"$stdout_capture_fifo" 4>"$stderr_capture_fifo"
+) &
+supervisor_pid=$!
+
+for _ in $(seq 1 100); do
+  if [[ -s "$startup_marker_file" ]]; then
+    break
+  fi
+  kill -0 "$supervisor_pid" 2>/dev/null ||
+    die "command supervisor exited before publishing startup"
+  sleep 0.05 || true
+done
+[[ -s "$startup_marker_file" ]] || die "command supervisor did not publish startup in time"
 
 if [[ -n "$timeout_seconds" ]]; then
   (
     sleep "$timeout_seconds"
-    if kill -0 "$child_pid" 2>/dev/null; then
+    if kill -0 "$supervisor_pid" 2>/dev/null; then
       umask 077
       : > "$timeout_marker_file"
-      terminate_child_bounded
     fi
   ) &
   timeout_pid=$!
 fi
 
-while kill -0 "$child_pid" 2>/dev/null; do
+while kill -0 "$supervisor_pid" 2>/dev/null; do
   publish_heartbeat
   sleep 1
 done &
 monitor_pid=$!
 
-# A trapped signal interrupts bash's wait before the child necessarily exits.
-# Keep waiting until the child has been reaped, then stop the heartbeat writer
-# before publishing the one terminal record.
+# A trapped signal interrupts bash's wait before the supervisor necessarily exits.
 while :; do
   set +e
-  wait "$child_pid"
-  child_exit_code=$?
+  wait "$supervisor_pid"
+  supervisor_exit_code=$?
   set -e
-  if kill -0 "$child_pid" 2>/dev/null; then
+  if (( termination_requested && supervisor_exit_code >= 128 )); then
+    set +e
+    wait "$supervisor_pid"
+    resumed_wait_exit_code=$?
+    set -e
+    if (( resumed_wait_exit_code != 127 )); then
+      supervisor_exit_code=$resumed_wait_exit_code
+    fi
+  fi
+  if kill -0 "$supervisor_pid" 2>/dev/null; then
     continue
   fi
   break
 done
+
+(( supervisor_exit_code == 0 )) || die "identity-bound command supervisor failed"
+
+flush_output_capture() {
+  local stdout_capture_exit_code=0 stderr_capture_exit_code=0
+  set +e
+  wait "$stdout_capture_pid"
+  stdout_capture_exit_code=$?
+  wait "$stderr_capture_pid"
+  stderr_capture_exit_code=$?
+  set -e
+  for capture_exit_code in "$stdout_capture_exit_code" "$stderr_capture_exit_code"; do
+    if (( capture_exit_code == capture_incomplete_exit_code )); then
+      capture_incomplete=1
+    elif (( capture_exit_code != 0 )); then
+      die "output capture failed while draining child streams"
+    fi
+  done
+  if (( capture_incomplete )); then
+    printf 'ERROR: output capture reached its bounded close deadline before FIFO EOF\n' >&2
+  fi
+}
+
+flush_output_capture
 
 if [[ -n "$timeout_pid" ]]; then
   kill "$timeout_pid" 2>/dev/null || true
@@ -122,15 +180,13 @@ kill "$monitor_pid" 2>/dev/null || true
 wait "$monitor_pid" 2>/dev/null || true
 trap '' TERM INT HUP
 
-signal_number=""
-if (( child_exit_code >= 128 )); then
-  signal_number=$((child_exit_code - 128))
-fi
-artifact_missing=0
-expected_artifact_path="$(python3 -c 'import json, sys; value=json.load(open(sys.argv[1], encoding="utf-8"))["expected_artifact_path"]; print("" if value is None else value)' "${run_dir}/manifest.json")"
-if [[ "$child_exit_code" -eq 0 && -n "$expected_artifact_path" && ! -f "$expected_artifact_path" ]]; then
-  artifact_missing=1
-fi
+mapfile -t supervised_result < <(
+  "${runtime_python[@]}" consume-supervised-command-result \
+    --run-dir "$run_dir" --runs-root "$runs_root"
+)
+[[ ${#supervised_result[@]} -eq 2 ]] || die "supervised command result is incomplete"
+child_exit_code="${supervised_result[0]}"
+signal_number="${supervised_result[1]}"
 complete_args=(complete --run-dir "$run_dir" --runs-root "$runs_root" --exit-code "$child_exit_code")
 peak="$(peak_rss_bytes)"
 if [[ -n "$peak" ]]; then
@@ -145,11 +201,12 @@ elif (( termination_requested )) || [[ -f "$operator_stop_marker_file" ]]; then
   complete_args+=(--operator-stopped)
 elif [[ "$(systemctl --user show "$unit_name" --no-pager --property=Result --value 2>/dev/null || true)" == "oom-kill" ]]; then
   complete_args+=(--resource-exhausted)
-fi
-if (( artifact_missing )); then
-  complete_args+=(--artifact-missing)
+elif (( capture_incomplete )); then
+  complete_args+=(--output-capture-failed)
 fi
 rm -f -- "$timeout_marker_file"
 rm -f -- "$operator_stop_marker_file"
+cleanup_capture_fifos
+trap - EXIT
 "${runtime_python[@]}" "${complete_args[@]}" >/dev/null
 exit 0

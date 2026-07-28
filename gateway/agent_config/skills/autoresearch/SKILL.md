@@ -87,9 +87,11 @@ capability object injected into every stage. `BLOCKED` states the concrete
 operator action required. The runner never downloads, infers, substitutes, or
 repairs evidence.
 
-Before `autoresearch-next`, stop the supervisor and prepare schema-v2 state by
-initializing a pristine state from the READY manifest. State missing
-`schema_version` is unsupported and must be archived, not migrated or repaired:
+Before `autoresearch-next`, stop the supervisor and prepare schema-v3 state by
+initializing a pristine state from the READY manifest. A live schema-v2 state,
+or state missing `schema_version`, is unsupported and must be archived, not
+migrated, repaired, or overwritten. Complete this reinitialization before
+restarting the supervisor:
 
 ```bash
 (
@@ -101,12 +103,16 @@ initializing a pristine state from the READY manifest. State missing
   uv run gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
+  if [ -e "$state" ]; then
+    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    mv -- "$state" "$archive"
+  fi
   mv -- "$tmp" "$state"
   trap - EXIT
 )
 ```
 
-This procedure atomically leaves schema-v2 state at the authoritative path used
+This procedure atomically leaves schema-v3 state at the authoritative path used
 by control and the supervisor. Use that path for the first dispatch:
 
 ```bash
@@ -130,7 +136,7 @@ rejects January/July 2021 but supports 2022 onward. The readiness command
 strictly probes the campaign start through Quantipy's public
 `security_universe_screen` and daily regular-hours `prices` APIs for `AAPL`.
 This intentional operator prewarm may hydrate/cache data, and any probe failure
-must not produce a READY receipt. Then resume the same schema-v2 state
+must not produce a READY receipt. Then resume the same schema-v3 state
 atomically:
 
 ```bash
@@ -631,7 +637,8 @@ Implementation requirements:
   that load the price panel. Commit the scaffold, focused tests, notebook
   shell, and over-budget preflight so verification can emit the structured
   feasibility `BUG_SIGNAL` without spending the hydrate cost.
-- Commit only after tests and notebook execution pass.
+- Commit after focused tests pass; notebook rendering is optional smoke/report evidence and
+  never replaces the required typed runtime verification.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
   `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--manifest` and
@@ -659,6 +666,92 @@ treated as no artifact. The artifact file must use the strict
 active `autoresearch-next` output. Never pass a raw unwrapped
 `verification_result`.
 
+## Mandatory Quantipy Typed Runtime Gate
+
+The implementation artifact names the absolute canonical committed
+`quantipy-experiment-v2` manifest under `implementation_result.workspace_path`
+and its SHA-256. It must declare exactly `prepare`, `smoke`, `feasibility`, and
+`model` stage files in that order. A raw notebook is not an implementation
+artifact and cannot stand in for this manifest. Quantipy resolves package and
+notebook paths from the manifest's parent, then stage files below that package.
+Every local Python source file present below the full package root must be
+tracked at the implementation commit and exact-byte identical; ignored,
+untracked, symlinked, or mutable source entries fail provenance. Generated
+`__pycache__` directories, `*.pyc`, and non-source runtime artifacts are not
+source provenance. Quantipy preflight reads the full package Python tree once,
+then all stage imports execute only from that approved immutable in-memory
+capsule. `run.json.source` must bind the complete uniquely ordered `.py` file
+list, each size and SHA-256, total bytes, and the
+`quantipy-experiment-source-v1` aggregate digest. No `run/source` directory is
+retained or accepted as evidence. G2 independently rebuilds the same inventory
+from Git blobs at the implementation commit; dirty execution followed by
+workspace restoration is rejected.
+
+Verification order is fixed: focused tests,
+`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight MANIFEST`, then
+launch the exact `env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run
+MANIFEST --output-root ROOT --run-id
+autoresearch-i<iteration>-<commit12>` command through
+`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The immutable detached
+manifest must set `expected_artifact_path` to the known `ROOT/RUN_ID/run.json`.
+Direct foreground execution cannot satisfy this contract. Under the
+non-malicious same-host agent model, PASS requires the worker-produced sealed
+attestation; a verifier claim cannot replace it. Before publishing terminal
+success, the detached worker securely opens that artifact once and records its
+path, size, SHA-256, and file identity in strict schema-v5 `status.json`, then
+seals the artifact/status mode 0400 and detached run directory mode 0500.
+Verification must bind the detached run directory and manifest digest and
+require successful terminal status, complete EOF drain, truthful truncation
+metadata for each bounded 64 KiB retained log tail, and current `run.json`
+bytes matching the worker attestation; an
+artifact-supplied hash alone is never proof. The deterministic run ID
+means the final path is known before execution: `ROOT/RUN_ID/run.json`. `ROOT`
+is the runner-declared fixed private autoresearch runs root; arbitrary output
+roots and mutable workspace output are rejected. State initialization and
+verification dispatch require that root to be owner-controlled mode 0700 and
+reject symlinked path components. G2 mirrors Quantipy's strict
+8 MiB canonical run-envelope cap. Committed source snapshots permit 1 MiB per
+source file, and a committed notebook snapshot permits 8 MiB. Within the run
+envelope, source evidence is limited to 256 ordered Python files, 1 MiB per
+file and 8 MiB total; stage summaries are
+limited to 4096 characters, failure messages to 2048, identity paths to 4096,
+and the nested or standalone panel receipt to 4 MiB.
+
+The CLI process contract is exact: exit 0 iff `run.success=true`, and exit 1
+iff `run.success=false`. PASS requires detached `succeeded`/exit 0. A valid
+typed rejected/failed envelope used by TEST_FAILURE or BUG_SIGNAL requires
+detached `failed`/exit 1, no signal, ordinary `process_error`, and complete
+sealed artifact attestation. Timeout, operator stop, resource exhaustion,
+artifact/capture failure, signals, exit 2+, and all other outcomes fail closed.
+
+Sealed local modes prevent ordinary verifier mutation, not a malicious
+same-UID process or root/sudo-capable operator deliberately rebuilding the
+control-plane record; that compromise is outside this threat model. Cleanup is
+an explicit operator action: `chmod 0700 <exact-detached-run-dir>`, then remove
+only that exact directory. Never recursively chmod or delete the runs root.
+
+Quantipy itself is the cheap mechanical admission gate: smoke and feasibility
+must complete before model is imported or executed. Never self-report that
+gate; copy its typed run receipt into `quantipy_experiment_evidence`.
+
+For `PASS`, evidence must match the implementation manifest path/digest and
+commit, `run.json` path/digest and ID, successful result, all four ordered
+completed stages, and panel identity/digests when requested. For
+`TEST_FAILURE` or `BUG_SIGNAL`, preserve the actual failed or rejected typed
+run evidence when a run exists. If execution never started,
+`quantipy_experiment_evidence` is `null` and
+`quantipy_execution_not_started` is mandatory. That strict receipt binds the
+manifest, deterministic expected run ID/path, exact failed command and
+evidence, and reason `focused_tests_failed` or `preflight_failed`; the expected
+run directory must be absent. G2 atomically creates a private identity-bound
+tombstone at that directory while validating the receipt, so the same run ID
+can never start later. Retry only after a new implementation/fix commit yields
+a new deterministic commit-bound run ID. A requested panel may omit evidence
+only for a typed pre-stage preflight, panel, or filesystem failure; otherwise
+its nested receipt and bound files are mandatory. `nbconvert`, `papermill`, and Jupyter execution can
+only smoke-test or render a report; none substitutes for the v2 runtime run or
+authorizes PASS.
+
 Verification is the first stage that records materialization evidence. Capture
 each history batch's contract digest, the per-date snapshot and grouped-daily
 identities and content digests, and the final member-union count and digest.
@@ -685,7 +778,7 @@ Failure classification is mandatory:
   set `status` to `TEST_FAILURE`, set `tests_passed` to `false`, and include
   the exact command in `commands_run` plus the decisive failure evidence in the
   artifact summaries.
-- Any hydrate, backtest, notebook, or similarly long verification command must
+- Any hydrate, backtest, typed runtime run, notebook report render, or similarly long verification command must
   run detached with bounded polling and durable run artifacts. Foreground tool
   calls beyond the watchdog are unsafe and invalid for these commands.
 - If commands ran but metrics are impossible, leaky, internally inconsistent,
@@ -699,9 +792,9 @@ Failure classification is mandatory:
   fabricated or zero-valued placeholders.
 
 In `DATA_INFRA_G0`, `status` and `tests_passed` describe verification command,
-test, and notebook execution plus experiment correctness; they do not describe
+test, and typed Quantipy runtime execution plus experiment correctness; they do not describe
 whether the data-infrastructure gate passed. If required commands, tests, and
-the notebook complete successfully and the deterministic audit returns a valid
+the typed runtime run completes successfully and the deterministic audit returns a valid
 `REMEDIATION_REQUIRED` receipt, emit `status=PASS` and `tests_passed=true` with
 that gate outcome. This is a completed verification that proceeds to review and
 non-suspending `DISCARD`, not a fixer task and never `INFRA_BLOCKED`. Use

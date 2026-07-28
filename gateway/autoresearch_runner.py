@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -22,10 +23,10 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from gateway.autoresearch_platform_validation import (
     PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,
@@ -43,9 +44,12 @@ DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
 DEFAULT_AUTORESEARCH_STATE_PATH = Path("/home/dev/.openclaw/autoresearch/quantipy-state.json")
+DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT = Path(
+    "/home/dev/.openclaw/autoresearch/quantipy-experiment-runs"
+)
 AUTORESEARCH_LOCK_NAMESPACE = Path("/tmp") / f"g2-openclaw-autoresearch-locks-{os.getuid()}"
 G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
-AUTORESEARCH_STATE_SCHEMA_VERSION = 2
+AUTORESEARCH_STATE_SCHEMA_VERSION = 3
 INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v3"
 INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
 AUTHORITATIVE_STATE_REFERENCE_VERSION = "g2-openclaw-autoresearch-state-reference-v1"
@@ -60,6 +64,21 @@ NEXT_ACTION_PROMPT_TARGET_BYTES = 31 * 1024
 # Expanded universe receipts need more than 24 KiB while the next-action prompt
 # remains bounded separately by MAX_NEXT_ACTION_PROMPT_BYTES.
 MAX_ARTIFACT_FILE_BYTES = 64 * 1024
+# Mirror Quantipy's canonical v2 limits: both raw secure reads and normalized
+# envelope validation cap run.json at 8 MiB; a nested/standalone panel receipt
+# remains independently capped at 4 MiB.
+QUANTIPY_PANEL_RECEIPT_MAX_BYTES = 4 * 1024 * 1024
+QUANTIPY_RUN_ENVELOPE_MAX_BYTES = 8 * 1024 * 1024
+QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN = "quantipy-experiment-source-v1"
+QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES = 1024 * 1024
+QUANTIPY_EXPERIMENT_SOURCE_TOTAL_MAX_BYTES = 8 * 1024 * 1024
+QUANTIPY_EXPERIMENT_NOTEBOOK_MAX_BYTES = 8 * 1024 * 1024
+QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT = 256
+QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH = 1024
+QUANTIPY_EXPERIMENT_STAGE_SUMMARY_MAX_LENGTH = 4096
+QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH = 2048
+QUANTIPY_EXPERIMENT_IDENTITY_PATH_MAX_LENGTH = 4096
+QUANTIPY_EXECUTION_NOT_STARTED_TOMBSTONE = ".g2-execution-not-started.json"
 MAX_UNIVERSE_SELECTION_DATES = 2200
 MAX_UNIVERSE_BATCH_DATES = 32
 MAX_UNIVERSE_BATCH_RESULTS = 10_000
@@ -70,6 +89,12 @@ MAX_FIXED_SLEEVE_SYMBOLS = 32
 NEXT_SESSION_EXECUTION_POLICY = "next-session-or-later"
 MEMBER_UNION_DIGEST_ALGORITHM = "sha256-uppercase-sorted-unique-newline-v1"
 XNYS_CALENDAR_IDENTITY = "XNYS"
+QUANTIPY_EXPERIMENT_SCHEMA_VERSION = "quantipy-experiment-v2"
+QUANTIPY_EXPERIMENT_STAGE_ORDER = ("prepare", "smoke", "feasibility", "model")
+QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES = frozenset(
+    ("manifest", "preflight", "import", "stage", "filesystem", "panel")
+)
+QUANTIPY_EXECUTION_NOT_STARTED_REASONS = frozenset(("focused_tests_failed", "preflight_failed"))
 _T = TypeVar("_T")
 _OPERATOR_PRECONDITION_MARKERS = (
     "no-code-operator",
@@ -1758,6 +1783,285 @@ class PriceHydrationScopePreflight:
 
 
 @dataclass(frozen=True, slots=True)
+class QuantipyExperimentFailureEvidence:
+    category: str
+    message: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExperimentFailureEvidence:
+        data = _ensure_mapping(raw, label="quantipy_experiment_evidence.failure")
+        _require_exact_keys(
+            data,
+            label="quantipy_experiment_evidence.failure",
+            expected=("category", "message"),
+        )
+        failure = cls(
+            category=_require_str(data, "category"),
+            message=_require_str(data, "message"),
+        )
+        failure.validate()
+        return failure
+
+    def validate(self) -> None:
+        if self.category not in QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES:
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.failure.category is not a Quantipy failure category"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {"category": self.category, "message": self.message}
+
+
+@dataclass(frozen=True, slots=True)
+class QuantipyExperimentPanelEvidence:
+    panel_path: str
+    panel_sha256: str
+    receipt_path: str
+    receipt_sha256: str
+    request_sha256: str
+    coverage_sha256: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExperimentPanelEvidence:
+        data = _ensure_mapping(raw, label="quantipy_experiment_evidence.panel")
+        _require_exact_keys(
+            data,
+            label="quantipy_experiment_evidence.panel",
+            expected=(
+                "panel_path",
+                "panel_sha256",
+                "receipt_path",
+                "receipt_sha256",
+                "request_sha256",
+                "coverage_sha256",
+            ),
+        )
+        evidence = cls(
+            panel_path=_require_str(data, "panel_path"),
+            panel_sha256=_require_sha256(data, "panel_sha256"),
+            receipt_path=_require_str(data, "receipt_path"),
+            receipt_sha256=_require_sha256(data, "receipt_sha256"),
+            request_sha256=_require_sha256(data, "request_sha256"),
+            coverage_sha256=_require_sha256(data, "coverage_sha256"),
+        )
+        evidence.validate()
+        return evidence
+
+    def validate(self) -> None:
+        if self.panel_path != "panel/panel.parquet":
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.panel.panel_path must be panel/panel.parquet"
+            )
+        if self.receipt_path != "panel/receipt.json":
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.panel.receipt_path must be panel/receipt.json"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "panel_path": self.panel_path,
+            "panel_sha256": self.panel_sha256,
+            "receipt_path": self.receipt_path,
+            "receipt_sha256": self.receipt_sha256,
+            "request_sha256": self.request_sha256,
+            "coverage_sha256": self.coverage_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QuantipyExperimentEvidence:
+    manifest_path: str
+    manifest_sha256: str
+    detached_run_directory: str
+    detached_run_manifest_sha256: str
+    run_id: str
+    run_json_path: str
+    run_json_sha256: str
+    success: bool
+    completed_stages: tuple[str, ...]
+    terminal_stage: str | None
+    terminal_status: str | None
+    failure: QuantipyExperimentFailureEvidence | None
+    panel: QuantipyExperimentPanelEvidence | None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExperimentEvidence:
+        data = _ensure_mapping(raw, label="quantipy_experiment_evidence")
+        _require_exact_keys(
+            data,
+            label="quantipy_experiment_evidence",
+            expected=(
+                "manifest_path",
+                "manifest_sha256",
+                "detached_run_directory",
+                "detached_run_manifest_sha256",
+                "run_id",
+                "run_json_path",
+                "run_json_sha256",
+                "success",
+                "completed_stages",
+                "terminal_stage",
+                "terminal_status",
+                "failure",
+                "panel",
+            ),
+        )
+        failure_raw = data.get("failure")
+        panel_raw = data.get("panel")
+        evidence = cls(
+            manifest_path=_require_workspace_path(data, "manifest_path"),
+            manifest_sha256=_require_sha256(data, "manifest_sha256"),
+            detached_run_directory=_require_workspace_path(data, "detached_run_directory"),
+            detached_run_manifest_sha256=_require_sha256(
+                data,
+                "detached_run_manifest_sha256",
+            ),
+            run_id=_require_str(data, "run_id"),
+            run_json_path=_require_workspace_path(data, "run_json_path"),
+            run_json_sha256=_require_sha256(data, "run_json_sha256"),
+            success=_require_bool(data, "success"),
+            completed_stages=_require_string_list(data, "completed_stages"),
+            terminal_stage=(
+                _require_str(data, "terminal_stage")
+                if data.get("terminal_stage") is not None
+                else None
+            ),
+            terminal_status=(
+                _require_str(data, "terminal_status")
+                if data.get("terminal_status") is not None
+                else None
+            ),
+            failure=(
+                QuantipyExperimentFailureEvidence.from_dict(failure_raw)
+                if failure_raw is not None
+                else None
+            ),
+            panel=(
+                QuantipyExperimentPanelEvidence.from_dict(panel_raw)
+                if panel_raw is not None
+                else None
+            ),
+        )
+        evidence.validate()
+        return evidence
+
+    def validate(self) -> None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.run_id) is None:
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.run_id must be a safe Quantipy run ID"
+            )
+        if self.completed_stages != QUANTIPY_EXPERIMENT_STAGE_ORDER[: len(self.completed_stages)]:
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.completed_stages must be an ordered Quantipy prefix"
+            )
+        if self.success and self.completed_stages != QUANTIPY_EXPERIMENT_STAGE_ORDER:
+            raise AutoresearchValidationError(
+                "successful Quantipy experiment evidence requires all four completed stages"
+            )
+        if self.success and self.failure is not None:
+            raise AutoresearchValidationError(
+                "successful Quantipy experiment evidence cannot contain failure evidence"
+            )
+        if self.success and (self.terminal_stage is not None or self.terminal_status is not None):
+            raise AutoresearchValidationError(
+                "successful Quantipy experiment evidence cannot contain a terminal failure stage"
+            )
+        if (self.terminal_stage is None) != (self.terminal_status is None):
+            raise AutoresearchValidationError(
+                "Quantipy experiment terminal stage and status must both be present or null"
+            )
+        if (
+            self.terminal_stage is not None
+            and self.terminal_stage not in QUANTIPY_EXPERIMENT_STAGE_ORDER
+        ):
+            raise AutoresearchValidationError("Quantipy experiment terminal stage is invalid")
+        if self.terminal_status is not None and self.terminal_status not in {"rejected", "failed"}:
+            raise AutoresearchValidationError("Quantipy experiment terminal status is invalid")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "manifest_path": self.manifest_path,
+            "manifest_sha256": self.manifest_sha256,
+            "detached_run_directory": self.detached_run_directory,
+            "detached_run_manifest_sha256": self.detached_run_manifest_sha256,
+            "run_id": self.run_id,
+            "run_json_path": self.run_json_path,
+            "run_json_sha256": self.run_json_sha256,
+            "success": self.success,
+            "completed_stages": list(self.completed_stages),
+            "terminal_stage": self.terminal_stage,
+            "terminal_status": self.terminal_status,
+            "failure": self.failure.to_dict() if self.failure is not None else None,
+            "panel": self.panel.to_dict() if self.panel is not None else None,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QuantipyExecutionNotStartedEvidence:
+    manifest_path: str
+    manifest_sha256: str
+    expected_run_id: str
+    expected_run_json_path: str
+    reason: str
+    command: str
+    evidence: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExecutionNotStartedEvidence:
+        data = _ensure_mapping(raw, label="quantipy_execution_not_started")
+        _require_exact_keys(
+            data,
+            label="quantipy_execution_not_started",
+            expected=(
+                "manifest_path",
+                "manifest_sha256",
+                "expected_run_id",
+                "expected_run_json_path",
+                "reason",
+                "command",
+                "evidence",
+            ),
+        )
+        receipt = cls(
+            manifest_path=_require_workspace_path(data, "manifest_path"),
+            manifest_sha256=_require_sha256(data, "manifest_sha256"),
+            expected_run_id=_require_str(data, "expected_run_id"),
+            expected_run_json_path=_require_workspace_path(data, "expected_run_json_path"),
+            reason=_require_str(data, "reason"),
+            command=_require_str(data, "command"),
+            evidence=_require_str(data, "evidence"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        if self.reason not in QUANTIPY_EXECUTION_NOT_STARTED_REASONS:
+            raise AutoresearchValidationError(
+                "quantipy_execution_not_started.reason must be focused_tests_failed "
+                "or preflight_failed"
+            )
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.expected_run_id) is None:
+            raise AutoresearchValidationError(
+                "quantipy_execution_not_started.expected_run_id is invalid"
+            )
+        if not self.command.strip() or not self.evidence.strip():
+            raise AutoresearchValidationError(
+                "quantipy_execution_not_started requires exact command and evidence"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "manifest_path": self.manifest_path,
+            "manifest_sha256": self.manifest_sha256,
+            "expected_run_id": self.expected_run_id,
+            "expected_run_json_path": self.expected_run_json_path,
+            "reason": self.reason,
+            "command": self.command,
+            "evidence": self.evidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ImplementationResultArtifact:
     summary: str
     workspace_path: str
@@ -1766,6 +2070,10 @@ class ImplementationResultArtifact:
     notebook_path: str
     tests_added_or_updated: tuple[str, ...]
     commands_run: tuple[str, ...]
+    experiment_manifest_path: str = str(
+        DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "unverified" / "experiment-manifest.json"
+    )
+    experiment_manifest_sha256: str = "0" * 64
     compute_fit: ComputeFitArtifact | None = None
     price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
 
@@ -1783,6 +2091,8 @@ class ImplementationResultArtifact:
                 "notebook_path",
                 "tests_added_or_updated",
                 "commands_run",
+                "experiment_manifest_path",
+                "experiment_manifest_sha256",
                 "compute_fit",
                 "price_hydration_scope_preflight",
             ),
@@ -1797,6 +2107,8 @@ class ImplementationResultArtifact:
             notebook_path=_require_str(data, "notebook_path"),
             tests_added_or_updated=_require_string_list(data, "tests_added_or_updated"),
             commands_run=_require_string_list(data, "commands_run"),
+            experiment_manifest_path=_require_workspace_path(data, "experiment_manifest_path"),
+            experiment_manifest_sha256=_require_sha256(data, "experiment_manifest_sha256"),
             compute_fit=(
                 ComputeFitArtifact.from_dict(compute_fit_raw)
                 if compute_fit_raw is not None
@@ -1820,6 +2132,10 @@ class ImplementationResultArtifact:
             raise AutoresearchValidationError(
                 "implementation_result commit_sha must be a Git commit SHA"
             )
+        _validate_workspace_path(
+            self.experiment_manifest_path,
+            label="implementation_result experiment_manifest_path",
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1830,6 +2146,8 @@ class ImplementationResultArtifact:
             "notebook_path": self.notebook_path,
             "tests_added_or_updated": list(self.tests_added_or_updated),
             "commands_run": list(self.commands_run),
+            "experiment_manifest_path": self.experiment_manifest_path,
+            "experiment_manifest_sha256": self.experiment_manifest_sha256,
             "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
             "price_hydration_scope_preflight": (
                 self.price_hydration_scope_preflight.to_dict()
@@ -3194,6 +3512,8 @@ class VerificationResultArtifact:
     infra_rationale: str | None = None
     universe_verification_receipt: UniverseVerificationReceipt | None = None
     price_hydration_receipt: PriceHydrationReceipt | None = None
+    quantipy_experiment_evidence: QuantipyExperimentEvidence | None = None
+    quantipy_execution_not_started: QuantipyExecutionNotStartedEvidence | None = None
 
     @classmethod
     def from_dict(
@@ -3223,6 +3543,8 @@ class VerificationResultArtifact:
             "infra_rationale",
             "universe_verification_receipt",
             "price_hydration_receipt",
+            "quantipy_experiment_evidence",
+            "quantipy_execution_not_started",
         )
         _require_exact_keys(
             data,
@@ -3276,6 +3598,8 @@ class VerificationResultArtifact:
         universe_receipt_raw = data["universe_verification_receipt"]
         hydration_receipt_raw = data["price_hydration_receipt"]
         platform_coverage_raw = data.get("platform_coverage_validation")
+        quantipy_evidence_raw = data.get("quantipy_experiment_evidence")
+        quantipy_not_started_raw = data.get("quantipy_execution_not_started")
         if platform_coverage_raw is not None and not isinstance(platform_coverage_raw, Mapping):
             raise AutoresearchValidationError(
                 "platform_coverage_validation must be an object or null"
@@ -3314,6 +3638,16 @@ class VerificationResultArtifact:
                 if hydration_receipt_raw is not None
                 else None
             ),
+            quantipy_experiment_evidence=(
+                QuantipyExperimentEvidence.from_dict(quantipy_evidence_raw)
+                if quantipy_evidence_raw is not None
+                else None
+            ),
+            quantipy_execution_not_started=(
+                QuantipyExecutionNotStartedEvidence.from_dict(quantipy_not_started_raw)
+                if quantipy_not_started_raw is not None
+                else None
+            ),
         )
         artifact.validate(
             mode=mode,
@@ -3337,6 +3671,37 @@ class VerificationResultArtifact:
         if self.status is VerificationStatus.TEST_FAILURE and self.tests_passed:
             raise AutoresearchValidationError(
                 "TEST_FAILURE verification cannot mark tests_passed=true"
+            )
+        evidence = self.quantipy_experiment_evidence
+        not_started = self.quantipy_execution_not_started
+        if evidence is not None and not_started is not None:
+            raise AutoresearchValidationError(
+                "verification cannot contain both Quantipy runtime and "
+                "execution-not-started evidence"
+            )
+        if self.status is VerificationStatus.PASS and not_started is not None:
+            raise AutoresearchValidationError(
+                "PASS verification cannot contain execution-not-started evidence"
+            )
+        if evidence is None:
+            if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
+                raise AutoresearchValidationError(
+                    "BUG_SIGNAL without a Quantipy run requires an explicit bug signal"
+                )
+            if (
+                self.status is VerificationStatus.TEST_FAILURE
+                and not self.null_test_summary.strip()
+            ):
+                raise AutoresearchValidationError(
+                    "TEST_FAILURE without a Quantipy run requires an explicit rationale"
+                )
+        elif self.status is VerificationStatus.PASS and not evidence.success:
+            raise AutoresearchValidationError(
+                "PASS verification cannot claim a failed Quantipy experiment run"
+            )
+        elif self.status is not VerificationStatus.PASS and evidence.success:
+            raise AutoresearchValidationError(
+                "non-PASS verification cannot claim a successful Quantipy experiment run"
             )
         if (
             self.status is VerificationStatus.PASS
@@ -3471,6 +3836,12 @@ class VerificationResultArtifact:
             else None,
             "price_hydration_receipt": self.price_hydration_receipt.to_dict()
             if self.price_hydration_receipt is not None
+            else None,
+            "quantipy_experiment_evidence": self.quantipy_experiment_evidence.to_dict()
+            if self.quantipy_experiment_evidence is not None
+            else None,
+            "quantipy_execution_not_started": self.quantipy_execution_not_started.to_dict()
+            if self.quantipy_execution_not_started is not None
             else None,
         }
 
@@ -3789,14 +4160,16 @@ class AutoresearchState:
         if "schema_version" not in data:
             raise AutoresearchValidationError(
                 "autoresearch state missing schema_version is unsupported; archive it and "
-                "initialize a schema-v2 state with `gateway-cli autoresearch-init-state`; "
+                "initialize a schema-v3 state with `gateway-cli autoresearch-init-state`; "
                 f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
             )
         schema_version = _require_int(data, "schema_version")
         if schema_version != AUTORESEARCH_STATE_SCHEMA_VERSION:
             raise AutoresearchValidationError(
-                "autoresearch state schema migration is required; "
-                f"expected {AUTORESEARCH_STATE_SCHEMA_VERSION}, got {schema_version}"
+                "autoresearch state cannot be migrated in place; stop the supervisor, archive "
+                f"the live schema-v{schema_version} state, and initialize a fresh schema-v"
+                f"{AUTORESEARCH_STATE_SCHEMA_VERSION} state with "
+                "`gateway-cli autoresearch-init-state` before restart"
             )
 
         def _parse_tuple(
@@ -3852,18 +4225,6 @@ class AutoresearchState:
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
 
-        def _parse_state_implementation(raw_implementation: object) -> ImplementationResultArtifact:
-            implementation_data = dict(
-                _ensure_mapping(raw_implementation, label="implementation_result")
-            )
-            implementation_data.setdefault("price_hydration_scope_preflight", None)
-            return ImplementationResultArtifact.from_dict(implementation_data)
-
-        def _parse_state_fix(raw_fix: object) -> FixResultArtifact:
-            fix_data = dict(_ensure_mapping(raw_fix, label="fix_result"))
-            fix_data.setdefault("price_hydration_scope_preflight", None)
-            return FixResultArtifact.from_dict(fix_data)
-
         state = cls(
             phase=Phase(_require_str(data, "phase")) if "phase" in data else Phase.SETUP_CONTEXT,
             iteration=_require_int(data, "iteration") if "iteration" in data else 1,
@@ -3879,7 +4240,7 @@ class AutoresearchState:
             else None,
             debate_rounds=_parse_tuple("debate_rounds", DebateResultArtifact.from_dict),
             consensus_history=_parse_tuple("consensus_history", ConsensusResultArtifact.from_dict),
-            implementation_result=_parse_state_implementation(implementation_raw)
+            implementation_result=ImplementationResultArtifact.from_dict(implementation_raw)
             if implementation_raw is not None
             else None,
             verification_history=_parse_tuple(
@@ -3890,7 +4251,7 @@ class AutoresearchState:
                 ),
             ),
             review_history=_parse_tuple("review_history", ReviewResultArtifact.from_dict),
-            fix_history=_parse_tuple("fix_history", _parse_state_fix),
+            fix_history=_parse_tuple("fix_history", FixResultArtifact.from_dict),
             pending_fix_trigger=FixTriggerPhase(pending_fix_trigger_raw)
             if pending_fix_trigger_raw is not None
             else None,
@@ -4228,6 +4589,8 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "notebook_path",
             "tests_added_or_updated",
             "commands_run",
+            "experiment_manifest_path",
+            "experiment_manifest_sha256",
             "compute_fit",
             "price_hydration_scope_preflight",
         ]
@@ -4253,6 +4616,8 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "infra_rationale",
             "universe_verification_receipt",
             "price_hydration_receipt",
+            "quantipy_experiment_evidence",
+            "quantipy_execution_not_started",
         ],
         "mode_requirements": {
             ResearchMode.ALPHA_RESEARCH.value: {
@@ -5167,6 +5532,1891 @@ def _require_clean_git_worktree(worktree: Path) -> None:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _SecureFileSnapshot:
+    path: Path
+    content: bytes
+    sha256: str
+    mode: int
+
+
+def _require_canonical_absolute_path(value: str | Path, *, label: str) -> Path:
+    path = Path(value)
+    declared = os.fspath(value)
+    if not path.is_absolute() or declared != path.as_posix() or str(path) != path.as_posix():
+        raise AutoresearchValidationError(f"{label} must be a canonical absolute path")
+    if any(part in {"", ".", ".."} for part in path.parts[1:]):
+        raise AutoresearchValidationError(f"{label} must be a canonical absolute path")
+    return path
+
+
+def _secure_open_snapshot(
+    value: str | Path,
+    *,
+    label: str,
+    trusted_root: Path | None = None,
+    private: bool = False,
+    max_bytes: int = MAX_ARTIFACT_FILE_BYTES,
+) -> _SecureFileSnapshot:
+    """Open without following links, then hash and parse the same immutable byte snapshot."""
+    path = _require_canonical_absolute_path(value, label=label)
+    if trusted_root is not None:
+        root = _require_canonical_absolute_path(trusted_root, label="trusted Quantipy runs root")
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                f"{label} must be under the trusted runs root"
+            ) from exc
+        _require_private_directory(root, label="trusted Quantipy runs root")
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory_fd = os.open("/", directory_flags)
+    try:
+        for component in path.parts[1:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be an existing canonical non-symlink regular file"
+        ) from exc
+    finally:
+        os.close(directory_fd)
+
+    try:
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise AutoresearchValidationError(f"{label} must be a regular file")
+        if before.st_uid != os.getuid():
+            raise AutoresearchValidationError(f"{label} must be owned by the autoresearch user")
+        if stat.S_IMODE(before.st_mode) & 0o022:
+            raise AutoresearchValidationError(f"{label} must not be group- or world-writable")
+        if private and (stat.S_IMODE(before.st_mode) & 0o077):
+            raise AutoresearchValidationError(f"{label} must not grant group or other access")
+        if private and before.st_nlink != 1:
+            raise AutoresearchValidationError(f"{label} must not be hard-linked")
+        if before.st_size > max_bytes:
+            raise AutoresearchValidationError(f"{label} exceeds the byte limit")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(file_fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        content = b"".join(chunks)
+        after = os.fstat(file_fd)
+        if len(content) > max_bytes:
+            raise AutoresearchValidationError(f"{label} exceeds the byte limit")
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise AutoresearchValidationError(f"{label} changed while it was being read")
+    finally:
+        os.close(file_fd)
+    return _SecureFileSnapshot(
+        path=path,
+        content=content,
+        sha256=hashlib.sha256(content).hexdigest(),
+        mode=stat.S_IMODE(before.st_mode),
+    )
+
+
+def _require_private_directory(path: Path, *, label: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(f"{label} does not exist") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise AutoresearchValidationError(
+            f"{label} must be an owned mode-0700 non-symlink directory"
+        )
+
+
+def _require_no_symlink_path_components(path: Path, *, label: str) -> None:
+    if not path.is_absolute():
+        raise AutoresearchValidationError(f"{label} must be absolute")
+    current = Path(path.anchor)
+    for component in path.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                f"{label} path components could not be inspected"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise AutoresearchValidationError(f"{label} must not traverse symlink path components")
+
+
+def provision_quantipy_experiment_runs_root() -> Path:
+    """Create or validate the one fixed private Quantipy experiment receipt root."""
+    root = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+    _require_no_symlink_path_components(root, label="trusted Quantipy runs root")
+    try:
+        root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "trusted Quantipy runs root could not be provisioned"
+        ) from exc
+    _require_no_symlink_path_components(root, label="trusted Quantipy runs root")
+    _require_private_directory(root, label="trusted Quantipy runs root")
+    return root
+
+
+def _require_strict_regular_file(value: str, *, label: str) -> Path:
+    return _secure_open_snapshot(value, label=label).path
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_json_mapping(path: Path, *, label: str) -> Mapping[str, object]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AutoresearchValidationError(f"{label} must be readable JSON") from exc
+    return _ensure_mapping(raw, label=label)
+
+
+def _parse_json_snapshot(snapshot: _SecureFileSnapshot, *, label: str) -> Mapping[str, object]:
+    try:
+        decoded = snapshot.content.decode("utf-8")
+        raw = json.loads(
+            decoded,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                ValueError(f"non-finite JSON number {value}")
+            ),
+        )
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise AutoresearchValidationError(f"{label} must be strict UTF-8 JSON") from exc
+    return _ensure_mapping(raw, label=label)
+
+
+def _strict_json_keys(
+    value: object,
+    *,
+    label: str,
+    expected: Sequence[str],
+) -> Mapping[str, object]:
+    data = _ensure_mapping(value, label=label)
+    _require_exact_keys(data, label=label, expected=expected)
+    return data
+
+
+def _strict_json_string(
+    value: object,
+    *,
+    label: str,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) < minimum
+        or (maximum is not None and len(value) > maximum)
+    ):
+        bound = f" between {minimum} and {maximum}" if maximum is not None else f" >= {minimum}"
+        raise AutoresearchValidationError(f"{label} must be a string of length{bound}")
+    return value
+
+
+def _strict_json_bool(value: object, *, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise AutoresearchValidationError(f"{label} must be a boolean")
+    return value
+
+
+def _strict_json_int(value: object, *, label: str, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise AutoresearchValidationError(f"{label} must be an integer >= {minimum}")
+    return value
+
+
+def _strict_json_float(value: object, *, label: str, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise AutoresearchValidationError(f"{label} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result) or result < minimum:
+        raise AutoresearchValidationError(f"{label} must be a finite number >= {minimum}")
+    return result
+
+
+def _strict_json_enum(value: object, *, label: str, allowed: frozenset[str]) -> str:
+    result = _strict_json_string(value, label=label)
+    if result not in allowed:
+        raise AutoresearchValidationError(f"{label} is not an allowed value")
+    return result
+
+
+def _strict_json_sha256(value: object, *, label: str) -> str:
+    result = _strict_json_string(value, label=label)
+    if re.fullmatch(r"[0-9a-f]{64}", result) is None:
+        raise AutoresearchValidationError(f"{label} must be a lowercase SHA-256 digest")
+    return result
+
+
+def _strict_json_datetime(value: object, *, label: str, utc_only: bool = False) -> datetime:
+    raw = _strict_json_string(value, label=label)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AutoresearchValidationError(f"{label} must be timezone-aware")
+    if utc_only and parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise AutoresearchValidationError(f"{label} must be UTC-aware")
+    return parsed
+
+
+def _strict_json_date(value: object, *, label: str) -> date:
+    raw = _strict_json_string(value, label=label)
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an ISO date") from exc
+    if parsed.isoformat() != raw:
+        raise AutoresearchValidationError(f"{label} must use canonical ISO date spelling")
+    return parsed
+
+
+def _canonical_json_sha256(value: Mapping[str, object]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_utc_text(value: object, *, label: str) -> str:
+    parsed = _strict_json_datetime(value, label=label, utc_only=True)
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _validate_quantipy_relative_path(value: object, *, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH
+        or "\\" in value
+    ):
+        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
+    path = Path(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
+    if value != path.as_posix():
+        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
+    return value
+
+
+def _validate_panel_request(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=("contract_version", "tickers", "start", "end", "timeframe", "market_hours"),
+    )
+    if data["contract_version"] != "research-price-panel-v1":
+        raise AutoresearchValidationError(f"{label}.contract_version is invalid")
+    tickers_raw = data["tickers"]
+    if not isinstance(tickers_raw, list) or not tickers_raw:
+        raise AutoresearchValidationError(f"{label}.tickers must be a non-empty JSON array")
+    tickers = tuple(_strict_json_string(item, label=f"{label}.tickers") for item in tickers_raw)
+    if any(re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker) is None for ticker in tickers):
+        raise AutoresearchValidationError(f"{label}.tickers contains a noncanonical ticker")
+    if tickers != tuple(sorted(tickers)) or len(set(tickers)) != len(tickers):
+        raise AutoresearchValidationError(f"{label}.tickers must be unique and sorted")
+    start = _strict_json_datetime(data["start"], label=f"{label}.start", utc_only=True)
+    end = _strict_json_datetime(data["end"], label=f"{label}.end", utc_only=True)
+    if start > end:
+        raise AutoresearchValidationError(f"{label} start must not be after end")
+    timeframe = _strict_json_enum(
+        data["timeframe"],
+        label=f"{label}.timeframe",
+        allowed=frozenset(("1min", "5min", "15min", "30min", "1h", "4h", "1d")),
+    )
+    market_hours = _strict_json_enum(
+        data["market_hours"],
+        label=f"{label}.market_hours",
+        allowed=frozenset(("all", "regular", "extended")),
+    )
+    return {
+        "contract_version": "research-price-panel-v1",
+        "tickers": list(tickers),
+        "start": _canonical_utc_text(data["start"], label=f"{label}.start"),
+        "end": _canonical_utc_text(data["end"], label=f"{label}.end"),
+        "timeframe": timeframe,
+        "market_hours": market_hours,
+    }
+
+
+def _validate_panel_coverage(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=(
+            "contract_version",
+            "requested_start_date",
+            "requested_end_date",
+            "timeframe",
+            "market_hours",
+            "provider_source",
+            "tickers",
+        ),
+    )
+    if data["contract_version"] != "price-coverage-v1":
+        raise AutoresearchValidationError(f"{label}.contract_version is invalid")
+    start_date = _strict_json_date(
+        data["requested_start_date"], label=f"{label}.requested_start_date"
+    )
+    end_date = _strict_json_date(data["requested_end_date"], label=f"{label}.requested_end_date")
+    if start_date > end_date:
+        raise AutoresearchValidationError(f"{label} requested date range is invalid")
+    timeframe = _strict_json_enum(
+        data["timeframe"],
+        label=f"{label}.timeframe",
+        allowed=frozenset(("1min", "5min", "15min", "30min", "1h", "4h", "1d")),
+    )
+    market_hours = _strict_json_enum(
+        data["market_hours"],
+        label=f"{label}.market_hours",
+        allowed=frozenset(("all", "regular", "extended")),
+    )
+    provider_source = _strict_json_enum(
+        data["provider_source"],
+        label=f"{label}.provider_source",
+        allowed=frozenset(("massive", "databento")),
+    )
+    tickers_raw = data["tickers"]
+    if not isinstance(tickers_raw, list) or not tickers_raw:
+        raise AutoresearchValidationError(f"{label}.tickers must be a non-empty JSON array")
+    normalized_tickers: list[dict[str, object]] = []
+    ticker_names: list[str] = []
+    for ticker_index, ticker_raw in enumerate(tickers_raw):
+        ticker_label = f"{label}.tickers[{ticker_index}]"
+        ticker = _strict_json_keys(ticker_raw, label=ticker_label, expected=("ticker", "sessions"))
+        ticker_name = _strict_json_string(ticker["ticker"], label=f"{ticker_label}.ticker")
+        if re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker_name) is None:
+            raise AutoresearchValidationError(f"{ticker_label}.ticker is noncanonical")
+        sessions_raw = ticker["sessions"]
+        if not isinstance(sessions_raw, list):
+            raise AutoresearchValidationError(f"{ticker_label}.sessions must be a JSON array")
+        normalized_sessions: list[dict[str, object]] = []
+        session_dates: list[date] = []
+        for session_index, session_raw in enumerate(sessions_raw):
+            session_label = f"{ticker_label}.sessions[{session_index}]"
+            session = _strict_json_keys(
+                session_raw,
+                label=session_label,
+                expected=(
+                    "session_date",
+                    "coverage_state",
+                    "mode_bar_count",
+                    "provider_request_id",
+                    "provider_http_status",
+                    "provider_query_count",
+                    "provider_results_count",
+                    "provider_requested_start",
+                    "provider_requested_end",
+                    "hydrated_at",
+                ),
+            )
+            session_date = _strict_json_date(
+                session["session_date"], label=f"{session_label}.session_date"
+            )
+            coverage_state = _strict_json_enum(
+                session["coverage_state"],
+                label=f"{session_label}.coverage_state",
+                allowed=frozenset(("observed", "provider_confirmed_empty")),
+            )
+            mode_count = _strict_json_int(
+                session["mode_bar_count"], label=f"{session_label}.mode_bar_count"
+            )
+            request_id = _strict_json_string(
+                session["provider_request_id"],
+                label=f"{session_label}.provider_request_id",
+                minimum=1,
+            )
+            if not request_id.strip():
+                raise AutoresearchValidationError(
+                    f"{session_label}.provider_request_id must not be blank"
+                )
+            if session["provider_http_status"] != 200 or isinstance(
+                session["provider_http_status"], bool
+            ):
+                raise AutoresearchValidationError(
+                    f"{session_label}.provider_http_status must be 200"
+                )
+            query_count = _strict_json_int(
+                session["provider_query_count"],
+                label=f"{session_label}.provider_query_count",
+            )
+            results_count = _strict_json_int(
+                session["provider_results_count"],
+                label=f"{session_label}.provider_results_count",
+            )
+            requested_start = _strict_json_datetime(
+                session["provider_requested_start"],
+                label=f"{session_label}.provider_requested_start",
+                utc_only=True,
+            )
+            requested_end = _strict_json_datetime(
+                session["provider_requested_end"],
+                label=f"{session_label}.provider_requested_end",
+                utc_only=True,
+            )
+            _strict_json_datetime(
+                session["hydrated_at"],
+                label=f"{session_label}.hydrated_at",
+                utc_only=True,
+            )
+            if query_count != results_count or results_count < mode_count:
+                raise AutoresearchValidationError(
+                    f"{session_label} provider counts are inconsistent"
+                )
+            if requested_start > requested_end:
+                raise AutoresearchValidationError(
+                    f"{session_label} provider request range is invalid"
+                )
+            session_dates.append(session_date)
+            normalized_sessions.append(
+                {
+                    "session_date": session_date.isoformat(),
+                    "coverage_state": coverage_state,
+                    "mode_bar_count": mode_count,
+                    "provider_request_id": request_id,
+                    "provider_http_status": 200,
+                    "provider_query_count": query_count,
+                    "provider_results_count": results_count,
+                    "provider_requested_start": _canonical_utc_text(
+                        session["provider_requested_start"],
+                        label=f"{session_label}.provider_requested_start",
+                    ),
+                    "provider_requested_end": _canonical_utc_text(
+                        session["provider_requested_end"],
+                        label=f"{session_label}.provider_requested_end",
+                    ),
+                    "hydrated_at": _canonical_utc_text(
+                        session["hydrated_at"], label=f"{session_label}.hydrated_at"
+                    ),
+                }
+            )
+        if session_dates != sorted(session_dates) or len(set(session_dates)) != len(session_dates):
+            raise AutoresearchValidationError(
+                f"{ticker_label}.sessions must have unique ordered dates"
+            )
+        ticker_names.append(ticker_name)
+        normalized_tickers.append({"ticker": ticker_name, "sessions": normalized_sessions})
+    if ticker_names != sorted(ticker_names) or len(set(ticker_names)) != len(ticker_names):
+        raise AutoresearchValidationError(f"{label}.tickers must be unique and ordered")
+    return {
+        "contract_version": "price-coverage-v1",
+        "requested_start_date": start_date.isoformat(),
+        "requested_end_date": end_date.isoformat(),
+        "timeframe": timeframe,
+        "market_hours": market_hours,
+        "provider_source": provider_source,
+        "tickers": normalized_tickers,
+    }
+
+
+def _validate_panel_receipt(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=(
+            "contract_version",
+            "request",
+            "request_sha256",
+            "coverage",
+            "coverage_sha256",
+            "panel_sha256",
+            "hydrated_at",
+            "exported_at",
+        ),
+    )
+    if data["contract_version"] != "research-price-panel-v1":
+        raise AutoresearchValidationError(f"{label}.contract_version is invalid")
+    request = _validate_panel_request(data["request"], label=f"{label}.request")
+    coverage = _validate_panel_coverage(data["coverage"], label=f"{label}.coverage")
+    request_sha = _strict_json_sha256(data["request_sha256"], label=f"{label}.request_sha256")
+    coverage_sha = _strict_json_sha256(data["coverage_sha256"], label=f"{label}.coverage_sha256")
+    panel_sha = _strict_json_sha256(data["panel_sha256"], label=f"{label}.panel_sha256")
+    hydrated = _strict_json_datetime(
+        data["hydrated_at"], label=f"{label}.hydrated_at", utc_only=True
+    )
+    exported = _strict_json_datetime(
+        data["exported_at"], label=f"{label}.exported_at", utc_only=True
+    )
+    if exported < hydrated:
+        raise AutoresearchValidationError(f"{label} export precedes hydration")
+    if request_sha != _canonical_json_sha256(request):
+        raise AutoresearchValidationError(f"{label} request digest does not match request")
+    if coverage_sha != _canonical_json_sha256(coverage):
+        raise AutoresearchValidationError(f"{label} coverage digest does not match coverage")
+    coverage_tickers_raw = coverage["tickers"]
+    request_tickers_raw = request["tickers"]
+    assert isinstance(coverage_tickers_raw, list)
+    assert isinstance(request_tickers_raw, list)
+    coverage_tickers = tuple(
+        _strict_json_string(
+            _ensure_mapping(item, label=f"{label}.coverage.ticker")["ticker"],
+            label=f"{label}.coverage.ticker",
+        )
+        for item in coverage_tickers_raw
+    )
+    if coverage_tickers != tuple(request_tickers_raw):
+        raise AutoresearchValidationError(f"{label} coverage tickers do not match request")
+    request_start = _strict_json_datetime(request["start"], label=f"{label}.request.start")
+    request_end = _strict_json_datetime(request["end"], label=f"{label}.request.end")
+    try:
+        from zoneinfo import ZoneInfo
+
+        new_york = ZoneInfo("America/New_York")
+    except Exception as exc:  # pragma: no cover - host database is a runtime prerequisite
+        raise AutoresearchValidationError("IANA timezone data is unavailable") from exc
+    if (
+        coverage["requested_start_date"] != request_start.astimezone(new_york).date().isoformat()
+        or coverage["requested_end_date"] != request_end.astimezone(new_york).date().isoformat()
+        or coverage["market_hours"] != request["market_hours"]
+        or coverage["timeframe"] != "1min"
+    ):
+        raise AutoresearchValidationError(f"{label} coverage does not match panel request")
+    return {
+        "contract_version": "research-price-panel-v1",
+        "request": request,
+        "request_sha256": request_sha,
+        "coverage": coverage,
+        "coverage_sha256": coverage_sha,
+        "panel_sha256": panel_sha,
+        "hydrated_at": _canonical_utc_text(data["hydrated_at"], label=f"{label}.hydrated_at"),
+        "exported_at": _canonical_utc_text(data["exported_at"], label=f"{label}.exported_at"),
+    }
+
+
+def _validate_quantipy_v2_manifest(
+    manifest_snapshot: _SecureFileSnapshot,
+    *,
+    workspace: Path,
+    commit_sha: str,
+    expected_sha256: str,
+) -> Mapping[str, object]:
+    manifest_path = manifest_snapshot.path
+    try:
+        relative_manifest = manifest_path.relative_to(workspace)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "implementation_result experiment_manifest_path must be under its workspace"
+        ) from exc
+    if manifest_snapshot.sha256 != expected_sha256:
+        raise AutoresearchValidationError(
+            "implementation_result experiment_manifest_sha256 does not match its file"
+        )
+    committed = _run_git(
+        workspace,
+        ("show", f"{commit_sha}:{relative_manifest.as_posix()}"),
+        operation="experiment manifest commit check",
+    )
+    if committed.returncode != 0 or committed.stdout.encode("utf-8") != manifest_snapshot.content:
+        raise AutoresearchValidationError(
+            "implementation_result experiment manifest must be committed unchanged at commit_sha"
+        )
+    raw_manifest = _parse_json_snapshot(manifest_snapshot, label="Quantipy experiment manifest")
+    allowed = frozenset(
+        ("schema_version", "experiment_id", "package_path", "notebook_path", "stage_files", "panel")
+    )
+    required = frozenset(("schema_version", "experiment_id", "package_path", "stage_files"))
+    if set(raw_manifest) - allowed or not required <= set(raw_manifest):
+        raise AutoresearchValidationError("Quantipy experiment manifest is not the exact v2 shape")
+    manifest = dict(raw_manifest)
+    if "notebook_path" not in manifest:
+        manifest["notebook_path"] = None
+    if "panel" not in manifest:
+        manifest["panel"] = None
+    if manifest.get("schema_version") != QUANTIPY_EXPERIMENT_SCHEMA_VERSION:
+        raise AutoresearchValidationError(
+            "Quantipy experiment manifest must use quantipy-experiment-v2"
+        )
+    experiment_id = manifest.get("experiment_id")
+    if (
+        not isinstance(experiment_id, str)
+        or re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", experiment_id) is None
+    ):
+        raise AutoresearchValidationError("Quantipy experiment manifest experiment_id is invalid")
+    _validate_quantipy_relative_path(manifest.get("package_path"), label="manifest package_path")
+    notebook_path = manifest.get("notebook_path")
+    if notebook_path is not None:
+        _validate_quantipy_relative_path(notebook_path, label="manifest notebook_path")
+    stages = manifest.get("stage_files")
+    if not isinstance(stages, list) or len(stages) != 4:
+        raise AutoresearchValidationError("Quantipy experiment manifest requires four stage_files")
+    stage_names: list[str] = []
+    stage_paths: list[str] = []
+    stage_entrypoints: list[str] = []
+    for stage in stages:
+        stage_data = _ensure_mapping(stage, label="manifest stage_file")
+        _require_exact_keys(
+            stage_data,
+            label="manifest stage_file",
+            expected=("name", "file_path", "entrypoint"),
+        )
+        name = _require_str(stage_data, "name")
+        stage_names.append(name)
+        stage_path = _validate_quantipy_relative_path(
+            stage_data.get("file_path"), label="manifest stage_file"
+        )
+        stage_paths.append(stage_path)
+        entrypoint = _strict_json_string(
+            stage_data["entrypoint"],
+            label="manifest stage_file entrypoint",
+            maximum=QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH,
+        )
+        stage_entrypoints.append(entrypoint)
+        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*", entrypoint) is None:
+            raise AutoresearchValidationError(
+                "Quantipy experiment manifest stage entrypoint is invalid"
+            )
+    if tuple(stage_names) != QUANTIPY_EXPERIMENT_STAGE_ORDER:
+        raise AutoresearchValidationError(
+            "Quantipy experiment manifest stage_files must be prepare, smoke, feasibility, model"
+        )
+    if len(set(stage_paths)) != 4 or len(set(stage_entrypoints)) != 4:
+        raise AutoresearchValidationError(
+            "Quantipy experiment manifest requires unique stage files and entrypoints"
+        )
+    panel = manifest["panel"]
+    if panel is not None:
+        panel_data = _strict_json_keys(
+            panel, label="manifest panel", expected=("api_url", "request")
+        )
+        api_url = _strict_json_string(
+            panel_data["api_url"],
+            label="manifest panel api_url",
+            maximum=2048,
+        )
+        if re.fullmatch(r"https?://[^/]+(?:/.*)?", api_url) is None:
+            raise AutoresearchValidationError("manifest panel api_url is invalid")
+        manifest["panel"] = {
+            "api_url": api_url,
+            "request": _validate_panel_request(
+                panel_data["request"], label="manifest panel request"
+            ),
+        }
+    _validate_quantipy_committed_sources(
+        manifest,
+        manifest_path=manifest_path,
+        workspace=workspace,
+        commit_sha=commit_sha,
+    )
+    return manifest
+
+
+def _git_show_committed_bytes(workspace: Path, commit_sha: str, relative_path: Path) -> bytes:
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(workspace), "show", f"{commit_sha}:{relative_path.as_posix()}"),
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise AutoresearchValidationError("Git is unavailable for source binding") from exc
+    if result.returncode != 0:
+        raise AutoresearchValidationError(
+            f"experiment source {relative_path.as_posix()} is not committed at commit_sha"
+        )
+    return result.stdout
+
+
+def _validate_quantipy_committed_sources(
+    manifest: Mapping[str, object],
+    *,
+    manifest_path: Path,
+    workspace: Path,
+    commit_sha: str,
+) -> None:
+    source_root = manifest_path.parent
+    package_relative = Path(
+        _validate_quantipy_relative_path(manifest["package_path"], label="manifest package_path")
+    )
+    package_root = source_root / package_relative
+    try:
+        package_workspace_relative = package_root.relative_to(workspace)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "manifest package_path must remain under the implementation workspace"
+        ) from exc
+    committed_paths = _git_tree_file_paths(
+        workspace,
+        commit_sha=commit_sha,
+        package_path=package_workspace_relative,
+    )
+    actual_paths = _secure_package_file_paths(package_root, workspace=workspace)
+    if actual_paths != committed_paths:
+        extra = sorted(path.as_posix() for path in actual_paths - committed_paths)
+        missing = sorted(path.as_posix() for path in committed_paths - actual_paths)
+        if extra:
+            raise AutoresearchValidationError(
+                f"experiment package contains an untracked or ignored package file: {extra[0]}"
+            )
+        raise AutoresearchValidationError(
+            f"experiment package is missing committed source: {missing[0]}"
+        )
+    stages = manifest["stage_files"]
+    assert isinstance(stages, list)
+    for stage_raw in stages:
+        stage = _ensure_mapping(stage_raw, label="manifest stage_file")
+        declared_stage = (
+            package_root
+            / _validate_quantipy_relative_path(stage["file_path"], label="manifest stage_file")
+        ).relative_to(workspace)
+        if declared_stage not in actual_paths:
+            raise AutoresearchValidationError(
+                f"declared experiment stage is not a committed package file: "
+                f"{declared_stage.as_posix()}"
+            )
+    for relative_path in sorted(actual_paths):
+        snapshot = _secure_open_snapshot(
+            workspace / relative_path,
+            label=f"experiment package source {relative_path.as_posix()}",
+            max_bytes=QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES,
+        )
+        if snapshot.content != _git_show_committed_bytes(workspace, commit_sha, relative_path):
+            raise AutoresearchValidationError(
+                f"experiment package source {relative_path.as_posix()} "
+                "must match commit_sha exactly"
+            )
+
+    source_paths: list[Path] = []
+    notebook = manifest["notebook_path"]
+    if notebook is not None:
+        source_paths.append(
+            source_root / _validate_quantipy_relative_path(notebook, label="manifest notebook_path")
+        )
+    for source_path in source_paths:
+        try:
+            relative_path = source_path.relative_to(workspace)
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "manifest notebook_path must remain under the implementation workspace"
+            ) from exc
+        snapshot = _secure_open_snapshot(
+            source_path,
+            label=f"experiment notebook {relative_path.as_posix()}",
+            max_bytes=QUANTIPY_EXPERIMENT_NOTEBOOK_MAX_BYTES,
+        )
+        if snapshot.content != _git_show_committed_bytes(workspace, commit_sha, relative_path):
+            raise AutoresearchValidationError(
+                f"experiment source {relative_path.as_posix()} must match commit_sha exactly"
+            )
+
+
+def _secure_package_file_paths(package_root: Path, *, workspace: Path) -> frozenset[Path]:
+    pending = [package_root]
+    files: set[Path] = set()
+    while pending:
+        directory = pending.pop()
+        try:
+            metadata = directory.lstat()
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "experiment package directory is unavailable"
+            ) from exc
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            raise AutoresearchValidationError(
+                "experiment package directories must be owned, non-symlink, and non-writable "
+                "by group or other"
+            )
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise AutoresearchValidationError("experiment package cannot be enumerated") from exc
+        for entry in entries:
+            path = Path(entry.path)
+            package_relative = path.relative_to(package_root)
+            try:
+                entry_metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AutoresearchValidationError(
+                    "experiment package entry changed during enumeration"
+                ) from exc
+            if stat.S_ISDIR(entry_metadata.st_mode):
+                if entry.name == "__pycache__":
+                    continue
+                pending.append(path)
+            elif stat.S_ISREG(entry_metadata.st_mode):
+                if not _is_quantipy_package_source_path(package_relative):
+                    continue
+                try:
+                    files.add(path.relative_to(workspace))
+                except ValueError as exc:
+                    raise AutoresearchValidationError(
+                        "experiment package entry escaped the workspace"
+                    ) from exc
+            else:
+                raise AutoresearchValidationError(
+                    "experiment package may contain only regular files and directories"
+                )
+    return frozenset(files)
+
+
+def _is_quantipy_package_source_path(path: Path) -> bool:
+    return "__pycache__" not in path.parts and path.suffix in {".py", ".pyi"}
+
+
+def _git_tree_file_paths(
+    workspace: Path,
+    *,
+    commit_sha: str,
+    package_path: Path,
+) -> frozenset[Path]:
+    try:
+        result = subprocess.run(
+            (
+                "git",
+                "-C",
+                str(workspace),
+                "ls-tree",
+                "-rz",
+                "--name-only",
+                commit_sha,
+                "--",
+                package_path.as_posix(),
+            ),
+            check=False,
+            capture_output=True,
+        )
+    except OSError as exc:
+        raise AutoresearchValidationError("Git is unavailable for package provenance") from exc
+    if result.returncode != 0:
+        raise AutoresearchValidationError("experiment package commit tree lookup failed")
+    committed_paths: set[Path] = set()
+    for raw_path in result.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        workspace_relative = Path(os.fsdecode(raw_path))
+        try:
+            package_relative = workspace_relative.relative_to(package_path)
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "experiment package commit tree lookup escaped the package root"
+            ) from exc
+        if _is_quantipy_package_source_path(package_relative):
+            committed_paths.add(workspace_relative)
+    return frozenset(committed_paths)
+
+
+def _canonical_quantipy_manifest_sha256(manifest: Mapping[str, object]) -> str:
+    return _sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+
+
+def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, str]:
+    data = _strict_json_keys(value, label=label, expected=("category", "message"))
+    return {
+        "category": _strict_json_enum(
+            data["category"],
+            label=f"{label}.category",
+            allowed=QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES,
+        ),
+        "message": _strict_json_string(
+            data["message"],
+            label=f"{label}.message",
+            minimum=1,
+            maximum=QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH,
+        ),
+    }
+
+
+def _quantipy_experiment_source_digest(files: Sequence[Mapping[str, object]]) -> str:
+    payload = {
+        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
+        "files": [
+            {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "size_bytes": item["size_bytes"],
+            }
+            for item in sorted(files, key=lambda item: str(item["path"]))
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_quantipy_run_source(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=("algorithm", "domain", "files", "total_bytes", "sha256"),
+    )
+    if data["algorithm"] != "sha256":
+        raise AutoresearchValidationError(f"{label}.algorithm is invalid")
+    if data["domain"] != QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN:
+        raise AutoresearchValidationError(f"{label}.domain is invalid")
+    files_raw = data["files"]
+    if (
+        not isinstance(files_raw, list)
+        or not 1 <= len(files_raw) <= QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT
+    ):
+        raise AutoresearchValidationError(
+            f"{label}.files must contain 1 to "
+            f"{QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT} source files"
+        )
+    files: list[dict[str, object]] = []
+    for index, raw_file in enumerate(files_raw):
+        file_label = f"{label}.files[{index}]"
+        source_file = _strict_json_keys(
+            raw_file,
+            label=file_label,
+            expected=("path", "sha256", "size_bytes"),
+        )
+        path = _validate_quantipy_relative_path(
+            source_file["path"],
+            label=f"{file_label}.path",
+        )
+        if Path(path).suffix != ".py":
+            raise AutoresearchValidationError(f"{file_label}.path must name Python source")
+        size_bytes = _strict_json_int(
+            source_file["size_bytes"],
+            label=f"{file_label}.size_bytes",
+        )
+        if size_bytes > QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES:
+            raise AutoresearchValidationError(f"{file_label}.size_bytes exceeds its limit")
+        files.append(
+            {
+                "path": path,
+                "sha256": _strict_json_sha256(
+                    source_file["sha256"],
+                    label=f"{file_label}.sha256",
+                ),
+                "size_bytes": size_bytes,
+            }
+        )
+    paths = tuple(str(item["path"]) for item in files)
+    if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
+        raise AutoresearchValidationError(f"{label}.files must be uniquely ordered by path")
+    total_bytes = _strict_json_int(data["total_bytes"], label=f"{label}.total_bytes")
+    if total_bytes > QUANTIPY_EXPERIMENT_SOURCE_TOTAL_MAX_BYTES or total_bytes != sum(
+        cast(int, item["size_bytes"]) for item in files
+    ):
+        raise AutoresearchValidationError(
+            f"{label}.total_bytes does not bind its bounded file inventory"
+        )
+    digest = _strict_json_sha256(data["sha256"], label=f"{label}.sha256")
+    if digest != _quantipy_experiment_source_digest(files):
+        raise AutoresearchValidationError(
+            f"{label}.sha256 does not match its canonical source inventory"
+        )
+    return {
+        "algorithm": "sha256",
+        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
+        "files": files,
+        "total_bytes": total_bytes,
+        "sha256": digest,
+    }
+
+
+def _validate_quantipy_execution_source_against_commit(
+    source: Mapping[str, object],
+    *,
+    manifest: Mapping[str, object],
+    source_root: Path,
+    workspace: Path,
+    commit_sha: str,
+) -> None:
+    files_raw = source["files"]
+    assert isinstance(files_raw, list)
+    package_relative = Path(str(manifest["package_path"]))
+    package_root = source_root / package_relative
+    try:
+        source_root_relative = source_root.relative_to(workspace)
+        package_workspace_relative = package_root.relative_to(workspace)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "Quantipy run source evidence escaped the implementation workspace"
+        ) from exc
+    committed_source_paths = sorted(
+        path
+        for path in _git_tree_file_paths(
+            workspace,
+            commit_sha=commit_sha,
+            package_path=package_workspace_relative,
+        )
+        if path.suffix == ".py"
+    )
+    expected_files: list[dict[str, object]] = []
+    for workspace_relative in committed_source_paths:
+        committed_bytes = _git_show_committed_bytes(
+            workspace,
+            commit_sha,
+            workspace_relative,
+        )
+        try:
+            source_relative = workspace_relative.relative_to(source_root_relative)
+            source_relative.relative_to(package_relative)
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "committed Quantipy package source escaped the manifest source root"
+            ) from exc
+        expected_files.append(
+            {
+                "path": source_relative.as_posix(),
+                "sha256": hashlib.sha256(committed_bytes).hexdigest(),
+                "size_bytes": len(committed_bytes),
+            }
+        )
+    expected_source: dict[str, object] = {
+        "algorithm": "sha256",
+        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
+        "files": expected_files,
+        "total_bytes": sum(cast(int, item["size_bytes"]) for item in expected_files),
+        "sha256": _quantipy_experiment_source_digest(expected_files),
+    }
+    if dict(source) != expected_source:
+        reported_by_path = {
+            str(_ensure_mapping(item, label="Quantipy run.json source file")["path"]): item
+            for item in files_raw
+        }
+        expected_by_path = {str(item["path"]): item for item in expected_files}
+        if reported_by_path.keys() == expected_by_path.keys():
+            mismatched_path = next(
+                path
+                for path in sorted(expected_by_path)
+                if reported_by_path[path] != expected_by_path[path]
+            )
+            raise AutoresearchValidationError(
+                "Quantipy execution-time source evidence does not match implementation commit: "
+                f"{mismatched_path}"
+            )
+        raise AutoresearchValidationError(
+            "Quantipy run source inventory does not exactly match implementation commit"
+        )
+
+
+def _validate_quantipy_run_panel(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=(
+            "panel_path",
+            "panel_sha256",
+            "receipt_path",
+            "receipt_sha256",
+            "request_sha256",
+            "coverage_sha256",
+            "receipt",
+        ),
+    )
+    if data["panel_path"] != "panel/panel.parquet":
+        raise AutoresearchValidationError(f"{label}.panel_path is invalid")
+    if data["receipt_path"] != "panel/receipt.json":
+        raise AutoresearchValidationError(f"{label}.receipt_path is invalid")
+    receipt = _validate_panel_receipt(data["receipt"], label=f"{label}.receipt")
+    canonical_receipt_bytes = json.dumps(
+        receipt,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(canonical_receipt_bytes) > QUANTIPY_PANEL_RECEIPT_MAX_BYTES:
+        raise AutoresearchValidationError(f"{label}.receipt exceeds its size limit")
+    panel_sha = _strict_json_sha256(data["panel_sha256"], label=f"{label}.panel_sha256")
+    receipt_sha = _strict_json_sha256(data["receipt_sha256"], label=f"{label}.receipt_sha256")
+    request_sha = _strict_json_sha256(data["request_sha256"], label=f"{label}.request_sha256")
+    coverage_sha = _strict_json_sha256(data["coverage_sha256"], label=f"{label}.coverage_sha256")
+    if (
+        panel_sha != receipt["panel_sha256"]
+        or request_sha != receipt["request_sha256"]
+        or coverage_sha != receipt["coverage_sha256"]
+    ):
+        raise AutoresearchValidationError(f"{label} digests do not bind its nested receipt")
+    return {
+        "panel_path": "panel/panel.parquet",
+        "panel_sha256": panel_sha,
+        "receipt_path": "panel/receipt.json",
+        "receipt_sha256": receipt_sha,
+        "request_sha256": request_sha,
+        "coverage_sha256": coverage_sha,
+        "receipt": receipt,
+    }
+
+
+def _validate_quantipy_run_envelope(
+    snapshot: _SecureFileSnapshot,
+) -> dict[str, object]:
+    run = _strict_json_keys(
+        _parse_json_snapshot(snapshot, label="Quantipy run.json"),
+        label="Quantipy run.json",
+        expected=(
+            "run_id",
+            "identity",
+            "manifest_sha256",
+            "source",
+            "success",
+            "panel_requested",
+            "panel",
+            "stage_receipts",
+            "telemetry",
+            "failure",
+        ),
+    )
+    run_id = _strict_json_string(run["run_id"], label="Quantipy run.json run_id")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", run_id) is None:
+        raise AutoresearchValidationError("Quantipy run.json run_id is invalid")
+    identity = _strict_json_keys(
+        run["identity"],
+        label="Quantipy run.json identity",
+        expected=("experiment_id", "package_path", "notebook_path"),
+    )
+    identity_experiment_id = _strict_json_string(
+        identity["experiment_id"],
+        label="Quantipy run.json identity experiment_id",
+    )
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", identity_experiment_id) is None:
+        raise AutoresearchValidationError("Quantipy run.json identity experiment_id is invalid")
+    normalized_identity: dict[str, object] = {
+        "experiment_id": identity_experiment_id,
+        "package_path": _strict_json_string(
+            identity["package_path"],
+            label="Quantipy run.json identity package_path",
+            minimum=1,
+            maximum=QUANTIPY_EXPERIMENT_IDENTITY_PATH_MAX_LENGTH,
+        ),
+        "notebook_path": None,
+    }
+    if identity["notebook_path"] is not None:
+        normalized_identity["notebook_path"] = _strict_json_string(
+            identity["notebook_path"],
+            label="Quantipy run.json identity notebook_path",
+            minimum=1,
+            maximum=QUANTIPY_EXPERIMENT_IDENTITY_PATH_MAX_LENGTH,
+        )
+    manifest_sha = _strict_json_sha256(
+        run["manifest_sha256"], label="Quantipy run.json manifest_sha256"
+    )
+    source = (
+        _validate_quantipy_run_source(
+            run["source"],
+            label="Quantipy run.json source",
+        )
+        if run["source"] is not None
+        else None
+    )
+    success = _strict_json_bool(run["success"], label="Quantipy run.json success")
+    panel_requested = _strict_json_bool(
+        run["panel_requested"], label="Quantipy run.json panel_requested"
+    )
+    panel = (
+        _validate_quantipy_run_panel(run["panel"], label="Quantipy run.json panel")
+        if run["panel"] is not None
+        else None
+    )
+    receipts_raw = run["stage_receipts"]
+    if not isinstance(receipts_raw, list):
+        raise AutoresearchValidationError("Quantipy run.json stage_receipts must be a JSON array")
+    normalized_receipts: list[dict[str, object]] = []
+    stages: list[str] = []
+    for index, receipt_raw in enumerate(receipts_raw):
+        label = f"Quantipy run.json stage_receipts[{index}]"
+        receipt = _strict_json_keys(
+            receipt_raw,
+            label=label,
+            expected=(
+                "stage",
+                "status",
+                "started_at",
+                "completed_at",
+                "wall_seconds",
+                "result",
+                "failure",
+            ),
+        )
+        stage = _strict_json_enum(
+            receipt["stage"],
+            label=f"{label}.stage",
+            allowed=frozenset(QUANTIPY_EXPERIMENT_STAGE_ORDER),
+        )
+        status_value = _strict_json_enum(
+            receipt["status"],
+            label=f"{label}.status",
+            allowed=frozenset(("completed", "rejected", "failed")),
+        )
+        started = _strict_json_datetime(receipt["started_at"], label=f"{label}.started_at")
+        completed = _strict_json_datetime(receipt["completed_at"], label=f"{label}.completed_at")
+        if completed < started:
+            raise AutoresearchValidationError(f"{label} completion precedes start")
+        wall_seconds = _strict_json_float(receipt["wall_seconds"], label=f"{label}.wall_seconds")
+        result: dict[str, object] | None = None
+        failure: dict[str, str] | None = None
+        if receipt["result"] is not None:
+            result_data = _strict_json_keys(
+                receipt["result"],
+                label=f"{label}.result",
+                expected=("stage", "decision", "summary"),
+            )
+            result = {
+                "stage": _strict_json_enum(
+                    result_data["stage"],
+                    label=f"{label}.result.stage",
+                    allowed=frozenset(QUANTIPY_EXPERIMENT_STAGE_ORDER),
+                ),
+                "decision": _strict_json_enum(
+                    result_data["decision"],
+                    label=f"{label}.result.decision",
+                    allowed=frozenset(("accepted", "rejected")),
+                ),
+                "summary": _strict_json_string(
+                    result_data["summary"],
+                    label=f"{label}.result.summary",
+                    minimum=1,
+                    maximum=QUANTIPY_EXPERIMENT_STAGE_SUMMARY_MAX_LENGTH,
+                ),
+            }
+        if receipt["failure"] is not None:
+            failure = _validate_quantipy_failure(receipt["failure"], label=f"{label}.failure")
+        if status_value == "completed":
+            if result is None or result["decision"] != "accepted" or failure is not None:
+                raise AutoresearchValidationError(
+                    f"{label} completed status requires accepted result only"
+                )
+        elif status_value == "rejected":
+            if result is None or result["decision"] != "rejected" or failure is not None:
+                raise AutoresearchValidationError(
+                    f"{label} rejected status requires rejected result only"
+                )
+            if stage not in {"smoke", "feasibility"}:
+                raise AutoresearchValidationError(f"{label} only smoke or feasibility may reject")
+        elif result is not None or failure is None:
+            raise AutoresearchValidationError(f"{label} failed status requires failure only")
+        elif failure["category"] not in {"import", "stage", "filesystem"}:
+            raise AutoresearchValidationError(f"{label} entered stage failure category is invalid")
+        if result is not None and result["stage"] != stage:
+            raise AutoresearchValidationError(f"{label} result stage does not match receipt stage")
+        stages.append(stage)
+        normalized_receipts.append(
+            {
+                "stage": stage,
+                "status": status_value,
+                "started_at": receipt["started_at"],
+                "completed_at": receipt["completed_at"],
+                "wall_seconds": wall_seconds,
+                "result": result,
+                "failure": failure,
+            }
+        )
+    if tuple(stages) != QUANTIPY_EXPERIMENT_STAGE_ORDER[: len(stages)]:
+        raise AutoresearchValidationError(
+            "Quantipy run.json stage receipts are not an ordered prefix"
+        )
+    if normalized_receipts and any(
+        receipt["status"] != "completed" for receipt in normalized_receipts[:-1]
+    ):
+        raise AutoresearchValidationError(
+            "only the final Quantipy entered stage may be non-completed"
+        )
+    telemetry = _strict_json_keys(
+        run["telemetry"],
+        label="Quantipy run.json telemetry",
+        expected=("scope", "started_at", "completed_at", "wall_seconds"),
+    )
+    if telemetry["scope"] != "process_wide":
+        raise AutoresearchValidationError("Quantipy run.json telemetry scope is invalid")
+    telemetry_started = _strict_json_datetime(
+        telemetry["started_at"], label="Quantipy run.json telemetry started_at"
+    )
+    telemetry_completed = _strict_json_datetime(
+        telemetry["completed_at"], label="Quantipy run.json telemetry completed_at"
+    )
+    if telemetry_completed < telemetry_started:
+        raise AutoresearchValidationError("Quantipy run.json telemetry completion precedes start")
+    telemetry_wall = _strict_json_float(
+        telemetry["wall_seconds"], label="Quantipy run.json telemetry wall_seconds"
+    )
+    previous_completed: datetime | None = None
+    for index, receipt in enumerate(normalized_receipts):
+        stage_started = _strict_json_datetime(
+            receipt["started_at"],
+            label=f"Quantipy run.json stage_receipts[{index}].started_at",
+        )
+        stage_completed = _strict_json_datetime(
+            receipt["completed_at"],
+            label=f"Quantipy run.json stage_receipts[{index}].completed_at",
+        )
+        if stage_started < telemetry_started or stage_completed > telemetry_completed:
+            raise AutoresearchValidationError(
+                "Quantipy stage timing falls outside process-wide telemetry"
+            )
+        if previous_completed is not None and stage_started < previous_completed:
+            raise AutoresearchValidationError("Quantipy stage timing overlaps or moves backward")
+        previous_completed = stage_completed
+    failure = (
+        _validate_quantipy_failure(run["failure"], label="Quantipy run.json failure")
+        if run["failure"] is not None
+        else None
+    )
+    if not panel_requested and panel is not None:
+        raise AutoresearchValidationError("unrequested Quantipy runs cannot bind panel evidence")
+    if not panel_requested and failure is not None and failure["category"] == "panel":
+        raise AutoresearchValidationError("unrequested Quantipy runs cannot fail panel preparation")
+    if (
+        panel_requested
+        and panel is None
+        and (failure is None or failure["category"] not in {"panel", "preflight", "filesystem"})
+    ):
+        raise AutoresearchValidationError(
+            "requested Quantipy panels require evidence or a valid pre-stage failure"
+        )
+    if panel is not None and failure is not None and failure["category"] == "panel":
+        raise AutoresearchValidationError("panel failures cannot also bind panel evidence")
+    if panel is not None and failure is not None and failure["category"] == "preflight":
+        raise AutoresearchValidationError("preflight failures cannot bind panel evidence")
+    if failure is not None and success:
+        raise AutoresearchValidationError("failed Quantipy runs cannot be successful")
+    if (
+        failure is not None
+        and failure["category"] in {"preflight", "panel"}
+        and normalized_receipts
+    ):
+        raise AutoresearchValidationError(
+            "preflight and panel failures require zero stage receipts"
+        )
+    if failure is not None and failure["category"] in {"manifest", "preflight"}:
+        if source is not None:
+            raise AutoresearchValidationError(
+                "manifest and preflight failures cannot bind source evidence"
+            )
+    elif source is None:
+        raise AutoresearchValidationError(
+            "entered and post-preflight Quantipy runs require source evidence"
+        )
+    if (
+        failure is not None
+        and failure["category"] in {"import", "stage", "filesystem"}
+        and normalized_receipts
+    ):
+        terminal = normalized_receipts[-1]
+        terminal_failure = terminal["failure"]
+        if terminal["status"] != "failed" or not isinstance(terminal_failure, Mapping):
+            raise AutoresearchValidationError(
+                "entered run failures require a terminal failed stage"
+            )
+        if terminal_failure["category"] != failure["category"]:
+            raise AutoresearchValidationError("run failure must match terminal stage failure")
+    if (
+        failure is not None
+        and failure["category"] in {"import", "stage"}
+        and not normalized_receipts
+    ):
+        raise AutoresearchValidationError(
+            "import and stage run failures require a terminal failed stage"
+        )
+    if not normalized_receipts and failure is None:
+        raise AutoresearchValidationError(
+            "Quantipy runs without entered stages require a run-level failure"
+        )
+    if (
+        failure is None
+        and len(normalized_receipts) < len(QUANTIPY_EXPERIMENT_STAGE_ORDER)
+        and all(receipt["status"] == "completed" for receipt in normalized_receipts)
+    ):
+        raise AutoresearchValidationError(
+            "incomplete Quantipy runs require rejection, stage failure, or run failure"
+        )
+    calculated_success = (
+        failure is None
+        and len(normalized_receipts) == 4
+        and all(receipt["status"] == "completed" for receipt in normalized_receipts)
+    )
+    if success != calculated_success:
+        raise AutoresearchValidationError(
+            "Quantipy run.json success is inconsistent with stage receipts"
+        )
+    if success and normalized_receipts[-1]["stage"] != "model":
+        raise AutoresearchValidationError("successful Quantipy runs must end with model")
+    normalized_run: dict[str, object] = {
+        "run_id": run_id,
+        "identity": normalized_identity,
+        "manifest_sha256": manifest_sha,
+        "source": source,
+        "success": success,
+        "panel_requested": panel_requested,
+        "panel": panel,
+        "stage_receipts": normalized_receipts,
+        "telemetry": {
+            "scope": "process_wide",
+            "started_at": telemetry["started_at"],
+            "completed_at": telemetry["completed_at"],
+            "wall_seconds": telemetry_wall,
+        },
+        "failure": failure,
+    }
+    canonical_size = len(
+        json.dumps(
+            normalized_run,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if canonical_size >= QUANTIPY_RUN_ENVELOPE_MAX_BYTES:
+        raise AutoresearchValidationError(
+            "Quantipy run.json canonical envelope exceeds its size limit"
+        )
+    return normalized_run
+
+
+def _run_failure_from_mapping(raw: object) -> QuantipyExperimentFailureEvidence | None:
+    if raw is None:
+        return None
+    return QuantipyExperimentFailureEvidence.from_dict(raw)
+
+
+def _validate_quantipy_detached_run_attestation(
+    *,
+    state: AutoresearchState,
+    implementation: ImplementationResultArtifact,
+    workspace: Path,
+    evidence: QuantipyExperimentEvidence,
+    expected_run_id: str,
+    run_snapshot: _SecureFileSnapshot,
+) -> None:
+    try:
+        import gateway.autoresearch_runs as detached_runs
+
+        detached_record = detached_runs.read_run_record(
+            run_dir=Path(evidence.detached_run_directory),
+            runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "Quantipy detached run record is unavailable or invalid"
+        ) from exc
+    if detached_record.run_directory != Path(evidence.detached_run_directory):
+        raise AutoresearchValidationError("Quantipy detached run directory is not canonical")
+    if detached_record.status.manifest_sha256 != evidence.detached_run_manifest_sha256:
+        raise AutoresearchValidationError(
+            "Quantipy detached run manifest digest does not match evidence"
+        )
+    detached_manifest = detached_record.manifest
+    expected_detached_command = (
+        "env",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "quantipy",
+        "experiment",
+        "run",
+        implementation.experiment_manifest_path,
+        "--output-root",
+        str(DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+        "--run-id",
+        expected_run_id,
+    )
+    if (
+        detached_manifest.iteration != state.iteration
+        or detached_manifest.phase is not Phase.VERIFICATION
+        or detached_manifest.working_directory != str(workspace)
+        or detached_manifest.expected_artifact_path != evidence.run_json_path
+        or detached_manifest.command_sha256
+        != detached_runs.command_sha256(expected_detached_command)
+    ):
+        raise AutoresearchValidationError(
+            "Quantipy detached run manifest does not bind the exact verification command"
+        )
+    detached_status = detached_record.status
+    if evidence.success:
+        if (
+            detached_status.state is not detached_runs.RunState.SUCCEEDED
+            or detached_status.exit_code != 0
+            or detached_status.signal_number is not None
+            or detached_status.failure_classification is not None
+        ):
+            raise AutoresearchValidationError(
+                "successful Quantipy envelope requires detached success with exit code 0"
+            )
+    elif (
+        detached_status.state is not detached_runs.RunState.FAILED
+        or detached_status.exit_code != 1
+        or detached_status.signal_number is not None
+        or detached_status.failure_classification
+        is not detached_runs.RunFailureClassification.PROCESS_ERROR
+    ):
+        raise AutoresearchValidationError(
+            "failed or rejected Quantipy envelope requires detached contract exit code 1"
+        )
+    capture = detached_status.output_capture
+    if capture is None or not capture.stdout.eof_observed or not capture.stderr.eof_observed:
+        raise AutoresearchValidationError(
+            "Quantipy detached run lacks complete EOF-drained independent output capture"
+        )
+    artifact_attestation = detached_status.expected_artifact_attestation
+    if (
+        detached_status.expected_artifact_attestation_status
+        is not detached_runs.ExpectedArtifactAttestationStatus.ATTESTED
+        or artifact_attestation is None
+    ):
+        raise AutoresearchValidationError(
+            "Quantipy detached run lacks expected artifact attestation"
+        )
+    if (
+        artifact_attestation.path != evidence.run_json_path
+        or artifact_attestation.size_bytes != len(run_snapshot.content)
+        or artifact_attestation.sha256 != run_snapshot.sha256
+    ):
+        raise AutoresearchValidationError(
+            "Quantipy run.json does not match detached worker artifact attestation"
+        )
+
+
+def _validate_quantipy_experiment_evidence(
+    state: AutoresearchState,
+    artifact: VerificationResultArtifact,
+) -> None:
+    evidence = artifact.quantipy_experiment_evidence
+    not_started = artifact.quantipy_execution_not_started
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "Quantipy experiment evidence requires implementation_result"
+        )
+    implementation = state.implementation_result
+    workspace = _require_strict_canonical_workspace_path(
+        implementation.workspace_path,
+        label="implementation_result workspace_path",
+    )
+    canonical_commit = _resolve_git_commit(
+        workspace,
+        implementation.commit_sha,
+        label="implementation_result commit_sha",
+    )
+    head_commit = _resolve_git_commit(workspace, "HEAD", label="implementation workspace HEAD")
+    if head_commit != canonical_commit:
+        raise AutoresearchValidationError(
+            "verification requires workspace HEAD to equal implementation commit_sha"
+        )
+    manifest_snapshot = _secure_open_snapshot(
+        implementation.experiment_manifest_path,
+        label="implementation_result experiment_manifest_path",
+    )
+    manifest = _validate_quantipy_v2_manifest(
+        manifest_snapshot,
+        workspace=workspace,
+        commit_sha=canonical_commit,
+        expected_sha256=implementation.experiment_manifest_sha256,
+    )
+    expected_run_id = f"autoresearch-i{state.iteration}-{canonical_commit[:12]}"
+    expected_run_path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
+    _require_private_directory(
+        DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        label="trusted Quantipy runs root",
+    )
+
+    if evidence is None:
+        if artifact.status is VerificationStatus.PASS:
+            raise AutoresearchValidationError(
+                "PASS verification requires Quantipy experiment evidence"
+            )
+        if not_started is None:
+            raise AutoresearchValidationError(
+                "non-PASS without runtime evidence requires execution-not-started evidence"
+            )
+        if (
+            not_started.manifest_path != implementation.experiment_manifest_path
+            or not_started.manifest_sha256 != implementation.experiment_manifest_sha256
+            or not_started.expected_run_id != expected_run_id
+            or not_started.expected_run_json_path != str(expected_run_path)
+        ):
+            raise AutoresearchValidationError(
+                "execution-not-started evidence does not bind the implementation and expected run"
+            )
+        if not_started.command not in artifact.commands_run:
+            raise AutoresearchValidationError(
+                "execution-not-started command must appear exactly in commands_run"
+            )
+        if not_started.reason == "preflight_failed":
+            expected_preflight = (
+                "PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight "
+                f"{implementation.experiment_manifest_path}"
+            )
+            if not_started.command != expected_preflight:
+                raise AutoresearchValidationError(
+                    "preflight_failed must bind the exact Quantipy preflight command"
+                )
+        elif "quantipy experiment" in not_started.command:
+            raise AutoresearchValidationError(
+                "focused_tests_failed cannot claim a Quantipy experiment command"
+            )
+        _reserve_quantipy_execution_not_started(
+            not_started,
+            runs_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        )
+        return
+    if not_started is not None:
+        raise AutoresearchValidationError(
+            "runtime evidence and execution-not-started evidence are mutually exclusive"
+        )
+    if (
+        evidence.manifest_path != implementation.experiment_manifest_path
+        or evidence.manifest_sha256 != implementation.experiment_manifest_sha256
+    ):
+        raise AutoresearchValidationError(
+            "Quantipy experiment evidence manifest binding does not match implementation_result"
+        )
+    if evidence.run_id != expected_run_id:
+        raise AutoresearchValidationError(
+            "Quantipy experiment evidence run_id is not deterministic for this iteration and commit"
+        )
+    if evidence.run_json_path != str(expected_run_path):
+        raise AutoresearchValidationError(
+            "Quantipy experiment run_json_path must use the trusted canonical run layout"
+        )
+    run_snapshot = _secure_open_snapshot(
+        evidence.run_json_path,
+        label="quantipy_experiment_evidence.run_json_path",
+        trusted_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        private=True,
+        max_bytes=QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
+    )
+    _require_private_directory(run_snapshot.path.parent, label="Quantipy run directory")
+    if run_snapshot.sha256 != evidence.run_json_sha256:
+        raise AutoresearchValidationError(
+            "quantipy_experiment_evidence.run_json_sha256 does not match run.json"
+        )
+    run = _validate_quantipy_run_envelope(run_snapshot)
+    if run["run_id"] != evidence.run_id or run["success"] is not evidence.success:
+        raise AutoresearchValidationError("Quantipy run.json identity does not match evidence")
+    if run["manifest_sha256"] != _canonical_quantipy_manifest_sha256(manifest):
+        raise AutoresearchValidationError(
+            "Quantipy run.json manifest_sha256 does not match manifest"
+        )
+    identity = _ensure_mapping(run["identity"], label="Quantipy run.json identity")
+    manifest_source_root = manifest_snapshot.path.parent
+    package_path = str(manifest_source_root / str(manifest["package_path"]))
+    notebook_path = (
+        str(manifest_source_root / str(manifest["notebook_path"]))
+        if manifest["notebook_path"] is not None
+        else None
+    )
+    if dict(identity) != {
+        "experiment_id": manifest["experiment_id"],
+        "package_path": package_path,
+        "notebook_path": notebook_path,
+    }:
+        raise AutoresearchValidationError(
+            "Quantipy run.json experiment identity does not match manifest"
+        )
+    run_source = run["source"]
+    if run_source is not None:
+        _validate_quantipy_execution_source_against_commit(
+            _ensure_mapping(run_source, label="Quantipy run.json source"),
+            manifest=manifest,
+            source_root=manifest_source_root,
+            workspace=workspace,
+            commit_sha=canonical_commit,
+        )
+    _validate_quantipy_detached_run_attestation(
+        state=state,
+        implementation=implementation,
+        workspace=workspace,
+        evidence=evidence,
+        expected_run_id=expected_run_id,
+        run_snapshot=run_snapshot,
+    )
+    receipts = run["stage_receipts"]
+    assert isinstance(receipts, list)
+    completed: list[str] = []
+    terminal_failure: QuantipyExperimentFailureEvidence | None = None
+    terminal_stage: str | None = None
+    terminal_status: str | None = None
+    for receipt_raw in receipts:
+        receipt = _ensure_mapping(receipt_raw, label="Quantipy run.json stage receipt")
+        stage = str(receipt["stage"])
+        status = str(receipt["status"])
+        if status == "completed":
+            completed.append(stage)
+        elif status == "rejected":
+            terminal_stage = stage
+            terminal_status = status
+        else:
+            terminal_failure = _run_failure_from_mapping(receipt["failure"])
+            terminal_stage = stage
+            terminal_status = status
+    if tuple(completed) != evidence.completed_stages:
+        raise AutoresearchValidationError(
+            "Quantipy experiment evidence completed_stages does not match run.json"
+        )
+    if (evidence.terminal_stage, evidence.terminal_status) != (terminal_stage, terminal_status):
+        raise AutoresearchValidationError(
+            "Quantipy experiment terminal stage evidence does not match run.json"
+        )
+    run_failure = _run_failure_from_mapping(run["failure"])
+    actual_failure = run_failure if run_failure is not None else terminal_failure
+    if evidence.failure != actual_failure:
+        raise AutoresearchValidationError(
+            "Quantipy experiment failure evidence does not match run.json"
+        )
+    is_success = bool(run["success"])
+    if evidence.success is not is_success:
+        raise AutoresearchValidationError("Quantipy run.json success does not match stage receipts")
+    if artifact.status is VerificationStatus.PASS and not is_success:
+        raise AutoresearchValidationError("PASS requires a successful completed Quantipy v2 run")
+    if artifact.status is not VerificationStatus.PASS and is_success:
+        raise AutoresearchValidationError("non-PASS must not report a successful Quantipy v2 run")
+    panel_requested = bool(run["panel_requested"])
+    if panel_requested is (manifest["panel"] is None):
+        raise AutoresearchValidationError(
+            "Quantipy run.json panel_requested does not match manifest"
+        )
+    run_panel = run["panel"]
+    if run_panel is None:
+        if evidence.panel is not None:
+            raise AutoresearchValidationError(
+                "Quantipy experiment panel evidence is not present in run.json"
+            )
+    else:
+        run_panel_data = _ensure_mapping(run_panel, label="Quantipy run.json panel")
+        if evidence.panel is None or evidence.panel.to_dict() != {
+            "panel_path": run_panel_data["panel_path"],
+            "panel_sha256": run_panel_data["panel_sha256"],
+            "receipt_path": run_panel_data["receipt_path"],
+            "receipt_sha256": run_panel_data["receipt_sha256"],
+            "request_sha256": run_panel_data["request_sha256"],
+            "coverage_sha256": run_panel_data["coverage_sha256"],
+        }:
+            raise AutoresearchValidationError(
+                "Quantipy experiment panel evidence does not match run.json"
+            )
+        panel_snapshot = _secure_open_snapshot(
+            run_snapshot.path.parent / evidence.panel.panel_path,
+            label="Quantipy panel file",
+            trusted_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+            private=True,
+            max_bytes=1024 * 1024 * 1024,
+        )
+        receipt_snapshot = _secure_open_snapshot(
+            run_snapshot.path.parent / evidence.panel.receipt_path,
+            label="Quantipy panel receipt",
+            trusted_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+            private=True,
+            max_bytes=QUANTIPY_PANEL_RECEIPT_MAX_BYTES,
+        )
+        _require_private_directory(
+            receipt_snapshot.path.parent,
+            label="Quantipy panel directory",
+        )
+        if (
+            panel_snapshot.sha256 != evidence.panel.panel_sha256
+            or receipt_snapshot.sha256 != evidence.panel.receipt_sha256
+        ):
+            raise AutoresearchValidationError("Quantipy panel evidence digest does not match files")
+        persisted_receipt = _validate_panel_receipt(
+            _parse_json_snapshot(receipt_snapshot, label="Quantipy panel receipt"),
+            label="Quantipy panel receipt",
+        )
+        if persisted_receipt != run_panel_data["receipt"]:
+            raise AutoresearchValidationError(
+                "Quantipy panel receipt bytes do not match nested run evidence"
+            )
+        manifest_panel = _ensure_mapping(manifest["panel"], label="manifest panel")
+        if persisted_receipt["request"] != manifest_panel["request"]:
+            raise AutoresearchValidationError(
+                "Quantipy panel receipt request does not match manifest request"
+            )
+
+
+def _reserve_quantipy_execution_not_started(
+    evidence: QuantipyExecutionNotStartedEvidence,
+    *,
+    runs_root: Path,
+) -> None:
+    """Reserve the deterministic run directory so a concurrent run cannot start later."""
+    _require_private_directory(runs_root, label="trusted Quantipy runs root")
+    root_fd = os.open(
+        runs_root,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+    )
+    try:
+        try:
+            os.mkdir(evidence.expected_run_id, mode=0o700, dir_fd=root_fd)
+        except FileExistsError as exc:
+            raise AutoresearchValidationError(
+                "execution-not-started is false because expected run directory already exists"
+            ) from exc
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "cannot atomically reserve the execution-not-started run directory"
+            ) from exc
+        run_fd = os.open(
+            evidence.expected_run_id,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root_fd,
+        )
+        try:
+            marker_fd = os.open(
+                QUANTIPY_EXECUTION_NOT_STARTED_TOMBSTONE,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=run_fd,
+            )
+            try:
+                payload = json.dumps(
+                    {
+                        "schema_version": "g2-quantipy-execution-not-started-v1",
+                        **evidence.to_dict(),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                offset = 0
+                while offset < len(payload):
+                    written = os.write(marker_fd, payload[offset:])
+                    if written <= 0:
+                        raise AutoresearchValidationError(
+                            "execution-not-started tombstone write was incomplete"
+                        )
+                    offset += written
+                os.fsync(marker_fd)
+            finally:
+                os.close(marker_fd)
+            os.fsync(run_fd)
+        finally:
+            os.close(run_fd)
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+
+
 def _require_ancestor(
     worktree: Path,
     ancestor: str,
@@ -5295,6 +7545,17 @@ def validate_artifact_workspace(
             authoritative_head,
             artifact_commit,
             error_message=("authoritative target_repo HEAD is not an ancestor of final fix commit"),
+        )
+    else:
+        manifest_snapshot = _secure_open_snapshot(
+            artifact.experiment_manifest_path,
+            label="implementation_result experiment_manifest_path",
+        )
+        _validate_quantipy_v2_manifest(
+            manifest_snapshot,
+            workspace=workspace,
+            commit_sha=artifact_commit,
+            expected_sha256=artifact.experiment_manifest_sha256,
         )
 
 
@@ -5665,14 +7926,20 @@ def _phase_instruction(
             "qp.prices(), hydrate, full backtest, or notebook command that would load "
             "the price panel; commit the scaffold, focused tests, notebook shell, and "
             "over-budget preflight so verification can emit the structured feasibility "
-            "BUG_SIGNAL without spending the hydrate cost."
+            "BUG_SIGNAL without spending the hydrate cost. Commit one canonical "
+            "quantipy-experiment-v2 manifest under the workspace with exactly prepare, smoke, "
+            "feasibility, and model stage_files; record its canonical absolute path and "
+            "SHA-256 in implementation_result. A notebook alone is not implementation evidence."
         ),
         Phase.VERIFICATION: (
             "Verify the produced experiment deterministically. "
             "Use implementation_result.workspace_path and "
             "implementation_result.commit_sha as the source under test. "
-            "Reject impossible metrics, failing tests, "
-            "or incomplete required metrics."
+            "Run focused tests, PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight, "
+            "then the exact detached PYTHONDONTWRITEBYTECODE=1 quantipy experiment run "
+            "under the fixed private runs root with deterministic "
+            "run_id before evaluating metrics. "
+            "Reject impossible metrics, failing tests, or incomplete required metrics."
         ),
         Phase.REVIEW: (
             "Run exactly one configured reviewer. "
@@ -5886,6 +8153,39 @@ def _verification_handoff_contract(
         "commands in commands_run and decisive evidence in the metric fields, "
         "null_test_summary, bug_signals, data_coverage, and infra_rationale when "
         "applicable.\n"
+        "- Mandatory typed Quantipy runtime gate: first run focused tests, then "
+        "`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight "
+        "<implementation_result.experiment_manifest_path>`, then launch the exact "
+        "`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run <manifest> --output-root "
+        f"{DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT} --run-id "
+        "autoresearch-i<iteration>-<commit12>` command through "
+        "`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. Its immutable detached "
+        "manifest must set expected_artifact_path to the known "
+        "`<root>/<run-id>/run.json`. Direct foreground execution cannot satisfy this "
+        "contract. Under the non-malicious same-host agent trust model, PASS requires the "
+        "detached worker's sealed attestation; a verifier claim cannot replace it. The "
+        "detached worker must publish terminal success with complete EOF drain, truthful "
+        "bounded-tail truncation metadata, and a secure expected-artifact "
+        "size/SHA-256 attestation before quantipy_experiment_evidence can be accepted; "
+        "the evidence must bind the detached run directory/manifest digest and the current "
+        "run.json bytes must match that worker attestation. An artifact-supplied hash alone "
+        "is never proof. The run must also match the committed manifest path/SHA and "
+        "implementation commit. Smoke and feasibility must accept before Quantipy imports "
+        "or executes model. PASS requires success and completed_stages exactly "
+        "[prepare, smoke, feasibility, model], plus panel identity/digests when requested. "
+        "Quantipy exits 0 exactly for success=true and 1 exactly for success=false. PASS "
+        "requires detached SUCCEEDED/exit 0. A valid rejected/failed run used by TEST_FAILURE "
+        "or BUG_SIGNAL requires detached FAILED/exit 1 with no signal and ordinary "
+        "process_error classification; timeout, operator stop, resource exhaustion, artifact, "
+        "capture, signal, or any other nonzero outcome is not a typed contract exit. A run "
+        "that exists must retain truthful rejected/failed typed evidence. When focused tests "
+        "or preflight prevent execution, set runtime evidence "
+        "to null and populate quantipy_execution_not_started with its allowed reason, exact "
+        "command/evidence, manifest binding, and expected run ID/path. G2 atomically tombstones "
+        "the absent run directory; retry only after a new commit yields a new deterministic ID. "
+        "Requested panels may omit evidence only for typed pre-stage preflight, panel, or "
+        "filesystem failures. Notebook execution, nbconvert, and papermill "
+        "may render a smoke/report only and never substitute for this gate or PASS.\n"
         "- Classify failures mechanically: any nonzero or failed test command is "
         "status TEST_FAILURE with tests_passed=false; impossible, leaky, or "
         "anomalous metrics are status BUG_SIGNAL with nonempty bug_signals; use "
@@ -5923,10 +8223,11 @@ def _verification_handoff_contract(
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
         "REMEDIATION_REQUIRED. status and tests_passed describe verifier command, "
-        "test, and notebook execution plus experiment correctness, never whether "
+        "test, and typed Quantipy runtime execution plus experiment correctness, never whether "
         "the infrastructure gate passed. REMEDIATION_REQUIRED is a valid completed "
         "verification outcome: emit PASS with tests_passed=true when commands, tests, "
-        "and notebook execution succeeded. A DATA_INFRA_G0 PASS may set alpha metrics "
+        "and typed Quantipy runtime execution succeeded. A DATA_INFRA_G0 PASS may set "
+        "alpha metrics "
         "and data_coverage to null when unavailable, but the platform gate requires "
         "runner-checkable implementation preflight plus paired universe, price hydration, "
         "and platform coverage receipts. If that provenance is unavailable or mismatched, emit "
@@ -6309,6 +8610,8 @@ def advance_state(
             raise AutoresearchValidationError(
                 "cannot advance implementation without consensus majority"
             )
+        if state_path is not None:
+            validate_artifact_workspace(state, artifact)
         _validate_implementation_workspace(state, artifact, require_compute_fit=True)
         _validate_alpha_implementation_price_preflight(state, artifact)
         next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
@@ -6323,6 +8626,8 @@ def advance_state(
         artifact.validate(mode=state.mode)
         _validate_alpha_price_scope_verification(state, artifact)
         _require_g0_platform_provenance(state, artifact, validation_context)
+        if state_path is not None:
+            _validate_quantipy_experiment_evidence(state, artifact)
         next_verification_history = (*state.verification_history, artifact)
         if artifact.status is VerificationStatus.PASS:
             next_state = replace(
@@ -6386,6 +8691,8 @@ def advance_state(
             next_attempts = state.verification_fix_attempts + 1
         else:
             next_attempts = state.verification_fix_attempts
+        if state_path is not None:
+            validate_artifact_workspace(state, artifact)
         _validate_fix_workspace(state, artifact)
         assert state.implementation_result is not None
         next_implementation = replace(
@@ -7011,7 +9318,7 @@ def load_state_file(path: Path) -> AutoresearchState:
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
-    """Create a pristine v2 campaign state pinned to authoritative readiness."""
+    """Create a pristine v3 campaign state pinned to authoritative readiness."""
     try:
         identity = readiness.require_ready()
     except ValueError as exc:
@@ -7076,6 +9383,7 @@ def advance_infrastructure_verification_failure(
             artifact,
             policy,
             validation_context=validation_context,
+            state_path=resolved_path,
         )
         _atomic_save_state_file(resolved_path, advanced)
         return advanced

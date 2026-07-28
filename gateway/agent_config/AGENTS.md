@@ -32,9 +32,11 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-Before `autoresearch-next`, an operator must prepare schema-v2 state while the
-supervisor is stopped. State missing `schema_version` is unsupported; archive
-it and initialize a fresh schema-v2 state:
+Before `autoresearch-next`, an operator must prepare schema-v3 state while the
+supervisor is stopped. A live schema-v2 state, or state missing
+`schema_version`, is unsupported: archive it and initialize a fresh schema-v3
+state before restarting the supervisor. Never overwrite or migrate schema-v2
+in place.
 
 ```bash
 (
@@ -46,12 +48,16 @@ it and initialize a fresh schema-v2 state:
   uv run gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
+  if [ -e "$state" ]; then
+    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    mv -- "$state" "$archive"
+  fi
   mv -- "$tmp" "$state"
   trap - EXIT
 )
 ```
 
-This procedure leaves schema-v2 state at the authoritative path used by
+This procedure leaves schema-v3 state at the authoritative path used by
 `autoresearch-next`, control, and the supervisor. Never run
 `autoresearch-next` against state missing `schema_version`.
 
@@ -73,7 +79,7 @@ entitlement supports 2022 onward but rejects January/July 2021. The readiness
 build runs a strict live campaign-start entitlement probe through Quantipy's
 public client (`security_universe_screen` and daily regular-hours `prices` for
 `AAPL`); it may hydrate/cache data as an intentional operator prewarm. Any
-probe failure leaves readiness blocked. Then resume the same schema-v2 state
+probe failure leaves readiness blocked. Then resume the same schema-v3 state
 atomically:
 
 ```bash
@@ -172,14 +178,32 @@ persisted workspace. Every attempt, including test failures and bug signals,
 must:
 
 1. Run the exact focused commands and capture decisive evidence.
-2. Write a complete JSON `verification_result` inside the strict production
+2. Run `PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight
+   <committed-v2-manifest>`, then the exact detached
+   `PYTHONDONTWRITEBYTECODE=1 quantipy experiment run <manifest> --output-root
+   <root> --run-id autoresearch-i<iteration>-<commit12>`. Its known receipt path is
+   `<root>/<run-id>/run.json`, under the runner-declared fixed private runs
+   root. Quantipy smoke and feasibility must accept before model
+   import/execution. Its typed source evidence must bind the complete immutable
+   preflight-approved Python inventory and match exact Git blobs at the
+   implementation commit; no `run/source` directory substitutes. A requested
+   panel always requires its typed receipt and bound files. If focused tests or
+   preflight stop execution, emit the strict
+   `quantipy_execution_not_started` receipt with the exact failed command,
+   evidence, expected run ID/path, and reason; the expected `run.json` must be
+   absent because the entire expected run directory must be absent, and G2
+   reserves that directory with a private tombstone.
+   Never reuse that run ID; retry after a new commit produces a new
+   deterministic commit-bound ID. Raw `nbconvert`, `papermill`, or notebook execution may render a
+   smoke/report only; it never substitutes for this typed run.
+3. Write a complete JSON `verification_result` inside the strict production
    envelope from the active `autoresearch-next` output:
    `{"instruction_manifest_sha256":"<source_manifest_sha256>","state_reference_sha256":"<state_reference_sha256>","artifact":{...}}`.
    Unavailable fields are `null`, never fabricated values. Never write or pass
    a raw unwrapped `verification_result`.
-3. Persist that envelope with `gateway-cli autoresearch-advance` before any
+4. Persist that envelope with `gateway-cli autoresearch-advance` before any
    prose status or handoff.
-4. Route an accepted fix request only to `fixer` in that same workspace, then
+5. Route an accepted fix request only to `fixer` in that same workspace, then
    repeat structured verification and review as directed by the runner.
 
 Only `PASS` may carry complete trusted metrics and coverage. Verification must
@@ -189,6 +213,27 @@ requires only the compact `DynamicUniverseCoverageReceipt`; legacy per-symbol
 and aggregate common-calendar coverage receipts are `DATA_INFRA_G0`-only. A
 failed experiment is classified and logged; the PM does not revert, promote,
 or repair code.
+
+`implementation_result` must bind a committed canonical
+`quantipy-experiment-v2` manifest under its workspace to its SHA-256.
+`quantipy_experiment_evidence` binds that same manifest, deterministic run ID,
+absolute `run.json` path/digest, detached run directory/manifest digest,
+ordered typed stage receipts, typed failure if present, and panel
+identity/digests. The exact Quantipy command must run through the detached
+launcher with `expected_artifact_path` set to `run.json`; direct foreground
+execution cannot satisfy the contract. Under the non-malicious same-host agent
+model, G2 accepts no `PASS` without sealed terminal worker status, EOF-drained
+bounded-tail log receipts with truthful truncation metadata, a secure worker
+artifact attestation matching the current `run.json` bytes, and
+successful four-stage receipt evidence. A non-PASS artifact may use `null`
+only when the run never started and it carries an explicit test rationale or
+bug signal; no agent self-report fallback exists.
+
+Quantipy exits 0 exactly for `run.success=true` and 1 exactly for
+`run.success=false`. PASS requires detached success/exit 0. Typed
+TEST_FAILURE/BUG_SIGNAL runtime evidence may use detached failure/exit 1 only
+with no signal and ordinary `process_error`; all infrastructure, artifact,
+capture, timeout, stop, resource, signal, and other exit outcomes fail closed.
 
 Every new `DATA_INFRA_G0` `PASS` requires paired universe, price hydration, and
 platform coverage receipts. The price hydration receipt includes the required

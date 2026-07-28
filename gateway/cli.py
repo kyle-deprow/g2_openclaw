@@ -579,17 +579,22 @@ def autoresearch_init_state(
     output_path: Path = _output_path_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
-    """Initialize a pristine schema-v2 campaign pinned to platform readiness."""
-    from gateway.autoresearch_runner import initialize_state, save_state_file
+    """Initialize a pristine schema-v3 campaign pinned to platform readiness."""
+    from gateway.autoresearch_runner import (
+        initialize_state,
+        provision_quantipy_experiment_runs_root,
+        save_state_file,
+    )
 
     try:
         readiness = load_platform_readiness(readiness_manifest)
+        provision_quantipy_experiment_runs_root()
         state = initialize_state(readiness)
         save_state_file(output_path, state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]wrote pristine autoresearch state v2:[/green] {output_path}")
+    console.print(f"[green]wrote pristine autoresearch state v3:[/green] {output_path}")
 
 
 @app.command("autoresearch-create-command-file")
@@ -749,10 +754,12 @@ def autoresearch_next(
 ) -> None:
     """Validate autoresearch state/config and print the deterministic next action."""
     from gateway.autoresearch_runner import (
+        Phase,
         build_receipt_catalog,
         load_autoresearch_policy,
         load_state_file,
         next_action,
+        provision_quantipy_experiment_runs_root,
         validate_target_worktree_clean,
     )
 
@@ -779,6 +786,8 @@ def autoresearch_next(
             readiness=readiness,
             state_path=state_path,
         )
+        if state.phase is Phase.VERIFICATION:
+            provision_quantipy_experiment_runs_root()
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

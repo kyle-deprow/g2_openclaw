@@ -56,6 +56,21 @@ repo config binds each stage to its model.
 5. Repeat review/fix until the reviewer reports no must-fix issues.
 6. Run final verification from the parent context.
 
+For Quantipy work, require a committed `quantipy-experiment-v2` manifest with
+exactly `prepare`, `smoke`, `feasibility`, and `model`. Run focused tests and
+`PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight` first, then detach
+the exact `PYTHONDONTWRITEBYTECODE=1 quantipy experiment run MANIFEST
+--output-root ROOT --run-id
+autoresearch-i<iteration>-<commit12>` command. Only `ROOT/run-id/run.json`
+under the runner-declared fixed private runs root proves full verification.
+Requested panels require their nested typed receipt and bound files. If
+focused tests or preflight prevent execution, return the exact failed command
+and evidence needed for `quantipy_execution_not_started`; do not claim a
+missing runtime receipt. G2 reserves that absent run directory with a private
+tombstone; retry only from a new implementation/fix commit with its new
+deterministic run ID. Notebook, `nbconvert`, and `papermill` execution can
+smoke-test or render a report only and never establish PASS.
+
 ## Detached Long Tasks
 
 Any hydration, backtest, notebook execution, or similarly long verification
@@ -103,6 +118,17 @@ Requirements:
    needed.
 8. Do not reduce scope just to avoid detached execution. If the task requires a
    long command, launch it safely and report the real status.
+
+For the mandatory Quantipy verification run, the exact command is `env
+PYTHONDONTWRITEBYTECODE=1 quantipy experiment run MANIFEST --output-root ROOT
+--run-id RUN_ID`. It must be launched here, never directly in a foreground
+tool call. Set the immutable run manifest's `expected_artifact_path` to the
+known `ROOT/RUN_ID/run.json`. Under the non-malicious same-host agent model,
+PASS requires the detached worker's sealed artifact/status attestation; a
+verifier claim cannot replace it. Evidence must bind the detached run
+directory and manifest digest, require EOF-drained bounded-tail log receipts
+with truthful truncation metadata, and match current artifact bytes to the
+worker's size/SHA-256 attestation.
 
 ## Recovery
 

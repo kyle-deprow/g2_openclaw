@@ -37,12 +37,13 @@ interactions. Autonomous research runs only in
 
 ## State Preparation
 
-Stop the supervisor before preparing state. The campaign uses schema-v2 state. The separate
+Stop the supervisor before preparing state. The campaign uses schema-v3 state. The separate
 schema-v3 platform-readiness manifest writes to
-`~/.openclaw/autoresearch/platform-readiness.json`. State missing
-`schema_version` is unsupported; archive it and initialize a fresh schema-v2 state. The state
-procedure writes a temporary file, validates the command result, and atomically
-replaces the authoritative state path.
+`~/.openclaw/autoresearch/platform-readiness.json`. A live schema-v2 state, or
+state missing `schema_version`, is unsupported. Archive it and initialize a
+fresh schema-v3 state before restarting the supervisor; never migrate or
+overwrite schema-v2 in place. The state procedure writes and validates a
+temporary replacement before archiving the old state.
 
 ```bash
 (
@@ -54,6 +55,10 @@ replaces the authoritative state path.
   uv run gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
+  if [ -e "$state" ]; then
+    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    mv -- "$state" "$archive"
+  fi
   mv -- "$tmp" "$state"
   trap - EXIT
 )
@@ -88,7 +93,7 @@ After G0 implementation and verification, `GATE_PASSED` requires a full-union
 counts and maps to non-suspending `INFRA_REPAIRED`. `REMEDIATION_REQUIRED` is
 stage evidence only and maps to non-suspending `DISCARD`.
 
-Then atomically resume the same schema-v2 state file:
+Then atomically resume the same schema-v3 state file:
 
 ```bash
 (
@@ -183,6 +188,69 @@ references, or inherited authentication.
 The detached worker uses a `MemoryHigh=20G` soft limit and a `MemoryMax=24G`
 hard limit. These limits apply only to the long-running research command and
 are separate from the OpenClaw gateway's own native-crash containment limits.
+
+## Quantipy Typed Runtime Verification
+
+Implementation must commit one canonical `quantipy-experiment-v2` manifest in
+its disposable workspace and record its absolute path and SHA-256 in
+`implementation_result`. Verification runs focused tests, then
+`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight MANIFEST`, then
+launches this exact command through `scripts/run-long-task.sh`:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run "$manifest" --output-root "$root" \
+  --run-id "autoresearch-i<iteration>-<commit12>"
+```
+
+The immutable detached manifest must set `expected_artifact_path` to the known
+`$root/$run_id/run.json`. Direct foreground execution cannot satisfy this
+contract. Under the non-malicious same-host agent trust model, PASS requires
+the worker-produced sealed attestation; a verifier claim cannot replace it.
+Before publishing terminal success, the detached
+worker securely snapshots that expected artifact and records its path, size,
+SHA-256, and file identity in schema-v5 `status.json`. It seals the artifact
+and terminal status mode 0400 and the detached run directory mode 0500. G2
+requires the detached run directory and manifest digest, successful terminal
+status, complete EOF drain with truthful truncation metadata for each bounded
+64 KiB retained log tail, and an exact match between the current `run.json`
+bytes and the worker attestation. The hash supplied in
+`quantipy_experiment_evidence` is not sufficient by itself.
+
+Quantipy exits 0 exactly when `run.success=true` and 1 exactly when it is
+false. PASS requires detached `succeeded`/exit 0. A typed rejected or failed
+run for TEST_FAILURE/BUG_SIGNAL requires detached `failed`/exit 1, no signal,
+and ordinary `process_error` classification. Timeout, operator stop, resource
+exhaustion, artifact/capture failure, signals, exit 2+, and other outcomes are
+not accepted as Quantipy contract exits.
+
+These permissions prevent ordinary verifier mutation; they are not
+cryptographic protection against a malicious process with the same UID or a
+root/sudo-capable operator rebuilding the local record. That compromise is
+outside the local control-plane threat model. For intentional cleanup only,
+the operator may run `chmod 0700 <exact-detached-run-dir>` and then remove that
+exact run directory; never recursively chmod or delete the runs root.
+
+`gateway-cli autoresearch-init-state` provisions `$root` at the fixed
+`/home/dev/.openclaw/autoresearch/quantipy-experiment-runs` path as an
+owner-controlled mode-0700 non-symlink directory and fails closed on an
+existing ownership, mode, or symlink-path-component violation. Verification
+dispatch validates the same fixed root before a run. There is no alternate root.
+`$root` is the runner-declared fixed private autoresearch runs root, and
+`$root/$run_id/run.json` is the only full runtime proof. Its digest, manifest
+binding, complete immutable execution-source file inventory/digests, four
+ordered completed receipts, and mandatory requested-panel receipt/files go in
+`quantipy_experiment_evidence`. G2 compares the full source inventory and
+domain-separated aggregate digest with exact Git blobs at the implementation
+commit; Quantipy retains no authoritative `run/source` directory. Smoke and
+feasibility must complete before model import/execution. `nbconvert`,
+`papermill`, and Jupyter
+may smoke-test or render a report only; they never substitute for a PASS. When
+focused tests or preflight prevent execution, runtime evidence is `null` and a
+strict `quantipy_execution_not_started` receipt must bind the exact failed
+command/evidence, manifest, deterministic expected run ID/path, and allowed
+reason. The entire expected run directory must be absent; validation atomically
+reserves it with a private identity-bound tombstone. A retry must use the new
+deterministic run ID produced by a new implementation/fix commit.
 
 Never run both preparation procedures for the same campaign. Archive
 incompatible state before initialization.
