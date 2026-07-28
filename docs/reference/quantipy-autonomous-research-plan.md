@@ -189,8 +189,8 @@ Every verification attempt ends in a complete JSON `verification_result`, even
 when commands fail or expose a bug signal:
 
 1. Run exact focused commands in the persisted implementation workspace.
-2. Run `env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight MANIFEST`,
-   then launch the exact `env PYTHONDONTWRITEBYTECODE=1 quantipy experiment
+2. Run `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`,
+   then launch the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment
    run MANIFEST --output-root ROOT --run-id
    autoresearch-i<iteration>-<commit12>` command through
    `scripts/run-long-task.sh`. Its immutable manifest must set

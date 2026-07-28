@@ -58,8 +58,8 @@ repo config binds each stage to its model.
 
 For Quantipy work, require a committed `quantipy-experiment-v2` manifest with
 exactly `prepare`, `smoke`, `feasibility`, and `model`. Run focused tests and
-`PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight` first, then detach
-the exact `PYTHONDONTWRITEBYTECODE=1 quantipy experiment run MANIFEST
+`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight` first, then detach
+the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run MANIFEST
 --output-root ROOT --run-id
 autoresearch-i<iteration>-<commit12>` command. Only `ROOT/run-id/run.json`
 under the runner-declared fixed private runs root proves full verification.
@@ -120,7 +120,7 @@ Requirements:
    long command, launch it safely and report the real status.
 
 For the mandatory Quantipy verification run, the exact command is `env
-PYTHONDONTWRITEBYTECODE=1 quantipy experiment run MANIFEST --output-root ROOT
+PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run MANIFEST --output-root ROOT
 --run-id RUN_ID`. It must be launched here, never directly in a foreground
 tool call. Set the immutable run manifest's `expected_artifact_path` to the
 known `ROOT/RUN_ID/run.json`. Under the non-malicious same-host agent model,

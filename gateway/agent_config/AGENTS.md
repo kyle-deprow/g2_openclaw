@@ -178,9 +178,9 @@ persisted workspace. Every attempt, including test failures and bug signals,
 must:
 
 1. Run the exact focused commands and capture decisive evidence.
-2. Run `PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight
+2. Run `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight
    <committed-v2-manifest>`, then the exact detached
-   `PYTHONDONTWRITEBYTECODE=1 quantipy experiment run <manifest> --output-root
+   `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run <manifest> --output-root
    <root> --run-id autoresearch-i<iteration>-<commit12>`. Its known receipt path is
    `<root>/<run-id>/run.json`, under the runner-declared fixed private runs
    root. Quantipy smoke and feasibility must accept before model

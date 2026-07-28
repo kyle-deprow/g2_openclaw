@@ -688,8 +688,8 @@ from Git blobs at the implementation commit; dirty execution followed by
 workspace restoration is rejected.
 
 Verification order is fixed: focused tests,
-`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight MANIFEST`, then
-launch the exact `env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run
+`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`, then
+launch the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run
 MANIFEST --output-root ROOT --run-id
 autoresearch-i<iteration>-<commit12>` command through
 `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The immutable detached

@@ -294,9 +294,13 @@ def test_infrastructure_verification_failure_advances_to_fix_test_atomically(
         null_test_summary="detached run failed",
         bug_signals=(),
         tests_passed=False,
-        commands_run=("quantipy experiment run",),
+        commands_run=("env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run",),
         data_coverage=None,
         quantipy_experiment_evidence=evidence,
+    )
+
+    assert artifact.commands_run == (
+        "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run",
     )
 
     advanced = advance_infrastructure_verification_failure(
@@ -2356,6 +2360,8 @@ def _write_quantipy_detached_run_record(
     command = (
         "env",
         "PYTHONDONTWRITEBYTECODE=1",
+        "uv",
+        "run",
         "quantipy",
         "experiment",
         "run",
@@ -2996,6 +3002,8 @@ def test_real_quantipy_non_success_contract_exit_advances_to_fix_test(
     command = (
         "env",
         "PYTHONDONTWRITEBYTECODE=1",
+        "uv",
+        "run",
         "quantipy",
         "experiment",
         "run",
@@ -4470,11 +4478,13 @@ def test_nonpass_without_run_requires_bound_execution_not_started_receipt(
 @pytest.mark.parametrize(
     ("command_prefix", "accepted"),
     (
-        ("PYTHONDONTWRITEBYTECODE=1 ", True),
+        ("env PYTHONDONTWRITEBYTECODE=1 uv run ", True),
+        ("PYTHONDONTWRITEBYTECODE=1 uv run ", False),
+        ("env PYTHONDONTWRITEBYTECODE=1 ", False),
         ("", False),
     ),
 )
-def test_preflight_not_started_requires_no_bytecode_exact_command(
+def test_preflight_not_started_requires_uv_run_exact_command(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
@@ -8984,8 +8994,9 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
     assert str(MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS) in prompt
     assert "price_hydration_scope_exceeds_budget" in prompt
     assert "do not run the hydrate/backtest command" in prompt
-    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight" in prompt
-    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment run" in prompt
+    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight" in prompt
+    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run" in prompt
+    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment" not in prompt
     assert "/home/dev/repos/g2_openclaw/scripts/run-long-task.sh" in prompt
     assert "expected_artifact_path" in prompt
     assert "Direct foreground execution" in prompt

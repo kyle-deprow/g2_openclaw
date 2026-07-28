@@ -194,11 +194,11 @@ are separate from the OpenClaw gateway's own native-crash containment limits.
 Implementation must commit one canonical `quantipy-experiment-v2` manifest in
 its disposable workspace and record its absolute path and SHA-256 in
 `implementation_result`. Verification runs focused tests, then
-`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight MANIFEST`, then
+`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`, then
 launches this exact command through `scripts/run-long-task.sh`:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run "$manifest" --output-root "$root" \
+env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run "$manifest" --output-root "$root" \
   --run-id "autoresearch-i<iteration>-<commit12>"
 ```
 

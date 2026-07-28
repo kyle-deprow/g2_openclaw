@@ -399,6 +399,7 @@ def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
             AGENT_CONFIG / "AGENTS.md",
             AGENT_CONFIG / "README.md",
             AUTORESEARCH,
+            AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md",
             PLAN,
         )
     )
@@ -415,8 +416,9 @@ def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
     assert "8 MiB" in normalized
     assert "1 MiB per source file" in normalized
     assert "8 MiB for the notebook" in normalized
-    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight" in normalized
-    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment run" in normalized
+    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight" in normalized
+    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run" in normalized
+    assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment" not in normalized
     assert "scripts/run-long-task.sh" in normalized
     assert "expected_artifact_path" in normalized
     assert "direct foreground" in normalized.lower()

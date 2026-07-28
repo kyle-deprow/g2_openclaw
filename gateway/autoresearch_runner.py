@@ -7134,6 +7134,8 @@ def _validate_quantipy_detached_run_attestation(
     expected_detached_command = (
         "env",
         "PYTHONDONTWRITEBYTECODE=1",
+        "uv",
+        "run",
         "quantipy",
         "experiment",
         "run",
@@ -7265,7 +7267,7 @@ def _validate_quantipy_experiment_evidence(
             )
         if not_started.reason == "preflight_failed":
             expected_preflight = (
-                "PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight "
+                "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight "
                 f"{implementation.experiment_manifest_path}"
             )
             if not_started.command != expected_preflight:
@@ -8034,8 +8036,9 @@ def _phase_instruction(
             "Verify the produced experiment deterministically. "
             "Use implementation_result.workspace_path and "
             "implementation_result.commit_sha as the source under test. "
-            "Run focused tests, PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight, "
-            "then the exact detached PYTHONDONTWRITEBYTECODE=1 quantipy experiment run "
+            "Run focused tests, env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment "
+            "preflight, then the exact detached env PYTHONDONTWRITEBYTECODE=1 uv run "
+            "quantipy experiment run "
             "under the fixed private runs root with deterministic "
             "run_id before evaluating metrics. "
             "Reject impossible metrics, failing tests, or incomplete required metrics."
@@ -8253,9 +8256,9 @@ def _verification_handoff_contract(
         "null_test_summary, bug_signals, data_coverage, and infra_rationale when "
         "applicable.\n"
         "- Mandatory typed Quantipy runtime gate: first run focused tests, then "
-        "`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment preflight "
+        "`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight "
         "<implementation_result.experiment_manifest_path>`, then launch the exact "
-        "`env PYTHONDONTWRITEBYTECODE=1 quantipy experiment run <manifest> --output-root "
+        "`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run <manifest> --output-root "
         f"{DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT} --run-id "
         "autoresearch-i<iteration>-<commit12>` command through "
         "`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. Its immutable detached "
