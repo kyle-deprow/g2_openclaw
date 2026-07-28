@@ -351,6 +351,114 @@ def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
     assert runs_root.stat().st_mode & 0o777 == 0o700
 
 
+def test_autoresearch_init_state_normalizes_user_owned_control_plane_ancestors(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    openclaw_root = tmp_path / "openclaw"
+    openclaw_root.mkdir(mode=0o755)
+    openclaw_root.chmod(0o755)
+    runs_parent = openclaw_root / "autoresearch"
+    runs_parent.mkdir(mode=0o775)
+    runs_parent.chmod(0o775)
+    runs_root = runs_parent / "quantipy-experiment-runs"
+
+    with patch.object(
+        autoresearch_runner,
+        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+        runs_root,
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert runs_parent.stat().st_mode & 0o777 == 0o700
+    assert openclaw_root.stat().st_mode & 0o777 == 0o700
+
+
+def test_autoresearch_init_state_securely_creates_control_plane_ancestors_with_umask_zero(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    openclaw_root = tmp_path / "openclaw"
+    runs_parent = openclaw_root / "autoresearch"
+    runs_root = runs_parent / "quantipy-experiment-runs"
+
+    original_umask = os.umask(0)
+    try:
+        with patch.object(
+            autoresearch_runner,
+            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+            runs_root,
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "autoresearch-init-state",
+                    "--output",
+                    str(tmp_path / "state.json"),
+                    "--readiness-manifest",
+                    str(readiness_path),
+                ],
+            )
+    finally:
+        os.umask(original_umask)
+
+    assert result.exit_code == 0, result.output
+    assert openclaw_root.stat().st_mode & 0o777 == 0o700
+    assert runs_parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_autoresearch_init_state_rejects_untrusted_control_plane_root_before_creating_leaf(
+    tmp_path: Path,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    runs_parent = tmp_path / "openclaw" / "autoresearch"
+    runs_parent.mkdir(parents=True, mode=0o700)
+    runs_parent.chmod(0o700)
+    runs_root = runs_parent / "quantipy-experiment-runs"
+
+    with (
+        patch.object(
+            autoresearch_runner,
+            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
+            runs_root,
+        ),
+        patch(
+            "gateway.autoresearch_runner.os.getuid",
+            return_value=os.getuid() + 1,
+        ),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 1
+    assert "control-plane root" in result.output
+    assert not runs_root.exists()
+
+
 def test_autoresearch_init_state_help_names_schema_v3() -> None:
     result = runner.invoke(app, ["autoresearch-init-state", "--help"])
 
@@ -417,7 +525,7 @@ def test_autoresearch_init_state_rejects_symlink_quantipy_runs_root(
         )
 
     assert result.exit_code == 1
-    assert "symlink path components" in result.output
+    assert "non-symlink directory" in result.output
 
 
 def test_autoresearch_init_state_rejects_symlinked_quantipy_runs_parent(
@@ -449,7 +557,7 @@ def test_autoresearch_init_state_rejects_symlinked_quantipy_runs_parent(
         )
 
     assert result.exit_code == 1
-    assert "symlink path components" in result.output
+    assert "non-symlink directory" in result.output
     assert not (private_target / "quantipy-experiment-runs").exists()
 
 

@@ -232,8 +232,11 @@ exact run directory; never recursively chmod or delete the runs root.
 
 `gateway-cli autoresearch-init-state` provisions `$root` at the fixed
 `/home/dev/.openclaw/autoresearch/quantipy-experiment-runs` path as an
-owner-controlled mode-0700 non-symlink directory and fails closed on an
-existing ownership, mode, or symlink-path-component violation. Verification
+owner-controlled mode-0700 non-symlink directory. It also creates or
+normalizes the fixed user-owned `.openclaw` and `.openclaw/autoresearch`
+control-plane ancestors to mode 0700 through no-follow directory descriptors;
+it never chmods `/home` or system ancestors. Provisioning fails closed on a
+foreign owner or symlink and on an invalid existing `$root` mode. Verification
 dispatch validates the same fixed root before a run. There is no alternate root.
 `$root` is the runner-declared fixed private autoresearch runs root, and
 `$root/$run_id/run.json` is the only full runtime proof. Its digest, manifest

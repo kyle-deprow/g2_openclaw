@@ -207,9 +207,14 @@ when commands fail or expose a bug signal:
    `ROOT` is the fixed private
    `/home/dev/.openclaw/autoresearch/quantipy-experiment-runs` root provisioned
    by state initialization as an owner-controlled mode-0700 non-symlink
-   directory. Initialization and verification dispatch reject symlinked path
-   components; there is no alternate root. Smoke and feasibility are the
-   mandatory admission gate before model import/execution.
+   directory. Initialization creates or normalizes only the fixed user-owned
+   `.openclaw` and `.openclaw/autoresearch` control-plane ancestors to mode
+   0700 with no-follow directory descriptors; it never chmods `/home` or
+   system ancestors and fails closed on foreign owners, symlinks, and an
+   invalid existing `ROOT` mode.
+   Verification dispatch validates the same fixed root before a run; there is
+   no alternate root. Smoke and feasibility are the mandatory admission gate
+   before model import/execution.
    Quantipy exits 0 iff `run.success=true` and 1 iff `run.success=false`.
    PASS requires detached success/exit 0. A typed rejected/failed envelope may
    advance TEST_FAILURE/BUG_SIGNAL only with detached failure/exit 1, no

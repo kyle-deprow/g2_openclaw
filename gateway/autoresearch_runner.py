@@ -5652,39 +5652,138 @@ def _require_private_directory(path: Path, *, label: str) -> None:
         )
 
 
-def _require_no_symlink_path_components(path: Path, *, label: str) -> None:
-    if not path.is_absolute():
-        raise AutoresearchValidationError(f"{label} must be absolute")
-    current = Path(path.anchor)
-    for component in path.parts[1:]:
-        current /= component
-        try:
-            metadata = current.lstat()
-        except FileNotFoundError:
-            return
-        except OSError as exc:
+def _open_no_follow_directory(path: Path, *, label: str) -> int:
+    """Open an existing canonical directory without traversing symlinks."""
+    canonical_path = _require_canonical_absolute_path(path, label=label)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        descriptor = os.open(canonical_path.anchor, flags)
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be an existing canonical non-symlink directory"
+        ) from exc
+    try:
+        for component in canonical_path.parts[1:]:
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        raise AutoresearchValidationError(
+            f"{label} must be an existing canonical non-symlink directory"
+        ) from exc
+    return descriptor
+
+
+def _create_or_normalize_private_directory(
+    parent_descriptor: int,
+    *,
+    name: str,
+    label: str,
+) -> int:
+    """Create or normalize one direct user-owned private directory by descriptor."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(f"{label} could not be provisioned") from exc
+    try:
+        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be an owned non-symlink directory"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise AutoresearchValidationError(f"{label} must be an owned non-symlink directory")
+        os.fchmod(descriptor, 0o700)
+        secured = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(secured.st_mode)
+            or secured.st_uid != os.getuid()
+            or stat.S_IMODE(secured.st_mode) != 0o700
+        ):
             raise AutoresearchValidationError(
-                f"{label} path components could not be inspected"
-            ) from exc
-        if stat.S_ISLNK(metadata.st_mode):
-            raise AutoresearchValidationError(f"{label} must not traverse symlink path components")
+                f"{label} must be an owned mode-0700 non-symlink directory"
+            )
+    except AutoresearchValidationError:
+        os.close(descriptor)
+        raise
+    except OSError as exc:
+        os.close(descriptor)
+        raise AutoresearchValidationError(f"{label} could not be secured") from exc
+    return descriptor
+
+
+def _provision_private_quantipy_control_plane_ancestors(root: Path) -> int:
+    """Provision the fixed private control-plane ancestors for the runs root."""
+    control_plane_root = root.parent.parent
+    runs_parent = root.parent
+    base_descriptor = _open_no_follow_directory(
+        control_plane_root.parent,
+        label="trusted Quantipy control-plane base",
+    )
+    try:
+        control_plane_descriptor = _create_or_normalize_private_directory(
+            base_descriptor,
+            name=control_plane_root.name,
+            label="trusted Quantipy control-plane root",
+        )
+    finally:
+        os.close(base_descriptor)
+    try:
+        return _create_or_normalize_private_directory(
+            control_plane_descriptor,
+            name=runs_parent.name,
+            label="trusted Quantipy runs parent",
+        )
+    finally:
+        os.close(control_plane_descriptor)
 
 
 def provision_quantipy_experiment_runs_root() -> Path:
     """Create or validate the one fixed private Quantipy experiment receipt root."""
-    root = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
-    _require_no_symlink_path_components(root, label="trusted Quantipy runs root")
+    root = _require_canonical_absolute_path(
+        DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        label="trusted Quantipy runs root",
+    )
+    parent_descriptor = _provision_private_quantipy_control_plane_ancestors(root)
     try:
-        root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        root.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            "trusted Quantipy runs root could not be provisioned"
-        ) from exc
-    _require_no_symlink_path_components(root, label="trusted Quantipy runs root")
-    _require_private_directory(root, label="trusted Quantipy runs root")
+        try:
+            os.mkdir(root.name, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "trusted Quantipy runs root could not be provisioned"
+            ) from exc
+        try:
+            descriptor = os.open(
+                root.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "trusted Quantipy runs root must be an owned mode-0700 non-symlink directory"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise AutoresearchValidationError(
+                    "trusted Quantipy runs root must be an owned mode-0700 non-symlink directory"
+                )
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
     return root
 
 
