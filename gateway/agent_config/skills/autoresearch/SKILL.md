@@ -406,6 +406,9 @@ guardrails exist only to keep execution clean:
   tmpfs and each Quantipy worktree virtualenv is about 1.5G, so stale iteration
   worktrees can exhaust it. Fix/Test reuses the exact persisted implementation
   worktree and accepted experiment commit; it never creates another worktree.
+  The managed OpenClaw gateway systemd drop-in enforces `UMask=0077`, so native
+  Codex children create new package files and directories without group/other
+  write bits; restart the active gateway after deploying that drop-in.
   Every detached implementation, prewarm, and Fix/Test manifest must set
   `working_directory` and the launcher must spawn the process with `cwd` set to
   that exact worktree path; never run those commands from the authoritative

@@ -4770,6 +4770,27 @@ def test_implementation_rejects_group_writable_manifest(
         )
 
 
+def test_implementation_rejects_group_writable_experiment_package(
+    git_worktree: GitWorktree,
+) -> None:
+    manifest_path, manifest_sha, _, _, commit_sha, _ = _write_quantipy_v2_run(git_worktree)
+    package_path = Path(manifest_path).parent / "experiment"
+    package_path.chmod(0o775)
+    artifact = replace(
+        _implementation_result(),
+        workspace_path=str(git_worktree.workspace),
+        commit_sha=commit_sha,
+        experiment_manifest_path=manifest_path,
+        experiment_manifest_sha256=manifest_sha,
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="package directories"):
+        validate_artifact_workspace(
+            AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout)),
+            artifact,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (("duplicate_stage", "unique"), ("extra_panel", "exact keys")),

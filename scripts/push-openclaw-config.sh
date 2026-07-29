@@ -99,6 +99,7 @@ MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_update_drawer"
 )
 RUNTIME_CAP_ENV_LINES=(
+  'UMask=0077'
   'Environment="LOKY_MAX_CPU_COUNT=1"'
   'Environment="OMP_NUM_THREADS=1"'
   'Environment="OPENBLAS_NUM_THREADS=1"'

@@ -40,6 +40,7 @@ STAGE_AGENT_IDS = [
 ]
 EXPECTED_RUNTIME_CAP_LINES = [
     "[Service]",
+    "UMask=0077",
     'Environment="LOKY_MAX_CPU_COUNT=1"',
     'Environment="OMP_NUM_THREADS=1"',
     'Environment="OPENBLAS_NUM_THREADS=1"',
