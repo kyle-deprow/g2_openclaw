@@ -36,7 +36,10 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     OpenClawUnavailableError,
+    RecoveryRecord,
+    RecoveryStatus,
     ShutdownRequested,
+    SupervisorCheckpoint,
     SupervisorError,
 )
 
@@ -294,6 +297,7 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
     return ControlConfig(
         state_path=state_path,
         owner_sessions_path=sessions_path,
+        checkpoint_path=tmp_path / "owner-recovery.json",
         wake_lock_path=tmp_path / "control-wake.lock",
         wake_claim_path=tmp_path / "control-wake.json",
         readiness_manifest_path=readiness_path,
@@ -320,6 +324,42 @@ def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
         "/home/dev/.openclaw/autoresearch/quantipy-state.json"
     ) in message
     assert events == ["rpc:list", "rpc:wake", "service:start"]
+
+
+def test_manual_wake_resets_exhausted_recovery_for_current_phase(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    checkpoint = SupervisorCheckpoint(
+        recovery_records={
+            "stale_state:7:review:failed": RecoveryRecord(
+                status=RecoveryStatus.EXHAUSTED,
+                attempt_count=2,
+                alerted=True,
+            ),
+            "stale_state:7:review:succeeded": RecoveryRecord(
+                status=RecoveryStatus.SUCCEEDED,
+                attempt_count=1,
+            ),
+            "stale_state:6:review:failed": RecoveryRecord(
+                status=RecoveryStatus.EXHAUSTED,
+                attempt_count=2,
+                alerted=True,
+            ),
+        }
+    )
+    checkpoint.save(config.checkpoint_path)
+
+    AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([]),
+    ).wake()
+
+    current = SupervisorCheckpoint.load(config.checkpoint_path).recovery_records
+    assert "stale_state:7:review:failed" not in current
+    assert "stale_state:7:review:succeeded" in current
+    assert "stale_state:6:review:failed" in current
 
 
 def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(

@@ -932,6 +932,44 @@ class SupervisorCheckpoint:
                     temporary_path.unlink()
 
 
+def reset_recovery_checkpoint_for_manual_wake(path: Path, *, iteration: int, phase: str) -> None:
+    """Allow an explicit operator wake to retry an exhausted recovery key.
+
+    Recovery attempt limits protect the autonomous supervisor from retry loops,
+    but an operator-initiated wake is a deliberate new recovery window. Remove
+    only failed or exhausted records for the current state phase; successful
+    records remain bounded history and must not be reset implicitly.
+    """
+    checkpoint_path = path.expanduser()
+    lock_path = checkpoint_path.with_name(f"{checkpoint_path.name}.lock")
+    prefixes = (
+        f"stale_state:{iteration}:{phase}:",
+        f"missing_verification_artifact:{iteration}:{phase}:",
+    )
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                checkpoint = SupervisorCheckpoint.load(checkpoint_path)
+                removed = [
+                    key
+                    for key, record in checkpoint.recovery_records.items()
+                    if key.startswith(prefixes)
+                    and record.status in {RecoveryStatus.FAILED, RecoveryStatus.EXHAUSTED}
+                ]
+                if removed:
+                    for key in removed:
+                        del checkpoint.recovery_records[key]
+                    checkpoint.save(checkpoint_path)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        raise SupervisorError(
+            f"failed to reset supervisor checkpoint {checkpoint_path}: {exc}"
+        ) from exc
+
+
 def _optional_float(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None

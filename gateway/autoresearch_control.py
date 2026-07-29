@@ -29,6 +29,7 @@ from gateway.autoresearch_runner import (
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
+    DEFAULT_CHECKPOINT_PATH,
     DEFAULT_OWNER_SESSIONS_PATH,
     DEFAULT_STATE_PATH,
     WAKE_MESSAGE,
@@ -39,6 +40,7 @@ from gateway.autoresearch_supervisor import (
     classify_autoresearch_task,
     make_idempotency_key,
     reconcile_relevant_running_tasks,
+    reset_recovery_checkpoint_for_manual_wake,
 )
 
 
@@ -129,6 +131,7 @@ class SystemdSupervisorServiceController:
 class ControlConfig:
     state_path: Path = DEFAULT_STATE_PATH
     owner_sessions_path: Path = DEFAULT_OWNER_SESSIONS_PATH
+    checkpoint_path: Path = DEFAULT_CHECKPOINT_PATH
     supervisor_service_name: str = DEFAULT_SUPERVISOR_SERVICE_NAME
     service_control_command: tuple[str, ...] = DEFAULT_SERVICE_CONTROL_COMMAND
     wake_lock_path: Path = DEFAULT_WAKE_LOCK_PATH
@@ -208,6 +211,12 @@ class AutoresearchControl:
                 raise
             try:
                 self._service_controller.ensure_started()
+                state = self._parse_state_material(state_material)
+                reset_recovery_checkpoint_for_manual_wake(
+                    self.config.checkpoint_path,
+                    iteration=state.iteration,
+                    phase=state.phase.value,
+                )
                 self._write_wake_claim(run_id=run_id, state_digest=state_digest)
             except SupervisorError as exc:
                 rollback_errors: list[str] = []
