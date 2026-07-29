@@ -37,6 +37,7 @@ from gateway.autoresearch_readiness import (
     EvidenceId,
     PlatformReadinessManifest,
     ReadinessStatus,
+    ResearchPanelProbeReceipt,
 )
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_STATE_PATH,
@@ -80,6 +81,7 @@ from gateway.autoresearch_runner import (
     DebateResultArtifact,
     DebateSubmission,
     DynamicUniverseCoverageReceipt,
+    ExternalVerificationRetryReceipt,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
@@ -125,6 +127,8 @@ from gateway.autoresearch_runner import (
     price_hydration_coverage_digest,
     price_hydration_request_digest,
     resume_suspended_iteration,
+    retry_external_verification,
+    retry_external_verification_state_file,
     save_state_file,
     standardize_mempalace_kg_object,
     standardized_mempalace_kg_facts,
@@ -329,7 +333,11 @@ def test_infrastructure_verification_failure_rejects_instruction_digest_mismatch
 ) -> None:
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
+        policy,
+    )
     state_path = tmp_path / "quantipy-state.json"
     save_state_file(state_path, state)
     state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
@@ -1653,7 +1661,11 @@ def _platform_coverage_receipt(
     return DynamicPriceCoverageReceipt.from_dict(raw)
 
 
-def _verification_result(status: VerificationStatus) -> VerificationResultArtifact:
+def _verification_result(
+    status: VerificationStatus,
+    *,
+    external_panel_failure: bool = False,
+) -> VerificationResultArtifact:
     bug_signals = ("Sharpe > 10",) if status is VerificationStatus.BUG_SIGNAL else ()
     return VerificationResultArtifact(
         status=status,
@@ -1689,7 +1701,20 @@ def _verification_result(status: VerificationStatus) -> VerificationResultArtifa
             else ("prepare",),
             terminal_stage=None if status is VerificationStatus.PASS else "smoke",
             terminal_status=None if status is VerificationStatus.PASS else "rejected",
-            failure=None,
+            failure=(
+                QuantipyExperimentFailureEvidence(
+                    category="panel",
+                    message=(
+                        "ExperimentPanelError: Client error '404 Not Found' for url "
+                        "'http://127.0.0.1:8000/price-data/research-panel?"
+                        "tickers=AAPL&start=2021-01-05T05%3A00%3A00%2B00%3A00&"
+                        "end=2021-01-06T04%3A59%3A59.999999%2B00%3A00&timeframe=1min&"
+                        "market_hours=regular'"
+                    ),
+                )
+                if external_panel_failure
+                else None
+            ),
             panel=None,
         ),
     )
@@ -4507,7 +4532,7 @@ def test_preflight_not_started_requires_uv_run_exact_command(
     run_path.parent.rmdir()
     command = f"{command_prefix}quantipy experiment preflight {evidence.manifest_path}"
     artifact = replace(
-        _verification_result(VerificationStatus.TEST_FAILURE),
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
         tests_passed=False,
         commands_run=(command,),
         quantipy_experiment_evidence=None,
@@ -4662,7 +4687,7 @@ def test_execution_not_started_receipt_is_rejected_when_expected_run_exists(
     )
     command = "uv run pytest tests/alpha/test_candidate.py"
     artifact = replace(
-        _verification_result(VerificationStatus.TEST_FAILURE),
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
         tests_passed=False,
         commands_run=(command,),
         quantipy_experiment_evidence=None,
@@ -6684,7 +6709,11 @@ def test_persisted_alpha_discard_without_verification_is_not_an_authorized_no_me
 ) -> None:
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
+        policy,
+    )
     unverified_discard = replace(
         state,
         phase=Phase.REPEAT,
@@ -7683,7 +7712,7 @@ def test_test_failure_persists_without_fabricating_unavailable_metrics(
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(state, _implementation_result(), policy)
     artifact = replace(
-        _verification_result(VerificationStatus.TEST_FAILURE),
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
         is_walk_forward_sharpe_net=None,
         oos_sharpe_net=None,
         max_drawdown_pct=None,
@@ -8013,6 +8042,191 @@ def test_verification_failure_routes_fix_test_with_pending_trigger(
     assert next_action(state, policy, receipts, platform_readiness).next_agent_ids == (
         policy.fixer.agent_id,
     )
+
+
+def test_external_verification_retry_preserves_failure_and_reuses_implementation_with_v2_run(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "_verified_panel_request_for_state",
+        lambda state: {
+            "contract_version": "research-price-panel-v1",
+            "tickers": ["AAPL"],
+            "start": "2021-01-05T05:00:00Z",
+            "end": "2021-01-06T04:59:59.999999Z",
+            "timeframe": "1min",
+            "market_hours": "regular",
+        },
+    )
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
+        policy,
+    )
+    failed_state = advance_state(
+        state,
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        policy,
+    )
+    probe = ResearchPanelProbeReceipt(
+        endpoint="http://127.0.0.1:8000/price-data/research-panel",
+        observed_at="2026-07-29T12:00:00Z",
+        response_bytes=18,
+        response_sha256="a" * 64,
+        session_date="2022-01-03",
+        symbol="AAPL",
+    )
+    receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_state,
+        probe,
+        "Restarted the stale Quantipy API service.",
+    )
+
+    retried = retry_external_verification(failed_state, receipt)
+
+    assert retried.phase is Phase.VERIFICATION
+    assert retried.pending_fix_trigger is None
+    assert retried.implementation_result == failed_state.implementation_result
+    assert retried.verification_history == failed_state.verification_history
+    assert retried.external_verification_retry_receipt == receipt
+    assert receipt.expected_run_id.endswith("-v2")
+
+
+def test_external_verification_retry_rejects_a_near_match_failure_message(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "_verified_panel_request_for_state",
+        lambda state: {
+            "contract_version": "research-price-panel-v1",
+            "tickers": ["AAPL"],
+            "start": "2021-01-05T05:00:00Z",
+            "end": "2021-01-06T04:59:59.999999Z",
+            "timeframe": "1min",
+            "market_hours": "regular",
+        },
+    )
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
+        policy,
+    )
+    failed_state = advance_state(
+        state,
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        policy,
+    )
+    latest = failed_state.latest_verification
+    assert latest is not None
+    evidence = latest.quantipy_experiment_evidence
+    assert evidence is not None
+    failure = evidence.failure
+    assert failure is not None
+    tampered = replace(
+        failed_state,
+        verification_history=(
+            replace(
+                latest,
+                quantipy_experiment_evidence=replace(
+                    evidence,
+                    failure=replace(
+                        failure,
+                        message=(
+                            "different URL first; 404 Not Found for "
+                            "http://127.0.0.1:8000/price-data/research-panel?"
+                            "tickers=AAPL&start=2021-01-05T05%3A00%3A00%2B00%3A00&"
+                            "end=2021-01-06T04%3A59%3A59.999999%2B00%3A00&timeframe=1min&"
+                            "market_hours=regular"
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="repaired panel HTTP 404"):
+        ExternalVerificationRetryReceipt.for_state(
+            tampered,
+            ResearchPanelProbeReceipt(
+                endpoint="http://127.0.0.1:8000/price-data/research-panel",
+                observed_at="2026-07-29T12:00:00Z",
+                response_bytes=18,
+                response_sha256="a" * 64,
+                session_date="2022-01-03",
+                symbol="AAPL",
+            ),
+            "Restarted the stale Quantipy API service.",
+        )
+
+
+def test_external_verification_retry_command_path_migrates_only_the_current_v3_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "_verified_panel_request_for_state",
+        lambda state: {
+            "contract_version": "research-price-panel-v1",
+            "tickers": ["AAPL"],
+            "start": "2021-01-05T05:00:00Z",
+            "end": "2021-01-06T04:59:59.999999Z",
+            "timeframe": "1min",
+            "market_hours": "regular",
+        },
+    )
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(
+        state,
+        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
+        policy,
+    )
+    failed_state = advance_state(
+        state,
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        policy,
+    )
+    v3_payload = failed_state.to_dict()
+    v3_payload["schema_version"] = 3
+    del v3_payload["external_verification_retry_receipt"]
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_text(json.dumps(v3_payload), encoding="utf-8")
+    probe = ResearchPanelProbeReceipt(
+        endpoint="http://127.0.0.1:8000/price-data/research-panel",
+        observed_at="2026-07-29T12:00:00Z",
+        response_bytes=18,
+        response_sha256="a" * 64,
+        session_date="2022-01-03",
+        symbol="AAPL",
+    )
+
+    retried = retry_external_verification_state_file(
+        state_path,
+        probe,
+        operator_reason="Restarted the stale Quantipy API service.",
+        policy=policy,
+        validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
+    )
+
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert retried.phase is Phase.VERIFICATION
+    assert persisted["schema_version"] == autoresearch_runner.AUTORESEARCH_STATE_SCHEMA_VERSION
+    assert persisted["verification_history"] == v3_payload["verification_history"]
+    assert persisted["implementation_result"] == v3_payload["implementation_result"]
+    assert persisted["external_verification_retry_receipt"]["expected_run_id"].endswith("-v2")
 
 
 @pytest.mark.parametrize(

@@ -250,7 +250,7 @@ def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspende
     )
     for path in runtime_paths:
         text = path.read_text(encoding="utf-8")
-        assert "schema-v3 state" in text
+        assert "schema-v4 state" in text
         assert "schema-v3 platform-readiness manifest" in text or "schema version 3" in text
         rebuild_index = text.index("autoresearch-build-readiness")
         resume_index = text.index("autoresearch-resume", rebuild_index)
@@ -264,7 +264,7 @@ def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspende
 
     plan_text = " ".join(PLAN.read_text(encoding="utf-8").split())
     assert "schema-v3 platform-readiness manifest" in plan_text
-    assert "schema-v3 state" in plan_text
+    assert "schema-v4 state" in plan_text
     assert "autoresearch-build-readiness" in plan_text
     assert "autoresearch-resume" in plan_text
     assert "--campaign-xnys-start" in plan_text

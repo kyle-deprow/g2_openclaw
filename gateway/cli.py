@@ -579,7 +579,7 @@ def autoresearch_init_state(
     output_path: Path = _output_path_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
-    """Initialize a pristine schema-v3 campaign pinned to platform readiness."""
+    """Initialize a pristine schema-v4 campaign pinned to platform readiness."""
     from gateway.autoresearch_runner import (
         initialize_state,
         provision_quantipy_experiment_runs_root,
@@ -594,7 +594,7 @@ def autoresearch_init_state(
     except ValueError as exc:
         console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]wrote pristine autoresearch state v3:[/green] {output_path}")
+    console.print(f"[green]wrote pristine autoresearch state v4:[/green] {output_path}")
 
 
 @app.command("autoresearch-create-command-file")
@@ -1105,6 +1105,60 @@ def autoresearch_resume(
         raise typer.Exit(code=1) from exc
 
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-retry-external-verification")
+def autoresearch_retry_external_verification(
+    state_path: Path = _state_path_argument,
+    reason: str = typer.Option(
+        ..., "--reason", help="Exact non-empty operator infrastructure repair reason."
+    ),
+    openclaw_config: Path = _openclaw_config_option,
+    quantipy_root: Path = _quantipy_root_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Operator-only retry for the current externally failed Quantipy verification."""
+    from gateway.autoresearch_readiness import (
+        EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR,
+        EXTERNAL_VERIFICATION_RETRY_OPERATOR_VALUE,
+        load_platform_readiness,
+        probe_research_panel_for_external_verification_retry,
+    )
+    from gateway.autoresearch_runner import (
+        AutoresearchValidationContext,
+        build_receipt_catalog,
+        load_autoresearch_policy,
+        retry_external_verification_state_file,
+    )
+
+    try:
+        if os.environ.get(EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR) != (
+            EXTERNAL_VERIFICATION_RETRY_OPERATOR_VALUE
+        ):
+            raise ValueError(
+                "operator capability is required; set "
+                f"{EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR}=1 in the human/Codex shell"
+            )
+        policy = load_autoresearch_policy(openclaw_config)
+        readiness = load_platform_readiness(readiness_manifest)
+        build_receipt_catalog(quantipy_root)
+        probe = probe_research_panel_for_external_verification_retry()
+        state = retry_external_verification_state_file(
+            state_path,
+            probe,
+            operator_reason=reason,
+            policy=policy,
+            validation_context=AutoresearchValidationContext.from_readiness(readiness),
+        )
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-retry-external-verification failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    receipt = state.external_verification_retry_receipt
+    assert receipt is not None
+    console.print(
+        f"[green]external verification retry authorized:[/green] {receipt.expected_run_id}"
+    )
 
 
 @app.command("autoresearch-suspend-infra")

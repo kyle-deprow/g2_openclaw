@@ -39,11 +39,11 @@ interactions. Autonomous research runs only in
 
 ## State Preparation
 
-Stop the supervisor before preparing state. The campaign uses schema-v3 state. The separate
+Stop the supervisor before preparing state. The campaign uses schema-v4 state. The separate
 schema-v3 platform-readiness manifest writes to
 `~/.openclaw/autoresearch/platform-readiness.json`. A live schema-v2 state, or
 state missing `schema_version`, is unsupported. Archive it and initialize a
-fresh schema-v3 state before restarting the supervisor; never migrate or
+fresh schema-v4 state before restarting the supervisor; never migrate or
 overwrite schema-v2 in place. The state procedure writes and validates a
 temporary replacement before archiving the old state.
 
@@ -73,6 +73,25 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
+The only schema-v3 to schema-v4 migration is the out-of-band operator retry
+for the already-recorded local panel HTTP 404. After stopping the supervisor
+and repairing the Quantipy API, invoke it from the human/Codex shell with the
+explicit operator capability:
+
+```bash
+cd /home/dev/repos/g2_openclaw && G2_OPENCLAW_OPERATOR_RETRY=1 \
+  uv run gateway-cli autoresearch-retry-external-verification \
+  /home/dev/.openclaw/autoresearch/quantipy-state.json \
+  --reason "Restarted the stale Quantipy API service and verified the panel route."
+```
+
+The command performs one bounded local AAPL/XNYS-session ZIP-contract probe,
+binds implementation and readiness identities, preserves the original failure
+receipt, and writes a deterministic `-v2` run ID. It rejects arbitrary test
+failures, repeated use, and PM/fixer invocations without the explicit
+capability. All other schema migration requires archiving and fresh state
+initialization; no general in-place migration exists.
+
 ## Suspended Campaign Resume
 
 If a live campaign is suspended on `INFRA_BLOCKED`, rebuild the schema-v3
@@ -100,7 +119,7 @@ ALPHA_RESEARCH `DISCARD` outcomes backed by completed verification with
 Crashes, exhausted verification failures, consensus failures, and
 infrastructure control-plane outcomes proceed without a memory write.
 
-Then atomically resume the same schema-v3 state file:
+Then atomically resume the same schema-v4 state file:
 
 ```bash
 (

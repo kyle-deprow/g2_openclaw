@@ -5,15 +5,20 @@ from __future__ import annotations
 import contextlib
 import errno
 import hashlib
+import io
 import json
 import os
 import re
 import stat
 import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import InitVar, dataclass
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -39,6 +44,26 @@ QUANTIPY_CAMPAIGN_XNYS_START = date(2022, 1, 3)
 QUANTIPY_CAMPAIGN_XNYS_END = date(2025, 12, 31)
 QUANTIPY_READINESS_PROBE_DATE_ENV_VAR = "QUANTIPY_READINESS_PROBE_DATE"
 QUANTIPY_READINESS_LOCAL_API_URL = "http://127.0.0.1:8000"
+QUANTIPY_RESEARCH_PANEL_PATH = "/price-data/research-panel"
+EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL = "AAPL"
+EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION = date(2022, 1, 3)
+EXTERNAL_VERIFICATION_RETRY_PROBE_TIMEOUT_SECONDS = 20.0
+EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES = 1024 * 1024
+EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR = "G2_OPENCLAW_OPERATOR_RETRY"
+EXTERNAL_VERIFICATION_RETRY_OPERATOR_VALUE = "1"
+EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_COMPRESSION_RATIO = 200.0
+RESEARCH_PANEL_RECEIPT_KEYS = frozenset(
+    {
+        "contract_version",
+        "request",
+        "request_sha256",
+        "coverage",
+        "coverage_sha256",
+        "panel_sha256",
+        "hydrated_at",
+        "exported_at",
+    }
+)
 
 
 class ReadinessError(ValueError):
@@ -61,6 +86,235 @@ class ReadinessStatus(StrEnum):
 class EvidenceId(StrEnum):
     QUANTIPY_DATA_CONTRACT = "quantipy_data_contract"
     XNYS_TRADING_CALENDAR = "xnys_trading_calendar"
+
+
+@dataclass(frozen=True, slots=True)
+class ResearchPanelProbeReceipt:
+    """Immutable evidence that the repaired local panel route served one bounded request."""
+
+    endpoint: str
+    observed_at: str
+    response_bytes: int
+    response_sha256: str
+    session_date: str
+    symbol: str
+
+    def __post_init__(self) -> None:
+        if self.endpoint != f"{QUANTIPY_READINESS_LOCAL_API_URL}{QUANTIPY_RESEARCH_PANEL_PATH}":
+            raise ReadinessManifestError(
+                "research-panel probe endpoint is not the local Quantipy route"
+            )
+        if self.symbol != EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL:
+            raise ReadinessManifestError("research-panel probe must use the bounded AAPL symbol")
+        if self.session_date != EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION.isoformat():
+            raise ReadinessManifestError("research-panel probe must use the bounded XNYS session")
+        if (
+            not isinstance(self.response_bytes, int)
+            or isinstance(self.response_bytes, bool)
+            or not 0 < self.response_bytes <= EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES
+        ):
+            raise ReadinessManifestError("research-panel probe response size is invalid")
+        _require_sha256(self.response_sha256, label="research-panel probe response_sha256")
+        try:
+            observed_at = datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ReadinessManifestError("research-panel probe observed_at is invalid") from exc
+        if observed_at.tzinfo is None or observed_at.utcoffset() != timedelta(0):
+            raise ReadinessManifestError("research-panel probe observed_at must be UTC-aware")
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ResearchPanelProbeReceipt:
+        data = _require_mapping(raw, label="research_panel_probe")
+        _require_exact_keys(
+            data,
+            {
+                "endpoint",
+                "observed_at",
+                "response_bytes",
+                "response_sha256",
+                "session_date",
+                "symbol",
+            },
+            label="research_panel_probe",
+        )
+        endpoint = data["endpoint"]
+        observed_at = data["observed_at"]
+        response_bytes = data["response_bytes"]
+        session_date = data["session_date"]
+        symbol = data["symbol"]
+        if not isinstance(endpoint, str):
+            raise ReadinessManifestError("research-panel probe endpoint is invalid")
+        if not isinstance(observed_at, str):
+            raise ReadinessManifestError("research-panel probe observed_at is invalid")
+        if not isinstance(session_date, str):
+            raise ReadinessManifestError("research-panel probe session_date is invalid")
+        if not isinstance(symbol, str):
+            raise ReadinessManifestError("research-panel probe strings are invalid")
+        if not isinstance(response_bytes, int) or isinstance(response_bytes, bool):
+            raise ReadinessManifestError("research-panel probe response_bytes is invalid")
+        return cls(
+            endpoint=endpoint,
+            observed_at=observed_at,
+            response_bytes=response_bytes,
+            response_sha256=_require_sha256(
+                data["response_sha256"], label="research_panel_probe.response_sha256"
+            ),
+            session_date=session_date,
+            symbol=symbol,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "endpoint": self.endpoint,
+            "observed_at": self.observed_at,
+            "response_bytes": self.response_bytes,
+            "response_sha256": self.response_sha256,
+            "session_date": self.session_date,
+            "symbol": self.symbol,
+        }
+
+
+def probe_research_panel_for_external_verification_retry() -> ResearchPanelProbeReceipt:
+    """Probe exactly one symbol and one XNYS session through the repaired local API."""
+    endpoint = f"{QUANTIPY_READINESS_LOCAL_API_URL}{QUANTIPY_RESEARCH_PANEL_PATH}"
+    query = urllib.parse.urlencode(
+        (
+            ("tickers", EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL),
+            ("start", EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION.isoformat()),
+            ("end", EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION.isoformat()),
+            ("timeframe", "1d"),
+            ("market_hours", "regular"),
+        )
+    )
+    request = urllib.request.Request(f"{endpoint}?{query}", method="GET")
+    try:
+        with urllib.request.urlopen(
+            request, timeout=EXTERNAL_VERIFICATION_RETRY_PROBE_TIMEOUT_SECONDS
+        ) as response:
+            if response.getcode() != 200:
+                raise ReadinessManifestError("research-panel probe did not return HTTP 200")
+            content_type = response.headers.get_content_type()
+            body = response.read(EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise ReadinessManifestError("research-panel live probe failed closed") from exc
+    if not body or len(body) > EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES:
+        raise ReadinessManifestError("research-panel probe response is empty or exceeds its bound")
+    if content_type != "application/zip" or not body.startswith(b"PK"):
+        raise ReadinessManifestError("research-panel probe response is not a ZIP archive")
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            infos = archive.infolist()
+            if tuple(info.filename for info in infos) != ("panel.parquet", "receipt.json"):
+                raise ReadinessManifestError(
+                    "research-panel probe ZIP does not match the two-member contract"
+                )
+            for info in infos:
+                _validate_probe_zip_member(info)
+            panel_bytes = _read_bounded_probe_zip_member(archive, infos[0])
+            receipt = json.loads(_read_bounded_probe_zip_member(archive, infos[1]))
+    except ReadinessManifestError:
+        raise
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+        raise ReadinessManifestError("research-panel probe ZIP is invalid") from exc
+    if (
+        not isinstance(receipt, dict)
+        or frozenset(receipt) != RESEARCH_PANEL_RECEIPT_KEYS
+        or receipt.get("contract_version") != "research-price-panel-v1"
+    ):
+        raise ReadinessManifestError(
+            "research-panel probe receipt is not the strict panel contract"
+        )
+    _validate_external_retry_probe_receipt(receipt, panel_bytes)
+    return ResearchPanelProbeReceipt(
+        endpoint=endpoint,
+        observed_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        response_bytes=len(body),
+        response_sha256=hashlib.sha256(body).hexdigest(),
+        session_date=EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION.isoformat(),
+        symbol=EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL,
+    )
+
+
+def _validate_probe_zip_member(info: zipfile.ZipInfo) -> None:
+    if info.is_dir() or info.flag_bits & 0x1:
+        raise ReadinessManifestError("research-panel probe ZIP members must be unencrypted files")
+    if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+        raise ReadinessManifestError("research-panel probe ZIP uses unsupported compression")
+    if info.file_size > EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES:
+        raise ReadinessManifestError("research-panel probe ZIP member exceeds expanded size bound")
+    compression_ratio = info.file_size / max(info.compress_size, 1)
+    if compression_ratio > EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_COMPRESSION_RATIO:
+        raise ReadinessManifestError("research-panel probe ZIP member exceeds compression ratio")
+
+
+def _read_bounded_probe_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    chunks: list[bytes] = []
+    bytes_read = 0
+    with archive.open(info, mode="r") as source:
+        while chunk := source.read(64 * 1024):
+            bytes_read += len(chunk)
+            if bytes_read > EXTERNAL_VERIFICATION_RETRY_PROBE_MAX_RESPONSE_BYTES:
+                raise ReadinessManifestError("research-panel probe ZIP member exceeds read bound")
+            chunks.append(chunk)
+    if bytes_read != info.file_size:
+        raise ReadinessManifestError("research-panel probe ZIP member size is inconsistent")
+    return b"".join(chunks)
+
+
+def _canonical_probe_json_sha256(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_external_retry_probe_receipt(receipt: object, panel_bytes: bytes) -> None:
+    if not isinstance(receipt, dict):
+        raise ReadinessManifestError("research-panel probe receipt must be a JSON object")
+    request = receipt.get("request")
+    coverage = receipt.get("coverage")
+    if not isinstance(request, dict) or not isinstance(coverage, dict):
+        raise ReadinessManifestError("research-panel probe receipt request/coverage are invalid")
+    if request != {
+        "contract_version": "research-price-panel-v1",
+        "tickers": [EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL],
+        "start": "2022-01-03T05:00:00Z",
+        "end": "2022-01-04T04:59:59.999999Z",
+        "timeframe": "1d",
+        "market_hours": "regular",
+    }:
+        raise ReadinessManifestError("research-panel probe request is not the bounded AAPL request")
+    coverage_tickers = coverage.get("tickers")
+    if not isinstance(coverage_tickers, list) or len(coverage_tickers) != 1:
+        raise ReadinessManifestError("research-panel probe coverage tickers are invalid")
+    if not isinstance(coverage_tickers[0], dict):
+        raise ReadinessManifestError("research-panel probe coverage ticker is invalid")
+    if (
+        coverage.get("contract_version") != "price-coverage-v1"
+        or coverage.get("requested_start_date") != "2022-01-03"
+        or coverage.get("requested_end_date") != "2022-01-03"
+        or coverage.get("timeframe") != "1min"
+        or coverage.get("market_hours") != "regular"
+        or coverage.get("provider_source") != "massive"
+        or coverage_tickers[0].get("ticker") != EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL
+    ):
+        raise ReadinessManifestError(
+            "research-panel probe coverage is not the bounded AAPL receipt"
+        )
+    if receipt.get("request_sha256") != _canonical_probe_json_sha256(request):
+        raise ReadinessManifestError("research-panel probe request digest is invalid")
+    if receipt.get("coverage_sha256") != _canonical_probe_json_sha256(coverage):
+        raise ReadinessManifestError("research-panel probe coverage digest is invalid")
+    if receipt.get("panel_sha256") != hashlib.sha256(panel_bytes).hexdigest():
+        raise ReadinessManifestError("research-panel probe panel digest is invalid")
+    for field in ("hydrated_at", "exported_at"):
+        value = receipt.get(field)
+        if not isinstance(value, str):
+            raise ReadinessManifestError(f"research-panel probe {field} is invalid")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ReadinessManifestError(f"research-panel probe {field} is invalid") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            raise ReadinessManifestError(f"research-panel probe {field} must be UTC-aware")
 
 
 @dataclass(frozen=True, slots=True)

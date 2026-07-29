@@ -323,7 +323,7 @@ def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
     readiness = _ready_manifest(tmp_path / "init-readiness")
     readiness_path = tmp_path / "platform-readiness.json"
     _write_readiness_manifest(readiness_path, readiness)
-    output = tmp_path / "pristine-v3.json"
+    output = tmp_path / "pristine-v4.json"
     runs_root = tmp_path / "openclaw" / "autoresearch" / "quantipy-experiment-runs"
     with patch.object(
         autoresearch_runner,
@@ -342,9 +342,9 @@ def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
         )
 
     assert result.exit_code == 0, result.output
-    assert "state v3" in result.output
+    assert "state v4" in result.output
     state = AutoresearchState.from_dict(json.loads(output.read_text(encoding="utf-8")))
-    assert state.to_dict()["schema_version"] == 3
+    assert state.to_dict()["schema_version"] == 4
     assert state.platform_readiness == readiness.identity()
     assert runs_root.is_dir()
     assert runs_root.stat().st_mode & 0o777 == 0o700
@@ -458,12 +458,12 @@ def test_autoresearch_init_state_rejects_untrusted_control_plane_root_before_cre
     assert not runs_root.exists()
 
 
-def test_autoresearch_init_state_help_names_schema_v3() -> None:
+def test_autoresearch_init_state_help_names_schema_v4() -> None:
     result = runner.invoke(app, ["autoresearch-init-state", "--help"])
 
     assert result.exit_code == 0, result.output
-    assert "schema-v3" in result.output
-    assert "schema-v2" not in result.output
+    assert "schema-v4" in result.output
+    assert "schema-v3" not in result.output
 
 
 def test_autoresearch_init_state_rejects_existing_nonprivate_quantipy_runs_root(

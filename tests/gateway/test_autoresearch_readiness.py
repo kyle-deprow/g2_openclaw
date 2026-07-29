@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
 import subprocess
 import sys
+import zipfile
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import cast
+from urllib import request as urllib_request
 
 import gateway.autoresearch_readiness as autoresearch_readiness
 import pytest
@@ -23,7 +26,9 @@ from gateway.autoresearch_readiness import (
     ReadinessBlockedError,
     ReadinessManifestError,
     ReadinessStatus,
+    ResearchPanelProbeReceipt,
     build_quantipy_readiness,
+    probe_research_panel_for_external_verification_retry,
     validate_state_readiness,
 )
 from gateway.autoresearch_runner import (
@@ -46,6 +51,126 @@ from tests.gateway.autoresearch_fixtures import (
 
 CAMPAIGN_XNYS_START = date(2022, 1, 3)
 CAMPAIGN_XNYS_END = date(2025, 12, 31)
+
+
+def test_external_verification_probe_uses_one_symbol_one_session_research_panel_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, amount: int = -1) -> bytes:
+            captured["read_amount"] = amount
+            panel_bytes = b"PAR1"
+            request = {
+                "contract_version": "research-price-panel-v1",
+                "tickers": ["AAPL"],
+                "start": "2022-01-03T05:00:00Z",
+                "end": "2022-01-04T04:59:59.999999Z",
+                "timeframe": "1d",
+                "market_hours": "regular",
+            }
+            coverage = {
+                "contract_version": "price-coverage-v1",
+                "requested_start_date": "2022-01-03",
+                "requested_end_date": "2022-01-03",
+                "timeframe": "1min",
+                "market_hours": "regular",
+                "provider_source": "massive",
+                "tickers": [{"ticker": "AAPL"}],
+            }
+
+            def canonical_sha(value: object) -> str:
+                return sha256(
+                    json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+                zip_file.writestr("panel.parquet", panel_bytes)
+                zip_file.writestr(
+                    "receipt.json",
+                    json.dumps(
+                        {
+                            "contract_version": "research-price-panel-v1",
+                            "request": request,
+                            "request_sha256": canonical_sha(request),
+                            "coverage": coverage,
+                            "coverage_sha256": canonical_sha(coverage),
+                            "panel_sha256": sha256(panel_bytes).hexdigest(),
+                            "hydrated_at": "2026-07-29T12:00:00Z",
+                            "exported_at": "2026-07-29T12:00:01Z",
+                        }
+                    ),
+                )
+            return archive.getvalue()
+
+        def getcode(self) -> int:
+            return 200
+
+        @property
+        def headers(self) -> object:
+            return SimpleNamespace(get_content_type=lambda: "application/zip")
+
+    def successful_urlopen(request: object, *, timeout: float) -> Response:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(urllib_request, "urlopen", successful_urlopen)
+
+    receipt = probe_research_panel_for_external_verification_retry()
+
+    assert isinstance(receipt, ResearchPanelProbeReceipt)
+    assert receipt.symbol == "AAPL"
+    assert receipt.session_date == "2022-01-03"
+    assert receipt.response_bytes > 0
+    assert receipt.endpoint.endswith("/price-data/research-panel")
+    assert captured["timeout"] == 20.0
+    assert captured["read_amount"] == 1024 * 1024 + 1
+    request = captured["request"]
+    assert isinstance(request, urllib_request.Request)
+    assert request.full_url == (
+        "http://127.0.0.1:8000/price-data/research-panel?"
+        "tickers=AAPL&start=2022-01-03&end=2022-01-03&timeframe=1d&market_hours=regular"
+    )
+
+
+def test_external_verification_probe_rejects_bounded_response_with_unbounded_panel_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("panel.parquet", b"0" * (1024 * 1024 + 1))
+        zip_file.writestr("receipt.json", "{}")
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, amount: int = -1) -> bytes:
+            return archive.getvalue()
+
+        def getcode(self) -> int:
+            return 200
+
+        @property
+        def headers(self) -> object:
+            return SimpleNamespace(get_content_type=lambda: "application/zip")
+
+    monkeypatch.setattr(urllib_request, "urlopen", lambda request, *, timeout: Response())
+
+    with pytest.raises(ReadinessManifestError, match="expanded size bound"):
+        probe_research_panel_for_external_verification_retry()
 
 
 def test_quantipy_readiness_pins_current_quantipy_alembic_head() -> None:

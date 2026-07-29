@@ -24,10 +24,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar, cast
+from urllib.parse import parse_qsl, urlparse
 
 from gateway.autoresearch_platform_validation import (
     PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,
@@ -37,6 +38,7 @@ from gateway.autoresearch_platform_validation import (
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
+    ResearchPanelProbeReceipt,
     load_xnys_calendar_evidence,
     validate_state_readiness,
 )
@@ -50,7 +52,8 @@ DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT = Path(
 )
 AUTORESEARCH_LOCK_NAMESPACE = Path("/tmp") / f"g2-openclaw-autoresearch-locks-{os.getuid()}"
 G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
-AUTORESEARCH_STATE_SCHEMA_VERSION = 3
+AUTORESEARCH_STATE_SCHEMA_VERSION = 4
+EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION = 1
 INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v3"
 INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
 AUTHORITATIVE_STATE_REFERENCE_VERSION = "g2-openclaw-autoresearch-state-reference-v1"
@@ -4119,6 +4122,132 @@ class PhaseTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalVerificationRetryReceipt:
+    """One operator-authorized retry of an externally failed verification run."""
+
+    expected_run_id: str
+    prior_verification_sha256: str
+    probe: ResearchPanelProbeReceipt
+    retry_attempt: int
+    implementation_commit: str
+    manifest_sha256: str
+    readiness_manifest_id: str
+    readiness_snapshot_id: str
+    operator_reason: str
+    schema_version: int = EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version != EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            raise AutoresearchValidationError(
+                "unsupported external verification retry receipt schema_version"
+            )
+        if self.retry_attempt != 2:
+            raise AutoresearchValidationError(
+                "external verification retry receipt only permits deterministic attempt 2"
+            )
+        _validate_sha256(
+            self.prior_verification_sha256,
+            label="external_verification_retry_receipt.prior_verification_sha256",
+        )
+        if re.fullmatch(r"[0-9a-f]{7,64}", self.implementation_commit) is None:
+            raise AutoresearchValidationError("implementation_commit is invalid")
+        _validate_sha256(self.manifest_sha256, label="manifest_sha256")
+        if not self.readiness_manifest_id or not self.readiness_snapshot_id:
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires readiness identities"
+            )
+        if not self.operator_reason or self.operator_reason.strip() != self.operator_reason:
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires a trimmed operator reason"
+            )
+        if (
+            re.fullmatch(r"autoresearch-i[1-9][0-9]*-[0-9a-f]{7,12}-v2", self.expected_run_id)
+            is None
+        ):
+            raise AutoresearchValidationError(
+                "external verification retry receipt expected_run_id is invalid"
+            )
+        if not isinstance(self.probe, ResearchPanelProbeReceipt):
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires a research-panel probe"
+            )
+
+    @classmethod
+    def for_state(
+        cls,
+        state: AutoresearchState,
+        probe: ResearchPanelProbeReceipt,
+        operator_reason: str,
+    ) -> ExternalVerificationRetryReceipt:
+        _validate_external_verification_retry_eligibility(state)
+        assert state.implementation_result is not None
+        assert state.latest_verification is not None
+        assert state.platform_readiness is not None
+        commit_sha = state.implementation_result.commit_sha
+        return cls(
+            expected_run_id=_deterministic_quantipy_run_id(
+                state.iteration,
+                commit_sha,
+                attempt=2,
+            ),
+            prior_verification_sha256=_canonical_json_digest(state.latest_verification.to_dict()),
+            probe=probe,
+            retry_attempt=2,
+            implementation_commit=commit_sha,
+            manifest_sha256=state.implementation_result.experiment_manifest_sha256,
+            readiness_manifest_id=state.platform_readiness.manifest_id,
+            readiness_snapshot_id=state.platform_readiness.snapshot_id,
+            operator_reason=operator_reason,
+        )
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ExternalVerificationRetryReceipt:
+        data = _ensure_mapping(raw, label="external_verification_retry_receipt")
+        _require_exact_keys(
+            data,
+            label="external_verification_retry_receipt",
+            expected=(
+                "expected_run_id",
+                "prior_verification_sha256",
+                "probe",
+                "retry_attempt",
+                "implementation_commit",
+                "manifest_sha256",
+                "readiness_manifest_id",
+                "readiness_snapshot_id",
+                "operator_reason",
+                "schema_version",
+            ),
+        )
+        return cls(
+            expected_run_id=_require_str(data, "expected_run_id"),
+            prior_verification_sha256=_require_sha256(data, "prior_verification_sha256"),
+            probe=ResearchPanelProbeReceipt.from_dict(data["probe"]),
+            retry_attempt=_require_int(data, "retry_attempt"),
+            implementation_commit=_require_str(data, "implementation_commit"),
+            manifest_sha256=_require_sha256(data, "manifest_sha256"),
+            readiness_manifest_id=_require_str(data, "readiness_manifest_id"),
+            readiness_snapshot_id=_require_str(data, "readiness_snapshot_id"),
+            operator_reason=_require_str(data, "operator_reason"),
+            schema_version=_require_int(data, "schema_version"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "expected_run_id": self.expected_run_id,
+            "prior_verification_sha256": self.prior_verification_sha256,
+            "probe": self.probe.to_dict(),
+            "retry_attempt": self.retry_attempt,
+            "implementation_commit": self.implementation_commit,
+            "manifest_sha256": self.manifest_sha256,
+            "readiness_manifest_id": self.readiness_manifest_id,
+            "readiness_snapshot_id": self.readiness_snapshot_id,
+            "operator_reason": self.operator_reason,
+            "schema_version": self.schema_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AutoresearchState:
     phase: Phase = Phase.SETUP_CONTEXT
     iteration: int = 1
@@ -4138,6 +4267,7 @@ class AutoresearchState:
     mode: ResearchMode | None = None
     memory_verification_receipt: MemoryVerificationReceipt | None = None
     platform_readiness: ReadinessIdentity | None = None
+    external_verification_retry_receipt: ExternalVerificationRetryReceipt | None = None
     suspended: bool = False
     suspension_reason: str | None = None
 
@@ -4167,11 +4297,16 @@ class AutoresearchState:
         if "schema_version" not in data:
             raise AutoresearchValidationError(
                 "autoresearch state missing schema_version is unsupported; archive it and "
-                "initialize a schema-v3 state with `gateway-cli autoresearch-init-state`; "
+                "initialize a schema-v4 state with `gateway-cli autoresearch-init-state`; "
                 f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
             )
         schema_version = _require_int(data, "schema_version")
         if schema_version != AUTORESEARCH_STATE_SCHEMA_VERSION:
+            if schema_version == 3:
+                raise AutoresearchValidationError(
+                    "schema-v3 state can only be migrated by the explicit operator command "
+                    "`gateway-cli autoresearch-retry-external-verification`"
+                )
             raise AutoresearchValidationError(
                 "autoresearch state cannot be migrated in place; stop the supervisor, archive "
                 f"the live schema-v{schema_version} state, and initialize a fresh schema-v"
@@ -4194,6 +4329,7 @@ class AutoresearchState:
         decision_raw = data.get("final_decision")
         receipt_raw = data.get("memory_verification_receipt")
         platform_readiness_raw = data.get("platform_readiness")
+        external_retry_raw = data.get("external_verification_retry_receipt")
         pending_fix_trigger_raw = data.get("pending_fix_trigger")
         if pending_fix_trigger_raw is not None and not isinstance(pending_fix_trigger_raw, str):
             raise AutoresearchValidationError("pending_fix_trigger must be a string or null")
@@ -4224,6 +4360,7 @@ class AutoresearchState:
                 "mode",
                 "memory_verification_receipt",
                 "platform_readiness",
+                "external_verification_retry_receipt",
                 "suspended",
                 "suspension_reason",
             ),
@@ -4275,6 +4412,11 @@ class AutoresearchState:
             platform_readiness=ReadinessIdentity.from_dict(platform_readiness_raw)
             if platform_readiness_raw is not None
             else None,
+            external_verification_retry_receipt=ExternalVerificationRetryReceipt.from_dict(
+                external_retry_raw
+            )
+            if external_retry_raw is not None
+            else None,
             suspended=_require_bool(data, "suspended") if "suspended" in data else False,
             suspension_reason=(
                 _require_str(data, "suspension_reason")
@@ -4314,9 +4456,232 @@ class AutoresearchState:
             "platform_readiness": self.platform_readiness.to_dict()
             if self.platform_readiness is not None
             else None,
+            "external_verification_retry_receipt": (
+                self.external_verification_retry_receipt.to_dict()
+                if self.external_verification_retry_receipt is not None
+                else None
+            ),
             "suspended": self.suspended,
             "suspension_reason": self.suspension_reason,
         }
+
+
+def _deterministic_quantipy_run_id(iteration: int, commit_sha: str, *, attempt: int) -> str:
+    if iteration < 1:
+        raise AutoresearchValidationError("iteration must be >= 1")
+    if re.fullmatch(r"[0-9a-f]{7,64}", commit_sha) is None:
+        raise AutoresearchValidationError("implementation_result commit_sha is invalid")
+    if attempt < 1:
+        raise AutoresearchValidationError("Quantipy verification attempt must be >= 1")
+    base = f"autoresearch-i{iteration}-{commit_sha[:12]}"
+    return base if attempt == 1 else f"{base}-v{attempt}"
+
+
+def _expected_quantipy_verification_run_id(state: AutoresearchState, commit_sha: str) -> str:
+    receipt = state.external_verification_retry_receipt
+    if receipt is not None and len(state.verification_history) == 1:
+        expected = _deterministic_quantipy_run_id(
+            state.iteration,
+            commit_sha,
+            attempt=receipt.retry_attempt,
+        )
+        if receipt.expected_run_id != expected:
+            raise AutoresearchValidationError(
+                "external verification retry receipt run ID is stale for the implementation commit"
+            )
+        return receipt.expected_run_id
+    return _deterministic_quantipy_run_id(state.iteration, commit_sha, attempt=1)
+
+
+def _validate_external_verification_retry_eligibility(state: AutoresearchState) -> None:
+    if state.external_verification_retry_receipt is not None:
+        raise AutoresearchValidationError("external verification retry was already consumed")
+    if state.phase is not Phase.FIX_TEST:
+        raise AutoresearchValidationError("external verification retry requires fix_test phase")
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        raise AutoresearchValidationError(
+            "external verification retry requires an ALPHA_RESEARCH iteration"
+        )
+    if state.pending_fix_trigger is not FixTriggerPhase.VERIFICATION:
+        raise AutoresearchValidationError(
+            "external verification retry requires a verification-triggered fix_test"
+        )
+    if state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "external verification retry requires the preserved implementation_result"
+        )
+    if (
+        state.latest_verification is None
+        or state.latest_verification.status is not VerificationStatus.TEST_FAILURE
+    ):
+        raise AutoresearchValidationError(
+            "external verification retry requires a typed TEST_FAILURE verification"
+        )
+    evidence = state.latest_verification.quantipy_experiment_evidence
+    failure = evidence.failure if evidence is not None else None
+    if (
+        failure is None
+        or failure.category != "panel"
+        or not _is_repaired_panel_http_404(state, failure.message)
+    ):
+        raise AutoresearchValidationError(
+            "external verification retry requires the repaired panel HTTP 404 failure"
+        )
+    if state.fix_history or state.verification_fix_attempts != 0:
+        raise AutoresearchValidationError(
+            "external verification retry must occur before any alpha fixer attempt"
+        )
+
+
+def _is_repaired_panel_http_404(state: AutoresearchState, message: str) -> bool:
+    match = re.fullmatch(
+        r"ExperimentPanelError: Client error '404 Not Found' for url '([^']+)'"
+        r"(?:\nFor more information check: "
+        r"https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404)?",
+        message,
+    )
+    if match is None:
+        return False
+    url = match.group(1)
+    parsed = urlparse(url)
+    implementation = state.implementation_result
+    preflight = implementation.price_hydration_scope_preflight if implementation else None
+    if (
+        parsed.scheme != "http"
+        or parsed.netloc != "127.0.0.1:8000"
+        or parsed.path != "/price-data/research-panel"
+        or "#" in url
+        or preflight is None
+    ):
+        return False
+    try:
+        expected_request = _verified_panel_request_for_state(state)
+    except AutoresearchValidationError:
+        return False
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if len(pairs) != 5:
+        return False
+    query = dict(pairs)
+    if set(query) != {"tickers", "start", "end", "timeframe", "market_hours"}:
+        return False
+    tickers = query["tickers"].split(",")
+    expected_tickers = expected_request["tickers"]
+    expected_start = _parse_utc_request_datetime(expected_request["start"])
+    expected_end = _parse_utc_request_datetime(expected_request["end"])
+    actual_start = _parse_utc_request_datetime(query["start"])
+    actual_end = _parse_utc_request_datetime(query["end"])
+    return (
+        len(tickers) == preflight.member_union_count
+        and isinstance(expected_tickers, list)
+        and tickers == expected_tickers
+        and actual_start == expected_start
+        and actual_end == expected_end
+        and query["timeframe"] == expected_request["timeframe"]
+        and query["market_hours"] == expected_request["market_hours"]
+    )
+
+
+def _parse_utc_request_datetime(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise AutoresearchValidationError("panel request datetime is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AutoresearchValidationError("panel request datetime is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise AutoresearchValidationError("panel request datetime must be UTC-aware")
+    return parsed.astimezone(UTC)
+
+
+def _verified_panel_request_for_state(state: AutoresearchState) -> Mapping[str, object]:
+    implementation = state.implementation_result
+    if implementation is None:
+        raise AutoresearchValidationError("panel request requires implementation_result")
+    workspace = Path(implementation.workspace_path)
+    snapshot = _secure_open_snapshot(
+        Path(implementation.experiment_manifest_path),
+        label="implementation_result experiment_manifest_path",
+    )
+    manifest = _validate_quantipy_v2_manifest(
+        snapshot,
+        workspace=workspace,
+        commit_sha=implementation.commit_sha,
+        expected_sha256=implementation.experiment_manifest_sha256,
+    )
+    panel = manifest.get("panel")
+    if not isinstance(panel, Mapping):
+        raise AutoresearchValidationError("experiment manifest must contain a panel request")
+    request = panel.get("request")
+    if not isinstance(request, Mapping):
+        raise AutoresearchValidationError("experiment manifest panel request is invalid")
+    return request
+
+
+def _validate_external_verification_retry_receipt(state: AutoresearchState) -> None:
+    receipt = state.external_verification_retry_receipt
+    if receipt is None:
+        return
+    if state.mode is not ResearchMode.ALPHA_RESEARCH or state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "external verification retry receipt requires an ALPHA_RESEARCH implementation"
+        )
+    if not state.verification_history:
+        raise AutoresearchValidationError(
+            "external verification retry receipt requires preserved verification evidence"
+        )
+    prior = state.verification_history[0]
+    if prior.status is not VerificationStatus.TEST_FAILURE:
+        raise AutoresearchValidationError(
+            "external verification retry receipt must bind a typed TEST_FAILURE"
+        )
+    if receipt.prior_verification_sha256 != _canonical_json_digest(prior.to_dict()):
+        raise AutoresearchValidationError(
+            "external verification retry receipt does not bind the preserved failure"
+        )
+    implementation = state.implementation_result
+    readiness = state.platform_readiness
+    if (
+        receipt.implementation_commit != implementation.commit_sha
+        or receipt.manifest_sha256 != implementation.experiment_manifest_sha256
+        or readiness is None
+        or receipt.readiness_manifest_id != readiness.manifest_id
+        or receipt.readiness_snapshot_id != readiness.snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "external verification retry receipt does not bind implementation/readiness identity"
+        )
+    expected = _deterministic_quantipy_run_id(
+        state.iteration,
+        implementation.commit_sha,
+        attempt=receipt.retry_attempt,
+    )
+    if receipt.expected_run_id != expected:
+        raise AutoresearchValidationError(
+            "external verification retry receipt run ID does not bind the implementation"
+        )
+
+
+def retry_external_verification(
+    state: AutoresearchState,
+    receipt: ExternalVerificationRetryReceipt,
+) -> AutoresearchState:
+    """Resume only the current external TEST_FAILURE without invoking the alpha fixer."""
+    _validate_external_verification_retry_eligibility(state)
+    expected = ExternalVerificationRetryReceipt.for_state(
+        state,
+        receipt.probe,
+        receipt.operator_reason,
+    )
+    if receipt != expected:
+        raise AutoresearchValidationError(
+            "external verification retry receipt does not match the current failed state"
+        )
+    return replace(
+        state,
+        external_verification_retry_receipt=receipt,
+        pending_fix_trigger=None,
+        phase=Phase.VERIFICATION,
+    )
 
 
 def _is_fail_closed_g0_platform_contract_bug_signal(
@@ -5293,6 +5658,7 @@ def _validate_state(
         raise AutoresearchValidationError("mode must be explicit after a context_packet exists")
     if state.context_packet is not None and state.mode is not state.context_packet.research_mode:
         raise AutoresearchValidationError("state mode must match context_packet research_mode")
+    _validate_external_verification_retry_receipt(state)
     if state.debate_rounds and state.context_packet is None:
         raise AutoresearchValidationError("debate history requires a context_packet")
     if state.consensus_history and state.latest_debate is None:
@@ -7384,7 +7750,7 @@ def _validate_quantipy_experiment_evidence(
         commit_sha=canonical_commit,
         expected_sha256=implementation.experiment_manifest_sha256,
     )
-    expected_run_id = f"autoresearch-i{state.iteration}-{canonical_commit[:12]}"
+    expected_run_id = _expected_quantipy_verification_run_id(state, canonical_commit)
     expected_run_path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
     _require_private_directory(
         DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
@@ -8242,6 +8608,7 @@ def _phase_instruction(
         phase,
         expected_artifact_type,
         state_path=state_path,
+        state=state,
         price_scope_preflight=(
             state.implementation_result.price_hydration_scope_preflight
             if phase is Phase.VERIFICATION and state.implementation_result is not None
@@ -8374,6 +8741,7 @@ def _verification_handoff_contract(
     expected_artifact_type: ArtifactType,
     *,
     state_path: Path,
+    state: AutoresearchState,
     price_scope_preflight: PriceHydrationScopePreflight | None = None,
 ) -> str:
     if (
@@ -8381,6 +8749,14 @@ def _verification_handoff_contract(
         or expected_artifact_type is not ArtifactType.VERIFICATION_RESULT
     ):
         return ""
+    expected_run_id = (
+        _expected_quantipy_verification_run_id(
+            state,
+            state.implementation_result.commit_sha,
+        )
+        if state.implementation_result is not None
+        else "autoresearch-i<iteration>-<commit12>"
+    )
     scope_gate = ""
     if price_scope_preflight is not None:
         scope_gate = (
@@ -8422,7 +8798,7 @@ def _verification_handoff_contract(
         "<implementation_result.experiment_manifest_path>`, then launch the exact "
         "`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run <manifest> --output-root "
         f"{DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT} --run-id "
-        "autoresearch-i<iteration>-<commit12>` command through "
+        f"{expected_run_id}` command through "
         "`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. Its immutable detached "
         "manifest must set expected_artifact_path to the known "
         "`<root>/<run-id>/run.json`. Direct foreground execution cannot satisfy this "
@@ -8985,6 +9361,7 @@ def advance_state(
             state,
             implementation_result=next_implementation,
             fix_history=(*state.fix_history, artifact),
+            external_verification_retry_receipt=None,
             verification_fix_attempts=next_attempts,
             pending_fix_trigger=None,
             phase=Phase.VERIFICATION,
@@ -9549,17 +9926,65 @@ def load_artifact_file(
 
 
 def load_state_file(path: Path) -> AutoresearchState:
+    return AutoresearchState.from_dict(_load_state_raw(path))
+
+
+def _load_state_raw(path: Path) -> Mapping[str, object]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise AutoresearchValidationError(f"missing state file: {path}") from exc
     except json.JSONDecodeError as exc:
         raise AutoresearchValidationError(f"invalid state JSON: {path}") from exc
-    return AutoresearchState.from_dict(raw)
+    return _ensure_mapping(raw, label="autoresearch_state")
+
+
+def _migrate_v3_state_for_external_verification_retry(
+    raw: Mapping[str, object],
+) -> AutoresearchState:
+    """Perform the one narrowly-authorized v3 -> v4 state migration."""
+    schema_version = _require_int(raw, "schema_version")
+    if schema_version != 3:
+        raise AutoresearchValidationError(
+            "external verification retry migration requires schema-v3 state"
+        )
+    migrated = dict(raw)
+    migrated["schema_version"] = AUTORESEARCH_STATE_SCHEMA_VERSION
+    migrated["external_verification_retry_receipt"] = None
+    return AutoresearchState.from_dict(migrated)
+
+
+def retry_external_verification_state_file(
+    state_path: Path,
+    probe: ResearchPanelProbeReceipt,
+    *,
+    operator_reason: str,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> AutoresearchState:
+    """Atomically migrate (if needed) and retry the sole operator-approved failure."""
+    resolved_path = state_path.expanduser().resolve(strict=False)
+    with _exclusive_state_locks((resolved_path,)):
+        raw = _load_state_raw(resolved_path)
+        schema_version = _require_int(raw, "schema_version")
+        if schema_version == 3:
+            state = _migrate_v3_state_for_external_verification_retry(raw)
+        elif schema_version == AUTORESEARCH_STATE_SCHEMA_VERSION:
+            state = AutoresearchState.from_dict(raw)
+        else:
+            raise AutoresearchValidationError(
+                "external verification retry accepts only schema-v3 or schema-v4 state"
+            )
+        _validate_state(state, policy, validation_context)
+        receipt = ExternalVerificationRetryReceipt.for_state(state, probe, operator_reason)
+        retried = retry_external_verification(state, receipt)
+        _validate_state(retried, policy, validation_context)
+        _atomic_save_state_file(resolved_path, retried)
+        return retried
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
-    """Create a pristine v3 campaign state pinned to authoritative readiness."""
+    """Create a pristine v4 campaign state pinned to authoritative readiness."""
     try:
         identity = readiness.require_ready()
     except ValueError as exc:

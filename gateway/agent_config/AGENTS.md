@@ -32,9 +32,9 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-Before `autoresearch-next`, an operator must prepare schema-v3 state while the
+Before `autoresearch-next`, an operator must prepare schema-v4 state while the
 supervisor is stopped. A live schema-v2 state, or state missing
-`schema_version`, is unsupported: archive it and initialize a fresh schema-v3
+`schema_version`, is unsupported: archive it and initialize a fresh schema-v4
 state before restarting the supervisor. Never overwrite or migrate schema-v2
 in place.
 
@@ -57,7 +57,7 @@ in place.
 )
 ```
 
-This procedure leaves schema-v3 state at the authoritative path used by
+This procedure leaves schema-v4 state at the authoritative path used by
 `autoresearch-next`, control, and the supervisor. Never run
 `autoresearch-next` against state missing `schema_version`.
 
@@ -79,7 +79,7 @@ entitlement supports 2022 onward but rejects January/July 2021. The readiness
 build runs a strict live campaign-start entitlement probe through Quantipy's
 public client (`security_universe_screen` and daily regular-hours `prices` for
 `AAPL`); it may hydrate/cache data as an intentional operator prewarm. Any
-probe failure leaves readiness blocked. Then resume the same schema-v3 state
+probe failure leaves readiness blocked. Then resume the same schema-v4 state
 atomically:
 
 ```bash

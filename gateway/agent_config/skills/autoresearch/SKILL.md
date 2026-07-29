@@ -87,7 +87,7 @@ capability object injected into every stage. `BLOCKED` states the concrete
 operator action required. The runner never downloads, infers, substitutes, or
 repairs evidence.
 
-Before `autoresearch-next`, stop the supervisor and prepare schema-v3 state by
+Before `autoresearch-next`, stop the supervisor and prepare schema-v4 state by
 initializing a pristine state from the READY manifest. A live schema-v2 state,
 or state missing `schema_version`, is unsupported and must be archived, not
 migrated, repaired, or overwritten. Complete this reinitialization before
@@ -112,7 +112,7 @@ restarting the supervisor:
 )
 ```
 
-This procedure atomically leaves schema-v3 state at the authoritative path used
+This procedure atomically leaves schema-v4 state at the authoritative path used
 by control and the supervisor. Use that path for the first dispatch:
 
 ```bash
@@ -122,6 +122,11 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
 
 An existing incompatible state or state missing `schema_version` must be
 archived, not rewritten or silently pinned.
+
+The operator-only external-verification retry is an out-of-band control-plane
+operation documented in the runtime README. The PM and fixer have no authority
+to invoke it; they must use the ordinary `fix_test` path for every experiment,
+code, data, and alpha failure.
 
 `autoresearch-next` checks the current schema-v3 platform-readiness manifest
 before selecting or dispatching
@@ -136,7 +141,7 @@ rejects January/July 2021 but supports 2022 onward. The readiness command
 strictly probes the campaign start through Quantipy's public
 `security_universe_screen` and daily regular-hours `prices` APIs for `AAPL`.
 This intentional operator prewarm may hydrate/cache data, and any probe failure
-must not produce a READY receipt. Then resume the same schema-v3 state
+must not produce a READY receipt. Then resume the same schema-v4 state
 atomically:
 
 ```bash
