@@ -574,10 +574,12 @@ Quantipy constraints:
 - Use a simple indicator core with optional Reddit/news sentiment conditioning.
 - Hyperparameter tuning uses time-series-aware splits.
 
-All Quantipy data preparation belongs to the implementation worker's prewarm command,
-before the committed experiment runtime is invoked. Use the public client path
+The implementation worker derives and prewarms the Quantipy data plan before the
+committed experiment runtime is invoked. Use the public client path
 (`qp.security_universe_screen()`, `qp.security_universe_history()`, and `qp.prices()`)
-to materialize the fixed, sorted panel request and its receipts. Do not import
+to derive the fixed, sorted panel request. The Quantipy runtime remains authoritative
+for panel creation, hydration, receipt validation, and receipt persistence; never
+fabricate or replace its receipts. Do not import
 `quantipy`, open a network client, access a provider or database, or hydrate data from
 `prepare.py` or any other v2 stage. Quantipy v2 stages are intentionally client-free;
 they consume only the immutable verified panel bound by the manifest.
@@ -633,7 +635,8 @@ Implementation requirements:
 - Module path: `src/quantipy/alpha/<strategy_name>/`.
 - Notebook path: `notebooks/experiments/<strategy_name>.ipynb`.
 - Unit tests for feature generation, split logic, and metric extraction.
-- Notebook sections: data inventory, hypothesis, real data loading, feature
+- Notebook sections: data inventory, hypothesis, verified panel loading (no external
+  calls), feature
   engineering, tuning, walk-forward backtest, transaction costs, OOS evaluation,
   null tests, and conclusion.
 - Backtest holding period must match prediction horizon.
@@ -652,7 +655,7 @@ Implementation requirements:
   never replaces the required typed runtime verification.
 - The committed v2 package must contain exactly the client-free `prepare`, `smoke`,
   `feasibility`, and `model` stage contract. The fixed manifest panel is the handoff
-  from the public-client prewarm to the runtime; never move the prewarm calls into a
+  from the implementation plan to the runtime; never move the prewarm calls into a
   stage to work around a preflight rejection.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through

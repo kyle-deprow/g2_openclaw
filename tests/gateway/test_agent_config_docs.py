@@ -100,6 +100,9 @@ def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
     for phrase in required:
         assert phrase in normalized_contract
 
+    assert "During implementation prewarm" in normalized_contract
+    assert "committed v2 experiment stages are client-free" in normalized_contract
+
 
 def test_all_runtime_routes_reference_data_contract_and_receipts() -> None:
     paths = (
