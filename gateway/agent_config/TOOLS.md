@@ -44,10 +44,12 @@ Key rules:
   autoresearch-only task markers.
 - While waiting on any required child, the PM must not use `sessions_yield`,
   `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
-- Repo-managed PM config denies `sessions_spawn`, `sessions_yield`, and
-  `agents_list` exactly. `agents_list` is OpenClaw's `sessions_spawn`
-  allowlist discovery tool; it is not native Codex agent discovery and must not
-  be used to decide whether a `.codex/agents/*.toml` stage is available.
+- Repo-managed PM config denies the OpenClaw tools `sessions_spawn`,
+  `sessions_yield`, `agents_list`, `sessions_list`, and `sessions_history`.
+  Native Codex `list_agents` is a separate collaboration primitive and is
+  forbidden by this protocol, but is not an OpenClaw deny-list ID. None of
+  these discovery/delegation tools may be used to decide whether a
+  `.codex/agents/*.toml` stage is available or to scan historical attempts.
   Do not remove that guard or add PM denies for MemPalace write tools or
   `mempalace__*`; the PM still must use native Codex `spawn_agent` and write
   final MemPalace experiment records.

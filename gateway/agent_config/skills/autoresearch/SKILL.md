@@ -340,6 +340,12 @@ routes stage agents to current Quantipy source-of-truth files from
 context, debate, consensus, implementation, review, or fix work. Do not copy
 those target-repo files into G2 OpenClaw.
 
+PM config denies the OpenClaw tools `sessions_spawn`, `sessions_yield`,
+`agents_list`, `sessions_list`, and `sessions_history`. Native Codex
+`list_agents` is a separate collaboration primitive, is forbidden by this
+protocol, and is not an OpenClaw deny-list ID. These discovery/delegation tools
+must never be used to scan historical autoresearch attempts.
+
 ## Execution Hygiene
 
 The loop has full authority to choose and test research strategies. Infra
@@ -367,22 +373,16 @@ guardrails exist only to keep execution clean:
   or route status, timestamps, and any decisive log lines. Then wait for the
   human operator or Codex. The PM never stops or relaunches the loop, repairs
   shared infrastructure, promotes shared-infrastructure patches, or touches G2.
-- Every spawned native Codex stage must use a deterministic unique label derived from
-  persisted state, never a generic reused stage name. Format:
-  `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. The same
-  iteration/stage/round/attempt tuple must map to exactly one label, and any
-  retry or recovery that changes round or attempt must change the label.
-  Codex-native task rows remain part of the complete task ledger after a task
-  reaches a terminal state; uniqueness is therefore checked against the
-  complete task ledger, not only currently running tasks.
-- An owner-session stop, restart, supervisor recovery wake, gateway restart,
-  or interrupted dispatch is a retry even when the authoritative state file
-  still names the same phase. Before spawning, parse every prior matching
-  label from the task ledger and choose the next unused attempt number. Never
-  reuse `r1-a1` (or any prior attempt) after such an event. A label collision
-  (`label already in use`) is a failed dispatch precondition: do not wait for
-  the announcement, do not silently rename a task after spawning, and retry
-  with the next unused attempt label while preserving the terminal artifact.
+- Every spawned native Codex stage must use the deterministic label supplied by
+  the authoritative iteration/phase/round/attempt instruction, never a generic
+  reused stage name. Format:
+  `autoresearch-i{iteration}-{stage}-r{round}-a{attempt}`. Do not enumerate
+  sessions, task history, or transcripts to find labels. If the current native
+  Codex spawn returns `label already in use`, increment the attempt and retry
+  while preserving any terminal artifact; never silently rename a live task.
+  An owner-session stop, restart, supervisor recovery wake, gateway restart,
+  or interrupted dispatch is a retry only when the current control command
+  reports that retry.
 - On recovery, reconcile only current iteration/phase attempt labels from the
   authoritative state and current task ledger using bounded metadata. Do not
   enumerate historical sessions or fetch old full transcripts. Inspect a native
@@ -506,10 +506,12 @@ While any required child completion is still outstanding, the PM must not use
 `sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
 handoff. Do not substitute the message tool or send an autonomous update to G2;
 these acknowledgements are internal PM transcript replies only.
-Repo-managed PM config denies `sessions_spawn`, `sessions_yield`, and
-`agents_list` exactly so OpenClaw session delegation and its allowlist probe
-cannot replace native Codex `spawn_agent`. Do not broaden that PM deny-list to
-MemPalace write tools; the PM must still use native Codex `spawn_agent` and
+Repo-managed PM config denies the OpenClaw tools `sessions_spawn`,
+`sessions_yield`, `agents_list`, `sessions_list`, and `sessions_history` so
+OpenClaw session delegation and discovery cannot replace native Codex
+`spawn_agent`. Native Codex `list_agents` is also forbidden by this protocol,
+but cannot be filtered through OpenClaw config. Do not broaden the PM deny-list
+to MemPalace write tools; the PM must still use native Codex `spawn_agent` and
 write final experiment records.
 
 Once all required children arrive, the PM must persist the authoritative

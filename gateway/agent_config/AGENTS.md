@@ -110,16 +110,15 @@ suspension. The supervisor does not repeatedly wake suspended work.
 
 ### Dispatch Label Recovery
 
-OpenClaw session labels remain occupied after a task reaches a terminal state.
-Every stage dispatch must therefore use a label that is unique across the
-complete task ledger, not merely across currently running tasks. An owner
+OpenClaw session labels can remain occupied after a task reaches a terminal
+state. Do not enumerate sessions or historical transcripts to discover that.
+Start with the deterministic label from the authoritative
+iteration/phase/round/attempt instruction. If the current native Codex spawn
+returns `label already in use`, increment the attempt and retry while
+preserving any terminal artifact; never silently relabel a live task. An owner
 session stop, restart, supervisor recovery wake, gateway restart, or
-interrupted dispatch is a retry even when the authoritative state remains in
-the same phase. Parse prior matching labels and increment the attempt number
-before spawning; never reuse `r1-a1` or any prior attempt. Treat `label already
-in use` as a failed dispatch precondition, preserve any terminal artifact, and
-retry with the next unused attempt label rather than waiting for a completion
-announcement or silently relabeling a live task.
+interrupted dispatch is a retry only when the current control command reports
+that retry, not a reason to enumerate historical sessions.
 
 ## Stage Boundaries
 

@@ -9574,12 +9574,12 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
         (
             _remove_pm_native_codex_delegation_deny,
-            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "PM must deny OpenClaw/session discovery and delegation tools "
             "for native Codex delegation",
         ),
         (
             _deny_pm_mempalace_mutation_tool,
-            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "PM must deny OpenClaw/session discovery and delegation tools "
             "for native Codex delegation",
         ),
         (_add_pm_openclaw_subagent_allowlist, "PM must not declare OpenClaw subagents"),

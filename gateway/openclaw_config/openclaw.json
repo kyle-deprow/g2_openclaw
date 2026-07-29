@@ -174,7 +174,9 @@
           "deny": [
             "sessions_spawn",
             "sessions_yield",
-            "agents_list"
+            "agents_list",
+            "sessions_list",
+            "sessions_history"
           ]
         }
       },

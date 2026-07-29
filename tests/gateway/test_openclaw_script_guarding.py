@@ -523,7 +523,13 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
     assert pm["thinkingDefault"] == "high"
     assert pm["skills"] == ["mempalace", "autoresearch"]
-    assert pm["tools"]["deny"] == ["sessions_spawn", "sessions_yield", "agents_list"]
+    assert pm["tools"]["deny"] == [
+        "sessions_spawn",
+        "sessions_yield",
+        "agents_list",
+        "sessions_list",
+        "sessions_history",
+    ]
     assert "subagents" not in pm
     assert all(agent.get("subagents", {}).get("allowAgents", []) == [] for agent in agents.values())
 

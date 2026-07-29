@@ -55,6 +55,8 @@ PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS=(
   "sessions_spawn"
   "sessions_yield"
   "agents_list"
+  "sessions_list"
+  "sessions_history"
 )
 MEMPALACE_READONLY_AGENT_IDS=(
   "context_curator"
@@ -1039,7 +1041,7 @@ if ! echo "${MERGED}" | jq -e \
   echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
   echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
   echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       autoresearch-pm must deny sessions_spawn, sessions_yield, and agents_list while retaining MemPalace mutator access for final experiment logging." >&2
+  echo "       autoresearch-pm must deny OpenClaw/session discovery and delegation tools while retaining MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
 

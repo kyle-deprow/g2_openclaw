@@ -329,7 +329,13 @@ def _compile_mempalace_alias_tool_ids(
 
 
 MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
-PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = ("sessions_spawn", "sessions_yield", "agents_list")
+PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = (
+    "sessions_spawn",
+    "sessions_yield",
+    "agents_list",
+    "sessions_list",
+    "sessions_history",
+)
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
     MEMPALACE_MUTATION_TOOLS
 )
@@ -4928,7 +4934,7 @@ def _validate_policy(
     pm_denied_tool_list = _require_string_list(pm_tools, "deny")
     if tuple(pm_denied_tool_list) != PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS:
         raise AutoresearchConfigError(
-            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "PM must deny OpenClaw/session discovery and delegation tools "
             "for native Codex delegation"
         )
     if pm_raw.get("subagents") is not None:

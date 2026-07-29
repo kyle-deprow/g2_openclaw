@@ -64,7 +64,10 @@ def test_runtime_docs_require_native_codex_stage_delegation() -> None:
 
     assert "native Codex `spawn_agent`" in normalized
     assert "OpenClaw `sessions_spawn` is not a valid substitute" in normalized
-    assert "PM config denies `sessions_spawn`, `sessions_yield`, and `agents_list`" in normalized
+    assert (
+        "PM config denies the OpenClaw tools `sessions_spawn`, `sessions_yield`, "
+        "`agents_list`, `sessions_list`, and `sessions_history`" in normalized
+    )
 
 
 def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
@@ -364,11 +367,10 @@ def test_dispatch_recovery_requires_task_ledger_unique_labels() -> None:
     autoresearch = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
 
     for text in (agents.lower(), autoresearch.lower()):
-        assert "complete task ledger" in text
+        assert "do not enumerate" in text
         assert "owner session stop" in text or "owner-session stop" in text
-        assert "never reuse `r1-a1`" in text
         assert "label already in use" in text
-        assert "next unused attempt" in text
+        assert "increment the attempt" in text
 
 
 def test_no_memory_and_keep_rules_match_deterministic_runner() -> None:
@@ -514,7 +516,10 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
     for text in (skill, tools):
         assert "`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn" in text
         assert "Do not silently wait" in text or "must not use `sessions_yield`" in text
-        assert "PM config denies `sessions_spawn`, `sessions_yield`, and `agents_list`" in text
+        assert (
+            "PM config denies the OpenClaw tools `sessions_spawn`, `sessions_yield`, "
+            "`agents_list`, `sessions_list`, and `sessions_history`" in text
+        )
         assert "internal PM transcript replies" in text
         assert "Do not use the message tool to send autonomous updates to G2" in text or (
             "Do not substitute the message tool or send an autonomous update to G2" in text
