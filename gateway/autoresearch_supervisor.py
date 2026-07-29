@@ -150,13 +150,13 @@ RECOVERY_ERROR_PATTERNS = (
 )
 EXPECTED_STAGE_AGENT_IDS: dict[Phase, tuple[str, ...]] = {
     Phase.DEBATE: (
-        "debater-microstructure",
-        "debater-data",
-        "debater-skeptic",
-        "debater-theory",
-        "debater-implementation",
+        "debater_microstructure",
+        "debater_data",
+        "debater_skeptic",
+        "debater_theory",
+        "debater_implementation",
     ),
-    Phase.CONSENSUS: ("consensus-arbiter",),
+    Phase.CONSENSUS: ("consensus_arbiter",),
     Phase.IMPLEMENTATION: ("implementer",),
     Phase.VERIFICATION: (AUTORESEARCH_OWNER_AGENT_ID,),
     Phase.REVIEW: ("reviewer",),
@@ -167,7 +167,7 @@ EXPECTED_STAGE_AGENT_IDS: dict[Phase, tuple[str, ...]] = {
 RELEVANT_AGENT_IDS = frozenset(
     {
         AUTORESEARCH_OWNER_AGENT_ID,
-        "context-curator",
+        "context_curator",
         *(agent_id for agent_ids in EXPECTED_STAGE_AGENT_IDS.values() for agent_id in agent_ids),
     }
 )
@@ -1532,7 +1532,7 @@ class AutoresearchSupervisor:
 
     def _expected_stage_agent_ids(self, state: AutoresearchState) -> tuple[str, ...]:
         if state.phase is Phase.SETUP_CONTEXT:
-            return (AUTORESEARCH_OWNER_AGENT_ID,) if state.setup is None else ("context-curator",)
+            return (AUTORESEARCH_OWNER_AGENT_ID,) if state.setup is None else ("context_curator",)
         return EXPECTED_STAGE_AGENT_IDS[state.phase]
 
     def _activity_guard(

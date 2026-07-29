@@ -142,12 +142,12 @@ operator-infrastructure blocker.
 
 Use the `autoresearch` skill for the complete protocol:
 
-1. `context-curator` summarizes receipts, baseline, recent outcomes,
+1. `context_curator` summarizes receipts, baseline, recent outcomes,
    canonical decision receipts, and read-only MemPalace findings.
 2. Five configured debaters remain configured for each debate. Dispatch them
    with native Codex `spawn_agent` using the exact stage names; a 3-of-5
    theory-family majority is required.
-3. `consensus-arbiter` freezes canonical plan/profile inputs and the sorted
+3. `consensus_arbiter` freezes canonical plan/profile inputs and the sorted
    selection schedule, but no redundant batch boundaries or materialization
    digests; the runner derives deterministic contiguous history batches.
 4. `implementer` creates code, tests, notebook, and a clean commit in the

@@ -31,9 +31,9 @@ Human via G2
   -> OpenClaw main: explicit control handoff only
   -> agent:autoresearch-pm:autoresearch:quantipy
      -> deterministic runner and persisted state
-     -> context-curator
+     -> context_curator
      -> five parallel debaters
-     -> consensus-arbiter (3-of-5 majority)
+     -> consensus_arbiter (3-of-5 majority)
      -> implementer
      -> structured verification
      -> one high-reasoning reviewer
@@ -172,13 +172,13 @@ operator-owned infrastructure blocker.
 |-------|----------------|
 | `main` | G2 control interface only |
 | `autoresearch-pm` | State orchestration, final decisions, experiment logging, PM-only MemPalace writes |
-| `context-curator` | Readiness/universe receipts, baseline, recent results, research log, read-only MemPalace context |
-| `debater-microstructure` | Market mechanics theory |
-| `debater-data` | Supported data, universe receipts, coverage, target construction |
-| `debater-skeptic` | Leakage, overfit, unsupported assumptions, cherry-picking pressure |
-| `debater-theory` | Statistical and finance rationale |
-| `debater-implementation` | Buildability, compute fit, verification cost |
-| `consensus-arbiter` | Majority decision and one implementation brief |
+| `context_curator` | Readiness/universe receipts, baseline, recent results, research log, read-only MemPalace context |
+| `debater_microstructure` | Market mechanics theory |
+| `debater_data` | Supported data, universe receipts, coverage, target construction |
+| `debater_skeptic` | Leakage, overfit, unsupported assumptions, cherry-picking pressure |
+| `debater_theory` | Statistical and finance rationale |
+| `debater_implementation` | Buildability, compute fit, verification cost |
+| `consensus_arbiter` | Majority decision and one implementation brief |
 | `implementer` | Experiment code, tests, notebook, clean commit |
 | `reviewer` | Single adversarial methodology review |
 | `fixer` | Bounded accepted experiment fixes in the persisted worktree |

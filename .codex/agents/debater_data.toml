@@ -1,4 +1,4 @@
-name = "debater-data"
+name = "debater_data"
 description = "Autoresearch debater focused on Quantipy data availability, coverage, universe construction, and target feasibility."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "high"

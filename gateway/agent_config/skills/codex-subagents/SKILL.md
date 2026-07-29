@@ -38,13 +38,13 @@ Codex TOMLs bind each stage to its model.
 
 | Native Codex stage | Role |
 |---|---|
-| `context-curator` | Read-only MemPalace and canonical decision-receipt context packet |
-| `debater-microstructure` | Market mechanics theory |
-| `debater-data` | Data availability, coverage, and target construction |
-| `debater-skeptic` | Leakage, overfit, and cherry-picking pressure |
-| `debater-theory` | Statistical and finance rationale |
-| `debater-implementation` | Buildability and verification cost |
-| `consensus-arbiter` | 3-of-5 majority decision and implementation brief |
+| `context_curator` | Read-only MemPalace and canonical decision-receipt context packet |
+| `debater_microstructure` | Market mechanics theory |
+| `debater_data` | Data availability, coverage, and target construction |
+| `debater_skeptic` | Leakage, overfit, and cherry-picking pressure |
+| `debater_theory` | Statistical and finance rationale |
+| `debater_implementation` | Buildability and verification cost |
+| `consensus_arbiter` | 3-of-5 majority decision and implementation brief |
 | `implementer` | End-to-end implementation |
 | `reviewer` | Single GPT-5.6-sol high methodology review |
 | `fixer` | Concrete fixes only |

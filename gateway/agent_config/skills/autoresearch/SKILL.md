@@ -283,7 +283,7 @@ compute fit and reports any mismatch.
 ## Loop
 
 ```text
-context-curator
+context_curator
   -> 5-agent debate
   -> consensus
   -> implement
@@ -321,13 +321,13 @@ inform prompt content, but they are not autoresearch stage names.
 
 | Stage | Agent | Model intent |
 |-------|-------|--------------|
-| Context | `context-curator` | `openai/gpt-5.4`, high |
-| Debate 1 | `debater-microstructure` | `openai/gpt-5.5`, high |
-| Debate 2 | `debater-data` | `openai/gpt-5.6-terra`, high |
-| Debate 3 | `debater-skeptic` | `openai/gpt-5.5`, high |
-| Debate 4 | `debater-theory` | `openai/gpt-5.4`, high |
-| Debate 5 | `debater-implementation` | `openai/gpt-5.4`, high |
-| Consensus | `consensus-arbiter` | `openai/gpt-5.6-sol`, high |
+| Context | `context_curator` | `openai/gpt-5.4`, high |
+| Debate 1 | `debater_microstructure` | `openai/gpt-5.5`, high |
+| Debate 2 | `debater_data` | `openai/gpt-5.6-terra`, high |
+| Debate 3 | `debater_skeptic` | `openai/gpt-5.5`, high |
+| Debate 4 | `debater_theory` | `openai/gpt-5.4`, high |
+| Debate 5 | `debater_implementation` | `openai/gpt-5.4`, high |
+| Consensus | `consensus_arbiter` | `openai/gpt-5.6-sol`, high |
 | Implement | `implementer` | `openai/gpt-5.4`, high |
 | Review | `reviewer` | `openai/gpt-5.6-sol`, high |
 | Fix | `fixer` | `openai/gpt-5.4`, high |
@@ -495,10 +495,11 @@ While any required child completion is still outstanding, the PM must not use
 `sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that
 handoff. Do not substitute the message tool or send an autonomous update to G2;
 these acknowledgements are internal PM transcript replies only.
-Repo-managed PM config denies `sessions_spawn` and `sessions_yield` exactly so
-this fails closed in tool policy. Do not broaden that PM deny-list to MemPalace
-write tools; the PM must still use native Codex `spawn_agent` and write final
-experiment records.
+Repo-managed PM config denies `sessions_spawn`, `sessions_yield`, and
+`agents_list` exactly so OpenClaw session delegation and its allowlist probe
+cannot replace native Codex `spawn_agent`. Do not broaden that PM deny-list to
+MemPalace write tools; the PM must still use native Codex `spawn_agent` and
+write final experiment records.
 
 Once all required children arrive, the PM must persist the authoritative
 artifact and emit a non-empty completion summary. Do not silently wait between
@@ -520,7 +521,7 @@ Do once before the first iteration:
 
 ## 1. Context Curator
 
-Call native `spawn_agent` for `context-curator` with read-only MemPalace access to produce a compact
+Call native `spawn_agent` for `context_curator` with read-only MemPalace access to produce a compact
 packet for the debate:
 
 - Current best metric, baseline, and last 10 experiment outcomes.
@@ -575,7 +576,7 @@ Quantipy constraints:
 
 ## 3. Consensus
 
-Call native Codex `spawn_agent` for `consensus-arbiter` to determine whether one theory has a 3-of-5
+Call native Codex `spawn_agent` for `consensus_arbiter` to determine whether one theory has a 3-of-5
 majority. Required output:
 
 - Winner, majority count, dissenting positions, or `NO_CONSENSUS`.

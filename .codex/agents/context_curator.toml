@@ -1,4 +1,4 @@
-name = "context-curator"
+name = "context_curator"
 description = "Autoresearch context curator: read-only MemPalace and Quantipy history synthesis for the PM-owned Quantipy loop."
 model = "gpt-5.4"
 model_reasoning_effort = "high"

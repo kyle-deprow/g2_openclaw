@@ -28,7 +28,7 @@ structured, auditable, and queryable through MemPalace.
 2. `mempalace_diary_read` with `agent_name: "autoresearch"` — review recent session notes
 
 **On every research iteration:**
-1. **Context setup** — PM reads prior experiments with `mempalace_search` and `mempalace_kg_query`, then delegates a read-only context packet to `context-curator`
+1. **Context setup** — PM reads prior experiments with `mempalace_search` and `mempalace_kg_query`, then delegates a read-only context packet to `context_curator`
 2. **Debate/review/implementation/fix stages** — non-PM agents use only `mempalace-readonly` plus denied mutation tools in config
 3. **Final log stage only** — after implementation, verification, review, fixes, and a runner-required final decision, the PM writes experiment results with `mempalace_add_drawer`, `mempalace_kg_add`, and `mempalace_diary_write`; policy-approved no-memory outcomes skip this stage
 

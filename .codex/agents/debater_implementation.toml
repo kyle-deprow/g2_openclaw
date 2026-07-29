@@ -1,4 +1,4 @@
-name = "debater-implementation"
+name = "debater_implementation"
 description = "Autoresearch debater focused on buildability, test cost, implementation risk, and verification path."
 model = "gpt-5.4"
 model_reasoning_effort = "high"

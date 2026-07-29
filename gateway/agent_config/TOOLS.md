@@ -28,8 +28,8 @@ Key rules:
 - `main` handles human G2 requests only by running:
   `cd /home/dev/repos/g2_openclaw && uv run python -m
   gateway.autoresearch_control wake`, `status`, or `stop`.
-- Use the native Codex agents `context-curator`, the five `debater-*` agents,
-  `consensus-arbiter`, `implementer`, `reviewer`, and `fixer` for the
+- Use the native Codex agents `context_curator`, the five `debater_*` agents,
+  `consensus_arbiter`, `implementer`, `reviewer`, and `fixer` for the
   autoresearch stages described in the autoresearch skill.
 - Call `spawn_agent` with the configured stage agent name. Do not spawn
   generic/default agents for autoresearch stages, and do not pass ad hoc model
@@ -44,7 +44,10 @@ Key rules:
   autoresearch-only task markers.
 - While waiting on any required child, the PM must not use `sessions_yield`,
   `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn for that handoff.
-- Repo-managed PM config denies `sessions_spawn` and `sessions_yield` exactly.
+- Repo-managed PM config denies `sessions_spawn`, `sessions_yield`, and
+  `agents_list` exactly. `agents_list` is OpenClaw's `sessions_spawn`
+  allowlist discovery tool; it is not native Codex agent discovery and must not
+  be used to decide whether a `.codex/agents/*.toml` stage is available.
   Do not remove that guard or add PM denies for MemPalace write tools or
   `mempalace__*`; the PM still must use native Codex `spawn_agent` and write
   final MemPalace experiment records.

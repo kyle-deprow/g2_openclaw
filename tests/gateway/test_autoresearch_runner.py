@@ -141,7 +141,7 @@ from gateway.autoresearch_runner import (
 
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
-QUANTIPY_V2_CONTRACT_COMMIT = "d7f1f094b3e51c32feb0112fc760bbb6549cf626"  # pragma: allowlist secret
+QUANTIPY_V2_CONTRACT_COMMIT = "c7327f51bc93c10132022d1b5ffaf59b918fe93b"  # pragma: allowlist secret
 QUANTIPY_V2_CONTRACT_FILE_SHA256 = {
     "src/quantipy/experiments/filesystem.py": "".join(
         (
@@ -153,10 +153,10 @@ QUANTIPY_V2_CONTRACT_FILE_SHA256 = {
     ),
     "src/quantipy/experiments/preflight.py": "".join(
         (
-            "cdaf5b077134900c",  # pragma: allowlist secret
-            "b3992f5a6a0d369b",  # pragma: allowlist secret
-            "2a5ebd126ccbf99c",  # pragma: allowlist secret
-            "2917ebe814f20e1c",  # pragma: allowlist secret
+            "ee7601b415713499",  # pragma: allowlist secret
+            "f7b0c867977cd3d4",  # pragma: allowlist secret
+            "058478ded35341d4",  # pragma: allowlist secret
+            "cc1a3894783d215a",  # pragma: allowlist secret
         )
     ),
     "src/quantipy/experiments/runtime.py": "".join(
@@ -760,7 +760,7 @@ def test_instruction_source_manifest_digest_is_bound_to_dispatch_context(
         build_instruction_source_manifest(
             phase=Phase.SETUP_CONTEXT,
             expected_artifact_type=ArtifactType.SETUP,
-            target_agent_ids=("context-curator",),
+            target_agent_ids=("context_curator",),
             target_repo_root=Path("/home/dev/repos/quantipy"),
             state=state,
             receipts=required_receipts,
@@ -1543,7 +1543,7 @@ def _no_consensus(round_number: int) -> ConsensusResultArtifact:
         winner_theory_id=None,
         winner_theory_family=None,
         majority_count=2,
-        majority_agent_ids=("debater-microstructure", "debater-data"),
+        majority_agent_ids=("debater_microstructure", "debater_data"),
         dissenting_positions=("Theory split across three families",),
         novelty_score=0.45,
         theory_score=0.49,
@@ -4847,7 +4847,7 @@ def test_phase_progression(
 
     state = advance_state(state, _setup_artifact(), policy)
     action = next_action(state, policy, receipts, platform_readiness)
-    assert action.next_agent_ids == ("context-curator",)
+    assert action.next_agent_ids == ("context_curator",)
 
     state = advance_state(state, _context_artifact(), policy)
     assert state.phase is Phase.DEBATE
@@ -9440,7 +9440,7 @@ def _add_pm_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
 
 
 def _add_stage_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
-    _agent(config, "consensus-arbiter")["subagents"] = {"allowAgents": ["reviewer"]}
+    _agent(config, "consensus_arbiter")["subagents"] = {"allowAgents": ["reviewer"]}
 
 
 def _give_main_a_pm_skill(config: dict[str, object]) -> None:
@@ -9448,11 +9448,11 @@ def _give_main_a_pm_skill(config: dict[str, object]) -> None:
 
 
 def _give_stage_agent_write_skill(config: dict[str, object]) -> None:
-    _agent(config, "context-curator")["skills"] = ["mempalace", "quantipy-methodology"]
+    _agent(config, "context_curator")["skills"] = ["mempalace", "quantipy-methodology"]
 
 
 def _remove_stage_agent_mempalace_deny(config: dict[str, object]) -> None:
-    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
+    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = deny[1:]
 
@@ -9461,13 +9461,13 @@ def _add_stage_agent_obsolete_mempalace_deny_alias(
     config: dict[str, object],
     alias: str = "mcp__mempalace__mempalace_add_drawer",
 ) -> None:
-    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
+    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = [*deny, alias]
 
 
 def _add_stage_agent_extra_noncanonical_mempalace_deny(config: dict[str, object]) -> None:
-    tools = cast(dict[str, object], _agent(config, "context-curator")["tools"])
+    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
     deny = cast(list[str], tools["deny"])
     tools["deny"] = [*deny, "mempalace-readonly.mempalace_search"]
 
@@ -9483,7 +9483,7 @@ def _expand_full_server_scope(config: dict[str, object]) -> None:
     servers = cast(dict[str, object], mcp["servers"])
     mempalace = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
     codex = cast(dict[str, object], mempalace["codex"])
-    codex["agents"] = ["autoresearch-pm", "context-curator"]
+    codex["agents"] = ["autoresearch-pm", "context_curator"]
 
 
 def _break_readonly_server_args(config: dict[str, object]) -> None:
@@ -9518,16 +9518,18 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
         (
             _remove_pm_native_codex_delegation_deny,
-            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation",
+            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "for native Codex delegation",
         ),
         (
             _deny_pm_mempalace_mutation_tool,
-            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation",
+            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "for native Codex delegation",
         ),
         (_add_pm_openclaw_subagent_allowlist, "PM must not declare OpenClaw subagents"),
         (
             _add_stage_openclaw_subagent_allowlist,
-            "consensus-arbiter must not declare OpenClaw subagents",
+            "consensus_arbiter must not declare OpenClaw subagents",
         ),
         (_give_main_a_pm_skill, "main must load no skills"),
         (
@@ -9642,13 +9644,13 @@ def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None
 
     assert cast(dict[str, object], full_server["codex"])["agents"] == ["autoresearch-pm"]
     assert cast(dict[str, object], readonly_server["codex"])["agents"] == [
-        "context-curator",
-        "debater-microstructure",
-        "debater-data",
-        "debater-skeptic",
-        "debater-theory",
-        "debater-implementation",
-        "consensus-arbiter",
+        "context_curator",
+        "debater_microstructure",
+        "debater_data",
+        "debater_skeptic",
+        "debater_theory",
+        "debater_implementation",
+        "consensus_arbiter",
         "implementer",
         "reviewer",
         "fixer",

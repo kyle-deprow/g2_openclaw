@@ -1,4 +1,4 @@
-name = "debater-microstructure"
+name = "debater_microstructure"
 description = "Autoresearch debater focused on intraday market mechanics, liquidity, spreads, and execution-aware alpha rationale."
 model = "gpt-5.5"
 model_reasoning_effort = "high"

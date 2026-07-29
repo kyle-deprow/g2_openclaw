@@ -54,8 +54,22 @@ MEMPALACE_FULL_AGENT_IDS=(
 PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS=(
   "sessions_spawn"
   "sessions_yield"
+  "agents_list"
 )
 MEMPALACE_READONLY_AGENT_IDS=(
+  "context_curator"
+  "debater_microstructure"
+  "debater_data"
+  "debater_skeptic"
+  "debater_theory"
+  "debater_implementation"
+  "consensus_arbiter"
+  "implementer"
+  "reviewer"
+  "fixer"
+)
+CODEX_NATIVE_STAGE_AGENT_IDS=("${MEMPALACE_READONLY_AGENT_IDS[@]}")
+CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS=(
   "context-curator"
   "debater-microstructure"
   "debater-data"
@@ -63,11 +77,7 @@ MEMPALACE_READONLY_AGENT_IDS=(
   "debater-theory"
   "debater-implementation"
   "consensus-arbiter"
-  "implementer"
-  "reviewer"
-  "fixer"
 )
-CODEX_NATIVE_STAGE_AGENT_IDS=("${MEMPALACE_READONLY_AGENT_IDS[@]}")
 MEMPALACE_MUTATION_TOOL_NAMES=(
   "mempalace_add_drawer"
   "mempalace_check_duplicate"
@@ -1029,7 +1039,7 @@ if ! echo "${MERGED}" | jq -e \
   echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
   echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
   echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       autoresearch-pm must deny exactly sessions_spawn and sessions_yield while retaining MemPalace mutator access for final experiment logging." >&2
+  echo "       autoresearch-pm must deny sessions_spawn, sessions_yield, and agents_list while retaining MemPalace mutator access for final experiment logging." >&2
   exit 1
 fi
 
@@ -1054,13 +1064,13 @@ if ! echo "${MERGED}" | jq -e \
   def expected_models: {
     "main": "openai/gpt-5.4",
     "autoresearch-pm": $pm,
-    "context-curator": "openai/gpt-5.4",
-    "debater-microstructure": "openai/gpt-5.5",
-    "debater-data": "openai/gpt-5.6-terra",
-    "debater-skeptic": "openai/gpt-5.5",
-    "debater-theory": "openai/gpt-5.4",
-    "debater-implementation": "openai/gpt-5.4",
-    "consensus-arbiter": "openai/gpt-5.6-sol",
+    "context_curator": "openai/gpt-5.4",
+    "debater_microstructure": "openai/gpt-5.5",
+    "debater_data": "openai/gpt-5.6-terra",
+    "debater_skeptic": "openai/gpt-5.5",
+    "debater_theory": "openai/gpt-5.4",
+    "debater_implementation": "openai/gpt-5.4",
+    "consensus_arbiter": "openai/gpt-5.6-sol",
     "implementer": "openai/gpt-5.4",
     "reviewer": "openai/gpt-5.6-sol",
     "fixer": "openai/gpt-5.4"
@@ -1178,17 +1188,18 @@ from pathlib import Path
 
 agents_dir = Path(sys.argv[1])
 expected = {
-    "context-curator": "gpt-5.4",
-    "debater-microstructure": "gpt-5.5",
-    "debater-data": "gpt-5.6-terra",
-    "debater-skeptic": "gpt-5.5",
-    "debater-theory": "gpt-5.4",
-    "debater-implementation": "gpt-5.4",
-    "consensus-arbiter": "gpt-5.6-sol",
+    "context_curator": "gpt-5.4",
+    "debater_microstructure": "gpt-5.5",
+    "debater_data": "gpt-5.6-terra",
+    "debater_skeptic": "gpt-5.5",
+    "debater_theory": "gpt-5.4",
+    "debater_implementation": "gpt-5.4",
+    "consensus_arbiter": "gpt-5.6-sol",
     "implementer": "gpt-5.4",
     "reviewer": "gpt-5.6-sol",
     "fixer": "gpt-5.4",
 }
+
 if not agents_dir.is_dir():
     raise SystemExit(f"missing native Codex agents directory: {agents_dir}")
 for name, model in expected.items():
@@ -1206,6 +1217,18 @@ for name, model in expected.items():
     if data.get("model_reasoning_effort") != "high":
         raise SystemExit(f"native Codex stage agent {name} must use high reasoning")
 PY
+}
+
+remove_legacy_codex_stage_agents() {
+  local agents_dir="$1"
+  [[ -d "${agents_dir}" ]] || return 0
+  for agent_id in "${CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS[@]}"; do
+    local stale_path="${agents_dir}/${agent_id}.toml"
+    if [[ -f "${stale_path}" ]]; then
+      rm -- "${stale_path}"
+      echo "Removed stale native Codex stage agent ${stale_path}"
+    fi
+  done
 }
 
 validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"
@@ -1246,6 +1269,7 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
   if workspace_has_autoresearch_agent "${AGENTS}"; then
     CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
     mkdir -p "${CODEX_AGENTS_DST}"
+    remove_legacy_codex_stage_agents "${CODEX_AGENTS_DST}"
     for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
       cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_AGENTS_DST}/${AGENT_ID}.toml"
     done
@@ -1264,6 +1288,7 @@ for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
   CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
   mkdir -p "${CODEX_RUNTIME_AGENTS_DST}"
+  remove_legacy_codex_stage_agents "${CODEX_RUNTIME_AGENTS_DST}"
   for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
     cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
   done

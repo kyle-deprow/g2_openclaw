@@ -17,13 +17,13 @@ CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
 CODEX_AGENTS = REPO_ROOT / ".codex" / "agents"
 NATIVE_CODEX_STAGE_MODELS = {
-    "context-curator": "gpt-5.4",
-    "debater-microstructure": "gpt-5.5",
-    "debater-data": "gpt-5.6-terra",
-    "debater-skeptic": "gpt-5.5",
-    "debater-theory": "gpt-5.4",
-    "debater-implementation": "gpt-5.4",
-    "consensus-arbiter": "gpt-5.6-sol",
+    "context_curator": "gpt-5.4",
+    "debater_microstructure": "gpt-5.5",
+    "debater_data": "gpt-5.6-terra",
+    "debater_skeptic": "gpt-5.5",
+    "debater_theory": "gpt-5.4",
+    "debater_implementation": "gpt-5.4",
+    "consensus_arbiter": "gpt-5.6-sol",
     "implementer": "gpt-5.4",
     "reviewer": "gpt-5.6-sol",
     "fixer": "gpt-5.4",
@@ -64,7 +64,7 @@ def test_runtime_docs_require_native_codex_stage_delegation() -> None:
 
     assert "native Codex `spawn_agent`" in normalized
     assert "OpenClaw `sessions_spawn` is not a valid substitute" in normalized
-    assert "PM config denies `sessions_spawn` and `sessions_yield`" in normalized
+    assert "PM config denies `sessions_spawn`, `sessions_yield`, and `agents_list`" in normalized
 
 
 def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
@@ -511,7 +511,7 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
     for text in (skill, tools):
         assert "`sessions_yield`, `NO_REPLY`, `ANNOUNCE_SKIP`, or a tool-only turn" in text
         assert "Do not silently wait" in text or "must not use `sessions_yield`" in text
-        assert "PM config denies `sessions_spawn` and `sessions_yield`" in text
+        assert "PM config denies `sessions_spawn`, `sessions_yield`, and `agents_list`" in text
         assert "internal PM transcript replies" in text
         assert "Do not use the message tool to send autonomous updates to G2" in text or (
             "Do not substitute the message tool or send an autonomous update to G2" in text

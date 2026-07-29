@@ -51,13 +51,13 @@ receipt are already loaded.
 
 | Stage agent | Additional Quantipy sources |
 |-------------|-----------------------------|
-| `context-curator` | `experiment-data`; `data-querying` only to interpret existing universe receipts; `explorer.toml`, `researcher.toml` |
-| `debater-microstructure` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
-| `debater-data` | `data-querying` including its price and security-master rules, `experiment-data`, `backtesting`; `researcher.toml` |
-| `debater-skeptic` | `experiment-data`, `backtesting`; `contrarian.toml`, `reviewer.toml` |
-| `debater-theory` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
-| `debater-implementation` | `backend-python`, `backtesting`, `data-querying`, `experiment-data`; `backend-python.toml`, `orchestrator.toml` |
-| `consensus-arbiter` | Candidate-governing skills cited by debaters; `contrarian.toml`, `theorist.toml`, `reviewer.toml` |
+| `context_curator` | `experiment-data`; `data-querying` only to interpret existing universe receipts; `explorer.toml`, `researcher.toml` |
+| `debater_microstructure` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
+| `debater_data` | `data-querying` including its price and security-master rules, `experiment-data`, `backtesting`; `researcher.toml` |
+| `debater_skeptic` | `experiment-data`, `backtesting`; `contrarian.toml`, `reviewer.toml` |
+| `debater_theory` | `backtesting`, `experiment-data`; `theorist.toml`, `researcher.toml` |
+| `debater_implementation` | `backend-python`, `backtesting`, `data-querying`, `experiment-data`; `backend-python.toml`, `orchestrator.toml` |
+| `consensus_arbiter` | Candidate-governing skills cited by debaters; `contrarian.toml`, `theorist.toml`, `reviewer.toml` |
 | `implementer` | `backend-python`, `backtesting`, `data-querying`, `experiment-data`; `backend-python.toml`, `orchestrator.toml` |
 | `reviewer` | `experiment-data`, `backtesting`, `data-querying`; `reviewer.toml`, `contrarian.toml` |
 | `fixer` | `backend-python` and the skill governing the accepted defect; `backend-python.toml`, `orchestrator.toml`, `reviewer.toml` |

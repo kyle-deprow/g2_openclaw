@@ -75,19 +75,19 @@ implementation. OpenClaw `sessions_spawn` is forbidden for autoresearch stages.
 
 | Subagent | Role |
 |----------|------|
-| context-curator | Enriches debate context from MemPalace and Quantipy history |
-| debater-microstructure | Proposes/critiques theories from market mechanics |
-| debater-data | Checks data availability, coverage, and target construction |
-| debater-skeptic | Attacks overfit, leakage, and cherry-picking risk |
-| debater-theory | Grounds theories in finance/statistical logic |
-| debater-implementation | Checks buildability and verification cost |
-| consensus-arbiter | Finds 3-of-5 majority or returns NO_CONSENSUS |
+| context_curator | Enriches debate context from MemPalace and Quantipy history |
+| debater_microstructure | Proposes/critiques theories from market mechanics |
+| debater_data | Checks data availability, coverage, and target construction |
+| debater_skeptic | Attacks overfit, leakage, and cherry-picking risk |
+| debater_theory | Grounds theories in finance/statistical logic |
+| debater_implementation | Checks buildability and verification cost |
+| consensus_arbiter | Finds 3-of-5 majority or returns NO_CONSENSUS |
 | implementer | Implements the single winning theory |
 | reviewer | Single GPT-5.6-sol high reviewer for theory fidelity and methodology |
 | fixer | Fixes concrete reviewer/test defects without changing the theory |
 
 Autoresearch uses one bounded debate per iteration. First call native
-`spawn_agent` for `context-curator`; then dispatch all five configured debaters
+`spawn_agent` for `context_curator`; then dispatch all five configured debaters
 with native `spawn_agent`. Only implement a theory after 3-of-5 majority.
 Review with the single `reviewer` stage.
 

@@ -1,4 +1,4 @@
-name = "debater-skeptic"
+name = "debater_skeptic"
 description = "Autoresearch debater focused on leakage, overfit, cherry-picking, null tests, and rejection pressure."
 model = "gpt-5.5"
 model_reasoning_effort = "high"

@@ -1863,11 +1863,11 @@ class TestAutoresearchCliCommands:
         tmp_path: Path,
     ) -> None:
         debate_agent_ids = (
-            "debater-microstructure",
-            "debater-data",
-            "debater-skeptic",
-            "debater-theory",
-            "debater-implementation",
+            "debater_microstructure",
+            "debater_data",
+            "debater_skeptic",
+            "debater_theory",
+            "debater_implementation",
         )
         debate = DebateResultArtifact(
             round_number=1,
@@ -2103,11 +2103,11 @@ class TestAutoresearchCliCommands:
         tmp_path: Path,
     ) -> None:
         debate_agent_ids = (
-            "debater-microstructure",
-            "debater-data",
-            "debater-skeptic",
-            "debater-theory",
-            "debater-implementation",
+            "debater_microstructure",
+            "debater_data",
+            "debater_skeptic",
+            "debater_theory",
+            "debater_implementation",
         )
         readiness = _ready_manifest(tmp_path / "g0-readiness")
         readiness_path = tmp_path / "platform-readiness.json"
@@ -2336,11 +2336,11 @@ class TestAutoresearchCliCommands:
         tmp_path: Path,
     ) -> None:
         debate_agent_ids = (
-            "debater-microstructure",
-            "debater-data",
-            "debater-skeptic",
-            "debater-theory",
-            "debater-implementation",
+            "debater_microstructure",
+            "debater_data",
+            "debater_skeptic",
+            "debater_theory",
+            "debater_implementation",
         )
         readiness = _ready_manifest(tmp_path / "g0-readiness")
         readiness_path = tmp_path / "platform-readiness.json"

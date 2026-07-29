@@ -329,7 +329,7 @@ def _compile_mempalace_alias_tool_ids(
 
 
 MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
-PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = ("sessions_spawn", "sessions_yield")
+PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = ("sessions_spawn", "sessions_yield", "agents_list")
 MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
     MEMPALACE_MUTATION_TOOLS
 )
@@ -4851,18 +4851,18 @@ def load_autoresearch_policy(
     policy = AutoresearchPolicy(
         pm=_agent_policy_from_json(agent_map, "autoresearch-pm"),
         main_interface=_agent_policy_from_json(agent_map, "main"),
-        context_curator=_agent_policy_from_json(agent_map, "context-curator"),
+        context_curator=_agent_policy_from_json(agent_map, "context_curator"),
         debate_agents=tuple(
             _agent_policy_from_json(agent_map, agent_id)
             for agent_id in (
-                "debater-microstructure",
-                "debater-data",
-                "debater-skeptic",
-                "debater-theory",
-                "debater-implementation",
+                "debater_microstructure",
+                "debater_data",
+                "debater_skeptic",
+                "debater_theory",
+                "debater_implementation",
             )
         ),
-        consensus=_agent_policy_from_json(agent_map, "consensus-arbiter"),
+        consensus=_agent_policy_from_json(agent_map, "consensus_arbiter"),
         implementer=_agent_policy_from_json(agent_map, "implementer"),
         reviewer=_agent_policy_from_json(agent_map, "reviewer"),
         fixer=_agent_policy_from_json(agent_map, "fixer"),
@@ -4889,14 +4889,14 @@ def _validate_policy(
         policy.context_curator.model != "openai/gpt-5.4"
         or policy.context_curator.reasoning != "high"
     ):
-        raise AutoresearchConfigError("context-curator must be openai/gpt-5.4 with high reasoning")
+        raise AutoresearchConfigError("context_curator must be openai/gpt-5.4 with high reasoning")
 
     expected_debate_models = {
-        "debater-microstructure": "openai/gpt-5.5",
-        "debater-data": "openai/gpt-5.6-terra",
-        "debater-skeptic": "openai/gpt-5.5",
-        "debater-theory": "openai/gpt-5.4",
-        "debater-implementation": "openai/gpt-5.4",
+        "debater_microstructure": "openai/gpt-5.5",
+        "debater_data": "openai/gpt-5.6-terra",
+        "debater_skeptic": "openai/gpt-5.5",
+        "debater_theory": "openai/gpt-5.4",
+        "debater_implementation": "openai/gpt-5.4",
     }
     for agent in policy.debate_agents:
         if agent.reasoning != "high":
@@ -4909,7 +4909,7 @@ def _validate_policy(
 
     if policy.consensus.model != "openai/gpt-5.6-sol" or policy.consensus.reasoning != "high":
         raise AutoresearchConfigError(
-            "consensus-arbiter must be openai/gpt-5.6-sol with high reasoning"
+            "consensus_arbiter must be openai/gpt-5.6-sol with high reasoning"
         )
     for agent in (policy.implementer, policy.fixer):
         if agent.model != "openai/gpt-5.4" or agent.reasoning != "high":
@@ -4928,7 +4928,8 @@ def _validate_policy(
     pm_denied_tool_list = _require_string_list(pm_tools, "deny")
     if tuple(pm_denied_tool_list) != PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS:
         raise AutoresearchConfigError(
-            "PM must deny exactly sessions_spawn and sessions_yield for native Codex delegation"
+            "PM must deny sessions_spawn, sessions_yield, and agents_list "
+            "for native Codex delegation"
         )
     if pm_raw.get("subagents") is not None:
         raise AutoresearchConfigError("PM must not declare OpenClaw subagents")

@@ -82,11 +82,11 @@ def _operator_precondition_state_json() -> str:
                     winner_theory_family="no-code-operator-evidence-precondition",
                     majority_count=5,
                     majority_agent_ids=(
-                        "debater-microstructure",
-                        "debater-data",
-                        "debater-skeptic",
-                        "debater-theory",
-                        "debater-implementation",
+                        "debater_microstructure",
+                        "debater_data",
+                        "debater_skeptic",
+                        "debater_theory",
+                        "debater_implementation",
                     ),
                     dissenting_positions=(),
                     novelty_score=1.0,
@@ -1749,10 +1749,10 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
     task: dict[str, object] = {
         "taskId": "debate-1",
         "status": "running",
-        "agentId": "debater-data",
+        "agentId": "debater_data",
         "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
         "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
-        "childSessionKey": "agent:debater-data:task-child",
+        "childSessionKey": "agent:debater_data:task-child",
         "updatedAt": int(supervisor_env.now * 1000) - 1_000,
     }
     fake = FakeOpenClaw(

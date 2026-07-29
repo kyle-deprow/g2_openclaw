@@ -27,13 +27,13 @@ NATIVE_CRASH_HARDENING_DROPIN = (
 )
 
 STAGE_AGENT_IDS = [
-    "context-curator",
-    "debater-microstructure",
-    "debater-data",
-    "debater-skeptic",
-    "debater-theory",
-    "debater-implementation",
-    "consensus-arbiter",
+    "context_curator",
+    "debater_microstructure",
+    "debater_data",
+    "debater_skeptic",
+    "debater_theory",
+    "debater_implementation",
+    "consensus_arbiter",
     "implementer",
     "reviewer",
     "fixer",
@@ -523,7 +523,7 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
     assert pm["thinkingDefault"] == "high"
     assert pm["skills"] == ["mempalace", "autoresearch"]
-    assert pm["tools"]["deny"] == ["sessions_spawn", "sessions_yield"]
+    assert pm["tools"]["deny"] == ["sessions_spawn", "sessions_yield", "agents_list"]
     assert "subagents" not in pm
     assert all(agent.get("subagents", {}).get("allowAgents", []) == [] for agent in agents.values())
 
@@ -823,6 +823,40 @@ def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspac
             assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
 
+def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    legacy_agent_ids = [
+        "context-curator",
+        "debater-microstructure",
+        "debater-data",
+        "debater-skeptic",
+        "debater-theory",
+        "debater-implementation",
+        "consensus-arbiter",
+    ]
+    managed_agent_dirs = [
+        *(
+            openclaw_home / workspace / ".codex/agents"
+            for workspace in ("workspace-autoresearch-pm", "workspace-reviewer")
+        ),
+        *(
+            openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
+            for agent_id in ["autoresearch-pm", *STAGE_AGENT_IDS]
+        ),
+    ]
+    for agents_dir in managed_agent_dirs:
+        agents_dir.mkdir(parents=True)
+        for legacy_agent_id in legacy_agent_ids:
+            (agents_dir / f"{legacy_agent_id}.toml").write_text("legacy\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    for agents_dir in managed_agent_dirs:
+        assert not any((agents_dir / f"{agent_id}.toml").exists() for agent_id in legacy_agent_ids)
+
+
 def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
@@ -832,6 +866,8 @@ def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> No
     assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"' in script
     assert '"${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"' in script
     assert 'validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"' in script
+    assert "CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS" in script
+    assert "remove_legacy_codex_stage_agents" in script
     for agent_id in STAGE_AGENT_IDS:
         assert f'"{agent_id}"' in script
 

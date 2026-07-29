@@ -1,4 +1,4 @@
-name = "debater-theory"
+name = "debater_theory"
 description = "Autoresearch debater focused on statistical and financial theory for simple intraday experiments."
 model = "gpt-5.4"
 model_reasoning_effort = "high"
