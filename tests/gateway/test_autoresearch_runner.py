@@ -8575,6 +8575,9 @@ def test_alpha_implementation_prompt_batches_history_and_hydrates_union_once(
 
     assert "one qp.security_universe_history() operation per batch" in prompt
     assert "qp.prices() exactly once for that union" in prompt
+    assert "before creating or running the committed quantipy-experiment-v2 package" in prompt
+    assert "do not put any quantipy import" in prompt
+    assert "v2 runtime intentionally gives stages only the immutable verified panel" in prompt
     assert "qp.security_universe_history() exactly once for all dates" not in prompt
 
 

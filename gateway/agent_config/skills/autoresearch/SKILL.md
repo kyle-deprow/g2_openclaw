@@ -574,6 +574,14 @@ Quantipy constraints:
 - Use a simple indicator core with optional Reddit/news sentiment conditioning.
 - Hyperparameter tuning uses time-series-aware splits.
 
+All Quantipy data preparation belongs to the implementation worker's prewarm command,
+before the committed experiment runtime is invoked. Use the public client path
+(`qp.security_universe_screen()`, `qp.security_universe_history()`, and `qp.prices()`)
+to materialize the fixed, sorted panel request and its receipts. Do not import
+`quantipy`, open a network client, access a provider or database, or hydrate data from
+`prepare.py` or any other v2 stage. Quantipy v2 stages are intentionally client-free;
+they consume only the immutable verified panel bound by the manifest.
+
 ## 3. Consensus
 
 Call native Codex `spawn_agent` for `consensus_arbiter` to determine whether one theory has a 3-of-5
@@ -642,6 +650,10 @@ Implementation requirements:
   feasibility `BUG_SIGNAL` without spending the hydrate cost.
 - Commit after focused tests pass; notebook rendering is optional smoke/report evidence and
   never replaces the required typed runtime verification.
+- The committed v2 package must contain exactly the client-free `prepare`, `smoke`,
+  `feasibility`, and `model` stage contract. The fixed manifest panel is the handoff
+  from the public-client prewarm to the runtime; never move the prewarm calls into a
+  stage to work around a preflight rejection.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
   `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--manifest` and
