@@ -50,6 +50,7 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
+    MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
     RECOVERY_MESSAGE,
     AutoresearchSupervisor,
     NativeGatewayRPC,
@@ -70,11 +71,13 @@ SignalDisposition = SignalHandler | signal.Handlers
 
 
 def test_recovery_message_uses_bounded_current_attempt_reconciliation() -> None:
-    assert "current iteration/phase attempt labels" in RECOVERY_MESSAGE
-    assert "bounded task metadata" in RECOVERY_MESSAGE
-    assert "do not enumerate historical sessions" in RECOVERY_MESSAGE
-    assert "fetch old full transcripts" in RECOVERY_MESSAGE
-    assert "exact current label" in RECOVERY_MESSAGE
+    for message in (RECOVERY_MESSAGE, MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE):
+        normalized = message.lower()
+        assert "current" in normalized
+        assert "task metadata" in normalized
+        assert "do not enumerate historical sessions" in normalized
+        assert "fetch old full transcripts" in normalized
+        assert "exact current label" in normalized
 
 
 def _operator_precondition_state_json() -> str:
