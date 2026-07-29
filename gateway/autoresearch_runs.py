@@ -1192,6 +1192,40 @@ def _attestation_failure(
     return _ExpectedArtifactAttestationFailure(reason, message)
 
 
+def _validate_existing_expected_artifact_ancestors(path: Path) -> None:
+    """Reject unsafe existing artifact ancestors before a detached task starts."""
+    current = path.parent
+    while True:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            if current == current.parent:
+                break
+            current = current.parent
+            continue
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                f"cannot inspect expected artifact ancestor: {current}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise AutoresearchRunRecordError(
+                f"expected artifact ancestor must be a non-symlink directory: {current}"
+            )
+        if metadata.st_uid not in {0, os.getuid()}:
+            raise AutoresearchRunRecordError(
+                f"expected artifact ancestor has an untrusted owner: {current}"
+            )
+        writable_by_others = bool(stat.S_IMODE(metadata.st_mode) & 0o022)
+        trusted_sticky_root = metadata.st_uid == 0 and bool(metadata.st_mode & stat.S_ISVTX)
+        if writable_by_others and not trusted_sticky_root:
+            raise AutoresearchRunRecordError(
+                f"expected artifact ancestor is group/world writable: {current}"
+            )
+        if current == current.parent:
+            break
+        current = current.parent
+
+
 def _open_expected_artifact_fd(path: Path, *, label: str) -> tuple[int, os.stat_result]:
     """Pin each ancestor with openat before opening the final artifact."""
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -1920,6 +1954,8 @@ def prepare_run(
     _reject_symlink(working_directory, label="manifest working_directory")
     if not working_directory.is_dir():
         raise AutoresearchRunRecordError("manifest working_directory must be a directory")
+    if manifest.expected_artifact_path is not None:
+        _validate_existing_expected_artifact_ancestors(Path(manifest.expected_artifact_path))
     try:
         canonical_run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     except FileExistsError as exc:

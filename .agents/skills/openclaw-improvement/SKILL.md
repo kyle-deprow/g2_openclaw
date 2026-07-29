@@ -256,8 +256,19 @@ the canonical operator-controlled root
 the parent before `git worktree add`:
 
 ```bash
+umask 077
 mkdir -p /home/dev/.openclaw/autoresearch/worktrees
+chmod 700 /home/dev/.openclaw/autoresearch/worktrees
+# After git worktree add, secure and verify the created worktree:
+chmod 700 /home/dev/.openclaw/autoresearch/worktrees/<worktree-name>
+stat -c '%U %a' /home/dev/.openclaw/autoresearch/worktrees
+stat -c '%U %a' /home/dev/.openclaw/autoresearch/worktrees/<worktree-name>
 ```
+
+The root and worktree must each be owned by the current user with mode `0700`; detached
+prewarm, implementation, and Fix/Test manifests must set `working_directory`, and
+the launcher must spawn the process with `cwd` set to that exact worktree path. The
+authoritative Quantipy checkout is never the execution directory for a disposable stage.
 
 The autoresearch advancement boundary rejects implementation evidence, persisted
 implementation evidence, and Fix/Test evidence outside that root. Fix/Test must

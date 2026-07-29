@@ -797,7 +797,8 @@ class GitWorktree:
 @pytest.fixture()
 def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     worktree_root = tmp_path / "operator-controlled" / "worktrees"
-    worktree_root.mkdir(parents=True)
+    worktree_root.mkdir(mode=0o700, parents=True)
+    worktree_root.chmod(0o700)
     monkeypatch.setattr(
         autoresearch_runner,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
@@ -817,6 +818,7 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     _git(target_checkout, "add", "README.md")
     _git(target_checkout, "commit", "-m", "baseline")
     _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    workspace.chmod(0o700)
     manifest = {
         "schema_version": "quantipy-experiment-v2",
         "experiment_id": "cli-runtime-audit",

@@ -2047,7 +2047,8 @@ def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktree:
     target_checkout = tmp_path / "target"
     workspace = autoresearch_worktree_root / "workspace"
-    autoresearch_worktree_root.mkdir(parents=True)
+    autoresearch_worktree_root.mkdir(mode=0o700, parents=True)
+    autoresearch_worktree_root.chmod(0o700)
     _git(tmp_path, "init", "--initial-branch=main", str(target_checkout))
     _git(target_checkout, "config", "user.email", "autoresearch@example.test")
     _git(target_checkout, "config", "user.name", "Autoresearch Test")
@@ -2055,6 +2056,7 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     _git(target_checkout, "add", "README.md")
     _git(target_checkout, "commit", "-m", "baseline")
     _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    workspace.chmod(0o700)
     (workspace / "experiment.txt").write_text("implementation\n", encoding="utf-8")
     _git(workspace, "add", "experiment.txt")
     _git(workspace, "commit", "-m", "implementation")
@@ -8349,6 +8351,34 @@ def test_workspace_validation_rejects_tmp_implementation_workspace(
         validate_artifact_workspace(state, artifact)
 
 
+def test_workspace_validation_rejects_group_writable_worktree_root(
+    git_worktree: GitWorktree,
+) -> None:
+    git_worktree.workspace.parent.chmod(0o775)
+    artifact = _implementation_artifact(git_worktree)
+    state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
+
+    with pytest.raises(AutoresearchValidationError, match="mode-0700"):
+        validate_artifact_workspace(state, artifact)
+
+
+def test_workspace_validation_rejects_group_writable_workspace(
+    git_worktree: GitWorktree,
+) -> None:
+    manifest_path, manifest_sha256, _, _, commit_sha, _ = _write_quantipy_v2_run(git_worktree)
+    git_worktree.workspace.chmod(0o775)
+    artifact = replace(
+        _implementation_artifact(git_worktree),
+        commit_sha=commit_sha,
+        experiment_manifest_path=manifest_path,
+        experiment_manifest_sha256=manifest_sha256,
+    )
+    state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
+
+    with pytest.raises(AutoresearchValidationError, match="mode-0700"):
+        validate_artifact_workspace(state, artifact)
+
+
 def test_workspace_validation_rejects_missing_operator_worktree_root(
     git_worktree: GitWorktree,
     monkeypatch: pytest.MonkeyPatch,
@@ -8555,12 +8585,33 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
     assert "Workspace isolation contract" in prompt
     assert "disposable git worktree" in prompt
     assert json.dumps(str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT)) in prompt
+    assert "umask 077" in prompt
     assert "mkdir -p /home/dev/.openclaw/autoresearch/worktrees" in prompt
+    assert "chmod 700" in prompt
+    assert "mode 0700" in prompt
+    assert "working_directory" in prompt
+    assert "authoritative target checkout" in prompt
     assert "never use /tmp" in prompt
     assert "31G tmpfs" in prompt
     assert "Commit all accepted implementation changes" in prompt
     assert "workspace_path" in prompt
     assert "commit_sha" in prompt
+
+
+def test_fix_test_prompt_contains_private_workspace_and_cwd_contract(
+    git_worktree: GitWorktree,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.FIX_TEST,
+        implementation_result=_implementation_artifact(git_worktree),
+    )
+
+    prompt = autoresearch_runner._workspace_isolation_contract(state, Phase.FIX_TEST)
+
+    assert "owned non-symlink" in prompt
+    assert "mode 0700" in prompt
+    assert "working_directory and spawned process cwd" in prompt
+    assert "authoritative target checkout" in prompt
 
 
 def test_alpha_implementation_prompt_batches_history_and_hydrates_union_once(

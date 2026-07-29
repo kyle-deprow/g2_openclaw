@@ -396,11 +396,20 @@ guardrails exist only to keep execution clean:
   default allowlisted local file.
 - All implementation and Fix/Test workspaces must be under the exact canonical
   operator-controlled root `/home/dev/.openclaw/autoresearch/worktrees`; never
-  use `/tmp` or any other root. Create that parent with `mkdir -p` before
-  `git worktree add`. `/tmp` is a 31G tmpfs and each Quantipy worktree virtualenv
-  is about 1.5G, so stale iteration worktrees can exhaust it. Fix/Test reuses
-  the exact persisted implementation worktree and accepted experiment commit;
-  it never creates another worktree.
+  use `/tmp` or any other root. Before `git worktree add`, run `umask 077` and
+  `mkdir -p` for that parent, run `chmod 700` on the parent, and verify that
+  the current user owns the parent with mode `0700`. After creation, run
+  `chmod 700` on the worktree directory and verify that the current user owns
+  it with mode `0700`; artifact attestation rejects untrusted group/world-writable
+  worktree ancestors (the shared same-host policy permits a root-owned sticky
+  directory such as `/tmp`). `/tmp` is a 31G
+  tmpfs and each Quantipy worktree virtualenv is about 1.5G, so stale iteration
+  worktrees can exhaust it. Fix/Test reuses the exact persisted implementation
+  worktree and accepted experiment commit; it never creates another worktree.
+  Every detached implementation, prewarm, and Fix/Test manifest must set
+  `working_directory` and the launcher must spawn the process with `cwd` set to
+  that exact worktree path; never run those commands from the authoritative
+  target checkout.
 - `gateway-cli autoresearch-advance` mechanically verifies implementation and
   fix artifacts: `workspace_path` is the strict canonical resolved worktree
   path (no symlink, `..`, or other alias), the workspace exists, is a registered
@@ -630,8 +639,13 @@ Implementation requirements:
 - Create the disposable Git worktree under the exact canonical root
   `/home/dev/.openclaw/autoresearch/worktrees` (for example,
   `/home/dev/.openclaw/autoresearch/worktrees/quantipy-i{iteration}-implementation`).
-  First run `mkdir -p /home/dev/.openclaw/autoresearch/worktrees`; the root
-  itself must exist and be canonical before the artifact can be accepted.
+  First run `umask 077 && mkdir -p /home/dev/.openclaw/autoresearch/worktrees &&
+  chmod 700 /home/dev/.openclaw/autoresearch/worktrees`, then verify current-user
+  ownership and mode `0700` for the root and the created worktree; the root itself
+  must exist and be canonical before the artifact can be accepted.
+  Set every detached prewarm manifest's `working_directory` and launch its
+  process with `cwd` set to this exact worktree path, not
+  `/home/dev/repos/quantipy`.
   Never use `/tmp`: it is a 31G tmpfs, while each Quantipy worktree virtualenv
   is about 1.5G and stale iterations exhaust the filesystem.
 - Module path: `src/quantipy/alpha/<strategy_name>/`.
@@ -949,8 +963,10 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
   it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
   the Fix/Test artifact must report that same canonical path. Paths outside
-  that root are invalid. Never create another worktree. Before editing,
-  preserve unrelated work and use only already-authoritative human/Codex shared
+  that root are invalid. Never create another worktree. Before editing, verify
+  that workspace is an owned non-symlink directory with mode `0700`; otherwise
+  stop and report the infrastructure blocker. Preserve unrelated work and use
+  only already-authoritative human/Codex shared
   infrastructure history; never edit shared infrastructure, and fail closed if
   reconciliation is ambiguous or risks unrelated loss. These are agent
   behavioral guardrails, not mechanical proofs. The artifact-advance boundary

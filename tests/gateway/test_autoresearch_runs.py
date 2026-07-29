@@ -78,6 +78,30 @@ def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path)
     assert "--opaque-value" not in (run_dir / "manifest.json").read_text(encoding="utf-8")
 
 
+def test_prepared_run_rejects_group_writable_expected_artifact_ancestor(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    artifact_parent = tmp_path / "artifact-parent"
+    artifact_parent.mkdir(mode=0o775)
+    artifact_parent.chmod(0o775)
+    artifact_path = artifact_parent / "run.json"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(run_dir, expected_artifact_path=artifact_path)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="group/world writable"):
+        prepare_run(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            runs_root=runs_root,
+            command=("verify-command", "--opaque-value"),
+        )
+
+
 def test_complete_killed_run_reports_resource_exhaustion_with_exact_evidence(
     tmp_path: Path,
 ) -> None:
@@ -975,6 +999,7 @@ def test_historical_terminal_success_cannot_prove_expected_artifact_bytes(
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
     artifact_path = tmp_path / "receipts" / "run.json"
     artifact_path.parent.mkdir()
+    artifact_path.parent.chmod(0o700)
     artifact_path.write_bytes(b"historic")
     artifact_path.chmod(0o600)
     manifest_path = tmp_path / "manifest.json"

@@ -5627,10 +5627,12 @@ def _require_strict_canonical_workspace_path(value: str, *, label: str) -> Path:
 
 
 def _require_autoresearch_worktree_root() -> Path:
-    return _require_strict_canonical_workspace_path(
+    root = _require_strict_canonical_workspace_path(
         str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT),
         label="autoresearch worktree root",
     )
+    _require_private_directory(root, label="autoresearch worktree root")
+    return root
 
 
 def _require_workspace_under_autoresearch_worktree_root(
@@ -7752,7 +7754,6 @@ def validate_artifact_workspace(
         raise AutoresearchValidationError(
             "artifact workspace_path is not a Git worktree registered to authoritative target_repo"
         )
-
     artifact_commit = _resolve_git_commit(
         workspace,
         artifact.commit_sha,
@@ -7798,6 +7799,7 @@ def validate_artifact_workspace(
             commit_sha=artifact_commit,
             expected_sha256=artifact.experiment_manifest_sha256,
         )
+    _require_private_directory(workspace, label="artifact workspace_path")
 
 
 def _json_block(payload: Mapping[str, object], *, compact: bool = False) -> str:
@@ -8538,8 +8540,11 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
             "Workspace isolation contract:\n"
             "- Create and use a disposable git worktree for this iteration under the "
             f"canonical operator-controlled root {worktree_root}; "
-            "before git worktree add, run mkdir -p "
-            "/home/dev/.openclaw/autoresearch/worktrees. "
+            "before git worktree add, run umask 077 and mkdir -p "
+            "/home/dev/.openclaw/autoresearch/worktrees, chmod 700 on that root, "
+            "and verify the current user owns it with mode 0700; after creation, "
+            "run chmod 700 on the worktree directory and verify it is owned by "
+            "the current user with mode 0700. "
             "never use /tmp. /tmp is a 31G tmpfs, and each Quantipy worktree virtualenv "
             "is about 1.5G, so stale iteration worktrees exhaust it. Do not implement "
             "directly in the main target repo checkout.\n"
@@ -8549,6 +8554,10 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
             "the worktree cannot be made clean, fail closed and report that blocker.\n"
             "- Include the disposable worktree path in workspace_path and the accepted "
             "commit SHA in commit_sha.\n"
+            "- Set every detached manifest's working_directory and spawned process "
+            "cwd to that exact worktree path; never run prewarm or implementation "
+            "commands from the "
+            "authoritative target checkout.\n"
             "- Preserve unrelated user files such as "
             "docs/quantipy_experiment_mempalace_preload.md.\n\n"
         )
@@ -8577,6 +8586,9 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "- Before editing, require a clean or recoverable Git state. Do not discard or "
         "overwrite unrelated changes; if reconciliation is ambiguous or would lose "
         "unrelated work, fail closed and report the blocker.\n"
+        "- Before editing, verify the persisted workspace is an owned non-symlink "
+        "directory with mode 0700; if that precondition fails, stop and report the "
+        "infrastructure blocker.\n"
         "- If the authoritative target checkout advanced because human/Codex promoted "
         "shared infrastructure, incorporate that already-authoritative history into this "
         "same experiment worktree while preserving the accepted experiment commit. Never "
@@ -8590,6 +8602,9 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "infrastructure blocker without emitting a fix_result.\n"
         "- Finish with a clean, committed result. The fix_result artifact must use the same "
         "verified workspace_path exactly and report its accepted final commit SHA in commit_sha.\n"
+        "- Keep every detached Fix/Test manifest's working_directory and spawned process "
+        "cwd set to the same persisted workspace_path; never run from the authoritative "
+        "target checkout.\n"
         "- If a verification fix changes the planned ALPHA price-hydration scope, include "
         "the updated price_hydration_scope_preflight in fix_result using the same strict "
         "object shape as implementation_result. If the fix does not change scope, set "
