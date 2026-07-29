@@ -95,8 +95,11 @@ WAKE_MESSAGE = (
 RECOVERY_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
-    "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile terminal stage "
-    "outputs from task records and native Codex thread transcripts before waiting or relaunching; "
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile only the current "
+    "iteration/phase attempt labels from the authoritative state and current task ledger. "
+    "Use bounded task metadata; do not enumerate historical sessions or fetch old full "
+    "transcripts. Inspect a native Codex transcript only for an exact current label and "
+    "only when its terminal artifact is needed before relaunching; "
     "infrastructure recovery only; no research steering. Do not silently switch "
     "provider, runtime, or model. If provider/model/auth/capacity is blocked, "
     "surface the control-plane blocker exactly and do not edit Quantipy experiment "

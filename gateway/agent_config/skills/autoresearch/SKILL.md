@@ -383,11 +383,13 @@ guardrails exist only to keep execution clean:
   (`label already in use`) is a failed dispatch precondition: do not wait for
   the announcement, do not silently rename a task after spawning, and retry
   with the next unused attempt label while preserving the terminal artifact.
-- On recovery, reconcile every expected label against the task ledger and its
-  native Codex thread transcript before waiting. Consume terminal outputs even
-  if the completion announcement was missed. Relaunch only a task with no
-  recoverable terminal output, using the next attempt label; never wait
-  indefinitely for an announcement from a terminal task.
+- On recovery, reconcile only current iteration/phase attempt labels from the
+  authoritative state and current task ledger using bounded metadata. Do not
+  enumerate historical sessions or fetch old full transcripts. Inspect a native
+  Codex transcript only for an exact current label and only when its terminal
+  artifact is needed. Relaunch a task with no recoverable terminal output using
+  the next attempt label; never wait indefinitely for an announcement from a
+  terminal task.
 - `gateway-cli autoresearch-next` fails closed if the Quantipy worktree contains
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only

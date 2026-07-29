@@ -50,6 +50,7 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
+    RECOVERY_MESSAGE,
     AutoresearchSupervisor,
     NativeGatewayRPC,
     OpenClawRPC,
@@ -66,6 +67,14 @@ from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
 SignalHandler = Callable[[int, FrameType | None], None]
 SignalDisposition = SignalHandler | signal.Handlers
+
+
+def test_recovery_message_uses_bounded_current_attempt_reconciliation() -> None:
+    assert "current iteration/phase attempt labels" in RECOVERY_MESSAGE
+    assert "bounded task metadata" in RECOVERY_MESSAGE
+    assert "do not enumerate historical sessions" in RECOVERY_MESSAGE
+    assert "fetch old full transcripts" in RECOVERY_MESSAGE
+    assert "exact current label" in RECOVERY_MESSAGE
 
 
 def _operator_precondition_state_json() -> str:
