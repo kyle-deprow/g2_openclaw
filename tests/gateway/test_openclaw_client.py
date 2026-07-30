@@ -274,6 +274,76 @@ class TestHappyPath:
             server.close()
             await server.wait_closed()
 
+    async def test_one_shot_request_returns_the_source_shaped_cached_terminal_payload(
+        self,
+    ) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"server": {"version": "2026.7.1-2"}},
+                            }
+                        )
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {
+                                    "runId": "cached-run",
+                                    "status": "ok",
+                                    "summary": "completed",
+                                    "result": {
+                                        "payloads": [{"text": "owner wake completed"}],
+                                        "meta": {"durationMs": 42},
+                                    },
+                                },
+                                "cached": True,
+                            }
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            result = await _make_client(port).request_once(
+                "agent",
+                {
+                    "message": "continue",
+                    "sessionKey": "agent:autoresearch-pm:autoresearch:quantipy",
+                    "idempotencyKey": "idem",
+                },
+                timeout_seconds=1.0,
+                required_server_version="2026.7.1-2",
+            )
+        finally:
+            server.close()
+            await server.wait_closed()
+
+        assert result == {
+            "runId": "cached-run",
+            "status": "ok",
+            "summary": "completed",
+            "result": {
+                "payloads": [{"text": "owner wake completed"}],
+                "meta": {"durationMs": 42},
+            },
+        }
+
     async def test_one_shot_request_rejects_a_non_object_payload(self) -> None:
         async def handler(ws: ServerConnection) -> None:
             await ws.send(

@@ -24,6 +24,7 @@ QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
 CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"
 MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
+G2_CONTROL_MCP_MODULE="gateway.g2_control_mcp_server"
 SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
@@ -47,10 +48,8 @@ REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
+CODEX_APP_SERVER_CLI_RESOLVED=""
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
-MEMPALACE_FULL_AGENT_IDS=(
-  "autoresearch-pm"
-)
 PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS=(
   "sessions_spawn"
   "sessions_yield"
@@ -71,6 +70,36 @@ MEMPALACE_READONLY_AGENT_IDS=(
   "fixer"
 )
 CODEX_NATIVE_STAGE_AGENT_IDS=("${MEMPALACE_READONLY_AGENT_IDS[@]}")
+MEMPALACE_READONLY_SERVER_AGENT_IDS=(
+  "main"
+  "autoresearch-pm"
+  "${MEMPALACE_READONLY_AGENT_IDS[@]}"
+)
+G2_CONTROL_SERVER_AGENT_IDS=("main")
+MAIN_OPENCLAW_TOOL_ALLOW_IDS=(
+  "g2-control__g2_autoresearch_status"
+  "g2-control__g2_autoresearch_start"
+  "g2-control__g2_autoresearch_stop"
+  "mempalace-readonly__mempalace_status"
+  "mempalace-readonly__mempalace_search"
+  "mempalace-readonly__mempalace_get_drawer"
+  "mempalace-readonly__mempalace_list_drawers"
+  "mempalace-readonly__mempalace_list_wings"
+  "mempalace-readonly__mempalace_list_rooms"
+  "mempalace-readonly__mempalace_get_taxonomy"
+  "mempalace-readonly__mempalace_get_aaak_spec"
+  "mempalace-readonly__mempalace_diary_read"
+  "mempalace-readonly__mempalace_kg_query"
+  "mempalace-readonly__mempalace_kg_timeline"
+  "mempalace-readonly__mempalace_kg_stats"
+  "mempalace-readonly__mempalace_traverse"
+  "mempalace-readonly__mempalace_find_tunnels"
+  "mempalace-readonly__mempalace_follow_tunnels"
+  "mempalace-readonly__mempalace_graph_stats"
+  "mempalace-readonly__mempalace_list_tunnels"
+  "mempalace-readonly__mempalace_list_hallways"
+  "mempalace-readonly__mempalace_memories_filed_away"
+)
 CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS=(
   "context-curator"
   "debater-microstructure"
@@ -79,24 +108,6 @@ CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS=(
   "debater-theory"
   "debater-implementation"
   "consensus-arbiter"
-)
-MEMPALACE_MUTATION_TOOL_NAMES=(
-  "mempalace_add_drawer"
-  "mempalace_check_duplicate"
-  "mempalace_checkpoint"
-  "mempalace_create_tunnel"
-  "mempalace_delete_by_source"
-  "mempalace_delete_drawer"
-  "mempalace_delete_hallway"
-  "mempalace_delete_tunnel"
-  "mempalace_diary_write"
-  "mempalace_hook_settings"
-  "mempalace_kg_add"
-  "mempalace_kg_invalidate"
-  "mempalace_mine"
-  "mempalace_reconnect"
-  "mempalace_sync"
-  "mempalace_update_drawer"
 )
 RUNTIME_CAP_ENV_LINES=(
   'UMask=0077'
@@ -198,28 +209,6 @@ SQL
     fi
     echo "  ${AGENT_ID} → ${target_db}"
   done
-}
-
-build_mempalace_mutation_policy_ids_json() {
-  local tool_names_json
-  tool_names_json="$(printf '%s\n' "${MEMPALACE_MUTATION_TOOL_NAMES[@]}" | jq -Rsc 'split("\n")[:-1]')"
-  jq -cn --argjson tool_names "${tool_names_json}" '
-    [$tool_names[] | "mempalace__\(.)"]
-  '
-}
-
-build_mempalace_obsolete_mutation_alias_ids_json() {
-  local tool_names_json
-  tool_names_json="$(printf '%s\n' "${MEMPALACE_MUTATION_TOOL_NAMES[@]}" | jq -Rsc 'split("\n")[:-1]')"
-  jq -cn --argjson tool_names "${tool_names_json}" '
-    def obsolete_aliases($tool_name):
-      [
-        $tool_name,
-        "mempalace.\($tool_name)",
-        "mcp__mempalace__\($tool_name)"
-      ];
-    [$tool_names[] | obsolete_aliases(.)[]]
-  '
 }
 
 build_string_array_json() {
@@ -470,7 +459,7 @@ require_openclaw_supported() {
 }
 
 require_codex_runtime_exact() {
-  local inspect_json plugin_version app_server_version
+  local inspect_json plugin_version app_server_version app_server_path
   if ! inspect_json="$(run_openclaw_cli plugins inspect codex --json)"; then
     echo "ERROR: Could not inspect the required Codex plugin." >&2
     return 1
@@ -490,6 +479,11 @@ require_codex_runtime_exact() {
     | select(.name == "@openai/codex")
     | .spec
   ' | head -n1)"
+  app_server_path="$(echo "${inspect_json}" | jq -r '
+    .plugin.dependencyStatus.dependencies[]?
+    | select(.name == "@openai/codex")
+    | .resolvedPath // empty
+  ' | head -n1)"
   if [[ "${plugin_version}" != "${REQUIRED_CODEX_PLUGIN_VERSION}" ]]; then
     echo "ERROR: Codex plugin ${plugin_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_PLUGIN_VERSION}." >&2
     echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
@@ -498,6 +492,11 @@ require_codex_runtime_exact() {
   if [[ "${app_server_version}" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
     echo "ERROR: Embedded @openai/codex ${app_server_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_APP_SERVER_VERSION}." >&2
     echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
+    return 1
+  fi
+  CODEX_APP_SERVER_CLI_RESOLVED="${app_server_path}/bin/codex.js"
+  if [[ ! -f "${CODEX_APP_SERVER_CLI_RESOLVED}" ]]; then
+    echo "ERROR: Embedded Codex CLI not found at ${CODEX_APP_SERVER_CLI_RESOLVED}." >&2
     return 1
   fi
   echo "Codex runtime validated: @openclaw/codex ${plugin_version} embeds @openai/codex ${app_server_version}"
@@ -596,11 +595,10 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
-MEMPALACE_MUTATION_DENY_IDS_JSON="$(build_mempalace_mutation_policy_ids_json)"
-MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON="$(build_mempalace_obsolete_mutation_alias_ids_json)"
-MEMPALACE_FULL_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_FULL_AGENT_IDS[@]}")"
-MEMPALACE_READONLY_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_AGENT_IDS[@]}")"
+MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_SERVER_AGENT_IDS[@]}")"
+G2_CONTROL_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${G2_CONTROL_SERVER_AGENT_IDS[@]}")"
 PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON="$(build_string_array_json "${PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS[@]}")"
+MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON="$(build_string_array_json "${MAIN_OPENCLAW_TOOL_ALLOW_IDS[@]}")"
 
 if [[ ! -f "${REPO_CONFIG}" ]]; then
   echo "ERROR: Repo config not found at ${REPO_CONFIG}" >&2
@@ -696,7 +694,6 @@ fi
 REQUIRED_REPO_SKILLS=(
   "autoresearch"
   "codex-subagents"
-  "mempalace"
   "mempalace-readonly"
   "quantipy-methodology"
 )
@@ -845,34 +842,37 @@ MERGED=$(echo "${MERGED}" | jq \
   --arg cache "${FASTEMBED_CACHE_PATH}" \
   --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
   --arg offline "${HF_HUB_OFFLINE}" \
-  --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
-  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
-  .mcp.servers.mempalace = {
-    "command": $cmd,
-    "args": ["-m", "mempalace.mcp_server", "--palace", $palace],
-    "codex": {
-      "agents": $full_agents
+  --arg repo "${REPO_ROOT}" \
+  --arg python "${PYTHON_BIN}" \
+  --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
+  --argjson readonly_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+  --argjson g2_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" '
+  .mcp.servers = {
+    "mempalace-readonly": {
+      "command": $cmd,
+      "args": [$wrapper, "--palace", $palace],
+      "codex": {
+        "agents": $readonly_agents
+      },
+      "env": {
+        "FASTEMBED_CACHE_PATH": $cache,
+        "MEMPALACE_EMBEDDING_MODEL": $model,
+        "HF_HUB_OFFLINE": $offline
+      }
     },
-    "env": {
-      "FASTEMBED_CACHE_PATH": $cache,
-      "MEMPALACE_EMBEDDING_MODEL": $model,
-      "HF_HUB_OFFLINE": $offline
-    }
-  }
-  | .mcp.servers."mempalace-readonly" = {
-    "command": $cmd,
-    "args": [$wrapper, "--palace", $palace],
-    "codex": {
-      "agents": $readonly_agents
-    },
-    "env": {
-      "FASTEMBED_CACHE_PATH": $cache,
-      "MEMPALACE_EMBEDDING_MODEL": $model,
-      "HF_HUB_OFFLINE": $offline
+    "g2-control": {
+      "command": $python,
+      "args": ["-m", $g2_module],
+      "codex": {
+        "agents": $g2_agents,
+        "defaultToolsApprovalMode": "approve"
+      },
+      "env": {
+        "PYTHONPATH": $repo
+      }
     }
   }
 ')
-echo "Resolved required MemPalace MCP: ${MEMPALACE_PYTHON} --palace ${MEMPALACE_PALACE}"
 echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
 echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
 
@@ -1017,32 +1017,26 @@ MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
 
 sanitize_stale_coding_provider_keys
 
+MERGED=$(echo "${MERGED}" | jq '
+  del(.plugins.entries.codex.config.codexDynamicToolsExclude)
+  | .plugins.entries.codex.config.nativeToolSurfaceEnabled = false
+')
+
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 
-# Read-only stage agents must deny exactly the internal OpenClaw MCP tool.name ids.
-# Dotted names are Codex-facing display/docs ids only, and historical bare/mcp__
-# aliases are rejected instead of accepted as compatibility forms.
+# No model thread is projected a write-capable MemPalace server. The platform
+# finalizer is the sole write boundary, so stage tool-deny compatibility lists
+# must not survive in the managed config.
 if ! echo "${MERGED}" | jq -e \
   --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
-  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
-  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" \
-  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" '
+  --argjson readonly_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" '
   def denies: (.tools.deny // []);
-  def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
+  def is_stage: (.id != "main" and .id != "autoresearch-pm");
   ([.agents.list[] | select(.id == "autoresearch-pm") | select(denies == $pm_native_codex_denies)] | length) == 1
   and
-  ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
-  and (([
-    .agents.list[] | denies[]?
-  ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
-  and (([
-    .agents.list[] | select(.id == "autoresearch-pm") | denies[]?
-  ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
+  ([.agents.list[] | select(is_stage) | select(.tools? != null)] | length) == 0
 ' >/dev/null; then
-  echo "ERROR: Every read-only autoresearch stage agent must deny exactly the 16 canonical MemPalace mutation policy IDs." >&2
-  echo "       Canonical IDs use internal server__tool form: mempalace__mempalace_<mutation>." >&2
-  echo "       Bare, dotted, and mcp__ MemPalace mutation aliases are obsolete and forbidden." >&2
-  echo "       autoresearch-pm must deny OpenClaw/session discovery and delegation tools while retaining MemPalace mutator access for final experiment logging." >&2
+  echo "ERROR: Autoresearch models must expose only read-only MemPalace and no stage write-tool remnants." >&2
   exit 1
 fi
 
@@ -1057,13 +1051,16 @@ if ! echo "${MERGED}" | jq -e \
   --arg cache "${FASTEMBED_CACHE_PATH}" \
   --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
   --arg offline "${HF_HUB_OFFLINE}" \
-  --argjson full_agents "${MEMPALACE_FULL_AGENT_IDS_JSON}" \
-  --argjson readonly_agents "${MEMPALACE_READONLY_AGENT_IDS_JSON}" \
+  --arg repo "${REPO_ROOT}" \
+  --arg python "${PYTHON_BIN}" \
+  --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
+  --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+  --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
   --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
-  --argjson mempalace_mutation_denies "${MEMPALACE_MUTATION_DENY_IDS_JSON}" \
-  --argjson obsolete_mempalace_mutation_aliases "${MEMPALACE_OBSOLETE_MUTATION_ALIAS_IDS_JSON}" '
+  --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
   def denies: (.tools.deny // []);
-  def is_stage: (.id as $id | ($readonly_agents | index($id)) != null);
+  def main_allow: (.tools.allow // []);
+  def is_stage: (.id != "main" and .id != "autoresearch-pm");
   def expected_models: {
     "main": "openai/gpt-5.4",
     "autoresearch-pm": $pm,
@@ -1080,6 +1077,13 @@ if ! echo "${MERGED}" | jq -e \
   };
   (.agents.defaults.thinkingDefault == "high")
   and ((.plugins.allow // []) | contains(["codex"]))
+  and (.plugins.entries.codex.enabled == true)
+  and (.plugins.entries.codex.config.nativeToolSurfaceEnabled == false)
+  and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
+  and (.plugins.entries.codex.config.appServer.sandbox == "workspace-write")
+  and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
+  and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir == "/home/dev/.openclaw/autoresearch/model-workspaces")
+  and (.plugins.entries.codex.config.appServer.networkProxy? == null)
   and (.agents.defaults.maxConcurrent == 2)
   and (.agents.defaults.subagents.maxConcurrent == 1)
   and (.agents.defaults.subagents.maxChildrenPerAgent? == null)
@@ -1087,30 +1091,29 @@ if ! echo "${MERGED}" | jq -e \
   and (.agents.defaults.compaction.mode == "default")
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
-  and (.mcp.servers.mempalace.command == $cmd)
-  and (.mcp.servers.mempalace.args == ["-m", "mempalace.mcp_server", "--palace", $palace])
-  and ((.mcp.servers.mempalace.codex.agents // []) == $full_agents)
-  and (.mcp.servers.mempalace.env == {
-    "FASTEMBED_CACHE_PATH": $cache,
-    "MEMPALACE_EMBEDDING_MODEL": $model,
-    "HF_HUB_OFFLINE": $offline
-  })
+  and ((.mcp.servers | keys | sort) == (["g2-control", "mempalace-readonly"] | sort))
   and (.mcp.servers."mempalace-readonly".command == $cmd)
   and (.mcp.servers."mempalace-readonly".args == [$wrapper, "--palace", $palace])
-  and ((.mcp.servers."mempalace-readonly".codex.agents // []) == $readonly_agents)
+  and ((.mcp.servers."mempalace-readonly".codex.agents // []) == $readonly_server_agents)
   and (.mcp.servers."mempalace-readonly".env == {
     "FASTEMBED_CACHE_PATH": $cache,
     "MEMPALACE_EMBEDDING_MODEL": $model,
     "HF_HUB_OFFLINE": $offline
   })
+  and (.mcp.servers."g2-control".command == $python)
+  and (.mcp.servers."g2-control".args == ["-m", $g2_module])
+  and ((.mcp.servers."g2-control".codex.agents // []) == $g2_server_agents)
+  and (.mcp.servers."g2-control".codex.defaultToolsApprovalMode == "approve")
+  and (.mcp.servers."g2-control".env == {"PYTHONPATH": $repo})
   and (([.agents.list[].id] | sort) == (expected_models | keys | sort))
   and all(.agents.list[]; .model.primary == expected_models[.id])
   and all(.agents.list[]; .thinkingDefault == "high")
+  and ([.agents.list[] | select(.id == "main" and .tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
   and ([.agents.list[] | select(
     .id == "autoresearch-pm"
     and .model.primary == $pm
     and .thinkingDefault == "high"
-    and ((.skills // []) | contains(["mempalace", "autoresearch"]))
+    and ((.skills // []) == ["mempalace-readonly", "autoresearch"])
     and denies == $pm_native_codex_denies
     and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
@@ -1120,27 +1123,20 @@ if ! echo "${MERGED}" | jq -e \
     and .thinkingDefault == "high"
     and (((.skills // []) | index("mempalace")) == null)
     and (((.skills // []) | index("autoresearch")) == null)
-    and (((.skills // []) | index("mempalace-readonly")) == null)
+    and ((.skills // []) == ["mempalace-readonly"])
     and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
   and ([.agents.list[] | select((.subagents.allowAgents? // []) | length > 0)] | length) == 0
-  and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("mempalace")) != null)] | length) == 0
+  and ([.agents.list[] | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
   and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("autoresearch")) != null)] | length) == 0
-  and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
   and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
-  and ([.agents.list[] | select(is_stage) | select(denies != $mempalace_mutation_denies)] | length) == 0
-  and (([
-    .agents.list[] | denies[]?
-  ] | map(select(. as $tool | $obsolete_mempalace_mutation_aliases | index($tool))) | length) == 0)
-  and (([
-    .agents.list[] | select(.id == "autoresearch-pm") | denies[]?
-  ] | map(select(. as $tool | ($mempalace_mutation_denies + $obsolete_mempalace_mutation_aliases) | index($tool))) | length) == 0)
+  and ([.agents.list[] | select(.id != "autoresearch-pm" and .id != "main") | select(.tools? != null)] | length) == 0
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, MemPalace full/read-only MCP split, stage skill scopes, Quantipy methodology skill, and memory tool denies." >&2
+  echo "       Check plugins.allow, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, read-only MemPalace projection, and stage skill scopes." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface split, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, MemPalace split, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface split, read-only-only MemPalace projection, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, Quantipy methodology skill, built-in memory disabled."
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
@@ -1219,7 +1215,169 @@ for name, model in expected.items():
         raise SystemExit(f"native Codex stage agent {name} must use {model}")
     if data.get("model_reasoning_effort") != "high":
         raise SystemExit(f"native Codex stage agent {name} must use high reasoning")
+    if "mcp_servers" in data:
+        raise SystemExit(f"native Codex stage agent {name} must not override inherited MCP servers")
 PY
+}
+
+write_codex_runtime_config() {
+  local codex_home="$1"
+  local agent_id="$2"
+  mkdir -p "${codex_home}"
+  CODEX_RUNTIME_AGENT_ID="${agent_id}" \
+  CODEX_RUNTIME_CONFIG_PATH="${codex_home}/config.toml" \
+  CODEX_RUNTIME_MEMPALACE_PYTHON="${MEMPALACE_PYTHON}" \
+  CODEX_RUNTIME_MEMPALACE_WRAPPER="${MEMPALACE_READONLY_WRAPPER_DST}" \
+  CODEX_RUNTIME_MEMPALACE_PALACE="${MEMPALACE_PALACE}" \
+  CODEX_RUNTIME_FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH}" \
+  CODEX_RUNTIME_MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL}" \
+  CODEX_RUNTIME_HF_HUB_OFFLINE="${HF_HUB_OFFLINE}" \
+  CODEX_RUNTIME_G2_PYTHON="${PYTHON_BIN}" \
+  CODEX_RUNTIME_G2_MODULE="${G2_CONTROL_MCP_MODULE}" \
+  CODEX_RUNTIME_REPO_ROOT="${REPO_ROOT}" \
+  "${PYTHON_BIN}" <<'PY'
+import json
+import os
+from pathlib import Path
+
+
+def quoted(value: str) -> str:
+    return json.dumps(value)
+
+
+def array(values: list[str]) -> str:
+    return "[" + ", ".join(quoted(value) for value in values) + "]"
+
+
+agent_id = os.environ["CODEX_RUNTIME_AGENT_ID"]
+config_path = Path(os.environ["CODEX_RUNTIME_CONFIG_PATH"])
+mempalace_server = {
+    "command": os.environ["CODEX_RUNTIME_MEMPALACE_PYTHON"],
+    "args": [
+        os.environ["CODEX_RUNTIME_MEMPALACE_WRAPPER"],
+        "--palace",
+        os.environ["CODEX_RUNTIME_MEMPALACE_PALACE"],
+    ],
+    "env": {
+        "FASTEMBED_CACHE_PATH": os.environ["CODEX_RUNTIME_FASTEMBED_CACHE_PATH"],
+        "MEMPALACE_EMBEDDING_MODEL": os.environ["CODEX_RUNTIME_MEMPALACE_EMBEDDING_MODEL"],
+        "HF_HUB_OFFLINE": os.environ["CODEX_RUNTIME_HF_HUB_OFFLINE"],
+    },
+}
+servers = {"mempalace-readonly": mempalace_server}
+if agent_id == "main":
+    servers["g2-control"] = {
+        "command": os.environ["CODEX_RUNTIME_G2_PYTHON"],
+        "args": ["-m", os.environ["CODEX_RUNTIME_G2_MODULE"]],
+        "env": {"PYTHONPATH": os.environ["CODEX_RUNTIME_REPO_ROOT"]},
+        "default_tools_approval_mode": "approve",
+    }
+
+lines = [
+    'approval_policy = "never"',
+    'sandbox_mode = "workspace-write"',
+    "",
+    "[sandbox_workspace_write]",
+    "network_access = true",
+    'writable_roots = ["/home/dev/.openclaw/autoresearch/model-workspaces", "/home/dev/.openclaw/autoresearch/stage-inbox"]',
+    "exclude_tmpdir_env_var = false",
+    "exclude_slash_tmp = false",
+    "",
+]
+for server_name in sorted(servers):
+    server = servers[server_name]
+    lines.extend(
+        [
+            f"[mcp_servers.{quoted(server_name)}]",
+            f"command = {quoted(server['command'])}",
+            f"args = {array(server['args'])}",
+        ]
+    )
+    default_tools_approval_mode = server.get("default_tools_approval_mode")
+    if default_tools_approval_mode is not None:
+        lines.append(f"default_tools_approval_mode = {quoted(default_tools_approval_mode)}")
+    env = server.get("env", {})
+    if env:
+        lines.append(f"[mcp_servers.{quoted(server_name)}.env]")
+        for key in sorted(env):
+            lines.append(f"{key} = {quoted(env[key])}")
+    lines.append("")
+config_path.write_text("\n".join(lines), encoding="utf-8")
+PY
+}
+
+validate_codex_runtime_config() {
+  local codex_home="$1"
+  local agent_id="$2"
+  local config_path="${codex_home}/config.toml"
+  "${PYTHON_BIN}" - "${config_path}" "${agent_id}" \
+    "${MEMPALACE_PYTHON}" "${MEMPALACE_READONLY_WRAPPER_DST}" "${MEMPALACE_PALACE}" \
+    "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+agent_id = sys.argv[2]
+mempalace_python = sys.argv[3]
+mempalace_wrapper = sys.argv[4]
+mempalace_palace = sys.argv[5]
+g2_python = sys.argv[6]
+g2_module = sys.argv[7]
+repo_root = sys.argv[8]
+data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+if data.get("approval_policy") != "never":
+    raise SystemExit("Codex runtime config must set approval_policy=never")
+if data.get("sandbox_mode") != "workspace-write":
+    raise SystemExit("Codex runtime config must set sandbox_mode=workspace-write")
+workspace = data.get("sandbox_workspace_write")
+if not isinstance(workspace, dict):
+    raise SystemExit("Codex runtime config missing [sandbox_workspace_write]")
+if workspace.get("network_access") is not True:
+    raise SystemExit("Codex runtime config must enable network_access for localhost Quantipy HTTP")
+if workspace.get("writable_roots") != [
+    "/home/dev/.openclaw/autoresearch/model-workspaces",
+    "/home/dev/.openclaw/autoresearch/stage-inbox",
+]:
+    raise SystemExit("Codex runtime config must scope writable_roots to model workspace and stage inbox only")
+if "permissions" in data or "default_permissions" in data or "network_proxy" in data:
+    raise SystemExit("Codex runtime config must not use unsupported permissions/network_proxy profiles")
+servers = data.get("mcp_servers")
+if not isinstance(servers, dict):
+    raise SystemExit("Codex runtime config must define direct mcp_servers")
+expected_names = {"mempalace-readonly", "g2-control"} if agent_id == "main" else {"mempalace-readonly"}
+if set(servers) != expected_names:
+    raise SystemExit(f"Codex runtime {agent_id} has wrong direct MCP server set: {sorted(servers)}")
+readonly = servers["mempalace-readonly"]
+if readonly.get("command") != mempalace_python or readonly.get("args") != [
+    mempalace_wrapper,
+    "--palace",
+    mempalace_palace,
+]:
+    raise SystemExit("Codex runtime MemPalace MCP command is not exact")
+readonly_env = readonly.get("env")
+if not isinstance(readonly_env, dict) or set(readonly_env) != {
+    "FASTEMBED_CACHE_PATH",
+    "HF_HUB_OFFLINE",
+    "MEMPALACE_EMBEDDING_MODEL",
+}:
+    raise SystemExit("Codex runtime MemPalace MCP env is not exact")
+if agent_id == "main":
+    g2 = servers["g2-control"]
+    if g2.get("command") != g2_python or g2.get("args") != ["-m", g2_module]:
+        raise SystemExit("Codex runtime g2-control MCP command is not exact")
+    if g2.get("default_tools_approval_mode") != "approve":
+        raise SystemExit("Codex runtime g2-control MCP approval mode is not exact")
+    if g2.get("env") != {"PYTHONPATH": repo_root}:
+        raise SystemExit("Codex runtime g2-control MCP env is not exact")
+PY
+  local doctor_json
+  doctor_json="$(env -u NODE_OPTIONS CODEX_HOME="${codex_home}" node "${CODEX_APP_SERVER_CLI_RESOLVED}" --strict-config doctor --json 2>&1 || true)"
+  if ! printf '%s\n' "${doctor_json}" | jq -e '.checks.config.load.status == "ok"' >/dev/null; then
+    echo "ERROR: Embedded Codex strict config validation failed for ${config_path}" >&2
+    printf '%s\n' "${doctor_json}" >&2
+    exit 1
+  fi
 }
 
 remove_legacy_codex_stage_agents() {
@@ -1285,18 +1443,26 @@ echo "Local workspace files such as USER.md and IDENTITY.md were left untouched.
 # Native Codex resolves agent definitions from the app-server's scoped
 # CODEX_HOME, not from the OpenClaw workspace. Keep that runtime source
 # synchronized for the PM and every configured stage agent.
-CODEX_NATIVE_RUNTIME_AGENT_IDS=("autoresearch-pm" "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}")
+CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "autoresearch-pm" "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}")
 echo "Copying native Codex stage agents to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
 for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
   CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
   mkdir -p "${CODEX_RUNTIME_AGENTS_DST}"
+  write_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
   remove_legacy_codex_stage_agents "${CODEX_RUNTIME_AGENTS_DST}"
-  for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
-    cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
-  done
-  validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"
-  echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_AGENTS_DST}"
+  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then
+    find "${CODEX_RUNTIME_AGENTS_DST}" -mindepth 1 -maxdepth 1 -type f -name '*.toml' -delete
+  else
+    for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
+      cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
+    done
+  fi
+  validate_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
+  if [[ "${CODEX_RUNTIME_AGENT_ID}" != "main" ]]; then
+    validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"
+  fi
+  echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_HOME}"
 done
 
 # Clean stale copies from wrong bootstrap locations without touching local
@@ -1328,6 +1494,11 @@ if [[ -d "${SKILLS_SRC}" ]]; then
     cp "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
     echo "Copied skill ${SKILL_NAME} → ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
   done
+fi
+STALE_MEMPALACE_WRITE_SKILL_DST="${SKILLS_DST}/mempalace"
+if [[ -d "${STALE_MEMPALACE_WRITE_SKILL_DST}" ]]; then
+  rm -rf -- "${STALE_MEMPALACE_WRITE_SKILL_DST}"
+  echo "Removed stale write-capable MemPalace skill ${STALE_MEMPALACE_WRITE_SKILL_DST}"
 fi
 
 # ── Manage Azure API-version preload artifact ────────────────────────────────

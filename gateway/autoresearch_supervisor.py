@@ -30,6 +30,7 @@ from gateway.autoresearch_readiness import (
     validate_state_readiness,
 )
 from gateway.autoresearch_runner import (
+    DEFAULT_AUTORESEARCH_STAGE_INBOX,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_ROOT,
     AutoresearchState,
@@ -42,8 +43,18 @@ from gateway.autoresearch_runner import (
     advance_infrastructure_verification_failure,
     build_authoritative_state_reference,
     build_receipt_catalog,
+    can_write_memory,
+    consume_stage_submission_inbox,
     expected_instruction_manifest_sha256,
+    finalize_repeat_memory_state_file,
     load_autoresearch_policy,
+    load_state_file,
+    migrate_legacy_autoresearch_workspace_state_file,
+    persist_next_iteration_state,
+    provision_quantipy_experiment_runs_root,
+    require_canonical_verification_dispatch_attestation,
+    seal_canonical_verification_dispatch_state_file,
+    start_next_iteration,
 )
 from gateway.autoresearch_runs import (
     DEFAULT_AUTORESEARCH_RUNS_ROOT,
@@ -90,7 +101,17 @@ DEFAULT_TASK_RPC_TIMEOUT_SECONDS = 30.0
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
-    "/home/dev/.openclaw/autoresearch/quantipy-state.json"
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json. The supervisor owns "
+    "final MemPalace persistence before waking this session; do not write "
+    "MemPalace from any model turn."
+)
+FINALIZED_MEMORY_WAKE_MESSAGE = (
+    "Required final MemPalace persistence was completed by the autoresearch "
+    "supervisor from authoritative state. Continue Quantipy autoresearch from "
+    "the authoritative state. First run exactly: cd /home/dev/repos/g2_openclaw "
+    "&& uv run gateway-cli autoresearch-next "
+    "/home/dev/.openclaw/autoresearch/quantipy-state.json. Do not write "
+    "MemPalace from any model turn."
 )
 RECOVERY_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
@@ -185,6 +206,10 @@ TARGET_WRITER_COMMAND_RE = re.compile(
 
 class SupervisorError(RuntimeError):
     """Base failure for strict autoresearch supervision."""
+
+
+class SupervisorCheckpointError(SupervisorError):
+    """A checkpoint could not be trusted; autonomous writes and wakes must stop."""
 
 
 class OpenClawUnavailableError(SupervisorError):
@@ -335,6 +360,13 @@ def make_idempotency_key(*, purpose: str, material: str) -> str:
     return f"autoresearch-{purpose}-{digest}"
 
 
+@dataclass(frozen=True, slots=True)
+class WakeDeliveryProof:
+    status: str
+    run_id: str | None = None
+    cached_terminal: bool = False
+
+
 class OpenClawRPC:
     """Native authenticated gateway RPC boundary shared by owner control surfaces."""
 
@@ -403,7 +435,7 @@ class OpenClawRPC:
         message: str,
         idempotency_key: str,
         shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-    ) -> str:
+    ) -> WakeDeliveryProof:
         params = json.dumps(
             {
                 "message": message,
@@ -418,15 +450,37 @@ class OpenClawRPC:
             shutdown_requested=shutdown_requested,
         )
         status = payload.get("status")
+        if not isinstance(status, str):
+            raise SupervisorError("OpenClaw wake response is missing a string status")
         session_key = payload.get("sessionKey")
-        run_id = payload.get("runId")
-        if status != "accepted" or session_key != AUTORESEARCH_OWNER_SESSION_KEY:
+        if status in {"accepted", "in_flight"} and session_key != AUTORESEARCH_OWNER_SESSION_KEY:
             raise SupervisorError(
-                "OpenClaw wake response did not accept the dedicated owner session"
+                "OpenClaw wake response did not target the dedicated owner session"
             )
+        if session_key is not None and session_key != AUTORESEARCH_OWNER_SESSION_KEY:
+            raise SupervisorError(
+                "OpenClaw wake response did not target the dedicated owner session"
+            )
+        run_id = payload.get("runId")
         if not isinstance(run_id, str) or not run_id.strip():
             raise SupervisorError("OpenClaw wake response is missing a non-empty runId")
-        return run_id
+        if status in {"accepted", "in_flight"}:
+            return WakeDeliveryProof(status=status, run_id=run_id)
+        if (
+            set(payload) == {"runId", "status", "summary", "result"}
+            and status == "ok"
+            and payload.get("summary") == "completed"
+            and isinstance(payload.get("result"), Mapping)
+            and bool(payload["result"])
+        ):
+            return WakeDeliveryProof(
+                status=status,
+                run_id=run_id,
+                cached_terminal=True,
+            )
+        raise SupervisorError(
+            "OpenClaw wake response did not prove delivery to the dedicated owner session"
+        )
 
     def delete_owner_session(self) -> bool:
         params = json.dumps(
@@ -524,6 +578,7 @@ class SupervisorOutcome(StrEnum):
     NO_ACTION = "no_action"
     NUDGED = "nudged"
     ALERT = "alert"
+    FINALIZED = "finalized"
 
 
 class RecoveryStatus(StrEnum):
@@ -784,6 +839,7 @@ class SupervisorConfig:
     expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
+    stage_inbox_path: Path = DEFAULT_AUTORESEARCH_STAGE_INBOX
 
     def __post_init__(self) -> None:
         _require_finite_positive(self.poll_interval_seconds, field_name="poll_interval_seconds")
@@ -879,8 +935,46 @@ class RecoveryRecord:
 
 
 @dataclass(slots=True)
+class MemoryWakeAcknowledgement:
+    status: str
+    acknowledged_at: float
+    run_id: str | None = None
+    cached_terminal: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, object]) -> MemoryWakeAcknowledgement:
+        status = _optional_str(raw.get("status"))
+        if status not in {"accepted", "in_flight", "ok"}:
+            raise SupervisorError(f"invalid memory wake acknowledgement status: {status!r}")
+        acknowledged_at = _optional_float(raw.get("acknowledged_at"))
+        if acknowledged_at is None or not math.isfinite(acknowledged_at) or acknowledged_at <= 0:
+            raise SupervisorError("memory wake acknowledgement requires acknowledged_at")
+        run_id = _optional_str(raw.get("run_id"))
+        cached_terminal = raw.get("cached_terminal") is True
+        if status == "ok" and not cached_terminal:
+            raise SupervisorError("cached memory wake acknowledgement must be terminal")
+        if status != "ok" and cached_terminal:
+            raise SupervisorError("non-terminal memory wake acknowledgement cannot be cached")
+        return cls(
+            status=status,
+            acknowledged_at=acknowledged_at,
+            run_id=run_id,
+            cached_terminal=cached_terminal,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "acknowledged_at": self.acknowledged_at,
+            "run_id": self.run_id,
+            "cached_terminal": self.cached_terminal,
+        }
+
+
+@dataclass(slots=True)
 class SupervisorCheckpoint:
     recovery_records: dict[str, RecoveryRecord] = field(default_factory=dict)
+    memory_wake_acknowledgements: dict[str, MemoryWakeAcknowledgement] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> SupervisorCheckpoint:
@@ -891,27 +985,56 @@ class SupervisorCheckpoint:
         except FileNotFoundError:
             return cls()
         except OSError as exc:
-            raise SupervisorError(f"failed to read supervisor checkpoint {path}: {exc}") from exc
+            raise SupervisorCheckpointError(
+                f"failed to read supervisor checkpoint {path}: {exc}"
+            ) from exc
         except json.JSONDecodeError as exc:
-            raise SupervisorError(f"invalid supervisor checkpoint JSON: {path}") from exc
+            raise SupervisorCheckpointError(f"invalid supervisor checkpoint JSON: {path}") from exc
         if not isinstance(raw, Mapping):
-            raise SupervisorError(f"invalid supervisor checkpoint payload: {path}")
+            raise SupervisorCheckpointError(f"invalid supervisor checkpoint payload: {path}")
         records_raw = raw.get("recovery_records", {})
         if not isinstance(records_raw, Mapping):
-            raise SupervisorError("recovery_records must be an object")
+            raise SupervisorCheckpointError("recovery_records must be an object")
         records: dict[str, RecoveryRecord] = {}
         for key, value in records_raw.items():
             if not isinstance(key, str) or not isinstance(value, Mapping):
-                raise SupervisorError("recovery_records entries must be keyed objects")
-            records[key] = RecoveryRecord.from_dict(value)
-        return cls(recovery_records=records)
+                raise SupervisorCheckpointError("recovery_records entries must be keyed objects")
+            try:
+                records[key] = RecoveryRecord.from_dict(value)
+            except SupervisorError as exc:
+                raise SupervisorCheckpointError(
+                    f"invalid supervisor checkpoint recovery record: {key}"
+                ) from exc
+        acks_raw = raw.get("memory_wake_acknowledgements", {})
+        if not isinstance(acks_raw, Mapping):
+            raise SupervisorCheckpointError("memory_wake_acknowledgements must be an object")
+        acknowledgements: dict[str, MemoryWakeAcknowledgement] = {}
+        for key, value in acks_raw.items():
+            if not isinstance(key, str) or not isinstance(value, Mapping):
+                raise SupervisorCheckpointError(
+                    "memory_wake_acknowledgements entries must be keyed objects"
+                )
+            try:
+                acknowledgements[key] = MemoryWakeAcknowledgement.from_dict(value)
+            except SupervisorError as exc:
+                raise SupervisorCheckpointError(
+                    f"invalid supervisor checkpoint memory wake acknowledgement: {key}"
+                ) from exc
+        return cls(
+            recovery_records=records,
+            memory_wake_acknowledgements=acknowledgements,
+        )
 
     def save(self, path: Path) -> None:
         serialized = json.dumps(
             {
+                "memory_wake_acknowledgements": {
+                    key: acknowledgement.to_dict()
+                    for key, acknowledgement in self.memory_wake_acknowledgements.items()
+                },
                 "recovery_records": {
                     key: record.to_dict() for key, record in self.recovery_records.items()
-                }
+                },
             },
             indent=2,
             sort_keys=True,
@@ -990,6 +1113,20 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def memory_wake_acknowledgement_key(state: AutoresearchState) -> str:
+    """Stable controller-state key for one finalized memory wake proof."""
+    decision = state.final_decision
+    receipt = state.memory_verification_receipt
+    if decision is None or receipt is None or not state.memory_written:
+        raise SupervisorError("memory wake acknowledgement requires finalized memory state")
+    if decision.experiment_id != receipt.experiment_id:
+        raise SupervisorError("memory wake acknowledgement experiment_id mismatch")
+    return (
+        "memory-finalized:"
+        f"{state.iteration}:{decision.experiment_id}:{receipt.verified_rows_digest}"
+    )
+
+
 def _structured_log(level: int, event: str, **fields: object) -> None:
     logger.log(level, json.dumps({"event": event, **fields}, sort_keys=True, default=str))
 
@@ -1013,11 +1150,19 @@ class AutoresearchSupervisor:
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
     ) -> SupervisorResult:
-        state = self._load_state()
-        if state.suspended:
-            return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
-        if self._is_terminal_state(state):
-            return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
+        try:
+            state = self._load_state()
+            if state.suspended:
+                return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
+            if self._is_terminal_state(state):
+                return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
+        except SupervisorCheckpointError as exc:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.checkpoint_corrupt",
+                detail=str(exc),
+            )
+            return SupervisorResult(SupervisorOutcome.ALERT, f"checkpoint_corrupt: {exc}")
         try:
             self._validate_dispatchable_state(state)
         except SupervisorError as exc:
@@ -1026,9 +1171,27 @@ class AutoresearchSupervisor:
                 SupervisorOutcome.ALERT,
                 f"platform_readiness_blocked: {exc}",
             )
+        writers = self._active_target_repo_writer_processes(state)
+        if writers:
+            return SupervisorResult(SupervisorOutcome.NO_ACTION, "target_repo_writer_active")
+        lifecycle_result = self._prepare_controller_lifecycle(
+            state,
+            shutdown_requested=shutdown_requested,
+        )
+        if lifecycle_result is not None:
+            return lifecycle_result
+        finalization_result = self._finalize_required_memory(
+            state,
+            shutdown_requested=shutdown_requested,
+        )
+        if finalization_result is not None:
+            return finalization_result
         run_record_result = self._consume_terminal_verification_run(state)
         if run_record_result is not None:
             return run_record_result
+        inbox_result = self._consume_stage_submission_inbox(state)
+        if inbox_result is not None:
+            return inbox_result
         if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
             lifecycle_result = self._owner_lifecycle_guard(state)
             if lifecycle_result is not None and lifecycle_result.reason == "active_owner_session":
@@ -1116,6 +1279,206 @@ class AutoresearchSupervisor:
             key_prefix="stale_state",
         )
 
+    def _prepare_controller_lifecycle(
+        self,
+        state: AutoresearchState,
+        *,
+        shutdown_requested: ShutdownRequested,
+    ) -> SupervisorResult | None:
+        try:
+            readiness = load_platform_readiness(self.config.readiness_manifest_path)
+            context = AutoresearchValidationContext.from_readiness(readiness)
+            policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+            migrated = migrate_legacy_autoresearch_workspace_state_file(
+                self.config.state_path,
+                policy=policy,
+                validation_context=context,
+            )
+            if migrated != state:
+                return SupervisorResult(SupervisorOutcome.NUDGED, "legacy_workspace_migrated")
+            if state.phase is Phase.VERIFICATION and state.implementation_result is not None:
+                sealed = seal_canonical_verification_dispatch_state_file(
+                    self.config.state_path,
+                    policy=policy,
+                    validation_context=context,
+                )
+                require_canonical_verification_dispatch_attestation(
+                    self.config.state_path,
+                    policy=policy,
+                    validation_context=context,
+                    expected_state_reference_sha256=build_authoritative_state_reference(
+                        sealed,
+                        state_path=self.config.state_path,
+                    ).sha256(),
+                )
+                provision_quantipy_experiment_runs_root()
+                if sealed != state:
+                    return SupervisorResult(
+                        SupervisorOutcome.NUDGED,
+                        "verification_dispatch_state_sealed",
+                    )
+            if state.phase is not Phase.REPEAT or state.final_decision is None:
+                return None
+            if not state.final_decision.continue_loop:
+                return None
+            if state.final_decision.memory_write_required and not state.memory_written:
+                return None
+            if state.final_decision.memory_write_required and not self._memory_wake_acknowledged(
+                state
+            ):
+                return None
+            receipts = build_receipt_catalog(
+                Path(state.setup.target_repo)
+                if state.setup is not None
+                else self.config.target_repo
+            )
+            instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=self.config.state_path,
+            )
+            next_state = start_next_iteration(state, readiness=readiness)
+            persist_next_iteration_state(
+                self.config.state_path,
+                self.config.state_path,
+                state,
+                next_state,
+                instruction_manifest_sha256=instruction_manifest_sha256,
+                policy=policy,
+                receipt_catalog_factory=lambda: build_receipt_catalog(
+                    Path(state.setup.target_repo)
+                    if state.setup is not None
+                    else self.config.target_repo
+                ),
+            )
+            proof = self._rpc.wake(
+                message=WAKE_MESSAGE,
+                idempotency_key=make_idempotency_key(
+                    purpose="repeat-successor",
+                    material=build_authoritative_state_reference(
+                        next_state,
+                        state_path=self.config.state_path,
+                    ).sha256(),
+                ),
+                shutdown_requested=shutdown_requested,
+            )
+            del proof
+            return SupervisorResult(
+                SupervisorOutcome.NUDGED,
+                "repeat_successor_started",
+                sent_wake=True,
+            )
+        except (AutoresearchValidationError, ValueError, OSError, SupervisorError) as exc:
+            return self._persistent_control_plane_alert(
+                key=f"controller-lifecycle:{state.iteration}:{state.phase.value}",
+                reason=f"controller_lifecycle_failed: {exc}",
+            )
+
+    def _finalize_required_memory(
+        self,
+        state: AutoresearchState,
+        *,
+        shutdown_requested: ShutdownRequested,
+    ) -> SupervisorResult | None:
+        if self._memory_wake_acknowledged(state):
+            return None
+        if not state.memory_written:
+            if not can_write_memory(state):
+                return None
+            try:
+                readiness = load_platform_readiness(self.config.readiness_manifest_path)
+                policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+                finalized = finalize_repeat_memory_state_file(
+                    self.config.state_path,
+                    policy=policy,
+                    validation_context=AutoresearchValidationContext.from_readiness(readiness),
+                )
+            except ValueError as exc:
+                _structured_log(
+                    logging.ERROR, "supervisor.memory_finalization_failed", detail=str(exc)
+                )
+                return SupervisorResult(
+                    SupervisorOutcome.ALERT, f"memory_finalization_failed: {exc}"
+                )
+        else:
+            finalized = state
+        receipt = finalized.memory_verification_receipt
+        experiment_id = receipt.experiment_id if receipt is not None else "<missing-receipt>"
+        try:
+            proof = self._rpc.wake(
+                message=FINALIZED_MEMORY_WAKE_MESSAGE,
+                idempotency_key=make_idempotency_key(
+                    purpose="memory-finalized",
+                    material=memory_wake_acknowledgement_key(finalized),
+                ),
+                shutdown_requested=shutdown_requested,
+            )
+            self._acknowledge_memory_owner_wake(finalized, proof)
+        except SupervisorError as exc:
+            _structured_log(logging.ERROR, "supervisor.memory_owner_wake_failed", detail=str(exc))
+            return SupervisorResult(
+                SupervisorOutcome.ALERT, "memory_finalized_owner_wake_retryable"
+            )
+        _structured_log(
+            logging.INFO,
+            "supervisor.memory_finalized",
+            iteration=finalized.iteration,
+            experiment_id=experiment_id,
+        )
+        return SupervisorResult(
+            SupervisorOutcome.FINALIZED,
+            "memory_finalized_owner_wake_sent",
+            sent_wake=True,
+        )
+
+    def _memory_wake_acknowledged(self, state: AutoresearchState) -> bool:
+        if not state.memory_written or state.memory_verification_receipt is None:
+            return False
+        try:
+            acknowledgement_key = memory_wake_acknowledgement_key(state)
+        except SupervisorError:
+            return False
+        with self._checkpoint_lock():
+            checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+            return acknowledgement_key in checkpoint.memory_wake_acknowledgements
+
+    def _acknowledge_memory_owner_wake(
+        self,
+        expected_state: AutoresearchState,
+        proof: WakeDeliveryProof,
+    ) -> None:
+        acknowledgement_key = memory_wake_acknowledgement_key(expected_state)
+        with self._checkpoint_lock():
+            current_state = load_state_file(self.config.state_path)
+            current_decision = current_state.final_decision
+            current_receipt = current_state.memory_verification_receipt
+            expected_decision = expected_state.final_decision
+            expected_receipt = expected_state.memory_verification_receipt
+            if current_state.iteration <= expected_state.iteration and (
+                current_decision is None
+                or current_receipt is None
+                or expected_decision is None
+                or expected_receipt is None
+                or current_state.iteration != expected_state.iteration
+                or current_decision.experiment_id != expected_decision.experiment_id
+                or current_receipt.experiment_id != expected_receipt.experiment_id
+                or current_receipt.verified_rows_digest != expected_receipt.verified_rows_digest
+            ):
+                raise SupervisorError(
+                    "memory owner wake acknowledgement no longer matches the finalized state"
+                )
+            checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+            checkpoint.memory_wake_acknowledgements[acknowledgement_key] = (
+                MemoryWakeAcknowledgement(
+                    status=proof.status,
+                    acknowledged_at=self._now(),
+                    run_id=proof.run_id,
+                    cached_terminal=proof.cached_terminal,
+                )
+            )
+            checkpoint.save(self.config.checkpoint_path)
+
     def run_forever(self) -> int:
         stop_requested = False
 
@@ -1148,6 +1511,12 @@ class AutoresearchSupervisor:
                     _structured_log(
                         logging.ERROR,
                         "supervisor.poll_failed",
+                        detail=str(exc),
+                    )
+                except SupervisorCheckpointError as exc:
+                    _structured_log(
+                        logging.ERROR,
+                        "supervisor.poll_failed_closed",
                         detail=str(exc),
                     )
                 deadline = self._now() + self.config.poll_interval_seconds
@@ -1266,6 +1635,37 @@ class AutoresearchSupervisor:
         return SupervisorResult(
             SupervisorOutcome.NUDGED,
             "detached_verification_failure_advanced",
+        )
+
+    def _consume_stage_submission_inbox(
+        self,
+        state: AutoresearchState,
+    ) -> SupervisorResult | None:
+        try:
+            readiness = load_platform_readiness(self.config.readiness_manifest_path)
+            context = AutoresearchValidationContext.from_readiness(readiness)
+            advanced = consume_stage_submission_inbox(
+                state_path=self.config.state_path,
+                output_path=self.config.state_path,
+                inbox_path=self.config.stage_inbox_path,
+                openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+                quantipy_root=(
+                    Path(state.setup.target_repo)
+                    if state.setup is not None
+                    else self.config.target_repo
+                ),
+                validation_context=context,
+            )
+        except (AutoresearchValidationError, ValueError, OSError) as exc:
+            return self._persistent_control_plane_alert(
+                key=f"stage-inbox:{state.iteration}:{state.phase.value}",
+                reason=f"stage_submission_inbox_invalid: {exc}",
+            )
+        if advanced is None:
+            return None
+        return SupervisorResult(
+            SupervisorOutcome.NUDGED,
+            "stage_submission_advanced",
         )
 
     def _matching_verification_runs(
@@ -1520,7 +1920,10 @@ class AutoresearchSupervisor:
             state.phase is Phase.REPEAT
             and decision is not None
             and not decision.continue_loop
-            and (not decision.memory_write_required or state.memory_written)
+            and (
+                not decision.memory_write_required
+                or (state.memory_written and self._memory_wake_acknowledged(state))
+            )
         )
 
     def _running_tasks(self, *, shutdown_requested: ShutdownRequested) -> list[dict[str, object]]:

@@ -226,7 +226,8 @@ def test_runtime_docs_define_canonical_decision_receipt_authority() -> None:
 
     assert "canonical decision receipts" in normalized
     assert "platform decision authority" in normalized
-    assert "autoresearch-start-next" in normalized
+    assert "supervisor/controller" in normalized
+    assert "read-only" in normalized
     assert "memPalace".lower() in normalized
 
 
@@ -325,7 +326,7 @@ def test_ownership_memory_and_config_guidance_remain_explicit() -> None:
     readme = " ".join(AGENT_CONFIG.joinpath("README.md").read_text(encoding="utf-8").split())
 
     assert "Human/Codex owns shared loaders" in agents
-    assert "only the PM may write" in agents
+    assert "platform finalizer alone writes" in agents
     assert "Do not use OpenClaw built-in memory" in agents
     assert "strict production envelope" in readme
     assert "Never write or pass a raw unwrapped `verification_result`" in agents

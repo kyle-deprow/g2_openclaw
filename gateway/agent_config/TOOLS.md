@@ -25,9 +25,11 @@ Key rules:
 - The `autoresearch-pm` agent is the autoresearch PM and loop controller on
   `openai/gpt-5.6-sol` high. Reserve `openai/gpt-5.6-sol` for PM,
   consensus, and review; debate skeptic runs on `openai/gpt-5.5`.
-- `main` handles human G2 requests only by running:
-  `cd /home/dev/repos/g2_openclaw && uv run python -m
-  gateway.autoresearch_control wake`, `status`, or `stop`.
+- `main` handles human G2 requests only through the `g2-control` MCP tools:
+  `g2-control.g2_autoresearch_status`,
+  `g2-control.g2_autoresearch_start`, and
+  `g2-control.g2_autoresearch_stop`. Main has a narrow non-wildcard
+  `tools.allow` list so Codex native shell/file tools remain unavailable.
 - Use the native Codex agents `context_curator`, the five `debater_*` agents,
   `consensus_arbiter`, `implementer`, `reviewer`, and `fixer` for the
   autoresearch stages described in the autoresearch skill.
@@ -50,15 +52,17 @@ Key rules:
   forbidden by this protocol, but is not an OpenClaw deny-list ID. None of
   these discovery/delegation tools may be used to decide whether a
   `.codex/agents/*.toml` stage is available or to scan historical attempts.
-  Do not remove that guard or add PM denies for MemPalace write tools or
-  `mempalace__*`; the PM still must use native Codex `spawn_agent` and write
-  final MemPalace experiment records.
+  Do not remove that guard. The PM must use native Codex `spawn_agent`; final
+  MemPalace persistence is platform-owned and never model-invoked.
 - These acknowledgements are internal PM transcript replies only. Do not use
   the message tool to send autonomous updates to G2.
 - After the last required child arrives, the PM must persist the authoritative
   artifact and emit a non-empty completion summary.
 
 ## Built-in Tools
+
+These tools are for `autoresearch-pm` and native Codex stage work where
+allowed by the active OpenClaw/Codex policy. They are not available to `main`.
 
 | Tool | Use |
 |------|-----|
@@ -80,8 +84,8 @@ repos. Implementation changes go through native Codex stage agents so the work
 has a plan, verification, commits, and recoverable history.
 
 OpenClaw built-in memory tools (`memory_search`, `memory_get`) are denied by
-policy. Use MemPalace read tools for research context. Only the PM agent loads
-the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
+policy. Use MemPalace read tools for research context. Every autoresearch model
+loads `mempalace-readonly`; no model loads a write-capable MemPalace skill.
 
 ## Memory (via MemPalace MCP)
 
@@ -107,18 +111,15 @@ the write-capable `mempalace` skill; non-PM agents load `mempalace-readonly`.
 | `mempalace-readonly.mempalace_list_hallways` | List hallways |
 | `mempalace-readonly.mempalace_memories_filed_away` | Inspect filed memory summaries |
 
-Read `mempalace` only when acting as `autoresearch-pm`. Read
-`mempalace-readonly` when acting as any context, debate, implementation,
-review, or fix stage agent. If MemPalace tools error, fail closed: report/block
+Read `mempalace-readonly` in every autoresearch role. If MemPalace tools error, fail closed: report/block
 with exact evidence, including the tool name, arguments, returned error, and
 timestamp, then await human/Codex operator action. The PM does not stop or
 relaunch the loop. Do not continue with hidden or unstructured state.
 
-Non-PM stage agents both deny every MemPalace mutation/operation tool in config
-and avoid the write-capable `mempalace` skill. They may read context, but they
-cannot alter durable MemPalace state. The PM performs final experiment logging
-through the write-capable skill only when the accepted final artifact sets
-`memory_write_required=true`.
+Every autoresearch model receives only `mempalace-readonly`, including native
+children inherited from the PM thread. The deterministic repeat finalizer alone
+writes the canonical final drawer and standardized KG facts after a validated
+`memory_write_required=true` decision.
 
 ## Long-Running Tasks
 

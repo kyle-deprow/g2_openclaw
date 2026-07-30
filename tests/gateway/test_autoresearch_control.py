@@ -3,7 +3,6 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
-import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from hashlib import sha256
@@ -495,35 +494,61 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
         owner_sessions_path=sessions_path,
         checkpoint_path=tmp_path / "owner-recovery.json",
         wake_lock_path=tmp_path / "control-wake.lock",
-        wake_claim_path=tmp_path / "control-wake.json",
         readiness_manifest_path=readiness_path,
         runs_root=tmp_path / "detached-runs",
     ), tmp_path
 
 
-def test_wake_dispatches_to_the_dedicated_session_without_waiting_for_final(
+def test_start_does_not_inspect_or_wake_an_existing_owner_task(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
+    # Arrange
     config, _ = control_env
     events: list[str] = []
-    fake = FakeOpenClaw(events=events)
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "owned",
+                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            }
+        ],
+        events=events,
+    )
     service = FakeSupervisorService(events)
 
-    AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
+    # Act
+    AutoresearchControl(config, task_gateway=fake, service_controller=service).start()
 
-    method, params = fake.rpc_calls[-1]
-    assert method == "agent"
-    assert params["sessionKey"] == AUTORESEARCH_OWNER_SESSION_KEY
-    message = params["message"]
-    assert isinstance(message, str)
-    assert (
-        "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
-        "/home/dev/.openclaw/autoresearch/quantipy-state.json"
-    ) in message
-    assert events == ["rpc:list", "rpc:wake", "service:start"]
+    # Assert
+    assert fake.rpc_calls == []
+    assert events == ["service:start"]
 
 
-def test_manual_wake_resets_exhausted_recovery_for_current_phase(
+def test_start_enables_the_supervisor_without_mutating_or_waking(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    # Arrange
+    config, _ = control_env
+    state_before = config.state_path.read_text(encoding="utf-8")
+    events: list[str] = []
+    fake = FakeOpenClaw(events=events)
+
+    # Act
+    AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService(events),
+    ).start()
+
+    # Assert
+    assert config.state_path.read_text(encoding="utf-8") == state_before
+    assert fake.rpc_calls == []
+    assert events == ["service:start"]
+
+
+def test_start_does_not_reset_supervisor_recovery_state(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -547,19 +572,21 @@ def test_manual_wake_resets_exhausted_recovery_for_current_phase(
     )
     checkpoint.save(config.checkpoint_path)
 
+    # Act
     AutoresearchControl(
         config,
         task_gateway=FakeOpenClaw(),
         service_controller=FakeSupervisorService([]),
-    ).wake()
+    ).start()
 
+    # Assert
     current = SupervisorCheckpoint.load(config.checkpoint_path).recovery_records
-    assert "stale_state:7:review:failed" not in current
+    assert "stale_state:7:review:failed" in current
     assert "stale_state:7:review:succeeded" in current
     assert "stale_state:6:review:failed" in current
 
 
-def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(
+def test_start_defers_unpinned_state_validation_to_the_supervisor(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -573,17 +600,20 @@ def test_wake_rejects_an_unpinned_state_before_any_openclaw_rpc(
     )
     fake = FakeOpenClaw()
 
-    with pytest.raises(ControlError, match="no pinned platform readiness receipt"):
-        AutoresearchControl(
-            config,
-            task_gateway=fake,
-            service_controller=FakeSupervisorService([]),
-        ).wake()
+    events: list[str] = []
 
+    AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService(events),
+    ).start()
+
+    assert fake.rpc_calls == []
+    assert events == ["service:start"]
     assert fake.rpc_calls == []
 
 
-def test_wake_rejects_a_suspended_state_before_any_openclaw_rpc(
+def test_start_defers_suspended_state_handling_to_the_supervisor(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -609,17 +639,19 @@ def test_wake_rejects_a_suspended_state_before_any_openclaw_rpc(
     config.state_path.write_text(json.dumps(suspended.to_dict()), encoding="utf-8")
     fake = FakeOpenClaw()
 
-    with pytest.raises(ControlError, match="run autoresearch-resume"):
-        AutoresearchControl(
-            config,
-            task_gateway=fake,
-            service_controller=FakeSupervisorService([]),
-        ).wake()
+    events: list[str] = []
+
+    AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService(events),
+    ).start()
 
     assert fake.rpc_calls == []
+    assert events == ["service:start"]
 
 
-def test_wake_rejects_duplicate_owned_running_task(
+def test_start_does_not_query_for_duplicate_owner_tasks(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -637,18 +669,17 @@ def test_wake_rejects_duplicate_owned_running_task(
         events=events,
     )
 
-    with pytest.raises(ControlError, match="already running: owned"):
-        AutoresearchControl(
-            config,
-            task_gateway=fake,
-            service_controller=FakeSupervisorService(events),
-        ).wake()
+    AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService(events),
+    ).start()
 
-    assert all(method != "agent" for method, _ in fake.rpc_calls)
-    assert events == ["rpc:list"]
+    assert fake.rpc_calls == []
+    assert events == ["service:start"]
 
 
-def test_wake_rejects_concurrent_local_wake_before_rpc(
+def test_start_rejects_concurrent_local_control_before_starting_service(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -661,97 +692,58 @@ def test_wake_rejects_concurrent_local_wake_before_rpc(
                 config,
                 task_gateway=FakeOpenClaw(events=events),
                 service_controller=FakeSupervisorService(events),
-            ).wake()
+            ).start()
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     assert events == []
 
 
-def test_recent_wake_claim_rejects_sequential_duplicate_wake(
+def test_repeated_start_never_creates_an_owner_wake(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
+    # Arrange
     config, _ = control_env
+    events: list[str] = []
     first = FakeOpenClaw()
     second = FakeOpenClaw()
 
+    # Act
     AutoresearchControl(
-        config, task_gateway=first, service_controller=FakeSupervisorService([])
-    ).wake()
+        config, task_gateway=first, service_controller=FakeSupervisorService(events)
+    ).start()
+    AutoresearchControl(
+        config, task_gateway=second, service_controller=FakeSupervisorService(events)
+    ).start()
 
-    first_key = first.rpc_calls[-1][1]["idempotencyKey"]
-    with pytest.raises(ControlError, match="recent autoresearch wake claim"):
-        AutoresearchControl(
-            config, task_gateway=second, service_controller=FakeSupervisorService([])
-        ).wake()
-
-    assert isinstance(first_key, str)
-    assert first_key.startswith("autoresearch-manual-wake-")
+    # Assert
+    assert first.rpc_calls == []
     assert second.rpc_calls == []
+    assert events == ["service:start", "service:start"]
 
 
-def test_ambiguous_wake_rpc_failure_preserves_claim(
+def test_start_ignores_an_unavailable_owner_rpc(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
+    # Arrange
     config, _ = control_env
     failed = FakeOpenClaw(wake_error="ambiguous")
 
-    with pytest.raises(SupervisorError):
-        AutoresearchControl(
-            config,
-            task_gateway=failed,
-            service_controller=FakeSupervisorService([]),
-        ).wake()
-
-    assert config.wake_claim_path.exists()
-    second = FakeOpenClaw()
-    with pytest.raises(ControlError, match="recent autoresearch wake claim"):
-        AutoresearchControl(
-            config,
-            task_gateway=second,
-            service_controller=FakeSupervisorService([]),
-        ).wake()
-    assert second.rpc_calls == []
-
-
-def test_stale_wake_claim_allows_new_wake(control_env: tuple[ControlConfig, Path]) -> None:
-    config, _ = control_env
-    config.wake_claim_path.write_text(
-        json.dumps({"created_at": 1_000_000_000.0, "run_id": "old"}),
-        encoding="utf-8",
-    )
-
-    fake = FakeOpenClaw()
-
+    # Act
     AutoresearchControl(
         config,
-        task_gateway=fake,
+        task_gateway=failed,
         service_controller=FakeSupervisorService([]),
-    ).wake()
+    ).start()
 
-    assert any(method == "agent" for method, _ in fake.rpc_calls)
-
-
-def test_future_wake_claim_eventually_expires(control_env: tuple[ControlConfig, Path]) -> None:
-    config, _ = control_env
-    config.wake_claim_path.write_text(
-        json.dumps({"created_at": time.time() + 10_000.0, "run_id": "future"}),
-        encoding="utf-8",
-    )
-
-    AutoresearchControl(
-        config,
-        task_gateway=FakeOpenClaw(),
-        service_controller=FakeSupervisorService([]),
-    ).wake()
-
-    assert config.wake_claim_path.exists()
+    # Assert
+    assert failed.rpc_calls == []
 
 
 def test_control_uses_the_installed_quantipy_supervisor_unit() -> None:
     assert DEFAULT_SUPERVISOR_SERVICE_NAME == "quantipy-autoresearch-supervisor.service"
 
 
-def test_wake_rolls_back_the_owner_session_when_supervisor_start_fails(
+def test_start_failure_does_not_attempt_owner_run_rollback(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -759,17 +751,10 @@ def test_wake_rolls_back_the_owner_session_when_supervisor_start_fails(
     fake = FakeOpenClaw(events=events)
     service = FailingSupervisorService(events, fail_on="start")
 
-    with pytest.raises(ControlError, match="rolled back"):
-        AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
+    with pytest.raises(ControlError, match="service start failed"):
+        AutoresearchControl(config, task_gateway=fake, service_controller=service).start()
 
-    assert events == [
-        "rpc:list",
-        "rpc:wake",
-        "service:start",
-        "service:stop",
-        "rpc:abort",
-        "rpc:delete",
-    ]
+    assert events == ["service:start"]
 
 
 def test_stop_does_not_cancel_or_delete_when_supervisor_stop_fails(
@@ -786,7 +771,7 @@ def test_stop_does_not_cancel_or_delete_when_supervisor_stop_fails(
     assert events == ["service:stop"]
 
 
-def test_wake_reports_abort_failure_but_still_deletes_owner_session(
+def test_start_failure_does_not_delete_the_owner_session(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -797,11 +782,10 @@ def test_wake_reports_abort_failure_but_still_deletes_owner_session(
     )
     service = FailingSupervisorService(events, fail_on="start")
 
-    with pytest.raises(ControlError, match="owner run abort"):
-        AutoresearchControl(config, task_gateway=fake, service_controller=service).wake()
+    with pytest.raises(ControlError, match="service start failed"):
+        AutoresearchControl(config, task_gateway=fake, service_controller=service).start()
 
-    assert events[-2:] == ["rpc:abort", "rpc:delete"]
-    assert config.wake_claim_path.exists()
+    assert events == ["service:start"]
 
 
 def test_stop_rejects_concurrent_local_wake(

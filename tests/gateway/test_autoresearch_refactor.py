@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -32,6 +34,7 @@ from gateway.autoresearch_runner import (
     InfraGateOutcome,
     MemberUnionManifestReceipt,
     MemoryVerificationReceipt,
+    Phase,
     PriceHydrationReceipt,
     PriceHydrationScopePreflight,
     ResearchMode,
@@ -40,10 +43,12 @@ from gateway.autoresearch_runner import (
     UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
+    build_final_memory_write_request,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
     verify_mempalace_final_decision,
 )
+from gateway.mempalace_finalizer import FINAL_MEMORY_SOURCE_FILE, finalization_journal_path
 
 
 def _coverage(*, fixed_sleeve_local_data: bool = False) -> AggregateCoverageReceipt:
@@ -99,6 +104,49 @@ def _alpha_verification() -> VerificationResultArtifact:
         tests_passed=True,
         commands_run=("uv run pytest",),
         data_coverage=_coverage(),
+    )
+
+
+def _retention_eligible_repeat_state() -> AutoresearchState:
+    return AutoresearchState(
+        phase=Phase.REPEAT,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        verification_history=(_alpha_verification(),),
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-1",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.38,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Improves baseline.",
+            log_summary="KEEP.",
+            continue_loop=True,
+            memory_write_required=True,
+        ),
+    )
+
+
+def _write_committed_finalization_journal(
+    state: AutoresearchState,
+    palace_path: Path,
+    *,
+    drawer_id: str,
+) -> None:
+    request = build_final_memory_write_request(state)
+    request_payload = json.dumps(request.to_dict(), separators=(",", ":"), sort_keys=True)
+    journal_path = finalization_journal_path(palace_path, request.experiment_id)
+    journal_path.parent.mkdir()
+    journal_path.write_text(
+        json.dumps(
+            {
+                "drawer_id": drawer_id,
+                "request_sha256": hashlib.sha256(request_payload.encode("utf-8")).hexdigest(),
+                "status": "committed",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
     )
 
 
@@ -476,6 +524,8 @@ def test_memory_receipt_rejects_noncanonical_experiment_id(experiment_id: str) -
 
 
 def test_mempalace_receipt_verifies_required_standardized_facts(tmp_path: Path) -> None:
+    state = _retention_eligible_repeat_state()
+    drawer_id = "drawer-finalizer"
     database = tmp_path / "knowledge_graph.sqlite3"
     connection = sqlite3.connect(database)
     connection.executescript(
@@ -496,29 +546,22 @@ def test_mempalace_receipt_verifies_required_standardized_facts(tmp_path: Path) 
         ("keeper_rationale", "improves_baseline"),
     )
     connection.executemany(
-        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
         [
-            (f"row-{index}", "iteration-1", predicate, obj, "result.json")
+            (
+                f"row-{index}",
+                "iteration-1",
+                predicate,
+                obj,
+                FINAL_MEMORY_SOURCE_FILE,
+                drawer_id,
+            )
             for index, (predicate, obj) in enumerate(facts)
         ],
     )
     connection.commit()
     connection.close()
-    state = AutoresearchState(
-        mode=ResearchMode.ALPHA_RESEARCH,
-        verification_history=(_alpha_verification(),),
-        final_decision=FinalDecisionArtifact(
-            experiment_id="iteration-1",
-            decision=FinalDecision.KEEP,
-            recommended_metric_name="OOS Sharpe net",
-            recommended_metric_value=0.38,
-            reviewer_verdict=FinalReviewerVerdict.PASS,
-            rationale="Improves baseline.",
-            log_summary="KEEP.",
-            continue_loop=True,
-            memory_write_required=True,
-        ),
-    )
+    _write_committed_finalization_journal(state, tmp_path, drawer_id=drawer_id)
 
     receipt = verify_mempalace_final_decision(state, database)
 
@@ -526,6 +569,8 @@ def test_mempalace_receipt_verifies_required_standardized_facts(tmp_path: Path) 
 
 
 def test_mempalace_receipt_fails_closed_without_provenance(tmp_path: Path) -> None:
+    state = _retention_eligible_repeat_state()
+    drawer_id = "drawer-finalizer"
     database = tmp_path / "knowledge_graph.sqlite3"
     connection = sqlite3.connect(database)
     connection.executescript(
@@ -536,28 +581,14 @@ def test_mempalace_receipt_fails_closed_without_provenance(tmp_path: Path) -> No
             source_file TEXT, source_drawer_id TEXT
         );
         INSERT INTO triples VALUES
-            ('1', 'iteration-1', 'decision', 'keep', NULL, NULL, NULL, NULL);
+            ('1', 'iteration-1', 'decision', 'keep', NULL, NULL, 'result.json', NULL);
         """
     )
     connection.commit()
     connection.close()
-    state = AutoresearchState(
-        mode=ResearchMode.ALPHA_RESEARCH,
-        verification_history=(_alpha_verification(),),
-        final_decision=FinalDecisionArtifact(
-            experiment_id="iteration-1",
-            decision=FinalDecision.KEEP,
-            recommended_metric_name="OOS Sharpe net",
-            recommended_metric_value=0.38,
-            reviewer_verdict=FinalReviewerVerdict.PASS,
-            rationale="Improves baseline.",
-            log_summary="KEEP.",
-            continue_loop=True,
-            memory_write_required=True,
-        ),
-    )
+    _write_committed_finalization_journal(state, tmp_path, drawer_id=drawer_id)
 
-    with pytest.raises(AutoresearchValidationError, match="source_file or source_drawer_id"):
+    with pytest.raises(AutoresearchValidationError, match="exact canonical finalizer provenance"):
         verify_mempalace_final_decision(state, database)
 
 
@@ -573,6 +604,8 @@ def test_mempalace_receipt_rejects_mismatched_required_fact_objects(
     predicate: str,
     object_value: str,
 ) -> None:
+    state = _retention_eligible_repeat_state()
+    drawer_id = "drawer-finalizer"
     database = tmp_path / "knowledge_graph.sqlite3"
     connection = sqlite3.connect(database)
     connection.executescript(
@@ -594,29 +627,22 @@ def test_mempalace_receipt_rejects_mismatched_required_fact_objects(
     }
     facts[predicate] = object_value
     connection.executemany(
-        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
         [
-            (f"row-{index}", "iteration-1", fact_predicate, fact_object, "result.json")
+            (
+                f"row-{index}",
+                "iteration-1",
+                fact_predicate,
+                fact_object,
+                FINAL_MEMORY_SOURCE_FILE,
+                drawer_id,
+            )
             for index, (fact_predicate, fact_object) in enumerate(facts.items())
         ],
     )
     connection.commit()
     connection.close()
-    state = AutoresearchState(
-        mode=ResearchMode.ALPHA_RESEARCH,
-        verification_history=(_alpha_verification(),),
-        final_decision=FinalDecisionArtifact(
-            experiment_id="iteration-1",
-            decision=FinalDecision.KEEP,
-            recommended_metric_name="OOS Sharpe net",
-            recommended_metric_value=0.38,
-            reviewer_verdict=FinalReviewerVerdict.PASS,
-            rationale="Improves baseline.",
-            log_summary="KEEP.",
-            continue_loop=True,
-            memory_write_required=True,
-        ),
-    )
+    _write_committed_finalization_journal(state, tmp_path, drawer_id=drawer_id)
 
     with pytest.raises(AutoresearchValidationError, match=predicate):
         verify_mempalace_final_decision(state, database)

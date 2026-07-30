@@ -18,19 +18,28 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import time
 import tomllib
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from ctypes.util import find_library
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlparse
 
 from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
+from gateway.mempalace_finalizer import (
+    FINAL_MEMORY_SOURCE_FILE,
+    FinalMemoryWriter,
+    FinalMemoryWriteRequest,
+    MempalaceFinalizationError,
+    SubprocessFinalMemoryWriter,
+    finalization_journal_path,
+)
 
 if TYPE_CHECKING:
     from gateway.autoresearch_runs import RunRecord
@@ -55,7 +64,11 @@ from gateway.autoresearch_readiness import (
 
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
-DEFAULT_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
+DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT = Path(
+    "/home/dev/.openclaw/autoresearch/model-workspaces"
+)
+DEFAULT_AUTORESEARCH_WORKTREE_ROOT = DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT
+DEFAULT_AUTORESEARCH_STAGE_INBOX = Path("/home/dev/.openclaw/autoresearch/stage-inbox")
 DEFAULT_AUTORESEARCH_STATE_PATH = Path("/home/dev/.openclaw/autoresearch/quantipy-state.json")
 DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT = Path(
     "/home/dev/.openclaw/autoresearch/quantipy-experiment-runs"
@@ -88,6 +101,7 @@ NEXT_ACTION_PROMPT_TARGET_BYTES = 31 * 1024
 # Expanded universe receipts need more than 24 KiB while the next-action prompt
 # remains bounded separately by MAX_NEXT_ACTION_PROMPT_BYTES.
 MAX_ARTIFACT_FILE_BYTES = 64 * 1024
+MAX_STAGE_SUBMISSION_BYTES = MAX_ARTIFACT_FILE_BYTES
 CANONICAL_QUANTIPY_PYPROJECT_MAX_BYTES = 64 * 1024
 CANONICAL_QUANTIPY_UV_LOCK_MAX_BYTES = 4 * 1024 * 1024
 CANONICAL_QUANTIPY_ENTRYPOINT_MAX_BYTES = 1024 * 1024
@@ -358,41 +372,20 @@ KEEP_DECISIONS = frozenset(
     {FinalDecision.KEEP, FinalDecision.SIGNIFICANT_KEEP, FinalDecision.STRONG_KEEP}
 )
 MEMPALACE_CONFIG_PLACEHOLDER = "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT"
-MEMPALACE_FULL_SERVER_ID = "mempalace"
 MEMPALACE_READONLY_SERVER_ID = "mempalace-readonly"
 MEMPALACE_READONLY_WRAPPER_BASENAME = "mempalace-readonly-server.py"
+G2_CONTROL_SERVER_ID = "g2-control"
+G2_CONTROL_MODULE = "gateway.g2_control_mcp_server"
+G2_CONTROL_TOOL_NAMES = (
+    "g2_autoresearch_status",
+    "g2_autoresearch_start",
+    "g2_autoresearch_stop",
+)
 MEMPALACE_KG_OBJECT_MAX_LENGTH = 128
 MEMPALACE_KG_OBJECT_SHA256_LENGTH = 64
-# OpenClaw policy checks compare internal MCP tool.name ids such as
-# "mempalace__mempalace_search". Codex-facing docs and traces show dotted
-# display ids such as "mempalace.mempalace_add_drawer" or
-# "mempalace-readonly.mempalace_search" after adaptation.
-MEMPALACE_POLICY_TOOL_PREFIX = "mempalace__"
-MEMPALACE_FULL_SERVER_DISPLAY_NAMESPACE = MEMPALACE_FULL_SERVER_ID
 MEMPALACE_READONLY_DISPLAY_NAMESPACE = MEMPALACE_READONLY_SERVER_ID
-MEMPALACE_MUTATION_TOOLS = (
-    "mempalace_add_drawer",
-    "mempalace_check_duplicate",
-    "mempalace_checkpoint",
-    "mempalace_create_tunnel",
-    "mempalace_delete_by_source",
-    "mempalace_delete_drawer",
-    "mempalace_delete_hallway",
-    "mempalace_delete_tunnel",
-    "mempalace_diary_write",
-    "mempalace_hook_settings",
-    "mempalace_kg_add",
-    "mempalace_kg_invalidate",
-    "mempalace_mine",
-    "mempalace_reconnect",
-    "mempalace_sync",
-    "mempalace_update_drawer",
-)
-MEMPALACE_OBSOLETE_MUTATION_TOOL_ID_PREFIXES = (
-    "",
-    "mcp__mempalace__",
-    f"{MEMPALACE_FULL_SERVER_DISPLAY_NAMESPACE}.",
-)
+MEMPALACE_READONLY_RUNTIME_NAMESPACE = MEMPALACE_READONLY_SERVER_ID
+G2_CONTROL_RUNTIME_NAMESPACE = G2_CONTROL_SERVER_ID
 MEMPALACE_READONLY_TOOL_NAMES = (
     "mempalace_status",
     "mempalace_search",
@@ -416,12 +409,6 @@ MEMPALACE_READONLY_TOOL_NAMES = (
 )
 
 
-def _compile_mempalace_policy_tool_ids(
-    tool_names: Sequence[str],
-) -> tuple[str, ...]:
-    return tuple(f"{MEMPALACE_POLICY_TOOL_PREFIX}{tool_name}" for tool_name in tool_names)
-
-
 def _compile_mempalace_codex_display_tool_ids(
     tool_names: Sequence[str],
     *,
@@ -430,18 +417,14 @@ def _compile_mempalace_codex_display_tool_ids(
     return tuple(f"{namespace}.{tool_name}" for tool_name in tool_names)
 
 
-def _compile_mempalace_alias_tool_ids(
+def _compile_codex_mcp_runtime_tool_ids(
     tool_names: Sequence[str],
     *,
-    prefixes: Sequence[str] = MEMPALACE_OBSOLETE_MUTATION_TOOL_ID_PREFIXES,
+    namespace: str,
 ) -> tuple[str, ...]:
-    expanded: list[str] = []
-    for prefix in prefixes:
-        expanded.extend(f"{prefix}{tool_name}" for tool_name in tool_names)
-    return tuple(expanded)
+    return tuple(f"{namespace}__{tool_name}" for tool_name in tool_names)
 
 
-MEMPALACE_MUTATION_DENY_TOOL_IDS = _compile_mempalace_policy_tool_ids(MEMPALACE_MUTATION_TOOLS)
 PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = (
     "sessions_spawn",
     "sessions_yield",
@@ -449,17 +432,25 @@ PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS = (
     "sessions_list",
     "sessions_history",
 )
-MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS = _compile_mempalace_alias_tool_ids(
-    MEMPALACE_MUTATION_TOOLS
-)
 MEMPALACE_READONLY_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
     MEMPALACE_READONLY_TOOL_NAMES,
     namespace=MEMPALACE_READONLY_DISPLAY_NAMESPACE,
 )
-MEMPALACE_MUTATION_DENY_TOOL_ID_SET = frozenset(MEMPALACE_MUTATION_DENY_TOOL_IDS)
-MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_ID_SET = frozenset(
-    MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
+G2_CONTROL_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
+    G2_CONTROL_TOOL_NAMES,
+    namespace=G2_CONTROL_SERVER_ID,
 )
+MEMPALACE_READONLY_RUNTIME_TOOL_IDS = _compile_codex_mcp_runtime_tool_ids(
+    MEMPALACE_READONLY_TOOL_NAMES,
+    namespace=MEMPALACE_READONLY_RUNTIME_NAMESPACE,
+)
+G2_CONTROL_RUNTIME_TOOL_IDS = _compile_codex_mcp_runtime_tool_ids(
+    G2_CONTROL_TOOL_NAMES,
+    namespace=G2_CONTROL_RUNTIME_NAMESPACE,
+)
+MAIN_ALLOWED_TOOL_IDS = (*G2_CONTROL_RUNTIME_TOOL_IDS, *MEMPALACE_READONLY_RUNTIME_TOOL_IDS)
+MAIN_OPENCLAW_TOOL_ALLOW_POLICY = MAIN_ALLOWED_TOOL_IDS
+LEGACY_AUTORESEARCH_WORKTREE_ROOT = Path("/home/dev/.openclaw/autoresearch/worktrees")
 DEFAULT_ALLOWED_TARGET_STATUS_LINES = ("?? docs/quantipy_experiment_mempalace_preload.md",)
 
 
@@ -6375,6 +6366,10 @@ def _validate_codex_native_stage_agents(policy: AutoresearchPolicy) -> None:
             raise AutoresearchConfigError(
                 f"native Codex stage agent {stage.agent_id} must use {stage.reasoning} reasoning"
             )
+        if "mcp_servers" in data:
+            raise AutoresearchConfigError(
+                f"native Codex stage agent {stage.agent_id} must not override inherited MCP servers"
+            )
 
 
 def load_autoresearch_policy(
@@ -6469,11 +6464,44 @@ def _validate_policy(
 ) -> None:
     if policy.main_interface.model != "openai/gpt-5.4" or policy.main_interface.reasoning != "high":
         raise AutoresearchConfigError("main must be openai/gpt-5.4 with high reasoning")
-    if policy.main_interface.skills:
-        raise AutoresearchConfigError("main must load no skills")
+    if tuple(policy.main_interface.skills) != ("mempalace-readonly",):
+        raise AutoresearchConfigError("main must load exactly mempalace-readonly")
     main_raw = agent_map["main"]
     if main_raw.get("subagents") is not None:
         raise AutoresearchConfigError("main must not declare a subagent allowlist")
+    main_tools = _ensure_mapping(main_raw.get("tools"), label="main.tools")
+    if main_tools.get("profile") != "minimal":
+        raise AutoresearchConfigError("main.tools.profile must be minimal")
+    main_allowed_tool_list = _require_string_list(main_tools, "allow")
+    if tuple(main_allowed_tool_list) != MAIN_OPENCLAW_TOOL_ALLOW_POLICY:
+        raise AutoresearchConfigError(
+            "main must allow exactly the direct Codex MCP control/read-only tools"
+        )
+    try:
+        plugins = _ensure_mapping(config.get("plugins"), label="plugins")
+        entries = _ensure_mapping(plugins.get("entries"), label="plugins.entries")
+        codex = _ensure_mapping(entries.get("codex"), label="plugins.entries.codex")
+        plugin_config = _ensure_mapping(codex.get("config"), label="plugins.entries.codex.config")
+    except AutoresearchValidationError as exc:
+        raise AutoresearchConfigError(str(exc)) from exc
+    if plugin_config.get("nativeToolSurfaceEnabled") is not False:
+        raise AutoresearchConfigError("Codex native tool surface must be disabled by config")
+    if "codexDynamicToolsExclude" in plugin_config:
+        raise AutoresearchConfigError(
+            "codexDynamicToolsExclude must not be used as a native Codex tool guard"
+        )
+    main_denied_tool_list = set(_require_string_list(main_tools, "deny"))
+    required_main_denies = {
+        "exec",
+        "sessions_spawn",
+        "sessions_yield",
+        "sessions_send",
+        "sessions_list",
+        "sessions_history",
+        "agents_list",
+    }
+    if not required_main_denies <= main_denied_tool_list:
+        raise AutoresearchConfigError("main must deny native exec and OpenClaw session/agent tools")
     if policy.pm.model != "openai/gpt-5.6-sol" or policy.pm.reasoning != "high":
         raise AutoresearchConfigError("PM must be openai/gpt-5.6-sol with high reasoning")
     if (
@@ -6512,8 +6540,8 @@ def _validate_policy(
     if policy.reviewer.agent_id != "reviewer":
         raise AutoresearchConfigError("reviewer stage must be configured as agent id 'reviewer'")
 
-    if tuple(policy.pm.skills) != ("mempalace", "autoresearch"):
-        raise AutoresearchConfigError("PM must load exactly mempalace and autoresearch")
+    if tuple(policy.pm.skills) != ("mempalace-readonly", "autoresearch"):
+        raise AutoresearchConfigError("PM must load exactly mempalace-readonly and autoresearch")
     pm_raw = agent_map["autoresearch-pm"]
     pm_tools = _ensure_mapping(pm_raw.get("tools"), label="autoresearch-pm.tools")
     pm_denied_tool_list = _require_string_list(pm_tools, "deny")
@@ -6524,6 +6552,7 @@ def _validate_policy(
         )
     if pm_raw.get("subagents") is not None:
         raise AutoresearchConfigError("PM must not declare OpenClaw subagents")
+    _validate_codex_app_server_sandbox(config)
     _validate_mempalace_server_split(config, policy)
     _validate_codex_native_stage_agents(policy)
     for agent in (
@@ -6543,40 +6572,38 @@ def _validate_policy(
                 f"{agent.agent_id} must load exactly mempalace-readonly, "
                 "quantipy-methodology, and quantipy-data-contract"
             )
-        if "mempalace" in agent.skills:
-            raise AutoresearchConfigError(f"{agent.agent_id} must not load mempalace")
         if agent_map[agent.agent_id].get("subagents") is not None:
             raise AutoresearchConfigError(f"{agent.agent_id} must not declare OpenClaw subagents")
-        tools = _ensure_mapping(
-            agent_map[agent.agent_id].get("tools"),
-            label=f"{agent.agent_id}.tools",
+        if agent_map[agent.agent_id].get("tools") is not None:
+            raise AutoresearchConfigError(
+                f"{agent.agent_id} must not carry MemPalace write-tool policy remnants"
+            )
+
+
+def _validate_codex_app_server_sandbox(config: Mapping[str, object]) -> None:
+    try:
+        plugins = _ensure_mapping(config.get("plugins"), label="plugins")
+        entries = _ensure_mapping(plugins.get("entries"), label="plugins.entries")
+        codex = _ensure_mapping(entries.get("codex"), label="plugins.entries.codex")
+        plugin_config = _ensure_mapping(codex.get("config"), label="plugins.entries.codex.config")
+        app_server = _ensure_mapping(
+            plugin_config.get("appServer"),
+            label="plugins.entries.codex.config.appServer",
         )
-        # These denies must use internal OpenClaw policy ids, not the dotted
-        # display ids that Codex shows in traces and docs.
-        denied_tool_list = _require_string_list(tools, "deny")
-        denied_tools = set(denied_tool_list)
-        missing_deny = sorted(MEMPALACE_MUTATION_DENY_TOOL_ID_SET - denied_tools)
-        if missing_deny:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must deny exact MemPalace mutation policy IDs: "
-                f"{', '.join(missing_deny)}"
-            )
-        obsolete_aliases = sorted(MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_ID_SET & denied_tools)
-        if obsolete_aliases:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must not deny obsolete MemPalace mutation aliases: "
-                f"{', '.join(obsolete_aliases)}"
-            )
-        unexpected_deny = sorted(denied_tools - MEMPALACE_MUTATION_DENY_TOOL_ID_SET)
-        if unexpected_deny:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must deny only canonical MemPalace mutation policy IDs: "
-                f"{', '.join(unexpected_deny)}"
-            )
-        if tuple(denied_tool_list) != MEMPALACE_MUTATION_DENY_TOOL_IDS:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must deny exactly the canonical MemPalace mutation policy IDs"
-            )
+    except AutoresearchValidationError as exc:
+        raise AutoresearchConfigError(str(exc)) from exc
+    if app_server.get("sandbox") != "workspace-write":
+        raise AutoresearchConfigError("Codex app-server sandbox must be workspace-write")
+    if app_server.get("defaultWorkspaceDir") != str(DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT):
+        raise AutoresearchConfigError(
+            "Codex app-server defaultWorkspaceDir must be "
+            f"{DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT}"
+        )
+    if app_server.get("networkProxy") is not None:
+        raise AutoresearchConfigError(
+            "Codex app-server networkProxy must not be configured; pinned Codex 0.144.3 "
+            "rejects the plugin-generated :project_roots permissions profile"
+        )
 
 
 def _validate_mempalace_server_split(
@@ -6586,25 +6613,33 @@ def _validate_mempalace_server_split(
     try:
         mcp = _ensure_mapping(config.get("mcp"), label="mcp")
         servers = _ensure_mapping(mcp.get("servers"), label="mcp.servers")
-        full_server = _ensure_mapping(
-            servers.get(MEMPALACE_FULL_SERVER_ID),
-            label=f"mcp.servers.{MEMPALACE_FULL_SERVER_ID}",
-        )
+        if set(servers) != {MEMPALACE_READONLY_SERVER_ID, G2_CONTROL_SERVER_ID}:
+            raise AutoresearchConfigError(
+                "mcp.servers must expose exactly mempalace-readonly and g2-control"
+            )
         readonly_server = _ensure_mapping(
             servers.get(MEMPALACE_READONLY_SERVER_ID),
             label=f"mcp.servers.{MEMPALACE_READONLY_SERVER_ID}",
         )
-        _validate_mempalace_server(
-            full_server,
-            server_id=MEMPALACE_FULL_SERVER_ID,
-            expected_agents=(policy.pm.agent_id,),
-            expected_args_prefix=("-m", "mempalace.mcp_server", "--palace"),
+        control_server = _ensure_mapping(
+            servers.get(G2_CONTROL_SERVER_ID),
+            label=f"mcp.servers.{G2_CONTROL_SERVER_ID}",
         )
         _validate_mempalace_server(
             readonly_server,
             server_id=MEMPALACE_READONLY_SERVER_ID,
-            expected_agents=policy.all_stage_agent_ids,
+            expected_agents=(
+                policy.main_interface.agent_id,
+                policy.pm.agent_id,
+                *policy.all_stage_agent_ids,
+            ),
             expected_args_prefix=(MEMPALACE_READONLY_WRAPPER_BASENAME, "--palace"),
+        )
+        _validate_mempalace_server(
+            control_server,
+            server_id=G2_CONTROL_SERVER_ID,
+            expected_agents=(policy.main_interface.agent_id,),
+            expected_args_prefix=("-m", G2_CONTROL_MODULE),
         )
     except AutoresearchValidationError as exc:
         raise AutoresearchConfigError(str(exc)) from exc
@@ -6625,16 +6660,16 @@ def _validate_mempalace_server(
         raise AutoresearchConfigError(
             f"mcp.servers.{server_id}.codex.agents must exactly match {expected_agents}"
         )
-    if server_id == MEMPALACE_FULL_SERVER_ID:
-        if len(args) != 4 or args[:3] != expected_args_prefix:
+    if server_id == G2_CONTROL_SERVER_ID:
+        if tuple(args) != expected_args_prefix:
             raise AutoresearchConfigError(
-                "mcp.servers.mempalace.args must be "
-                "['-m', 'mempalace.mcp_server', '--palace', '<path>']"
+                "mcp.servers.g2-control.args must be ['-m', 'gateway.g2_control_mcp_server']"
             )
-        if not args[3].strip():
-            raise AutoresearchConfigError("mcp.servers.mempalace.args[3] must be a palace path")
+        if codex.get("defaultToolsApprovalMode") != "approve":
+            raise AutoresearchConfigError(
+                "mcp.servers.g2-control.codex.defaultToolsApprovalMode must be approve"
+            )
         return
-
     if len(args) != 3 or args[1] != "--palace":
         raise AutoresearchConfigError(
             "mcp.servers.mempalace-readonly.args must be ['<wrapper>', '--palace', '<path>']"
@@ -7201,6 +7236,57 @@ def _require_git_worktree_root(path: Path, *, label: str) -> Path:
     return resolved_path
 
 
+def _require_isolated_git_clone_root(path: Path, *, label: str) -> Path:
+    root = _require_git_worktree_root(path, label=label)
+    git_metadata = root / ".git"
+    try:
+        metadata = git_metadata.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must contain private .git directory metadata"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise AutoresearchValidationError(
+            f"{label} must be an isolated clone with a private .git directory"
+        )
+    _require_private_directory(git_metadata, label=f"{label} .git metadata")
+    return root
+
+
+def _require_artifact_origin_matches_target(
+    workspace: Path,
+    target_checkout: Path,
+    *,
+    label: str,
+) -> None:
+    result = _run_git(
+        workspace,
+        ("config", "--get", "remote.origin.url"),
+        operation=f"origin check for {label}",
+    )
+    origin = result.stdout.strip()
+    if result.returncode != 0 or not origin:
+        raise AutoresearchValidationError(
+            f"Git ancestry check failed in {_render_literal(str(workspace))}"
+        )
+    parsed = urlparse(origin)
+    if parsed.scheme and parsed.scheme != "file":
+        raise AutoresearchValidationError(
+            f"{label} remote.origin.url must be the authoritative local target_repo"
+        )
+    origin_path = Path(unquote(parsed.path if parsed.scheme == "file" else origin)).expanduser()
+    try:
+        resolved_origin = origin_path.resolve(strict=True)
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"{label} remote.origin.url does not resolve to authoritative target_repo"
+        ) from exc
+    if resolved_origin != target_checkout:
+        raise AutoresearchValidationError(
+            f"Git ancestry check failed in {_render_literal(str(workspace))}"
+        )
+
+
 def _require_strict_canonical_workspace_path(value: str, *, label: str) -> Path:
     declared_path = Path(value).expanduser()
     try:
@@ -7225,6 +7311,30 @@ def _require_autoresearch_worktree_root() -> Path:
     )
     _require_private_directory(root, label="autoresearch worktree root")
     return root
+
+
+def _path_under_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def state_has_legacy_autoresearch_workspace(state: AutoresearchState) -> bool:
+    """Return whether persisted state still points at the retired linked-worktree root."""
+    workspaces: list[str] = []
+    if state.implementation_result is not None:
+        workspaces.append(state.implementation_result.workspace_path)
+    workspaces.extend(fix.workspace_path for fix in state.fix_history)
+    for value in workspaces:
+        try:
+            path = Path(value).expanduser().resolve(strict=False)
+        except RuntimeError:
+            return True
+        if _path_under_root(path, LEGACY_AUTORESEARCH_WORKTREE_ROOT):
+            return True
+    return False
 
 
 def _require_workspace_under_autoresearch_worktree_root(
@@ -7269,6 +7379,19 @@ def _require_git_descends_from(
     if result.returncode != 0:
         raise AutoresearchValidationError(
             f"{label} must descend from the exact readiness-pinned Quantipy commit"
+        )
+
+
+def _require_git_success(
+    working_directory: Path,
+    arguments: Sequence[str],
+    *,
+    operation: str,
+) -> None:
+    result = _run_git(working_directory, arguments, operation=operation)
+    if result.returncode != 0:
+        raise AutoresearchValidationError(
+            f"Git {operation} failed in {_render_literal(str(working_directory))}"
         )
 
 
@@ -9427,13 +9550,14 @@ def _require_ancestor(
     descendant: str,
     *,
     error_message: str,
+    missing_is_not_ancestor: bool = False,
 ) -> None:
     result = _run_git(
         worktree,
         ("merge-base", "--is-ancestor", ancestor, descendant),
         operation="ancestry check",
     )
-    if result.returncode == 1:
+    if result.returncode == 1 or (missing_is_not_ancestor and result.returncode != 0):
         raise AutoresearchValidationError(error_message)
     if result.returncode != 0:
         raise AutoresearchValidationError(
@@ -9517,7 +9641,7 @@ def validate_artifact_workspace(
         )
         _validate_implementation_workspace(state, artifact)
 
-    workspace = _require_git_worktree_root(workspace, label="artifact workspace_path")
+    workspace = _require_isolated_git_clone_root(workspace, label="artifact workspace_path")
     target_checkout = _require_git_worktree_root(
         Path(state.setup.target_repo).expanduser(),
         label="authoritative target_repo",
@@ -9526,19 +9650,11 @@ def validate_artifact_workspace(
         raise AutoresearchValidationError(
             "artifact workspace_path must be distinct from authoritative target_repo"
         )
-    registered_worktrees = {
-        Path(line.removeprefix("worktree ")).resolve()
-        for line in _require_git_output(
-            target_checkout,
-            ("worktree", "list", "--porcelain"),
-            operation="worktree registration check",
-        ).splitlines()
-        if line.startswith("worktree ")
-    }
-    if workspace not in registered_worktrees:
-        raise AutoresearchValidationError(
-            "artifact workspace_path is not a Git worktree registered to authoritative target_repo"
-        )
+    _require_artifact_origin_matches_target(
+        workspace,
+        target_checkout,
+        label="artifact workspace_path",
+    )
     artifact_commit = _resolve_git_commit(
         workspace,
         artifact.commit_sha,
@@ -9551,16 +9667,12 @@ def validate_artifact_workspace(
 
     if isinstance(artifact, FixResultArtifact):
         assert state.implementation_result is not None
-        implementation_commit = _resolve_git_commit(
-            workspace,
-            state.implementation_result.commit_sha,
-            label="prior implementation commit_sha",
-        )
         _require_ancestor(
             workspace,
-            implementation_commit,
+            state.implementation_result.commit_sha,
             artifact_commit,
             error_message="prior implementation commit_sha is not an ancestor of final fix commit",
+            missing_is_not_ancestor=True,
         )
         authoritative_head = _resolve_git_commit(
             target_checkout,
@@ -9572,8 +9684,23 @@ def validate_artifact_workspace(
             authoritative_head,
             artifact_commit,
             error_message=("authoritative target_repo HEAD is not an ancestor of final fix commit"),
+            missing_is_not_ancestor=True,
         )
     else:
+        authoritative_head = _resolve_git_commit(
+            target_checkout,
+            "HEAD",
+            label="authoritative target_repo HEAD",
+        )
+        _require_ancestor(
+            workspace,
+            authoritative_head,
+            artifact_commit,
+            error_message=(
+                "authoritative target_repo HEAD is not an ancestor of implementation commit"
+            ),
+            missing_is_not_ancestor=True,
+        )
         manifest_snapshot = _secure_open_snapshot(
             artifact.experiment_manifest_path,
             label="implementation_result experiment_manifest_path",
@@ -10003,7 +10130,9 @@ def _phase_instruction(
         ),
         Phase.REPEAT: (
             "The iteration is complete. Do not start the next loop from prompt memory. "
-            "Write memory only if allowed, then create a new state explicitly."
+            "Do not write MemPalace from a model turn. If final memory is required, "
+            "the platform supervisor finalizes it from authoritative state before "
+            "the next iteration is adopted."
         ),
     }
     contract = _json_block(ARTIFACT_CONTRACTS[expected_artifact_type], compact=True)
@@ -10352,15 +10481,16 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         worktree_root = _render_literal(str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT))
         return (
             "Workspace isolation contract:\n"
-            "- Create and use a disposable git worktree for this iteration under the "
-            f"canonical operator-controlled root {worktree_root}; "
-            "before git worktree add, run umask 077 and mkdir -p "
-            "/home/dev/.openclaw/autoresearch/worktrees, chmod 700 on that root, "
-            "and verify the current user owns it with mode 0700; after creation, "
-            "run chmod 700 on the worktree directory and verify it is owned by "
-            "the current user with mode 0700. "
-            "never use /tmp. /tmp is a 31G tmpfs, and each Quantipy worktree virtualenv "
-            "is about 1.5G, so stale iteration worktrees exhaust it. Do not implement "
+            "- Create and use a disposable isolated clone for this iteration under the "
+            f"canonical model-writable root {worktree_root}; "
+            "before cloning, run umask 077 and mkdir -p "
+            "/home/dev/.openclaw/autoresearch/model-workspaces, chmod 700 on that root, "
+            "and verify the current user owns it with mode 0700; after clone creation, "
+            "run chmod 700 on the workspace directory and verify it is owned by "
+            "the current user with mode 0700. Do not use git worktree; linked worktrees "
+            "share canonical Git metadata with the authoritative checkout. "
+            "Never use /tmp. /tmp is a 31G tmpfs, and each Quantipy workspace virtualenv "
+            "is about 1.5G, so stale iteration workspaces exhaust it. Do not implement "
             "directly in the main target repo checkout.\n"
             "- Do not leave background experiment, notebook, pytest, or data-generation "
             "processes running after the stage exits.\n"
@@ -11007,6 +11137,104 @@ def standardized_mempalace_kg_facts(state: AutoresearchState) -> dict[str, str]:
     return facts
 
 
+def build_final_memory_write_request(state: AutoresearchState) -> FinalMemoryWriteRequest:
+    """Derive the only MemPalace write payload from a validated final state."""
+    if not can_write_memory(state) or state.final_decision is None or state.mode is None:
+        raise AutoresearchValidationError(
+            "final MemPalace persistence requires a retention-eligible repeat decision"
+        )
+    verification = state.latest_verification
+    if verification is None:
+        raise AutoresearchValidationError(
+            "final MemPalace persistence requires the final verification result"
+        )
+    drawer_content = _compact_json_block(
+        {
+            "experiment_id": state.final_decision.experiment_id,
+            "final_decision": state.final_decision.to_dict(),
+            "research_mode": state.mode.value,
+            "schema": "g2-openclaw.autoresearch.final-memory.v1",
+            "verification_result": verification.to_dict(),
+        }
+    )
+    return FinalMemoryWriteRequest(
+        experiment_id=state.final_decision.experiment_id,
+        drawer_content=drawer_content,
+        facts=standardized_mempalace_kg_facts(state),
+    )
+
+
+def finalize_repeat_memory(
+    state: AutoresearchState,
+    *,
+    writer: FinalMemoryWriter | None = None,
+) -> AutoresearchState:
+    """Write, verify, and mark the state-owned final decision exactly once."""
+    request = build_final_memory_write_request(state)
+    finalizer = writer or SubprocessFinalMemoryWriter.from_environment(
+        repository_root=G2_OPENCLAW_REPO_ROOT
+    )
+    try:
+        kg_path = finalizer.write(request)
+    except MempalaceFinalizationError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    receipt = verify_mempalace_final_decision(state, kg_path)
+    return mark_memory_written(state, receipt)
+
+
+def finalize_repeat_memory_state_file(
+    state_path: Path,
+    *,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None,
+    writer: FinalMemoryWriter | None = None,
+) -> AutoresearchState:
+    """Finalize and atomically mark the current repeat state under its state lock."""
+    resolved_state_path = state_path.expanduser().resolve(strict=False)
+    with _exclusive_state_lock(resolved_state_path):
+        state = load_state_file(resolved_state_path)
+        _validate_state(state, policy, validation_context)
+        finalized = finalize_repeat_memory(state, writer=writer)
+        _validate_state(finalized, policy, validation_context)
+        _atomic_save_state_file(resolved_state_path, finalized)
+        return finalized
+
+
+def _committed_finalization_journal_drawer_id(
+    journal: object,
+    *,
+    expected_request_sha256: str,
+) -> str:
+    _validate_sha256(expected_request_sha256, label="expected_request_sha256")
+    if not isinstance(journal, Mapping):
+        raise AutoresearchValidationError("MemPalace finalization journal must be an object")
+    if set(journal) != {"status", "request_sha256", "drawer_id"}:
+        raise AutoresearchValidationError(
+            "MemPalace committed finalization journal schema is invalid"
+        )
+    if journal.get("status") != "committed":
+        raise AutoresearchValidationError("MemPalace finalization journal is not committed")
+    request_sha256 = journal.get("request_sha256")
+    if not isinstance(request_sha256, str):
+        raise AutoresearchValidationError(
+            "MemPalace finalization journal request_sha256 is invalid"
+        )
+    try:
+        _validate_sha256(request_sha256, label="request_sha256")
+    except AutoresearchValidationError as exc:
+        raise AutoresearchValidationError(
+            "MemPalace finalization journal request_sha256 is invalid"
+        ) from exc
+    if request_sha256 != expected_request_sha256:
+        raise AutoresearchValidationError("MemPalace finalization journal does not match state")
+    drawer_id = journal.get("drawer_id")
+    if not isinstance(drawer_id, str) or not drawer_id.strip():
+        raise AutoresearchValidationError(
+            "MemPalace finalization journal lacks canonical drawer ID"
+        )
+    return drawer_id
+
+
 def verify_mempalace_final_decision(
     state: AutoresearchState,
     kg_path: Path | None = None,
@@ -11027,6 +11255,19 @@ def verify_mempalace_final_decision(
         raise AutoresearchValidationError(f"MemPalace KG does not exist: {path}")
     decision = state.final_decision
     expected_objects = standardized_mempalace_kg_facts(state)
+    request = build_final_memory_write_request(state)
+    journal_path = finalization_journal_path(path.parent, decision.experiment_id)
+    try:
+        journal: object = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AutoresearchValidationError("MemPalace finalization journal is unavailable") from exc
+    expected_journal_digest = _sha256_text(
+        json.dumps(request.to_dict(), separators=(",", ":"), sort_keys=True)
+    )
+    expected_drawer_id = _committed_finalization_journal_drawer_id(
+        journal,
+        expected_request_sha256=expected_journal_digest,
+    )
     required = set(expected_objects)
     connection: sqlite3.Connection | None = None
     try:
@@ -11065,9 +11306,9 @@ def verify_mempalace_final_decision(
             continue
         source_file = str(row[6] or "").strip()
         source_drawer_id = str(row[7] or "").strip()
-        if not source_file and not source_drawer_id:
+        if source_file != FINAL_MEMORY_SOURCE_FILE or source_drawer_id != expected_drawer_id:
             raise AutoresearchValidationError(
-                "MemPalace standardized facts require source_file or source_drawer_id"
+                "MemPalace standardized facts require exact canonical finalizer provenance"
             )
         if not str(row[3]).strip():
             raise AutoresearchValidationError(
@@ -11287,6 +11528,259 @@ def resume_suspended_iteration(
         setup=state.setup,
         platform_readiness=identity,
     )
+
+
+def _rewrite_workspace_prefix(value: str, *, old_root: Path, new_root: Path) -> str:
+    path = Path(value).expanduser().resolve(strict=False)
+    try:
+        relative = path.relative_to(old_root)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "legacy workspace migration can rewrite only paths under the retired worktree root"
+        ) from exc
+    return str(new_root / relative)
+
+
+def _clone_legacy_workspace_for_state(
+    *,
+    legacy_workspace: Path,
+    authoritative_checkout: Path,
+    destination: Path,
+    commit_sha: str,
+) -> None:
+    def validate_destination() -> None:
+        workspace = _require_isolated_git_clone_root(
+            destination,
+            label="legacy workspace migration destination",
+        )
+        _require_artifact_origin_matches_target(
+            workspace,
+            authoritative_checkout,
+            label="legacy workspace migration destination",
+        )
+        head = _resolve_git_commit(workspace, "HEAD", label="migrated workspace HEAD")
+        if head != _resolve_git_commit(
+            workspace,
+            commit_sha,
+            label="migrated workspace commit_sha",
+        ):
+            raise AutoresearchValidationError(
+                "legacy workspace migration destination exists with a different HEAD"
+            )
+        authoritative_head = _resolve_git_commit(
+            authoritative_checkout,
+            "HEAD",
+            label="authoritative target_repo HEAD",
+        )
+        _require_ancestor(
+            workspace,
+            authoritative_head,
+            head,
+            error_message=(
+                "authoritative target_repo HEAD is not an ancestor of migrated workspace commit"
+            ),
+            missing_is_not_ancestor=True,
+        )
+        _require_clean_git_worktree(workspace)
+
+    if destination.exists():
+        validate_destination()
+        return
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination.parent.chmod(0o700)
+    _require_private_directory(destination.parent, label="legacy workspace migration root")
+    _require_git_success(
+        authoritative_checkout.parent,
+        (
+            "clone",
+            "--no-hardlinks",
+            "--no-local",
+            str(authoritative_checkout),
+            str(destination),
+        ),
+        operation="clone legacy autoresearch workspace",
+    )
+    destination.chmod(0o700)
+    (destination / ".git").chmod(0o700)
+    _require_artifact_origin_matches_target(
+        destination,
+        authoritative_checkout,
+        label="legacy workspace migration destination",
+    )
+    _require_git_success(
+        destination,
+        ("fetch", "origin", commit_sha),
+        operation="fetch migrated autoresearch workspace commit",
+    )
+    _require_git_success(
+        destination,
+        ("checkout", "--detach", commit_sha),
+        operation="checkout migrated autoresearch workspace commit",
+    )
+    _remove_group_world_write_bits(destination)
+    destination.chmod(0o700)
+    (destination / ".git").chmod(0o700)
+    validate_destination()
+
+
+def _remove_group_world_write_bits(path: Path) -> None:
+    for current_root, directory_names, file_names in os.walk(path):
+        root_path = Path(current_root)
+        if root_path.name == ".git":
+            directory_names[:] = []
+            continue
+        root_mode = stat.S_IMODE(root_path.lstat().st_mode)
+        root_path.chmod(root_mode & ~0o022)
+        for file_name in file_names:
+            file_path = root_path / file_name
+            file_metadata = file_path.lstat()
+            if stat.S_ISLNK(file_metadata.st_mode):
+                continue
+            file_mode = stat.S_IMODE(file_metadata.st_mode)
+            file_path.chmod(file_mode & ~0o022)
+
+
+def _require_legacy_linked_worktree_from_authoritative_checkout(
+    legacy_workspace: Path,
+    authoritative_checkout: Path,
+) -> None:
+    git_file = legacy_workspace / ".git"
+    try:
+        git_metadata = git_file.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "legacy workspace migration requires linked worktree .git metadata"
+        ) from exc
+    if stat.S_ISLNK(git_metadata.st_mode) or not stat.S_ISREG(git_metadata.st_mode):
+        raise AutoresearchValidationError(
+            "legacy workspace migration requires source linked worktree metadata"
+        )
+    common_dir = Path(
+        _require_git_output(
+            legacy_workspace,
+            ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+            operation="legacy linked worktree common git dir check",
+        )
+    ).resolve(strict=True)
+    authoritative_git_dir = Path(
+        _require_git_output(
+            authoritative_checkout,
+            ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+            operation="authoritative target_repo common git dir check",
+        )
+    ).resolve(strict=True)
+    if common_dir != authoritative_git_dir:
+        raise AutoresearchValidationError(
+            "legacy workspace migration source must share authoritative target_repo Git metadata"
+        )
+
+
+def migrate_legacy_autoresearch_workspace_state_file(
+    state_path: Path,
+    *,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None,
+) -> AutoresearchState:
+    """Move a pre-isolated-clone active state onto the controller-owned workspace root.
+
+    This is intentionally not exposed as a model artifact transition. It exists so a
+    live state carrying the retired linked-worktree path can resume without allowing
+    another model write to that legacy workspace.
+    """
+    resolved_state_path = state_path.expanduser().resolve(strict=False)
+    with _exclusive_state_lock(resolved_state_path):
+        state = load_state_file(resolved_state_path)
+        if not state_has_legacy_autoresearch_workspace(state):
+            return state
+        implementation = state.implementation_result
+        if implementation is None:
+            raise AutoresearchValidationError(
+                "legacy workspace migration requires implementation_result"
+            )
+        old_root = LEGACY_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
+        old_workspace = Path(implementation.workspace_path).expanduser().resolve(strict=True)
+        if not _path_under_root(old_workspace, old_root):
+            raise AutoresearchValidationError(
+                "legacy workspace migration requires implementation_result under retired root"
+            )
+        legacy_root_metadata = old_root.lstat()
+        if old_root.is_symlink() or not stat.S_ISDIR(legacy_root_metadata.st_mode):
+            raise AutoresearchValidationError("legacy workspace root must be a plain directory")
+        old_workspace = _require_git_worktree_root(
+            old_workspace,
+            label="legacy implementation_result workspace_path",
+        )
+        if state.setup is None:
+            raise AutoresearchValidationError(
+                "legacy workspace migration requires setup target_repo"
+            )
+        authoritative_checkout = _require_git_worktree_root(
+            Path(state.setup.target_repo).expanduser(),
+            label="authoritative target_repo",
+        )
+        _require_legacy_linked_worktree_from_authoritative_checkout(
+            old_workspace,
+            authoritative_checkout,
+        )
+        _require_clean_git_worktree(old_workspace)
+        implementation_commit = _resolve_git_commit(
+            old_workspace,
+            implementation.commit_sha,
+            label="legacy implementation_result commit_sha",
+        )
+        _resolve_git_commit(
+            authoritative_checkout,
+            implementation_commit,
+            label="authoritative target_repo object database implementation commit",
+        )
+        if _resolve_git_commit(old_workspace, "HEAD", label="legacy workspace HEAD") != (
+            implementation_commit
+        ):
+            raise AutoresearchValidationError(
+                "legacy workspace migration requires implementation commit at HEAD"
+            )
+        new_root = DEFAULT_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
+        new_workspace = new_root / old_workspace.relative_to(old_root)
+        _clone_legacy_workspace_for_state(
+            legacy_workspace=old_workspace,
+            authoritative_checkout=authoritative_checkout,
+            destination=new_workspace,
+            commit_sha=implementation_commit,
+        )
+        migrated_implementation = replace(
+            implementation,
+            workspace_path=str(new_workspace),
+            experiment_manifest_path=_rewrite_workspace_prefix(
+                implementation.experiment_manifest_path,
+                old_root=old_root,
+                new_root=new_root,
+            ),
+        )
+        migrated_fixes = tuple(
+            replace(
+                fix,
+                workspace_path=_rewrite_workspace_prefix(
+                    fix.workspace_path,
+                    old_root=old_root,
+                    new_root=new_root,
+                ),
+            )
+            for fix in state.fix_history
+        )
+        migrated = replace(
+            state,
+            implementation_result=migrated_implementation,
+            fix_history=migrated_fixes,
+        )
+        validate_artifact_workspace(
+            replace(migrated, implementation_result=None, fix_history=()),
+            migrated_implementation,
+        )
+        for fix in migrated.fix_history:
+            validate_artifact_workspace(migrated, fix)
+        _validate_state(migrated, policy, validation_context)
+        _atomic_save_state_file(resolved_state_path, migrated)
+        return migrated
 
 
 def load_artifact_file(
@@ -12818,6 +13312,331 @@ def advance_artifact_state_file(
             publication_guard=publication_guard,
         )
         return candidate
+
+
+def submit_stage_artifact_file(
+    *,
+    state_path: Path,
+    artifact_path: Path,
+    inbox_path: Path = DEFAULT_AUTORESEARCH_STAGE_INBOX,
+    instruction_manifest_sha256: str,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None,
+    state_reference_sha256: str | None = None,
+) -> Path:
+    """Validate a model-produced artifact and publish only its envelope to the inbox.
+
+    This is the model-writable boundary. It never writes authoritative state; the
+    supervisor/controller later re-derives the same transition under state locks.
+    """
+    resolved_state_path = state_path.expanduser().resolve(strict=False)
+    resolved_artifact_path = artifact_path.expanduser().resolve(strict=False)
+    configured_inbox_path = inbox_path.expanduser()
+    source_state = load_state_file(resolved_state_path)
+    _require_canonical_verification_runtime_attestation(
+        source_state,
+        validation_context=validation_context,
+    )
+    expected_reference = build_authoritative_state_reference(
+        source_state,
+        state_path=resolved_state_path,
+    )
+    artifact = load_artifact_file(
+        resolved_artifact_path,
+        source_state,
+        policy,
+        instruction_manifest_sha256=instruction_manifest_sha256,
+        validation_context=validation_context,
+        state_reference_sha256=state_reference_sha256,
+        state_path=resolved_state_path,
+    )
+    if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
+        validate_artifact_workspace(source_state, artifact)
+    advance_state(
+        source_state,
+        artifact,
+        policy,
+        validation_context=validation_context,
+        state_path=resolved_state_path,
+    )
+    envelope = resolved_artifact_path.read_bytes()
+    if len(envelope) > MAX_STAGE_SUBMISSION_BYTES:
+        raise AutoresearchValidationError(
+            "stage submission exceeds hard byte budget: "
+            f"{len(envelope)} > {MAX_STAGE_SUBMISSION_BYTES} bytes"
+        )
+    artifact_sha256 = hashlib.sha256(envelope).hexdigest()
+    filename = (
+        f"{source_state.iteration:04d}-{source_state.phase.value}-"
+        f"{expected_reference.sha256()[:16]}-{artifact_sha256[:16]}.json"
+    )
+    output_path = configured_inbox_path / filename
+    try:
+        configured_inbox_path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        inbox_fd = os.open(
+            configured_inbox_path,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except FileExistsError:
+        raise
+    except OSError as exc:
+        raise AutoresearchValidationError(f"failed to open stage submission inbox: {exc}") from exc
+    try:
+        _validate_stage_inbox_directory_fd(inbox_fd, label="stage submission inbox")
+        try:
+            output_fd = os.open(
+                filename,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=inbox_fd,
+            )
+        except FileExistsError:
+            try:
+                existing_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_fd)
+            except OSError as exc:
+                raise AutoresearchValidationError(
+                    f"failed to inspect existing stage submission artifact: {exc}"
+                ) from exc
+            try:
+                existing = os.read(existing_fd, MAX_STAGE_SUBMISSION_BYTES + 1)
+            finally:
+                os.close(existing_fd)
+            if hashlib.sha256(existing).hexdigest() != artifact_sha256:
+                raise AutoresearchValidationError(
+                    "stage submission filename collision with different artifact"
+                ) from None
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                f"failed to write stage submission inbox artifact: {exc}"
+            ) from exc
+        else:
+            try:
+                written = 0
+                while written < len(envelope):
+                    written += os.write(output_fd, envelope[written:])
+                os.fsync(output_fd)
+            finally:
+                os.close(output_fd)
+    finally:
+        os.close(inbox_fd)
+    return output_path
+
+
+def _validate_stage_inbox_directory_fd(fd: int, *, label: str) -> os.stat_result:
+    metadata = os.fstat(fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise AutoresearchValidationError(f"{label} must be a plain directory")
+    if metadata.st_uid != os.getuid():
+        raise AutoresearchValidationError(f"{label} must be owned by the current user")
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise AutoresearchValidationError(f"{label} must not be group/world writable")
+    return metadata
+
+
+def _open_stage_inbox_child_directory(inbox_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=inbox_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"cannot create stage submission {name} directory: {exc}"
+        ) from exc
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=inbox_fd,
+        )
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"stage submission {name} path must be a plain directory: {exc}"
+        ) from exc
+    try:
+        _validate_stage_inbox_directory_fd(child_fd, label=f"stage submission {name} directory")
+    except Exception:
+        os.close(child_fd)
+        raise
+    return child_fd
+
+
+def _move_stage_inbox_entry_no_replace(
+    name: str,
+    *,
+    src_dir_fd: int,
+    dst_dir_fd: int,
+) -> None:
+    for attempt in range(128):
+        target = name
+        if attempt:
+            digest = hashlib.sha256(f"{name}\n{time.time_ns()}\n{attempt}".encode()).hexdigest()
+            target = f"{name}.{digest[:16]}"
+        try:
+            os.link(
+                name,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                f"cannot quarantine stage submission artifact: {exc}"
+            ) from exc
+        os.unlink(name, dir_fd=src_dir_fd)
+        return
+    raise AutoresearchValidationError(
+        "cannot quarantine stage submission artifact without overwrite"
+    )
+
+
+def consume_stage_submission_inbox(
+    *,
+    state_path: Path,
+    output_path: Path,
+    inbox_path: Path,
+    openclaw_config: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
+    quantipy_root: Path = DEFAULT_QUANTIPY_ROOT,
+    validation_context: AutoresearchValidationContext | None,
+) -> AutoresearchState | None:
+    """Consume at most one validated stage submission from a model-writable inbox."""
+    try:
+        inbox_fd = os.open(
+            inbox_path.expanduser(),
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AutoresearchValidationError(f"cannot open stage submission inbox: {exc}") from exc
+    snapshot_path: Path | None = None
+    accepted_fd: int | None = None
+    rejected_fd: int | None = None
+    try:
+        _validate_stage_inbox_directory_fd(inbox_fd, label="stage submission inbox")
+        accepted_fd = _open_stage_inbox_child_directory(inbox_fd, "accepted")
+        rejected_fd = _open_stage_inbox_child_directory(inbox_fd, "rejected")
+        assert accepted_fd is not None
+        assert rejected_fd is not None
+
+        candidates: list[str] = []
+        for name in sorted(os.listdir(inbox_fd)):
+            if not name.endswith(".json"):
+                continue
+            entry = os.stat(name, dir_fd=inbox_fd, follow_symlinks=False)
+            if not stat.S_ISREG(entry.st_mode):
+                raise AutoresearchValidationError(
+                    "stage submission candidate must be a non-symlink regular file"
+                )
+            candidates.append(name)
+
+        if not candidates:
+            return None
+        policy = load_autoresearch_policy(openclaw_config)
+
+        def quarantine(name: str, destination_fd: int) -> None:
+            _move_stage_inbox_entry_no_replace(
+                name,
+                src_dir_fd=inbox_fd,
+                dst_dir_fd=destination_fd,
+            )
+
+        for artifact_name in candidates:
+            try:
+                artifact_stat = os.stat(artifact_name, dir_fd=inbox_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise AutoresearchValidationError(
+                    f"cannot inspect stage submission artifact: {exc}"
+                ) from exc
+            if not stat.S_ISREG(artifact_stat.st_mode):
+                raise AutoresearchValidationError(
+                    "stage submission artifact must be a non-symlink regular file"
+                )
+            try:
+                artifact_fd = os.open(artifact_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_fd)
+            except OSError as exc:
+                raise AutoresearchValidationError(
+                    f"cannot open stage submission artifact: {exc}"
+                ) from exc
+            try:
+                opened_artifact = os.fstat(artifact_fd)
+                if (
+                    opened_artifact.st_dev,
+                    opened_artifact.st_ino,
+                    opened_artifact.st_size,
+                ) != (
+                    artifact_stat.st_dev,
+                    artifact_stat.st_ino,
+                    artifact_stat.st_size,
+                ):
+                    raise AutoresearchValidationError(
+                        "stage submission artifact changed during inspection"
+                    )
+                if opened_artifact.st_nlink != 1:
+                    quarantine(artifact_name, rejected_fd)
+                    continue
+                if opened_artifact.st_size > MAX_STAGE_SUBMISSION_BYTES:
+                    quarantine(artifact_name, rejected_fd)
+                    continue
+                envelope = os.read(artifact_fd, MAX_STAGE_SUBMISSION_BYTES + 1)
+                if len(envelope) != opened_artifact.st_size:
+                    raise AutoresearchValidationError(
+                        "stage submission artifact changed while reading"
+                    )
+            finally:
+                os.close(artifact_fd)
+            snapshot_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=Path(state_path).expanduser().resolve(strict=False).parent,
+                    prefix=".stage-submission.",
+                    suffix=".json",
+                    delete=False,
+                ) as snapshot:
+                    snapshot_path = Path(snapshot.name)
+                    snapshot.write(envelope)
+                    snapshot.flush()
+                    os.fsync(snapshot.fileno())
+                snapshot_path.chmod(0o600)
+                artifact_path = snapshot_path
+                state = load_state_file(state_path)
+                receipts = build_receipt_catalog(quantipy_root)
+                instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                    state,
+                    policy,
+                    receipts,
+                    state_path=state_path,
+                )
+                try:
+                    advanced = advance_artifact_state_file(
+                        state_path=state_path,
+                        output_path=output_path,
+                        artifact_path=artifact_path,
+                        instruction_manifest_sha256=instruction_manifest_sha256,
+                        policy=policy,
+                        validation_context=validation_context,
+                    )
+                except AutoresearchValidationError:
+                    quarantine(artifact_name, rejected_fd)
+                    continue
+                quarantine(artifact_name, accepted_fd)
+                return advanced
+            finally:
+                if snapshot_path is not None:
+                    with suppress(FileNotFoundError):
+                        snapshot_path.unlink()
+    finally:
+        if accepted_fd is not None:
+            os.close(accepted_fd)
+        if rejected_fd is not None:
+            os.close(rejected_fd)
+        os.close(inbox_fd)
+    return None
 
 
 def persist_next_iteration_state(

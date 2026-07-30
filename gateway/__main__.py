@@ -47,8 +47,6 @@ _cli_commands = {
     "stop",
     "autoresearch-next",
     "autoresearch-advance",
-    "autoresearch-mark-memory",
-    "autoresearch-start-next",
     "autoresearch-pin-readiness",
     "autoresearch-build-readiness",
     "autoresearch-resume",

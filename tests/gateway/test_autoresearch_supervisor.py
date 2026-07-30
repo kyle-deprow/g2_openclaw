@@ -7,7 +7,7 @@ import os
 import signal
 import subprocess
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from types import FrameType
@@ -24,12 +24,14 @@ from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_ROOT,
     AutoresearchState,
+    AutoresearchValidationError,
     ConsensusResultArtifact,
     ConsensusStatus,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
     ImplementationResultArtifact,
+    MemoryVerificationReceipt,
     Phase,
     PriceHydrationScopePreflight,
     ResearchMode,
@@ -58,13 +60,19 @@ from gateway.autoresearch_supervisor import (
     OpenClawUnavailableError,
     ShutdownInterrupted,
     ShutdownRequested,
+    SupervisorCheckpoint,
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
     SupervisorResult,
+    WakeDeliveryProof,
     main,
+    make_idempotency_key,
+    memory_wake_acknowledgement_key,
 )
 from gateway.openclaw_client import OpenClawError, OpenClawTransportError
+
+from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
 SignalHandler = Callable[[int, FrameType | None], None]
 SignalDisposition = SignalHandler | signal.Handlers
@@ -316,14 +324,15 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
     evidence: dict[str, dict[str, str | None]] = {}
     for evidence_id in EvidenceId:
         evidence_path = readiness_evidence / f"{evidence_id.value}.json"
-        evidence_path.write_text(
-            (
-                json.dumps({"quantipy_commit": "a" * 40})
-                if evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT
-                else f"{evidence_id.value}\n"
-            ),
-            encoding="utf-8",
-        )
+        if evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT:
+            evidence_path.write_text(
+                json.dumps({"quantipy_commit": "a" * 40}),
+                encoding="utf-8",
+            )
+        elif evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
+            write_xnys_calendar_evidence(evidence_path)
+        else:
+            evidence_path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {
             "path": str(evidence_path),
             "sha256": sha256(evidence_path.read_bytes()).hexdigest(),
@@ -1134,6 +1143,342 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert idempotency_key.startswith("autoresearch-")
 
 
+def test_supervisor_finalizes_required_memory_and_immediately_wakes_owner(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=9,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-9",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.42,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Passes review and improves baseline.",
+            log_summary="KEEP iteration-9.",
+            continue_loop=True,
+            memory_write_required=True,
+        ),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+
+    def fake_finalize(*args: object, **kwargs: object) -> AutoresearchState:
+        del args, kwargs
+        finalized = replace(
+            state,
+            memory_written=True,
+            memory_verification_receipt=MemoryVerificationReceipt(
+                experiment_id="iteration-9",
+                kg_path=str(supervisor_env.state_path.parent / "knowledge_graph.sqlite3"),
+                predicates=("decision",),
+                verified_rows_digest="a" * 64,
+            ),
+        )
+        supervisor_env.state_path.write_text(json.dumps(finalized.to_dict()), encoding="utf-8")
+        return finalized
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.can_write_memory", lambda _: True)
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.load_platform_readiness",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.validate_state_readiness",
+        lambda *_: supervisor_env.readiness_identity,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.AutoresearchValidationContext.from_readiness",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.finalize_repeat_memory_state_file",
+        fake_finalize,
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.FINALIZED
+    assert result.reason == "memory_finalized_owner_wake_sent"
+    assert result.sent_wake is True
+    method, payload = fake.rpc_calls[-1]
+    assert method == "agent"
+    assert payload["sessionKey"] == AUTORESEARCH_OWNER_SESSION_KEY
+    message = payload["message"]
+    assert isinstance(message, str)
+    assert (
+        "Required final MemPalace persistence was completed by the autoresearch supervisor"
+        in message
+    )
+    finalized_state = AutoresearchState.from_dict(
+        json.loads(supervisor_env.state_path.read_text(encoding="utf-8"))
+    )
+    idempotency_key = payload["idempotencyKey"]
+    assert isinstance(idempotency_key, str)
+    assert idempotency_key == make_idempotency_key(
+        purpose="memory-finalized",
+        material=memory_wake_acknowledgement_key(finalized_state),
+    )
+
+
+def test_supervisor_retries_unacknowledged_final_memory_wake_for_terminal_iteration(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=11,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-11",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.42,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Passes review and improves baseline.",
+            log_summary="KEEP iteration-11.",
+            continue_loop=False,
+            memory_write_required=True,
+        ),
+        memory_written=True,
+        memory_verification_receipt=MemoryVerificationReceipt(
+            experiment_id="iteration-11",
+            kg_path=str(supervisor_env.state_path.parent / "knowledge_graph.sqlite3"),
+            predicates=("decision",),
+            verified_rows_digest="a" * 64,
+        ),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+    fake.agent_payload = {"status": "rejected"}
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.load_platform_readiness", lambda _: object()
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.validate_state_readiness",
+        lambda *_: supervisor_env.readiness_identity,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.AutoresearchValidationContext.from_readiness",
+        lambda _: object(),
+    )
+
+    # Act
+    failed = _supervisor(supervisor_env, fake).run_once()
+    fake.agent_payload = {
+        "status": "accepted",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "runId": "retry-run-11",
+    }
+    retried = _supervisor(supervisor_env, fake).run_once()
+
+    # Assert
+    persisted = AutoresearchState.from_dict(
+        json.loads(supervisor_env.state_path.read_text(encoding="utf-8"))
+    )
+    assert failed.reason == "memory_finalized_owner_wake_retryable"
+    assert retried.reason == "memory_finalized_owner_wake_sent"
+    assert "memory_owner_wake_sent" not in persisted.to_dict()
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    acknowledgement = checkpoint.memory_wake_acknowledgements[
+        memory_wake_acknowledgement_key(persisted)
+    ]
+    assert acknowledgement.status == "accepted"
+    assert acknowledgement.run_id == "retry-run-11"
+
+
+def test_memory_wake_acknowledgement_preserves_a_racing_successor_state(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    # Arrange
+    completed = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=12,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-12",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.42,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Passes review and improves baseline.",
+            log_summary="KEEP iteration-12.",
+            continue_loop=True,
+            memory_write_required=True,
+        ),
+        memory_written=True,
+        memory_verification_receipt=MemoryVerificationReceipt(
+            experiment_id="iteration-12",
+            kg_path=str(supervisor_env.state_path.parent / "knowledge_graph.sqlite3"),
+            predicates=("decision",),
+            verified_rows_digest="b" * 64,
+        ),
+    )
+    successor = AutoresearchState(phase=Phase.SETUP_CONTEXT, iteration=13)
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(successor.to_dict()), encoding="utf-8")
+
+    # Act
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    supervisor._acknowledge_memory_owner_wake(
+        completed,
+        WakeDeliveryProof(status="in_flight", run_id="run-12"),
+    )
+
+    # Assert
+    assert (
+        AutoresearchState.from_dict(
+            json.loads(supervisor_env.state_path.read_text(encoding="utf-8"))
+        )
+        == successor
+    )
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    acknowledgement = checkpoint.memory_wake_acknowledgements[
+        memory_wake_acknowledgement_key(completed)
+    ]
+    assert acknowledgement.status == "in_flight"
+    assert acknowledgement.run_id == "run-12"
+
+
+def test_supervisor_persists_repeat_successor_before_wake(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=15,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-15",
+            decision=FinalDecision.NO_CONSENSUS,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.0,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="No consensus; continue with a fresh proposal.",
+            log_summary="NO_CONSENSUS iteration-15.",
+            continue_loop=True,
+            memory_write_required=False,
+        ),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    successor = replace(state, phase=Phase.SETUP_CONTEXT, iteration=16, final_decision=None)
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+    persisted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.AutoresearchValidationContext.from_readiness",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.build_receipt_catalog",
+        lambda *_: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.expected_instruction_manifest_sha256",
+        lambda *_, **__: "d" * 64,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.start_next_iteration",
+        lambda *_args, **_kwargs: successor,
+    )
+
+    def fake_persist(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        persisted["called"] = True
+        supervisor_env.state_path.write_text(json.dumps(successor.to_dict()), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.persist_next_iteration_state",
+        fake_persist,
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert result.reason == "repeat_successor_started"
+    assert result.sent_wake is True
+    assert persisted == {"called": True}
+    assert (
+        AutoresearchState.from_dict(
+            json.loads(supervisor_env.state_path.read_text(encoding="utf-8"))
+        )
+        == successor
+    )
+    method, payload = fake.rpc_calls[-1]
+    assert method == "agent"
+    assert payload["idempotencyKey"] == make_idempotency_key(
+        purpose="repeat-successor",
+        material=build_authoritative_state_reference(
+            successor,
+            state_path=supervisor_env.state_path,
+        ).sha256(),
+    )
+
+
+def test_supervisor_memory_finalization_failure_does_not_wake_owner(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=10,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-10",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.42,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Passes review and improves baseline.",
+            log_summary="KEEP iteration-10.",
+            continue_loop=True,
+            memory_write_required=True,
+        ),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    fake = FakeOpenClaw()
+
+    def fail_finalize(*args: object, **kwargs: object) -> AutoresearchState:
+        del args, kwargs
+        raise AutoresearchValidationError("strict finalizer failure")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.can_write_memory", lambda _: True)
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.load_platform_readiness",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.validate_state_readiness",
+        lambda *_: supervisor_env.readiness_identity,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.AutoresearchValidationContext.from_readiness",
+        lambda _: object(),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.finalize_repeat_memory_state_file",
+        fail_finalize,
+    )
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "memory_finalization_failed: strict finalizer failure"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
 def test_supervisor_rejects_an_unpinned_state_before_any_openclaw_rpc(
     supervisor_env: SupervisorEnv,
 ) -> None:
@@ -1151,6 +1496,7 @@ def test_supervisor_rejects_an_unpinned_state_before_any_openclaw_rpc(
 
 def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
     supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = supervisor_env.repo_root.parent / "quantipy-worktree"
     workspace.mkdir()
@@ -1162,6 +1508,20 @@ def test_supervisor_classifies_missing_verification_artifact_and_wakes_owner(
     )
     _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     fake = FakeOpenClaw()
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.seal_canonical_verification_dispatch_state_file",
+        lambda *_, **__: AutoresearchState.from_dict(
+            json.loads(supervisor_env.state_path.read_text(encoding="utf-8"))
+        ),
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.require_canonical_verification_dispatch_attestation",
+        lambda *_, **__: None,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.provision_quantipy_experiment_runs_root",
+        lambda: None,
+    )
 
     result = _supervisor(supervisor_env, fake).run_once()
 
@@ -1258,20 +1618,202 @@ def test_recovery_retries_use_distinct_idempotency_keys(
     "response",
     [
         {"status": "rejected", "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY, "runId": "run"},
+        {"status": "accepted", "runId": "run"},
+        {"status": "in_flight", "runId": "run"},
         {"status": "accepted", "sessionKey": "agent:other:session", "runId": "run"},
         {"status": "accepted", "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY, "runId": ""},
+        {"status": "completed", "runId": "run"},
+        {
+            "runId": "cached-run",
+            "status": "timeout",
+            "summary": "completed",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+        },
+        {
+            "runId": "cached-run",
+            "status": "error",
+            "summary": "completed",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+        },
+        {
+            "runId": "cached-run",
+            "status": "failed",
+            "summary": "completed",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+        },
+        {
+            "runId": "cached-run",
+            "status": "cancelled",
+            "summary": "completed",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+        },
+        {
+            "runId": "cached-run",
+            "status": "ok",
+            "summary": "still running",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+        },
+        {"runId": "cached-run", "status": "ok", "summary": "completed"},
+        {
+            "runId": "cached-run",
+            "status": "ok",
+            "summary": "completed",
+            "result": None,
+        },
+        {
+            "runId": "cached-run",
+            "status": "ok",
+            "summary": "completed",
+            "result": {},
+        },
+        {
+            "runId": "cached-run",
+            "status": "ok",
+            "summary": "completed",
+            "result": {"payloads": [{"text": "owner wake completed"}]},
+            "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        },
     ],
 )
-def test_supervisor_fails_closed_for_an_invalid_wake_response(
-    supervisor_env: SupervisorEnv, response: dict[str, object]
-) -> None:
-    _prepare_stale_state(supervisor_env)
+def test_supervisor_fails_closed_for_an_invalid_wake_response(response: dict[str, object]) -> None:
     fake = FakeOpenClaw()
     fake.agent_payload = response
+
+    with pytest.raises(SupervisorError, match="OpenClaw wake response"):
+        OpenClawRPC(fake).wake(message="continue", idempotency_key="idem")
+
+
+@pytest.mark.parametrize(
+    ("response", "expected_status", "expected_run_id", "cached_terminal"),
+    [
+        (
+            {
+                "status": "accepted",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "runId": "run-accepted",
+            },
+            "accepted",
+            "run-accepted",
+            False,
+        ),
+        (
+            {
+                "status": "in_flight",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "runId": "run-in-flight",
+            },
+            "in_flight",
+            "run-in-flight",
+            False,
+        ),
+        (
+            {
+                "runId": "cached-run-1",
+                "status": "ok",
+                "summary": "completed",
+                "result": {
+                    "payloads": [{"text": "owner wake completed"}],
+                    "meta": {"durationMs": 42},
+                },
+            },
+            "ok",
+            "cached-run-1",
+            True,
+        ),
+    ],
+)
+def test_openclaw_wake_accepts_idempotent_delivery_proofs(
+    response: dict[str, object],
+    expected_status: str,
+    expected_run_id: str | None,
+    cached_terminal: bool,
+) -> None:
+    fake = FakeOpenClaw()
+    fake.agent_payload = response
+
+    proof = OpenClawRPC(fake).wake(message="continue", idempotency_key="idem")
+
+    assert proof.status == expected_status
+    assert proof.run_id == expected_run_id
+    assert proof.cached_terminal is cached_terminal
+
+
+def test_supervisor_corrupt_checkpoint_fails_closed_without_wake(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=14,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-14",
+            decision=FinalDecision.KEEP,
+            recommended_metric_name="OOS Sharpe net",
+            recommended_metric_value=0.42,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+            rationale="Passes review and improves baseline.",
+            log_summary="KEEP iteration-14.",
+            continue_loop=False,
+            memory_write_required=True,
+        ),
+        memory_written=True,
+        memory_verification_receipt=MemoryVerificationReceipt(
+            experiment_id="iteration-14",
+            kg_path=str(supervisor_env.state_path.parent / "knowledge_graph.sqlite3"),
+            predicates=("decision",),
+            verified_rows_digest="c" * 64,
+        ),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    supervisor_env.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.checkpoint_path.write_text("{", encoding="utf-8")
+    fake = FakeOpenClaw()
     supervisor = _supervisor(supervisor_env, fake)
 
-    with pytest.raises(SupervisorError, match="wake response"):
-        supervisor.run_once()
+    with caplog.at_level(logging.ERROR):
+        result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason.startswith("checkpoint_corrupt:")
+    assert not fake.rpc_calls
+    assert "supervisor.checkpoint_corrupt" in caplog.text
+
+
+def test_supervisor_run_forever_stays_alive_after_closed_checkpoint_alert(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.checkpoint_path.write_text("{", encoding="utf-8")
+    fake = FakeOpenClaw()
+    harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", harness.install)
+
+    def stop_after_first_sleep(_seconds: float) -> None:
+        harness.trigger(signal.SIGTERM)
+
+    code = AutoresearchSupervisor(
+        SupervisorConfig(
+            state_path=supervisor_env.state_path,
+            readiness_manifest_path=supervisor_env.readiness_manifest_path,
+            checkpoint_path=supervisor_env.checkpoint_path,
+            autoresearch_dir=supervisor_env.state_path.parent,
+            owner_sessions_path=supervisor_env.sessions_path,
+            target_repo=supervisor_env.repo_root,
+            proc_root=supervisor_env.proc_root,
+            poll_interval_seconds=60,
+        ),
+        now=lambda: supervisor_env.now,
+        sleep=stop_after_first_sleep,
+        task_gateway=fake,
+    ).run_forever()
+
+    assert code == 0
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
 
 
 @pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
@@ -1543,7 +2085,9 @@ def test_missing_verification_reason_is_not_masked_by_owner_session_error(
 
     result = _supervisor(supervisor_env, fake).run_once()
 
-    assert result.reason == "missing_verification_artifact"
+    assert result.reason == (
+        "controller_lifecycle_failed: implementation_result requires a majority consensus"
+    )
 
 
 def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
@@ -1948,7 +2492,7 @@ def test_lost_task_projection_with_active_persisted_writer_suppresses_recovery(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "target_repo_writer_active"
-    assert ("tasks.get", {"taskId": "owner-turn"}) in fake.rpc_calls
+    assert fake.rpc_calls == []
 
 
 def test_lost_task_projection_permits_recovery_after_persisted_writer_exits(

@@ -146,8 +146,8 @@ canonical decision receipts and MemPalace readonly retrieval with
 ### OpenClaw repeats failed experiments
 **Cause:** Not checking memory before proposing.
 **Fix:** Enforce MemPalace readonly retrieval at the start of each new context
-pass in autoresearch. Write failed experiment details to MemPalace only during
-final PM decision logging after DISCARD or CRASH.
+pass in autoresearch. The platform finalizer alone persists a validated,
+retention-eligible canonical decision after the model turn completes.
 
 ### Supervisor repeatedly reports invalid autoresearch state JSON
 **Symptom:** The supervisor restarts repeatedly with `invalid autoresearch state
@@ -239,7 +239,7 @@ PM/stage boundary:
 - Only human/Codex fixes, promotes, restarts, or relaunches operator-owned
   surfaces. PM never touches G2, promotes patches, edits shared infrastructure,
   or relaunches recovery for shared-infrastructure failures.
-- Non-PM agents do not write MemPalace; stage agents use readonly retrieval.
+- Models do not write MemPalace; PM and stage agents use readonly retrieval.
 
 Do not run concurrent `pytest` processes in the same checkout; coverage state
 can corrupt. Serialize verification or use isolated worktrees.

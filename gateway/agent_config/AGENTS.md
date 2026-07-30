@@ -4,11 +4,10 @@
 
 OpenClaw has two top-level agents:
 
-- `main` is the human-facing G2 interface. It has no research or MemPalace
-  skills and never performs PM work.
-- `autoresearch-pm` owns autonomous orchestration, state transitions, final
-  decisions, and the write-capable `mempalace` skill. It never edits target
-  repository code.
+- `main` is the human-facing G2 interface. It has only read-only MemPalace
+  retrieval for context and never performs PM work.
+- `autoresearch-pm` owns autonomous orchestration, state transitions, and final
+  decisions. It receives only read-only MemPalace and never edits target repository code.
 
 Autonomous work runs only in
 `agent:autoresearch-pm:autoresearch:quantipy`. `main` maps human requests to:
@@ -22,6 +21,12 @@ cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control 
 Report the command result in the same human turn. If it fails, report the exact
 blocker. Do not reproduce PM behavior in the G2 session. The loop continues
 until an explicit human/Codex stop command.
+
+G2 start only enables the supervisor service. It does not validate or mutate
+the authoritative state and never sends a direct PM wake. Each supervisor
+`run_once` deterministically performs any legacy migration, verification
+sealing/provisioning, repeat-successor transition, and then the corresponding
+owner-session wake.
 
 ## Deterministic State
 
@@ -65,10 +70,9 @@ Do not maintain phase, retries, or completion state in prompt memory. Before
 dispatch, the runner validates the schema-v3 platform-readiness manifest at
 `~/.openclaw/autoresearch/platform-readiness.json` and its Quantipy data
 contract and XNYS evidence receipts. Existing active state is pinned explicitly
-with `autoresearch-pin-readiness`. At a completed repeat boundary, only after
-the runner's memory or explicit no-memory obligation passes,
-`autoresearch-start-next` persists the immutable per-iteration canonical
-decision receipt and may atomically adopt a different validated READY receipt.
+with `autoresearch-pin-readiness`. At a completed repeat boundary, the
+supervisor runs the fixed state-derived finalizer if memory is required,
+atomically marks its verified receipt, and wakes the PM to continue.
 A suspended `INFRA_BLOCKED` state instead resumes explicitly with
 `autoresearch-resume`.
 
@@ -155,7 +159,8 @@ Use the `autoresearch` skill for the complete protocol:
    prose.
 6. One configured high-reasoning `reviewer` performs adversarial review.
 7. `fixer` handles bounded experiment defects in the same worktree.
-8. The PM decides, logs, performs any required MemPalace write, and continues.
+8. The PM decides and logs; the supervisor performs any required MemPalace
+   finalization from authoritative state before continuation.
 
 Research is intraday equity alpha using real Quantipy data, simple defensible
 features, optional sentiment, realistic costs, time-aware validation, null
@@ -262,9 +267,11 @@ The deterministic decision order is:
   baseline.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
-remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` persists the immutable decision receipt, then begins
-the next iteration with fresh context.
+remains `NO_CONSENSUS`; it does not suspend and does not write MemPalace. At
+completed repeat boundaries, successor transition is supervisor/controller
+owned: the runner only reports read-only next action, and the supervisor
+persists the immutable decision receipt and begins fresh context before waking
+the PM.
 An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
 Suspension is explicit operator-owned readiness suspension only. After
 completed G0 verification, `GATE_PASSED` with a full-union `COMPLETE` receipt
@@ -280,9 +287,9 @@ durable negative or methodology results. `CRASH`, exhausted `TEST_FAILURE` or
 `NO_CONSENSUS`, and operator `INFRA_BLOCKED` always set
 `memory_write_required=false`.
 
-MemPalace is the only durable autonomous research memory. Stage agents may
-read it only through `mempalace-readonly`; only the PM may write after a final
-memory-required decision. Search before writing, record compact experiment and
+MemPalace is the only durable autonomous research memory. Every model reads it
+only through `mempalace-readonly`; the platform finalizer alone writes after a
+validated memory-required decision. Search before writing, record compact experiment and
 receipt facts, and never store full ticker arrays. Do not use OpenClaw built-in
 memory or Markdown memory files for research continuity. Canonical decision
 receipts under the autoresearch state directory are the platform decision

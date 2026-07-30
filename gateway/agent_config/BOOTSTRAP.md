@@ -81,9 +81,10 @@ or orchestration changes belong to the human/Codex operator. Preserve those
 boundaries even when a shared change exposes an experiment defect.
 
 MemPalace and canonical per-iteration decision receipts are the durable
-autonomous research authorities, and only `autoresearch-pm` may mutate
-MemPalace. Stage agents have read-only access. Store compact receipt references
-and experiment facts, never full universe symbol arrays.
+autonomous research authorities. All models, including `autoresearch-pm`, have
+read-only MemPalace access; only the supervisor-owned platform finalizer may
+write state-derived final records. Store compact receipt references and
+experiment facts, never full universe symbol arrays.
 
 ## Commands
 

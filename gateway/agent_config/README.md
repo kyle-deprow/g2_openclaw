@@ -73,6 +73,10 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
+`autoresearch-next` is model-facing and read-only. Verification dispatch
+attestation/provisioning and repeat successor persistence are supervisor-owned
+during `run_once` before its corresponding wake. G2 start only enables that
+supervisor; it neither mutates authoritative state nor sends a direct PM wake.
 There is no state-schema migration in the external-verification command. The
 only legacy retry-receipt bootstrap accepted by schema-v4 state is the actual
 schema-1 receipt for deterministic attempt `-v2`: it must bind exactly one
@@ -134,8 +138,8 @@ intentional operator prewarm; a failed probe produces no READY receipt.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
 remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` persists the immutable decision receipt, then begins
-the next iteration with fresh context.
+the runner records the immutable decision receipt before beginning the next
+iteration with fresh context.
 An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
 Suspension remains explicit operator-owned readiness suspension only.
 After G0 implementation and verification, `GATE_PASSED` requires a full-union

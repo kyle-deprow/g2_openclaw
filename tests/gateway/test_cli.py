@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import signal
-import sqlite3
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -19,7 +18,6 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
-from gateway.autoresearch_decision_receipts import decision_receipt_path
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -33,7 +31,6 @@ from gateway.autoresearch_readiness import (
     canonical_platform_capabilities,
 )
 from gateway.autoresearch_runner import (
-    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     MEMBER_UNION_DIGEST_ALGORITHM,
     QUANTIPY_RECEIPT_PATHS,
@@ -56,15 +53,12 @@ from gateway.autoresearch_runner import (
     FixTriggerPhase,
     GroupedSummaryReceipt,
     ImplementationResultArtifact,
-    InfraGateOutcome,
     MemberUnionManifestReceipt,
     MetricDirection,
     Phase,
     PriceHydrationReceipt,
     PriceHydrationScopePreflight,
     ResearchMode,
-    ReviewResultArtifact,
-    ReviewVerdict,
     SetupContextArtifact,
     UniverseDateVerificationReceipt,
     UniverseHistoryBatchReceipt,
@@ -845,8 +839,11 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     (target_checkout / "README.md").write_text("baseline\n", encoding="utf-8")
     _git(target_checkout, "add", "README.md")
     _git(target_checkout, "commit", "-m", "baseline")
-    _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    _git(tmp_path, "clone", str(target_checkout), str(workspace))
+    _git(workspace, "config", "user.email", "autoresearch@example.test")
+    _git(workspace, "config", "user.name", "Autoresearch Test")
     workspace.chmod(0o700)
+    (workspace / ".git").chmod(0o700)
     manifest = {
         "schema_version": "quantipy-experiment-v2",
         "experiment_id": "cli-runtime-audit",
@@ -885,6 +882,18 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     _git(workspace, "add", "experiment.txt")
     _git(workspace, "commit", "-m", "fix")
     final_commit = _git(workspace, "rev-parse", "HEAD")
+    _git(
+        target_checkout,
+        "fetch",
+        str(workspace),
+        f"{implementation_commit}:refs/autoresearch-fixtures/{implementation_commit}",
+    )
+    _git(
+        target_checkout,
+        "fetch",
+        str(workspace),
+        f"{final_commit}:refs/autoresearch-fixtures/{final_commit}",
+    )
     return GitWorktree(target_checkout, workspace, implementation_commit, final_commit)
 
 
@@ -1903,763 +1912,6 @@ class TestAutoresearchCliCommands:
         assert saved["phase"] == "setup_context"
         assert saved["setup"]["metric_name"] == "OOS Sharpe net"
 
-    def test_autoresearch_mark_memory_and_start_next_persist_state(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        debate_agent_ids = (
-            "debater_microstructure",
-            "debater_data",
-            "debater_skeptic",
-            "debater_theory",
-            "debater_implementation",
-        )
-        debate = DebateResultArtifact(
-            round_number=1,
-            submissions=tuple(
-                DebateSubmission(
-                    agent_id=agent_id,
-                    theory_id=f"theory-{index}",
-                    theory_family="vwap-obv",
-                    vote_family="vwap-obv",
-                    hypothesis="VWAP and OBV capture intraday accumulation.",
-                    universe="Small-cap semiconductors",
-                    example_tickers=("AMD", "SMCI"),
-                    feature_pipeline="OHLCV to VWAP and OBV features",
-                    model_plan="Time-series classifier",
-                    walk_forward_plan="Expanding windows",
-                    transaction_cost_model="0.7 bps",
-                    data_coverage_plan="Use the common 2021-2026 calendar.",
-                    rejection_criteria="Discard below baseline.",
-                    objections=(),
-                )
-                for index, agent_id in enumerate(debate_agent_ids, start=1)
-            ),
-        )
-        consensus = ConsensusResultArtifact(
-            round_number=1,
-            status=ConsensusStatus.MAJORITY,
-            winner_theory_id="theory-1",
-            winner_theory_family="vwap-obv",
-            majority_count=5,
-            majority_agent_ids=debate_agent_ids,
-            dissenting_positions=(),
-            novelty_score=0.6,
-            theory_score=0.7,
-            implementation_risk_score=0.3,
-            data_adequacy_score=0.9,
-            overfit_risk_score=0.2,
-            expected_net_sharpe=0.5,
-            rejection_reasons=(),
-            implementation_brief="Implement the narrow VWAP and OBV experiment.",
-            dissent_summary="The panel reached consensus.",
-            universe_plan=_universe_plan(),
-        )
-        verification = VerificationResultArtifact(
-            status=VerificationStatus.PASS,
-            is_walk_forward_sharpe_net=0.41,
-            oos_sharpe_net=0.38,
-            max_drawdown_pct=12.4,
-            win_rate=0.54,
-            trade_count=211,
-            trades_per_day=1.9,
-            oos_trading_days=128,
-            feature_importances_summary="VWAP distance and OBV slope dominate.",
-            null_test_summary="Null shuffle drops Sharpe near zero.",
-            bug_signals=(),
-            tests_passed=True,
-            commands_run=("uv run pytest",),
-            data_coverage=_dynamic_coverage(),
-            universe_verification_receipt=_universe_receipt(),
-            price_hydration_receipt=_hydration_receipt(),
-        )
-        readiness = _ready_manifest(tmp_path / "readiness")
-        readiness_path = tmp_path / "platform-readiness.json"
-        _write_readiness_manifest(readiness_path, readiness)
-        validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        verification = replace(
-            verification,
-            universe_verification_receipt=_bind_universe_receipt_to_validation_context(
-                _universe_receipt(),
-                validation_context,
-            ),
-        )
-        repeat_state = AutoresearchState(
-            phase=Phase.REPEAT,
-            iteration=3,
-            setup=SetupContextArtifact(
-                goal="Find a profitable intraday alpha",
-                metric_name="OOS Sharpe net",
-                metric_direction=MetricDirection.MAXIMIZE,
-                target_repo="/home/dev/repos/quantipy",
-                writable_scope="src/quantipy/alpha",
-                baseline_summary="Baseline OOS Sharpe net is 0.18.",
-                hard_constraints=("No overnight holds",),
-                data_sources=("qp.prices()",),
-            ),
-            context_packet=ContextPacketArtifact(
-                baseline_metric="0.18 OOS Sharpe net",
-                current_best_metric="0.22 OOS Sharpe net",
-                recent_experiment_outcomes=(),
-                prior_findings=(),
-                open_proposals=(),
-                hard_constraints=("No overnight holds",),
-                available_data_sources=("qp.prices()",),
-                loaded_quantipy_sources=("AGENTS.md",),
-                research_mode=ResearchMode.ALPHA_RESEARCH,
-                mode_rationale="Coverage supports an alpha experiment.",
-                burned_theory_families=(),
-            ),
-            debate_rounds=(debate,),
-            consensus_history=(consensus,),
-            implementation_result=ImplementationResultArtifact(
-                summary="Implemented the narrow VWAP and OBV experiment.",
-                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "iteration-3"),
-                commit_sha="abc1234",
-                module_path="src/quantipy/alpha/vwap_obv/",
-                notebook_path="notebooks/experiments/vwap_obv.ipynb",
-                tests_added_or_updated=("tests/test_vwap_obv.py",),
-                commands_run=("uv run pytest tests/test_vwap_obv.py",),
-                price_hydration_scope_preflight=PriceHydrationScopePreflight(
-                    member_union_count=1,
-                    experiment_start="2021-01-04",
-                    experiment_end="2021-12-31",
-                    timeframe="1min",
-                    market_hours="regular",
-                    session_count=252,
-                    planned_symbol_sessions=252,
-                    within_budget=True,
-                ),
-            ),
-            verification_history=(verification,),
-            review_history=(
-                ReviewResultArtifact(
-                    reviewer_agent_id="reviewer",
-                    verdict=ReviewVerdict.PASS,
-                    recommended_metric_name="OOS Sharpe net",
-                    recommended_metric_value=0.38,
-                    critical_issues=(),
-                    noncritical_issues=(),
-                    fix_requests=(),
-                    summary="Methodology review passed.",
-                ),
-            ),
-            final_decision=FinalDecisionArtifact(
-                experiment_id="iteration-3",
-                decision=FinalDecision.KEEP,
-                recommended_metric_name="OOS Sharpe net",
-                recommended_metric_value=0.38,
-                reviewer_verdict=FinalReviewerVerdict.PASS,
-                rationale="Improves baseline without review blockers.",
-                log_summary="KEEP vwap_obv_intraday with updated baseline review.",
-                continue_loop=True,
-                memory_write_required=True,
-            ),
-            mode=ResearchMode.ALPHA_RESEARCH,
-            platform_readiness=readiness.identity(),
-        )
-        state_path = tmp_path / "repeat-state.json"
-        memory_state_path = tmp_path / "memory-state.json"
-        next_state_path = tmp_path / "next-state.json"
-        kg_path = tmp_path / "knowledge_graph.sqlite3"
-        connection = sqlite3.connect(kg_path)
-        connection.executescript(
-            """
-            CREATE TABLE triples (
-                id TEXT PRIMARY KEY, subject TEXT NOT NULL, predicate TEXT NOT NULL,
-                object TEXT NOT NULL, valid_from TEXT, valid_to TEXT,
-                source_file TEXT, source_drawer_id TEXT
-            );
-            """
-        )
-        connection.executemany(
-            "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
-            [
-                ("1", "iteration-3", "decision", "keep", "result.json"),
-                ("2", "iteration-3", "research_mode", "alpha_research", "result.json"),
-                ("3", "iteration-3", "alpha_decision_metric", "oos_sharpe_net_0_38", "result.json"),
-                (
-                    "4",
-                    "iteration-3",
-                    "data_window",
-                    "2021_01_04_to_2021_12_31_oos_2021_10_01_to_2021_12_31",
-                    "result.json",
-                ),
-                ("5", "iteration-3", "reviewer_verdict", "pass", "result.json"),
-                (
-                    "6",
-                    "iteration-3",
-                    "keeper_rationale",
-                    "improves_baseline_without_review_blockers",
-                    "result.json",
-                ),
-            ],
-        )
-        connection.commit()
-        connection.close()
-        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
-
-        mark_result = runner.invoke(
-            app,
-            [
-                "autoresearch-mark-memory",
-                str(state_path),
-                "--output",
-                str(memory_state_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(readiness_path),
-                "--mempalace-kg-path",
-                str(kg_path),
-            ],
-        )
-        assert mark_result.exit_code == 0, mark_result.output
-        marked = json.loads(memory_state_path.read_text(encoding="utf-8"))
-        assert marked["memory_written"] is True
-        assert marked["memory_verification_receipt"]["experiment_id"] == "iteration-3"
-
-        next_result = runner.invoke(
-            app,
-            [
-                "autoresearch-start-next",
-                str(memory_state_path),
-                "--output",
-                str(next_state_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(readiness_path),
-            ],
-        )
-        assert next_result.exit_code == 0
-        next_state = json.loads(next_state_path.read_text(encoding="utf-8"))
-        assert next_state["phase"] == "setup_context"
-        assert next_state["iteration"] == 4
-        assert next_state["setup"]["metric_name"] == "OOS Sharpe net"
-        receipt_path = decision_receipt_path(memory_state_path, 3)
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        assert receipt["iteration"] == 3
-        assert receipt["final_decision"]["decision"] == "KEEP"
-        assert receipt["memory_verification_receipt"]["experiment_id"] == "iteration-3"
-
-    def test_autoresearch_mark_memory_rejects_valid_g0_infra_repaired_state(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        debate_agent_ids = (
-            "debater_microstructure",
-            "debater_data",
-            "debater_skeptic",
-            "debater_theory",
-            "debater_implementation",
-        )
-        readiness = _ready_manifest(tmp_path / "g0-readiness")
-        readiness_path = tmp_path / "platform-readiness.json"
-        _write_readiness_manifest(readiness_path, readiness)
-        validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        requested_sessions = tuple(
-            session
-            for session in validation_context.xnys_sessions
-            if date(2021, 1, 4) <= session <= date(2021, 12, 31)
-        )
-        preflight = PriceHydrationScopePreflight(
-            member_union_count=_MEMBER_UNION_COUNT,
-            experiment_start="2021-01-04",
-            experiment_end="2021-12-31",
-            timeframe="1min",
-            market_hours="regular",
-            session_count=len(requested_sessions),
-            planned_symbol_sessions=_MEMBER_UNION_COUNT * len(requested_sessions),
-            within_budget=True,
-        )
-        state = AutoresearchState(platform_readiness=readiness.identity())
-        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-        state = advance_state(
-            state,
-            SetupContextArtifact(
-                goal="Repair platform coverage provenance for the next alpha run",
-                metric_name="coverage gate",
-                metric_direction=MetricDirection.MAXIMIZE,
-                target_repo="/home/dev/repos/quantipy",
-                writable_scope="src/quantipy/alpha",
-                baseline_summary="Coverage gate is currently blocked.",
-                hard_constraints=("Do not modify Quantipy",),
-                data_sources=("qp.prices()",),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ContextPacketArtifact(
-                baseline_metric="Coverage gate blocked",
-                current_best_metric="Coverage gate blocked",
-                recent_experiment_outcomes=(),
-                prior_findings=(),
-                open_proposals=(),
-                hard_constraints=("Do not modify Quantipy",),
-                available_data_sources=("qp.prices()",),
-                loaded_quantipy_sources=("AGENTS.md",),
-                research_mode=ResearchMode.DATA_INFRA_G0,
-                mode_rationale="Repair cap and source provenance before an alpha rerun.",
-                burned_theory_families=(),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            DebateResultArtifact(
-                round_number=1,
-                submissions=tuple(
-                    DebateSubmission(
-                        agent_id=agent_id,
-                        theory_id=f"theory-{index}",
-                        theory_family="platform-coverage",
-                        vote_family="platform-coverage",
-                        hypothesis="Repair cap/source provenance before resuming alpha research.",
-                        universe="Declared liquid-common stocks sleeve",
-                        example_tickers=("AMD", "SMCI"),
-                        feature_pipeline="Readiness evidence to platform coverage reconciliation",
-                        model_plan="No model change",
-                        walk_forward_plan="No walk-forward run in G0",
-                        transaction_cost_model="N/A",
-                        data_coverage_plan="Use the pinned XNYS readiness evidence.",
-                        rejection_criteria="Discard if provenance remains incomplete.",
-                        objections=(),
-                        compute_fit=ComputeFitArtifact(
-                            target=ComputeTarget.CPU,
-                            rationale=(
-                                "The repair path is an evidence reconciliation workflow "
-                                "that runs comfortably on CPU."
-                            ),
-                            required_dependencies=(),
-                            benchmark_plan=(
-                                "Record wall time and peak memory for the provenance "
-                                "repair validation."
-                            ),
-                        ),
-                    )
-                    for index, agent_id in enumerate(debate_agent_ids, start=1)
-                ),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ConsensusResultArtifact(
-                round_number=1,
-                status=ConsensusStatus.MAJORITY,
-                winner_theory_id="theory-1",
-                winner_theory_family="platform-coverage",
-                majority_count=5,
-                majority_agent_ids=debate_agent_ids,
-                dissenting_positions=(),
-                novelty_score=0.6,
-                theory_score=0.8,
-                implementation_risk_score=0.2,
-                data_adequacy_score=0.9,
-                overfit_risk_score=0.1,
-                expected_net_sharpe=0.0,
-                rejection_reasons=(),
-                implementation_brief="Audit and restore platform provenance bindings.",
-                dissent_summary="The panel reached consensus.",
-                universe_plan=_universe_plan(),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ImplementationResultArtifact(
-                summary="Validated the platform provenance repair path.",
-                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "g0-iteration-1"),
-                commit_sha="abc1234",
-                module_path="src/quantipy/alpha/vwap_obv/",
-                notebook_path="notebooks/experiments/vwap_obv.ipynb",
-                tests_added_or_updated=("tests/test_platform_coverage.py",),
-                commands_run=("uv run pytest tests/test_platform_coverage.py",),
-                compute_fit=ComputeFitArtifact(
-                    target=ComputeTarget.CPU,
-                    rationale=(
-                        "The provenance reconciliation workload is deterministic and small."
-                    ),
-                    required_dependencies=(),
-                    benchmark_plan="Record wall time and peak memory for the repair run.",
-                ),
-                price_hydration_scope_preflight=preflight,
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            VerificationResultArtifact(
-                status=VerificationStatus.PASS,
-                is_walk_forward_sharpe_net=0.0,
-                oos_sharpe_net=0.0,
-                max_drawdown_pct=0.0,
-                win_rate=0.0,
-                trade_count=0,
-                trades_per_day=0.0,
-                oos_trading_days=0,
-                feature_importances_summary="Not applicable to G0 coverage remediation.",
-                null_test_summary="Not applicable to G0 coverage remediation.",
-                bug_signals=(),
-                tests_passed=True,
-                commands_run=("uv run pytest tests/test_platform_coverage.py",),
-                data_coverage=_dynamic_coverage(),
-                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
-                infra_rationale="Every source and cap record has auditable provenance.",
-                platform_coverage_validation=_platform_coverage_receipt(
-                    context=validation_context,
-                    preflight=preflight,
-                ),
-                universe_verification_receipt=_bind_universe_receipt_to_validation_context(
-                    _universe_receipt(),
-                    validation_context,
-                ),
-                price_hydration_receipt=_hydration_receipt(),
-            ),
-            policy,
-            validation_context=validation_context,
-        )
-        state = advance_state(
-            state,
-            ReviewResultArtifact(
-                reviewer_agent_id="reviewer",
-                verdict=ReviewVerdict.PASS,
-                recommended_metric_name="coverage gate",
-                recommended_metric_value=0.0,
-                critical_issues=(),
-                noncritical_issues=(),
-                fix_requests=(),
-                summary="Methodology review passed.",
-            ),
-            policy,
-        )
-        repeat_state = advance_state(
-            state,
-            FinalDecisionArtifact(
-                experiment_id="g0-iteration-1",
-                decision=FinalDecision.INFRA_REPAIRED,
-                recommended_metric_name="coverage gate",
-                recommended_metric_value=None,
-                reviewer_verdict=FinalReviewerVerdict.PASS,
-                rationale="Data repair completed.",
-                log_summary="G0 gate passed.",
-                continue_loop=True,
-                memory_write_required=False,
-                infra_rationale="Cap/source provenance is now present for the declared sleeve.",
-            ),
-            policy,
-            validation_context=validation_context,
-        )
-        state_path = tmp_path / "g0-repeat-state.json"
-        output_path = tmp_path / "g0-memory-state.json"
-        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
-
-        result = runner.invoke(
-            app,
-            [
-                "autoresearch-mark-memory",
-                str(state_path),
-                "--output",
-                str(output_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(readiness_path),
-            ],
-        )
-
-        assert repeat_state.final_decision is not None
-        assert repeat_state.final_decision.memory_write_required is False
-        assert result.exit_code == 1
-        assert "MemPalace verification is prohibited for a" in result.output
-        assert not output_path.exists()
-
-    def test_autoresearch_start_next_accepts_valid_g0_no_memory_handoff(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        debate_agent_ids = (
-            "debater_microstructure",
-            "debater_data",
-            "debater_skeptic",
-            "debater_theory",
-            "debater_implementation",
-        )
-        readiness = _ready_manifest(tmp_path / "g0-readiness")
-        readiness_path = tmp_path / "platform-readiness.json"
-        stale_readiness_path = tmp_path / "stale-platform-readiness.json"
-        _write_readiness_manifest(readiness_path, readiness)
-        validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        requested_sessions = tuple(
-            session
-            for session in validation_context.xnys_sessions
-            if date(2021, 1, 4) <= session <= date(2021, 12, 31)
-        )
-        preflight = PriceHydrationScopePreflight(
-            member_union_count=_MEMBER_UNION_COUNT,
-            experiment_start="2021-01-04",
-            experiment_end="2021-12-31",
-            timeframe="1min",
-            market_hours="regular",
-            session_count=len(requested_sessions),
-            planned_symbol_sessions=_MEMBER_UNION_COUNT * len(requested_sessions),
-            within_budget=True,
-        )
-        state = AutoresearchState(platform_readiness=readiness.identity())
-        policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-        state = advance_state(
-            state,
-            SetupContextArtifact(
-                goal="Repair platform coverage provenance for the next alpha run",
-                metric_name="coverage gate",
-                metric_direction=MetricDirection.MAXIMIZE,
-                target_repo="/home/dev/repos/quantipy",
-                writable_scope="src/quantipy/alpha",
-                baseline_summary="Coverage gate is currently blocked.",
-                hard_constraints=("Do not modify Quantipy",),
-                data_sources=("qp.prices()",),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ContextPacketArtifact(
-                baseline_metric="Coverage gate blocked",
-                current_best_metric="Coverage gate blocked",
-                recent_experiment_outcomes=(),
-                prior_findings=(),
-                open_proposals=(),
-                hard_constraints=("Do not modify Quantipy",),
-                available_data_sources=("qp.prices()",),
-                loaded_quantipy_sources=("AGENTS.md",),
-                research_mode=ResearchMode.DATA_INFRA_G0,
-                mode_rationale="Repair cap and source provenance before an alpha rerun.",
-                burned_theory_families=(),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            DebateResultArtifact(
-                round_number=1,
-                submissions=tuple(
-                    DebateSubmission(
-                        agent_id=agent_id,
-                        theory_id=f"theory-{index}",
-                        theory_family="platform-coverage",
-                        vote_family="platform-coverage",
-                        hypothesis="Repair cap/source provenance before resuming alpha research.",
-                        universe="Declared liquid-common stocks sleeve",
-                        example_tickers=("AMD", "SMCI"),
-                        feature_pipeline="Readiness evidence to platform coverage reconciliation",
-                        model_plan="No model change",
-                        walk_forward_plan="No walk-forward run in G0",
-                        transaction_cost_model="N/A",
-                        data_coverage_plan="Use the pinned XNYS readiness evidence.",
-                        rejection_criteria="Discard if provenance remains incomplete.",
-                        objections=(),
-                        compute_fit=ComputeFitArtifact(
-                            target=ComputeTarget.CPU,
-                            rationale=(
-                                "The repair path is an evidence reconciliation workflow "
-                                "that runs comfortably on CPU."
-                            ),
-                            required_dependencies=(),
-                            benchmark_plan=(
-                                "Record wall time and peak memory for the provenance "
-                                "repair validation."
-                            ),
-                        ),
-                    )
-                    for index, agent_id in enumerate(debate_agent_ids, start=1)
-                ),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ConsensusResultArtifact(
-                round_number=1,
-                status=ConsensusStatus.MAJORITY,
-                winner_theory_id="theory-1",
-                winner_theory_family="platform-coverage",
-                majority_count=5,
-                majority_agent_ids=debate_agent_ids,
-                dissenting_positions=(),
-                novelty_score=0.6,
-                theory_score=0.8,
-                implementation_risk_score=0.2,
-                data_adequacy_score=0.9,
-                overfit_risk_score=0.1,
-                expected_net_sharpe=0.0,
-                rejection_reasons=(),
-                implementation_brief="Audit and restore platform provenance bindings.",
-                dissent_summary="The panel reached consensus.",
-                universe_plan=_universe_plan(),
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            ImplementationResultArtifact(
-                summary="Validated the platform provenance repair path.",
-                workspace_path=str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "g0-iteration-1"),
-                commit_sha="abc1234",
-                module_path="src/quantipy/alpha/vwap_obv/",
-                notebook_path="notebooks/experiments/vwap_obv.ipynb",
-                tests_added_or_updated=("tests/test_platform_coverage.py",),
-                commands_run=("uv run pytest tests/test_platform_coverage.py",),
-                compute_fit=ComputeFitArtifact(
-                    target=ComputeTarget.CPU,
-                    rationale=(
-                        "The provenance reconciliation workload is deterministic and small."
-                    ),
-                    required_dependencies=(),
-                    benchmark_plan="Record wall time and peak memory for the repair run.",
-                ),
-                price_hydration_scope_preflight=preflight,
-            ),
-            policy,
-        )
-        state = advance_state(
-            state,
-            VerificationResultArtifact(
-                status=VerificationStatus.PASS,
-                is_walk_forward_sharpe_net=0.0,
-                oos_sharpe_net=0.0,
-                max_drawdown_pct=0.0,
-                win_rate=0.0,
-                trade_count=0,
-                trades_per_day=0.0,
-                oos_trading_days=0,
-                feature_importances_summary="Not applicable to G0 coverage remediation.",
-                null_test_summary="Not applicable to G0 coverage remediation.",
-                bug_signals=(),
-                tests_passed=True,
-                commands_run=("uv run pytest tests/test_platform_coverage.py",),
-                data_coverage=_dynamic_coverage(),
-                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
-                infra_rationale="Every source and cap record has auditable provenance.",
-                platform_coverage_validation=_platform_coverage_receipt(
-                    context=validation_context,
-                    preflight=preflight,
-                ),
-                universe_verification_receipt=_bind_universe_receipt_to_validation_context(
-                    _universe_receipt(),
-                    validation_context,
-                ),
-                price_hydration_receipt=_hydration_receipt(),
-            ),
-            policy,
-            validation_context=validation_context,
-        )
-        state = advance_state(
-            state,
-            ReviewResultArtifact(
-                reviewer_agent_id="reviewer",
-                verdict=ReviewVerdict.PASS,
-                recommended_metric_name="coverage gate",
-                recommended_metric_value=0.0,
-                critical_issues=(),
-                noncritical_issues=(),
-                fix_requests=(),
-                summary="Methodology review passed.",
-            ),
-            policy,
-        )
-        repeat_state = advance_state(
-            state,
-            FinalDecisionArtifact(
-                experiment_id="g0-iteration-1",
-                decision=FinalDecision.INFRA_REPAIRED,
-                recommended_metric_name="coverage gate",
-                recommended_metric_value=None,
-                reviewer_verdict=FinalReviewerVerdict.PASS,
-                rationale="Data repair completed.",
-                log_summary="G0 gate passed.",
-                continue_loop=True,
-                memory_write_required=False,
-                infra_rationale="Cap/source provenance is now present for the declared sleeve.",
-            ),
-            policy,
-            validation_context=validation_context,
-        )
-        state_path = tmp_path / "g0-repeat-state.json"
-        next_state_path = tmp_path / "g0-next-state.json"
-        state_path.write_text(json.dumps(repeat_state.to_dict()), encoding="utf-8")
-
-        mark_result = runner.invoke(
-            app,
-            [
-                "autoresearch-mark-memory",
-                str(state_path),
-                "--output",
-                str(next_state_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(readiness_path),
-            ],
-        )
-
-        assert repeat_state.final_decision is not None
-        assert repeat_state.final_decision.memory_write_required is False
-        assert mark_result.exit_code == 1
-        assert "MemPalace verification is prohibited for a" in mark_result.output
-        assert not next_state_path.exists()
-
-        stale_readiness = replace(
-            readiness,
-            manifest_id="manifest-cli-test-2",
-            snapshot_id="snapshot-cli-test-2",
-        )
-        _write_readiness_manifest(stale_readiness_path, stale_readiness)
-
-        stale_result = runner.invoke(
-            app,
-            [
-                "autoresearch-start-next",
-                str(state_path),
-                "--output",
-                str(next_state_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(stale_readiness_path),
-            ],
-        )
-
-        assert stale_result.exit_code == 1
-        assert "platform readiness receipt is" in stale_result.output
-        assert "stale; run autoresearch-resume explicitly" in stale_result.output
-
-        next_result = runner.invoke(
-            app,
-            [
-                "autoresearch-start-next",
-                str(state_path),
-                "--output",
-                str(next_state_path),
-                "--openclaw-config",
-                str(DEFAULT_OPENCLAW_CONFIG_PATH),
-                "--readiness-manifest",
-                str(readiness_path),
-            ],
-        )
-
-        assert next_result.exit_code == 0, next_result.output
-        next_state = json.loads(next_state_path.read_text(encoding="utf-8"))
-        assert next_state["phase"] == "setup_context"
-        assert next_state["iteration"] == 2
-        assert next_state["setup"]["metric_name"] == "coverage gate"
-        receipt_path = decision_receipt_path(state_path, 1)
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        assert receipt["iteration"] == 1
-        assert receipt["final_decision"]["decision"] == "INFRA_REPAIRED"
-        assert receipt["memory_verification_receipt"] is None
-
     def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"
         quantipy_root = tmp_path / "quantipy"
@@ -2696,6 +1948,76 @@ class TestAutoresearchCliCommands:
         assert result.exit_code == 1
         assert "active experiment/test writer" in result.output
         assert "processes" in result.output
+
+    def test_autoresearch_next_does_not_finalize_memory_from_cli(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        state_path = tmp_path / "repeat-state.json"
+        quantipy_root = tmp_path / "quantipy"
+        quantipy_root.mkdir()
+        readiness = _ready_manifest(tmp_path / "readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = AutoresearchState(
+            phase=Phase.REPEAT,
+            iteration=7,
+            mode=ResearchMode.ALPHA_RESEARCH,
+            final_decision=FinalDecisionArtifact(
+                experiment_id="iteration-7",
+                decision=FinalDecision.KEEP,
+                recommended_metric_name="OOS Sharpe net",
+                recommended_metric_value=0.42,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+                rationale="Passes review and improves baseline.",
+                log_summary="KEEP iteration-7.",
+                continue_loop=True,
+                memory_write_required=True,
+            ),
+            platform_readiness=readiness.identity(),
+        )
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+        class FakeAction:
+            source_manifest_sha256 = "0" * 64
+            state_reference_sha256 = "1" * 64
+
+            def to_dict(self) -> dict[str, object]:
+                return {"phase": "repeat", "next_agent_ids": []}
+
+        def forbidden_finalize(*args: object, **kwargs: object) -> AutoresearchState:
+            del args, kwargs
+            raise AssertionError("autoresearch-next must not finalize memory")
+
+        monkeypatch.setattr(
+            "gateway.autoresearch_runner.finalize_repeat_memory_state_file",
+            forbidden_finalize,
+        )
+        monkeypatch.setattr("gateway.autoresearch_runner.build_receipt_catalog", lambda _: object())
+        monkeypatch.setattr(
+            "gateway.autoresearch_runner.next_action", lambda *_, **__: FakeAction()
+        )
+        monkeypatch.setattr("gateway.cli._active_target_writer_processes", lambda _: ())
+
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-next",
+                str(state_path),
+                "--quantipy-root",
+                str(quantipy_root),
+                "--openclaw-config",
+                str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output) == {"next_agent_ids": [], "phase": "repeat"}
+        persisted = json.loads(state_path.read_text(encoding="utf-8"))
+        assert persisted["memory_written"] is False
 
     def test_autoresearch_next_provisions_fixed_runs_root_before_verification_dispatch(
         self,
@@ -2750,9 +2072,9 @@ class TestAutoresearchCliCommands:
             )
 
         assert result.exit_code == 0, result.output
-        seal_runtime.assert_called_once()
-        require_runtime.assert_called_once()
-        provision.assert_called_once_with()
+        seal_runtime.assert_not_called()
+        require_runtime.assert_not_called()
+        provision.assert_not_called()
 
     def test_autoresearch_create_command_file_reads_secure_stdin_protocol(
         self,

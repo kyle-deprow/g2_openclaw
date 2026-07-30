@@ -54,10 +54,6 @@ from gateway.autoresearch_runner import (
     MAX_ARTIFACT_FILE_BYTES,
     MAX_NEXT_ACTION_PROMPT_BYTES,
     MEMBER_UNION_DIGEST_ALGORITHM,
-    MEMPALACE_FULL_SERVER_ID,
-    MEMPALACE_MUTATION_DENY_TOOL_IDS,
-    MEMPALACE_MUTATION_TOOLS,
-    MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS,
     MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
     MEMPALACE_READONLY_SERVER_ID,
     MEMPALACE_READONLY_TOOL_NAMES,
@@ -118,10 +114,13 @@ from gateway.autoresearch_runner import (
     VerificationResultArtifact,
     VerificationStatus,
     advance_infrastructure_verification_failure,
+    build_final_memory_write_request,
     build_instruction_source_manifest,
     build_receipt_catalog,
     can_write_memory,
     expected_instruction_manifest_sha256,
+    finalize_repeat_memory,
+    finalize_repeat_memory_state_file,
     instruction_source_manifest_sha256,
     load_artifact_file,
     load_autoresearch_policy,
@@ -148,6 +147,11 @@ from gateway.autoresearch_runner import (
     advance_state as _runner_advance_state,
 )
 from gateway.cli import app
+from gateway.mempalace_finalizer import (
+    FINAL_MEMORY_SOURCE_FILE,
+    FinalMemoryWriteRequest,
+    finalization_journal_path,
+)
 from typer.testing import CliRunner
 
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
@@ -1288,20 +1292,42 @@ def _write_active_mempalace_facts(
     overrides = object_overrides if object_overrides is not None else {}
     connection = sqlite3.connect(kg_path)
     connection.executemany(
-        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
         [
             (
                 str(index),
                 subject,
                 predicate,
                 overrides.get(predicate, object_value),
-                "result.json",
+                FINAL_MEMORY_SOURCE_FILE,
+                "drawer-finalizer",
             )
             for index, (predicate, object_value) in enumerate(facts.items(), start=1)
         ],
     )
     connection.commit()
     connection.close()
+
+
+def _write_committed_finalization_journal(
+    kg_path: Path,
+    request: FinalMemoryWriteRequest,
+) -> None:
+    digest = sha256(
+        json.dumps(request.to_dict(), separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    path = finalization_journal_path(kg_path.parent, request.experiment_id)
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "drawer_id": "drawer-finalizer",
+                "request_sha256": digest,
+                "status": "committed",
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _setup_artifact() -> SetupContextArtifact:
@@ -2079,7 +2105,7 @@ class GitWorktree:
 
 @pytest.fixture()
 def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    worktree_root = tmp_path / "operator-controlled" / "worktrees"
+    worktree_root = tmp_path / "operator-controlled" / "model-workspaces"
     monkeypatch.setattr(
         autoresearch_runner,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
@@ -2100,8 +2126,11 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     (target_checkout / "README.md").write_text("baseline\n", encoding="utf-8")
     _git(target_checkout, "add", "README.md")
     _git(target_checkout, "commit", "-m", "baseline")
-    _git(target_checkout, "worktree", "add", "-b", "autoresearch", str(workspace))
+    _git(tmp_path, "clone", str(target_checkout), str(workspace))
+    _git(workspace, "config", "user.email", "autoresearch@example.test")
+    _git(workspace, "config", "user.name", "Autoresearch Test")
     workspace.chmod(0o700)
+    (workspace / ".git").chmod(0o700)
     (workspace / "experiment.txt").write_text("implementation\n", encoding="utf-8")
     _git(workspace, "add", "experiment.txt")
     _git(workspace, "commit", "-m", "implementation")
@@ -2110,6 +2139,18 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
     _git(workspace, "add", "experiment.txt")
     _git(workspace, "commit", "-m", "fix")
     final_commit = _git(workspace, "rev-parse", "HEAD")
+    _git(
+        target_checkout,
+        "fetch",
+        str(workspace),
+        f"{implementation_commit}:refs/autoresearch-fixtures/{implementation_commit}",
+    )
+    _git(
+        target_checkout,
+        "fetch",
+        str(workspace),
+        f"{final_commit}:refs/autoresearch-fixtures/{final_commit}",
+    )
     return GitWorktree(target_checkout, workspace, implementation_commit, final_commit)
 
 
@@ -2214,6 +2255,14 @@ def _write_quantipy_v2_run(
     notebook_requested: bool = False,
     extra_source_file_count: int = 0,
 ) -> tuple[str, str, Path, str, str, str]:
+    canonical_head = _git(worktree.target_checkout, "rev-parse", "HEAD")
+    _git(
+        worktree.workspace,
+        "fetch",
+        str(worktree.target_checkout),
+        f"{canonical_head}:refs/autoresearch-fixtures/canonical-head",
+    )
+    _git(worktree.workspace, "checkout", "--detach", canonical_head)
     source_root = worktree.workspace / manifest_parent
     source_root.mkdir(parents=True, exist_ok=True)
     current_directory = source_root
@@ -2286,6 +2335,12 @@ def _write_quantipy_v2_run(
     _git(worktree.workspace, "add", manifest_parent.as_posix() or ".")
     _git(worktree.workspace, "commit", "-m", "add v2 experiment runtime")
     commit_sha = _git(worktree.workspace, "rev-parse", "HEAD")
+    _git(
+        worktree.target_checkout,
+        "fetch",
+        str(worktree.workspace),
+        f"{commit_sha}:refs/autoresearch-fixtures/{commit_sha}",
+    )
 
     ordered_stages = ("prepare", "smoke", "feasibility", "model")
     entered_stages = ordered_stages[: ordered_stages.index(terminal_stage) + 1]
@@ -5392,6 +5447,256 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
     assert not output_path.exists()
 
 
+def test_stage_submission_inbox_validates_then_supervisor_advances(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    artifact_path = tmp_path / "artifact.json"
+    inbox_path = tmp_path / "stage-inbox"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    instruction_digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    state_reference = autoresearch_runner.build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": instruction_digest,
+                "state_reference_sha256": state_reference,
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    submission_path = autoresearch_runner.submit_stage_artifact_file(
+        state_path=state_path,
+        artifact_path=artifact_path,
+        inbox_path=inbox_path,
+        instruction_manifest_sha256=instruction_digest,
+        policy=policy,
+        validation_context=None,
+    )
+
+    assert submission_path.parent == inbox_path
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+    monkeypatch.setattr(autoresearch_runner, "build_receipt_catalog", lambda _: receipts)
+    advanced = autoresearch_runner.consume_stage_submission_inbox(
+        state_path=state_path,
+        output_path=state_path,
+        inbox_path=inbox_path,
+        openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        validation_context=None,
+    )
+    assert advanced is not None
+    assert advanced.setup == _setup_artifact()
+    assert autoresearch_runner.load_state_file(state_path).setup == _setup_artifact()
+    assert not submission_path.exists()
+    assert (inbox_path / "accepted" / submission_path.name).is_file()
+
+
+def test_stage_submission_inbox_rejects_invalid_envelope_without_state_write(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    inbox_path = tmp_path / "stage-inbox"
+    inbox_path.mkdir()
+    inbox_path.chmod(0o700)
+    bad_submission = inbox_path / "bad.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    bad_submission.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": "0" * 64,
+                "state_reference_sha256": "1" * 64,
+                "artifact": _setup_artifact().to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    advanced = autoresearch_runner.consume_stage_submission_inbox(
+        state_path=state_path,
+        output_path=state_path,
+        inbox_path=inbox_path,
+        openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        validation_context=None,
+    )
+
+    assert advanced is None
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+    assert not bad_submission.exists()
+    assert (inbox_path / "rejected" / bad_submission.name).is_file()
+
+
+def test_stage_submission_inbox_rejects_symlinked_root_without_outside_write(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    outside = tmp_path / "outside"
+    inbox_path = tmp_path / "stage-inbox"
+    outside.mkdir()
+    inbox_path.symlink_to(outside, target_is_directory=True)
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    protected = outside / "bad.json"
+    protected.write_text("do-not-touch\n", encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="cannot open stage submission inbox"):
+        autoresearch_runner.consume_stage_submission_inbox(
+            state_path=state_path,
+            output_path=state_path,
+            inbox_path=inbox_path,
+            openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            validation_context=None,
+        )
+
+    assert protected.read_text(encoding="utf-8") == "do-not-touch\n"
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+
+
+def test_stage_submission_inbox_rejects_symlinked_rejected_directory_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    inbox_path = tmp_path / "stage-inbox"
+    outside = tmp_path / "outside"
+    inbox_path.mkdir()
+    inbox_path.chmod(0o700)
+    outside.mkdir()
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    bad_submission = inbox_path / "bad.json"
+    bad_submission.write_text("{}", encoding="utf-8")
+    (inbox_path / "rejected").symlink_to(outside, target_is_directory=True)
+    protected = outside / "bad.json"
+    protected.write_text("do-not-overwrite\n", encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="rejected path must be a plain"):
+        autoresearch_runner.consume_stage_submission_inbox(
+            state_path=state_path,
+            output_path=state_path,
+            inbox_path=inbox_path,
+            openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            validation_context=None,
+        )
+
+    assert protected.read_text(encoding="utf-8") == "do-not-overwrite\n"
+    assert bad_submission.is_file()
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+
+
+def test_stage_submission_inbox_rejects_symlinked_accepted_directory_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    inbox_path = tmp_path / "stage-inbox"
+    outside = tmp_path / "outside"
+    inbox_path.mkdir()
+    inbox_path.chmod(0o700)
+    outside.mkdir()
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    bad_submission = inbox_path / "bad.json"
+    bad_submission.write_text("{}", encoding="utf-8")
+    (inbox_path / "accepted").symlink_to(outside, target_is_directory=True)
+    protected = outside / "bad.json"
+    protected.write_text("do-not-overwrite\n", encoding="utf-8")
+
+    with pytest.raises(AutoresearchValidationError, match="accepted path must be a plain"):
+        autoresearch_runner.consume_stage_submission_inbox(
+            state_path=state_path,
+            output_path=state_path,
+            inbox_path=inbox_path,
+            openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            validation_context=None,
+        )
+
+    assert protected.read_text(encoding="utf-8") == "do-not-overwrite\n"
+    assert bad_submission.is_file()
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+
+
+def test_stage_submission_inbox_rejects_hardlinked_submission_without_state_write(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    inbox_path = tmp_path / "stage-inbox"
+    inbox_path.mkdir()
+    inbox_path.chmod(0o700)
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    source = tmp_path / "source.json"
+    source.write_text("{}", encoding="utf-8")
+    hardlink = inbox_path / "hardlink.json"
+    os.link(source, hardlink)
+
+    advanced = autoresearch_runner.consume_stage_submission_inbox(
+        state_path=state_path,
+        output_path=state_path,
+        inbox_path=inbox_path,
+        openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        validation_context=None,
+    )
+
+    assert advanced is None
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+    assert not hardlink.exists()
+    assert (inbox_path / "rejected" / "hardlink.json").is_file()
+
+
+def test_stage_submission_inbox_duplicate_rejection_destination_gets_unique_name(
+    tmp_path: Path,
+) -> None:
+    state = AutoresearchState()
+    state_path = tmp_path / "state.json"
+    inbox_path = tmp_path / "stage-inbox"
+    rejected_path = inbox_path / "rejected"
+    inbox_path.mkdir()
+    inbox_path.chmod(0o700)
+    rejected_path.mkdir()
+    rejected_path.chmod(0o700)
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    bad_submission = inbox_path / "bad.json"
+    bad_submission.write_text("{}", encoding="utf-8")
+    stale_rejected = rejected_path / "bad.json"
+    stale_rejected.write_text("do-not-overwrite\n", encoding="utf-8")
+
+    advanced = autoresearch_runner.consume_stage_submission_inbox(
+        state_path=state_path,
+        output_path=state_path,
+        inbox_path=inbox_path,
+        openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        validation_context=None,
+    )
+
+    assert advanced is None
+    assert stale_rejected.read_text(encoding="utf-8") == "do-not-overwrite\n"
+    assert not bad_submission.exists()
+    rejected_names = sorted(path.name for path in rejected_path.iterdir())
+    assert rejected_names[0] == "bad.json"
+    assert any(name.startswith("bad.json.") for name in rejected_names)
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
+
+
 def test_persist_derived_state_rejects_an_invalid_candidate_before_write(
     tmp_path: Path,
     platform_readiness: PlatformReadinessManifest,
@@ -7329,6 +7634,9 @@ def test_verify_mempalace_final_decision_accepts_compacted_alpha_discard_rationa
         subject="alpha-discard-1",
         facts=facts,
     )
+    _write_committed_finalization_journal(
+        mempalace_kg_path, build_final_memory_write_request(alpha_memory_state)
+    )
     connection = sqlite3.connect(mempalace_kg_path)
     connection.execute(
         "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, ?, ?, NULL)",
@@ -7359,15 +7667,19 @@ def test_verify_mempalace_final_decision_rejects_conflicting_active_alpha_fact(
         subject="alpha-discard-1",
         facts=facts,
     )
+    _write_committed_finalization_journal(
+        mempalace_kg_path, build_final_memory_write_request(alpha_memory_state)
+    )
     connection = sqlite3.connect(mempalace_kg_path)
     connection.execute(
-        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
         (
             "conflicting-rationale",
             "alpha-discard-1",
             "failed_due_to",
             "shortened_retry_rationale",
-            "result.json",
+            FINAL_MEMORY_SOURCE_FILE,
+            "drawer-finalizer",
         ),
     )
     connection.commit()
@@ -7390,6 +7702,9 @@ def test_verify_mempalace_final_decision_rejects_normalized_but_not_exact_active
         subject="alpha-discard-1",
         facts=facts,
         object_overrides={"decision": " DISC---ARD "},
+    )
+    _write_committed_finalization_journal(
+        mempalace_kg_path, build_final_memory_write_request(alpha_memory_state)
     )
 
     with pytest.raises(
@@ -7424,15 +7739,19 @@ def test_mempalace_incident_replay_accepts_emitted_compacted_alpha_discard_ratio
         subject="alpha-discard-1",
         facts=partial_facts,
     )
+    _write_committed_finalization_journal(
+        mempalace_kg_path, build_final_memory_write_request(incident_state)
+    )
     connection = sqlite3.connect(mempalace_kg_path)
     connection.execute(
-        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL)",
+        "INSERT INTO triples VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)",
         (
             "emitted-infra-rationale",
             "alpha-discard-1",
             "failed_due_to",
             emitted_rationale,
-            "result.json",
+            FINAL_MEMORY_SOURCE_FILE,
+            "drawer-finalizer",
         ),
     )
     connection.commit()
@@ -7551,6 +7870,81 @@ def test_memory_write_gated_until_final_decision(
     next_iteration = start_next_iteration(state, readiness=readiness)
     assert next_iteration.phase is Phase.SETUP_CONTEXT
     assert next_iteration.iteration == 2
+
+
+def test_final_memory_write_request_is_derived_from_authoritative_repeat_state(
+    alpha_memory_state: AutoresearchState,
+) -> None:
+    request = build_final_memory_write_request(alpha_memory_state)
+    final_decision = alpha_memory_state.final_decision
+    verification_result = alpha_memory_state.latest_verification
+    assert final_decision is not None
+    assert verification_result is not None
+
+    assert request.experiment_id == "alpha-discard-1"
+    assert request.facts == standardized_mempalace_kg_facts(alpha_memory_state)
+    assert request.drawer_content == json.dumps(
+        {
+            "experiment_id": "alpha-discard-1",
+            "final_decision": final_decision.to_dict(),
+            "research_mode": ResearchMode.ALPHA_RESEARCH.value,
+            "schema": "g2-openclaw.autoresearch.final-memory.v1",
+            "verification_result": verification_result.to_dict(),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+@dataclass
+class _StateDerivedMemoryWriter:
+    kg_path: Path
+    request_experiment_id: str | None = None
+
+    def write(self, request: FinalMemoryWriteRequest) -> Path:
+        self.request_experiment_id = request.experiment_id
+        _write_active_mempalace_facts(
+            self.kg_path,
+            subject=request.experiment_id,
+            facts=request.facts,
+        )
+        _write_committed_finalization_journal(self.kg_path, request)
+        return self.kg_path
+
+
+def test_finalize_repeat_memory_marks_only_the_state_derived_final_decision(
+    alpha_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+) -> None:
+    writer = _StateDerivedMemoryWriter(mempalace_kg_path)
+
+    finalized = finalize_repeat_memory(alpha_memory_state, writer=writer)
+
+    assert finalized.memory_written is True
+    assert finalized.memory_verification_receipt is not None
+    assert finalized.memory_verification_receipt.experiment_id == "alpha-discard-1"
+    assert writer.request_experiment_id == "alpha-discard-1"
+
+
+def test_finalize_repeat_memory_state_file_atomically_marks_the_current_repeat_state(
+    alpha_memory_state: AutoresearchState,
+    mempalace_kg_path: Path,
+    policy: AutoresearchPolicy,
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    save_state_file(state_path, alpha_memory_state)
+    writer = _StateDerivedMemoryWriter(mempalace_kg_path)
+
+    finalized = finalize_repeat_memory_state_file(
+        state_path,
+        policy=policy,
+        validation_context=None,
+        writer=writer,
+    )
+
+    assert finalized.memory_written is True
+    assert autoresearch_runner.load_state_file(state_path) == finalized
 
 
 def test_persist_next_iteration_state_writes_canonical_decision_receipt(
@@ -11029,7 +11423,7 @@ def test_workspace_validation_rejects_missing_worktree(git_worktree: GitWorktree
 
 
 def test_implementation_workspace_uses_stable_persistent_default_root() -> None:
-    assert Path("/home/dev/.openclaw/autoresearch/worktrees") == (
+    assert Path("/home/dev/.openclaw/autoresearch/model-workspaces") == (
         DEFAULT_AUTORESEARCH_WORKTREE_ROOT
     )
 
@@ -11135,7 +11529,7 @@ def test_fix_workspace_validation_rejects_retargeted_symlink_path(
         validate_artifact_workspace(state, artifact)
 
 
-def test_workspace_validation_rejects_unregistered_git_worktree(
+def test_workspace_validation_rejects_unrelated_isolated_clone(
     git_worktree: GitWorktree,
     tmp_path: Path,
 ) -> None:
@@ -11146,6 +11540,8 @@ def test_workspace_validation_rejects_unregistered_git_worktree(
     (unrelated_checkout / "README.md").write_text("unrelated\n", encoding="utf-8")
     _git(unrelated_checkout, "add", "README.md")
     _git(unrelated_checkout, "commit", "-m", "unrelated")
+    unrelated_checkout.chmod(0o700)
+    (unrelated_checkout / ".git").chmod(0o700)
     artifact = replace(
         _implementation_artifact(git_worktree),
         workspace_path=str(unrelated_checkout),
@@ -11153,7 +11549,7 @@ def test_workspace_validation_rejects_unregistered_git_worktree(
     )
     state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
 
-    with pytest.raises(AutoresearchValidationError, match="not a Git worktree registered"):
+    with pytest.raises(AutoresearchValidationError, match="Git ancestry check failed"):
         validate_artifact_workspace(state, artifact)
 
 
@@ -11238,14 +11634,128 @@ def test_workspace_validation_accepts_implementation_and_fix_under_operator_root
     implementation_state = AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout))
     fix_state = AutoresearchState(
         setup=_workspace_setup(git_worktree.target_checkout),
-        implementation_result=_implementation_artifact(git_worktree),
+        implementation_result=implementation,
     )
 
     validate_artifact_workspace(implementation_state, implementation)
+    (git_worktree.workspace / "fix.txt").write_text("fix after runtime\n", encoding="utf-8")
+    _git(git_worktree.workspace, "add", "fix.txt")
+    _git(git_worktree.workspace, "commit", "-m", "fix after runtime")
+    fix_commit_sha = _git(git_worktree.workspace, "rev-parse", "HEAD")
     validate_artifact_workspace(
         fix_state,
-        replace(_fix_artifact(git_worktree), commit_sha=commit_sha),
+        replace(_fix_artifact(git_worktree), commit_sha=fix_commit_sha),
     )
+
+
+def _legacy_migration_state(
+    git_worktree: GitWorktree,
+    legacy_root: Path,
+    policy: AutoresearchPolicy,
+) -> tuple[AutoresearchState, str, str]:
+    manifest_path, manifest_sha256, _, _, commit_sha, _ = _write_quantipy_v2_run(git_worktree)
+    legacy_workspace = legacy_root / "iteration-1"
+    legacy_root.mkdir(mode=0o700, parents=True)
+    legacy_root.chmod(0o700)
+    _git(
+        git_worktree.target_checkout,
+        "worktree",
+        "add",
+        "--detach",
+        str(legacy_workspace),
+        commit_sha,
+    )
+    legacy_workspace.chmod(0o700)
+    relative_manifest = Path(manifest_path).relative_to(git_worktree.workspace)
+    implementation = replace(
+        _implementation_result(),
+        workspace_path=str(legacy_workspace),
+        commit_sha=commit_sha,
+        experiment_manifest_path=str(legacy_workspace / relative_manifest),
+        experiment_manifest_sha256=manifest_sha256,
+    )
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(state, setup=_workspace_setup(git_worktree.target_checkout))
+    return advance_state(state, implementation, policy), commit_sha, str(legacy_workspace)
+
+
+def test_legacy_active_workspace_migration_clones_from_authoritative_checkout(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "legacy-worktrees"
+    new_root = tmp_path / "controller-worktrees"
+    new_root.mkdir(mode=0o700)
+    new_root.chmod(0o700)
+    monkeypatch.setattr(autoresearch_runner, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    state, commit_sha, legacy_workspace = _legacy_migration_state(
+        git_worktree,
+        legacy_root,
+        policy,
+    )
+    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+    migrated = autoresearch_runner.migrate_legacy_autoresearch_workspace_state_file(
+        state_path,
+        policy=policy,
+        validation_context=None,
+    )
+
+    assert migrated.implementation_result is not None
+    migrated_workspace = Path(migrated.implementation_result.workspace_path)
+    assert migrated_workspace == new_root / Path(legacy_workspace).relative_to(legacy_root)
+    assert migrated.implementation_result.commit_sha == commit_sha
+    assert _git(migrated_workspace, "config", "--get", "remote.origin.url") == str(
+        git_worktree.target_checkout
+    )
+    assert _git(migrated_workspace, "rev-parse", "HEAD") == commit_sha
+    assert not _git(migrated_workspace, "status", "--porcelain=v1", "--untracked-files=all")
+    assert json.loads(state_path.read_text(encoding="utf-8")) == migrated.to_dict()
+
+
+def test_legacy_workspace_migration_rejects_existing_destination_with_wrong_origin(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "legacy-worktrees"
+    new_root = tmp_path / "controller-worktrees"
+    new_root.mkdir(mode=0o700)
+    new_root.chmod(0o700)
+    monkeypatch.setattr(autoresearch_runner, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    state, commit_sha, legacy_workspace = _legacy_migration_state(
+        git_worktree,
+        legacy_root,
+        policy,
+    )
+    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    destination = new_root / Path(legacy_workspace).relative_to(legacy_root)
+    _git(tmp_path, "clone", str(git_worktree.workspace), str(destination))
+    _git(destination, "checkout", "--detach", commit_sha)
+    destination.chmod(0o700)
+    (destination / ".git").chmod(0o700)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"remote\.origin\.url must be the authoritative local target_repo|Git ancestry check",
+    ):
+        autoresearch_runner.migrate_legacy_autoresearch_workspace_state_file(
+            state_path,
+            policy=policy,
+            validation_context=None,
+        )
+
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
 
 
 def test_fix_workspace_validation_rejects_exact_persisted_workspace_outside_root(
@@ -11280,15 +11790,15 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
     prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
     assert "Workspace isolation contract" in prompt
-    assert "disposable git worktree" in prompt
+    assert "disposable isolated clone" in prompt
     assert json.dumps(str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT)) in prompt
     assert "umask 077" in prompt
-    assert "mkdir -p /home/dev/.openclaw/autoresearch/worktrees" in prompt
+    assert "mkdir -p /home/dev/.openclaw/autoresearch/model-workspaces" in prompt
     assert "chmod 700" in prompt
     assert "mode 0700" in prompt
     assert "working_directory" in prompt
     assert "authoritative target checkout" in prompt
-    assert "never use /tmp" in prompt
+    assert "Never use /tmp" in prompt
     assert "31G tmpfs" in prompt
     assert "Commit all accepted implementation changes" in prompt
     assert "workspace_path" in prompt
@@ -11478,7 +11988,7 @@ def test_implementation_prompt_does_not_direct_reuse_of_a_prior_workspace(
 
     prompt = next_action(state, policy, receipts, platform_readiness).prompt_text
 
-    assert "Create and use a disposable git worktree" in prompt
+    assert "Create and use a disposable isolated clone" in prompt
     assert "Reuse the exact persisted implementation worktree" not in prompt
 
 
@@ -12140,6 +12650,42 @@ def _set_agent_runtime_id(config: dict[str, object]) -> None:
     runtime["id"] = "other"
 
 
+def _set_codex_danger_full_access(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["sandbox"] = "danger-full-access"
+
+
+def _drop_codex_app_server_sandbox(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    del app_server["sandbox"]
+
+
+def _set_codex_wrong_default_workspace(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["defaultWorkspaceDir"] = "/home/dev/repos/g2_openclaw"
+
+
+def _add_codex_network_proxy(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["networkProxy"] = {"enabled": True}
+
+
 def _set_safeguard_compaction(config: dict[str, object]) -> None:
     agents_root = cast(dict[str, object], config["agents"])
     defaults = cast(dict[str, object], agents_root["defaults"])
@@ -12182,12 +12728,6 @@ def _remove_pm_native_codex_delegation_deny(config: dict[str, object]) -> None:
     tools["deny"] = []
 
 
-def _deny_pm_mempalace_mutation_tool(config: dict[str, object]) -> None:
-    tools = cast(dict[str, object], _agent(config, "autoresearch-pm")["tools"])
-    deny = cast(list[str], tools["deny"])
-    tools["deny"] = [*deny, "mempalace__mempalace_kg_add"]
-
-
 def _add_pm_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
     _agent(config, "autoresearch-pm")["subagents"] = {"allowAgents": ["reviewer"]}
 
@@ -12200,29 +12740,13 @@ def _give_main_a_pm_skill(config: dict[str, object]) -> None:
     _agent(config, "main")["skills"] = ["autoresearch"]
 
 
+def _set_main_full_profile(config: dict[str, object]) -> None:
+    tools = cast(dict[str, object], _agent(config, "main")["tools"])
+    tools["profile"] = "full"
+
+
 def _give_stage_agent_write_skill(config: dict[str, object]) -> None:
     _agent(config, "context_curator")["skills"] = ["mempalace", "quantipy-methodology"]
-
-
-def _remove_stage_agent_mempalace_deny(config: dict[str, object]) -> None:
-    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
-    deny = cast(list[str], tools["deny"])
-    tools["deny"] = deny[1:]
-
-
-def _add_stage_agent_obsolete_mempalace_deny_alias(
-    config: dict[str, object],
-    alias: str = "mcp__mempalace__mempalace_add_drawer",
-) -> None:
-    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
-    deny = cast(list[str], tools["deny"])
-    tools["deny"] = [*deny, alias]
-
-
-def _add_stage_agent_extra_noncanonical_mempalace_deny(config: dict[str, object]) -> None:
-    tools = cast(dict[str, object], _agent(config, "context_curator")["tools"])
-    deny = cast(list[str], tools["deny"])
-    tools["deny"] = [*deny, "mempalace-readonly.mempalace_search"]
 
 
 def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
@@ -12231,12 +12755,10 @@ def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
     del servers[MEMPALACE_READONLY_SERVER_ID]
 
 
-def _expand_full_server_scope(config: dict[str, object]) -> None:
+def _add_forbidden_full_mempalace_server(config: dict[str, object]) -> None:
     mcp = cast(dict[str, object], config["mcp"])
     servers = cast(dict[str, object], mcp["servers"])
-    mempalace = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
-    codex = cast(dict[str, object], mempalace["codex"])
-    codex["agents"] = ["autoresearch-pm", "context_curator"]
+    servers["mempalace"] = {}
 
 
 def _break_readonly_server_args(config: dict[str, object]) -> None:
@@ -12252,6 +12774,17 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (_drop_codex_plugin_allow, "plugins.allow must explicitly include codex"),
         (_set_openai_api, "providers.openai.api must be openai-responses"),
         (_set_agent_runtime_id, "providers.openai.agentRuntime.id must be codex"),
+        (_set_codex_danger_full_access, "Codex app-server sandbox must be workspace-write"),
+        (_drop_codex_app_server_sandbox, "Codex app-server sandbox must be workspace-write"),
+        (
+            _set_codex_wrong_default_workspace,
+            "Codex app-server defaultWorkspaceDir must be "
+            "/home/dev/.openclaw/autoresearch/model-workspaces",
+        ),
+        (
+            _add_codex_network_proxy,
+            "Codex app-server networkProxy must not be configured",
+        ),
         (
             _set_safeguard_compaction,
             "agents.defaults.compaction.mode must be default for the Codex OAuth route",
@@ -12268,14 +12801,9 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
             _set_rejecting_subagent_child_cap,
             "agents.defaults.subagents.maxChildrenPerAgent must not be configured",
         ),
-        (_drop_pm_mempalace_skill, "PM must load exactly mempalace and autoresearch"),
+        (_drop_pm_mempalace_skill, "PM must load exactly mempalace-readonly and autoresearch"),
         (
             _remove_pm_native_codex_delegation_deny,
-            "PM must deny OpenClaw/session discovery and delegation tools "
-            "for native Codex delegation",
-        ),
-        (
-            _deny_pm_mempalace_mutation_tool,
             "PM must deny OpenClaw/session discovery and delegation tools "
             "for native Codex delegation",
         ),
@@ -12284,7 +12812,8 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
             _add_stage_openclaw_subagent_allowlist,
             "consensus_arbiter must not declare OpenClaw subagents",
         ),
-        (_give_main_a_pm_skill, "main must load no skills"),
+        (_give_main_a_pm_skill, "main must load exactly mempalace-readonly"),
+        (_set_main_full_profile, "main\\.tools\\.profile must be minimal"),
         (
             _give_stage_agent_write_skill,
             "must load exactly mempalace-readonly, quantipy-methodology, and "
@@ -12292,26 +12821,16 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         ),
         (
             _drop_mempalace_readonly_server,
-            "mcp\\.servers\\.mempalace-readonly must be an object",
+            "mcp.servers must expose exactly mempalace-readonly and g2-control",
         ),
         (
-            _expand_full_server_scope,
-            "mcp\\.servers\\.mempalace\\.codex\\.agents must exactly match "
-            "\\('autoresearch-pm',\\)",
+            _add_forbidden_full_mempalace_server,
+            "mcp.servers must expose exactly mempalace-readonly and g2-control",
         ),
         (
             _break_readonly_server_args,
             "mcp\\.servers\\.mempalace-readonly\\.args must be "
             "\\['<wrapper>', '--palace', '<path>'\\]",
-        ),
-        (_remove_stage_agent_mempalace_deny, "must deny exact MemPalace mutation policy IDs"),
-        (
-            _add_stage_agent_obsolete_mempalace_deny_alias,
-            "must not deny obsolete MemPalace mutation aliases",
-        ),
-        (
-            _add_stage_agent_extra_noncanonical_mempalace_deny,
-            "must deny only canonical MemPalace mutation policy IDs",
         ),
     ],
 )
@@ -12329,74 +12848,28 @@ def test_load_autoresearch_policy_validates_route_skills_and_mempalace_denies(
         load_autoresearch_policy(config_path)
 
 
-@pytest.mark.parametrize(
-    "alias",
-    [
-        "mempalace_add_drawer",
-        "mempalace.mempalace_add_drawer",
-        "mcp__mempalace__mempalace_add_drawer",
-    ],
-)
-def test_load_autoresearch_policy_rejects_each_obsolete_mempalace_alias(
-    tmp_path: Path,
-    alias: str,
-) -> None:
-    config = deepcopy(_load_config())
-    _add_stage_agent_obsolete_mempalace_deny_alias(config, alias)
-    config_path = tmp_path / "openclaw.json"
-    config_path.write_text(json.dumps(config), encoding="utf-8")
-
-    with pytest.raises(
-        AutoresearchConfigError,
-        match="must not deny obsolete MemPalace mutation aliases",
-    ):
-        load_autoresearch_policy(config_path)
-
-
-def test_mempalace_mutation_policy_ids_use_internal_tool_names_only() -> None:
-    expected_ids = tuple(f"mempalace__{tool_name}" for tool_name in MEMPALACE_MUTATION_TOOLS)
-
-    assert expected_ids == MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert all(tool_id.startswith("mempalace__mempalace_") for tool_id in expected_ids)
-    assert "mempalace__mempalace_add_drawer" in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mempalace.mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mcp__mempalace__mempalace_add_drawer" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mempalace.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-    assert "mcp__mempalace__mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
-
-
-def test_mempalace_obsolete_mutation_alias_ids_cover_bare_dotted_and_mcp_forms() -> None:
-    assert len(MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS) == len(MEMPALACE_MUTATION_TOOLS) * 3
-    assert "mempalace_add_drawer" in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
-    assert "mempalace.mempalace_add_drawer" in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
-    assert "mcp__mempalace__mempalace_add_drawer" in (MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS)
-    assert "mempalace__mempalace_add_drawer" not in MEMPALACE_OBSOLETE_MUTATION_ALIAS_TOOL_IDS
-
-
 def test_mempalace_policy_and_codex_display_names_are_intentionally_distinct() -> None:
     assert "mempalace-readonly.mempalace_search" in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
     assert "mempalace__mempalace_search" not in MEMPALACE_READONLY_DISPLAY_TOOL_IDS
-    assert "mempalace-readonly.mempalace_search" not in MEMPALACE_MUTATION_DENY_TOOL_IDS
 
 
-def test_mempalace_readonly_tool_registry_matches_expected_split() -> None:
+def test_mempalace_readonly_tool_registry_contains_no_mutators() -> None:
     assert len(MEMPALACE_READONLY_TOOL_NAMES) == 19
-    assert set(MEMPALACE_READONLY_TOOL_NAMES).isdisjoint(MEMPALACE_MUTATION_TOOLS)
     assert "mempalace_status" in MEMPALACE_READONLY_TOOL_NAMES
     assert "mempalace_diary_write" not in MEMPALACE_READONLY_TOOL_NAMES
 
 
-def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None:
+def test_default_openclaw_config_projects_readonly_memory_and_main_control_only() -> None:
     config = _load_config()
     mcp = cast(dict[str, object], config["mcp"])
     servers = cast(dict[str, object], mcp["servers"])
-    full_server = cast(dict[str, object], servers[MEMPALACE_FULL_SERVER_ID])
     readonly_server = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
+    control_server = cast(dict[str, object], servers[autoresearch_runner.G2_CONTROL_SERVER_ID])
 
-    assert cast(dict[str, object], full_server["codex"])["agents"] == ["autoresearch-pm"]
+    assert list(servers) == [MEMPALACE_READONLY_SERVER_ID, autoresearch_runner.G2_CONTROL_SERVER_ID]
     assert cast(dict[str, object], readonly_server["codex"])["agents"] == [
+        "main",
+        "autoresearch-pm",
         "context_curator",
         "debater_microstructure",
         "debater_data",
@@ -12408,40 +12881,55 @@ def test_default_openclaw_config_declares_exact_mempalace_server_split() -> None
         "reviewer",
         "fixer",
     ]
-    assert cast(list[str], full_server["args"])[:3] == ["-m", "mempalace.mcp_server", "--palace"]
     assert cast(list[str], readonly_server["args"])[1:] == [
         "--palace",
         "PLACEHOLDER_RESOLVED_BY_PUSH_SCRIPT",
     ]
+    control_codex = cast(dict[str, object], control_server["codex"])
+    assert control_codex["agents"] == ["main"]
+    assert control_codex["defaultToolsApprovalMode"] == "approve"
+    assert cast(list[str], control_server["args"]) == [
+        "-m",
+        autoresearch_runner.G2_CONTROL_MODULE,
+    ]
 
 
-def test_default_openclaw_config_denies_exact_canonical_mempalace_policy_ids() -> None:
+def test_default_openclaw_config_has_no_model_visible_mempalace_write_tools() -> None:
     config = _load_config()
     agents_root = cast(dict[str, object], config["agents"])
     agents = cast(list[dict[str, object]], agents_root["list"])
-    expected_denies = list(MEMPALACE_MUTATION_DENY_TOOL_IDS)
-
     for agent in agents:
         agent_id = cast(str, agent["id"])
         if agent_id == "main":
-            assert "tools" not in agent or "deny" not in cast(dict[str, object], agent["tools"])
+            tools = cast(dict[str, object], agent["tools"])
+            assert tools["profile"] == "minimal"
+            assert cast(list[str], tools["allow"]) == list(
+                autoresearch_runner.MAIN_OPENCLAW_TOOL_ALLOW_POLICY
+            )
+            denied_tools = cast(list[str], tools["deny"])
+            assert "exec" in denied_tools
+            assert "sessions_spawn" in denied_tools
             continue
         if agent_id == "autoresearch-pm":
             tools = cast(dict[str, object], agent["tools"])
             denied_tools = cast(list[str], tools["deny"])
             assert denied_tools == list(PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS)
             assert "sessions_yield" in denied_tools
-            assert not any(tool_id.startswith("mempalace__") for tool_id in denied_tools)
             continue
-        tools = cast(dict[str, object], agent["tools"])
-        denied_tools = cast(list[str], tools["deny"])
-        assert denied_tools == expected_denies, agent_id
-        assert all(tool_id.startswith("mempalace__mempalace_") for tool_id in denied_tools), (
-            agent_id
-        )
-        assert not any("." in tool_id or tool_id.startswith("mcp__") for tool_id in denied_tools), (
-            agent_id
-        )
+        assert "tools" not in agent, agent_id
+
+
+def test_native_codex_autoresearch_stage_agents_have_no_mcp_overrides() -> None:
+    config = _load_config()
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    readonly_server = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
+    readonly_agents = cast(list[str], cast(dict[str, object], readonly_server["codex"])["agents"])
+
+    assert readonly_agents[:2] == ["main", "autoresearch-pm"]
+    for agent_id in readonly_agents[2:]:
+        path = autoresearch_runner.G2_OPENCLAW_REPO_ROOT / ".codex" / "agents" / f"{agent_id}.toml"
+        assert "[mcp_servers" not in path.read_text(encoding="utf-8"), agent_id
 
 
 def test_quantipy_execution_contract_uses_canonical_runtime_and_immutable_source(

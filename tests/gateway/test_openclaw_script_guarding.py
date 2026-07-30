@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,30 @@ STAGE_AGENT_IDS = [
     "implementer",
     "reviewer",
     "fixer",
+]
+EXPECTED_MAIN_ALLOW = [
+    "g2-control__g2_autoresearch_status",
+    "g2-control__g2_autoresearch_start",
+    "g2-control__g2_autoresearch_stop",
+    "mempalace-readonly__mempalace_status",
+    "mempalace-readonly__mempalace_search",
+    "mempalace-readonly__mempalace_get_drawer",
+    "mempalace-readonly__mempalace_list_drawers",
+    "mempalace-readonly__mempalace_list_wings",
+    "mempalace-readonly__mempalace_list_rooms",
+    "mempalace-readonly__mempalace_get_taxonomy",
+    "mempalace-readonly__mempalace_get_aaak_spec",
+    "mempalace-readonly__mempalace_diary_read",
+    "mempalace-readonly__mempalace_kg_query",
+    "mempalace-readonly__mempalace_kg_timeline",
+    "mempalace-readonly__mempalace_kg_stats",
+    "mempalace-readonly__mempalace_traverse",
+    "mempalace-readonly__mempalace_find_tunnels",
+    "mempalace-readonly__mempalace_follow_tunnels",
+    "mempalace-readonly__mempalace_graph_stats",
+    "mempalace-readonly__mempalace_list_tunnels",
+    "mempalace-readonly__mempalace_list_hallways",
+    "mempalace-readonly__mempalace_memories_filed_away",
 ]
 EXPECTED_RUNTIME_CAP_LINES = [
     "[Service]",
@@ -226,6 +251,23 @@ def _write_push_script_fixture_bin(
     gateway_active_state: str = "inactive",
 ) -> Path:
     mock_bin = home / "mock-bin"
+    codex_package = home / "mock-codex-package"
+    codex_bin = codex_package / "bin"
+    codex_bin.mkdir(parents=True)
+    (codex_bin / "codex.js").write_text(
+        """
+const fs = require("fs");
+if (process.env.CODEX_DOCTOR_LOG) {
+  fs.appendFileSync(
+    process.env.CODEX_DOCTOR_LOG,
+    `${process.env.CODEX_HOME || "<unset>"} ${process.argv.slice(2).join(" ")}\\n`
+  );
+}
+console.log(JSON.stringify({ checks: { config: { load: { status: "ok" } } } }));
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
     openclaw = mock_bin / "openclaw"
     _write_executable(
         openclaw,
@@ -272,7 +314,11 @@ case "${1:-}" in
     "status": "loaded",
     "dependencyStatus": {
       "dependencies": [
-        {"name": "@openai/codex", "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.144.3}"}
+        {
+          "name": "@openai/codex",
+          "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.144.3}",
+          "resolvedPath": "${MOCK_CODEX_RESOLVED_PATH}"
+        }
       ]
     }
   }
@@ -455,6 +501,8 @@ def _prepare_push_script_home(
             "SYSTEMCTL_LOG": str(home / "systemctl.log"),
             "CP_LOG": str(home / "cp.log"),
             "OPENCLAW_LOG": str(home / "openclaw.log"),
+            "MOCK_CODEX_RESOLVED_PATH": str(home / "mock-codex-package"),
+            "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
             "TEST_ROOT": str(tmp_path),
         },
     )
@@ -515,15 +563,18 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
 
     main = agents["main"]
     assert main["model"]["primary"] == "openai/gpt-5.4"
-    assert "mempalace" not in main.get("skills", [])
+    assert main["skills"] == ["mempalace-readonly"]
     assert "autoresearch" not in main.get("skills", [])
-    assert "mempalace-readonly" not in main.get("skills", [])
     assert main.get("subagents", {}).get("allowAgents", []) == []
+    assert main["tools"]["profile"] == "minimal"
+    assert main["tools"]["allow"] == EXPECTED_MAIN_ALLOW
+    assert "exec" in main["tools"]["deny"]
+    assert "sessions_spawn" in main["tools"]["deny"]
 
     pm = agents["autoresearch-pm"]
     assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
     assert pm["thinkingDefault"] == "high"
-    assert pm["skills"] == ["mempalace", "autoresearch"]
+    assert pm["skills"] == ["mempalace-readonly", "autoresearch"]
     assert pm["tools"]["deny"] == [
         "sessions_spawn",
         "sessions_yield",
@@ -535,8 +586,24 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert all(agent.get("subagents", {}).get("allowAgents", []) == [] for agent in agents.values())
 
     servers = config["mcp"]["servers"]
-    assert servers["mempalace"]["codex"]["agents"] == ["autoresearch-pm"]
-    assert servers["mempalace-readonly"]["codex"]["agents"] == STAGE_AGENT_IDS
+    assert list(servers) == ["mempalace-readonly", "g2-control"]
+    assert servers["mempalace-readonly"]["codex"]["agents"] == [
+        "main",
+        "autoresearch-pm",
+        *STAGE_AGENT_IDS,
+    ]
+    assert servers["g2-control"]["codex"]["agents"] == ["main"]
+    assert servers["g2-control"]["codex"]["defaultToolsApprovalMode"] == "approve"
+    assert servers["g2-control"]["args"] == ["-m", "gateway.g2_control_mcp_server"]
+    codex_entry = config["plugins"]["entries"]["codex"]
+    assert codex_entry["enabled"] is True
+    app_server = codex_entry["config"]["appServer"]
+    assert app_server["sandbox"] == "workspace-write"
+    assert app_server["defaultWorkspaceDir"] == "/home/dev/.openclaw/autoresearch/model-workspaces"
+    assert "networkProxy" not in app_server
+    assert codex_entry["config"]["nativeToolSurfaceEnabled"] is False
+    assert "codexDynamicToolsExclude" not in codex_entry["config"]
+    assert "danger-full-access" not in json.dumps(codex_entry)
 
 
 def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
@@ -547,19 +614,72 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert '"copilot-proxy"' in script
     assert '"copilot-cli"' in script
     assert "sanitize_stale_coding_provider_keys" in script
-    assert '  "autoresearch-pm"\n)' in script
+    assert '  "main"\n  "autoresearch-pm"\n  "${MEMPALACE_READONLY_AGENT_IDS[@]}"' in script
     assert 'select(.id == "autoresearch-pm") | .model.primary' in script
     assert 'select(.id == "main") | .model.primary) = $pm' not in script
-    assert "main interface split, autoresearch-pm model" in script
+    assert "main interface split, read-only-only MemPalace projection" in script
     assert "PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS" in script
     assert "autoresearch-pm model/skills/native Codex delegation denies" in script
     assert ".agents.defaults.maxConcurrent == 2" in script
     assert ".agents.defaults.subagents.maxConcurrent == 1" in script
     assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" in script
     assert "sessions_spawn" in script
+    assert "G2_CONTROL_MCP_MODULE" in script
+    assert "MAIN_OPENCLAW_TOOL_ALLOW_IDS" in script
+    assert "main_allow == $main_openclaw_allow" in script
+    assert '.tools.profile == "minimal"' in script
+    assert "networkProxy? == null" in script
+    assert "validate_codex_runtime_config" in script
     assert ".subagents.allowAgents?" in script
     assert "strict concurrency caps" in script
     assert "main interface restrictions" in script
+
+
+def test_installed_codex_native_surface_is_not_enabled_by_main_wildcard_allow() -> None:
+    config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+    main_tools = agents["main"]["tools"]
+    assert main_tools["profile"] == "minimal"
+    assert main_tools["allow"] == EXPECTED_MAIN_ALLOW
+    assert "*" not in main_tools["allow"]
+    assert "exec" in main_tools["deny"]
+    codex_config = config["plugins"]["entries"]["codex"]["config"]
+    assert codex_config["nativeToolSurfaceEnabled"] is False
+    assert "codexDynamicToolsExclude" not in codex_config
+
+    candidates = sorted(
+        Path.home().glob(
+            ".openclaw/npm/projects/*/node_modules/@openclaw/codex/dist/provider-capabilities-*.js"
+        )
+    )
+    if not candidates:
+        pytest.skip("installed @openclaw/codex provider-capabilities bundle not found")
+    source = candidates[-1].read_text(encoding="utf-8")
+    function_start = source.index("function shouldEnableCodexAppServerNativeToolSurface")
+    function_body = source[function_start : source.index("function ", function_start + 1)]
+    assert "if (toolsAllow === void 0)" in function_body
+    assert "return hasWildcardCodexToolsAllow(toolsAllow)" in function_body
+
+
+def test_installed_runtime_projects_main_mcp_servers_from_codex_agent_scope() -> None:
+    config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+    main_allow = agents["main"]["tools"]["allow"]
+    assert main_allow == EXPECTED_MAIN_ALLOW
+    servers = config["mcp"]["servers"]
+    assert servers["g2-control"]["codex"]["agents"] == ["main"]
+    assert "main" in servers["mempalace-readonly"]["codex"]["agents"]
+
+    candidates = sorted(
+        Path.home().glob(
+            ".openclaw/npm/projects/*/node_modules/@openclaw/codex/dist/thread-lifecycle-*.js"
+        )
+    )
+    if not candidates:
+        pytest.skip("installed @openclaw/codex thread-lifecycle bundle not found")
+    mcp_source = candidates[-1].read_text(encoding="utf-8")
+    assert "buildCodexUserMcpServersThreadConfigPatch" in mcp_source
+    assert "userMcpServersConfigPatch" in mcp_source
 
 
 def test_bootstrap_reconciles_exact_codex_runtime_and_reinstalls_daemon() -> None:
@@ -821,13 +941,44 @@ def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspac
             source = REPO_ROOT / ".codex/agents" / f"{agent_id}.toml"
             assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     assert not (openclaw_home / "workspace/.codex/agents").exists()
-    for agent_id in ["autoresearch-pm", *STAGE_AGENT_IDS]:
-        agents_dir = openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
+    for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]:
+        codex_home = openclaw_home / "agents" / agent_id / "agent/codex-home"
+        config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
+        assert config["approval_policy"] == "never"
+        assert config["sandbox_mode"] == "workspace-write"
+        workspace_write = config["sandbox_workspace_write"]
+        assert workspace_write["network_access"] is True
+        assert workspace_write["writable_roots"] == [
+            "/home/dev/.openclaw/autoresearch/model-workspaces",
+            "/home/dev/.openclaw/autoresearch/stage-inbox",
+        ]
+        assert "permissions" not in config
+        assert "network_proxy" not in config
+        mcp_servers = config["mcp_servers"]
+        expected_servers = (
+            {"mempalace-readonly", "g2-control"} if agent_id == "main" else {"mempalace-readonly"}
+        )
+        assert set(mcp_servers) == expected_servers
+        assert mcp_servers["mempalace-readonly"]["args"][-2:] == [
+            "--palace",
+            str(Path(env["HOME"]) / ".mempalace/palace"),
+        ]
+        if agent_id == "main":
+            assert mcp_servers["g2-control"]["args"] == ["-m", "gateway.g2_control_mcp_server"]
+            assert mcp_servers["g2-control"]["default_tools_approval_mode"] == "approve"
+        agents_dir = codex_home / "agents"
         assert agents_dir.is_dir()
-        for stage_id in STAGE_AGENT_IDS:
-            copied = agents_dir / f"{stage_id}.toml"
-            source = REPO_ROOT / ".codex/agents" / f"{stage_id}.toml"
-            assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+        if agent_id == "main":
+            assert list(agents_dir.glob("*.toml")) == []
+        else:
+            for stage_id in STAGE_AGENT_IDS:
+                copied = agents_dir / f"{stage_id}.toml"
+                source = REPO_ROOT / ".codex/agents" / f"{stage_id}.toml"
+                assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    doctor_log = Path(env["CODEX_DOCTOR_LOG"]).read_text(encoding="utf-8")
+    for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]:
+        codex_home = openclaw_home / "agents" / agent_id / "agent/codex-home"
+        assert f"{codex_home} --strict-config doctor --json" in doctor_log
 
 
 def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path: Path) -> None:
@@ -849,7 +1000,7 @@ def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path:
         ),
         *(
             openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
-            for agent_id in ["autoresearch-pm", *STAGE_AGENT_IDS]
+            for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]
         ),
     ]
     for agents_dir in managed_agent_dirs:
@@ -864,6 +1015,21 @@ def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path:
         assert not any((agents_dir / f"{agent_id}.toml").exists() for agent_id in legacy_agent_ids)
 
 
+def test_push_script_removes_stale_deployed_mempalace_write_skill(tmp_path: Path) -> None:
+    # Arrange
+    env = _prepare_push_script_home(tmp_path)
+    stale_skill = Path(env["OPENCLAW_PUSH_HOME"]) / "skills" / "mempalace"
+    stale_skill.mkdir(parents=True)
+    (stale_skill / "SKILL.md").write_text("stale write skill\n", encoding="utf-8")
+
+    # Act
+    result = _run_push_script(env)
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    assert not stale_skill.exists()
+
+
 def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
@@ -873,10 +1039,20 @@ def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> No
     assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"' in script
     assert '"${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"' in script
     assert 'validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"' in script
+    assert 'CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "autoresearch-pm"' in script
+    assert 'if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then' in script
     assert "CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS" in script
     assert "remove_legacy_codex_stage_agents" in script
+    assert "must not override inherited MCP servers" in script
     for agent_id in STAGE_AGENT_IDS:
         assert f'"{agent_id}"' in script
+
+
+def test_repo_native_codex_stage_agents_have_no_mcp_overrides() -> None:
+    for agent_id in STAGE_AGENT_IDS:
+        path = REPO_ROOT / ".codex/agents" / f"{agent_id}.toml"
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        assert "mcp_servers" not in data, agent_id
 
 
 def test_push_script_removes_stale_copilot_provider_keys_from_local_config(

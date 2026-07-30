@@ -9,8 +9,9 @@ Run a continuous Quantipy research pipeline in the dedicated
 `agent:autoresearch-pm:autoresearch:quantipy` session. The PM curates context,
 runs a five-agent debate, delegates experiment implementation and review,
 advances structured artifacts through the deterministic runner, decides and
-logs the outcome, and begins the next iteration. G2 `main` handles only explicit
-human start/status/stop requests.
+logs the outcome. The supervisor/controller owns repeat successor persistence
+and wakes the PM only after the next iteration is prepared. G2 `main` handles
+only explicit human start/status/stop requests.
 
 ## Ownership
 
@@ -21,8 +22,8 @@ data loaders, harnesses, dependencies, runtime controls, readiness evidence,
 and G2/OpenClaw infrastructure remain human/Codex operator owned. The PM never
 promotes or repairs shared infrastructure.
 
-Only `autoresearch-pm` has write-capable MemPalace access. All stage agents are
-read-only. This boundary applies to implementation, recovery, and final logging.
+No model has write-capable MemPalace access. The non-model supervisor finalizer
+is the only writer, and it persists only state-derived final records.
 
 ## Architecture
 
@@ -38,7 +39,8 @@ Human via G2
      -> structured verification
      -> one high-reasoning reviewer
      -> fixer in the same worktree when directed
-     -> PM decision, experiment log, required MemPalace write
+     -> PM decision and experiment log
+     -> supervisor-owned required MemPalace finalization
      -> next iteration until explicit stop
 ```
 
@@ -171,7 +173,7 @@ operator-owned infrastructure blocker.
 | Agent | Responsibility |
 |-------|----------------|
 | `main` | G2 control interface only |
-| `autoresearch-pm` | State orchestration, final decisions, experiment logging, PM-only MemPalace writes |
+| `autoresearch-pm` | State orchestration, final decisions, experiment logging, read-only MemPalace context |
 | `context_curator` | Readiness/universe receipts, baseline, recent results, research log, read-only MemPalace context |
 | `debater_microstructure` | Market mechanics theory |
 | `debater_data` | Supported data, universe receipts, coverage, target construction |
@@ -365,10 +367,11 @@ to a byte-exact copied state file, after rechecking both paths, but it never
 derives the historical digest from the copy pathname. Every canonical
 verification dispatch (including ordinary attempts) first seals the complete
 canonical runtime attestation in runner-owned state and re-attests it before
-result publication and advancement. `autoresearch-next` performs one final
-locked re-attestation after constructing the action, verifies that the
+result publication and advancement. Before waking/dispatch, the
+supervisor/controller performs the locked re-attestation, verifies that the
 authoritative state-reference digest still equals the generated action, and
-only then provisions/returns the dispatch. READY identities without an exact
+only then provisions the dispatch. `autoresearch-next` is model-facing
+read-only. READY identities without an exact
 `quantipy_commit` are rejected during ordinary validation and dispatch; there
 is no older-READY compatibility path. The sole recovery exception first
 validates and references an untouched historical three-field v4 readiness
@@ -442,8 +445,9 @@ The runner enforces this order for alpha work:
    baseline.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
-remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` begins the next iteration with fresh context.
+remains `NO_CONSENSUS`; it does not suspend and does not write MemPalace.
+After finalization, the supervisor/controller begins the next iteration with
+fresh context before waking the PM.
 `INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
 readiness suspension. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
@@ -451,8 +455,8 @@ readiness suspension. Completed
 `INFRA_REPAIRED`. The gate mapping never overrides consensus handling. Both
 no-memory outcomes set
 `memory_write_required=false`. For every other memory-required final decision,
-the PM writes compact experiment, feature, model, metric, reviewer, decision,
-failure, and receipt facts after the decision artifact is accepted. Full ticker
+the supervisor writes compact experiment, feature, model, metric, reviewer,
+decision, failure, and receipt facts after the decision artifact is accepted. Full ticker
 arrays are never stored in prompts, historical logs, or MemPalace. Canonical
 decision receipts under the autoresearch state directory replace
 the read-only historical `RESEARCH_LOG.md` as platform decision authority.

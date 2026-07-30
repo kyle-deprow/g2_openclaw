@@ -1,6 +1,6 @@
 ---
 name: mempalace-readonly
-description: Read-only MemPalace context access for non-PM autoresearch stage agents. Provides search, diary, traversal, and knowledge graph query guidance without any write-capable workflows.
+description: Read-only MemPalace context access for every autoresearch model thread. Provides search, diary, traversal, and knowledge graph query guidance without any write-capable workflows.
 version: 1.0.0
 ---
 
@@ -8,12 +8,13 @@ version: 1.0.0
 
 ## Activation
 
-This skill is for non-PM autoresearch stage agents only. It provides read access
+This skill is for every autoresearch model thread. It provides read access
 to MemPalace context so debates, reviews, implementation, and fixes can account
 for prior experiments without mutating durable memory.
 
-The write-capable `mempalace` skill is PM-only. If this agent is not the PM,
-do not activate or rely on that skill.
+No autoresearch model receives a write-capable MemPalace server or skill.
+Final decision persistence is performed only by the deterministic platform
+finalizer at the validated repeat transition.
 
 Do not use OpenClaw built-in memory tools (`memory_search`, `memory_get`) or
 Markdown memory files (`MEMORY.md`, `memory/YYYY-MM-DD.md`) for research
@@ -43,9 +44,9 @@ Use only read-only MemPalace tools:
 - `mempalace-readonly.mempalace_list_hallways`
 - `mempalace-readonly.mempalace_memories_filed_away`
 
-Non-PM agents should not receive write-capable MemPalace tools in config. If
-one appears available, treat that as a configuration error and stop instead of
-calling it.
+No autoresearch model should receive write-capable MemPalace tools in config.
+If a `mcp__mempalace__*` write tool appears available, treat that as a
+configuration error and stop instead of calling it.
 
 ## Stage Usage
 

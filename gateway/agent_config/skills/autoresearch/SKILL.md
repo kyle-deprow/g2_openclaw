@@ -6,19 +6,21 @@ version: 8.1.0
 
 # Autoresearch
 
-Autoresearch is a PM-owned loop, but the loop state and next-stage selection
-must come from the deterministic runner in `gateway.autoresearch_runner` (or
-`gateway-cli autoresearch-next`), not from prompt memory. Because the PM
+Autoresearch is a PM-orchestrated loop, but authoritative lifecycle mutation,
+loop state, and next-stage selection must come from the deterministic
+controller/supervisor in `gateway.autoresearch_runner` (or read-only
+`gateway-cli autoresearch-next` output), not from prompt memory. Because the PM
 workspace is outside this repo, invoke it exactly as `cd
 /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next
 /home/dev/.openclaw/autoresearch/quantipy-state.json`. The PM uses that
-control-plane output to choose the next stage, verify metrics, log to MemPalace,
+control-plane output to choose the next stage and verify metrics,
 and repeat until the human says `stop`.
 
 Durable research memory is MemPalace only. Do not use `memory_search`,
 `memory_get`, flat daily memory files, OpenClaw memory flush, or prompt-only
-loop memory for research continuity. Only the PM loads the write-capable
-`mempalace` skill; all native Codex stage agents remain read-only.
+loop memory for research continuity. Every model thread receives only the
+repo-filtered `mempalace-readonly` server. The platform finalizer writes the
+canonical final drawer and standardized KG facts after a validated decision.
 
 The owner-only supervisor polls the authoritative state and OpenClaw task
 records every 60 seconds. Its default stale-task threshold is 15 minutes so
@@ -168,15 +170,16 @@ atomically:
 
 Resume accepts the new READY receipt, clears the suspension, and starts the next
 iteration. Normal completed transitions, including no-memory `INFRA_REPAIRED`
-and `NO_CONSENSUS` outcomes, still use `autoresearch-start-next`. Only at that
-completed boundary, after the required memory write or policy-approved
-no-memory transition, `autoresearch-start-next` may atomically replace the
-pinned identity with a different validated READY receipt. It never changes an
-active or suspended iteration's receipt.
+and `NO_CONSENSUS` outcomes, are supervisor/controller-owned. At that completed
+boundary the supervisor runs the platform-owned finalizer when required,
+records the verified receipt, may atomically replace the pinned identity with a
+different validated READY receipt, persists the successor, and only then wakes
+the PM. `autoresearch-next` remains a read-only model-facing action source and
+never changes an active or suspended iteration's receipt.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
-remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and
-`autoresearch-start-next` begins the next iteration with fresh context.
+remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and the
+supervisor begins the next iteration with fresh context before waking the PM.
 `INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
 readiness suspension. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
@@ -399,18 +402,18 @@ guardrails exist only to keep execution clean:
   unapproved dirty files before a stage launch. The persistent
   `docs/quantipy_experiment_mempalace_preload.md` audit note is the only
   default allowlisted local file.
-- All implementation and Fix/Test workspaces must be under the exact canonical
-  operator-controlled root `/home/dev/.openclaw/autoresearch/worktrees`; never
-  use `/tmp` or any other root. Before `git worktree add`, run `umask 077` and
+- All implementation and Fix/Test workspaces must be isolated clones under the
+  exact canonical model-writable root
+  `/home/dev/.openclaw/autoresearch/model-workspaces`; never use linked Git
+  worktrees, `/tmp`, or any other root. Before cloning, run `umask 077` and
   `mkdir -p` for that parent, run `chmod 700` on the parent, and verify that
   the current user owns the parent with mode `0700`. After creation, run
-  `chmod 700` on the worktree directory and verify that the current user owns
-  it with mode `0700`; artifact attestation rejects untrusted group/world-writable
-  worktree ancestors (the shared same-host policy permits a root-owned sticky
-  directory such as `/tmp`). `/tmp` is a 31G
-  tmpfs and each Quantipy worktree virtualenv is about 1.5G, so stale iteration
-  worktrees can exhaust it. Fix/Test reuses the exact persisted implementation
-  worktree and accepted experiment commit; it never creates another worktree.
+  `chmod 700` on the clone directory and verify that the current user owns it
+  with mode `0700`; artifact attestation rejects linked `.git` metadata and
+  untrusted group/world-writable ancestors. `/tmp` is a 31G tmpfs and each
+  Quantipy workspace virtualenv is about 1.5G, so stale iteration workspaces can
+  exhaust it. Fix/Test reuses the exact persisted implementation clone and
+  accepted experiment commit; it never creates another workspace.
   The managed OpenClaw gateway systemd drop-in enforces `UMask=0077`, so native
   Codex children create new package files and directories without group/other
   write bits; restart the active gateway after deploying that drop-in.
@@ -418,14 +421,15 @@ guardrails exist only to keep execution clean:
   `working_directory` and the launcher must spawn the process with `cwd` set to
   that exact worktree path; never run those commands from the authoritative
   target checkout.
-- `gateway-cli autoresearch-advance` mechanically verifies implementation and
-  fix artifacts: `workspace_path` is the strict canonical resolved worktree
-  path (no symlink, `..`, or other alias), the workspace exists, is a registered
-  Git worktree distinct from the authoritative target checkout, is clean, and
-  has the artifact commit at `HEAD`. Implementation evidence, the persisted
-  implementation workspace, and the Fix/Test workspace must all be below
-  `/home/dev/.openclaw/autoresearch/worktrees`; every path outside that root
-  fails closed. For Fix/Test it additionally verifies the persisted
+- `gateway-cli autoresearch-submit-stage` mechanically verifies implementation
+  and fix artifacts, then writes only a strict artifact envelope to the
+  supervisor-owned stage inbox. `workspace_path` is the strict canonical
+  resolved clone path (no symlink, `..`, or other alias), the workspace exists,
+  has private `.git` directory metadata distinct from the authoritative target
+  checkout, is clean, and has the artifact commit at `HEAD`. Implementation
+  evidence, the persisted implementation workspace, and the Fix/Test workspace
+  must all be below `/home/dev/.openclaw/autoresearch/model-workspaces`; every
+  path outside that root fails closed. For Fix/Test it additionally verifies the persisted
   implementation and fix artifact use that same exact canonical path, and that
   the implementation commit and authoritative target `HEAD` are ancestors of
   the final fix commit.
@@ -494,8 +498,8 @@ PM and stage-agent conduct:
   relaunches stages for shared-infrastructure recovery, or touches G2/OpenClaw
   orchestration. The PM never touches G2, promotes patches, edits shared
   infrastructure, or performs recovery relaunches for operator-owned issues.
-- Non-PM agents do not write MemPalace. Stage agents use readonly retrieval
-  only; the PM writes MemPalace only at the allowed final decision points.
+- Models do not write MemPalace. PM and stage agents use readonly retrieval
+  only; the supervisor finalizes required memory from authoritative state.
 
 ### Completion Delivery Protocol
 
@@ -518,9 +522,9 @@ Repo-managed PM config denies the OpenClaw tools `sessions_spawn`,
 `sessions_yield`, `agents_list`, `sessions_list`, and `sessions_history` so
 OpenClaw session delegation and discovery cannot replace native Codex
 `spawn_agent`. Native Codex `list_agents` is also forbidden by this protocol,
-but cannot be filtered through OpenClaw config. Do not broaden the PM deny-list
-to MemPalace write tools; the PM must still use native Codex `spawn_agent` and
-write final experiment records.
+  but cannot be filtered through OpenClaw config. Do not restore MemPalace write
+  tools to the PM; the PM must use native Codex `spawn_agent` and leave final
+  experiment persistence to the supervisor.
 
 Once all required children arrive, the PM must persist the authoritative
 artifact and emit a non-empty completion summary. Do not silently wait between
@@ -646,12 +650,12 @@ Call native Codex `spawn_agent` for `implementer` with the final implementation 
 
 Implementation requirements:
 
-- Create the disposable Git worktree under the exact canonical root
-  `/home/dev/.openclaw/autoresearch/worktrees` (for example,
-  `/home/dev/.openclaw/autoresearch/worktrees/quantipy-i{iteration}-implementation`).
-  First run `umask 077 && mkdir -p /home/dev/.openclaw/autoresearch/worktrees &&
-  chmod 700 /home/dev/.openclaw/autoresearch/worktrees`, then verify current-user
-  ownership and mode `0700` for the root and the created worktree; the root itself
+- Create the disposable isolated clone under the exact canonical root
+  `/home/dev/.openclaw/autoresearch/model-workspaces` (for example,
+  `/home/dev/.openclaw/autoresearch/model-workspaces/quantipy-i{iteration}-implementation`).
+  First run `umask 077 && mkdir -p /home/dev/.openclaw/autoresearch/model-workspaces &&
+  chmod 700 /home/dev/.openclaw/autoresearch/model-workspaces`, then verify current-user
+  ownership and mode `0700` for the root and the created clone; the root itself
   must exist and be canonical before the artifact can be accepted.
   Set every detached prewarm manifest's `working_directory` and launch its
   process with `cwd` set to this exact worktree path, not
@@ -1052,9 +1056,9 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
   entries for these fixes.
 - No methodology issue: proceed to decide/log.
 - Reuse the exact persisted implementation `workspace_path` and accepted commit;
-  it must already be under `/home/dev/.openclaw/autoresearch/worktrees`, and
+  it must already be under `/home/dev/.openclaw/autoresearch/model-workspaces`, and
   the Fix/Test artifact must report that same canonical path. Paths outside
-  that root are invalid. Never create another worktree. Before editing, verify
+  that root are invalid. Never create another workspace. Before editing, verify
   that workspace is an owned non-symlink directory with mode `0700`; otherwise
   stop and report the infrastructure blocker. Preserve unrelated work and use
   only already-authoritative human/Codex shared
@@ -1100,7 +1104,8 @@ Actions:
 - DISCARD/CRASH: do not promote the disposable experiment commit; log why and
   move to the next proposal.
 - NO_CONSENSUS: set `NOT_RUN` and the explicit no-memory flag, remain
-  unsuspended, then begin the next iteration's fresh context pass.
+  unsuspended, then let the supervisor begin the next iteration's fresh context
+  pass before PM wake.
 - The PM cannot choose the memory flag. It is `true` only for `ALPHA_RESEARCH`
   `KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, or `DISCARD` with the latest
   completed verification `PASS` and `tests_passed=true`, including reviewed
@@ -1108,16 +1113,14 @@ Actions:
   `TEST_FAILURE`/`BUG_SIGNAL`, every `DATA_INFRA_G0` outcome (including
   `INFRA_REPAIRED` and remediation `DISCARD`), `NO_CONSENSUS`, and operator
   `INFRA_BLOCKED`.
-- After a runner-required memory decision, the PM writes MemPalace drawers and
-  KG facts for experiment, feature, model, metric, decision, and failure mode.
+- After a runner-required memory decision, the platform finalizer writes one
+  canonical drawer and the standardized KG facts derived from authoritative state.
   Every policy-approved no-memory outcome bypasses MemPalace.
-- Write a MemPalace diary entry only as part of memory-required final experiment
-  logging.
-- `autoresearch-start-next` persists the immutable per-iteration canonical
-  decision receipt under the autoresearch state directory before replacing a
-  completed state. That receipt, bound to the state reference, final decision,
-  verification artifact, memory receipt, and instruction manifest digest, is
-  the platform decision authority with MemPalace.
+- The runner records the immutable per-iteration canonical decision receipt
+  under the autoresearch state directory before replacing a completed state.
+  That receipt, bound to the state reference, final decision, verification
+  artifact, memory receipt, and instruction manifest digest, is the platform
+  decision authority with MemPalace.
 
 ## Recovery And Status
 

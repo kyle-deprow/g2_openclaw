@@ -31,7 +31,6 @@ from rich.panel import Panel
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
-    validate_state_readiness,
 )
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
@@ -48,12 +47,6 @@ _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
 _REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
 _REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
-_mempalace_kg_path_option = typer.Option(
-    None,
-    "--mempalace-kg-path",
-    hidden=True,
-    help="Override the MemPalace KG path for deterministic tests.",
-)
 _TARGET_WRITER_COMMAND_RE = re.compile(
     r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
@@ -754,15 +747,10 @@ def autoresearch_next(
 ) -> None:
     """Validate autoresearch state/config and print the deterministic next action."""
     from gateway.autoresearch_runner import (
-        AutoresearchValidationContext,
-        Phase,
         build_receipt_catalog,
         load_autoresearch_policy,
         load_state_file,
         next_action,
-        provision_quantipy_experiment_runs_root,
-        require_canonical_verification_dispatch_attestation,
-        seal_canonical_verification_dispatch_state_file,
         validate_target_worktree_clean,
     )
 
@@ -782,13 +770,6 @@ def autoresearch_next(
                 f"{details}\n"
                 "Stop them before launching the next autoresearch stage."
             )
-        if state.phase is Phase.VERIFICATION:
-            validation_context = AutoresearchValidationContext.from_readiness(readiness)
-            state = seal_canonical_verification_dispatch_state_file(
-                state_path,
-                policy=policy,
-                validation_context=validation_context,
-            )
         action = next_action(
             state,
             policy,
@@ -796,14 +777,22 @@ def autoresearch_next(
             readiness=readiness,
             state_path=state_path,
         )
-        if state.phase is Phase.VERIFICATION:
-            require_canonical_verification_dispatch_attestation(
-                state_path,
-                policy=policy,
-                validation_context=validation_context,
-                expected_state_reference_sha256=action.state_reference_sha256,
+        reloaded_state = load_state_file(state_path)
+        confirmed_action = next_action(
+            reloaded_state,
+            policy,
+            receipts,
+            readiness=readiness,
+            state_path=state_path,
+        )
+        if (
+            confirmed_action.source_manifest_sha256 != action.source_manifest_sha256
+            or confirmed_action.state_reference_sha256 != action.state_reference_sha256
+        ):
+            raise ValueError(
+                "autoresearch dispatch input changed after action construction; "
+                "rerun autoresearch-next"
             )
-            provision_quantipy_experiment_runs_root()
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -929,92 +918,63 @@ def autoresearch_advance(
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
 
 
-@app.command("autoresearch-mark-memory")
-def autoresearch_mark_memory(
+@app.command("autoresearch-submit-stage")
+def autoresearch_submit_stage(
     state_path: Path = _state_path_argument,
-    output_path: Path = _output_path_option,
-    openclaw_config: Path = _openclaw_config_option,
-    readiness_manifest: Path = _readiness_manifest_option,
-    mempalace_kg_path: Path | None = _mempalace_kg_path_option,
-) -> None:
-    """Verify MemPalace facts and persist its receipt for a finished iteration."""
-    from gateway.autoresearch_runner import (
-        AutoresearchValidationContext,
-        load_autoresearch_policy,
-        load_state_file,
-        mark_memory_written,
-        persist_derived_state,
-        validate_state,
-        verify_mempalace_final_decision,
-    )
-
-    try:
-        policy = load_autoresearch_policy(openclaw_config)
-        state = load_state_file(state_path)
-        readiness = load_platform_readiness(readiness_manifest)
-        validate_state_readiness(state.platform_readiness, readiness)
-        validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        validate_state(state, policy, validation_context)
-        receipt = verify_mempalace_final_decision(state, mempalace_kg_path)
-        next_state = mark_memory_written(state, receipt)
-        validate_state(next_state, policy, validation_context)
-        persist_derived_state(state_path, output_path, state, next_state, policy=policy)
-    except ValueError as exc:
-        console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
-
-
-@app.command("autoresearch-start-next")
-def autoresearch_start_next(
-    state_path: Path = _state_path_argument,
-    output_path: Path = _output_path_option,
+    artifact_path: Path = _artifact_path_argument,
     openclaw_config: Path = _openclaw_config_option,
     quantipy_root: Path = _quantipy_root_option,
     readiness_manifest: Path = _readiness_manifest_option,
+    instruction_manifest_sha256: str | None = _instruction_manifest_sha256_option,
+    state_reference_sha256: str | None = _state_reference_sha256_option,
 ) -> None:
-    """Start the next persisted autoresearch iteration after memory is written."""
+    """Submit a validated stage artifact to the supervisor-owned inbox."""
     from gateway.autoresearch_runner import (
+        DEFAULT_AUTORESEARCH_STAGE_INBOX,
         AutoresearchValidationContext,
         build_receipt_catalog,
         expected_instruction_manifest_sha256,
         load_autoresearch_policy,
         load_state_file,
-        persist_next_iteration_state,
-        start_next_iteration,
-        validate_state,
+        submit_stage_artifact_file,
     )
 
     try:
         policy = load_autoresearch_policy(openclaw_config)
         state = load_state_file(state_path)
         readiness = load_platform_readiness(readiness_manifest)
-        validate_state_readiness(state.platform_readiness, readiness)
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
-        validate_state(state, policy, validation_context)
-        receipts = build_receipt_catalog(quantipy_root)
-        instruction_manifest_sha256 = expected_instruction_manifest_sha256(
-            state,
-            policy,
-            receipts,
+        validation_context.validate_for_state(state)
+        if instruction_manifest_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", instruction_manifest_sha256
+        ):
+            raise ValueError("instruction_manifest_sha256 must be a SHA-256 hex digest")
+        if state_reference_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", state_reference_sha256
+        ):
+            raise ValueError("state_reference_sha256 must be a SHA-256 hex digest")
+        if instruction_manifest_sha256 is None:
+            receipts = build_receipt_catalog(quantipy_root)
+            instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=state_path,
+            )
+        submission_path = submit_stage_artifact_file(
             state_path=state_path,
-        )
-        next_state = start_next_iteration(state, readiness=readiness)
-        persist_next_iteration_state(
-            state_path,
-            output_path,
-            state,
-            next_state,
+            artifact_path=artifact_path,
+            inbox_path=DEFAULT_AUTORESEARCH_STAGE_INBOX,
             instruction_manifest_sha256=instruction_manifest_sha256,
             policy=policy,
-            receipt_catalog_factory=lambda: build_receipt_catalog(quantipy_root),
+            validation_context=validation_context,
+            state_reference_sha256=state_reference_sha256,
         )
     except ValueError as exc:
-        console.print(f"[red]autoresearch-start-next failed:[/red] {exc}")
+        console.print(f"[red]autoresearch-submit-stage failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+    console.print(f"[green]submitted stage artifact:[/green] {submission_path}")
 
 
 @app.command("autoresearch-pin-readiness")

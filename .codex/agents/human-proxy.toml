@@ -167,7 +167,7 @@ When working on this repo, reference these skills as needed:
 **OpenClaw agent skills** (deployed to `~/.openclaw/skills/` via push script):
 - `gateway/agent_config/skills/codex-subagents/` — Codex subagent delegation, detached runs, resume, debugging
 - `gateway/agent_config/skills/autoresearch/` — Autonomous research loop protocol
-- `gateway/agent_config/skills/mempalace/` — MemPalace MCP tools, knowledge graph, autoresearch memory integration
+- `gateway/agent_config/skills/mempalace-readonly/` — read-only MemPalace context for autoresearch models
 
 **Repo skills** (for Codex in this repo):
 - `.agents/skills/openclaw-improvement/` — Meta: how to improve OpenClaw through skills

@@ -13,7 +13,7 @@ configuration used by the G2 Gateway.
 | `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
 | `openclaw-codex-runtime.conf` | User-systemd drop-in source for the fail-closed Codex compaction verifier |
 | `openclaw-gateway-native-crash-hardening.conf` | User-systemd drop-in source for OpenClaw memory and native-crash restart containment |
-| `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for non-PM agents |
+| `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for all autoresearch models |
 | `README.md` | This file |
 
 ## Cold-Start Install (Fresh Machine)
@@ -89,9 +89,25 @@ these settings into the local config with `jq`, preserving everything else.
 - **MemPalace-only research memory** — disables built-in OpenClaw memory search
   and memory flush, keeps OpenClaw compaction in `default` mode so Codex
   app-server native compaction owns Codex sessions, denies
-  `memory_search`/`memory_get`, and requires the MemPalace MCP server split:
-  full `mempalace` for `autoresearch-pm`, no MemPalace access for `main`, and
-  filtered `mempalace-readonly` for every native Codex stage agent.
+  `memory_search`/`memory_get`, and projects only filtered
+  `mempalace-readonly` into every model thread, including the G2 `main`
+  interface, the PM, and every native Codex stage agent.
+  The state-bound platform finalizer, outside every model thread, performs
+  canonical final-decision persistence through the installed MemPalace venv.
+- **Main control boundary** — keeps `main` on an exact non-wildcard OpenClaw
+  allowlist, disables the OpenClaw Codex native tool surface, and loads exactly
+  `g2-control` plus read-only MemPalace through `main`'s direct Codex
+  `agent/codex-home/config.toml`. The rejected wildcard plus
+  `codexDynamicToolsExclude` pattern is not used because it cannot remove
+  native Codex shell/file/write surfaces.
+- **Scoped Codex homes** — writes and validates per-agent direct Codex
+  `agent/codex-home/config.toml` for `main`, the PM, and spawned native children with
+  `approval_policy=never`, `sandbox_mode=workspace-write`,
+  `sandbox_workspace_write.writable_roots` limited to
+  `/home/dev/.openclaw/autoresearch/model-workspaces` and
+  `/home/dev/.openclaw/autoresearch/stage-inbox`, and supported Codex 0.144.3
+  `network_access=true` rather than the removed OpenClaw plugin `networkProxy`
+  profile.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
   deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
 - **Agent roster** — exact `main` interface agent, `autoresearch-pm`, and
@@ -235,12 +251,12 @@ The script will:
 3. Deep-merge the repo config into the local config (local-only keys preserved)
 4. Set the selected default model, force the repo-managed agent roster, and
    fail if any pinned agent model is not declared
-5. Install the repo-managed MemPalace read-only wrapper, then resolve the full
-   and read-only MemPalace MCP commands plus palace path
+5. Install the repo-managed MemPalace read-only wrapper and resolve its palace path
 6. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
 7. Validate repo-managed invariants for `main` interface isolation,
    `autoresearch-pm`, exact stage-agent models, high reasoning, memory policy,
-   and the full/read-only MemPalace MCP server split
+   the read-only-only MemPalace MCP projection, and native Codex stage-agent
+   MCP inheritance
 8. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`
