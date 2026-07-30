@@ -247,6 +247,12 @@ OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
 
 run_openclaw_cli() {
+  run_openclaw_cli_for_config "${LOCAL_CONFIG}" "$@"
+}
+
+run_openclaw_cli_for_config() {
+  local config_path="$1"
+  shift
   local -a env_args=(
     -u OPENCLAW_HOME
     -u OPENCLAW_PUSH_HOME
@@ -259,7 +265,7 @@ run_openclaw_cli() {
   env \
     "${env_args[@]}" \
     OPENCLAW_STATE_DIR="${OPENCLAW_PUSH_HOME}" \
-    OPENCLAW_CONFIG_PATH="${LOCAL_CONFIG}" \
+    OPENCLAW_CONFIG_PATH="${config_path}" \
     "${OPENCLAW_BIN_RESOLVED}" "$@"
 }
 
@@ -1019,7 +1025,7 @@ sanitize_stale_coding_provider_keys
 
 MERGED=$(echo "${MERGED}" | jq '
   del(.plugins.entries.codex.config.codexDynamicToolsExclude)
-  | .plugins.entries.codex.config.nativeToolSurfaceEnabled = false
+  | del(.plugins.entries.codex.config.nativeToolSurfaceEnabled)
 ')
 
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
@@ -1078,7 +1084,7 @@ if ! echo "${MERGED}" | jq -e \
   (.agents.defaults.thinkingDefault == "high")
   and ((.plugins.allow // []) | contains(["codex"]))
   and (.plugins.entries.codex.enabled == true)
-  and (.plugins.entries.codex.config.nativeToolSurfaceEnabled == false)
+  and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
   and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
   and (.plugins.entries.codex.config.appServer.sandbox == "workspace-write")
   and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
@@ -1133,10 +1139,30 @@ if ! echo "${MERGED}" | jq -e \
   and ([.agents.list[] | select(.id != "autoresearch-pm" and .id != "main") | select(.tools? != null)] | length) == 0
 ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, read-only MemPalace projection, and stage skill scopes." >&2
+  echo "       Check plugins.allow, Codex app-server config schema, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, read-only MemPalace projection, and stage skill scopes." >&2
   exit 1
 fi
 echo "Managed invariants validated: main interface split, read-only-only MemPalace projection, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, Quantipy methodology skill, built-in memory disabled."
+
+validate_generated_openclaw_config() {
+  local temp_config validate_json validate_status
+  temp_config="$(mktemp "${OPENCLAW_PUSH_HOME}/.openclaw.generated.XXXXXX.json")"
+  printf '%s\n' "${MERGED}" | jq . > "${temp_config}"
+  if validate_json="$(run_openclaw_cli_for_config "${temp_config}" config validate --json 2>&1)"; then
+    validate_status=0
+  else
+    validate_status=$?
+  fi
+  rm -f "${temp_config}"
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | jq -e '.valid == true' >/dev/null 2>&1; then
+    echo "ERROR: Generated OpenClaw config failed schema validation before write." >&2
+    printf '%s\n' "${validate_json}" >&2
+    exit 1
+  fi
+  echo "Generated OpenClaw config schema validated with ${OPENCLAW_BIN_RESOLVED} config validate --json."
+}
+
+validate_generated_openclaw_config
 
 # ── Write merged config ─────────────────────────────────────────────────────
 echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
@@ -1371,13 +1397,417 @@ if agent_id == "main":
     if g2.get("env") != {"PYTHONPATH": repo_root}:
         raise SystemExit("Codex runtime g2-control MCP env is not exact")
 PY
-  local doctor_json
-  doctor_json="$(env -u NODE_OPTIONS CODEX_HOME="${codex_home}" node "${CODEX_APP_SERVER_CLI_RESOLVED}" --strict-config doctor --json 2>&1 || true)"
-  if ! printf '%s\n' "${doctor_json}" | jq -e '.checks.config.load.status == "ok"' >/dev/null; then
-    echo "ERROR: Embedded Codex strict config validation failed for ${config_path}" >&2
-    printf '%s\n' "${doctor_json}" >&2
+  repair_codex_runtime_log_db "${codex_home}"
+  validate_codex_doctor_owned_checks "${codex_home}" "${config_path}"
+}
+
+repair_codex_runtime_log_db() {
+  local codex_home="$1"
+  local log_db="${codex_home}/logs_2.sqlite"
+  local repair_output
+
+  if ! repair_output="$("${PYTHON_BIN}" - "${log_db}" <<'PY' 2>&1
+import os
+import json
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+log_db = Path(sys.argv[1])
+expected_schema = {
+    (
+        "index",
+        "idx_logs_process_uuid_threadless_ts",
+        "logs",
+        "CREATE INDEX idx_logs_process_uuid_threadless_ts ON logs(process_uuid, ts DESC, ts_nanos DESC, id DESC)\nWHERE thread_id IS NULL",
+    ),
+    (
+        "index",
+        "idx_logs_thread_id",
+        "logs",
+        "CREATE INDEX idx_logs_thread_id ON logs(thread_id)",
+    ),
+    (
+        "index",
+        "idx_logs_thread_id_ts",
+        "logs",
+        "CREATE INDEX idx_logs_thread_id_ts ON logs(thread_id, ts DESC, ts_nanos DESC, id DESC)",
+    ),
+    (
+        "index",
+        "idx_logs_ts",
+        "logs",
+        "CREATE INDEX idx_logs_ts ON logs(ts DESC, ts_nanos DESC, id DESC)",
+    ),
+    (
+        "table",
+        "logs",
+        "logs",
+        """CREATE TABLE logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    ts_nanos INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    target TEXT NOT NULL,
+    feedback_log_body TEXT,
+    module_path TEXT,
+    file TEXT,
+    line INTEGER,
+    thread_id TEXT,
+    process_uuid TEXT,
+    estimated_bytes INTEGER NOT NULL DEFAULT 0
+)""",
+    ),
+}
+index_only_patterns = (
+    re.compile(r"^row [0-9]+ missing from index idx_logs_thread_id$"),
+    re.compile(r"^wrong # of entries in index idx_logs_thread_id$"),
+)
+
+
+def run_sql(sql: str) -> str:
+    completed = subprocess.run(
+        ["sqlite3", str(log_db), sql],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
+    return completed.stdout.strip()
+
+
+def run_sql_json(sql: str) -> object:
+    completed = subprocess.run(
+        ["sqlite3", "-json", str(log_db), sql],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise SystemExit(completed.stderr.strip() or completed.stdout.strip())
+    try:
+        return json.loads(completed.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid sqlite JSON output for {log_db}: {exc}") from exc
+
+
+def file_identity() -> tuple[int, int] | None:
+    try:
+        st = os.lstat(log_db)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        raise SystemExit(f"Scoped Codex log DB must not be a symlink: {log_db}")
+    if not stat.S_ISREG(st.st_mode):
+        raise SystemExit(f"Scoped Codex log DB must be a regular file: {log_db}")
+    if st.st_nlink != 1:
+        raise SystemExit(
+            f"Scoped Codex log DB must not have hard links; st_nlink={st.st_nlink}: {log_db}"
+        )
+    if st.st_uid != os.geteuid():
+        raise SystemExit(
+            f"Scoped Codex log DB owner uid {st.st_uid} does not match current uid {os.geteuid()}: {log_db}"
+        )
+    return (st.st_dev, st.st_ino)
+
+
+def schema_rows() -> set[tuple[str, str, str, str]]:
+    raw = run_sql_json(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+        "WHERE tbl_name = 'logs' AND type IN ('table', 'index') "
+        "ORDER BY type, name;"
+    )
+    if not isinstance(raw, list):
+        raise SystemExit(f"unexpected logs_2.sqlite schema JSON for {log_db}")
+    rows: set[tuple[str, str, str, str]] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise SystemExit(f"unexpected logs_2.sqlite schema row: {item!r}")
+        values = (item.get("type"), item.get("name"), item.get("tbl_name"), item.get("sql"))
+        if not all(isinstance(value, str) for value in values):
+            raise SystemExit(f"unexpected logs_2.sqlite schema row: {item!r}")
+        rows.add(values)  # type: ignore[arg-type]
+    return rows
+
+
+def validate_schema() -> None:
+    actual = schema_rows()
+    if actual != expected_schema:
+        missing = sorted(expected_schema - actual)
+        extra = sorted(actual - expected_schema)
+        raise SystemExit(
+            f"Scoped Codex log DB schema does not match the pinned logs_2.sqlite schema at {log_db}; "
+            f"missing={missing!r}; extra={extra!r}"
+        )
+
+
+def parse_integrity(output: str) -> list[str]:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        raise SystemExit(f"empty PRAGMA integrity_check output for {log_db}")
+    return lines
+
+
+def is_repairable_idx_logs_thread_id_only(lines: list[str]) -> bool:
+    return all(any(pattern.fullmatch(line) for pattern in index_only_patterns) for line in lines)
+
+
+identity_before = file_identity()
+if identity_before is None:
+    raise SystemExit(0)
+validate_schema()
+integrity_before = parse_integrity(run_sql("PRAGMA integrity_check;"))
+if integrity_before == ["ok"]:
+    raise SystemExit(0)
+if not is_repairable_idx_logs_thread_id_only(integrity_before):
+    raise SystemExit(
+        f"Scoped Codex log DB {log_db} has non-repairable integrity errors: {integrity_before!r}"
+    )
+
+print(f"Repairing scoped Codex log DB idx_logs_thread_id with REINDEX: {log_db}")
+integrity_after = parse_integrity(
+    run_sql("REINDEX idx_logs_thread_id; PRAGMA integrity_check;")
+)
+if integrity_after != ["ok"]:
+    raise SystemExit(
+        f"Scoped Codex log DB {log_db} remains corrupt after REINDEX idx_logs_thread_id: {integrity_after!r}"
+    )
+if file_identity() != identity_before:
+    raise SystemExit(f"Scoped Codex log DB identity changed during repair: {log_db}")
+validate_schema()
+print(f"Repaired scoped Codex log DB idx_logs_thread_id: {log_db}")
+PY
+)"; then
+    echo "ERROR: Scoped Codex log DB validation/repair failed for ${log_db}." >&2
+    printf '%s\n' "${repair_output}" >&2
     exit 1
   fi
+  if [[ -n "${repair_output}" ]]; then
+    printf '%s\n' "${repair_output}"
+  fi
+}
+
+validate_codex_doctor_owned_checks() {
+  local codex_home="$1"
+  local config_path="$2"
+  local doctor_stdout doctor_stderr doctor_status app_server_package_root
+
+  doctor_stdout="$(mktemp)"
+  doctor_stderr="$(mktemp)"
+  app_server_package_root="$(dirname "$(dirname "${CODEX_APP_SERVER_CLI_RESOLVED}")")"
+  if env -u NODE_OPTIONS CODEX_HOME="${codex_home}" \
+    node "${CODEX_APP_SERVER_CLI_RESOLVED}" --strict-config doctor --json \
+    >"${doctor_stdout}" 2>"${doctor_stderr}"; then
+    doctor_status=0
+  else
+    doctor_status=$?
+  fi
+
+  if ! "${PYTHON_BIN}" - "${doctor_stdout}" "${doctor_stderr}" "${codex_home}" \
+    "${config_path}" "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${app_server_package_root}" \
+    "${doctor_status}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+stdout_path = Path(sys.argv[1])
+stderr_path = Path(sys.argv[2])
+codex_home = Path(sys.argv[3])
+config_path = Path(sys.argv[4])
+required_version = sys.argv[5]
+app_server_package_root = Path(sys.argv[6])
+doctor_status = int(sys.argv[7])
+
+try:
+    report = json.loads(stdout_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"doctor did not emit valid JSON for {config_path}: {exc}") from exc
+
+checks = report.get("checks")
+if not isinstance(checks, dict):
+    raise SystemExit(f"doctor JSON for {config_path} is missing checks")
+
+required_checks = {
+    "config.load",
+    "mcp.config",
+    "sandbox.helpers",
+    "runtime.provenance",
+}
+missing = sorted(required_checks - set(checks))
+if missing:
+    raise SystemExit(f"doctor JSON for {config_path} is missing owned checks: {', '.join(missing)}")
+
+failures: list[str] = []
+for check_id in sorted(required_checks):
+    check = checks[check_id]
+    if not isinstance(check, dict):
+        failures.append(f"{check_id}=invalid")
+    elif check.get("status") != "ok":
+        failures.append(f"{check_id}={check.get('status', '<missing>')}")
+
+if report.get("codexVersion") != required_version:
+    failures.append(f"codexVersion={report.get('codexVersion', '<missing>')} expected {required_version}")
+
+runtime = checks["runtime.provenance"]
+runtime_details = runtime.get("details") if isinstance(runtime, dict) else None
+if not isinstance(runtime_details, dict) or runtime_details.get("version") != required_version:
+    actual = runtime_details.get("version", "<missing>") if isinstance(runtime_details, dict) else "<missing>"
+    failures.append(f"runtime.provenance.details.version={actual} expected {required_version}")
+
+ignored: list[str] = []
+unexpected: list[str] = []
+
+def has_shape(
+    check_id: str,
+    check: dict[str, object],
+    *,
+    category: str,
+    status: str,
+    summary: str,
+    details: dict[str, object],
+) -> bool:
+    if check.get("id") != check_id:
+        return False
+    if check.get("category") != category:
+        return False
+    if check.get("status") != status:
+        return False
+    if check.get("summary") != summary:
+        return False
+    actual_details = check.get("details")
+    if not isinstance(actual_details, dict):
+        return False
+    return actual_details == details
+
+def is_expected_openclaw_managed_auth_failure(check_id: str, check: dict[str, object]) -> bool:
+    return (
+        has_shape(
+            check_id,
+            check,
+            category="auth",
+            status="fail",
+            summary="no Codex credentials were found",
+            details={
+                "auth file": str(codex_home / "auth.json"),
+                "auth storage mode": "File",
+            },
+        )
+        and not (codex_home / "auth.json").exists()
+    )
+
+def is_expected_embedded_installation_failure(check_id: str, check: dict[str, object]) -> bool:
+    return has_shape(
+        check_id,
+        check,
+        category="install",
+        status="fail",
+        summary="npm install -g @openai/codex would update a different install",
+        details={"running package root": str(app_server_package_root)},
+    )
+
+def is_expected_update_probe_failure(check_id: str, check: dict[str, object]) -> bool:
+    mismatch = has_shape(
+        check_id,
+        check,
+        category="updates",
+        status="fail",
+        summary="update would target a different npm install",
+        details={"running package root": str(app_server_package_root)},
+    )
+    timeout = has_shape(
+        check_id,
+        check,
+        category="updates",
+        status="warning",
+        summary="update check timed out",
+        details={"running package root": str(app_server_package_root)},
+    )
+    return mismatch or timeout
+
+def is_expected_missing_auth_websocket_warning(check_id: str, check: dict[str, object]) -> bool:
+    return (
+        has_shape(
+            check_id,
+            check,
+            category="websocket",
+            status="warning",
+            summary="Responses WebSocket failed; HTTPS fallback may still work",
+            details={
+                "auth mode": "none",
+                "endpoint": "wss://api.openai.com/v1/<redacted>",
+                "model provider": "openai",
+                "provider name": "OpenAI",
+                "supports websockets": "true",
+                "wire API": "responses",
+            },
+        )
+        and not (codex_home / "auth.json").exists()
+    )
+
+for check_id, raw_check in checks.items():
+    if not isinstance(raw_check, dict):
+        unexpected.append(f"{check_id}=invalid")
+        continue
+    status = raw_check.get("status")
+    if status == "ok":
+        continue
+    if status not in {"fail", "warning"}:
+        unexpected.append(f"{check_id}={status}")
+        continue
+    if check_id == "auth.credentials" and is_expected_openclaw_managed_auth_failure(check_id, raw_check):
+        ignored.append(check_id)
+    elif check_id == "installation" and is_expected_embedded_installation_failure(check_id, raw_check):
+        ignored.append(check_id)
+    elif check_id == "updates.status" and is_expected_update_probe_failure(check_id, raw_check):
+        ignored.append(check_id)
+    elif check_id == "network.websocket_reachability" and is_expected_missing_auth_websocket_warning(check_id, raw_check):
+        ignored.append(check_id)
+    else:
+        unexpected.append(f"{check_id}={status}")
+
+if failures:
+    raise SystemExit(
+        f"owned Codex doctor checks failed for {config_path}: {', '.join(failures)}"
+    )
+if unexpected:
+    raise SystemExit(
+        f"unexpected fatal Codex doctor checks for {config_path}: {', '.join(sorted(unexpected))}"
+    )
+
+if doctor_status == 0:
+    if ignored:
+        raise SystemExit(
+            f"doctor exited 0 for {config_path} with non-ok checks: {', '.join(sorted(ignored))}"
+        )
+elif doctor_status == 1:
+    if ignored:
+        print(
+            "Codex doctor non-owned failures ignored for "
+            f"{config_path}: {', '.join(sorted(ignored))}. "
+            "OpenClaw owns OAuth in openclaw-agent.sqlite and embeds the pinned Codex package."
+        )
+    else:
+        raise SystemExit(
+            f"doctor exited 1 for {config_path} without an allowed non-owned failure"
+        )
+else:
+    raise SystemExit(f"doctor exited {doctor_status} for {config_path}; expected 0 or 1")
+
+stderr = stderr_path.read_text(encoding="utf-8").strip()
+if stderr:
+    print(f"Codex doctor stderr for {config_path}: {stderr}")
+PY
+  then
+    echo "ERROR: Embedded Codex owned validation failed for ${config_path}" >&2
+    cat "${doctor_stderr}" >&2
+    cat "${doctor_stdout}" >&2
+    rm -f "${doctor_stdout}" "${doctor_stderr}"
+    exit 1
+  fi
+  rm -f "${doctor_stdout}" "${doctor_stderr}"
 }
 
 remove_legacy_codex_stage_agents() {

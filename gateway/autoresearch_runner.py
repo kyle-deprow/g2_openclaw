@@ -6484,8 +6484,10 @@ def _validate_policy(
         plugin_config = _ensure_mapping(codex.get("config"), label="plugins.entries.codex.config")
     except AutoresearchValidationError as exc:
         raise AutoresearchConfigError(str(exc)) from exc
-    if plugin_config.get("nativeToolSurfaceEnabled") is not False:
-        raise AutoresearchConfigError("Codex native tool surface must be disabled by config")
+    if "nativeToolSurfaceEnabled" in plugin_config:
+        raise AutoresearchConfigError(
+            "nativeToolSurfaceEnabled is not supported by the current Codex plugin schema"
+        )
     if "codexDynamicToolsExclude" in plugin_config:
         raise AutoresearchConfigError(
             "codexDynamicToolsExclude must not be used as a native Codex tool guard"

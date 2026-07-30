@@ -95,11 +95,12 @@ these settings into the local config with `jq`, preserving everything else.
   The state-bound platform finalizer, outside every model thread, performs
   canonical final-decision persistence through the installed MemPalace venv.
 - **Main control boundary** — keeps `main` on an exact non-wildcard OpenClaw
-  allowlist, disables the OpenClaw Codex native tool surface, and loads exactly
+  allowlist so the Codex native tool surface stays disabled by current
+  `@openclaw/codex` policy, and loads exactly
   `g2-control` plus read-only MemPalace through `main`'s direct Codex
   `agent/codex-home/config.toml`. The rejected wildcard plus
-  `codexDynamicToolsExclude` pattern is not used because it cannot remove
-  native Codex shell/file/write surfaces.
+  `codexDynamicToolsExclude` pattern and unsupported
+  `nativeToolSurfaceEnabled` plugin config key are not used.
 - **Scoped Codex homes** — writes and validates per-agent direct Codex
   `agent/codex-home/config.toml` for `main`, the PM, and spawned native children with
   `approval_policy=never`, `sandbox_mode=workspace-write`,
@@ -260,7 +261,9 @@ The script will:
 8. Copy managed agent bootstrap files to every configured agent workspace, copy
    repo skills after validating the referenced skill directories, and copy
    `azure-api-version-preload.cjs`
-9. Validate the result with `openclaw config validate` and inspect the Codex plugin
+9. Validate the generated config with `openclaw config validate --json` before
+   writing, validate the written result with `openclaw config validate`, and
+   inspect the Codex plugin
 10. Install the supervisor service definition, the persistent OpenClaw Gateway
    runtime-cap, Codex runtime-verifier, and native-crash hardening drop-ins,
    then run `systemctl --user daemon-reload`. These four managed systemd files

@@ -92,6 +92,30 @@ EXPECTED_NATIVE_CRASH_HARDENING_LINES = [
     ),
 ]
 EXPECTED_NATIVE_CRASH_HARDENING_TEXT = "\n".join(EXPECTED_NATIVE_CRASH_HARDENING_LINES) + "\n"
+CODEX_LOG_DB_SCHEMA = (
+    """
+CREATE TABLE logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    ts_nanos INTEGER NOT NULL,
+    level TEXT NOT NULL,
+    target TEXT NOT NULL,
+    feedback_log_body TEXT,
+    module_path TEXT,
+    file TEXT,
+    line INTEGER,
+    thread_id TEXT,
+    process_uuid TEXT,
+    estimated_bytes INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_logs_ts ON logs(ts DESC, ts_nanos DESC, id DESC);
+CREATE INDEX idx_logs_thread_id ON logs(thread_id);
+CREATE INDEX idx_logs_thread_id_ts ON logs(thread_id, ts DESC, ts_nanos DESC, id DESC);
+"""
+    "CREATE INDEX idx_logs_process_uuid_threadless_ts "
+    "ON logs(process_uuid, ts DESC, ts_nanos DESC, id DESC)\n"
+    "WHERE thread_id IS NULL;"
+).strip()
 SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM")
 
 
@@ -263,7 +287,116 @@ if (process.env.CODEX_DOCTOR_LOG) {
     `${process.env.CODEX_HOME || "<unset>"} ${process.argv.slice(2).join(" ")}\\n`
   );
 }
-console.log(JSON.stringify({ checks: { config: { load: { status: "ok" } } } }));
+const codexHome = process.env.CODEX_HOME || "<unset>";
+const packageRoot = process.env.MOCK_CODEX_RESOLVED_PATH || "<unset>";
+const checks = {
+  "auth.credentials": {
+    id: "auth.credentials",
+    status: process.env.MOCK_CODEX_DOCTOR_AUTH_STATUS || "fail",
+    category: "auth",
+    summary: "no Codex credentials were found",
+    details: {
+      "auth file": `${codexHome}/auth.json`,
+      "auth storage mode": process.env.MOCK_CODEX_DOCTOR_AUTH_STORAGE_MODE || "File"
+    }
+  },
+  "config.load": {
+    id: "config.load",
+    status: process.env.MOCK_CODEX_DOCTOR_CONFIG_STATUS || "ok",
+    category: "config",
+    summary: "config loaded",
+    details: {"config.toml": `${codexHome}/config.toml`}
+  },
+  "installation": {
+    id: "installation",
+    status: process.env.MOCK_CODEX_DOCTOR_INSTALL_STATUS || "fail",
+    category: "install",
+    summary: process.env.MOCK_CODEX_DOCTOR_INSTALL_SUMMARY ||
+      "npm install -g @openai/codex would update a different install",
+    details: {"running package root": packageRoot}
+  },
+  "mcp.config": {
+    id: "mcp.config",
+    status: process.env.MOCK_CODEX_DOCTOR_MCP_STATUS || "ok",
+    category: "mcp",
+    summary: "MCP config loaded",
+    details: {}
+  },
+  "network.websocket_reachability": {
+    id: "network.websocket_reachability",
+    status: process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_STATUS || "warning",
+    category: "websocket",
+    summary: "Responses WebSocket failed; HTTPS fallback may still work",
+    details: {
+      "auth mode": process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_AUTH_MODE || "none",
+      endpoint: "wss://api.openai.com/v1/<redacted>",
+      "model provider": "openai",
+      "provider name": "OpenAI",
+      "supports websockets": "true",
+      "wire API": "responses"
+    }
+  },
+  "runtime.provenance": {
+    id: "runtime.provenance",
+    status: process.env.MOCK_CODEX_DOCTOR_RUNTIME_STATUS || "ok",
+    category: "runtime",
+    summary: "running npm on linux-x86_64",
+    details: {version: process.env.MOCK_CODEX_DOCTOR_RUNTIME_VERSION || "0.144.3"}
+  },
+  "sandbox.helpers": {
+    id: "sandbox.helpers",
+    status: process.env.MOCK_CODEX_DOCTOR_SANDBOX_STATUS || "ok",
+    category: "sandbox",
+    summary: "sandbox configuration is readable",
+    details: {}
+  },
+  "updates.status": {
+    id: "updates.status",
+    status: process.env.MOCK_CODEX_DOCTOR_UPDATE_STATUS || "fail",
+    category: "updates",
+    summary: process.env.MOCK_CODEX_DOCTOR_UPDATE_SUMMARY ||
+      "update would target a different npm install",
+    details: {"running package root": packageRoot}
+  }
+};
+if (process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL) {
+  checks[process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL] = {
+    id: process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL,
+    status: "fail",
+    category: "state",
+    summary: "unexpected failure injected by test",
+    details: {}
+  };
+}
+if (process.env.MOCK_CODEX_DOCTOR_EXTRA_WARNING) {
+  checks[process.env.MOCK_CODEX_DOCTOR_EXTRA_WARNING] = {
+    id: process.env.MOCK_CODEX_DOCTOR_EXTRA_WARNING,
+    status: "warning",
+    category: "network",
+    summary: "unexpected warning injected by test",
+    details: {}
+  };
+}
+if (process.env.MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK) {
+  const check = checks[process.env.MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK];
+  if (check) {
+    check.details[process.env.MOCK_CODEX_DOCTOR_DETAIL_KEY || "extra"] =
+      process.env.MOCK_CODEX_DOCTOR_DETAIL_VALUE || "unexpected";
+  }
+}
+if (process.env.MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK) {
+  const check = checks[process.env.MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK];
+  if (check) {
+    delete check.details[process.env.MOCK_CODEX_DOCTOR_DETAIL_KEY || "running package root"];
+  }
+}
+console.log(JSON.stringify({
+  schemaVersion: 1,
+  overallStatus: "fail",
+  codexVersion: "0.144.3",
+  checks
+}));
+process.exit(Number(process.env.MOCK_CODEX_DOCTOR_EXIT_STATUS || "1"));
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -284,10 +417,14 @@ if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_OPENCLAW_STATE_DIR" ]]; then
   printf 'unexpected OPENCLAW_STATE_DIR=%s\n' "${OPENCLAW_STATE_DIR:-<unset>}" >&2
   exit 68
 fi
-if [[ "${OPENCLAW_CONFIG_PATH:-}" != "$EXPECTED_OPENCLAW_CONFIG_PATH" ]]; then
+case "${OPENCLAW_CONFIG_PATH:-}" in
+  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
+    ;;
+  *)
   printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
   exit 69
-fi
+    ;;
+esac
 printf '%s %s %s %s %s %s\n' \
   "openclaw $*" \
   "OPENCLAW_HOME=<unset>" \
@@ -301,7 +438,38 @@ case "${1:-}" in
     ;;
   config)
     [[ "${2:-}" == "validate" ]] || exit 44
-    printf 'config ok\n'
+    if jq -e '.plugins.entries.codex.config.nativeToolSurfaceEnabled? != null' \
+      "$OPENCLAW_CONFIG_PATH" >/dev/null; then
+      if [[ "${3:-}" == "--json" ]]; then
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [
+    {
+      "path": "plugins.entries.codex.config",
+      "message": "must not have additional properties: nativeToolSurfaceEnabled"
+    }
+  ]
+}
+JSON
+      else
+        printf 'invalid config: nativeToolSurfaceEnabled\n' >&2
+      fi
+      exit 12
+    fi
+    if [[ "${MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL:-0}" == "1" ]]; then
+      if [[ "${3:-}" == "--json" ]]; then
+        printf '{"valid":false,"errors":[{"path":"injected","message":"test failure"}]}\n'
+      else
+        printf 'invalid config injected by test\n' >&2
+      fi
+      exit 12
+    fi
+    if [[ "${3:-}" == "--json" ]]; then
+      printf '{"valid":true,"path":"%s","warnings":[]}\n' "$OPENCLAW_CONFIG_PATH"
+    else
+      printf 'config ok\n'
+    fi
     ;;
   plugins)
     [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 45
@@ -411,7 +579,35 @@ esac
     _write_executable(
         mock_bin / "sqlite3",
         r"""
-if [[ "$#" -ge 2 ]]; then
+printf 'sqlite3 %s\n' "$*" >> "${SQLITE_LOG:-/dev/null}"
+if [[ "${1:-}" == "-json" && "$#" -ge 3 && "$(basename "$2")" == "logs_2.sqlite" ]]; then
+  /usr/bin/sqlite3 "$@"
+elif [[ "$#" -ge 2 && "$(basename "$1")" == "logs_2.sqlite" ]]; then
+  case "$2" in
+    "PRAGMA integrity_check;")
+      if [[ "${MOCK_CODEX_LOG_DB_INTEGRITY:-ok}" == "corrupt" ]]; then
+        printf 'row 4135 missing from index idx_logs_thread_id\n'
+      elif [[ "${MOCK_CODEX_LOG_DB_INTEGRITY:-ok}" == "other_index" ]]; then
+        printf 'row 4135 missing from index idx_logs_ts\n'
+      elif [[ "${MOCK_CODEX_LOG_DB_INTEGRITY:-ok}" == "table" ]]; then
+        printf 'database disk image is malformed\n'
+      else
+        printf 'ok\n'
+      fi
+      ;;
+    "REINDEX idx_logs_thread_id; PRAGMA integrity_check;")
+      if [[ "${MOCK_CODEX_LOG_DB_REPAIR:-ok}" == "fail" ]]; then
+        printf 'row 4135 missing from index idx_logs_thread_id\n'
+      else
+        printf 'ok\n'
+      fi
+      ;;
+    *)
+      printf 'unexpected logs_2.sqlite sqlite command: %s\n' "$2" >&2
+      exit 90
+      ;;
+  esac
+elif [[ "$#" -ge 2 ]]; then
   printf '1\n'
 else
   cat >/dev/null
@@ -503,6 +699,7 @@ def _prepare_push_script_home(
             "OPENCLAW_LOG": str(home / "openclaw.log"),
             "MOCK_CODEX_RESOLVED_PATH": str(home / "mock-codex-package"),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
+            "SQLITE_LOG": str(home / "sqlite.log"),
             "TEST_ROOT": str(tmp_path),
         },
     )
@@ -520,6 +717,19 @@ def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
 
 def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def _create_codex_logs_db(path: Path, schema: str = CODEX_LOG_DB_SCHEMA) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(schema)
+
+
+def _read_sqlite_log(env: dict[str, str]) -> str:
+    sqlite_log = Path(env["SQLITE_LOG"])
+    if not sqlite_log.exists():
+        return ""
+    return sqlite_log.read_text(encoding="utf-8")
 
 
 def _contains_forbidden_key(value: object, forbidden: set[str]) -> bool:
@@ -601,7 +811,7 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert app_server["sandbox"] == "workspace-write"
     assert app_server["defaultWorkspaceDir"] == "/home/dev/.openclaw/autoresearch/model-workspaces"
     assert "networkProxy" not in app_server
-    assert codex_entry["config"]["nativeToolSurfaceEnabled"] is False
+    assert "nativeToolSurfaceEnabled" not in codex_entry["config"]
     assert "codexDynamicToolsExclude" not in codex_entry["config"]
     assert "danger-full-access" not in json.dumps(codex_entry)
 
@@ -644,7 +854,7 @@ def test_installed_codex_native_surface_is_not_enabled_by_main_wildcard_allow() 
     assert "*" not in main_tools["allow"]
     assert "exec" in main_tools["deny"]
     codex_config = config["plugins"]["entries"]["codex"]["config"]
-    assert codex_config["nativeToolSurfaceEnabled"] is False
+    assert "nativeToolSurfaceEnabled" not in codex_config
     assert "codexDynamicToolsExclude" not in codex_config
 
     candidates = sorted(
@@ -911,11 +1121,12 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 1
     openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
-    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 3
-    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 3
-    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 3
+    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 4
+    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 4
+    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 4
     assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 3
-    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 3
+    assert "config validate --json" in openclaw_log
+    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 4
     assert "inherited-openclaw-home" not in openclaw_log
     assert "inherited-state-dir" not in openclaw_log
     assert "inherited-config.json" not in openclaw_log
@@ -979,6 +1190,378 @@ def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspac
     for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]:
         codex_home = openclaw_home / "agents" / agent_id / "agent/codex-home"
         assert f"{codex_home} --strict-config doctor --json" in doctor_log
+
+
+def test_push_script_allows_expected_non_owned_codex_doctor_failures(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Codex doctor non-owned failures ignored" in result.stdout
+    assert "auth.credentials" in result.stdout
+    assert "installation" in result.stdout
+    assert "network.websocket_reachability" in result.stdout
+    assert "updates.status" in result.stdout
+    assert "OpenClaw owns OAuth in openclaw-agent.sqlite" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "expected_check"),
+    [
+        ("MOCK_CODEX_DOCTOR_CONFIG_STATUS", "fail", "config.load=fail"),
+        ("MOCK_CODEX_DOCTOR_MCP_STATUS", "fail", "mcp.config=fail"),
+        ("MOCK_CODEX_DOCTOR_SANDBOX_STATUS", "fail", "sandbox.helpers=fail"),
+        ("MOCK_CODEX_DOCTOR_RUNTIME_STATUS", "fail", "runtime.provenance=fail"),
+        ("MOCK_CODEX_DOCTOR_RUNTIME_STATUS", "warning", "runtime.provenance=warning"),
+    ],
+)
+def test_push_script_rejects_owned_codex_doctor_failures(
+    tmp_path: Path,
+    env_name: str,
+    env_value: str,
+    expected_check: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env[env_name] = env_value
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "owned Codex doctor checks failed" in result.stderr
+    assert expected_check in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_accepts_zero_codex_doctor_exit_only_when_all_checks_ok(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_EXIT_STATUS"] = "0"
+    env["MOCK_CODEX_DOCTOR_AUTH_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_INSTALL_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_UPDATE_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_WEBSOCKET_STATUS"] = "ok"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Codex doctor non-owned failures ignored" not in result.stdout
+
+
+def test_push_script_rejects_zero_codex_doctor_exit_with_allowed_non_owned_checks(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_EXIT_STATUS"] = "0"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "doctor exited 0" in result.stderr
+    assert "auth.credentials" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_accepts_one_codex_doctor_exit_for_allowed_non_owned_checks(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Codex doctor non-owned failures ignored" in result.stdout
+
+
+def test_push_script_rejects_one_codex_doctor_exit_without_allowed_non_owned_checks(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_AUTH_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_INSTALL_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_UPDATE_STATUS"] = "ok"
+    env["MOCK_CODEX_DOCTOR_WEBSOCKET_STATUS"] = "ok"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "doctor exited 1" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_seven_codex_doctor_exit_even_with_allowed_non_owned_checks(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_EXIT_STATUS"] = "7"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "doctor exited 7" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_unexpected_fatal_codex_doctor_failure(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_EXTRA_FAIL"] = "state.paths"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "state.paths=fail" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_unexpected_codex_doctor_warning(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_EXTRA_WARNING"] = "network.proxy"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "network.proxy=warning" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_validates_generated_openclaw_config_before_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env["MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Generated OpenClaw config failed schema validation before write" in result.stderr
+    assert "config validate --json" in Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value", "expected_check"),
+    [
+        ("MOCK_CODEX_DOCTOR_AUTH_STORAGE_MODE", "SQLite", "auth.credentials=fail"),
+        (
+            "MOCK_CODEX_DOCTOR_INSTALL_SUMMARY",
+            "a different install was detected",
+            "installation=fail",
+        ),
+        ("MOCK_CODEX_DOCTOR_UPDATE_SUMMARY", "update timed out", "updates.status=fail"),
+        (
+            "MOCK_CODEX_DOCTOR_WEBSOCKET_AUTH_MODE",
+            "bearer",
+            "network.websocket_reachability=warning",
+        ),
+    ],
+)
+def test_push_script_rejects_allowed_codex_doctor_shape_drift(
+    tmp_path: Path,
+    env_name: str,
+    value: str,
+    expected_check: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env[env_name] = value
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert expected_check in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("check_id", "detail_key", "mutation"),
+    [
+        ("installation", "extra", "extra"),
+        ("updates.status", "running package root", "missing"),
+    ],
+)
+def test_push_script_rejects_allowed_codex_doctor_detail_key_drift(
+    tmp_path: Path,
+    check_id: str,
+    detail_key: str,
+    mutation: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_DETAIL_KEY"] = detail_key
+    if mutation == "extra":
+        env["MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK"] = check_id
+    else:
+        env["MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK"] = check_id
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert f"{check_id}=" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_accepts_missing_scoped_codex_log_db_without_sqlite_access(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    sqlite_log = _read_sqlite_log(env)
+    assert str(log_db) not in sqlite_log
+    assert not log_db.exists()
+
+
+def test_push_script_repairs_scoped_codex_log_db_index_corruption(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db)
+    env["MOCK_CODEX_LOG_DB_INTEGRITY"] = "corrupt"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    sqlite_log = _read_sqlite_log(env)
+    assert f"sqlite3 {log_db} PRAGMA integrity_check;" in sqlite_log
+    assert f"sqlite3 {log_db} REINDEX idx_logs_thread_id; PRAGMA integrity_check;" in sqlite_log
+    assert "REINDEX;" not in sqlite_log
+    assert f"Repaired scoped Codex log DB idx_logs_thread_id: {log_db}" in result.stdout
+
+
+def test_push_script_fails_when_scoped_codex_log_db_reindex_cannot_repair(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db)
+    env["MOCK_CODEX_LOG_DB_INTEGRITY"] = "corrupt"
+    env["MOCK_CODEX_LOG_DB_REPAIR"] = "fail"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert f"Scoped Codex log DB validation/repair failed for {log_db}" in result.stderr
+    assert "remains corrupt after REINDEX idx_logs_thread_id" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_scoped_codex_log_db_symlink(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    real_db = tmp_path / "real-logs.sqlite"
+    _create_codex_logs_db(real_db)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    log_db.parent.mkdir(parents=True)
+    log_db.symlink_to(real_db)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "must not be a symlink" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_dangling_scoped_codex_log_db_symlink(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    log_db.parent.mkdir(parents=True)
+    log_db.symlink_to(tmp_path / "missing-logs.sqlite")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "must not be a symlink" in result.stderr
+    assert str(log_db) not in _read_sqlite_log(env)
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_nonregular_scoped_codex_log_db_path(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    log_db.mkdir(parents=True)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "must be a regular file" in result.stderr
+    assert str(log_db) not in _read_sqlite_log(env)
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_hardlinked_scoped_codex_log_db_before_sqlite_access(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db)
+    hardlink = tmp_path / "logs-hardlink.sqlite"
+    os.link(log_db, hardlink)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "must not have hard links" in result.stderr
+    assert str(log_db) not in _read_sqlite_log(env)
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_scoped_codex_log_db_wrong_owner(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db)
+    wrong_uid = 65534 if os.geteuid() != 65534 else 0
+    try:
+        os.chown(log_db, wrong_uid, -1)
+    except PermissionError:
+        pytest.skip("changing file owner requires elevated test privileges")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "does not match current uid" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_wrong_scoped_codex_log_db_schema(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db, "CREATE TABLE logs (id INTEGER PRIMARY KEY, thread_id TEXT);")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "schema does not match the pinned logs_2.sqlite schema" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize("integrity", ["other_index", "table"])
+def test_push_script_rejects_non_idx_logs_thread_id_corruption(
+    tmp_path: Path,
+    integrity: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
+    _create_codex_logs_db(log_db)
+    env["MOCK_CODEX_LOG_DB_INTEGRITY"] = integrity
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "non-repairable integrity errors" in result.stderr
+    sqlite_log = _read_sqlite_log(env)
+    assert "REINDEX idx_logs_thread_id" not in sqlite_log
+    assert "Done. Config pushed successfully." not in result.stdout
 
 
 def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path: Path) -> None:

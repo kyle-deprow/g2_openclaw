@@ -12686,6 +12686,14 @@ def _add_codex_network_proxy(config: dict[str, object]) -> None:
     app_server["networkProxy"] = {"enabled": True}
 
 
+def _add_codex_native_tool_surface_key(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    plugin_config["nativeToolSurfaceEnabled"] = False
+
+
 def _set_safeguard_compaction(config: dict[str, object]) -> None:
     agents_root = cast(dict[str, object], config["agents"])
     defaults = cast(dict[str, object], agents_root["defaults"])
@@ -12784,6 +12792,10 @@ def _break_readonly_server_args(config: dict[str, object]) -> None:
         (
             _add_codex_network_proxy,
             "Codex app-server networkProxy must not be configured",
+        ),
+        (
+            _add_codex_native_tool_surface_key,
+            "nativeToolSurfaceEnabled is not supported by the current Codex plugin schema",
         ),
         (
             _set_safeguard_compaction,
