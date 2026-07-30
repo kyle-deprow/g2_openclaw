@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import zlib
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -16,6 +18,7 @@ from io import BytesIO
 from pathlib import Path
 from threading import Barrier, Event, Thread
 from typing import cast
+from urllib.parse import urlencode
 
 import gateway.autoresearch_runner as autoresearch_runner
 import gateway.autoresearch_runs as autoresearch_runs
@@ -145,7 +148,6 @@ from gateway.autoresearch_runner import (
 
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
 
-QUANTIPY_V2_CONTRACT_COMMIT = "c7327f51bc93c10132022d1b5ffaf59b918fe93b"  # pragma: allowlist secret
 QUANTIPY_V2_CONTRACT_FILE_SHA256 = {
     "src/quantipy/experiments/filesystem.py": "".join(
         (
@@ -1698,18 +1700,21 @@ def _verification_result(
             success=status is VerificationStatus.PASS,
             completed_stages=("prepare", "smoke", "feasibility", "model")
             if status is VerificationStatus.PASS
-            else ("prepare",),
-            terminal_stage=None if status is VerificationStatus.PASS else "smoke",
-            terminal_status=None if status is VerificationStatus.PASS else "rejected",
+            else (() if external_panel_failure else ("prepare",)),
+            terminal_stage=(
+                None if status is VerificationStatus.PASS or external_panel_failure else "smoke"
+            ),
+            terminal_status=(
+                None if status is VerificationStatus.PASS or external_panel_failure else "rejected"
+            ),
             failure=(
                 QuantipyExperimentFailureEvidence(
                     category="panel",
                     message=(
-                        "ExperimentPanelError: Client error '404 Not Found' for url "
-                        "'http://127.0.0.1:8000/price-data/research-panel?"
-                        "tickers=AAPL&start=2021-01-05T05%3A00%3A00%2B00%3A00&"
-                        "end=2021-01-06T04%3A59%3A59.999999%2B00%3A00&timeframe=1min&"
-                        "market_hours=regular'"
+                        "ExperimentPanelError: Client error '413 Request Entity Too Large' for url "
+                        "'http://127.0.0.1:8000/price-data/research-panel?tickers=AAPL'\n"
+                        "For more information check: "
+                        "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
                     ),
                 )
                 if external_panel_failure
@@ -2269,7 +2274,25 @@ def _write_quantipy_v2_run(
             "timeframe": "1min",
             "market_hours": "all",
             "provider_source": "massive",
-            "tickers": [{"ticker": "AMD", "sessions": []}],
+            "tickers": [
+                {
+                    "ticker": "AMD",
+                    "sessions": [
+                        {
+                            "session_date": "2026-07-28",
+                            "coverage_state": "observed",
+                            "mode_bar_count": 1,
+                            "provider_request_id": "panel-request",
+                            "provider_http_status": 200,
+                            "provider_query_count": 1,
+                            "provider_results_count": 1,
+                            "provider_requested_start": "2026-07-28T13:30:00Z",
+                            "provider_requested_end": "2026-07-28T20:00:00Z",
+                            "hydrated_at": "2026-07-28T21:00:00Z",
+                        }
+                    ],
+                }
+            ],
         }
         request_sha = sha256(
             json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
@@ -2277,11 +2300,24 @@ def _write_quantipy_v2_run(
         coverage_sha = sha256(
             json.dumps(coverage, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
+        expanded_coverage = json.dumps(
+            coverage, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        compressed_coverage = zlib.compress(expanded_coverage, level=zlib.Z_BEST_COMPRESSION)
+        compact_coverage = {
+            "contract_version": "price-coverage-compact-v1",
+            "encoding": "canonical-json-zlib-base64-v1",
+            "compressed_size": len(compressed_coverage),
+            "expanded_size": len(expanded_coverage),
+            "compression_ratio": len(expanded_coverage) / len(compressed_coverage),
+            "coverage_sha256": coverage_sha,
+            "payload": base64.b64encode(compressed_coverage).decode("ascii"),
+        }
         receipt = {
-            "contract_version": "research-price-panel-v1",
+            "contract_version": "research-price-panel-receipt-v2",
             "request": request,
             "request_sha256": request_sha,
-            "coverage": coverage,
+            "coverage": compact_coverage,
             "coverage_sha256": coverage_sha,
             "panel_sha256": sha256(panel_bytes).hexdigest(),
             "hydrated_at": "2026-07-28T13:00:00Z",
@@ -2381,9 +2417,12 @@ def _write_quantipy_detached_run_record(
     run_id: str,
     run_path: Path,
     iteration: int = 1,
+    detached_run_dir: Path | None = None,
 ) -> tuple[str, str]:
     detached_root = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT
-    detached_run_dir = detached_root / f"iteration-{iteration}" / "verification" / "attempt-1"
+    detached_run_dir = detached_run_dir or (
+        detached_root / f"iteration-{iteration}" / "verification" / "attempt-1"
+    )
     command = (
         "env",
         "PYTHONDONTWRITEBYTECODE=1",
@@ -4040,6 +4079,43 @@ def test_quantipy_panel_receipt_is_parsed_and_bound_to_manifest_and_files(
     assert advanced.phase is Phase.REVIEW
 
 
+def test_quantipy_panel_receipt_rejects_legacy_v1_before_coverage_fallback() -> None:
+    # Arrange
+    receipt = {
+        "contract_version": "research-price-panel-v1",
+        "request": None,
+        "request_sha256": "0" * 64,
+        "coverage": None,
+        "coverage_sha256": "0" * 64,
+        "panel_sha256": "0" * 64,
+        "hydrated_at": "2026-07-28T13:00:00Z",
+        "exported_at": "2026-07-28T13:00:01Z",
+    }
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="contract_version"):
+        autoresearch_runner._validate_panel_receipt(receipt, label="panel receipt")
+
+
+def test_quantipy_compact_panel_constants_match_the_shared_gateway_contract() -> None:
+    # Arrange
+    quantipy_schemas = Path("/home/dev/repos/quantipy/src/quantipy/price_data/schemas.py")
+
+    # Act
+    source = quantipy_schemas.read_text(encoding="utf-8")
+
+    # Assert
+    assert (
+        "RESEARCH_PRICE_PANEL_RECEIPT_CONTRACT_VERSION: "
+        'Literal["research-price-panel-receipt-v2"]' in source
+    )
+    assert 'COMPACT_PRICE_COVERAGE_CONTRACT_VERSION: Literal["price-coverage-compact-v1"]' in source
+    assert 'COMPACT_PRICE_COVERAGE_ENCODING: Literal["canonical-json-zlib-base64-v1"]' in source
+    assert "MAX_COMPACT_PRICE_COVERAGE_BYTES = 32 * 1024 * 1024" in source
+    assert "MAX_COMPACT_PRICE_COVERAGE_COMPRESSED_BYTES = 4 * 1024 * 1024" in source
+    assert "MAX_COMPACT_PRICE_COVERAGE_RATIO = 200.0" in source
+
+
 def test_quantipy_run_receipt_larger_than_64k_is_accepted(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,
@@ -4075,7 +4151,7 @@ def test_quantipy_run_receipt_larger_than_64k_is_accepted(
     assert advanced.phase is Phase.REVIEW
 
 
-def test_quantipy_run_receipt_over_8_mib_is_rejected(
+def test_quantipy_run_receipt_at_8_mib_is_rejected(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
@@ -4091,9 +4167,13 @@ def test_quantipy_run_receipt_over_8_mib_is_rejected(
     )
     run_path = Path(evidence.run_json_path)
     run = json.loads(run_path.read_text(encoding="utf-8"))
-    run["stage_receipts"][-1]["result"]["summary"] = "x" * (8 * 1024 * 1024)
+    run["stage_receipts"][-1]["result"]["summary"] = ""
+    baseline_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    run["stage_receipts"][-1]["result"]["summary"] = "x" * (
+        autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES - len(baseline_bytes)
+    )
     run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
-    assert len(run_bytes) > autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES
+    assert len(run_bytes) == autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES
     run_path.chmod(0o600)
     run_path.write_bytes(run_bytes)
 
@@ -4339,7 +4419,6 @@ def test_local_failure_fixture_acceptance_matches_current_quantipy_v2(
     if not quantipy_python.is_file():
         pytest.skip("current Quantipy v2 environment is unavailable for contract cross-check")
     quantipy_root = Path("/home/dev/repos/quantipy")
-    assert _git(quantipy_root, "rev-parse", "HEAD") == QUANTIPY_V2_CONTRACT_COMMIT
     assert {
         relative_path: sha256((quantipy_root / relative_path).read_bytes()).hexdigest()
         for relative_path in QUANTIPY_V2_CONTRACT_FILE_SHA256
@@ -8044,76 +8123,45 @@ def test_verification_failure_routes_fix_test_with_pending_trigger(
     )
 
 
-def test_external_verification_retry_preserves_failure_and_reuses_implementation_with_v2_run(
-    monkeypatch: pytest.MonkeyPatch,
+def test_external_verification_retry_preserves_failure_and_reuses_implementation_with_v3_run(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
     policy: AutoresearchPolicy,
-    platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "_verified_panel_request_for_state",
-        lambda state: {
-            "contract_version": "research-price-panel-v1",
-            "tickers": ["AAPL"],
-            "start": "2021-01-05T05:00:00Z",
-            "end": "2021-01-06T04:59:59.999999Z",
-            "timeframe": "1min",
-            "market_hours": "regular",
-        },
-    )
-    state = _state_to_consensus(policy, platform_readiness)
-    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
-    state = advance_state(
-        state,
-        replace(_implementation_result(), commit_sha="a1a1a1a1a1a1"),
-        policy,
-    )
-    failed_state = advance_state(
-        state,
-        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
-        policy,
-    )
-    probe = ResearchPanelProbeReceipt(
-        endpoint="http://127.0.0.1:8000/price-data/research-panel",
-        observed_at="2026-07-29T12:00:00Z",
-        response_bytes=18,
-        response_sha256="a" * 64,
-        session_date="2022-01-03",
-        symbol="AAPL",
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    materialized = autoresearch_runner._materialize_attested_pending_retry_failure(
+        stale_state,
+        policy=policy,
+        validation_context=validation_context,
     )
     receipt = ExternalVerificationRetryReceipt.for_state(
-        failed_state,
+        materialized,
         probe,
         "Restarted the stale Quantipy API service.",
     )
 
-    retried = retry_external_verification(failed_state, receipt)
+    # Act
+    retried = retry_external_verification(materialized, receipt)
 
+    # Assert
     assert retried.phase is Phase.VERIFICATION
     assert retried.pending_fix_trigger is None
-    assert retried.implementation_result == failed_state.implementation_result
-    assert retried.verification_history == failed_state.verification_history
+    assert retried.implementation_result == materialized.implementation_result
+    assert retried.verification_history == materialized.verification_history
     assert retried.external_verification_retry_receipt == receipt
-    assert receipt.expected_run_id.endswith("-v2")
+    assert receipt.expected_run_id.endswith("-v3")
 
 
 def test_external_verification_retry_rejects_a_near_match_failure_message(
-    monkeypatch: pytest.MonkeyPatch,
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "_verified_panel_request_for_state",
-        lambda state: {
-            "contract_version": "research-price-panel-v1",
-            "tickers": ["AAPL"],
-            "start": "2021-01-05T05:00:00Z",
-            "end": "2021-01-06T04:59:59.999999Z",
-            "timeframe": "1min",
-            "market_hours": "regular",
-        },
-    )
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(
@@ -8141,20 +8189,17 @@ def test_external_verification_retry_rejects_a_near_match_failure_message(
                     evidence,
                     failure=replace(
                         failure,
-                        message=(
-                            "different URL first; 404 Not Found for "
-                            "http://127.0.0.1:8000/price-data/research-panel?"
-                            "tickers=AAPL&start=2021-01-05T05%3A00%3A00%2B00%3A00&"
-                            "end=2021-01-06T04%3A59%3A59.999999%2B00%3A00&timeframe=1min&"
-                            "market_hours=regular"
-                        ),
+                        message="ResearchPanelArchiveError: HTTP 413 without local panel context",
                     ),
                 ),
             ),
         ),
     )
 
-    with pytest.raises(AutoresearchValidationError, match="repaired panel HTTP 404"):
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="historical local research-panel HTTP 404",
+    ):
         ExternalVerificationRetryReceipt.for_state(
             tampered,
             ResearchPanelProbeReceipt(
@@ -8169,24 +8214,547 @@ def test_external_verification_retry_rejects_a_near_match_failure_message(
         )
 
 
-def test_external_verification_retry_command_path_migrates_only_the_current_v3_state(
+def test_external_verification_retry_replaces_v2_receipt_with_deterministic_v3(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+        stale_state,
+        policy=policy,
+        validation_context=validation_context,
+    )
+
+    # Act
+    v3_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_v2_state, probe, "Raised the gateway receipt limit again."
+    )
+    retried = retry_external_verification(failed_v2_state, v3_receipt)
+
+    # Assert
+    assert retried.verification_history == failed_v2_state.verification_history
+    assert retried.external_verification_retry_receipt == v3_receipt
+    assert v3_receipt.expected_run_id.endswith("-v3")
+    assert v3_receipt.schema_version == 2
+    assert v3_receipt.verification_history_sha256 == tuple(
+        autoresearch_runner._canonical_json_digest(artifact.to_dict())
+        for artifact in failed_v2_state.verification_history
+    )
+    validate_state(retried, policy)
+
+
+@pytest.mark.parametrize(
+    "tampering", ("v1_null_summary", "v2_null_summary", "missing", "reordered")
+)
+def test_v3_retry_receipt_rejects_tampered_complete_prior_history(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+    tampering: str,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+        stale_state,
+        policy=policy,
+        validation_context=validation_context,
+    )
+    v3_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_v2_state, probe, "Raised the gateway receipt limit again."
+    )
+    retried = retry_external_verification(failed_v2_state, v3_receipt)
+    first, second = retried.verification_history
+    history: tuple[VerificationResultArtifact, ...]
+    if tampering == "v1_null_summary":
+        history = (replace(first, null_test_summary="tampered first summary"), second)
+    elif tampering == "v2_null_summary":
+        history = (first, replace(second, null_test_summary="tampered second summary"))
+    elif tampering == "missing":
+        history = (first,)
+    else:
+        history = (second, first)
+    tampered = replace(retried, verification_history=history)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="external verification retry"):
+        validate_state(tampered, policy, validation_context)
+
+
+def test_external_verification_retry_requires_the_complete_sealed_history_chain(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+        stale_state,
+        policy=policy,
+        validation_context=validation_context,
+    )
+    v3_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_v2_state, probe, "Raised the gateway receipt limit again."
+    )
+    retried_v3_state = retry_external_verification(failed_v2_state, v3_receipt)
+    v2_failure = failed_v2_state.latest_verification
+    assert v2_failure is not None
+    v2_evidence = v2_failure.quantipy_experiment_evidence
+    assert v2_evidence is not None
+    sealed_v3_failure = replace(
+        v2_failure,
+        quantipy_experiment_evidence=replace(v2_evidence, run_id=v3_receipt.expected_run_id),
+    )
+    failed_v3_state = replace(
+        retried_v3_state,
+        phase=Phase.FIX_TEST,
+        pending_fix_trigger=FixTriggerPhase.VERIFICATION,
+        verification_history=(*retried_v3_state.verification_history, sealed_v3_failure),
+    )
+
+    # Act
+    v4_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_v3_state, probe, "Raised the gateway receipt limit a final time."
+    )
+
+    # Assert
+    assert v4_receipt.expected_run_id.endswith("-v4")
+    assert v4_receipt.prior_verification_sha256 == autoresearch_runner._canonical_json_digest(
+        sealed_v3_failure.to_dict()
+    )
+    assert v4_receipt.verification_history_sha256 == tuple(
+        autoresearch_runner._canonical_json_digest(artifact.to_dict())
+        for artifact in failed_v3_state.verification_history
+    )
+
+
+@pytest.fixture()
+def live_v2_http_413_state_file(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> tuple[
+    Path,
+    ResearchPanelProbeReceipt,
+    AutoresearchValidationContext,
+    tuple[tuple[Path, str], ...],
+]:
+    """A private copy of the live stale-state plus attested v2 artifact shape."""
+    state, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    manifest = json.loads(Path(evidence.manifest_path).read_text(encoding="utf-8"))
+    panel = cast(dict[str, object], manifest["panel"])
+    request = cast(dict[str, object], panel["request"])
+    expected_url = "http://127.0.0.1:8000/price-data/research-panel?" + urlencode(
+        (
+            ("tickers", ",".join(cast(list[str], request["tickers"]))),
+            ("start", "2026-07-28T12:00:00+00:00"),
+            ("end", "2026-07-28T13:00:00+00:00"),
+            ("timeframe", cast(str, request["timeframe"])),
+            ("market_hours", cast(str, request["market_hours"])),
+        )
+    )
+    initial = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        quantipy_experiment_evidence=replace(
+            evidence,
+            success=False,
+            completed_stages=(),
+            terminal_stage=None,
+            terminal_status=None,
+            failure=QuantipyExperimentFailureEvidence(
+                category="panel",
+                message=(
+                    "ExperimentPanelError: Client error '404 Not Found' for url "
+                    f"'{expected_url}'\n"
+                    "For more information check: "
+                    "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+                ),
+            ),
+            panel=None,
+        ),
+    )
+    failed_initial = advance_state(state, initial, policy)
+    probe = ResearchPanelProbeReceipt(
+        endpoint="http://127.0.0.1:8000/price-data/research-panel",
+        observed_at="2026-07-29T12:00:00Z",
+        response_bytes=18,
+        response_sha256="a" * 64,
+        session_date="2022-01-03",
+        symbol="AAPL",
+    )
+    v2_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_initial, probe, "Raised the gateway receipt limit."
+    )
+    stale_state = retry_external_verification(failed_initial, v2_receipt)
+    v2_run_path = trusted_quantipy_runs_root / v2_receipt.expected_run_id / "run.json"
+    run = json.loads(Path(evidence.run_json_path).read_text(encoding="utf-8"))
+    run.update(
+        run_id=v2_receipt.expected_run_id,
+        success=False,
+        panel_requested=True,
+        panel=None,
+        stage_receipts=[],
+        failure={
+            "category": "panel",
+            "message": (
+                "ExperimentPanelError: Client error '413 Request Entity Too Large' for url "
+                f"'{expected_url}'\nFor more information check: "
+                "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
+            ),
+        },
+    )
+    v2_run_path.parent.mkdir(mode=0o700)
+    v2_run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    v2_run_path.write_bytes(v2_run_bytes)
+    v2_run_path.chmod(0o600)
+    detached_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{stale_state.iteration}-verification-r1-a{v2_receipt.retry_attempt}-"
+        f"{v2_receipt.implementation_commit[:12]}-v{v2_receipt.retry_attempt}"
+    )
+    _write_quantipy_detached_run_record(
+        workspace=git_worktree.workspace,
+        manifest_path=evidence.manifest_path,
+        run_id=v2_receipt.expected_run_id,
+        run_path=v2_run_path,
+        detached_run_dir=detached_run_dir,
+    )
+    state_path = tmp_path / "live-v2-http-413-state.json"
+    state_path.write_text(json.dumps(stale_state.to_dict()), encoding="utf-8")
+    immutable_hashes = tuple(
+        (path, sha256(path.read_bytes()).hexdigest())
+        for root in (v2_run_path.parent, detached_run_dir)
+        for path in sorted(path for path in root.rglob("*") if path.is_file())
+    )
+    return state_path, probe, _runtime_verification_context(stale_state), immutable_hashes
+
+
+def test_retry_state_file_materializes_the_attested_live_v2_http_413_to_v3(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, immutable_hashes = live_v2_http_413_state_file
+
+    # Act
+    retried = retry_external_verification_state_file(
+        state_path,
+        probe,
+        operator_reason="Raised the gateway receipt limit again.",
+        policy=policy,
+        validation_context=validation_context,
+    )
+
+    # Assert
+    assert retried.external_verification_retry_receipt is not None
+    assert retried.external_verification_retry_receipt.expected_run_id.endswith("-v3")
+    assert retried.latest_verification is not None
+    assert retried.latest_verification.quantipy_experiment_evidence is not None
+    assert retried.latest_verification.quantipy_experiment_evidence.run_id.endswith("-v2")
+    assert len(retried.verification_history) == 2
+    assert retried.external_verification_retry_receipt.prior_verification_sha256 == (
+        autoresearch_runner._canonical_json_digest(retried.verification_history[-1].to_dict())
+    )
+    assert tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in immutable_hashes) == (
+        immutable_hashes
+    )
+
+
+def test_v2_retry_receipt_rejects_an_unrelated_historical_http_404(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    prior = stale_state.latest_verification
+    assert prior is not None
+    evidence = prior.quantipy_experiment_evidence
+    assert evidence is not None
+    failure = evidence.failure
+    assert failure is not None
+    unrelated = replace(
+        stale_state,
+        verification_history=(
+            replace(
+                prior,
+                quantipy_experiment_evidence=replace(
+                    evidence,
+                    failure=replace(
+                        failure,
+                        message=(
+                            "ExperimentPanelError: Client error '404 Not Found' for url "
+                            "'http://127.0.0.1:8000/price-data/research-panel?"
+                            "tickers=UNRELATED'\nFor more information check: "
+                            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    receipt = unrelated.external_verification_retry_receipt
+    assert receipt is not None
+    unrelated = replace(
+        unrelated,
+        external_verification_retry_receipt=replace(
+            receipt,
+            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+                unrelated.verification_history[0].to_dict()
+            ),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="historical local research-panel HTTP 404",
+    ):
+        validate_state(unrelated, policy, validation_context)
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    ("reordered_query", "missing_mdn"),
+)
+def test_v2_retry_receipt_rejects_a_tampered_historical_http_404_message(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+    tampering: str,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    initial = stale_state.verification_history[0]
+    evidence = initial.quantipy_experiment_evidence
+    assert evidence is not None
+    failure = evidence.failure
+    assert failure is not None
+    if tampering == "reordered_query":
+        message_prefix, message_suffix = failure.message.split(" for url '", maxsplit=1)
+        url, mdn = message_suffix.split("'\n", maxsplit=1)
+        endpoint, query = url.split("?", maxsplit=1)
+        query_parts = query.split("&")
+        replacement = (
+            f"{message_prefix} for url '{endpoint}?{query_parts[1]}&{query_parts[0]}&"
+            f"{'&'.join(query_parts[2:])}'\n{mdn}"
+        )
+    else:
+        replacement = failure.message.split("\n", maxsplit=1)[0]
+    tampered_initial = replace(
+        initial,
+        quantipy_experiment_evidence=replace(
+            evidence, failure=replace(failure, message=replacement)
+        ),
+    )
+    receipt = stale_state.external_verification_retry_receipt
+    assert receipt is not None
+    tampered = replace(
+        stale_state,
+        verification_history=(tampered_initial,),
+        external_verification_retry_receipt=replace(
+            receipt,
+            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+                tampered_initial.to_dict()
+            ),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError, match="historical local research-panel HTTP 404"
+    ):
+        validate_state(tampered, policy, validation_context)
+
+
+def test_v2_retry_receipt_rejects_an_appended_verification_history_entry(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    initial = stale_state.verification_history[0]
+    receipt = stale_state.external_verification_retry_receipt
+    assert receipt is not None
+    tampered = replace(
+        stale_state,
+        verification_history=(initial, initial),
+        external_verification_retry_receipt=replace(
+            receipt,
+            prior_verification_sha256=autoresearch_runner._canonical_json_digest(initial.to_dict()),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="verification history topology"):
+        validate_state(tampered, policy, validation_context)
+
+
+def test_external_verification_retry_rejects_an_unrelated_legacy_http_413_query(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    materialized = autoresearch_runner._materialize_attested_pending_retry_failure(
+        stale_state,
+        policy=policy,
+        validation_context=validation_context,
+    )
+    latest = materialized.latest_verification
+    assert latest is not None
+    evidence = latest.quantipy_experiment_evidence
+    assert evidence is not None
+    failure = evidence.failure
+    assert failure is not None
+    unrelated = replace(
+        materialized,
+        verification_history=(
+            *materialized.verification_history[:-1],
+            replace(
+                latest,
+                quantipy_experiment_evidence=replace(
+                    evidence,
+                    failure=replace(
+                        failure,
+                        message=(
+                            "ExperimentPanelError: Client error '413 Request Entity Too Large' "
+                            "for url 'http://127.0.0.1:8000/price-data/research-panel?"
+                            "tickers=UNRELATED'\nFor more information check: "
+                            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="local research-panel HTTP 413",
+    ):
+        ExternalVerificationRetryReceipt.for_state(
+            unrelated,
+            probe,
+            "Raised the gateway receipt limit again.",
+        )
+
+
+def test_external_verification_retry_receipt_rejects_an_unrelated_legacy_http_413_query(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = live_v2_http_413_state_file
+    stale_state = autoresearch_runner.load_state_file(state_path)
+    prior = stale_state.verification_history[0]
+    evidence = prior.quantipy_experiment_evidence
+    assert evidence is not None
+    failure = evidence.failure
+    assert failure is not None
+    unrelated = replace(
+        stale_state,
+        verification_history=(
+            replace(
+                prior,
+                quantipy_experiment_evidence=replace(
+                    evidence,
+                    failure=replace(
+                        failure,
+                        message=(
+                            "ExperimentPanelError: Client error '413 Request Entity Too Large' "
+                            "for url 'http://127.0.0.1:8000/price-data/research-panel?"
+                            "tickers=UNRELATED'\nFor more information check: "
+                            "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    receipt = unrelated.external_verification_retry_receipt
+    assert receipt is not None
+    unrelated = replace(
+        unrelated,
+        external_verification_retry_receipt=replace(
+            receipt,
+            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+                unrelated.verification_history[0].to_dict()
+            ),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="historical local research-panel HTTP 404",
+    ):
+        validate_state(unrelated, policy, validation_context)
+
+
+def test_external_verification_retry_command_path_rejects_schema_v3_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     policy: AutoresearchPolicy,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "_verified_panel_request_for_state",
-        lambda state: {
-            "contract_version": "research-price-panel-v1",
-            "tickers": ["AAPL"],
-            "start": "2021-01-05T05:00:00Z",
-            "end": "2021-01-06T04:59:59.999999Z",
-            "timeframe": "1min",
-            "market_hours": "regular",
-        },
-    )
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     state = advance_state(
@@ -8213,20 +8781,14 @@ def test_external_verification_retry_command_path_migrates_only_the_current_v3_s
         symbol="AAPL",
     )
 
-    retried = retry_external_verification_state_file(
-        state_path,
-        probe,
-        operator_reason="Restarted the stale Quantipy API service.",
-        policy=policy,
-        validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
-    )
-
-    persisted = json.loads(state_path.read_text(encoding="utf-8"))
-    assert retried.phase is Phase.VERIFICATION
-    assert persisted["schema_version"] == autoresearch_runner.AUTORESEARCH_STATE_SCHEMA_VERSION
-    assert persisted["verification_history"] == v3_payload["verification_history"]
-    assert persisted["implementation_result"] == v3_payload["implementation_result"]
-    assert persisted["external_verification_retry_receipt"]["expected_run_id"].endswith("-v2")
+    with pytest.raises(AutoresearchValidationError, match="compatible schema-v4"):
+        retry_external_verification_state_file(
+            state_path,
+            probe,
+            operator_reason="Restarted the stale Quantipy API service.",
+            policy=policy,
+            validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
+        )
 
 
 @pytest.mark.parametrize(

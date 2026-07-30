@@ -44,7 +44,7 @@ schema-v3 platform-readiness manifest writes to
 `~/.openclaw/autoresearch/platform-readiness.json`. A live schema-v2 state, or
 state missing `schema_version`, is unsupported. Archive it and initialize a
 fresh schema-v4 state before restarting the supervisor; never migrate or
-overwrite schema-v2 in place. The state procedure writes and validates a
+overwrite incompatible state in place. The state procedure writes and validates a
 temporary replacement before archiving the old state.
 
 ```bash
@@ -58,7 +58,7 @@ temporary replacement before archiving the old state.
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
-    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    archive="${state}.incompatible.$(date -u +%Y%m%dT%H%M%SZ).archive"
     mv -- "$state" "$archive"
   fi
   mv -- "$tmp" "$state"
@@ -73,10 +73,12 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-The only schema-v3 to schema-v4 migration is the out-of-band operator retry
-for the already-recorded local panel HTTP 404. After stopping the supervisor
-and repairing the Quantipy API, invoke it from the human/Codex shell with the
-explicit operator capability:
+There is no state-schema migration in the external-verification command. The
+only legacy retry-receipt bootstrap accepted by schema-v4 state is the actual
+schema-1 receipt for deterministic attempt `-v2`: it must bind exactly one
+canonical initial `-v1` local-panel HTTP 404 artifact. After stopping the
+supervisor and repairing the Quantipy API, invoke the operator command from the
+human/Codex shell with the explicit capability:
 
 ```bash
 cd /home/dev/repos/g2_openclaw && G2_OPENCLAW_OPERATOR_RETRY=1 \
@@ -85,12 +87,18 @@ cd /home/dev/repos/g2_openclaw && G2_OPENCLAW_OPERATOR_RETRY=1 \
   --reason "Restarted the stale Quantipy API service and verified the panel route."
 ```
 
-The command performs one bounded local AAPL/XNYS-session ZIP-contract probe,
-binds implementation and readiness identities, preserves the original failure
-receipt, and writes a deterministic `-v2` run ID. It rejects arbitrary test
-failures, repeated use, and PM/fixer invocations without the explicit
-capability. All other schema migration requires archiving and fresh state
-initialization; no general in-place migration exists.
+Each retry performs a bounded local AAPL/XNYS-session ZIP-contract probe. The
+probe requires exactly one `AAPL` coverage ticker with exactly the
+`2022-01-03` session, one requested/observed date range, valid Quantipy
+hydration and export ordering, and every receipt/panel digest. The command
+binds implementation and readiness identities, preserves every failure
+artifact, and advances deterministically from `-v2` through the hard cap
+`-v9`. It writes retry-receipt schema 2 from `-v3` onward; that receipt contains
+the complete ordered canonical digest list for all prior verification artifacts.
+It rejects arbitrary failures, malformed or reordered history, and PM/fixer
+invocations without the explicit capability. All state-schema changes require
+archiving and fresh schema-v4 initialization; no general in-place migration
+exists.
 
 ## Suspended Campaign Resume
 

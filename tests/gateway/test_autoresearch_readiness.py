@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import base64
 import io
 import json
 import os
 import subprocess
 import sys
 import zipfile
+import zlib
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from hashlib import sha256
@@ -83,13 +85,45 @@ def test_external_verification_probe_uses_one_symbol_one_session_research_panel_
                 "timeframe": "1min",
                 "market_hours": "regular",
                 "provider_source": "massive",
-                "tickers": [{"ticker": "AAPL"}],
+                "tickers": [
+                    {
+                        "ticker": "AAPL",
+                        "sessions": [
+                            {
+                                "session_date": "2022-01-03",
+                                "coverage_state": "observed",
+                                "mode_bar_count": 1,
+                                "provider_request_id": "probe-request",
+                                "provider_http_status": 200,
+                                "provider_query_count": 1,
+                                "provider_results_count": 1,
+                                "provider_requested_start": "2022-01-03T14:30:00Z",
+                                "provider_requested_end": "2022-01-03T21:00:00Z",
+                                "hydrated_at": "2022-01-04T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
             }
 
             def canonical_sha(value: object) -> str:
                 return sha256(
                     json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
+
+            expanded_coverage = json.dumps(
+                coverage, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            compressed_coverage = zlib.compress(expanded_coverage, level=zlib.Z_BEST_COMPRESSION)
+            compact_coverage = {
+                "contract_version": "price-coverage-compact-v1",
+                "encoding": "canonical-json-zlib-base64-v1",
+                "compressed_size": len(compressed_coverage),
+                "expanded_size": len(expanded_coverage),
+                "compression_ratio": len(expanded_coverage) / len(compressed_coverage),
+                "coverage_sha256": canonical_sha(coverage),
+                "payload": base64.b64encode(compressed_coverage).decode("ascii"),
+            }
 
             archive = io.BytesIO()
             with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
@@ -98,10 +132,10 @@ def test_external_verification_probe_uses_one_symbol_one_session_research_panel_
                     "receipt.json",
                     json.dumps(
                         {
-                            "contract_version": "research-price-panel-v1",
+                            "contract_version": "research-price-panel-receipt-v2",
                             "request": request,
                             "request_sha256": canonical_sha(request),
-                            "coverage": coverage,
+                            "coverage": compact_coverage,
                             "coverage_sha256": canonical_sha(coverage),
                             "panel_sha256": sha256(panel_bytes).hexdigest(),
                             "hydrated_at": "2026-07-29T12:00:00Z",
@@ -170,6 +204,135 @@ def test_external_verification_probe_rejects_bounded_response_with_unbounded_pan
     monkeypatch.setattr(urllib_request, "urlopen", lambda request, *, timeout: Response())
 
     with pytest.raises(ReadinessManifestError, match="expanded size bound"):
+        probe_research_panel_for_external_verification_retry()
+
+
+@pytest.mark.parametrize(
+    ("ticker_names", "session_dates", "exported_at", "match"),
+    (
+        (("AAPL",), (), "2026-07-29T12:00:01Z", "exactly one AAPL session"),
+        (
+            ("AAPL",),
+            ("2022-01-03", "2022-01-04"),
+            "2026-07-29T12:00:01Z",
+            "exactly one AAPL session",
+        ),
+        (("AAPL",), ("2022-01-04",), "2026-07-29T12:00:01Z", "bounded XNYS session"),
+        (("AAPL",), ("2022-01-03",), "2026-07-29T11:59:59Z", "export precedes hydration"),
+        ((), ("2022-01-03",), "2026-07-29T12:00:01Z", "tickers"),
+        (
+            ("AAPL", "MSFT"),
+            ("2022-01-03",),
+            "2026-07-29T12:00:01Z",
+            "tickers",
+        ),
+    ),
+)
+def test_external_verification_probe_rejects_invalid_aapl_session_or_export_order(
+    monkeypatch: pytest.MonkeyPatch,
+    ticker_names: tuple[str, ...],
+    session_dates: tuple[str, ...],
+    exported_at: str,
+    match: str,
+) -> None:
+    # Arrange
+    panel_bytes = b"PAR1"
+    request = {
+        "contract_version": "research-price-panel-v1",
+        "tickers": ["AAPL"],
+        "start": "2022-01-03T05:00:00Z",
+        "end": "2022-01-04T04:59:59.999999Z",
+        "timeframe": "1d",
+        "market_hours": "regular",
+    }
+    coverage: dict[str, object] = {
+        "contract_version": "price-coverage-v1",
+        "requested_start_date": "2022-01-03",
+        "requested_end_date": "2022-01-03",
+        "timeframe": "1min",
+        "market_hours": "regular",
+        "provider_source": "massive",
+        "tickers": [
+            {
+                "ticker": "AAPL",
+                "sessions": [
+                    {
+                        "session_date": "2022-01-03",
+                        "coverage_state": "observed",
+                        "mode_bar_count": 1,
+                        "provider_request_id": "probe-request",
+                        "provider_http_status": 200,
+                        "provider_query_count": 1,
+                        "provider_results_count": 1,
+                        "provider_requested_start": "2022-01-03T14:30:00Z",
+                        "provider_requested_end": "2022-01-03T21:00:00Z",
+                        "hydrated_at": "2022-01-04T00:00:00Z",
+                    }
+                ],
+            }
+        ],
+    }
+    tickers = cast(list[dict[str, object]], coverage["tickers"])
+    sessions = cast(list[dict[str, object]], tickers[0]["sessions"])
+    session = sessions[0]
+    ticker = tickers[0]
+    ticker["sessions"] = [
+        {**session, "session_date": session_date} for session_date in session_dates
+    ]
+    coverage["tickers"] = [{**ticker, "ticker": ticker_name} for ticker_name in ticker_names]
+    canonical_coverage = json.dumps(coverage, sort_keys=True, separators=(",", ":")).encode()
+    compressed_coverage = zlib.compress(canonical_coverage, level=zlib.Z_BEST_COMPRESSION)
+    compact_coverage = {
+        "contract_version": "price-coverage-compact-v1",
+        "encoding": "canonical-json-zlib-base64-v1",
+        "compressed_size": len(compressed_coverage),
+        "expanded_size": len(canonical_coverage),
+        "compression_ratio": len(canonical_coverage) / len(compressed_coverage),
+        "coverage_sha256": sha256(canonical_coverage).hexdigest(),
+        "payload": base64.b64encode(compressed_coverage).decode("ascii"),
+    }
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr("panel.parquet", panel_bytes)
+        zip_file.writestr(
+            "receipt.json",
+            json.dumps(
+                {
+                    "contract_version": "research-price-panel-receipt-v2",
+                    "request": request,
+                    "request_sha256": sha256(
+                        json.dumps(request, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "coverage": compact_coverage,
+                    "coverage_sha256": sha256(canonical_coverage).hexdigest(),
+                    "panel_sha256": sha256(panel_bytes).hexdigest(),
+                    "hydrated_at": "2026-07-29T12:00:00Z",
+                    "exported_at": exported_at,
+                }
+            ),
+        )
+
+    class Response:
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def read(self, amount: int = -1) -> bytes:
+            return archive.getvalue()
+
+        def getcode(self) -> int:
+            return 200
+
+        @property
+        def headers(self) -> object:
+            return SimpleNamespace(get_content_type=lambda: "application/zip")
+
+    monkeypatch.setattr(urllib_request, "urlopen", lambda request, *, timeout: Response())
+
+    # Act / Assert
+    with pytest.raises(ReadinessManifestError, match=match):
         probe_research_panel_for_external_verification_retry()
 
 

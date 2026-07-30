@@ -293,6 +293,48 @@ total; stage summaries are
 limited to 4096 characters, failure messages to 2048, identity paths to 4096,
 and the nested or standalone panel receipt to 4 MiB.
 
+The shared G2/Quantipy panel wire contract is receipt
+`research-price-panel-receipt-v2` over the unchanged request
+`research-price-panel-v1`. Receipt coverage is the exact seven-key
+`price-coverage-compact-v1` object with
+`canonical-json-zlib-base64-v1`: strict canonical base64, bounded zlib decode
+without an unbounded flush, exact size/ratio/digest checks, EOF/no trailing data,
+and strict canonical JSON before the normal full coverage validation. G2 keeps
+only compact coverage in normalized run evidence. Raw receipt bytes are bounded
+to 4 MiB. Raw/canonical run envelopes must be strictly below 8 MiB; expanded
+coverage is capped at 32 MiB, compressed coverage at 4 MiB, and compression
+ratio at 200.
+
+External verification retry is an explicit human/Codex operator infrastructure
+operation, never PM authority. With `G2_OPENCLAW_OPERATOR_RETRY=1`, an operator
+may retry only a strictly revalidated, attested local research-panel HTTP 413
+pre-stage panel failure (`success=false`, `panel_requested=true`, `panel=null`,
+no stage receipts). The prior artifact, implementation commit, and manifest must
+all still match. The receipt is replaced, verification history is retained, and
+the deterministic run ID advances from `-v2` to `-v3` and onward only through
+`-v9`. Missing, running, successful, or methodology failures are rejected; no
+artifact is deleted or reused. The compatible state schema remains v4 and is not
+silently migrated.
+
+The sole accepted legacy bootstrap is retry-receipt schema 1 at deterministic
+attempt `-v2`, with exactly the initial `-v1` artifact and its canonical digest.
+It exists only to materialize the already-attested live v2 HTTP 413 failure.
+Every newly issued receipt uses retry-receipt schema 2 and, from `-v3` onward,
+contains the complete ordered canonical digest list for every prior verification
+artifact. Every validation recomputes and compares that list exactly: changing
+any artifact field (including `null_test_summary`), or adding, removing, or
+reordering history, fails closed. The initial `-v1` artifact must contain the
+canonical byte-exact local HTTP 404 message (including ordered query and MDN
+line); every sealed `-v2` through the immediately prior attempt must contain the
+corresponding byte-exact manifest-bound HTTP 413. Each run ID is deterministic.
+
+Before every operator retry, the local readiness probe invokes the same complete
+panel-receipt semantic validator used for Quantipy run evidence. It accepts only
+one `AAPL` ticker with exactly the `2022-01-03` session and `sessions=1`, the
+bounded request and observed coverage ranges, correct digest bindings, and
+hydration no later than export. Zero or multiple tickers/sessions, another
+session, invalid ranges, or export before hydration fails closed.
+
 For every new `DATA_INFRA_G0` envelope, include
 `platform_coverage_validation` emitted by Quantipy's shared
 `qp.validate_dynamic_price_coverage` validator; a self-authored JSON receipt

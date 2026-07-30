@@ -1117,7 +1117,7 @@ def autoresearch_retry_external_verification(
     quantipy_root: Path = _quantipy_root_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
-    """Operator-only retry for the current externally failed Quantipy verification."""
+    """Operator-only bounded retry for the current local panel HTTP 413 verification failure."""
     from gateway.autoresearch_readiness import (
         EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR,
         EXTERNAL_VERIFICATION_RETRY_OPERATOR_VALUE,

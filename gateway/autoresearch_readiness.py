@@ -23,6 +23,13 @@ from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
 
+from gateway.autoresearch_panel_receipts import (
+    PANEL_RECEIPT_CONTRACT_VERSION,
+    PanelReceiptValidationError,
+    decode_compact_price_coverage,
+    validate_research_panel_receipt,
+)
+
 DEFAULT_PLATFORM_READINESS_PATH = (
     Path.home() / ".openclaw" / "autoresearch" / "platform-readiness.json"
 )
@@ -219,7 +226,7 @@ def probe_research_panel_for_external_verification_retry() -> ResearchPanelProbe
     if (
         not isinstance(receipt, dict)
         or frozenset(receipt) != RESEARCH_PANEL_RECEIPT_KEYS
-        or receipt.get("contract_version") != "research-price-panel-v1"
+        or receipt.get("contract_version") != PANEL_RECEIPT_CONTRACT_VERSION
     ):
         raise ReadinessManifestError(
             "research-panel probe receipt is not the strict panel contract"
@@ -261,18 +268,22 @@ def _read_bounded_probe_zip_member(archive: zipfile.ZipFile, info: zipfile.ZipIn
     return b"".join(chunks)
 
 
-def _canonical_probe_json_sha256(value: object) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _validate_external_retry_probe_receipt(receipt: object, panel_bytes: bytes) -> None:
-    if not isinstance(receipt, dict):
-        raise ReadinessManifestError("research-panel probe receipt must be a JSON object")
-    request = receipt.get("request")
-    coverage = receipt.get("coverage")
-    if not isinstance(request, dict) or not isinstance(coverage, dict):
-        raise ReadinessManifestError("research-panel probe receipt request/coverage are invalid")
+    try:
+        normalized = validate_research_panel_receipt(
+            receipt,
+            label="research-panel probe receipt",
+            panel_bytes=panel_bytes,
+        )
+        coverage = decode_compact_price_coverage(
+            normalized["coverage"], label="research-panel probe coverage"
+        )
+    except PanelReceiptValidationError as exc:
+        raise ReadinessManifestError(str(exc)) from exc
+    request = normalized["request"]
+    compact_coverage = normalized["coverage"]
+    assert isinstance(request, dict)
+    assert isinstance(compact_coverage, dict)
     if request != {
         "contract_version": "research-price-panel-v1",
         "tickers": [EXTERNAL_VERIFICATION_RETRY_PROBE_SYMBOL],
@@ -287,6 +298,18 @@ def _validate_external_retry_probe_receipt(receipt: object, panel_bytes: bytes) 
         raise ReadinessManifestError("research-panel probe coverage tickers are invalid")
     if not isinstance(coverage_tickers[0], dict):
         raise ReadinessManifestError("research-panel probe coverage ticker is invalid")
+    sessions = coverage_tickers[0].get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != 1:
+        raise ReadinessManifestError(
+            "research-panel probe coverage must contain exactly one AAPL session"
+        )
+    if (
+        not isinstance(sessions[0], dict)
+        or sessions[0].get("session_date") != EXTERNAL_VERIFICATION_RETRY_PROBE_SESSION.isoformat()
+    ):
+        raise ReadinessManifestError(
+            "research-panel probe coverage session is not the bounded XNYS session"
+        )
     if (
         coverage.get("contract_version") != "price-coverage-v1"
         or coverage.get("requested_start_date") != "2022-01-03"
@@ -299,22 +322,6 @@ def _validate_external_retry_probe_receipt(receipt: object, panel_bytes: bytes) 
         raise ReadinessManifestError(
             "research-panel probe coverage is not the bounded AAPL receipt"
         )
-    if receipt.get("request_sha256") != _canonical_probe_json_sha256(request):
-        raise ReadinessManifestError("research-panel probe request digest is invalid")
-    if receipt.get("coverage_sha256") != _canonical_probe_json_sha256(coverage):
-        raise ReadinessManifestError("research-panel probe coverage digest is invalid")
-    if receipt.get("panel_sha256") != hashlib.sha256(panel_bytes).hexdigest():
-        raise ReadinessManifestError("research-panel probe panel digest is invalid")
-    for field in ("hydrated_at", "exported_at"):
-        value = receipt.get(field)
-        if not isinstance(value, str):
-            raise ReadinessManifestError(f"research-panel probe {field} is invalid")
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ReadinessManifestError(f"research-panel probe {field} is invalid") from exc
-        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-            raise ReadinessManifestError(f"research-panel probe {field} must be UTC-aware")
 
 
 @dataclass(frozen=True, slots=True)

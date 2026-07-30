@@ -761,6 +761,38 @@ file and 8 MiB total; stage summaries are
 limited to 4096 characters, failure messages to 2048, identity paths to 4096,
 and the nested or standalone panel receipt to 4 MiB.
 
+Research-panel receipts use `research-price-panel-receipt-v2`; the request remains
+`research-price-panel-v1`. Its `coverage` is only the seven-key compact
+`price-coverage-compact-v1` object using
+`canonical-json-zlib-base64-v1`. G2 decodes it fail-closed: strict canonical
+base64, bounded zlib expansion (no unbounded flush), exact compressed/expanded
+sizes and ratio, EOF with no trailing data, strict canonical JSON, expanded
+coverage digest, then the full coverage semantics. Never put expanded coverage
+into `run.json` normalization or state. Raw receipt bytes are capped at 4 MiB;
+raw and canonical run envelopes must be strictly below 8 MiB. Expanded coverage
+is capped at 32 MiB with a ratio no greater than 200.
+
+Only a human/Codex operator shell holding `G2_OPENCLAW_OPERATOR_RETRY=1` may run
+`gateway-cli autoresearch-retry-external-verification`. It is not PM authority.
+It can retry only a fully attested, failed, pre-stage local research-panel HTTP
+413 run with `panel_requested=true`, `panel=null`, and no stage receipts. The
+operator command revalidates the preserved artifact, manifest, and implementation
+identity before replacing the retry receipt and issuing the next deterministic
+run ID (`-v2`, then `-v3`, through a hard cap of `-v9`). Preserve every prior
+artifact and verification-history entry; never delete or reuse a prior run
+directory. Missing, running, successful, methodology, or any non-413 failure is
+not retry-eligible.
+
+Schema-v4 state has no general retry migration. The only legacy bootstrap is the
+actual retry-receipt schema 1 for `-v2`, which binds exactly the canonical
+initial `-v1` failure. Every new receipt uses schema 2 and binds the complete
+ordered canonical digest list of prior verification artifacts. Recompute that
+list exactly: any changed field, including `null_test_summary`, or missing,
+extra, or reordered artifact fails closed. Each retry's local AAPL probe uses
+the full shared panel-receipt validator and requires exactly one AAPL ticker and
+one `2022-01-03` session, valid requested/observed ranges and digest bindings,
+and hydration no later than export.
+
 The CLI process contract is exact: exit 0 iff `run.success=true`, and exit 1
 iff `run.success=false`. PASS requires detached `succeeded`/exit 0. A valid
 typed rejected/failed envelope used by TEST_FAILURE or BUG_SIGNAL requires
