@@ -3817,6 +3817,8 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError(
                 "PASS verification cannot contain execution-not-started evidence"
             )
+        if evidence is not None:
+            evidence.validate()
         if evidence is None:
             if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
                 raise AutoresearchValidationError(
@@ -3833,9 +3835,17 @@ class VerificationResultArtifact:
             raise AutoresearchValidationError(
                 "PASS verification cannot claim a failed Quantipy experiment run"
             )
-        elif self.status is not VerificationStatus.PASS and evidence.success:
+        elif self.status is VerificationStatus.TEST_FAILURE and evidence.success:
             raise AutoresearchValidationError(
-                "non-PASS verification cannot claim a successful Quantipy experiment run"
+                "TEST_FAILURE verification cannot claim a successful Quantipy experiment run"
+            )
+        elif (
+            self.status is VerificationStatus.BUG_SIGNAL
+            and evidence.success
+            and not self.tests_passed
+        ):
+            raise AutoresearchValidationError(
+                "BUG_SIGNAL successful Quantipy experiment requires tests_passed=true"
             )
         if (
             self.status is VerificationStatus.PASS
@@ -7698,6 +7708,29 @@ def _require_private_directory(path: Path, *, label: str) -> None:
         )
 
 
+def _require_sealed_quantipy_panel_directory(path: Path) -> None:
+    """Require the exact read-only directory mode emitted for completed panels."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError("Quantipy panel directory does not exist") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o500
+    ):
+        raise AutoresearchValidationError(
+            "Quantipy panel directory must be an owned mode-0500 non-symlink directory"
+        )
+
+
+def _require_sealed_quantipy_panel_file(snapshot: _SecureFileSnapshot, *, label: str) -> None:
+    """Require the exact file mode emitted with completed panel evidence."""
+    if snapshot.owner_uid != os.getuid() or snapshot.mode != 0o400:
+        raise AutoresearchValidationError(f"{label} must be an owned mode-0400 sealed file")
+
+
 def _open_no_follow_directory(path: Path, *, label: str) -> int:
     """Open an existing canonical directory without traversing symlinks."""
     canonical_path = _require_canonical_absolute_path(path, label=label)
@@ -9252,8 +9285,18 @@ def _validate_quantipy_experiment_evidence(
         raise AutoresearchValidationError("Quantipy run.json success does not match stage receipts")
     if artifact.status is VerificationStatus.PASS and not is_success:
         raise AutoresearchValidationError("PASS requires a successful completed Quantipy v2 run")
-    if artifact.status is not VerificationStatus.PASS and is_success:
-        raise AutoresearchValidationError("non-PASS must not report a successful Quantipy v2 run")
+    if artifact.status is VerificationStatus.TEST_FAILURE and is_success:
+        raise AutoresearchValidationError(
+            "TEST_FAILURE must not report a successful Quantipy v2 run"
+        )
+    if (
+        artifact.status is VerificationStatus.BUG_SIGNAL
+        and is_success
+        and not artifact.tests_passed
+    ):
+        raise AutoresearchValidationError(
+            "BUG_SIGNAL successful Quantipy v2 run requires tests_passed=true"
+        )
     panel_requested = bool(run["panel_requested"])
     if panel_requested is (manifest["panel"] is None):
         raise AutoresearchValidationError(
@@ -9278,6 +9321,8 @@ def _validate_quantipy_experiment_evidence(
             raise AutoresearchValidationError(
                 "Quantipy experiment panel evidence does not match run.json"
             )
+        panel_directory = run_snapshot.path.parent / "panel"
+        _require_sealed_quantipy_panel_directory(panel_directory)
         panel_snapshot = _secure_open_snapshot(
             run_snapshot.path.parent / evidence.panel.panel_path,
             label="Quantipy panel file",
@@ -9292,10 +9337,8 @@ def _validate_quantipy_experiment_evidence(
             private=True,
             max_bytes=QUANTIPY_PANEL_RECEIPT_MAX_BYTES,
         )
-        _require_private_directory(
-            receipt_snapshot.path.parent,
-            label="Quantipy panel directory",
-        )
+        _require_sealed_quantipy_panel_file(panel_snapshot, label="Quantipy panel file")
+        _require_sealed_quantipy_panel_file(receipt_snapshot, label="Quantipy panel receipt")
         if (
             panel_snapshot.sha256 != evidence.panel.panel_sha256
             or receipt_snapshot.sha256 != evidence.panel.receipt_sha256
@@ -10198,11 +10241,16 @@ def _verification_handoff_contract(
         "or executes model. PASS requires success and completed_stages exactly "
         "[prepare, smoke, feasibility, model], plus panel identity/digests when requested. "
         "Quantipy exits 0 exactly for success=true and 1 exactly for success=false. PASS "
-        "requires detached SUCCEEDED/exit 0. A valid rejected/failed run used by TEST_FAILURE "
-        "or BUG_SIGNAL requires detached FAILED/exit 1 with no signal and ordinary "
-        "process_error classification; timeout, operator stop, resource exhaustion, artifact, "
-        "capture, signal, or any other nonzero outcome is not a typed contract exit. A run "
-        "that exists must retain truthful rejected/failed typed evidence. When focused tests "
+        "requires detached SUCCEEDED/exit 0. Process success is not research validity: a "
+        "successful run with anomalous or missing alpha metrics, coverage, or paired receipts "
+        "is BUG_SIGNAL when tests_passed=true and bug_signals is nonempty; it routes to FIX_TEST "
+        "and never counts as PASS. TEST_FAILURE remains invalid after a successful Quantipy run "
+        "because focused test failure prevents runtime execution under this command order. A valid "
+        "rejected/failed run used by TEST_FAILURE or BUG_SIGNAL requires detached FAILED/exit 1 "
+        "with no signal and ordinary process_error classification; timeout, operator stop, "
+        "resource exhaustion, artifact, capture, signal, or any other nonzero outcome is not "
+        "a typed contract exit. A run that exists must retain truthful rejected/failed typed "
+        "evidence. When focused tests "
         "prevent execution, set runtime evidence "
         "to null and populate quantipy_execution_not_started with its allowed reason, exact "
         "command/evidence, manifest binding, and expected run ID/path. G2 atomically tombstones "

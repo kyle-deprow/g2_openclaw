@@ -228,10 +228,18 @@ only when the run never started and it carries an explicit test rationale or
 bug signal; no agent self-report fallback exists.
 
 Quantipy exits 0 exactly for `run.success=true` and 1 exactly for
-`run.success=false`. PASS requires detached success/exit 0. Typed
-TEST_FAILURE/BUG_SIGNAL runtime evidence may use detached failure/exit 1 only
-with no signal and ordinary `process_error`; all infrastructure, artifact,
-capture, timeout, stop, resource, signal, and other exit outcomes fail closed.
+`run.success=false`. Process success is not research validity: successful
+execution with anomalous or missing alpha evidence is BUG_SIGNAL. A successful
+`BUG_SIGNAL` requires `tests_passed=true`, nonempty `bug_signals`, and the same
+sealed detached success/exit-0 attestation as a completed run; it goes to
+`fixer` and never counts as PASS. PASS still requires that success plus all
+required alpha metrics, compact coverage, and paired receipts. A typed
+rejected/failed run for TEST_FAILURE or BUG_SIGNAL requires detached
+failure/exit 1 with no signal and ordinary `process_error`; all infrastructure,
+artifact, capture, timeout, stop, resource, signal, and other exit outcomes
+fail closed. TEST_FAILURE remains invalid after a successful Quantipy run:
+focused test failure must prevent runtime execution under the required command
+order.
 
 Every new `DATA_INFRA_G0` `PASS` requires paired universe, price hydration, and
 platform coverage receipts. The price hydration receipt includes the required

@@ -271,11 +271,18 @@ bytes and the worker attestation. The hash supplied in
 `quantipy_experiment_evidence` is not sufficient by itself.
 
 Quantipy exits 0 exactly when `run.success=true` and 1 exactly when it is
-false. PASS requires detached `succeeded`/exit 0. A typed rejected or failed
-run for TEST_FAILURE/BUG_SIGNAL requires detached `failed`/exit 1, no signal,
-and ordinary `process_error` classification. Timeout, operator stop, resource
-exhaustion, artifact/capture failure, signals, exit 2+, and other outcomes are
-not accepted as Quantipy contract exits.
+false. Process success is not research validity: PASS requires detached
+`succeeded`/exit 0 plus complete alpha evidence (metrics, coverage, and paired
+receipts) after all four stages. Under this rule, successful execution with
+anomalous or missing alpha evidence is BUG_SIGNAL: it may truthfully carry the detached
+`succeeded`/exit-0 four-stage evidence when focused tests passed, but it never
+counts as PASS and routes to the fixer. TEST_FAILURE remains invalid after a
+successful Quantipy run because focused test failure prevents runtime execution
+in the required command order. TEST_FAILURE and an ordinary failed BUG_SIGNAL
+use typed detached `failed`/exit 1 as applicable, with no signal and ordinary
+`process_error` classification. Timeout, operator stop, resource exhaustion,
+artifact/capture failure, signals, exit 2+, and other outcomes are not accepted
+as Quantipy contract exits.
 
 These permissions prevent ordinary verifier mutation; they are not
 cryptographic protection against a malicious process with the same UID or a

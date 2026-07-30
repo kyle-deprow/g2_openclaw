@@ -832,11 +832,18 @@ one `2022-01-03` session, valid requested/observed ranges and digest bindings,
 and hydration no later than export.
 
 The CLI process contract is exact: exit 0 iff `run.success=true`, and exit 1
-iff `run.success=false`. PASS requires detached `succeeded`/exit 0. A valid
-typed rejected/failed envelope used by TEST_FAILURE or BUG_SIGNAL requires
-detached `failed`/exit 1, no signal, ordinary `process_error`, and complete
-sealed artifact attestation. Timeout, operator stop, resource exhaustion,
-artifact/capture failure, signals, exit 2+, and all other outcomes fail closed.
+iff `run.success=false`. Process success is not research validity: successful
+execution with anomalous or missing alpha evidence is BUG_SIGNAL. A successful
+`BUG_SIGNAL` requires `tests_passed=true`, nonempty `bug_signals`, and the same
+sealed detached `succeeded`/exit-0 attestation as a completed run; route it to
+`fixer`, never review it as PASS. PASS still requires complete alpha metrics,
+compact coverage, and paired receipts. A valid typed rejected/failed envelope
+for TEST_FAILURE or BUG_SIGNAL requires detached `failed`/exit 1, no signal,
+ordinary `process_error`, and complete sealed artifact attestation. Timeout,
+operator stop, resource exhaustion, artifact/capture failure, signals, exit
+2+, and all other outcomes fail closed. TEST_FAILURE remains invalid after a
+successful Quantipy run because focused test failure must prevent runtime
+execution under the required command order.
 
 Sealed local modes prevent ordinary verifier mutation, not a malicious
 same-UID process or root/sudo-capable operator deliberately rebuilding the
@@ -850,9 +857,11 @@ gate; copy its typed run receipt into `quantipy_experiment_evidence`.
 
 For `PASS`, evidence must match the implementation manifest path/digest and
 commit, `run.json` path/digest and ID, successful result, all four ordered
-completed stages, and panel identity/digests when requested. For
-`TEST_FAILURE` or `BUG_SIGNAL`, preserve the actual failed or rejected typed
-run evidence when a run exists. If execution never started,
+completed stages, and panel identity/digests when requested. A `BUG_SIGNAL`
+may instead preserve successful four-stage typed evidence when tests passed
+but alpha metrics, coverage, or paired receipts are missing or anomalous; do
+not fabricate unavailable fields. `TEST_FAILURE` must preserve only actual
+failed or rejected typed run evidence when a run exists. If execution never started,
 `quantipy_experiment_evidence` is `null` and
 `quantipy_execution_not_started` is mandatory. That strict receipt binds the
 manifest, deterministic expected run ID/path, exact failed command and
@@ -896,8 +905,10 @@ Failure classification is mandatory:
   run detached with bounded polling and durable run artifacts. Foreground tool
   calls beyond the watchdog are unsafe and invalid for these commands.
 - If commands ran but metrics are impossible, leaky, internally inconsistent,
-  or match a bug signal, set `status` to `BUG_SIGNAL`, keep `bug_signals`
-  nonempty, and include the exact command and evidence that exposed it.
+  missing after otherwise successful execution, or match a bug signal, set
+  `status` to `BUG_SIGNAL`, keep `bug_signals` nonempty, and include the exact
+  command and evidence that exposed it. Successful process execution does not
+  make this PASS.
 - Use `PASS` only when tests passed and `bug_signals` is empty. `ALPHA_RESEARCH`
   `PASS` requires complete alpha metrics, compact dynamic coverage, and paired
   universe and price-hydration receipts.

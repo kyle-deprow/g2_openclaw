@@ -218,11 +218,18 @@ when commands fail or expose a bug signal:
    no alternate root. Smoke and feasibility are the mandatory admission gate
    before model import/execution.
    Quantipy exits 0 iff `run.success=true` and 1 iff `run.success=false`.
-   PASS requires detached success/exit 0. A typed rejected/failed envelope may
-   advance TEST_FAILURE/BUG_SIGNAL only with detached failure/exit 1, no
-   signal, ordinary `process_error`, and complete sealed artifact attestation;
-   timeout, stop, resource, artifact/capture, signal, and other exit outcomes
-   fail closed.
+   Process success is not research validity: successful execution with
+   anomalous or missing alpha evidence is BUG_SIGNAL. A successful `BUG_SIGNAL`
+   requires `tests_passed=true`, nonempty `bug_signals`, and the same sealed
+   detached success/exit-0 attestation as a completed run; it routes to
+   `fixer` and never counts as PASS. PASS still requires complete alpha metrics,
+   compact coverage, and paired receipts. A typed rejected/failed envelope for
+   TEST_FAILURE or BUG_SIGNAL requires detached failure/exit 1, no signal,
+   ordinary `process_error`, and complete sealed artifact attestation; timeout,
+   stop, resource, artifact/capture, signal, and other exit outcomes fail
+   closed. TEST_FAILURE remains invalid after a successful Quantipy run because
+   focused test failure must prevent runtime execution under the required
+   command order.
    Sealed mode 0400 artifact/status files and a mode 0500 detached run
    directory prevent ordinary verifier mutation; they do not protect against
    a malicious same-UID process or root/sudo-capable operator deliberately
@@ -260,9 +267,12 @@ Implementation records the absolute canonical committed
 `quantipy-experiment-v2` manifest path and SHA-256. `PASS` additionally needs
 `quantipy_experiment_evidence` matching that manifest/commit, deterministic
 run ID, `run.json` digest, all four completed ordered stages, and panel
-identity/digests when requested. A typed failed/rejected run is retained for
-`TEST_FAILURE` or `BUG_SIGNAL`. When execution never started, runtime evidence
-is `null` only alongside a strict `quantipy_execution_not_started` receipt
+identity/digests when requested. A `BUG_SIGNAL` may retain truthful successful
+four-stage evidence when tests passed but alpha metrics, coverage, or paired
+receipts are missing or anomalous; unavailable fields remain `null` and it is
+never PASS. A typed failed/rejected run is retained for `TEST_FAILURE` or
+`BUG_SIGNAL`. When execution never started, runtime evidence is `null` only
+alongside a strict `quantipy_execution_not_started` receipt
 binding the manifest, deterministic expected run ID/path, exact failed
 command/evidence, and reason `focused_tests_failed`; the
 expected run directory must be absent. Validation atomically reserves that

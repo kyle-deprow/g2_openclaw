@@ -2464,6 +2464,7 @@ def _write_quantipy_v2_run(
         receipt_path = panel_directory / "receipt.json"
         receipt_path.write_bytes(receipt_bytes)
         receipt_path.chmod(0o400)
+        panel_directory.chmod(0o500)
     run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
     run_path.write_bytes(run_bytes)
     run_path.chmod(0o600)
@@ -2725,6 +2726,171 @@ def test_advance_state_requires_successful_quantipy_v2_run_receipt(
 
     # Assert
     assert advanced.phase is Phase.REVIEW
+
+
+@pytest.fixture()
+def successful_quantipy_evidence() -> QuantipyExperimentEvidence:
+    evidence = _verification_result(VerificationStatus.PASS).quantipy_experiment_evidence
+    assert evidence is not None
+    return evidence
+
+
+def test_successful_quantipy_bug_signal_routes_to_fix_without_fabricating_alpha_evidence(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    verification = replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        bug_signals=("quantipy_runtime_missing_alpha_metrics",),
+        data_coverage=None,
+        platform_coverage_validation=None,
+        universe_verification_receipt=None,
+        price_hydration_receipt=None,
+        quantipy_experiment_evidence=evidence,
+    )
+
+    # Act
+    advanced = _runner_advance_state(
+        state,
+        verification,
+        policy,
+        validation_context=_runtime_verification_context(state),
+        state_path=state_path,
+    )
+
+    # Assert
+    assert advanced.phase is Phase.FIX_TEST
+    assert advanced.latest_verification is not None
+    assert advanced.latest_verification.quantipy_experiment_evidence == evidence
+    assert advanced.latest_verification.is_walk_forward_sharpe_net is None
+    assert advanced.latest_verification.data_coverage is None
+    assert advanced.latest_verification.universe_verification_receipt is None
+
+
+def test_successful_quantipy_bug_signal_requires_nonempty_signals(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        bug_signals=(),
+        quantipy_experiment_evidence=replace(
+            successful_quantipy_evidence,
+            panel=None,
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="requires at least one bug signal"):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_successful_quantipy_bug_signal_requires_passing_tests(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.BUG_SIGNAL),
+        tests_passed=False,
+        quantipy_experiment_evidence=successful_quantipy_evidence,
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="successful Quantipy experiment requires tests_passed=true",
+    ):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_successful_quantipy_evidence_rejects_incomplete_stages(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        quantipy_experiment_evidence=replace(
+            successful_quantipy_evidence,
+            completed_stages=("prepare", "smoke", "feasibility"),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="requires all four completed stages"):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_successful_quantipy_evidence_rejects_failure_evidence(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        quantipy_experiment_evidence=replace(
+            successful_quantipy_evidence,
+            failure=QuantipyExperimentFailureEvidence(category="panel", message="bad panel"),
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="cannot contain failure evidence"):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_successful_quantipy_evidence_rejects_terminal_failure_stage(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS),
+        quantipy_experiment_evidence=replace(
+            successful_quantipy_evidence,
+            terminal_stage="model",
+            terminal_status="failed",
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="cannot contain a terminal failure stage",
+    ):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
+
+
+def test_test_failure_rejects_successful_quantipy_evidence(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    # Arrange
+    artifact = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        quantipy_experiment_evidence=successful_quantipy_evidence,
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="TEST_FAILURE verification cannot claim a successful Quantipy experiment run",
+    ):
+        artifact.validate(mode=ResearchMode.ALPHA_RESEARCH)
 
 
 def test_quantipy_pass_rejects_run_json_substituted_after_worker_attestation(
@@ -3921,22 +4087,29 @@ def test_quantipy_secure_reader_rejects_symlinked_panel_receipt(
         panel_requested=True,
     )
     receipt_path = Path(evidence.run_json_path).parent / "panel" / "receipt.json"
+    receipt_path.parent.chmod(0o700)
     target = tmp_path / "receipt-target.json"
     target.write_bytes(receipt_path.read_bytes())
     receipt_path.unlink()
     receipt_path.symlink_to(target)
+    receipt_path.parent.chmod(0o500)
 
-    with pytest.raises(AutoresearchValidationError, match="non-symlink regular file"):
-        _runner_advance_state(
-            state,
-            replace(
-                _verification_result(VerificationStatus.PASS),
-                quantipy_experiment_evidence=evidence,
-            ),
-            policy,
-            validation_context=_runtime_verification_context(state),
-            state_path=state_path,
-        )
+    try:
+        with pytest.raises(AutoresearchValidationError, match="non-symlink regular file"):
+            _runner_advance_state(
+                state,
+                replace(
+                    _verification_result(VerificationStatus.PASS),
+                    quantipy_experiment_evidence=evidence,
+                ),
+                policy,
+                validation_context=_runtime_verification_context(state),
+                state_path=state_path,
+            )
+    finally:
+        receipt_path.parent.chmod(0o700)
+        receipt_path.unlink()
+        target.unlink()
 
 
 def test_quantipy_panel_rejects_arbitrary_receipt_file(
@@ -4196,6 +4369,7 @@ def test_requested_panel_preflight_failure_without_panel_evidence_is_valid(
     failure = {"category": "preflight", "message": "preflight rejected source"}
     run.update(success=False, source=None, panel=None, stage_receipts=[], failure=failure)
     panel_directory = run_path.parent / "panel"
+    panel_directory.chmod(0o700)
     (panel_directory / "panel.parquet").unlink()
     (panel_directory / "receipt.json").unlink()
     panel_directory.rmdir()
@@ -9135,6 +9309,7 @@ def _write_public_v5_verification_artifact(
     fixture: PublicPlatformRecoveryFixture,
     recovered: AutoresearchState,
     status: VerificationStatus,
+    successful_bug_signal: bool = False,
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     tmp_path: Path,
@@ -9147,7 +9322,7 @@ def _write_public_v5_verification_artifact(
     assert setup is not None
     template_path = (
         fixture.successful_run_template_path
-        if status is VerificationStatus.PASS
+        if status is VerificationStatus.PASS or successful_bug_signal
         else fixture.failed_run_template_path
     )
     run = json.loads(template_path.read_text(encoding="utf-8"))
@@ -9165,7 +9340,7 @@ def _write_public_v5_verification_artifact(
             destination = run_path.parent / cast(str, relative_path)
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             destination.write_bytes(source.read_bytes())
-            destination.chmod(0o600)
+            destination.chmod(0o400)
     run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
     run_path.write_bytes(run_bytes)
     run_path.chmod(0o600)
@@ -9180,6 +9355,8 @@ def _write_public_v5_verification_artifact(
         run_path=run_path,
         detached_run_dir=detached_run_dir,
     )
+    if isinstance(panel, dict):
+        (run_path.parent / "panel").chmod(0o500)
     if isinstance(panel, dict):
         panel_evidence = QuantipyExperimentPanelEvidence(
             panel_path=cast(str, panel["panel_path"]),
@@ -9250,6 +9427,18 @@ def _write_public_v5_verification_artifact(
     else:
         artifact = replace(
             artifact,
+            is_walk_forward_sharpe_net=None,
+            oos_sharpe_net=None,
+            max_drawdown_pct=None,
+            win_rate=None,
+            trade_count=None,
+            trades_per_day=None,
+            oos_trading_days=None,
+            bug_signals=(
+                ("quantipy_runtime_missing_alpha_metrics",)
+                if successful_bug_signal
+                else artifact.bug_signals
+            ),
             data_coverage=None,
             platform_coverage_validation=None,
             universe_verification_receipt=None,
@@ -9364,6 +9553,224 @@ def test_public_v5_artifact_advancement_routes_and_consumes_runtime_receipts(
         tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in immutable_v5_hashes)
         == immutable_v5_hashes
     )
+
+
+def test_public_v5_successful_bug_signal_advances_and_consumes_runtime_receipts(
+    public_platform_v4_recovery_fixture: PublicPlatformRecoveryFixture,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    fixture = public_platform_v4_recovery_fixture
+    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+        fixture.copied_state_path,
+        probe=fixture.probe,
+        operator_reason="Moved verification to the sealed canonical runtime.",
+        policy=policy,
+        validation_context=fixture.validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    artifact_path, action = _write_public_v5_verification_artifact(
+        fixture=fixture,
+        recovered=recovered,
+        status=VerificationStatus.BUG_SIGNAL,
+        successful_bug_signal=True,
+        policy=policy,
+        receipts=receipts,
+        tmp_path=tmp_path,
+    )
+    artifact_payload = cast(
+        dict[str, object],
+        json.loads(artifact_path.read_text(encoding="utf-8")),
+    )
+    artifact_body = cast(dict[str, object], artifact_payload["artifact"])
+    evidence_body = cast(
+        dict[str, object],
+        artifact_body["quantipy_experiment_evidence"],
+    )
+    panel_directory = Path(cast(str, evidence_body["run_json_path"])).parent / "panel"
+    assert stat.S_IMODE(panel_directory.stat().st_mode) == 0o500
+
+    # Act
+    advanced = autoresearch_runner.advance_artifact_state_file(
+        state_path=fixture.copied_state_path,
+        output_path=fixture.copied_state_path,
+        artifact_path=artifact_path,
+        instruction_manifest_sha256=action.source_manifest_sha256,
+        state_reference_sha256=action.state_reference_sha256,
+        policy=policy,
+        validation_context=fixture.validation_context,
+    )
+
+    # Assert
+    assert advanced.phase is Phase.FIX_TEST
+    assert advanced.pending_fix_trigger is FixTriggerPhase.VERIFICATION
+    assert advanced.latest_verification is not None
+    assert advanced.latest_verification.status is VerificationStatus.BUG_SIGNAL
+    assert advanced.latest_verification.quantipy_experiment_evidence is not None
+    assert advanced.latest_verification.quantipy_experiment_evidence.success is True
+    assert advanced.latest_verification.is_walk_forward_sharpe_net is None
+    assert advanced.latest_verification.data_coverage is None
+    assert advanced.external_verification_retry_receipt is None
+    assert len(advanced.verification_history) == 4
+    assert advanced.platform_runtime_recovery_receipt is None
+    assert advanced.canonical_quantipy_runtime_attestation is None
+    assert fixture.live_state_path.read_bytes() == fixture.live_state_bytes
+
+
+@pytest.mark.parametrize("mode", (0o700, 0o550, 0o777))
+def test_public_v5_artifact_advancement_rejects_unsealed_panel_directory_modes(
+    public_platform_v4_recovery_fixture: PublicPlatformRecoveryFixture,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    # Arrange
+    fixture = public_platform_v4_recovery_fixture
+    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+        fixture.copied_state_path,
+        probe=fixture.probe,
+        operator_reason="Moved verification to the sealed canonical runtime.",
+        policy=policy,
+        validation_context=fixture.validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    artifact_path, action = _write_public_v5_verification_artifact(
+        fixture=fixture,
+        recovered=recovered,
+        status=VerificationStatus.PASS,
+        policy=policy,
+        receipts=receipts,
+        tmp_path=tmp_path,
+    )
+    payload = cast(dict[str, object], json.loads(artifact_path.read_text(encoding="utf-8")))
+    artifact = cast(dict[str, object], payload["artifact"])
+    evidence = cast(dict[str, object], artifact["quantipy_experiment_evidence"])
+    Path(cast(str, evidence["run_json_path"])).parent.joinpath("panel").chmod(mode)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="Quantipy panel directory"):
+        autoresearch_runner.advance_artifact_state_file(
+            state_path=fixture.copied_state_path,
+            output_path=fixture.copied_state_path,
+            artifact_path=artifact_path,
+            instruction_manifest_sha256=action.source_manifest_sha256,
+            state_reference_sha256=action.state_reference_sha256,
+            policy=policy,
+            validation_context=fixture.validation_context,
+        )
+
+
+def test_public_v5_artifact_advancement_rejects_symlinked_panel_directory(
+    public_platform_v4_recovery_fixture: PublicPlatformRecoveryFixture,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    fixture = public_platform_v4_recovery_fixture
+    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+        fixture.copied_state_path,
+        probe=fixture.probe,
+        operator_reason="Moved verification to the sealed canonical runtime.",
+        policy=policy,
+        validation_context=fixture.validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    artifact_path, action = _write_public_v5_verification_artifact(
+        fixture=fixture,
+        recovered=recovered,
+        status=VerificationStatus.PASS,
+        policy=policy,
+        receipts=receipts,
+        tmp_path=tmp_path,
+    )
+    payload = cast(dict[str, object], json.loads(artifact_path.read_text(encoding="utf-8")))
+    artifact = cast(dict[str, object], payload["artifact"])
+    evidence = cast(dict[str, object], artifact["quantipy_experiment_evidence"])
+    panel_directory = Path(cast(str, evidence["run_json_path"])).parent / "panel"
+    panel_directory.chmod(0o700)
+    sealed_directory = panel_directory.with_name("sealed-panel")
+    panel_directory.rename(sealed_directory)
+    panel_directory.symlink_to(sealed_directory, target_is_directory=True)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="Quantipy panel"):
+        autoresearch_runner.advance_artifact_state_file(
+            state_path=fixture.copied_state_path,
+            output_path=fixture.copied_state_path,
+            artifact_path=artifact_path,
+            instruction_manifest_sha256=action.source_manifest_sha256,
+            state_reference_sha256=action.state_reference_sha256,
+            policy=policy,
+            validation_context=fixture.validation_context,
+        )
+
+
+@pytest.mark.parametrize("relative_path", ("panel/panel.parquet", "panel/receipt.json"))
+def test_public_v5_artifact_advancement_rejects_unsealed_panel_file_modes(
+    public_platform_v4_recovery_fixture: PublicPlatformRecoveryFixture,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+    relative_path: str,
+) -> None:
+    # Arrange
+    fixture = public_platform_v4_recovery_fixture
+    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+        fixture.copied_state_path,
+        probe=fixture.probe,
+        operator_reason="Moved verification to the sealed canonical runtime.",
+        policy=policy,
+        validation_context=fixture.validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    artifact_path, action = _write_public_v5_verification_artifact(
+        fixture=fixture,
+        recovered=recovered,
+        status=VerificationStatus.PASS,
+        policy=policy,
+        receipts=receipts,
+        tmp_path=tmp_path,
+    )
+    payload = cast(dict[str, object], json.loads(artifact_path.read_text(encoding="utf-8")))
+    artifact = cast(dict[str, object], payload["artifact"])
+    evidence = cast(dict[str, object], artifact["quantipy_experiment_evidence"])
+    run_directory = Path(cast(str, evidence["run_json_path"])).parent
+    (run_directory / relative_path).chmod(0o600)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="mode-0400 sealed file"):
+        autoresearch_runner.advance_artifact_state_file(
+            state_path=fixture.copied_state_path,
+            output_path=fixture.copied_state_path,
+            artifact_path=artifact_path,
+            instruction_manifest_sha256=action.source_manifest_sha256,
+            state_reference_sha256=action.state_reference_sha256,
+            policy=policy,
+            validation_context=fixture.validation_context,
+        )
+
+
+def test_sealed_quantipy_panel_directory_rejects_a_foreign_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    panel_directory = tmp_path / "panel"
+    panel_directory.mkdir(mode=0o500)
+    foreign_uid = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: foreign_uid)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="Quantipy panel directory"):
+        autoresearch_runner._require_sealed_quantipy_panel_directory(panel_directory)
 
 
 @pytest.mark.parametrize("race", ("runtime", "source", "status", "run", "state"))

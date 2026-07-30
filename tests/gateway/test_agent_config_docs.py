@@ -496,6 +496,21 @@ def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
     assert "never substitutes" in normalized
 
 
+def test_runtime_docs_distinguish_process_success_from_research_validity() -> None:
+    runtime_paths = (AGENT_CONFIG / "AGENTS.md", AGENT_CONFIG / "README.md", AUTORESEARCH, PLAN)
+
+    for path in runtime_paths:
+        text = " ".join(path.read_text(encoding="utf-8").split())
+
+        assert "Process success is not research validity" in text
+        assert "successful execution with anomalous or missing alpha evidence is BUG_SIGNAL" in text
+        assert "TEST_FAILURE remains invalid after a successful Quantipy run" in text
+        assert (
+            "TEST_FAILURE/BUG_SIGNAL runtime evidence may use detached failure/exit 1 only"
+            not in text
+        )
+
+
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:
     skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
     tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())
