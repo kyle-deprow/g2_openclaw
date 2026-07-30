@@ -2035,6 +2035,14 @@ def _load_manifest(run_dir: Path, runs_root: Path) -> tuple[Path, RunManifest, s
     return canonical_run_dir, manifest, _manifest_digest(manifest)
 
 
+def read_run_manifest(
+    *, run_dir: Path, runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
+) -> RunManifest:
+    """Load and validate a detached manifest without reading mutable status data."""
+    _directory, manifest, _digest = _load_manifest(run_dir, runs_root)
+    return manifest
+
+
 def start_run(
     *,
     run_dir: Path,

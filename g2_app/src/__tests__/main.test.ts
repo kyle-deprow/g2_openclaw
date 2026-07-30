@@ -183,8 +183,60 @@ describe('main.ts boot()', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Session frame routing (P2-12)
+  // Status and session frame routing
   // -----------------------------------------------------------------------
+  describe('status frame routing', () => {
+    it('recovers error to idle on an authoritative gateway idle status', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+
+      routeFrame({ type: 'error', detail: 'temporary gateway failure', code: 'GATEWAY_ERROR' });
+      routeFrame({ type: 'status', status: 'idle' });
+
+      expect(mockSm.current).toBe('idle');
+      expect(mockSm.transition).toHaveBeenNthCalledWith(1, 'error');
+      expect(mockSm.transition).toHaveBeenNthCalledWith(2, 'idle');
+      expect(mockDisplay.showError).toHaveBeenCalledWith('temporary gateway failure');
+      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+      expect(mockConversation.addSystem).toHaveBeenCalledWith('Error: temporary gateway failure');
+      expect(mockConversation.clear).not.toHaveBeenCalled();
+    });
+
+    it('keeps an error visible until the gateway sends a subsequent idle status', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+
+      routeFrame({ type: 'error', detail: 'temporary gateway failure', code: 'GATEWAY_ERROR' });
+
+      expect(mockSm.current).toBe('error');
+      expect(mockDisplay.showError).toHaveBeenCalledWith('temporary gateway failure');
+      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+    });
+
+    it('continues to ignore status:idle while confirming', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'confirming';
+
+      routeFrame({ type: 'status', status: 'idle' });
+
+      expect(mockSm.current).toBe('confirming');
+      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+    });
+
+    it('ignores status:idle while in menu state', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'menu';
+
+      routeFrame({ type: 'status', status: 'idle' });
+
+      // State should remain menu — the guard prevents the transition
+      expect(mockSm.current).toBe('menu');
+      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+    });
+  });
+
   describe('session frame routing', () => {
     it('session_list frame in menu state calls display.showSessionMenu', async () => {
       await runBoot();
@@ -250,18 +302,6 @@ describe('main.ts boot()', () => {
       expect(mockConversation.clear).toHaveBeenCalled();
       expect(mockInput.closeSessionMenu).not.toHaveBeenCalled();
       expect(mockDisplay.showIdle).toHaveBeenCalled();
-    });
-
-    it('ignores status:idle while in menu state', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      mockSm._current = 'menu';
-
-      routeFrame({ type: 'status', status: 'idle' });
-
-      // State should remain menu — the guard prevents the transition
-      expect(mockSm.current).toBe('menu');
-      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
     });
 
     it('session_switched without sessionId does not crash localStorage', async () => {

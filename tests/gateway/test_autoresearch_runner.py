@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -8487,6 +8488,506 @@ def test_retry_state_file_materializes_the_attested_live_v2_http_413_to_v3(
     assert tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in immutable_hashes) == (
         immutable_hashes
     )
+
+
+def test_interrupted_verification_receipt_binds_the_pre_recovery_topology() -> None:
+    # Arrange
+    receipt_type = autoresearch_runner.InterruptedVerificationAttemptReceipt
+    prior_retry_receipt = ExternalVerificationRetryReceipt(
+        expected_run_id="autoresearch-i1-aaaaaaaaaaaa-v3",
+        prior_verification_sha256="3" * 64,
+        probe=ResearchPanelProbeReceipt(
+            endpoint="http://127.0.0.1:8000/price-data/research-panel",
+            observed_at="2026-07-29T12:00:00Z",
+            response_bytes=18,
+            response_sha256="a" * 64,
+            session_date="2022-01-03",
+            symbol="AAPL",
+        ),
+        retry_attempt=3,
+        implementation_commit="a" * 40,
+        manifest_sha256="b" * 64,
+        readiness_manifest_id="manifest-1",
+        readiness_snapshot_id="snapshot-1",
+        operator_reason="Raised the gateway receipt limit again.",
+        verification_history_sha256=("2" * 64, "3" * 64),
+    )
+
+    # Act
+    receipt = receipt_type(
+        expected_run_id="autoresearch-i1-aaaaaaaaaaaa-v3",
+        interrupted_attempt=3,
+        implementation_commit="a" * 40,
+        implementation_manifest_sha256="b" * 64,
+        detached_run_directory="/tmp/autoresearch-runs/i1-verification-r1-a3",
+        detached_run_manifest_sha256="c" * 64,
+        detached_run_status_sha256="d" * 64,
+        state_sha256="e" * 64,
+        state_reference_sha256="0" * 64,
+        instruction_manifest_sha256="f" * 64,
+        prior_retry_receipt_sha256=autoresearch_runner._canonical_json_digest(
+            prior_retry_receipt.to_dict()
+        ),
+        prior_retry_receipt=prior_retry_receipt,
+        verification_history_sha256=("2" * 64, "3" * 64),
+        operator_reason="Stopped the detached v3 process.",
+    )
+
+    # Assert
+    assert receipt.to_dict()["interrupted_attempt"] == 3
+    assert receipt.to_dict()["prior_retry_receipt"] == prior_retry_receipt.to_dict()
+
+
+@pytest.mark.parametrize("artifact_appears_during_inactivity_check", (False, True))
+def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_verification_artifact(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+    artifact_appears_during_inactivity_check: bool,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    v3_state = retry_external_verification_state_file(
+        state_path,
+        probe,
+        operator_reason="Raised the gateway receipt limit again.",
+        policy=policy,
+        validation_context=validation_context,
+    )
+    v3_receipt = v3_state.external_verification_retry_receipt
+    assert v3_receipt is not None
+    implementation = v3_state.implementation_result
+    assert implementation is not None
+    state_reference = autoresearch_runner.build_authoritative_state_reference(
+        v3_state, state_path=state_path
+    ).sha256()
+    instruction_digest = expected_instruction_manifest_sha256(
+        v3_state, policy, receipts, state_path=state_path
+    )
+    task_label = (
+        f"autoresearch-i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+    )
+    run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+    )
+    run_path = (
+        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        / v3_receipt.expected_run_id
+        / "run.json"
+    )
+    command = (
+        "bash",
+        "-lc",
+        " ".join(
+            (
+                "env",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "uv",
+                "run",
+                "quantipy",
+                "experiment",
+                "run",
+                implementation.experiment_manifest_path,
+                "--output-root",
+                str(autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+                "--run-id",
+                v3_receipt.expected_run_id,
+            )
+        ),
+    )
+    manifest_path = tmp_path / "copied-live-v3-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": v3_state.iteration,
+                "phase": "verification",
+                "attempt": 3,
+                "task_label": task_label,
+                "state_reference_sha256": state_reference,
+                "instruction_manifest_sha256": instruction_digest,
+                "run_directory": str(run_dir),
+                "working_directory": implementation.workspace_path,
+                "command_sha256": autoresearch_runs.command_sha256(command),
+                "expected_artifact_path": str(run_path),
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command=command,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.prepare_output_capture(
+        run_dir=run_dir, runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT
+    )
+    for stream in autoresearch_runs.RunOutputStream:
+        autoresearch_runs.capture_output_stream(
+            run_dir=run_dir,
+            runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+            stream=stream,
+            source=BytesIO(b""),
+        )
+    autoresearch_runs.start_run(
+        run_dir=run_dir,
+        pid=999_999,
+        systemd_unit="openclaw-long-task-1-1.service",
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.complete_run(
+        run_dir=run_dir,
+        exit_code=143,
+        signal_number=None,
+        peak_rss_bytes=None,
+        failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    preserved_v3_files = tuple(
+        (path, sha256(path.read_bytes()).hexdigest())
+        for path in sorted(path for path in run_dir.rglob("*") if path.is_file())
+    )
+    unrelated_record = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / "historical-malformed"
+    unrelated_record.mkdir(mode=0o700)
+    malformed_manifest = unrelated_record / "manifest.json"
+    malformed_manifest.write_text("not JSON", encoding="utf-8")
+    unrelated_manifest_digest = sha256(malformed_manifest.read_bytes()).hexdigest()
+    state_before_recovery = state_path.read_bytes()
+
+    def inactive_unit(_unit: str) -> bool:
+        if artifact_appears_during_inactivity_check:
+            run_path.parent.mkdir(mode=0o700)
+            run_path.write_text("{}", encoding="utf-8")
+        return False
+
+    # Act / Assert
+    if artifact_appears_during_inactivity_check:
+        with pytest.raises(AutoresearchValidationError, match=r"run\.json to be absent"):
+            autoresearch_runner.recover_interrupted_verification_state_file(
+                state_path,
+                operator_reason="Stopped the detached v3 process before it produced run.json.",
+                policy=policy,
+                receipts=receipts,
+                validation_context=validation_context,
+                systemd_is_active=inactive_unit,
+                proc_root=tmp_path / "proc",
+            )
+        assert state_path.read_bytes() == state_before_recovery
+        return
+
+    recovered = autoresearch_runner.recover_interrupted_verification_state_file(
+        state_path,
+        operator_reason="Stopped the detached v3 process before it produced run.json.",
+        policy=policy,
+        receipts=receipts,
+        validation_context=validation_context,
+        systemd_is_active=inactive_unit,
+        proc_root=tmp_path / "proc",
+    )
+
+    # Assert
+    assert recovered.external_verification_retry_receipt is not None
+    assert recovered.external_verification_retry_receipt.expected_run_id.endswith("-v4")
+    assert len(recovered.verification_history) == 2
+    assert len(recovered.interrupted_verification_history) == 1
+    assert (
+        tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in preserved_v3_files)
+        == preserved_v3_files
+    )
+    assert sha256(malformed_manifest.read_bytes()).hexdigest() == unrelated_manifest_digest
+
+
+def test_interrupted_v3_recovery_accepts_the_copied_live_worker_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    source_root = Path.home() / ".openclaw" / "autoresearch"
+    source_state_path = source_root / "quantipy-state.json"
+    source_run_dir = source_root / "runs" / "i1-verification-r1-a3-b9dd1214ce03-v3"
+    source_files = (
+        source_state_path,
+        *(path for path in source_run_dir.rglob("*") if path.is_file()),
+    )
+    source_hashes = tuple((path, sha256(path.read_bytes()).hexdigest()) for path in source_files)
+    state_path = tmp_path / "quantipy-state.json"
+    state_path.write_bytes(source_state_path.read_bytes())
+    detached_root = tmp_path / "runs"
+    detached_root.mkdir(mode=0o700)
+    run_dir = detached_root / source_run_dir.name
+    shutil.copytree(source_run_dir, run_dir, copy_function=shutil.copy2)
+    run_dir.chmod(0o700)
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.chmod(0o600)
+    manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    copied_state = autoresearch_runner.load_state_file(state_path)
+    manifest_raw["run_directory"] = str(run_dir)
+    manifest_raw["state_reference_sha256"] = (
+        autoresearch_runner.build_authoritative_state_reference(
+            copied_state,
+            state_path=state_path,
+        ).sha256()
+    )
+    copied_manifest = autoresearch_runs.RunManifest.from_dict(manifest_raw)
+    manifest_path.write_bytes(
+        json.dumps(copied_manifest.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        + b"\n"
+    )
+    manifest_path.chmod(0o400)
+    status_path = run_dir / "status.json"
+    status_path.chmod(0o600)
+    status_raw = json.loads(status_path.read_text(encoding="utf-8"))
+    status_raw["manifest_sha256"] = sha256(manifest_path.read_bytes()).hexdigest()
+    status_path.write_bytes(
+        json.dumps(status_raw, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    status_path.chmod(0o400)
+    run_dir.chmod(0o500)
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+
+    # Act
+    recovered = autoresearch_runner.recover_interrupted_verification_state_file(
+        state_path,
+        operator_reason="Recorded the worker-produced operator stop without a run envelope.",
+        policy=policy,
+        receipts=receipts,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+
+    # Assert
+    assert recovered.external_verification_retry_receipt is not None
+    assert recovered.external_verification_retry_receipt.expected_run_id == (
+        "autoresearch-i1-b9dd1214ce03-v4"
+    )
+    assert recovered.interrupted_verification_history[0].instruction_manifest_sha256 == (
+        copied_manifest.instruction_manifest_sha256
+    )
+    assert tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in source_hashes) == (
+        source_hashes
+    )
+
+
+def test_interrupted_v3_recovery_rejects_duplicate_expected_manifest_identities(
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir(mode=0o700)
+    directory_name = "i1-verification-r1-a3-aaaaaaaaaaaa-v3"
+    task_label = "autoresearch-i1-verification-r1-a3-aaaaaaaaaaaa-v3"
+    for name, instruction_digest in (
+        (directory_name, "c" * 64),
+        ("duplicate", "e" * 64),
+    ):
+        run_dir = runs_root / name
+        run_dir.mkdir(mode=0o700)
+        manifest = autoresearch_runs.RunManifest(
+            schema_version=1,
+            iteration=1,
+            phase=Phase.VERIFICATION,
+            attempt=3,
+            task_label=task_label,
+            state_reference_sha256="b" * 64,
+            instruction_manifest_sha256=instruction_digest,
+            run_directory=str(run_dir),
+            working_directory=str(tmp_path),
+            command_sha256="d" * 64,
+            expected_artifact_path=None,
+            timeout_seconds=None,
+        )
+        (run_dir / "manifest.json").write_bytes(
+            json.dumps(manifest.to_dict(), sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+        (run_dir / "manifest.json").chmod(0o400)
+        run_dir.chmod(0o500)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="duplicate expected detached v3"):
+        autoresearch_runner._find_exact_interrupted_detached_run(
+            runs_root=runs_root,
+            iteration=1,
+            directory_name=directory_name,
+            task_label=task_label,
+            state_reference_sha256="b" * 64,
+        )
+
+
+def test_interrupted_v4_http_413_authorizes_v5_with_a_new_probe_and_reason(
+    live_v2_http_413_state_file: tuple[
+        Path,
+        ResearchPanelProbeReceipt,
+        AutoresearchValidationContext,
+        tuple[tuple[Path, str], ...],
+    ],
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+) -> None:
+    # Arrange
+    state_path, probe, validation_context, _ = live_v2_http_413_state_file
+    v3_state = retry_external_verification_state_file(
+        state_path,
+        probe,
+        operator_reason="Raised the gateway receipt limit again.",
+        policy=policy,
+        validation_context=validation_context,
+    )
+    v3_receipt = v3_state.external_verification_retry_receipt
+    implementation = v3_state.implementation_result
+    assert v3_receipt is not None
+    assert implementation is not None
+    state_reference = autoresearch_runner.build_authoritative_state_reference(
+        v3_state, state_path=state_path
+    ).sha256()
+    instruction_digest = expected_instruction_manifest_sha256(
+        v3_state, policy, receipts, state_path=state_path
+    )
+    task_label = (
+        f"autoresearch-i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+    )
+    run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+    )
+    run_path = (
+        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        / v3_receipt.expected_run_id
+        / "run.json"
+    )
+    command = (
+        "bash",
+        "-lc",
+        " ".join(
+            (
+                "env",
+                "PYTHONDONTWRITEBYTECODE=1",
+                "uv",
+                "run",
+                "quantipy",
+                "experiment",
+                "run",
+                implementation.experiment_manifest_path,
+                "--output-root",
+                str(autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+                "--run-id",
+                v3_receipt.expected_run_id,
+            )
+        ),
+    )
+    manifest_path = tmp_path / "v5-recovery-v3-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": v3_state.iteration,
+                "phase": "verification",
+                "attempt": 3,
+                "task_label": task_label,
+                "state_reference_sha256": state_reference,
+                "instruction_manifest_sha256": instruction_digest,
+                "run_directory": str(run_dir),
+                "working_directory": implementation.workspace_path,
+                "command_sha256": autoresearch_runs.command_sha256(command),
+                "expected_artifact_path": str(run_path),
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command=command,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.prepare_output_capture(
+        run_dir=run_dir, runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT
+    )
+    for stream in autoresearch_runs.RunOutputStream:
+        autoresearch_runs.capture_output_stream(
+            run_dir=run_dir,
+            runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+            stream=stream,
+            source=BytesIO(b""),
+        )
+    autoresearch_runs.start_run(
+        run_dir=run_dir,
+        pid=999_999,
+        systemd_unit="openclaw-long-task-1-1.service",
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.complete_run(
+        run_dir=run_dir,
+        exit_code=143,
+        signal_number=None,
+        peak_rss_bytes=None,
+        failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    recovered = autoresearch_runner.recover_interrupted_verification_state_file(
+        state_path,
+        operator_reason="Stopped the detached v3 process before it produced run.json.",
+        policy=policy,
+        receipts=receipts,
+        validation_context=validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    v4_receipt = recovered.external_verification_retry_receipt
+    v2_failure = recovered.latest_verification
+    assert v4_receipt is not None
+    assert v2_failure is not None
+    v2_evidence = v2_failure.quantipy_experiment_evidence
+    assert v2_evidence is not None
+    failed_v4 = replace(
+        recovered,
+        phase=Phase.FIX_TEST,
+        pending_fix_trigger=FixTriggerPhase.VERIFICATION,
+        verification_history=(
+            *recovered.verification_history,
+            replace(
+                v2_failure,
+                quantipy_experiment_evidence=replace(
+                    v2_evidence,
+                    run_id=v4_receipt.expected_run_id,
+                ),
+            ),
+        ),
+    )
+    next_probe = replace(probe, response_bytes=19, response_sha256="b" * 64)
+
+    # Act
+    v5_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_v4,
+        next_probe,
+        "Increased the response limit after the v4 failure.",
+    )
+    retried = retry_external_verification(failed_v4, v5_receipt)
+
+    # Assert
+    validate_state(retried, policy, validation_context)
+    assert v5_receipt.expected_run_id.endswith("-v5")
+    assert v5_receipt.probe == next_probe
+    assert v5_receipt.operator_reason == "Increased the response limit after the v4 failure."
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="interrupted verification history requires an external verification retry receipt",
+    ):
+        validate_state(
+            replace(retried, external_verification_retry_receipt=None),
+            policy,
+            validation_context,
+        )
 
 
 def test_v2_retry_receipt_rejects_an_unrelated_historical_http_404(

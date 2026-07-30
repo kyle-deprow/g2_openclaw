@@ -7,7 +7,7 @@ import json
 import secrets
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import websockets
@@ -296,7 +296,7 @@ class TestEmptyTranscriptionSkipsOpenClaw:
         )
 
         # Simulate a recording in progress with a non-empty buffer
-        buf = AsyncMock()
+        buf = Mock()
         buf.is_empty = False
         buf.to_numpy.return_value = "fake-audio"
         session._audio_buffer = buf
@@ -331,7 +331,7 @@ class TestEmptyTranscriptionSkipsOpenClaw:
             transcriber=mock_transcriber,
         )
 
-        buf = AsyncMock()
+        buf = Mock()
         buf.is_empty = False
         buf.to_numpy.return_value = "fake-audio"
         session._audio_buffer = buf
@@ -431,13 +431,19 @@ class TestFullWebSocketIntegration:
                             }
                         )
                     )
-                    for d in deltas:
+                    for seq, delta in enumerate(deltas, start=1):
                         await ws.send(
                             json.dumps(
                                 {
                                     "type": "event",
                                     "event": "agent",
-                                    "payload": {"stream": "assistant", "delta": d},
+                                    "payload": {
+                                        "runId": "mock-run-1",
+                                        "seq": seq,
+                                        "stream": "assistant",
+                                        "ts": seq,
+                                        "data": {"delta": delta},
+                                    },
                                 }
                             )
                         )
@@ -447,7 +453,13 @@ class TestFullWebSocketIntegration:
                             {
                                 "type": "event",
                                 "event": "agent",
-                                "payload": {"stream": "lifecycle", "phase": "end"},
+                                "payload": {
+                                    "runId": "mock-run-1",
+                                    "seq": len(deltas) + 1,
+                                    "stream": "lifecycle",
+                                    "ts": len(deltas) + 1,
+                                    "data": {"phase": "end"},
+                                },
                             }
                         )
                     )

@@ -78,12 +78,6 @@ function routeFrame(frame: InboundFrame): void {
 
     // -- Server status change --------------------------------------------
     case 'status': {
-      // Guard: ignore status:idle while in error — user must dismiss.
-      if (frame.status === 'idle' && sm.current === 'error') {
-        console.log('[Main] Ignoring status:idle — currently in error state');
-        return;
-      }
-
       // Guard: ignore status:idle while confirming — user must confirm/reject.
       if (frame.status === 'idle' && sm.current === 'confirming') {
         console.log('[Main] Ignoring status:idle — waiting for user confirmation');

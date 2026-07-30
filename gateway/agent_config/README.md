@@ -100,6 +100,25 @@ invocations without the explicit capability. All state-schema changes require
 archiving and fresh schema-v4 initialization; no general in-place migration
 exists.
 
+An owner-session stop first disables the supervisor, cancels only exact owner
+tasks, then repeatedly rescans state-bound detached manifests until a bounded
+quiescence interval proves that no pending manifest-only launch or running unit
+remains. It stops only exact state-bound transient units and deletes the owner
+session only after each stopped record seals
+`operator_stopped`/exit 143/signal null and its unit and PID are inactive. For
+detached units, `is-active` exit 3 requires exact
+`loaded/inactive/dead` `show` evidence, while exit 4 requires exact
+`not-found/inactive/dead` evidence. A
+stopped pending `-v3` verification is not an external-panel retry. With the
+supervisor stopped, a human/Codex operator may use
+`G2_OPENCLAW_OPERATOR_INTERRUPTED_VERIFICATION_RECOVERY=1` and
+`gateway-cli autoresearch-recover-interrupted-verification` only for the exact
+sealed v1/v2 + schema-2-v3 topology; recovery writes an interruption receipt
+that embeds and digests the complete immutable v3 retry receipt, plus
+deterministic `-v4` authorization, without inventing a verification result.
+Subsequent `-v5` authorization binds its own current probe/reason and validates
+the preserved v3 receipt independently.
+
 ## Suspended Campaign Resume
 
 If a live campaign is suspended on `INFRA_BLOCKED`, rebuild the schema-v3

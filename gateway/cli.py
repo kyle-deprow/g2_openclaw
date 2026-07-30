@@ -1161,6 +1161,55 @@ def autoresearch_retry_external_verification(
     )
 
 
+@app.command("autoresearch-recover-interrupted-verification")
+def autoresearch_recover_interrupted_verification(
+    state_path: Path = _state_path_argument,
+    reason: str = typer.Option(
+        ..., "--reason", help="Exact non-empty operator reason for the detached v3 stop."
+    ),
+    openclaw_config: Path = _openclaw_config_option,
+    quantipy_root: Path = _quantipy_root_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Operator-only recovery for the one sealed, stopped detached v3 verification run."""
+    from gateway.autoresearch_readiness import load_platform_readiness
+    from gateway.autoresearch_runner import (
+        INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR,
+        INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_VALUE,
+        AutoresearchValidationContext,
+        build_receipt_catalog,
+        load_autoresearch_policy,
+        recover_interrupted_verification_state_file,
+    )
+
+    try:
+        if os.environ.get(INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR) != (
+            INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_VALUE
+        ):
+            raise ValueError(
+                "operator capability is required; set "
+                f"{INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR}=1 in the human/Codex shell"
+            )
+        policy = load_autoresearch_policy(openclaw_config)
+        readiness = load_platform_readiness(readiness_manifest)
+        state = recover_interrupted_verification_state_file(
+            state_path,
+            operator_reason=reason,
+            policy=policy,
+            receipts=build_receipt_catalog(quantipy_root),
+            validation_context=AutoresearchValidationContext.from_readiness(readiness),
+        )
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-recover-interrupted-verification failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    receipt = state.external_verification_retry_receipt
+    assert receipt is not None
+    console.print(
+        f"[green]interrupted verification recovery authorized:[/green] {receipt.expected_run_id}"
+    )
+
+
 @app.command("autoresearch-suspend-infra")
 def autoresearch_suspend_infra(
     state_path: Path = _state_path_argument,

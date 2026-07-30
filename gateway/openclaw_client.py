@@ -9,7 +9,10 @@ import logging
 import ssl
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
+from typing import NewType
 
 import websockets
 from websockets import ClientConnection
@@ -67,6 +70,46 @@ class _StopSentinel:
 
 _STOP: _StopSentinel = _StopSentinel()
 
+AgentRunId = NewType("AgentRunId", str)
+
+
+class _AgentEventStream(StrEnum):
+    """Agent event streams consumed by the gateway client."""
+
+    ASSISTANT = "assistant"
+    LIFECYCLE = "lifecycle"
+
+
+class _AgentLifecyclePhase(StrEnum):
+    """Lifecycle phases that terminate an agent stream."""
+
+    END = "end"
+    ERROR = "error"
+
+
+_AGENT_EVENT_REQUIRED_PAYLOAD_FIELDS = frozenset({"runId", "seq", "stream", "ts", "data"})
+_AGENT_EVENT_OPTIONAL_STRING_PAYLOAD_FIELDS = frozenset(
+    {"spawnedBy", "sessionKey", "sessionId", "agentId"}
+)
+_AGENT_EVENT_OPTIONAL_BOOLEAN_PAYLOAD_FIELDS = frozenset({"isHeartbeat"})
+_AGENT_EVENT_PAYLOAD_FIELDS = (
+    _AGENT_EVENT_REQUIRED_PAYLOAD_FIELDS
+    | _AGENT_EVENT_OPTIONAL_STRING_PAYLOAD_FIELDS
+    | _AGENT_EVENT_OPTIONAL_BOOLEAN_PAYLOAD_FIELDS
+)
+_RESTART_STOP_REASON = "restart"
+
+
+@dataclass(frozen=True)
+class _AgentEvent:
+    """Validated OpenClaw 2026.7.1 agent event payload."""
+
+    run_id: AgentRunId
+    seq: int
+    stream: str
+    ts: int
+    data: dict[str, object]
+
 
 class OpenClawError(Exception):
     """Raised when OpenClaw returns an error or communication fails."""
@@ -76,7 +119,65 @@ class OpenClawTransportError(OpenClawError):
     """Raised for retryable OpenClaw connection, timeout, or socket failures."""
 
 
-def _process_agent_event(msg: dict[str, object]) -> str | _StopSentinel | None:
+def _parse_agent_event(msg: object) -> _AgentEvent | None:
+    """Validate the exact OpenClaw 2026.7.1 agent-event envelope."""
+    if not isinstance(msg, Mapping):
+        logger.warning("Ignoring non-object OpenClaw agent event")
+        return None
+    if msg.get("type") != "event" or msg.get("event") != "agent":
+        return None
+
+    payload = msg.get("payload")
+    if (
+        not isinstance(payload, dict)
+        or not _AGENT_EVENT_REQUIRED_PAYLOAD_FIELDS.issubset(payload)
+        or not set(payload).issubset(_AGENT_EVENT_PAYLOAD_FIELDS)
+    ):
+        logger.warning("Ignoring OpenClaw agent event with an invalid payload envelope")
+        return None
+
+    for field in _AGENT_EVENT_OPTIONAL_STRING_PAYLOAD_FIELDS:
+        value = payload.get(field)
+        if field in payload and (not isinstance(value, str) or not value):
+            logger.warning("Ignoring OpenClaw agent event with an invalid %s", field)
+            return None
+    is_heartbeat = payload.get("isHeartbeat")
+    if "isHeartbeat" in payload and not isinstance(is_heartbeat, bool):
+        logger.warning("Ignoring OpenClaw agent event with an invalid isHeartbeat")
+        return None
+
+    event_run_id = payload["runId"]
+    seq = payload["seq"]
+    stream = payload["stream"]
+    ts = payload["ts"]
+    data = payload["data"]
+
+    if not isinstance(event_run_id, str) or not event_run_id.strip():
+        logger.warning("Ignoring OpenClaw agent event with an invalid runId")
+        return None
+    if isinstance(seq, bool) or not isinstance(seq, int) or seq < 0:
+        logger.warning("Ignoring OpenClaw agent event with an invalid seq")
+        return None
+    if not isinstance(stream, str) or not stream.strip():
+        logger.warning("Ignoring OpenClaw agent event with an invalid stream")
+        return None
+    if isinstance(ts, bool) or not isinstance(ts, int) or ts < 0:
+        logger.warning("Ignoring OpenClaw agent event with an invalid ts")
+        return None
+    if not isinstance(data, dict):
+        logger.warning("Ignoring OpenClaw agent event with an invalid data object")
+        return None
+
+    return _AgentEvent(
+        run_id=AgentRunId(event_run_id),
+        seq=seq,
+        stream=stream,
+        ts=ts,
+        data=data,
+    )
+
+
+def _process_agent_event(msg: object, *, run_id: AgentRunId) -> str | _StopSentinel | None:
     """Extract a delta string from an agent event message.
 
     Returns:
@@ -86,36 +187,38 @@ def _process_agent_event(msg: dict[str, object]) -> str | _StopSentinel | None:
 
     Raises ``OpenClawError`` on agent error events.
     """
-    if msg.get("type") != "event" or msg.get("event") != "agent":
+    event = _parse_agent_event(msg)
+    if event is None:
         return None
 
-    payload = msg.get("payload", {})
-    if not isinstance(payload, dict):
+    if event.run_id != run_id:
+        logger.debug("Ignoring agent event for a different run")
         return None
 
-    stream = payload.get("stream")
     logger.info(
         "_stream_deltas agent event: stream=%s payload=%s",
-        stream,
-        json.dumps(payload)[:200],
+        event.stream,
+        json.dumps(event.data)[:200],
     )
 
-    # The real payload fields live inside payload.data (not top-level payload)
-    data = payload.get("data", {})
-    if not isinstance(data, dict):
-        data = {}
-
-    if stream == "assistant":
-        delta = data.get("delta", "") or payload.get("delta", "")
-        if delta:
-            return str(delta)
+    if event.stream == _AgentEventStream.ASSISTANT:
+        delta = event.data.get("delta")
+        if isinstance(delta, str) and delta:
+            return delta
         return None
-    elif stream == "lifecycle":
-        phase = data.get("phase") or payload.get("phase")
-        if phase == "end":
+    if event.stream == _AgentEventStream.LIFECYCLE:
+        phase = event.data.get("phase")
+        if phase == _AgentLifecyclePhase.END:
             return _STOP
-        elif phase == "error":
-            detail = data.get("error") or payload.get("error", "agent error")
+        if phase == _AgentLifecyclePhase.ERROR:
+            if (
+                event.data.get("aborted") is True
+                and event.data.get("stopReason") == _RESTART_STOP_REASON
+            ):
+                return _STOP
+            detail = event.data.get("error")
+            if not isinstance(detail, str) or not detail:
+                detail = "agent error"
             raise OpenClawError(f"agent error: {detail}")
     # Ignore tool and other streams
     return None
@@ -432,6 +535,14 @@ class OpenClawClient:
             error = resp.get("error", "unknown error")
             raise OpenClawError(f"agent request rejected: {error}")
 
+        accepted_payload = resp.get("payload")
+        if not isinstance(accepted_payload, Mapping):
+            raise OpenClawError("agent response has a non-object payload")
+        accepted_run_id = accepted_payload.get("runId")
+        if not isinstance(accepted_run_id, str) or not accepted_run_id.strip():
+            raise OpenClawError("agent response missing a valid runId")
+        run_id = AgentRunId(accepted_run_id)
+
         # Now yield assistant deltas from the event stream
         async def _stream_deltas(
             pre_buffered: list[dict[str, object]],
@@ -444,7 +555,7 @@ class OpenClawClient:
                 # First, drain any events that arrived before the res frame
                 for msg in pre_buffered:
                     logger.info("_stream_deltas buffered: %s", json.dumps(msg)[:200])
-                    result = _process_agent_event(msg)
+                    result = _process_agent_event(msg, run_id=run_id)
                     if isinstance(result, _StopSentinel):
                         _clean_exit = True
                         return
@@ -461,7 +572,7 @@ class OpenClawClient:
 
                     logger.info("_stream_deltas raw: %s", json.dumps(msg)[:200])
                     logger.info("wire recv: %s", json.dumps(msg)[:300])
-                    result = _process_agent_event(msg)
+                    result = _process_agent_event(msg, run_id=run_id)
                     if isinstance(result, _StopSentinel):
                         _clean_exit = True
                         return

@@ -783,6 +783,26 @@ artifact and verification-history entry; never delete or reuse a prior run
 directory. Missing, running, successful, methodology, or any non-413 failure is
 not retry-eligible.
 
+An `operator_stopped` detached verification is never a PM retry and never a
+supervisor transition. The supervisor emits one control-plane alert and waits.
+Only a human/Codex shell with
+`G2_OPENCLAW_OPERATOR_INTERRUPTED_VERIFICATION_RECOVERY=1` may run
+`gateway-cli autoresearch-recover-interrupted-verification`. It accepts only
+the current pending `-v3` topology: sealed v1/v2 panel artifacts, a schema-2
+v3 retry receipt, and exactly one sealed detached v3 record with `failed`, exit
+143, signal null, `operator_stopped`, no `run.json`, an inactive exact transient
+unit, a dead recorded PID, complete EOF-drained output capture, and a failed
+`missing` expected-artifact attestation with no artifact attestation payload.
+After liveness checks, recovery re-reads and matches the sealed manifest,
+status, and both log hashes, then confirms `run.json` is still absent immediately
+before atomically publishing state under the state lock. It preserves v3 files,
+records typed bindings for state, instruction, the full
+immutable prior v3 receipt and its digest, ordered history, manifest, and
+status, then authorizes only deterministic `-v4`. A later `-v5` retry validates
+that preserved v3 receipt independently of its current probe and reason; it
+never fabricates a
+`verification_result`.
+
 Schema-v4 state has no general retry migration. The only legacy bootstrap is the
 actual retry-receipt schema 1 for `-v2`, which binds exactly the canonical
 initial `-v1` failure. Every new receipt uses schema 2 and binds the complete

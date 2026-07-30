@@ -670,6 +670,67 @@ def test_newer_succeeded_detached_attempt_prevents_an_older_failure_from_advanci
     assert result is None
 
 
+def test_operator_stopped_detached_verification_alerts_without_advancing_state(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    # Arrange
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state, state_path=supervisor_env.state_path
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state, supervisor_env.state_path
+    )
+    run_dir = supervisor_env.runs_root / "operator-stopped"
+    manifest_path = supervisor_env.state_path.parent / "operator-stopped-manifest.json"
+    command = ("verify", "--opaque")
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": state.iteration,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    start_run(run_dir=run_dir, pid=999_999, runs_root=supervisor_env.runs_root)
+    complete_run(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        exit_code=143,
+        signal_number=15,
+        peak_rss_bytes=None,
+        failure_classification=RunFailureClassification.OPERATOR_STOPPED,
+    )
+
+    # Act
+    result = supervisor._consume_terminal_verification_run(state)
+
+    # Assert
+    assert result is not None
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.reason == "interrupted_detached_verification_requires_operator_recovery"
+    assert supervisor._load_state() == state
+
+
 def test_detached_verification_instruction_digest_mismatch_is_ignored_as_stale_history(
     supervisor_env: SupervisorEnv,
 ) -> None:

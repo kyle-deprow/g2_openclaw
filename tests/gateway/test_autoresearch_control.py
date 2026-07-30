@@ -4,16 +4,19 @@ import fcntl
 import json
 import subprocess
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 
+import gateway.autoresearch_runs as autoresearch_runs
 import pytest
 from gateway.autoresearch_control import (
     DEFAULT_SUPERVISOR_SERVICE_NAME,
     AutoresearchControl,
     ControlConfig,
     ControlError,
+    SystemdDetachedRunController,
     SystemdSupervisorServiceController,
 )
 from gateway.autoresearch_readiness import (
@@ -31,6 +34,7 @@ from gateway.autoresearch_runner import (
     FinalReviewerVerdict,
     Phase,
     ResearchMode,
+    build_authoritative_state_reference,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -238,6 +242,98 @@ class FailingSupervisorService(FakeSupervisorService):
             raise ControlError("service stop failed")
 
 
+class FakeDetachedRunController:
+    def __init__(
+        self,
+        *,
+        runs_root: Path,
+        on_unit_check: Callable[[], None] | None = None,
+        operator_stop_signal_number: int | None = None,
+    ) -> None:
+        self.runs_root = runs_root
+        self.stopped_units: list[str] = []
+        self._on_unit_check = on_unit_check
+        self._operator_stop_signal_number = operator_stop_signal_number
+
+    def stop_unit(self, unit: str) -> None:
+        self.stopped_units.append(unit)
+        for run_dir in self.runs_root.iterdir():
+            try:
+                record = autoresearch_runs.read_run_record(
+                    run_dir=run_dir, runs_root=self.runs_root
+                )
+            except autoresearch_runs.AutoresearchRunRecordError:
+                continue
+            if record.status.systemd_unit == unit:
+                autoresearch_runs.complete_run(
+                    run_dir=run_dir,
+                    runs_root=self.runs_root,
+                    exit_code=143,
+                    signal_number=self._operator_stop_signal_number,
+                    peak_rss_bytes=None,
+                    failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
+                )
+
+    def is_active(self, unit: str) -> bool:
+        if self._on_unit_check is not None:
+            callback = self._on_unit_check
+            self._on_unit_check = None
+            callback()
+        return False
+
+    def is_pid_alive(self, pid: int | None) -> bool:
+        return False
+
+
+def _prepare_state_bound_detached_run(
+    config: ControlConfig,
+    tmp_path: Path,
+    *,
+    name: str,
+    unit: str,
+    start: bool,
+) -> Path:
+    state = AutoresearchState.from_dict(json.loads(config.state_path.read_text(encoding="utf-8")))
+    run_dir = config.runs_root / name
+    command = ("uv", "run", "pytest")
+    manifest_path = tmp_path / f"{name}-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": state.iteration,
+                "phase": state.phase.value,
+                "attempt": 1,
+                "task_label": "autoresearch-i7-review-r1-a1",
+                "state_reference_sha256": build_authoritative_state_reference(
+                    state, state_path=config.state_path
+                ).sha256(),
+                "instruction_manifest_sha256": "a" * 64,
+                "run_directory": str(run_dir),
+                "working_directory": str(tmp_path),
+                "command_sha256": autoresearch_runs.command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=config.runs_root,
+        command=command,
+    )
+    if start:
+        autoresearch_runs.start_run(
+            run_dir=run_dir,
+            runs_root=config.runs_root,
+            pid=999_999,
+            systemd_unit=unit,
+        )
+    return run_dir
+
+
 def test_systemd_controller_uses_durable_enable_and_disable_transitions() -> None:
     calls: list[list[str]] = []
 
@@ -275,6 +371,104 @@ def test_systemd_controller_uses_durable_enable_and_disable_transitions() -> Non
     ]
 
 
+@pytest.mark.parametrize(
+    ("is_active_returncode", "show_output", "expected_active"),
+    (
+        (3, "LoadState=loaded\nActiveState=inactive\nSubState=dead\n", False),
+        (4, "LoadState=not-found\nActiveState=inactive\nSubState=dead\n", False),
+    ),
+)
+def test_detached_systemd_controller_accepts_only_known_inactive_unit_states(
+    is_active_returncode: int,
+    show_output: str,
+    expected_active: bool,
+) -> None:
+    # Arrange
+    calls: list[list[str]] = []
+
+    def run_command(
+        command: list[str], *, check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        calls.append(command)
+        if command[2] == "is-active":
+            return subprocess.CompletedProcess(command, is_active_returncode, "", "")
+        return subprocess.CompletedProcess(command, 0, show_output, "")
+
+    controller = SystemdDetachedRunController(run_command)
+
+    # Act
+    active = controller.is_active("openclaw-long-task-1-1.service")
+
+    # Assert
+    assert active is expected_active
+
+
+def test_stop_rejects_a_signal_terminated_operator_stopped_record(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    # Arrange
+    config, tmp_path = control_env
+    _prepare_state_bound_detached_run(
+        config,
+        tmp_path,
+        name="signal-terminated",
+        unit="openclaw-long-task-1-1.service",
+        start=True,
+    )
+    # Act / Assert
+    with pytest.raises(ControlError, match="operator_stopped terminal status"):
+        AutoresearchControl(
+            config,
+            task_gateway=FakeOpenClaw(),
+            service_controller=FakeSupervisorService([]),
+            detached_run_controller=FakeDetachedRunController(
+                runs_root=config.runs_root,
+                operator_stop_signal_number=15,
+            ),
+        ).stop()
+
+
+@pytest.mark.parametrize(
+    "show_result",
+    (
+        subprocess.CompletedProcess([], 1, "", "unit lookup failed"),
+        subprocess.CompletedProcess(
+            [], 0, "LoadState=loaded\nActiveState=inactive\nSubState=dead\n", ""
+        ),
+        subprocess.CompletedProcess(
+            [], 0, "LoadState=not-found\nActiveState=active\nSubState=dead\n", ""
+        ),
+        subprocess.CompletedProcess(
+            [], 0, "LoadState=not-found\nActiveState=inactive\nSubState=exited\n", ""
+        ),
+        subprocess.CompletedProcess([], 0, "LoadState=not-found\nActiveState=inactive\n", ""),
+    ),
+)
+def test_detached_systemd_controller_rejects_unknown_collected_unit_state(
+    show_result: subprocess.CompletedProcess[str],
+) -> None:
+    # Arrange
+    def run_command(
+        command: list[str], *, check: bool, capture_output: bool, text: bool
+    ) -> subprocess.CompletedProcess[str]:
+        del check, capture_output, text
+        if command[2] == "is-active":
+            return subprocess.CompletedProcess(command, 4, "", "")
+        return subprocess.CompletedProcess(
+            command,
+            show_result.returncode,
+            show_result.stdout,
+            show_result.stderr,
+        )
+
+    controller = SystemdDetachedRunController(run_command)
+
+    # Act / Assert
+    with pytest.raises(ControlError, match="detached unit status failed"):
+        controller.is_active("openclaw-long-task-1-1.service")
+
+
 @pytest.fixture()
 def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
     state_path = tmp_path / "quantipy-state.json"
@@ -301,6 +495,7 @@ def control_env(tmp_path: Path) -> tuple[ControlConfig, Path]:
         wake_lock_path=tmp_path / "control-wake.lock",
         wake_claim_path=tmp_path / "control-wake.json",
         readiness_manifest_path=readiness_path,
+        runs_root=tmp_path / "detached-runs",
     ), tmp_path
 
 
@@ -586,7 +781,7 @@ def test_stop_does_not_cancel_or_delete_when_supervisor_stop_fails(
     with pytest.raises(ControlError, match="service stop failed"):
         AutoresearchControl(config, task_gateway=fake, service_controller=service).stop()
 
-    assert events == ["rpc:list", "service:stop"]
+    assert events == ["service:stop"]
 
 
 def test_wake_reports_abort_failure_but_still_deletes_owner_session(
@@ -665,7 +860,6 @@ def test_stop_cancels_only_tasks_with_the_exact_owner_session(
         "key": AUTORESEARCH_OWNER_SESSION_KEY,
     }
     assert events == [
-        "rpc:list",
         "service:stop",
         "rpc:list",
         "rpc:cancel",
@@ -673,7 +867,199 @@ def test_stop_cancels_only_tasks_with_the_exact_owner_session(
     ]
 
 
-def test_stop_revalidates_tasks_after_stopping_the_supervisor(
+def test_stop_stops_only_the_current_state_bound_detached_unit_before_session_delete(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    # Arrange
+    config, tmp_path = control_env
+    state = AutoresearchState.from_dict(json.loads(config.state_path.read_text(encoding="utf-8")))
+    runs_root = tmp_path / "detached-runs"
+    run_dir = runs_root / "owned"
+    command = ("uv", "run", "pytest")
+    manifest_path = tmp_path / "owned-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": state.iteration,
+                "phase": state.phase.value,
+                "attempt": 1,
+                "task_label": "autoresearch-i7-review-r1-a1",
+                "state_reference_sha256": build_authoritative_state_reference(
+                    state, state_path=config.state_path
+                ).sha256(),
+                "instruction_manifest_sha256": "a" * 64,
+                "run_directory": str(run_dir),
+                "working_directory": str(tmp_path),
+                "command_sha256": autoresearch_runs.command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=manifest_path, run_dir=run_dir, runs_root=runs_root, command=command
+    )
+    autoresearch_runs.start_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        pid=999_999,
+        systemd_unit="openclaw-long-task-1-1.service",
+    )
+    detached = FakeDetachedRunController(runs_root=runs_root)
+    fake = FakeOpenClaw()
+
+    # Act
+    result = AutoresearchControl(
+        config,
+        task_gateway=fake,
+        service_controller=FakeSupervisorService([]),
+        detached_run_controller=detached,
+        runs_root=runs_root,
+    ).stop()
+
+    # Assert
+    assert detached.stopped_units == ["openclaw-long-task-1-1.service"]
+    assert result.stopped_detached_run_directories == (str(run_dir),)
+    assert any(method == "sessions.delete" for method, _ in fake.rpc_calls)
+
+
+def test_stop_waits_for_a_state_bound_manifest_to_publish_its_running_status(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    # Arrange
+    config, tmp_path = control_env
+    config = replace(
+        config,
+        detached_stop_timeout_seconds=1.0,
+        detached_stop_poll_seconds=0.001,
+        detached_stop_quiescence_seconds=0.001,
+    )
+    waiting_run_dir = _prepare_state_bound_detached_run(
+        config,
+        tmp_path,
+        name="waiting-launch",
+        unit="openclaw-long-task-2-2.service",
+        start=False,
+    )
+    _prepare_state_bound_detached_run(
+        config,
+        tmp_path,
+        name="seed-launch",
+        unit="openclaw-long-task-1-1.service",
+        start=True,
+    )
+
+    def publish_waiting_status() -> None:
+        autoresearch_runs.start_run(
+            run_dir=waiting_run_dir,
+            runs_root=config.runs_root,
+            pid=999_998,
+            systemd_unit="openclaw-long-task-2-2.service",
+        )
+
+    detached = FakeDetachedRunController(
+        runs_root=config.runs_root,
+        on_unit_check=publish_waiting_status,
+    )
+
+    # Act
+    result = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([]),
+        detached_run_controller=detached,
+    ).stop()
+
+    # Assert
+    assert detached.stopped_units == [
+        "openclaw-long-task-1-1.service",
+        "openclaw-long-task-2-2.service",
+    ]
+    assert result.stopped_detached_run_directories == (
+        str(config.runs_root / "seed-launch"),
+        str(waiting_run_dir),
+    )
+
+
+def test_stop_rescans_for_a_launcher_that_appears_after_an_empty_scan(
+    control_env: tuple[ControlConfig, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    config, tmp_path = control_env
+    config = replace(
+        config,
+        detached_stop_timeout_seconds=1.0,
+        detached_stop_poll_seconds=0.001,
+        detached_stop_quiescence_seconds=0.002,
+    )
+    launched = False
+
+    def publish_after_first_scan(_seconds: float) -> None:
+        nonlocal launched
+        if launched:
+            return
+        launched = True
+        _prepare_state_bound_detached_run(
+            config,
+            tmp_path,
+            name="late-launch",
+            unit="openclaw-long-task-3-3.service",
+            start=True,
+        )
+
+    monkeypatch.setattr("gateway.autoresearch_control.time.sleep", publish_after_first_scan)
+    detached = FakeDetachedRunController(runs_root=config.runs_root)
+
+    # Act
+    result = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([]),
+        detached_run_controller=detached,
+    ).stop()
+
+    # Assert
+    assert detached.stopped_units == ["openclaw-long-task-3-3.service"]
+    assert result.stopped_detached_run_directories == (str(config.runs_root / "late-launch"),)
+
+
+def test_stop_disables_and_cancels_before_failing_closed_on_a_malformed_detached_record(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    # Arrange
+    config, _ = control_env
+    (config.runs_root / "malformed").mkdir(parents=True)
+    (config.runs_root / "malformed" / "manifest.json").write_text("{}", encoding="utf-8")
+    events: list[str] = []
+    fake = FakeOpenClaw(
+        tasks=[
+            {
+                "taskId": "owned",
+                "id": "owned",
+                "agentId": "reviewer",
+                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+                "childSessionKey": "agent:reviewer:task-child",
+            }
+        ],
+        events=events,
+    )
+
+    # Act / Assert
+    with pytest.raises(ControlError, match="malformed detached run record"):
+        AutoresearchControl(
+            config,
+            task_gateway=fake,
+            service_controller=FakeSupervisorService(events),
+        ).stop()
+
+    assert events == ["service:stop", "rpc:list", "rpc:cancel"]
+
+
+def test_stop_reads_and_cancels_tasks_after_stopping_the_supervisor(
     control_env: tuple[ControlConfig, Path],
 ) -> None:
     config, _ = control_env
@@ -692,7 +1078,7 @@ def test_stop_revalidates_tasks_after_stopping_the_supervisor(
         config, task_gateway=fake, service_controller=FakeSupervisorService(events)
     ).stop()
 
-    assert events[:4] == ["rpc:list", "service:stop", "rpc:list", "rpc:cancel"]
+    assert events[:4] == ["service:stop", "rpc:list", "rpc:cancel", "rpc:delete"]
 
 
 def test_stop_rejects_a_cancel_response_with_a_mismatched_returned_task(

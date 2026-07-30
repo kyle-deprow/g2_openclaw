@@ -1229,6 +1229,14 @@ class AutoresearchSupervisor:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_matching_detached_run")
         if latest.status.state is RunState.SUCCEEDED:
             return None
+        if latest.status.failure_classification is RunFailureClassification.OPERATOR_STOPPED:
+            return self._persistent_control_plane_alert(
+                key=(
+                    "interrupted-detached-verification:"
+                    f"{state.iteration}:{state.phase.value}:{state_reference_sha256}"
+                ),
+                reason="interrupted_detached_verification_requires_operator_recovery",
+            )
         if state.mode is not ResearchMode.ALPHA_RESEARCH:
             return self._persistent_control_plane_alert(
                 key=f"run-record-mode:{state.iteration}:{state.phase.value}:{state_reference_sha256}",

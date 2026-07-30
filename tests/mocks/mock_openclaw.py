@@ -74,13 +74,19 @@ async def handler(ws: ServerConnection) -> None:
             )
 
             # Stream assistant deltas
-            for delta in deltas:
+            for seq, delta in enumerate(deltas, start=1):
                 await ws.send(
                     json.dumps(
                         {
                             "type": "event",
                             "event": "agent",
-                            "payload": {"stream": "assistant", "delta": delta},
+                            "payload": {
+                                "runId": "mock-run-1",
+                                "seq": seq,
+                                "stream": "assistant",
+                                "ts": seq,
+                                "data": {"delta": delta},
+                            },
                         }
                     )
                 )
@@ -92,7 +98,13 @@ async def handler(ws: ServerConnection) -> None:
                     {
                         "type": "event",
                         "event": "agent",
-                        "payload": {"stream": "lifecycle", "phase": "end"},
+                        "payload": {
+                            "runId": "mock-run-1",
+                            "seq": len(deltas) + 1,
+                            "stream": "lifecycle",
+                            "ts": len(deltas) + 1,
+                            "data": {"phase": "end"},
+                        },
                     }
                 )
             )

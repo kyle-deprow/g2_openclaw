@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -16,6 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
+import gateway.autoresearch_runs as detached_runs
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
@@ -25,6 +27,7 @@ from gateway.autoresearch_runner import (
     AutoresearchState,
     AutoresearchValidationContext,
     AutoresearchValidationError,
+    build_authoritative_state_reference,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -42,6 +45,7 @@ from gateway.autoresearch_supervisor import (
     reconcile_relevant_running_tasks,
     reset_recovery_checkpoint_for_manual_wake,
 )
+from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
 
 
 class ServiceCommandRunner(Protocol):
@@ -59,6 +63,9 @@ DEFAULT_SERVICE_CONTROL_COMMAND = ("systemctl", "--user")
 DEFAULT_WAKE_LOCK_PATH = Path.home() / ".openclaw" / "autoresearch" / "control-wake.lock"
 DEFAULT_WAKE_CLAIM_PATH = Path.home() / ".openclaw" / "autoresearch" / "control-wake.json"
 DEFAULT_WAKE_CLAIM_TTL_SECONDS = 300.0
+DEFAULT_DETACHED_STOP_TIMEOUT_SECONDS = 20.0
+DEFAULT_DETACHED_STOP_POLL_SECONDS = 0.1
+DEFAULT_DETACHED_STOP_QUIESCENCE_SECONDS = 0.25
 
 
 class SupervisorServiceController(Protocol):
@@ -69,6 +76,16 @@ class SupervisorServiceController(Protocol):
     def stop(self) -> None: ...
 
     def is_active(self) -> bool: ...
+
+
+class DetachedRunController(Protocol):
+    """Stops and verifies only a manifest-bound transient user unit."""
+
+    def stop_unit(self, unit: str) -> None: ...
+
+    def is_active(self, unit: str) -> bool: ...
+
+    def is_pid_alive(self, pid: int | None) -> bool: ...
 
 
 def _run_default_command(
@@ -127,6 +144,49 @@ class SystemdSupervisorServiceController:
         return result.stdout.strip() or result.stderr.strip() or "no output"
 
 
+class SystemdDetachedRunController:
+    """Uses exact transient-unit names from sealed detached records only."""
+
+    def __init__(self, run_command: ServiceCommandRunner) -> None:
+        self._run_command = run_command
+
+    def stop_unit(self, unit: str) -> None:
+        result = self._run(("systemctl", "--user", "stop", unit))
+        if result.returncode != 0:
+            raise ControlError(f"detached unit stop failed for {unit}: {self._output(result)}")
+
+    def is_active(self, unit: str) -> bool:
+        try:
+            return systemd_unit_is_active(unit, run_command=self._run)
+        except SystemdUnitStateError as exc:
+            raise ControlError(f"detached unit status failed for {unit}: {exc}") from exc
+
+    def is_pid_alive(self, pid: int | None) -> bool:
+        if pid is None:
+            return False
+        try:
+            raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise ControlError(f"failed to inspect detached pid {pid}: {exc}") from exc
+        closing = raw.rfind(")")
+        fields = raw[closing + 1 :].split() if closing >= 0 else []
+        if not fields:
+            raise ControlError(f"malformed process stat for detached pid {pid}")
+        return fields[0] != "Z"
+
+    def _run(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        try:
+            return self._run_command(list(command), check=False, capture_output=True, text=True)
+        except OSError as exc:
+            raise ControlError(f"failed to execute detached unit command: {exc}") from exc
+
+    @staticmethod
+    def _output(result: subprocess.CompletedProcess[str]) -> str:
+        return result.stdout.strip() or result.stderr.strip() or "no output"
+
+
 @dataclass(frozen=True, slots=True)
 class ControlConfig:
     state_path: Path = DEFAULT_STATE_PATH
@@ -138,6 +198,10 @@ class ControlConfig:
     wake_claim_path: Path = DEFAULT_WAKE_CLAIM_PATH
     wake_claim_ttl_seconds: float = DEFAULT_WAKE_CLAIM_TTL_SECONDS
     readiness_manifest_path: Path = DEFAULT_PLATFORM_READINESS_PATH
+    runs_root: Path = detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT
+    detached_stop_timeout_seconds: float = DEFAULT_DETACHED_STOP_TIMEOUT_SECONDS
+    detached_stop_poll_seconds: float = DEFAULT_DETACHED_STOP_POLL_SECONDS
+    detached_stop_quiescence_seconds: float = DEFAULT_DETACHED_STOP_QUIESCENCE_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +226,7 @@ class ControlStatus:
 class StopResult:
     cancelled_task_ids: tuple[str, ...]
     deleted_session: bool
+    stopped_detached_run_directories: tuple[str, ...] = ()
 
 
 class AutoresearchControl:
@@ -174,6 +239,8 @@ class AutoresearchControl:
         service_command_runner: ServiceCommandRunner | None = None,
         task_gateway: TaskGateway | None = None,
         service_controller: SupervisorServiceController | None = None,
+        detached_run_controller: DetachedRunController | None = None,
+        runs_root: Path | None = None,
     ) -> None:
         self.config = config or ControlConfig()
         self._rpc = OpenClawRPC(task_gateway)
@@ -185,6 +252,10 @@ class AutoresearchControl:
             service_name=self.config.supervisor_service_name,
             run_command=service_run_command,
         )
+        self._detached_run_controller = detached_run_controller or SystemdDetachedRunController(
+            service_run_command
+        )
+        self._runs_root = self.config.runs_root if runs_root is None else runs_root
 
     def wake(self) -> str:
         with self._wake_lock():
@@ -358,11 +429,8 @@ class AutoresearchControl:
 
     def stop(self) -> StopResult:
         with self._wake_lock():
-            # Validate the live task schema and ownership before disabling recovery.
-            self._owned_running_tasks()
+            # Freeze new supervisor work before inspecting records that may be mid-launch.
             self._service_controller.stop()
-            # Re-read after the supervisor is stopped so a task launched during the
-            # preflight window is included in cancellation.
             owned_tasks = self._owned_running_tasks()
             task_ids = tuple(self._task_id(task) for task in owned_tasks)
             for task_id in task_ids:
@@ -370,12 +438,154 @@ class AutoresearchControl:
                     self._rpc.cancel_task(task_id=task_id)
                 except SupervisorError as exc:
                     raise ControlError(f"failed to cancel owned task {task_id}: {exc}") from exc
+            state = self._load_state()
+            stopped_directories = self._stop_detached_runs(state)
             try:
                 deleted_session = self._rpc.delete_owner_session()
             except SupervisorError as exc:
                 raise ControlError(f"failed to delete autoresearch owner session: {exc}") from exc
             self._clear_wake_claim()
-            return StopResult(cancelled_task_ids=task_ids, deleted_session=deleted_session)
+            return StopResult(
+                cancelled_task_ids=task_ids,
+                deleted_session=deleted_session,
+                stopped_detached_run_directories=stopped_directories,
+            )
+
+    def _owned_detached_launches(
+        self, state: AutoresearchState
+    ) -> tuple[tuple[detached_runs.RunRecord, ...], tuple[Path, ...]]:
+        """Return state-bound running records and manifest-only launch windows."""
+        state_reference = build_authoritative_state_reference(
+            state, state_path=self.config.state_path
+        ).sha256()
+        try:
+            root_metadata = self._runs_root.lstat()
+        except FileNotFoundError:
+            return (), ()
+        except OSError as exc:
+            raise ControlError(f"cannot inspect detached runs root: {exc}") from exc
+        if not root_metadata or self._runs_root.is_symlink() or not self._runs_root.is_dir():
+            raise ControlError("detached runs root must be a non-symlink directory")
+        records: list[detached_runs.RunRecord] = []
+        pending_manifest_directories: list[Path] = []
+        units: set[str] = set()
+        for directory, child_directories, files in os.walk(self._runs_root, followlinks=False):
+            child_directories.sort()
+            files.sort()
+            parent = Path(directory)
+            if any((parent / child).is_symlink() for child in child_directories):
+                raise ControlError("symlinked detached run directory prevents safe stop")
+            if "manifest.json" not in files:
+                continue
+            try:
+                canonical_directory, manifest, _digest = detached_runs._load_manifest(
+                    parent, self._runs_root
+                )
+            except detached_runs.AutoresearchRunRecordError as exc:
+                raise ControlError(
+                    f"malformed detached run record prevents safe stop: {parent}: {exc}"
+                ) from exc
+            if (
+                manifest.iteration != state.iteration
+                or manifest.phase is not state.phase
+                or manifest.state_reference_sha256 != state_reference
+            ):
+                continue
+            status_path = canonical_directory / "status.json"
+            if not status_path.exists():
+                if status_path.is_symlink():
+                    raise ControlError("symlinked detached status prevents safe stop")
+                pending_manifest_directories.append(canonical_directory)
+                continue
+            try:
+                record = detached_runs.read_run_record(
+                    run_dir=canonical_directory, runs_root=self._runs_root
+                )
+            except detached_runs.AutoresearchRunRecordError as exc:
+                raise ControlError(
+                    f"malformed detached run record prevents safe stop: {parent}: {exc}"
+                ) from exc
+            if record.status.state is not detached_runs.RunState.RUNNING:
+                continue
+            unit = record.status.systemd_unit
+            if (
+                unit is None
+                or re.fullmatch(r"openclaw-long-task-[0-9]+-[0-9]+\.service", unit) is None
+            ):
+                raise ControlError("owned detached run has an unsafe systemd unit identity")
+            if unit in units:
+                raise ControlError("multiple owned detached runs claim the same systemd unit")
+            units.add(unit)
+            records.append(record)
+        return tuple(records), tuple(pending_manifest_directories)
+
+    def _stop_detached_runs(self, state: AutoresearchState) -> tuple[str, ...]:
+        if (
+            self.config.detached_stop_timeout_seconds <= 0
+            or self.config.detached_stop_poll_seconds <= 0
+            or self.config.detached_stop_quiescence_seconds <= 0
+        ):
+            raise ControlError(
+                "detached stop timeout, poll, and quiescence intervals must be positive"
+            )
+        deadline = time.monotonic() + self.config.detached_stop_timeout_seconds
+        stopped_units: dict[Path, str] = {}
+        quiescent_since: float | None = None
+        while True:
+            running, pending = self._owned_detached_launches(state)
+            for record in running:
+                unit = record.status.systemd_unit
+                assert unit is not None
+                existing_unit = stopped_units.get(record.run_directory)
+                if existing_unit is not None and existing_unit != unit:
+                    raise ControlError("owned detached run changed its systemd unit identity")
+                if existing_unit is None:
+                    self._detached_run_controller.stop_unit(unit)
+                    stopped_units[record.run_directory] = unit
+
+            terminal_pending = False
+            for run_directory, unit in stopped_units.items():
+                try:
+                    record = detached_runs.read_run_record(
+                        run_dir=run_directory, runs_root=self._runs_root
+                    )
+                except detached_runs.AutoresearchRunRecordError as exc:
+                    raise ControlError(
+                        f"owned detached run became unreadable during stop: {run_directory}: {exc}"
+                    ) from exc
+                status = record.status
+                if status.systemd_unit != unit:
+                    raise ControlError("owned detached run changed its systemd unit identity")
+                if status.state is detached_runs.RunState.RUNNING:
+                    terminal_pending = True
+                    continue
+                if (
+                    status.state is not detached_runs.RunState.FAILED
+                    or status.exit_code != 143
+                    or status.signal_number is not None
+                    or status.failure_classification
+                    is not detached_runs.RunFailureClassification.OPERATOR_STOPPED
+                ):
+                    raise ControlError(
+                        "owned detached run did not seal the required operator_stopped "
+                        "terminal status"
+                    )
+                if self._detached_run_controller.is_active(
+                    unit
+                ) or self._detached_run_controller.is_pid_alive(status.pid):
+                    terminal_pending = True
+
+            now = time.monotonic()
+            if not running and not pending and not terminal_pending:
+                if quiescent_since is None:
+                    quiescent_since = now
+                elif now - quiescent_since >= self.config.detached_stop_quiescence_seconds:
+                    return tuple(str(directory) for directory in stopped_units)
+            else:
+                quiescent_since = None
+            if now >= deadline:
+                raise ControlError("timed out waiting for owned detached runs to quiesce")
+            time.sleep(self.config.detached_stop_poll_seconds)
 
     def _state_material(self) -> str:
         try:

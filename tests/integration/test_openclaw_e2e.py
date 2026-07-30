@@ -12,7 +12,7 @@ import contextlib
 import json
 import secrets
 import socket
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, cast
 
 import numpy as np
@@ -29,6 +29,32 @@ from gateway.transcriber import Transcriber
 # ---------------------------------------------------------------------------
 
 TIMEOUT = 10.0
+
+
+def _agent_event(
+    *,
+    run_id: str,
+    seq: int,
+    stream: str,
+    data: Mapping[str, object],
+    optional_fields: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build an OpenClaw 2026.7.1 agent event frame."""
+    payload: dict[str, object] = {
+        "runId": run_id,
+        "seq": seq,
+        "stream": stream,
+        "ts": seq,
+        "data": dict(data),
+    }
+    if optional_fields is not None:
+        payload.update(optional_fields)
+
+    return {
+        "type": "event",
+        "event": "agent",
+        "payload": payload,
+    }
 
 
 async def _recv(ws: websockets.ClientConnection) -> dict[str, Any]:
@@ -164,24 +190,44 @@ async def _standard_oc_handler(ws: websockets.ServerConnection) -> None:
                     }
                 )
             )
-            for delta in ["Hello ", "world"]:
+            for seq, delta in enumerate(["Hello ", "world"], start=1):
+                if delta == "Hello ":
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="foreign-run",
+                                seq=1,
+                                stream="assistant",
+                                data={"delta": "ignore this"},
+                            )
+                        )
+                    )
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {"stream": "assistant", "delta": delta},
-                        }
+                        _agent_event(
+                            run_id="run-1",
+                            seq=seq,
+                            stream="assistant",
+                            data={"delta": delta},
+                            optional_fields={
+                                "sessionKey": "agent:main:g2",
+                                "sessionId": "session-1",
+                                "agentId": "main",
+                                "spawnedBy": "agent:main:parent",
+                                "isHeartbeat": False,
+                            },
+                        )
                     )
                 )
                 await asyncio.sleep(0.01)
             await ws.send(
                 json.dumps(
-                    {
-                        "type": "event",
-                        "event": "agent",
-                        "payload": {"stream": "lifecycle", "phase": "end"},
-                    }
+                    _agent_event(
+                        run_id="run-1",
+                        seq=3,
+                        stream="lifecycle",
+                        data={"phase": "end"},
+                    )
                 )
             )
 
@@ -212,11 +258,12 @@ async def _long_response_oc_handler(ws: websockets.ServerConnection) -> None:
                 delta = f"D{i:03d}-" + "x" * 45  # exactly 50 chars
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {"stream": "assistant", "delta": delta},
-                        }
+                        _agent_event(
+                            run_id="run-long",
+                            seq=i + 1,
+                            stream="assistant",
+                            data={"delta": delta},
+                        )
                     )
                 )
                 # Small sleep every 10 deltas to avoid overwhelming the loop
@@ -224,17 +271,18 @@ async def _long_response_oc_handler(ws: websockets.ServerConnection) -> None:
                     await asyncio.sleep(0.01)
             await ws.send(
                 json.dumps(
-                    {
-                        "type": "event",
-                        "event": "agent",
-                        "payload": {"stream": "lifecycle", "phase": "end"},
-                    }
+                    _agent_event(
+                        run_id="run-long",
+                        seq=101,
+                        stream="lifecycle",
+                        data={"phase": "end"},
+                    )
                 )
             )
 
 
 async def _hanging_oc_handler(ws: websockets.ServerConnection) -> None:
-    """Accepts agent request but never sends deltas — simulates a hang."""
+    """Sends only foreign terminal events, then leaves the accepted run pending."""
     await _send_connect_challenge(ws)
     async for raw in ws:
         msg = json.loads(raw)
@@ -255,7 +303,27 @@ async def _hanging_oc_handler(ws: websockets.ServerConnection) -> None:
                     }
                 )
             )
-            # Hang forever — never send deltas or lifecycle
+            await ws.send(
+                json.dumps(
+                    _agent_event(
+                        run_id="foreign-run",
+                        seq=1,
+                        stream="lifecycle",
+                        data={"phase": "end"},
+                    )
+                )
+            )
+            await ws.send(
+                json.dumps(
+                    _agent_event(
+                        run_id="foreign-run",
+                        seq=2,
+                        stream="lifecycle",
+                        data={"phase": "error", "error": "foreign failure"},
+                    )
+                )
+            )
+            # The accepted run has no delta or terminal event, so the gateway must timeout.
             await asyncio.sleep(300)
 
 
@@ -281,29 +349,27 @@ async def _error_mid_stream_oc_handler(ws: websockets.ServerConnection) -> None:
                     }
                 )
             )
-            for delta in ["partial ", "response"]:
+            for seq, delta in enumerate(["partial ", "response"], start=1):
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {"stream": "assistant", "delta": delta},
-                        }
+                        _agent_event(
+                            run_id="run-err",
+                            seq=seq,
+                            stream="assistant",
+                            data={"delta": delta},
+                        )
                     )
                 )
                 await asyncio.sleep(0.01)
             # Lifecycle error
             await ws.send(
                 json.dumps(
-                    {
-                        "type": "event",
-                        "event": "agent",
-                        "payload": {
-                            "stream": "lifecycle",
-                            "phase": "error",
-                            "error": "model exploded",
-                        },
-                    }
+                    _agent_event(
+                        run_id="run-err",
+                        seq=3,
+                        stream="lifecycle",
+                        data={"phase": "error", "error": "model exploded"},
+                    )
                 )
             )
 
@@ -719,11 +785,12 @@ async def _empty_response_oc_handler(ws: websockets.ServerConnection) -> None:
             # No deltas — immediate lifecycle end
             await ws.send(
                 json.dumps(
-                    {
-                        "type": "event",
-                        "event": "agent",
-                        "payload": {"stream": "lifecycle", "phase": "end"},
-                    }
+                    _agent_event(
+                        run_id="run-empty",
+                        seq=1,
+                        stream="lifecycle",
+                        data={"phase": "end"},
+                    )
                 )
             )
 
@@ -791,43 +858,36 @@ class TestRecoveryAfterError:
                         # First request: lifecycle error
                         await ws.send(
                             json.dumps(
-                                {
-                                    "type": "event",
-                                    "event": "agent",
-                                    "payload": {
-                                        "stream": "lifecycle",
-                                        "phase": "error",
-                                        "error": "temporary failure",
-                                    },
-                                }
+                                _agent_event(
+                                    run_id=f"run-{current}",
+                                    seq=1,
+                                    stream="lifecycle",
+                                    data={"phase": "error", "error": "temporary failure"},
+                                )
                             )
                         )
                     else:
                         # Subsequent requests: normal response
-                        for delta in ["Recovered ", "OK"]:
+                        for seq, delta in enumerate(["Recovered ", "OK"], start=1):
                             await ws.send(
                                 json.dumps(
-                                    {
-                                        "type": "event",
-                                        "event": "agent",
-                                        "payload": {
-                                            "stream": "assistant",
-                                            "delta": delta,
-                                        },
-                                    }
+                                    _agent_event(
+                                        run_id=f"run-{current}",
+                                        seq=seq,
+                                        stream="assistant",
+                                        data={"delta": delta},
+                                    )
                                 )
                             )
                             await asyncio.sleep(0.01)
                         await ws.send(
                             json.dumps(
-                                {
-                                    "type": "event",
-                                    "event": "agent",
-                                    "payload": {
-                                        "stream": "lifecycle",
-                                        "phase": "end",
-                                    },
-                                }
+                                _agent_event(
+                                    run_id=f"run-{current}",
+                                    seq=3,
+                                    stream="lifecycle",
+                                    data={"phase": "end"},
+                                )
                             )
                         )
 

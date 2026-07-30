@@ -5,12 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from typing import Any
+from collections.abc import Mapping
 
 import pytest
 import websockets
 from gateway.device_identity import DeviceIdentity, _generate_identity
-from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
+from gateway.openclaw_client import (
+    OpenClawClient,
+    OpenClawError,
+    OpenClawTransportError,
+    _parse_agent_event,
+)
 from websockets import ServerConnection
 from websockets.asyncio.server import Server
 
@@ -25,6 +30,33 @@ pytestmark = pytest.mark.asyncio
 def _make_test_identity() -> DeviceIdentity:
     """Generate a throwaway device identity for testing."""
     return _generate_identity()
+
+
+def _agent_event(
+    *,
+    run_id: str,
+    seq: object,
+    stream: str,
+    ts: object,
+    data: Mapping[str, object],
+    optional_fields: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build an OpenClaw 2026.7.1 agent event frame."""
+    payload: dict[str, object] = {
+        "runId": run_id,
+        "seq": seq,
+        "stream": stream,
+        "ts": ts,
+        "data": dict(data),
+    }
+    if optional_fields is not None:
+        payload.update(optional_fields)
+
+    return {
+        "type": "event",
+        "event": "agent",
+        "payload": payload,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -99,14 +131,13 @@ async def _mock_openclaw_handler(
             if error_on_agent:
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {
-                                "stream": "lifecycle",
-                                "data": {"phase": "error", "error": "model crashed"},
-                            },
-                        }
+                        _agent_event(
+                            run_id="mock-run-1",
+                            seq=1,
+                            stream="lifecycle",
+                            ts=1,
+                            data={"phase": "error", "error": "model crashed"},
+                        )
                     )
                 )
                 return
@@ -114,44 +145,64 @@ async def _mock_openclaw_handler(
             if disconnect_mid_stream:
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {"stream": "assistant", "data": {"delta": deltas[0]}},
-                        }
+                        _agent_event(
+                            run_id="mock-run-1",
+                            seq=1,
+                            stream="assistant",
+                            ts=1,
+                            data={"delta": deltas[0]},
+                        )
                     )
                 )
                 await ws.close()
                 return
 
-            for d in deltas:
+            for seq, delta in enumerate(deltas, start=1):
                 await ws.send(
                     json.dumps(
-                        {
-                            "type": "event",
-                            "event": "agent",
-                            "payload": {"stream": "assistant", "data": {"delta": d}},
-                        }
+                        _agent_event(
+                            run_id="mock-run-1",
+                            seq=seq,
+                            stream="assistant",
+                            ts=seq,
+                            data={"delta": delta},
+                        )
                     )
                 )
                 await asyncio.sleep(0.01)
 
             await ws.send(
                 json.dumps(
-                    {
-                        "type": "event",
-                        "event": "agent",
-                        "payload": {"stream": "lifecycle", "data": {"phase": "end"}},
-                    }
+                    _agent_event(
+                        run_id="mock-run-1",
+                        seq=len(deltas) + 1,
+                        stream="lifecycle",
+                        ts=len(deltas) + 1,
+                        data={"phase": "end"},
+                    )
                 )
             )
 
 
-async def _start_mock_server(**kwargs: Any) -> tuple[Server, int]:
+async def _start_mock_server(
+    *,
+    auth_ok: bool = True,
+    deltas: list[str] | None = None,
+    error_on_agent: bool = False,
+    disconnect_mid_stream: bool = False,
+    send_challenge: bool = True,
+) -> tuple[Server, int]:
     """Start a mock OpenClaw server on an ephemeral port. Returns (server, port)."""
 
     async def handler(ws: ServerConnection) -> None:
-        await _mock_openclaw_handler(ws, **kwargs)
+        await _mock_openclaw_handler(
+            ws,
+            auth_ok=auth_ok,
+            deltas=deltas,
+            error_on_agent=error_on_agent,
+            disconnect_mid_stream=disconnect_mid_stream,
+            send_challenge=send_challenge,
+        )
 
     server = await websockets.serve(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -345,7 +396,7 @@ class TestHappyPath:
 
     async def test_connect_sends_device_block_and_scopes(self) -> None:
         """The connect request includes device identity, role, and scopes."""
-        captured: dict[str, Any] = {}
+        captured: dict[str, object] = {}
 
         async def handler(ws: ServerConnection) -> None:
             nonce = secrets.token_urlsafe(16)
@@ -375,6 +426,7 @@ class TestHappyPath:
             # Verify device block present
             assert "device" in captured
             device = captured["device"]
+            assert isinstance(device, Mapping)
             assert "id" in device
             assert "publicKey" in device
             assert "signature" in device
@@ -435,20 +487,24 @@ class TestBufferedEvents:
                     # Send deltas BEFORE the res frame
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "assistant", "data": {"delta": "early1 "}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-1",
+                                seq=1,
+                                stream="assistant",
+                                ts=1,
+                                data={"delta": "early1 "},
+                            )
                         )
                     )
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "assistant", "data": {"delta": "early2 "}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-1",
+                                seq=2,
+                                stream="assistant",
+                                ts=2,
+                                data={"delta": "early2 "},
+                            )
                         )
                     )
                     # Now send the res ack
@@ -465,20 +521,24 @@ class TestBufferedEvents:
                     # Then more deltas after res
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "assistant", "data": {"delta": "late "}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-1",
+                                seq=3,
+                                stream="assistant",
+                                ts=3,
+                                data={"delta": "late "},
+                            )
                         )
                     )
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "lifecycle", "data": {"phase": "end"}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-1",
+                                seq=4,
+                                stream="lifecycle",
+                                ts=4,
+                                data={"phase": "end"},
+                            )
                         )
                     )
 
@@ -518,20 +578,24 @@ class TestBufferedEvents:
                     # Send delta + lifecycle end BEFORE res
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "assistant", "data": {"delta": "fast!"}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-2",
+                                seq=1,
+                                stream="assistant",
+                                ts=1,
+                                data={"delta": "fast!"},
+                            )
                         )
                     )
                     await ws.send(
                         json.dumps(
-                            {
-                                "type": "event",
-                                "event": "agent",
-                                "payload": {"stream": "lifecycle", "data": {"phase": "end"}},
-                            }
+                            _agent_event(
+                                run_id="mock-run-2",
+                                seq=2,
+                                stream="lifecycle",
+                                ts=2,
+                                data={"phase": "end"},
+                            )
                         )
                     )
                     # Res comes after (client already got everything)
@@ -569,6 +633,750 @@ class TestAgentErrors:
                 async for _ in stream:
                     pass
             await client.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+
+class TestAgentRunCorrelation:
+    """Agent events are consumed only by the accepted agent run."""
+
+    @pytest.mark.parametrize(
+        "optional_fields",
+        [
+            {"spawnedBy": "agent:main:parent"},
+            {"isHeartbeat": True},
+            {"isHeartbeat": False},
+            {"sessionKey": "agent:main:g2"},
+            {"sessionId": "session-123"},
+            {"agentId": "main"},
+        ],
+    )
+    async def test_accepts_documented_or_emitted_optional_envelope_field(
+        self, optional_fields: Mapping[str, object]
+    ) -> None:
+        event = _agent_event(
+            run_id="current-run",
+            seq=0,
+            stream="assistant",
+            ts=0,
+            data={"delta": "valid"},
+            optional_fields=optional_fields,
+        )
+
+        parsed = _parse_agent_event(event)
+
+        assert parsed is not None
+
+    @pytest.mark.parametrize(
+        "optional_fields",
+        [
+            {"spawnedBy": ""},
+            {"spawnedBy": 1},
+            {"isHeartbeat": "true"},
+            {"isHeartbeat": 1},
+            {"sessionKey": ""},
+            {"sessionKey": 1},
+            {"sessionId": ""},
+            {"sessionId": 1},
+            {"agentId": ""},
+            {"agentId": 1},
+        ],
+    )
+    async def test_rejects_invalid_optional_envelope_field_type_or_constraint(
+        self, optional_fields: Mapping[str, object]
+    ) -> None:
+        event = _agent_event(
+            run_id="current-run",
+            seq=0,
+            stream="assistant",
+            ts=0,
+            data={"delta": "valid"},
+            optional_fields=optional_fields,
+        )
+
+        parsed = _parse_agent_event(event)
+
+        assert parsed is None
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("runId", ""),
+            ("runId", 1),
+            ("stream", ""),
+            ("stream", 1),
+            ("data", []),
+            ("data", "delta"),
+        ],
+    )
+    async def test_rejects_invalid_required_envelope_field(self, field: str, value: object) -> None:
+        payload: dict[str, object] = {
+            "runId": "current-run",
+            "seq": 0,
+            "stream": "assistant",
+            "ts": 0,
+            "data": {"delta": "valid"},
+        }
+        payload[field] = value
+        event = {"type": "event", "event": "agent", "payload": payload}
+
+        parsed = _parse_agent_event(event)
+
+        assert parsed is None
+
+    @pytest.mark.parametrize("required_field", ["runId", "seq", "stream", "ts", "data"])
+    async def test_rejects_missing_required_envelope_field(self, required_field: str) -> None:
+        payload: dict[str, object] = {
+            "runId": "current-run",
+            "seq": 0,
+            "stream": "assistant",
+            "ts": 0,
+            "data": {"delta": "valid"},
+        }
+        del payload[required_field]
+        event = {"type": "event", "event": "agent", "payload": payload}
+
+        parsed = _parse_agent_event(event)
+
+        assert parsed is None
+
+    @pytest.mark.parametrize(
+        "unknown_field",
+        ["unrecognized", "delta", "phase", "error"],
+    )
+    async def test_rejects_unknown_or_flattened_envelope_field(self, unknown_field: str) -> None:
+        event = _agent_event(
+            run_id="current-run",
+            seq=0,
+            stream="assistant",
+            ts=0,
+            data={"delta": "valid"},
+            optional_fields={unknown_field: "value"},
+        )
+
+        parsed = _parse_agent_event(event)
+
+        assert parsed is None
+
+    @pytest.mark.parametrize(
+        ("ts", "is_accepted"),
+        [
+            (0, True),
+            (1, True),
+            (1.0, False),
+            (-1, False),
+            (True, False),
+            ("1", False),
+            (float("inf"), False),
+            (float("-inf"), False),
+            (float("nan"), False),
+        ],
+    )
+    async def test_timestamp_must_be_a_nonnegative_integer(
+        self, ts: object, is_accepted: bool
+    ) -> None:
+        event = _agent_event(
+            run_id="current-run", seq=0, stream="assistant", ts=ts, data={"delta": "valid"}
+        )
+
+        parsed = _parse_agent_event(event)
+
+        assert (parsed is not None) is is_accepted
+
+    @pytest.mark.parametrize(
+        ("seq", "is_accepted"),
+        [
+            (0, True),
+            (1, True),
+            (1.0, False),
+            (-1, False),
+            (True, False),
+            ("1", False),
+            (float("inf"), False),
+            (float("-inf"), False),
+            (float("nan"), False),
+        ],
+    )
+    async def test_sequence_must_be_a_nonnegative_integer(
+        self, seq: object, is_accepted: bool
+    ) -> None:
+        event = _agent_event(
+            run_id="current-run", seq=seq, stream="assistant", ts=0, data={"delta": "valid"}
+        )
+
+        parsed = _parse_agent_event(event)
+
+        assert (parsed is not None) is is_accepted
+
+    async def test_ignores_malformed_or_flattened_matching_events(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(json.dumps([]))
+                    malformed_payloads = [
+                        {
+                            "runId": "current-run",
+                            "stream": "assistant",
+                            "ts": 1,
+                            "data": {"delta": "missing-seq"},
+                        },
+                        {
+                            "runId": "current-run",
+                            "seq": -1,
+                            "stream": "assistant",
+                            "ts": 2,
+                            "data": {"delta": "negative-seq"},
+                        },
+                        {
+                            "runId": "current-run",
+                            "seq": 2,
+                            "ts": 3,
+                            "data": {"delta": "missing-stream"},
+                        },
+                        {
+                            "runId": "current-run",
+                            "seq": 3,
+                            "stream": "assistant",
+                            "data": {"delta": "missing-ts"},
+                        },
+                        {
+                            "runId": "current-run",
+                            "seq": 4,
+                            "stream": "assistant",
+                            "ts": 5,
+                        },
+                        {
+                            "runId": "current-run",
+                            "seq": 5,
+                            "stream": "lifecycle",
+                            "ts": 6,
+                            "phase": "end",
+                        },
+                    ]
+                    for payload in malformed_payloads:
+                        await ws.send(
+                            json.dumps({"type": "event", "event": "agent", "payload": payload})
+                        )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=6,
+                                stream="assistant",
+                                ts=7,
+                                data={"delta": "valid"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=7,
+                                stream="lifecycle",
+                                ts=8,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            collected = [delta async for delta in stream]
+
+            assert collected == ["valid"]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_foreign_terminal_events_timeout_and_close_the_socket(self) -> None:
+        socket_closed = asyncio.Event()
+
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="foreign-run",
+                                seq=1,
+                                stream="lifecycle",
+                                ts=1,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="foreign-run",
+                                seq=2,
+                                stream="lifecycle",
+                                ts=2,
+                                data={"phase": "error", "error": "foreign failure"},
+                            )
+                        )
+                    )
+                    await ws.wait_closed()
+                    socket_closed.set()
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+            stream = await client.send_message("Hi")
+
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(anext(stream), timeout=0.05)
+            await asyncio.wait_for(socket_closed.wait(), timeout=1.0)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_ignores_foreign_lifecycle_before_acceptance(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="other-run",
+                                seq=1,
+                                stream="lifecycle",
+                                ts=1,
+                                data={
+                                    "phase": "error",
+                                    "error": "agent run aborted for restart",
+                                    "aborted": True,
+                                    "stopReason": "restart",
+                                },
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=2,
+                                stream="assistant",
+                                ts=2,
+                                data={"delta": "current"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=3,
+                                stream="lifecycle",
+                                ts=3,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            collected = [delta async for delta in stream]
+
+            assert collected == ["current"]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_ignores_foreign_lifecycle_after_acceptance(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="other-run",
+                                seq=1,
+                                stream="lifecycle",
+                                ts=1,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="other-run",
+                                seq=2,
+                                stream="lifecycle",
+                                ts=2,
+                                data={
+                                    "phase": "error",
+                                    "error": "agent run aborted for restart",
+                                    "aborted": True,
+                                    "stopReason": "restart",
+                                },
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=3,
+                                stream="assistant",
+                                ts=3,
+                                data={"delta": "current"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=4,
+                                stream="lifecycle",
+                                ts=4,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            collected = [delta async for delta in stream]
+
+            assert collected == ["current"]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_ignores_foreign_or_missing_events_for_the_same_session(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    for seq, stream, data in (
+                        (1, "assistant", {"delta": "foreign"}),
+                        (2, "lifecycle", {"phase": "end"}),
+                        (3, "lifecycle", {"phase": "error", "error": "foreign failure"}),
+                    ):
+                        await ws.send(
+                            json.dumps(
+                                _agent_event(
+                                    run_id="other-run",
+                                    seq=seq,
+                                    stream=stream,
+                                    ts=seq,
+                                    data=data,
+                                )
+                            )
+                        )
+                    for seq, stream, data in (
+                        (4, "assistant", {"delta": "missing"}),
+                        (5, "lifecycle", {"phase": "end"}),
+                        (6, "lifecycle", {"phase": "error", "error": "missing failure"}),
+                    ):
+                        await ws.send(
+                            json.dumps(
+                                {
+                                    "type": "event",
+                                    "event": "agent",
+                                    "payload": {
+                                        "seq": seq,
+                                        "stream": stream,
+                                        "ts": seq,
+                                        "data": data,
+                                    },
+                                }
+                            )
+                        )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=7,
+                                stream="assistant",
+                                ts=7,
+                                data={"delta": "current"},
+                            )
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=8,
+                                stream="lifecycle",
+                                ts=8,
+                                data={"phase": "end"},
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            collected = [delta async for delta in stream]
+
+            assert collected == ["current"]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_matching_restart_abort_ends_cleanly(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=1,
+                                stream="lifecycle",
+                                ts=1,
+                                data={
+                                    "phase": "error",
+                                    "error": "agent run aborted for restart",
+                                    "aborted": True,
+                                    "stopReason": "restart",
+                                },
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            collected = [delta async for delta in stream]
+
+            assert collected == []
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_matching_error_with_restart_text_but_no_abort_fields_raises(self) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": {"runId": "current-run"},
+                            }
+                        )
+                    )
+                    await ws.send(
+                        json.dumps(
+                            _agent_event(
+                                run_id="current-run",
+                                seq=1,
+                                stream="lifecycle",
+                                ts=1,
+                                data={
+                                    "phase": "error",
+                                    "error": "agent run aborted for restart",
+                                },
+                            )
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            stream = await client.send_message("Hi")
+            with pytest.raises(OpenClawError, match="agent run aborted for restart"):
+                async for _ in stream:
+                    pass
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.parametrize("payload", [{}, {"runId": ""}, {"runId": " \t "}, {"runId": 1}])
+    async def test_rejects_an_accepted_response_without_a_valid_run_id(
+        self, payload: dict[str, object]
+    ) -> None:
+        async def handler(ws: ServerConnection) -> None:
+            await ws.send(
+                json.dumps(
+                    {"type": "event", "event": "connect.challenge", "payload": {"nonce": "nonce"}}
+                )
+            )
+            async for raw in ws:
+                message = json.loads(raw)
+                if message["method"] == "connect":
+                    await ws.send(
+                        json.dumps({"type": "res", "id": message["id"], "ok": True, "payload": {}})
+                    )
+                elif message["method"] == "agent":
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "type": "res",
+                                "id": message["id"],
+                                "ok": True,
+                                "payload": payload,
+                            }
+                        )
+                    )
+
+        server = await websockets.serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            client = _make_client(port)
+
+            with pytest.raises(OpenClawError, match="runId"):
+                await client.send_message("Hi")
         finally:
             server.close()
             await server.wait_closed()

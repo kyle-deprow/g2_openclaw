@@ -27,8 +27,13 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from urllib.parse import urlencode
+
+from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
+
+if TYPE_CHECKING:
+    from gateway.autoresearch_runs import RunRecord
 
 from gateway.autoresearch_panel_receipts import (
     PANEL_RECEIPT_MAX_BYTES,
@@ -60,8 +65,14 @@ AUTORESEARCH_LOCK_NAMESPACE = Path("/tmp") / f"g2-openclaw-autoresearch-locks-{o
 G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
 AUTORESEARCH_STATE_SCHEMA_VERSION = 4
 EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION = 2
+INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION = 3
 LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION = 1
 MAX_EXTERNAL_VERIFICATION_RETRY_ATTEMPT = 9
+OPENCLAW_LONG_TASK_UNIT_RE = re.compile(r"openclaw-long-task-[0-9]+-[0-9]+\.service\Z")
+INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR = (
+    "G2_OPENCLAW_OPERATOR_INTERRUPTED_VERIFICATION_RECOVERY"
+)
+INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_VALUE = "1"
 INSTRUCTION_SOURCE_MANIFEST_VERSION = "g2-openclaw-autoresearch-instruction-manifest-v3"
 INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN = "g2-openclaw.autoresearch.instruction-manifest"
 AUTHORITATIVE_STATE_REFERENCE_VERSION = "g2-openclaw-autoresearch-state-reference-v1"
@@ -4130,6 +4141,178 @@ class PhaseTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class InterruptedVerificationAttemptReceipt:
+    """Immutable proof that one exact detached verification attempt was stopped."""
+
+    expected_run_id: str
+    interrupted_attempt: int
+    implementation_commit: str
+    implementation_manifest_sha256: str
+    detached_run_directory: str
+    detached_run_manifest_sha256: str
+    detached_run_status_sha256: str
+    state_sha256: str
+    state_reference_sha256: str
+    instruction_manifest_sha256: str
+    prior_retry_receipt_sha256: str
+    prior_retry_receipt: ExternalVerificationRetryReceipt
+    verification_history_sha256: tuple[str, ...]
+    operator_reason: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise AutoresearchValidationError(
+                "unsupported interrupted verification attempt receipt schema_version"
+            )
+        if self.interrupted_attempt != 3:
+            raise AutoresearchValidationError(
+                "interrupted verification recovery accepts only the current v3 attempt"
+            )
+        if (
+            re.fullmatch(
+                rf"autoresearch-i[1-9][0-9]*-{self.implementation_commit[:12]}-v{self.interrupted_attempt}",
+                self.expected_run_id,
+            )
+            is None
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt expected_run_id is invalid"
+            )
+        if (
+            not isinstance(self.detached_run_directory, str)
+            or not Path(self.detached_run_directory).is_absolute()
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt detached_run_directory must be absolute"
+            )
+        if re.fullmatch(r"[0-9a-f]{7,64}", self.implementation_commit) is None:
+            raise AutoresearchValidationError(
+                "interrupted verification receipt implementation_commit is invalid"
+            )
+        for label, digest in (
+            ("implementation_manifest_sha256", self.implementation_manifest_sha256),
+            ("detached_run_manifest_sha256", self.detached_run_manifest_sha256),
+            ("detached_run_status_sha256", self.detached_run_status_sha256),
+            ("state_sha256", self.state_sha256),
+            ("state_reference_sha256", self.state_reference_sha256),
+            ("instruction_manifest_sha256", self.instruction_manifest_sha256),
+            ("prior_retry_receipt_sha256", self.prior_retry_receipt_sha256),
+        ):
+            _validate_sha256(digest, label=f"interrupted_verification_attempt_receipt.{label}")
+        if not isinstance(self.prior_retry_receipt, ExternalVerificationRetryReceipt):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires the immutable prior retry receipt"
+            )
+        if (
+            self.prior_retry_receipt.schema_version
+            != EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires a schema-v2 prior retry receipt"
+            )
+        if (
+            self.prior_retry_receipt.retry_attempt != self.interrupted_attempt
+            or self.prior_retry_receipt.expected_run_id != self.expected_run_id
+            or self.prior_retry_receipt.implementation_commit != self.implementation_commit
+            or self.prior_retry_receipt.manifest_sha256 != self.implementation_manifest_sha256
+            or self.prior_retry_receipt_sha256
+            != _canonical_json_digest(self.prior_retry_receipt.to_dict())
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt prior retry receipt binding is invalid"
+            )
+        if (
+            not isinstance(self.verification_history_sha256, tuple)
+            or len(self.verification_history_sha256) != 2
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires the ordered v1/v2 history"
+            )
+        for index, digest in enumerate(self.verification_history_sha256, start=1):
+            _validate_sha256(
+                digest,
+                label=(
+                    f"interrupted_verification_attempt_receipt.verification_history_sha256[{index}]"
+                ),
+            )
+        if not self.operator_reason or self.operator_reason.strip() != self.operator_reason:
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires a trimmed operator reason"
+            )
+
+    @classmethod
+    def from_dict(cls, raw: object) -> InterruptedVerificationAttemptReceipt:
+        data = _ensure_mapping(raw, label="interrupted_verification_attempt_receipt")
+        _require_exact_keys(
+            data,
+            label="interrupted_verification_attempt_receipt",
+            expected=(
+                "expected_run_id",
+                "interrupted_attempt",
+                "implementation_commit",
+                "implementation_manifest_sha256",
+                "detached_run_directory",
+                "detached_run_manifest_sha256",
+                "detached_run_status_sha256",
+                "state_sha256",
+                "state_reference_sha256",
+                "instruction_manifest_sha256",
+                "prior_retry_receipt_sha256",
+                "prior_retry_receipt",
+                "verification_history_sha256",
+                "operator_reason",
+                "schema_version",
+            ),
+        )
+        history = data["verification_history_sha256"]
+        if not isinstance(history, list):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt verification_history_sha256 must be a list"
+            )
+        return cls(
+            expected_run_id=_require_str(data, "expected_run_id"),
+            interrupted_attempt=_require_int(data, "interrupted_attempt"),
+            implementation_commit=_require_str(data, "implementation_commit"),
+            implementation_manifest_sha256=_require_sha256(data, "implementation_manifest_sha256"),
+            detached_run_directory=_require_str(data, "detached_run_directory"),
+            detached_run_manifest_sha256=_require_sha256(data, "detached_run_manifest_sha256"),
+            detached_run_status_sha256=_require_sha256(data, "detached_run_status_sha256"),
+            state_sha256=_require_sha256(data, "state_sha256"),
+            state_reference_sha256=_require_sha256(data, "state_reference_sha256"),
+            instruction_manifest_sha256=_require_sha256(data, "instruction_manifest_sha256"),
+            prior_retry_receipt_sha256=_require_sha256(data, "prior_retry_receipt_sha256"),
+            prior_retry_receipt=ExternalVerificationRetryReceipt.from_dict(
+                data["prior_retry_receipt"]
+            ),
+            verification_history_sha256=tuple(
+                _require_sha256({"value": digest}, "value") for digest in history
+            ),
+            operator_reason=_require_str(data, "operator_reason"),
+            schema_version=_require_int(data, "schema_version"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "expected_run_id": self.expected_run_id,
+            "interrupted_attempt": self.interrupted_attempt,
+            "implementation_commit": self.implementation_commit,
+            "implementation_manifest_sha256": self.implementation_manifest_sha256,
+            "detached_run_directory": self.detached_run_directory,
+            "detached_run_manifest_sha256": self.detached_run_manifest_sha256,
+            "detached_run_status_sha256": self.detached_run_status_sha256,
+            "state_sha256": self.state_sha256,
+            "state_reference_sha256": self.state_reference_sha256,
+            "instruction_manifest_sha256": self.instruction_manifest_sha256,
+            "prior_retry_receipt_sha256": self.prior_retry_receipt_sha256,
+            "prior_retry_receipt": self.prior_retry_receipt.to_dict(),
+            "verification_history_sha256": list(self.verification_history_sha256),
+            "operator_reason": self.operator_reason,
+            "schema_version": self.schema_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ExternalVerificationRetryReceipt:
     """One operator-authorized retry of an externally failed verification run."""
 
@@ -4143,12 +4326,14 @@ class ExternalVerificationRetryReceipt:
     readiness_snapshot_id: str
     operator_reason: str
     verification_history_sha256: tuple[str, ...] = field(default_factory=tuple)
+    interruption_history_sha256: tuple[str, ...] = field(default_factory=tuple)
     schema_version: int = EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         if self.schema_version not in {
             LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
             EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
         }:
             raise AutoresearchValidationError(
                 "unsupported external verification retry receipt schema_version"
@@ -4166,16 +4351,46 @@ class ExternalVerificationRetryReceipt:
                 "external verification retry receipt verification_history_sha256 must be a tuple"
             )
         if self.schema_version == LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
-            if self.retry_attempt != 2 or self.verification_history_sha256:
+            if (
+                self.retry_attempt != 2
+                or self.verification_history_sha256
+                or self.interruption_history_sha256
+            ):
                 raise AutoresearchValidationError(
                     "legacy external verification retry receipt only accepts the live v2 bootstrap"
                 )
-        else:
+        elif self.schema_version == EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
             if len(self.verification_history_sha256) != self.retry_attempt - 1:
                 raise AutoresearchValidationError(
                     "external verification retry receipt must bind every prior verification "
                     "artifact"
                 )
+            if self.interruption_history_sha256:
+                raise AutoresearchValidationError(
+                    "schema-v2 external verification retry receipt cannot bind interruptions"
+                )
+        else:
+            if not isinstance(self.interruption_history_sha256, tuple):
+                raise AutoresearchValidationError(
+                    "interrupted external verification retry receipt interruption "
+                    "history must be a tuple"
+                )
+            if (
+                len(self.verification_history_sha256) + len(self.interruption_history_sha256)
+                != self.retry_attempt - 1
+            ):
+                raise AutoresearchValidationError(
+                    "interrupted external verification retry receipt must bind every prior attempt"
+                )
+            for history_name, history in (
+                ("verification_history_sha256", self.verification_history_sha256),
+                ("interruption_history_sha256", self.interruption_history_sha256),
+            ):
+                for index, digest in enumerate(history, start=1):
+                    _validate_sha256(
+                        digest,
+                        label=f"external_verification_retry_receipt.{history_name}[{index}]",
+                    )
             for index, digest in enumerate(self.verification_history_sha256, start=1):
                 _validate_sha256(
                     digest,
@@ -4239,6 +4454,15 @@ class ExternalVerificationRetryReceipt:
                 _canonical_json_digest(artifact.to_dict())
                 for artifact in state.verification_history
             ),
+            interruption_history_sha256=tuple(
+                _canonical_json_digest(interruption.to_dict())
+                for interruption in state.interrupted_verification_history
+            ),
+            schema_version=(
+                INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+                if state.interrupted_verification_history
+                else EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+            ),
         )
 
     @classmethod
@@ -4257,9 +4481,18 @@ class ExternalVerificationRetryReceipt:
             "operator_reason",
             "schema_version",
         )
-        if schema_version == EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+        if schema_version in {
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
             expected = (*expected, "verification_history_sha256")
-        elif schema_version != LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+        if schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            expected = (*expected, "interruption_history_sha256")
+        if schema_version not in {
+            LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
             raise AutoresearchValidationError(
                 "unsupported external verification retry receipt schema_version"
             )
@@ -4285,6 +4518,14 @@ class ExternalVerificationRetryReceipt:
                 label=(f"external_verification_retry_receipt.verification_history_sha256[{index}]"),
             )
             history.append(digest)
+        interruptions_raw = data.get("interruption_history_sha256", [])
+        if not isinstance(interruptions_raw, list):
+            raise AutoresearchValidationError(
+                "external verification retry receipt interruption_history_sha256 must be a list"
+            )
+        interruptions = tuple(
+            _require_sha256({"value": digest}, "value") for digest in interruptions_raw
+        )
         return cls(
             expected_run_id=_require_str(data, "expected_run_id"),
             prior_verification_sha256=_require_sha256(data, "prior_verification_sha256"),
@@ -4296,6 +4537,7 @@ class ExternalVerificationRetryReceipt:
             readiness_snapshot_id=_require_str(data, "readiness_snapshot_id"),
             operator_reason=_require_str(data, "operator_reason"),
             verification_history_sha256=tuple(history),
+            interruption_history_sha256=interruptions,
             schema_version=schema_version,
         )
 
@@ -4312,8 +4554,13 @@ class ExternalVerificationRetryReceipt:
             "operator_reason": self.operator_reason,
             "schema_version": self.schema_version,
         }
-        if self.schema_version == EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+        if self.schema_version in {
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
             receipt["verification_history_sha256"] = list(self.verification_history_sha256)
+        if self.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            receipt["interruption_history_sha256"] = list(self.interruption_history_sha256)
         return receipt
 
 
@@ -4338,6 +4585,9 @@ class AutoresearchState:
     memory_verification_receipt: MemoryVerificationReceipt | None = None
     platform_readiness: ReadinessIdentity | None = None
     external_verification_retry_receipt: ExternalVerificationRetryReceipt | None = None
+    interrupted_verification_history: tuple[InterruptedVerificationAttemptReceipt, ...] = field(
+        default_factory=tuple
+    )
     suspended: bool = False
     suspension_reason: str | None = None
 
@@ -4402,34 +4652,36 @@ class AutoresearchState:
             raise AutoresearchValidationError(
                 "mode must be explicit in persisted autoresearch state"
             )
-        _require_exact_keys(
-            data,
-            label="autoresearch_state",
-            expected=(
-                "schema_version",
-                "phase",
-                "iteration",
-                "consensus_retry_count",
-                "verification_fix_attempts",
-                "setup",
-                "context_packet",
-                "debate_rounds",
-                "consensus_history",
-                "implementation_result",
-                "verification_history",
-                "review_history",
-                "fix_history",
-                "pending_fix_trigger",
-                "final_decision",
-                "memory_written",
-                "mode",
-                "memory_verification_receipt",
-                "platform_readiness",
-                "external_verification_retry_receipt",
-                "suspended",
-                "suspension_reason",
-            ),
+        expected_state_keys: tuple[str, ...] = (
+            "schema_version",
+            "phase",
+            "iteration",
+            "consensus_retry_count",
+            "verification_fix_attempts",
+            "setup",
+            "context_packet",
+            "debate_rounds",
+            "consensus_history",
+            "implementation_result",
+            "verification_history",
+            "review_history",
+            "fix_history",
+            "pending_fix_trigger",
+            "final_decision",
+            "memory_written",
+            "mode",
+            "memory_verification_receipt",
+            "platform_readiness",
+            "external_verification_retry_receipt",
+            "interrupted_verification_history",
+            "suspended",
+            "suspension_reason",
         )
+        if "interrupted_verification_history" not in data:
+            expected_state_keys = tuple(
+                key for key in expected_state_keys if key != "interrupted_verification_history"
+            )
+        _require_exact_keys(data, label="autoresearch_state", expected=expected_state_keys)
         mode_raw = data.get("mode")
         if mode_raw is not None and not isinstance(mode_raw, str):
             raise AutoresearchValidationError("mode must be a string or null")
@@ -4482,6 +4734,10 @@ class AutoresearchState:
             )
             if external_retry_raw is not None
             else None,
+            interrupted_verification_history=_parse_tuple(
+                "interrupted_verification_history",
+                InterruptedVerificationAttemptReceipt.from_dict,
+            ),
             suspended=_require_bool(data, "suspended") if "suspended" in data else False,
             suspension_reason=(
                 _require_str(data, "suspension_reason")
@@ -4493,7 +4749,7 @@ class AutoresearchState:
 
     def to_dict(self) -> dict[str, object]:
         verification_history = [artifact.to_dict() for artifact in self.verification_history]
-        return {
+        state: dict[str, object] = {
             "schema_version": AUTORESEARCH_STATE_SCHEMA_VERSION,
             "phase": self.phase.value,
             "iteration": self.iteration,
@@ -4529,6 +4785,11 @@ class AutoresearchState:
             "suspended": self.suspended,
             "suspension_reason": self.suspension_reason,
         }
+        if self.interrupted_verification_history:
+            state["interrupted_verification_history"] = [
+                receipt.to_dict() for receipt in self.interrupted_verification_history
+            ]
+        return state
 
 
 def _deterministic_quantipy_run_id(iteration: int, commit_sha: str, *, attempt: int) -> str:
@@ -4633,6 +4894,10 @@ def _validate_external_verification_retry_eligibility(state: AutoresearchState) 
 def _validate_external_verification_retry_receipt(state: AutoresearchState) -> None:
     receipt = state.external_verification_retry_receipt
     if receipt is None:
+        if state.interrupted_verification_history:
+            raise AutoresearchValidationError(
+                "interrupted verification history requires an external verification retry receipt"
+            )
         return
     if state.mode is not ResearchMode.ALPHA_RESEARCH or state.implementation_result is None:
         raise AutoresearchValidationError(
@@ -4660,6 +4925,90 @@ def _validate_external_verification_retry_receipt(state: AutoresearchState) -> N
         raise AutoresearchValidationError(
             "external verification retry receipt run ID does not bind the implementation"
         )
+    _validate_interrupted_verification_history(state, receipt)
+
+
+def _validate_interrupted_verification_history(
+    state: AutoresearchState,
+    receipt: ExternalVerificationRetryReceipt,
+) -> None:
+    """Validate the one supported, recorded gap between the v2 and v4 artifacts."""
+    interruptions = state.interrupted_verification_history
+    if not interruptions:
+        return
+    if len(interruptions) != 1 or receipt.retry_attempt < 4:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery accepts exactly one recorded v3 interruption"
+        )
+    interruption = interruptions[0]
+    implementation = state.implementation_result
+    assert implementation is not None
+    expected_v3 = _deterministic_quantipy_run_id(
+        state.iteration, implementation.commit_sha, attempt=3
+    )
+    history_sha256 = tuple(
+        _canonical_json_digest(artifact.to_dict()) for artifact in state.verification_history[:2]
+    )
+    if (
+        interruption.expected_run_id != expected_v3
+        or interruption.implementation_commit != implementation.commit_sha
+        or interruption.implementation_manifest_sha256 != implementation.experiment_manifest_sha256
+        or interruption.verification_history_sha256 != history_sha256
+        or receipt.interruption_history_sha256 != (_canonical_json_digest(interruption.to_dict()),)
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt topology does not bind the preserved v1/v2 history"
+        )
+    prior_receipt = interruption.prior_retry_receipt
+    if (
+        prior_receipt.expected_run_id != expected_v3
+        or prior_receipt.prior_verification_sha256 != history_sha256[-1]
+        or prior_receipt.retry_attempt != 3
+        or prior_receipt.implementation_commit != implementation.commit_sha
+        or prior_receipt.manifest_sha256 != implementation.experiment_manifest_sha256
+        or prior_receipt.verification_history_sha256 != history_sha256
+        or prior_receipt.readiness_manifest_id != receipt.readiness_manifest_id
+        or prior_receipt.readiness_snapshot_id != receipt.readiness_snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt does not preserve the immutable prior retry receipt"
+        )
+    predecessor = replace(
+        state,
+        phase=Phase.VERIFICATION,
+        pending_fix_trigger=None,
+        verification_history=state.verification_history[:2],
+        external_verification_retry_receipt=prior_receipt,
+        interrupted_verification_history=(),
+    )
+    if interruption.prior_retry_receipt_sha256 != _canonical_json_digest(
+        prior_receipt.to_dict()
+    ) or interruption.state_sha256 != _canonical_json_digest(predecessor.to_dict()):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt does not bind the pre-recovery state "
+            "and retry receipt"
+        )
+    try:
+        import gateway.autoresearch_runs as detached_runs
+
+        record = detached_runs.read_run_record(
+            run_dir=Path(interruption.detached_run_directory),
+            runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "interrupted verification receipt detached v3 record is unavailable or invalid"
+        ) from exc
+    if (
+        record.manifest.state_reference_sha256 != interruption.state_reference_sha256
+        or record.manifest.instruction_manifest_sha256 != interruption.instruction_manifest_sha256
+        or record.status.manifest_sha256 != interruption.detached_run_manifest_sha256
+        or _canonical_json_digest(record.status.to_dict())
+        != interruption.detached_run_status_sha256
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt detached v3 manifest/status digest does not match"
+        )
 
 
 def _validate_external_verification_retry_history(
@@ -4667,8 +5016,28 @@ def _validate_external_verification_retry_history(
     receipt: ExternalVerificationRetryReceipt,
 ) -> None:
     """Fail closed unless every sealed retry artifact forms one exact chain."""
-    pending_history_length = receipt.retry_attempt - 1
-    sealed_history_length = receipt.retry_attempt
+    interruptions = state.interrupted_verification_history
+    if (
+        interruptions
+        and receipt.schema_version != INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification history requires the interruption-aware retry receipt"
+        )
+    if (
+        not interruptions
+        and receipt.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+    ):
+        raise AutoresearchValidationError(
+            "interruption-aware retry receipt requires an interruption history"
+        )
+    interruption_count = len(interruptions)
+    pending_history_length = receipt.retry_attempt - 1 - interruption_count
+    sealed_history_length = receipt.retry_attempt - interruption_count
+    if pending_history_length < 1:
+        raise AutoresearchValidationError(
+            "external verification retry interruption topology is invalid"
+        )
     history_length = len(state.verification_history)
     if history_length not in (pending_history_length, sealed_history_length):
         raise AutoresearchValidationError(
@@ -4688,7 +5057,19 @@ def _validate_external_verification_retry_history(
         )
     implementation = state.implementation_result
     assert implementation is not None
-    for attempt, artifact in enumerate(state.verification_history, start=1):
+    interruption_attempts = tuple(
+        interruption.interrupted_attempt for interruption in interruptions
+    )
+    if interruption_attempts != tuple(sorted(interruption_attempts)) or len(
+        set(interruption_attempts)
+    ) != len(interruption_attempts):
+        raise AutoresearchValidationError(
+            "interrupted verification history attempts must be ordered and unique"
+        )
+    for index, artifact in enumerate(state.verification_history, start=1):
+        attempt = index + sum(
+            1 for interruption_attempt in interruption_attempts if interruption_attempt <= index
+        )
         _validate_external_verification_retry_history_artifact(
             state,
             artifact,
@@ -4710,6 +5091,16 @@ def _validate_external_verification_retry_history(
         raise AutoresearchValidationError(
             "external verification retry receipt does not bind the complete ordered "
             "verification history"
+        )
+    expected_interruption_history_sha256 = tuple(
+        _canonical_json_digest(interruption.to_dict()) for interruption in interruptions
+    )
+    if receipt.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION and (
+        receipt.interruption_history_sha256 != expected_interruption_history_sha256
+    ):
+        raise AutoresearchValidationError(
+            "external verification retry receipt does not bind the complete ordered "
+            "interruption history"
         )
 
 
@@ -9311,6 +9702,7 @@ def advance_state(
             implementation_result=next_implementation,
             fix_history=(*state.fix_history, artifact),
             external_verification_retry_receipt=None,
+            interrupted_verification_history=(),
             verification_fix_attempts=next_attempts,
             pending_fix_trigger=None,
             phase=Phase.VERIFICATION,
@@ -9923,6 +10315,373 @@ def retry_external_verification_state_file(
         _validate_state(retried, policy, validation_context)
         _atomic_save_state_file(resolved_path, retried)
         return retried
+
+
+def _default_systemd_is_active(unit: str) -> bool:
+    def run_command(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AutoresearchValidationError(
+                f"cannot inspect interrupted detached systemd unit {unit}: {exc}"
+            ) from exc
+
+    try:
+        return systemd_unit_is_active(unit, run_command=run_command)
+    except SystemdUnitStateError as exc:
+        raise AutoresearchValidationError(
+            f"cannot prove interrupted detached systemd unit is inactive: {unit}"
+        ) from exc
+
+
+def _detached_pid_is_alive(pid: int | None, *, proc_root: Path) -> bool:
+    if pid is None:
+        return False
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"cannot inspect interrupted detached process {pid}: {exc}"
+        ) from exc
+    closing = raw.rfind(")")
+    fields = raw[closing + 1 :].split() if closing >= 0 else []
+    if not fields:
+        raise AutoresearchValidationError(
+            f"malformed process stat for interrupted detached process {pid}"
+        )
+    return fields[0] != "Z"
+
+
+@dataclass(frozen=True, slots=True)
+class _SealedInterruptedRunAttestation:
+    """Immutable detached evidence required before interrupted-v3 publication."""
+
+    manifest_sha256: str
+    status_sha256: str
+    stdout_sha256: str
+    stderr_sha256: str
+
+
+def _attest_sealed_interrupted_run(record: RunRecord) -> _SealedInterruptedRunAttestation:
+    capture = record.status.output_capture
+    if capture is None:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery requires sealed worker output capture"
+        )
+    return _SealedInterruptedRunAttestation(
+        manifest_sha256=record.status.manifest_sha256,
+        status_sha256=_canonical_json_digest(record.status.to_dict()),
+        stdout_sha256=capture.stdout.sha256,
+        stderr_sha256=capture.stderr.sha256,
+    )
+
+
+def _reattest_sealed_interrupted_run(
+    record: RunRecord,
+    *,
+    runs_root: Path,
+    expected: _SealedInterruptedRunAttestation,
+) -> None:
+    """Re-read the sealed record and capture tails before state publication."""
+    import gateway.autoresearch_runs as detached_runs
+
+    try:
+        current = detached_runs.read_run_record(
+            run_dir=record.run_directory,
+            runs_root=runs_root,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery cannot re-attest the sealed detached v3 record"
+        ) from exc
+    if _attest_sealed_interrupted_run(current) != expected:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery sealed detached v3 evidence changed"
+        )
+
+
+def _require_absent_interrupted_run_artifact(path: Path) -> None:
+    if path.exists() or path.is_symlink():
+        raise AutoresearchValidationError(
+            "interrupted verification recovery requires the v3 run.json to be absent"
+        )
+
+
+def recover_interrupted_verification_state_file(
+    state_path: Path,
+    *,
+    operator_reason: str,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    validation_context: AutoresearchValidationContext | None = None,
+    systemd_is_active: Callable[[str], bool] | None = None,
+    proc_root: Path = Path("/proc"),
+) -> AutoresearchState:
+    """Record the one operator-stopped v3 attempt and authorize deterministic v4.
+
+    This deliberately does not materialize a VerificationResultArtifact: no
+    Quantipy envelope was produced for the stopped process.
+    """
+    resolved_path = state_path.expanduser().resolve(strict=False)
+    unit_is_active = systemd_is_active or _default_systemd_is_active
+    with _exclusive_state_locks((resolved_path,)):
+        state = load_state_file(resolved_path)
+        _validate_state(state, policy, validation_context)
+        receipt = state.external_verification_retry_receipt
+        implementation = state.implementation_result
+        if (
+            state.phase is not Phase.VERIFICATION
+            or state.mode is not ResearchMode.ALPHA_RESEARCH
+            or receipt is None
+            or receipt.schema_version != EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+            or receipt.retry_attempt != 3
+            or implementation is None
+            or state.interrupted_verification_history
+            or len(state.verification_history) != 2
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery accepts only the exact pending v3 topology"
+            )
+        if not operator_reason or operator_reason.strip() != operator_reason:
+            raise AutoresearchValidationError(
+                "interrupted verification recovery requires a trimmed operator reason"
+            )
+        expected_run_id = _deterministic_quantipy_run_id(
+            state.iteration, implementation.commit_sha, attempt=3
+        )
+        if receipt.expected_run_id != expected_run_id:
+            raise AutoresearchValidationError(
+                "interrupted verification recovery retry receipt identity is stale"
+            )
+        expected_state_reference = build_authoritative_state_reference(
+            state, state_path=resolved_path
+        ).sha256()
+        expected_run_path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
+        expected_task_label = (
+            f"autoresearch-i{state.iteration}-verification-r1-a3-"
+            f"{implementation.commit_sha[:12]}-v3"
+        )
+        expected_directory_name = (
+            f"i{state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+        )
+        try:
+            import gateway.autoresearch_runs as detached_runs
+
+            record = _find_exact_interrupted_detached_run(
+                runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+                iteration=state.iteration,
+                directory_name=expected_directory_name,
+                task_label=expected_task_label,
+                state_reference_sha256=expected_state_reference,
+            )
+        except (OSError, ValueError) as exc:
+            raise AutoresearchValidationError(
+                "interrupted verification recovery cannot inspect detached run records"
+            ) from exc
+        expected_instruction_digest = record.manifest.instruction_manifest_sha256
+        expected_command = (
+            "bash",
+            "-lc",
+            " ".join(
+                (
+                    "env",
+                    "PYTHONDONTWRITEBYTECODE=1",
+                    "uv",
+                    "run",
+                    "quantipy",
+                    "experiment",
+                    "run",
+                    implementation.experiment_manifest_path,
+                    "--output-root",
+                    str(DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+                    "--run-id",
+                    expected_run_id,
+                )
+            ),
+        )
+        if (
+            record.manifest.phase is not Phase.VERIFICATION
+            or record.manifest.attempt != 3
+            or record.manifest.task_label != expected_task_label
+            or record.manifest.working_directory != implementation.workspace_path
+            or record.manifest.expected_artifact_path != str(expected_run_path)
+            or record.manifest.command_sha256 != detached_runs.command_sha256(expected_command)
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery detached manifest is not the exact v3 command"
+            )
+        status = record.status
+        if (
+            status.state is not detached_runs.RunState.FAILED
+            or status.exit_code != 143
+            or status.signal_number is not None
+            or status.failure_classification
+            is not detached_runs.RunFailureClassification.OPERATOR_STOPPED
+            or status.systemd_unit is None
+            or OPENCLAW_LONG_TASK_UNIT_RE.fullmatch(status.systemd_unit) is None
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery detached status is not terminal "
+                "operator_stopped/143"
+            )
+        capture = status.output_capture
+        if capture is None or any(
+            stream.truncated
+            or not stream.eof_observed
+            or stream.bytes_observed != stream.bytes_stored
+            for stream in (capture.stdout, capture.stderr)
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery requires complete sealed worker output capture"
+            )
+        if (
+            status.expected_artifact_attestation_status
+            is not detached_runs.ExpectedArtifactAttestationStatus.FAILED
+            or status.expected_artifact_attestation_error
+            is not detached_runs.ExpectedArtifactAttestationError.MISSING
+            or status.expected_artifact_attestation is not None
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery requires a missing v3 artifact attestation"
+            )
+        sealed_attestation = _attest_sealed_interrupted_run(record)
+        history_sha256 = tuple(
+            _canonical_json_digest(artifact.to_dict()) for artifact in state.verification_history
+        )
+        interruption = InterruptedVerificationAttemptReceipt(
+            expected_run_id=expected_run_id,
+            interrupted_attempt=3,
+            implementation_commit=implementation.commit_sha,
+            implementation_manifest_sha256=implementation.experiment_manifest_sha256,
+            detached_run_directory=str(record.run_directory),
+            detached_run_manifest_sha256=status.manifest_sha256,
+            detached_run_status_sha256=_canonical_json_digest(status.to_dict()),
+            state_sha256=_canonical_json_digest(state.to_dict()),
+            state_reference_sha256=expected_state_reference,
+            instruction_manifest_sha256=expected_instruction_digest,
+            prior_retry_receipt_sha256=_canonical_json_digest(receipt.to_dict()),
+            prior_retry_receipt=receipt,
+            verification_history_sha256=history_sha256,
+            operator_reason=operator_reason,
+        )
+        next_receipt = ExternalVerificationRetryReceipt(
+            expected_run_id=_deterministic_quantipy_run_id(
+                state.iteration, implementation.commit_sha, attempt=4
+            ),
+            prior_verification_sha256=history_sha256[-1],
+            probe=receipt.probe,
+            retry_attempt=4,
+            implementation_commit=implementation.commit_sha,
+            manifest_sha256=implementation.experiment_manifest_sha256,
+            readiness_manifest_id=receipt.readiness_manifest_id,
+            readiness_snapshot_id=receipt.readiness_snapshot_id,
+            operator_reason=receipt.operator_reason,
+            verification_history_sha256=history_sha256,
+            interruption_history_sha256=(_canonical_json_digest(interruption.to_dict()),),
+            schema_version=INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        )
+        recovered = replace(
+            state,
+            external_verification_retry_receipt=next_receipt,
+            interrupted_verification_history=(interruption,),
+        )
+        _validate_state(recovered, policy, validation_context)
+        if unit_is_active(status.systemd_unit):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery refuses an active detached systemd unit"
+            )
+        if _detached_pid_is_alive(status.pid, proc_root=proc_root):
+            raise AutoresearchValidationError(
+                "interrupted verification recovery refuses a live detached process"
+            )
+        _reattest_sealed_interrupted_run(
+            record,
+            runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+            expected=sealed_attestation,
+        )
+        _require_absent_interrupted_run_artifact(expected_run_path)
+        _atomic_save_state_file(resolved_path, recovered)
+        return recovered
+
+
+def _find_exact_interrupted_detached_run(
+    *,
+    runs_root: Path,
+    iteration: int,
+    directory_name: str,
+    task_label: str,
+    state_reference_sha256: str,
+) -> RunRecord:
+    """Select the sole state-bound v3 manifest before reading any run status."""
+    import gateway.autoresearch_runs as detached_runs
+
+    try:
+        metadata = runs_root.lstat()
+    except FileNotFoundError as exc:
+        raise AutoresearchValidationError("detached runs root is unavailable") from exc
+    if runs_root.is_symlink() or not runs_root.is_dir() or not metadata:
+        raise AutoresearchValidationError("detached runs root is not a safe directory")
+
+    expected_directory = runs_root / directory_name
+    try:
+        expected_manifest = detached_runs.read_run_manifest(
+            run_dir=expected_directory,
+            runs_root=runs_root,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery expected detached v3 manifest is unavailable "
+            "or invalid"
+        ) from exc
+    if (
+        expected_manifest.phase is not Phase.VERIFICATION
+        or expected_manifest.iteration != iteration
+        or expected_manifest.attempt != 3
+        or expected_manifest.task_label != task_label
+        or expected_manifest.state_reference_sha256 != state_reference_sha256
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification recovery expected detached v3 manifest identity is invalid"
+        )
+
+    duplicate_directories: list[Path] = []
+    for directory, child_directories, files in os.walk(runs_root, followlinks=False):
+        child_directories.sort()
+        files.sort()
+        parent = Path(directory)
+        if parent == expected_directory or "manifest.json" not in files:
+            continue
+        try:
+            manifest = detached_runs.read_run_manifest(run_dir=parent, runs_root=runs_root)
+        except (OSError, ValueError):
+            continue
+        if (
+            manifest.phase is Phase.VERIFICATION
+            and manifest.iteration == iteration
+            and manifest.attempt == 3
+            and manifest.task_label == task_label
+            and manifest.state_reference_sha256 == state_reference_sha256
+        ):
+            duplicate_directories.append(parent)
+    if duplicate_directories:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery found duplicate expected detached v3 identities"
+        )
+    try:
+        return detached_runs.read_run_record(run_dir=expected_directory, runs_root=runs_root)
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery expected detached v3 status is unavailable "
+            "or invalid"
+        ) from exc
 
 
 def _materialize_attested_pending_retry_failure(
