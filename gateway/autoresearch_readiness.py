@@ -497,6 +497,12 @@ def _require_sha256(value: object, *, label: str) -> str:
     return value
 
 
+def _require_sha256_commit(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise ReadinessManifestError(f"{label} must be a full lowercase Git commit SHA")
+    return value
+
+
 def _require_literal_bool(value: object, expected: bool, *, label: str) -> bool:
     if not isinstance(value, bool) or value is not expected:
         raise ReadinessManifestError(f"{label} must be {str(expected).lower()}")
@@ -979,25 +985,34 @@ class ReadinessIdentity:
     manifest_id: str
     snapshot_id: str
     receipt_sha256: str
+    quantipy_commit: str | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> ReadinessIdentity:
         data = _require_mapping(raw, label="platform_readiness")
-        _require_exact_keys(
-            data, {"manifest_id", "snapshot_id", "receipt_sha256"}, label="platform_readiness"
-        )
+        expected = {"manifest_id", "snapshot_id", "receipt_sha256"}
+        if "quantipy_commit" in data:
+            expected.add("quantipy_commit")
+        _require_exact_keys(data, expected, label="platform_readiness")
+        quantipy_commit = data.get("quantipy_commit")
+        if quantipy_commit is not None:
+            quantipy_commit = _require_sha256_commit(quantipy_commit, label="quantipy_commit")
         return cls(
             manifest_id=_require_identifier(data, "manifest_id"),
             snapshot_id=_require_identifier(data, "snapshot_id"),
             receipt_sha256=_require_sha256(data["receipt_sha256"], label="receipt_sha256"),
+            quantipy_commit=quantipy_commit,
         )
 
-    def to_dict(self) -> dict[str, str]:
-        return {
+    def to_dict(self) -> dict[str, str | None]:
+        identity: dict[str, str | None] = {
             "manifest_id": self.manifest_id,
             "receipt_sha256": self.receipt_sha256,
             "snapshot_id": self.snapshot_id,
         }
+        if self.quantipy_commit is not None:
+            identity["quantipy_commit"] = self.quantipy_commit
+        return identity
 
 
 @dataclass(frozen=True, slots=True)
@@ -1150,6 +1165,7 @@ class PlatformReadinessManifest:
         self.validate()
         if self.status is not ReadinessStatus.READY:
             raise ReadinessBlockedError(self.reason or "platform readiness is BLOCKED")
+        _, quantipy_commit = load_quantipy_data_contract_evidence(self)
         canonical = json.dumps(
             self.to_dict(), sort_keys=True, separators=(",", ":"), ensure_ascii=True
         )
@@ -1157,6 +1173,7 @@ class PlatformReadinessManifest:
             manifest_id=self.manifest_id,
             snapshot_id=self.snapshot_id,
             receipt_sha256=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+            quantipy_commit=quantipy_commit,
         )
 
     def require_ready(self) -> ReadinessIdentity:
@@ -1257,6 +1274,34 @@ def load_xnys_calendar_evidence(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReadinessManifestError("XNYS calendar evidence must be valid UTF-8 JSON") from exc
     return receipt.sha256, XNYSCalendarEvidence.from_dict(raw)
+
+
+def load_quantipy_data_contract_evidence(
+    manifest: PlatformReadinessManifest,
+) -> tuple[str, str]:
+    """Return the exact committed Quantipy SHA pinned by READY evidence."""
+    manifest.validate()
+    if manifest.status is not ReadinessStatus.READY:
+        raise ReadinessBlockedError(manifest.reason or "platform readiness is BLOCKED")
+    receipt = manifest.evidence[EvidenceId.QUANTIPY_DATA_CONTRACT]
+    if receipt.path is None or receipt.sha256 is None:
+        raise ReadinessManifestError("READY manifest requires pinned Quantipy contract evidence")
+    descriptor = _ImmutableEvidenceDescriptor.open(Path(receipt.path))
+    try:
+        if descriptor.sha256 != receipt.sha256:
+            raise ReadinessManifestError(
+                "Quantipy contract evidence SHA-256 does not match the readiness manifest"
+            )
+        raw = json.loads(descriptor.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReadinessManifestError("Quantipy contract evidence must be valid UTF-8 JSON") from exc
+    finally:
+        descriptor.close()
+    data = _require_mapping(raw, label="quantipy contract evidence")
+    quantipy_commit = _require_sha256_commit(
+        data.get("quantipy_commit"), label="quantipy contract evidence.quantipy_commit"
+    )
+    return receipt.sha256, quantipy_commit
 
 
 def canonical_platform_capabilities(

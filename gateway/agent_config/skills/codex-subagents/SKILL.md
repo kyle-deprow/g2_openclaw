@@ -60,14 +60,13 @@ Codex TOMLs bind each stage to its model.
 6. Run final verification from the parent context.
 
 For Quantipy work, require a committed `quantipy-experiment-v2` manifest with
-exactly `prepare`, `smoke`, `feasibility`, and `model`. Run focused tests and
-`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight` first, then detach
-the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run MANIFEST
+exactly `prepare`, `smoke`, `feasibility`, and `model`. Run focused tests, then detach
+the exact `env PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync quantipy experiment run MANIFEST
 --output-root ROOT --run-id
 autoresearch-i<iteration>-<commit12>` command. Only `ROOT/run-id/run.json`
 under the runner-declared fixed private runs root proves full verification.
 Requested panels require their nested typed receipt and bound files. If
-focused tests or preflight prevent execution, return the exact failed command
+focused tests prevent execution, return the exact failed command
 and evidence needed for `quantipy_execution_not_started`; do not claim a
 missing runtime receipt. G2 reserves that absent run directory with a private
 tombstone; retry only from a new implementation/fix commit with its new
@@ -123,7 +122,7 @@ Requirements:
    long command, launch it safely and report the real status.
 
 For the mandatory Quantipy verification run, the exact command is `env
-PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run MANIFEST --output-root ROOT
+PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync quantipy experiment run MANIFEST --output-root ROOT
 --run-id RUN_ID`. It must be launched here, never directly in a foreground
 tool call. Set the immutable run manifest's `expected_artifact_path` to the
 known `ROOT/RUN_ID/run.json`. Under the non-malicious same-host agent model,

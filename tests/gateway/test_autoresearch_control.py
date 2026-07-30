@@ -57,6 +57,8 @@ def _ready_manifest(path: Path) -> PlatformReadinessManifest:
         evidence_path = path / f"{evidence_id.value}.json"
         if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
             write_xnys_calendar_evidence(evidence_path)
+        elif evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT:
+            evidence_path.write_text(json.dumps({"quantipy_commit": "a" * 40}), encoding="utf-8")
         else:
             evidence_path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {

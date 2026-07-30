@@ -30,6 +30,16 @@ interface. Autonomous Quantipy research is handed off explicitly to
 `agent:autoresearch-pm:autoresearch:quantipy`; the PM session runs separately
 and does not send autonomous completion announcements to G2.
 
+Quantipy verification separates immutable experiment source from the canonical
+runtime: source stays in its committed autoresearch worktree, while detached
+execution uses direct argv with `uv --directory /home/dev/repos/quantipy run
+--frozen --no-sync` from that runtime. The runner attests the clean,
+commit-bound runtime, lockfiles, exact CLI entrypoint bytes/size/mode,
+executable/import resolution, and source Git blobs. The exceptional sealed v4
+panel-receipt failure has its own operator-capability recovery command
+(`autoresearch-recover-platform-runtime`), which alone may authorize a v5 run;
+see the autoresearch skill and research plan for the exact topology.
+
 ## Repository Structure
 
 ```

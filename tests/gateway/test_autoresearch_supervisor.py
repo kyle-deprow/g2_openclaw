@@ -316,7 +316,14 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
     evidence: dict[str, dict[str, str | None]] = {}
     for evidence_id in EvidenceId:
         evidence_path = readiness_evidence / f"{evidence_id.value}.json"
-        evidence_path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
+        evidence_path.write_text(
+            (
+                json.dumps({"quantipy_commit": "a" * 40})
+                if evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT
+                else f"{evidence_id.value}\n"
+            ),
+            encoding="utf-8",
+        )
         evidence[evidence_id.value] = {
             "path": str(evidence_path),
             "sha256": sha256(evidence_path.read_bytes()).hexdigest(),

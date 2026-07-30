@@ -92,13 +92,13 @@ probe requires exactly one `AAPL` coverage ticker with exactly the
 `2022-01-03` session, one requested/observed date range, valid Quantipy
 hydration and export ordering, and every receipt/panel digest. The command
 binds implementation and readiness identities, preserves every failure
-artifact, and advances deterministically from `-v2` through the hard cap
-`-v9`. It writes retry-receipt schema 2 from `-v3` onward; that receipt contains
-the complete ordered canonical digest list for all prior verification artifacts.
-It rejects arbitrary failures, malformed or reordered history, and PM/fixer
-invocations without the explicit capability. All state-schema changes require
-archiving and fresh schema-v4 initialization; no general in-place migration
-exists.
+artifact, and authorizes only the historical `-v2` bootstrap and one generic
+`-v3` retry. It writes retry-receipt schema 2 and binds the complete ordered
+canonical digest list for all prior verification artifacts. It rejects arbitrary
+failures, malformed or reordered history, v4-and-later generic retries, and
+PM/fixer invocations without the explicit capability. All state-schema changes
+require archiving and fresh schema-v4 initialization; no general in-place
+migration exists.
 
 An owner-session stop first disables the supervisor, cancels only exact owner
 tasks, then repeatedly rescans state-bound detached manifests until a bounded
@@ -116,8 +116,10 @@ supervisor stopped, a human/Codex operator may use
 sealed v1/v2 + schema-2-v3 topology; recovery writes an interruption receipt
 that embeds and digests the complete immutable v3 retry receipt, plus
 deterministic `-v4` authorization, without inventing a verification result.
-Subsequent `-v5` authorization binds its own current probe/reason and validates
-the preserved v3 receipt independently.
+Only `G2_OPENCLAW_OPERATOR_PLATFORM_RUNTIME_RECOVERY=1` and
+`gateway-cli autoresearch-recover-platform-runtime` may subsequently authorize
+`-v5`. It binds its own current probe/reason, re-attests the canonical runtime,
+and validates the preserved v3/v4 chain independently.
 
 ## Suspended Campaign Resume
 
@@ -247,11 +249,10 @@ are separate from the OpenClaw gateway's own native-crash containment limits.
 Implementation must commit one canonical `quantipy-experiment-v2` manifest in
 its disposable workspace and record its absolute path and SHA-256 in
 `implementation_result`. Verification runs focused tests, then
-`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`, then
 launches this exact command through `scripts/run-long-task.sh`:
 
 ```bash
-env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run "$manifest" --output-root "$root" \
+env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run --frozen --no-sync quantipy experiment run "$manifest" --output-root "$root" \
   --run-id "autoresearch-i<iteration>-<commit12>"
 ```
 
@@ -301,7 +302,7 @@ commit; Quantipy retains no authoritative `run/source` directory. Smoke and
 feasibility must complete before model import/execution. `nbconvert`,
 `papermill`, and Jupyter
 may smoke-test or render a report only; they never substitute for a PASS. When
-focused tests or preflight prevent execution, runtime evidence is `null` and a
+focused tests prevent execution, runtime evidence is `null` and a
 strict `quantipy_execution_not_started` receipt must bind the exact failed
 command/evidence, manifest, deterministic expected run ID/path, and allowed
 reason. The entire expected run directory must be absent; validation atomically

@@ -754,12 +754,15 @@ def autoresearch_next(
 ) -> None:
     """Validate autoresearch state/config and print the deterministic next action."""
     from gateway.autoresearch_runner import (
+        AutoresearchValidationContext,
         Phase,
         build_receipt_catalog,
         load_autoresearch_policy,
         load_state_file,
         next_action,
         provision_quantipy_experiment_runs_root,
+        require_canonical_verification_dispatch_attestation,
+        seal_canonical_verification_dispatch_state_file,
         validate_target_worktree_clean,
     )
 
@@ -779,6 +782,13 @@ def autoresearch_next(
                 f"{details}\n"
                 "Stop them before launching the next autoresearch stage."
             )
+        if state.phase is Phase.VERIFICATION:
+            validation_context = AutoresearchValidationContext.from_readiness(readiness)
+            state = seal_canonical_verification_dispatch_state_file(
+                state_path,
+                policy=policy,
+                validation_context=validation_context,
+            )
         action = next_action(
             state,
             policy,
@@ -787,6 +797,12 @@ def autoresearch_next(
             state_path=state_path,
         )
         if state.phase is Phase.VERIFICATION:
+            require_canonical_verification_dispatch_attestation(
+                state_path,
+                policy=policy,
+                validation_context=validation_context,
+                expected_state_reference_sha256=action.state_reference_sha256,
+            )
             provision_quantipy_experiment_runs_root()
     except ValueError as exc:
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
@@ -866,16 +882,11 @@ def autoresearch_advance(
     """Advance autoresearch state with a validated artifact and persist the result."""
     from gateway.autoresearch_runner import (
         AutoresearchValidationContext,
-        FixResultArtifact,
-        ImplementationResultArtifact,
-        advance_state,
+        advance_artifact_state_file,
         build_receipt_catalog,
         expected_instruction_manifest_sha256,
-        load_artifact_file,
         load_autoresearch_policy,
         load_state_file,
-        persist_derived_state,
-        validate_artifact_workspace,
     )
 
     try:
@@ -902,24 +913,15 @@ def autoresearch_advance(
             )
         else:
             source_manifest_sha256 = instruction_manifest_sha256
-        artifact = load_artifact_file(
-            artifact_path,
-            state,
-            policy,
+        advance_artifact_state_file(
+            state_path=state_path,
+            output_path=output_path,
+            artifact_path=artifact_path,
             instruction_manifest_sha256=source_manifest_sha256,
-            state_reference_sha256=state_reference_sha256,
-            state_path=state_path,
-        )
-        if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
-            validate_artifact_workspace(state, artifact)
-        next_state = advance_state(
-            state,
-            artifact,
-            policy,
+            policy=policy,
             validation_context=validation_context,
-            state_path=state_path,
+            state_reference_sha256=state_reference_sha256,
         )
-        persist_derived_state(state_path, output_path, state, next_state)
     except ValueError as exc:
         console.print(f"[red]autoresearch-advance failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -956,7 +958,7 @@ def autoresearch_mark_memory(
         receipt = verify_mempalace_final_decision(state, mempalace_kg_path)
         next_state = mark_memory_written(state, receipt)
         validate_state(next_state, policy, validation_context)
-        persist_derived_state(state_path, output_path, state, next_state)
+        persist_derived_state(state_path, output_path, state, next_state, policy=policy)
     except ValueError as exc:
         console.print(f"[red]autoresearch-mark-memory failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -1099,7 +1101,7 @@ def autoresearch_resume(
         validate_state(state, policy)
         readiness = load_platform_readiness(readiness_manifest)
         next_state = resume_suspended_iteration(state, readiness)
-        persist_derived_state(state_path, output_path, state, next_state)
+        persist_derived_state(state_path, output_path, state, next_state, policy=policy)
     except ValueError as exc:
         console.print(f"[red]autoresearch-resume failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -1210,6 +1212,54 @@ def autoresearch_recover_interrupted_verification(
     )
 
 
+@app.command("autoresearch-recover-platform-runtime")
+def autoresearch_recover_platform_runtime(
+    state_path: Path = _state_path_argument,
+    reason: str = typer.Option(
+        ..., "--reason", help="Exact non-empty operator reason for canonical runtime recovery."
+    ),
+    openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Operator-only exact recovery of the sealed v4 panel receipt failure into v5."""
+    from gateway.autoresearch_readiness import (
+        load_platform_readiness,
+        probe_research_panel_for_external_verification_retry,
+    )
+    from gateway.autoresearch_runner import (
+        PLATFORM_RUNTIME_RECOVERY_OPERATOR_ENV_VAR,
+        PLATFORM_RUNTIME_RECOVERY_OPERATOR_VALUE,
+        AutoresearchValidationContext,
+        load_autoresearch_policy,
+        recover_platform_runtime_state_file,
+    )
+
+    try:
+        if os.environ.get(PLATFORM_RUNTIME_RECOVERY_OPERATOR_ENV_VAR) != (
+            PLATFORM_RUNTIME_RECOVERY_OPERATOR_VALUE
+        ):
+            raise ValueError(
+                "operator capability is required; set "
+                f"{PLATFORM_RUNTIME_RECOVERY_OPERATOR_ENV_VAR}=1 in the human/Codex shell"
+            )
+        policy = load_autoresearch_policy(openclaw_config)
+        readiness = load_platform_readiness(readiness_manifest)
+        state = recover_platform_runtime_state_file(
+            state_path,
+            probe=probe_research_panel_for_external_verification_retry(),
+            operator_reason=reason,
+            policy=policy,
+            validation_context=AutoresearchValidationContext.from_readiness(readiness),
+        )
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-recover-platform-runtime failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    receipt = state.external_verification_retry_receipt
+    assert receipt is not None
+    console.print(f"[green]platform runtime recovery authorized:[/green] {receipt.expected_run_id}")
+
+
 @app.command("autoresearch-suspend-infra")
 def autoresearch_suspend_infra(
     state_path: Path = _state_path_argument,
@@ -1234,7 +1284,7 @@ def autoresearch_suspend_infra(
         validate_state(state, policy)
         next_state = suspend_for_infrastructure(state, reason)
         validate_state(next_state, policy)
-        persist_derived_state(state_path, output_path, state, next_state)
+        persist_derived_state(state_path, output_path, state, next_state, policy=policy)
     except ValueError as exc:
         console.print(f"[red]autoresearch-suspend-infra failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

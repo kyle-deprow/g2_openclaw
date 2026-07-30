@@ -176,17 +176,17 @@ persisted workspace. Every attempt, including test failures and bug signals,
 must:
 
 1. Run the exact focused commands and capture decisive evidence.
-2. Run `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight
-   <committed-v2-manifest>`, then the exact detached
-   `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run <manifest> --output-root
-   <root> --run-id autoresearch-i<iteration>-<commit12>`. Its known receipt path is
+2. Launch the one canonical detached command only after focused tests pass:
+   `env PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync
+   quantipy experiment run <manifest> --output-root <root> --run-id autoresearch-i<iteration>-<commit12>`.
+   Its known receipt path is
    `<root>/<run-id>/run.json`, under the runner-declared fixed private runs
    root. Quantipy smoke and feasibility must accept before model
    import/execution. Its typed source evidence must bind the complete immutable
-   preflight-approved Python inventory and match exact Git blobs at the
+   committed Python inventory and match exact Git blobs at the
    implementation commit; no `run/source` directory substitutes. A requested
-   panel always requires its typed receipt and bound files. If focused tests or
-   preflight stop execution, emit the strict
+   panel always requires its typed receipt and bound files. If focused tests
+   stop execution, emit the strict
    `quantipy_execution_not_started` receipt with the exact failed command,
    evidence, expected run ID/path, and reason; the expected `run.json` must be
    absent because the entire expected run directory must be absent, and G2

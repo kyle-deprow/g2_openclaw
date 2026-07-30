@@ -189,12 +189,14 @@ Every verification attempt ends in a complete JSON `verification_result`, even
 when commands fail or expose a bug signal:
 
 1. Run exact focused commands in the persisted implementation workspace.
-2. Run `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`,
-   then launch the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment
-   run MANIFEST --output-root ROOT --run-id
+2. Launch the exact direct argv `env PYTHONDONTWRITEBYTECODE=1 uv --directory
+   /home/dev/repos/quantipy run --frozen --no-sync quantipy experiment run
+   <absolute-worktree-manifest> --output-root ROOT --run-id
    autoresearch-i<iteration>-<commit12>` command through
    `scripts/run-long-task.sh`. Its immutable manifest must set
-   `expected_artifact_path` to `ROOT/run-id/run.json`. Direct foreground
+   cwd to `/home/dev/repos/quantipy` and `expected_artifact_path` to
+   `ROOT/run-id/run.json`. The implementation worktree is immutable experiment
+   source, not a runtime checkout. Direct foreground
    execution cannot satisfy this contract. Under the non-malicious same-host
    agent model, PASS requires the worker-produced sealed attestation; a
    verifier claim cannot replace it. The detached worker must publish terminal
@@ -262,7 +264,7 @@ identity/digests when requested. A typed failed/rejected run is retained for
 `TEST_FAILURE` or `BUG_SIGNAL`. When execution never started, runtime evidence
 is `null` only alongside a strict `quantipy_execution_not_started` receipt
 binding the manifest, deterministic expected run ID/path, exact failed
-command/evidence, and reason `focused_tests_failed` or `preflight_failed`; the
+command/evidence, and reason `focused_tests_failed`; the
 expected run directory must be absent. Validation atomically reserves that
 directory with a private identity-bound tombstone, preventing a later run from
 reusing the ID. Retry after a new implementation/fix commit provides a new
@@ -311,10 +313,10 @@ may retry only a strictly revalidated, attested local research-panel HTTP 413
 pre-stage panel failure (`success=false`, `panel_requested=true`, `panel=null`,
 no stage receipts). The prior artifact, implementation commit, and manifest must
 all still match. The receipt is replaced, verification history is retained, and
-the deterministic run ID advances from `-v2` to `-v3` and onward only through
-`-v9`. Missing, running, successful, or methodology failures are rejected; no
-artifact is deleted or reused. The compatible state schema remains v4 and is not
-silently migrated.
+the deterministic run ID advances only from the historical `-v2` bootstrap to
+`-v3`. Missing, running, successful, methodology, or v4-and-later generic
+retries are rejected; no artifact is deleted or reused. The compatible state
+schema remains v4 and is not silently migrated.
 
 The sole accepted legacy bootstrap is retry-receipt schema 1 at deterministic
 attempt `-v2`, with exactly the initial `-v1` artifact and its canonical digest.
@@ -327,6 +329,44 @@ reordering history, fails closed. The initial `-v1` artifact must contain the
 canonical byte-exact local HTTP 404 message (including ordered query and MDN
 line); every sealed `-v2` through the immediately prior attempt must contain the
 corresponding byte-exact manifest-bound HTTP 413. Each run ID is deterministic.
+
+The one v4-to-v5 platform recovery is separate from generic HTTP retries. An
+operator capability command, `autoresearch-recover-platform-runtime`, accepts
+only a sealed v4 `process_error`/exit-1 historical bash run with EOF-drained
+attested `run.json`, no panel or stages, and exactly
+`ExperimentPanelError: Research panel receipt is invalid.` It records a
+versioned receipt for the v1/v2/v4 artifact chain, v3 interruption, old
+worktree runtime and new canonical runtime. The canonical target runtime must
+be clean, commit-bound with regular owner-controlled committed
+`pyproject.toml` (64 KiB) / `uv.lock` (4 MiB) files (owner-controlled `0664`
+is allowed), pin its `.venv/bin/quantipy` entrypoint and `src/quantipy`
+package, allow an owner-controlled non-world-writable `.venv` directory
+including mode `0775`, and record the entrypoint's exact SHA-256, byte size,
+mode, and external uv-managed base interpreter path/version/SHA-256/byte
+size/mode. Both executable attestations persist the exact owner UID and reject
+reload or re-attestation under a different UID; world-write remains prohibited.
+Its runtime and
+implementation commits must both descend from the exact readiness-pinned
+Quantipy commit. It obtains a fresh compact-v2 AAPL probe and authorizes only
+the deterministic direct-argv v5 attempt; it never enters the fixer path.
+The historical v4 state-reference identity always remains the authoritative
+live state pathname bound by the detached manifest. Recovery may publish only
+to a byte-exact copied state file, after rechecking both paths, but it never
+derives the historical digest from the copy pathname. Every canonical
+verification dispatch (including ordinary attempts) first seals the complete
+canonical runtime attestation in runner-owned state and re-attests it before
+result publication and advancement. `autoresearch-next` performs one final
+locked re-attestation after constructing the action, verifies that the
+authoritative state-reference digest still equals the generated action, and
+only then provisions/returns the dispatch. READY identities without an exact
+`quantipy_commit` are rejected during ordinary validation and dispatch; there
+is no older-READY compatibility path. The sole recovery exception first
+validates and references an untouched historical three-field v4 readiness
+identity, accepts the current identity only when its sole difference is a
+nonnull `quantipy_commit`, reconstructs the historical predecessor without
+that commit or either recovery/runtime attestation, and persists the current
+four-field identity in v5.
+The exceptional v4-to-v5 authorization receipt remains a separate requirement.
 
 Before every operator retry, the local readiness probe invokes the same complete
 panel-receipt semantic validator used for Quantipy run evidence. It accepts only

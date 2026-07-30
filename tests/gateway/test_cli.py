@@ -38,6 +38,7 @@ from gateway.autoresearch_runner import (
     MEMBER_UNION_DIGEST_ALGORITHM,
     QUANTIPY_RECEIPT_PATHS,
     AuthoritativeSnapshotReceipt,
+    AutoresearchPolicy,
     AutoresearchState,
     AutoresearchValidationContext,
     ComputeFitArtifact,
@@ -110,6 +111,31 @@ _MEMBER_UNION_COUNT, _MEMBER_UNION_DIGEST = autoresearch_runner.canonical_member
     _MEMBER_UNION_SYMBOLS
 )
 _MEMBER_UNION_SHA256 = sha256(_MEMBER_UNION_PATH.read_bytes()).hexdigest()
+
+
+def test_platform_runtime_recovery_requires_its_own_operator_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("G2_OPENCLAW_OPERATOR_PLATFORM_RUNTIME_RECOVERY", raising=False)
+
+    # Act
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-recover-platform-runtime",
+            str(state_path),
+            "--reason",
+            "Re-attest canonical runtime.",
+        ],
+    )
+
+    # Assert
+    assert result.exit_code == 1
+    assert "G2_OPENCLAW_OPERATOR_PLATFORM_RUNTIME_RECOVERY=1" in result.output
 
 
 @pytest.fixture(autouse=True)
@@ -603,6 +629,8 @@ def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:
         path = tmp_path / f"{evidence_id.value}.json"
         if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
             write_xnys_calendar_evidence(path)
+        elif evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT:
+            path.write_text(json.dumps({"quantipy_commit": "a" * 40}), encoding="utf-8")
         else:
             path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {
@@ -1578,25 +1606,40 @@ class TestAutoresearchCliCommands:
             git_worktree,
             commit_sha=git_worktree.final_commit,
         )
-        original_persist = autoresearch_runner.persist_derived_state
+        original_advance = autoresearch_runner.advance_artifact_state_file
 
-        def mutate_source_then_persist(
-            source_path: Path,
+        def mutate_source_then_advance(
+            *,
+            state_path: Path,
             output_path: Path,
-            source_state: AutoresearchState,
-            derived_state: AutoresearchState,
-        ) -> None:
-            changed_source_state = replace(source_state, iteration=source_state.iteration + 1)
+            artifact_path: Path,
+            instruction_manifest_sha256: str,
+            policy: AutoresearchPolicy,
+            validation_context: AutoresearchValidationContext | None,
+            state_reference_sha256: str | None = None,
+        ) -> AutoresearchState:
+            source_path = state_path
+            source_state = AutoresearchState.from_dict(
+                json.loads(source_path.read_text(encoding="utf-8"))
+            )
             source_path.write_text(
-                json.dumps(changed_source_state.to_dict()),
+                json.dumps(replace(source_state, iteration=source_state.iteration + 1).to_dict()),
                 encoding="utf-8",
             )
-            original_persist(source_path, output_path, source_state, derived_state)
+            return original_advance(
+                state_path=state_path,
+                output_path=output_path,
+                artifact_path=artifact_path,
+                instruction_manifest_sha256=instruction_manifest_sha256,
+                policy=policy,
+                validation_context=validation_context,
+                state_reference_sha256=state_reference_sha256,
+            )
 
         with patch.object(
             autoresearch_runner,
-            "persist_derived_state",
-            new=mutate_source_then_persist,
+            "advance_artifact_state_file",
+            new=mutate_source_then_advance,
         ):
             result, output_path = self._invoke_autoresearch_advance(tmp_path, state, artifact)
 
@@ -2661,6 +2704,7 @@ class TestAutoresearchCliCommands:
         state = MagicMock()
         state.phase = Phase.VERIFICATION
         action = MagicMock()
+        action.state_reference_sha256 = "a" * 64
         action.to_dict.return_value = {"phase": "verification"}
         state_path = tmp_path / "state.json"
         config_path = tmp_path / "openclaw.json"
@@ -2676,6 +2720,15 @@ class TestAutoresearchCliCommands:
             patch("gateway.cli.load_platform_readiness"),
             patch("gateway.autoresearch_runner.build_receipt_catalog"),
             patch("gateway.autoresearch_runner.next_action", return_value=action),
+            patch("gateway.autoresearch_runner.AutoresearchValidationContext.from_readiness"),
+            patch(
+                "gateway.autoresearch_runner.seal_canonical_verification_dispatch_state_file",
+                return_value=state,
+            ) as seal_runtime,
+            patch(
+                "gateway.autoresearch_runner.require_canonical_verification_dispatch_attestation",
+                return_value=state,
+            ) as require_runtime,
             patch(
                 "gateway.autoresearch_runner.provision_quantipy_experiment_runs_root"
             ) as provision,
@@ -2697,6 +2750,8 @@ class TestAutoresearchCliCommands:
             )
 
         assert result.exit_code == 0, result.output
+        seal_runtime.assert_called_once()
+        require_runtime.assert_called_once()
         provision.assert_called_once_with()
 
     def test_autoresearch_create_command_file_reads_secure_stdin_protocol(

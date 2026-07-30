@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.0.0
+version: 8.1.0
 ---
 
 # Autoresearch
@@ -729,15 +729,25 @@ list, each size and SHA-256, total bytes, and the
 `quantipy-experiment-source-v1` aggregate digest. No `run/source` directory is
 retained or accepted as evidence. G2 independently rebuilds the same inventory
 from Git blobs at the implementation commit; dirty execution followed by
-workspace restoration is rejected.
+workspace restoration is rejected. The implementation worktree is immutable
+source only: it is never the runtime cwd and need not contain runtime lockfiles
+or the installed package.
 
-Verification order is fixed: focused tests,
-`env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight MANIFEST`, then
-launch the exact `env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run
-MANIFEST --output-root ROOT --run-id
-autoresearch-i<iteration>-<commit12>` command through
+Verification order is fixed: focused tests, then launch the exact direct argv
+`env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run
+--frozen --no-sync quantipy experiment run <absolute-worktree-manifest>
+--output-root ROOT --run-id autoresearch-i<iteration>-<commit12>` through
 `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The immutable detached
-manifest must set `expected_artifact_path` to the known `ROOT/RUN_ID/run.json`.
+manifest must set its cwd to `/home/dev/repos/quantipy` and
+`expected_artifact_path` to the known `ROOT/RUN_ID/run.json`. The canonical
+runtime root must equal the state target repo, be tracked-file clean, preserve
+committed regular owner-controlled `pyproject.toml` (64 KiB) and `uv.lock`
+(4 MiB) files (owner-controlled `0664` is allowed; world-writable is not),
+pin `.venv/bin/quantipy` and `src/quantipy`, allow an owner-controlled,
+non-world-writable `.venv` directory including mode `0775`, and record the
+CLI entrypoint's exact SHA-256, byte size, mode, plus its external uv-managed
+base interpreter path, version, SHA-256, byte size, and mode. Both runtime and implementation
+commits must descend from the exact readiness-pinned Quantipy commit.
 Direct foreground execution cannot satisfy this contract. Under the
 non-malicious same-host agent model, PASS requires the worker-produced sealed
 attestation; a verifier claim cannot replace it. Before publishing terminal
@@ -777,11 +787,11 @@ Only a human/Codex operator shell holding `G2_OPENCLAW_OPERATOR_RETRY=1` may run
 It can retry only a fully attested, failed, pre-stage local research-panel HTTP
 413 run with `panel_requested=true`, `panel=null`, and no stage receipts. The
 operator command revalidates the preserved artifact, manifest, and implementation
-identity before replacing the retry receipt and issuing the next deterministic
-run ID (`-v2`, then `-v3`, through a hard cap of `-v9`). Preserve every prior
-artifact and verification-history entry; never delete or reuse a prior run
-directory. Missing, running, successful, methodology, or any non-413 failure is
-not retry-eligible.
+identity before replacing the retry receipt and issuing only the historical
+`-v2` bootstrap or the one generic `-v3` run. Preserve every prior artifact and
+verification-history entry; never delete or reuse a prior run directory.
+Missing, running, successful, methodology, v4-and-later generic retries, or
+any non-413 failure is not retry-eligible.
 
 An `operator_stopped` detached verification is never a PM retry and never a
 supervisor transition. The supervisor emits one control-plane alert and waits.
@@ -798,10 +808,18 @@ status, and both log hashes, then confirms `run.json` is still absent immediatel
 before atomically publishing state under the state lock. It preserves v3 files,
 records typed bindings for state, instruction, the full
 immutable prior v3 receipt and its digest, ordered history, manifest, and
-status, then authorizes only deterministic `-v4`. A later `-v5` retry validates
-that preserved v3 receipt independently of its current probe and reason; it
-never fabricates a
-`verification_result`.
+status, then authorizes only deterministic `-v4`. There is no generic `-v5`
+retry. A separate human/Codex capability,
+`G2_OPENCLAW_OPERATOR_PLATFORM_RUNTIME_RECOVERY=1 gateway-cli
+autoresearch-recover-platform-runtime --reason <reason>`, accepts only the
+sealed exact v4 panel-receipt failure: historical bash command/worktree cwd,
+failed `process_error` exit 1, EOF-drained attested `run.json`, no panel or
+stages, and exactly `ExperimentPanelError: Research panel receipt is invalid.`
+It writes a versioned receipt binding v1/v2/v4 artifacts, v3 interruption,
+prior receipts, old worktree runtime, canonical runtime commit/root/lockfiles,
+a fresh compact-v2 AAPL probe, and operator reason. It re-attests all hashes,
+absence/liveness and runtime facts immediately before atomic publication and
+authorizes only canonical direct-argv `-v5`; it never invokes a fixer.
 
 Schema-v4 state has no general retry migration. The only legacy bootstrap is the
 actual retry-receipt schema 1 for `-v2`, which binds exactly the canonical
@@ -838,7 +856,7 @@ run evidence when a run exists. If execution never started,
 `quantipy_experiment_evidence` is `null` and
 `quantipy_execution_not_started` is mandatory. That strict receipt binds the
 manifest, deterministic expected run ID/path, exact failed command and
-evidence, and reason `focused_tests_failed` or `preflight_failed`; the expected
+evidence, and reason `focused_tests_failed`; the expected
 run directory must be absent. G2 atomically creates a private identity-bound
 tombstone at that directory while validating the receipt, so the same run ID
 can never start later. Retry only after a new implementation/fix commit yields

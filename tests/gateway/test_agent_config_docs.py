@@ -460,7 +460,7 @@ def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
     assert "fixed private" in normalized
     assert "quantipy_execution_not_started" in normalized
     assert "focused_tests_failed" in normalized
-    assert "preflight_failed" in normalized
+    assert "preflight_failed" not in normalized
     assert "expected `run.json` must be absent" in normalized
     assert "private identity-bound tombstone" in normalized
     assert "new deterministic commit-bound run id" in normalized.lower()
@@ -468,8 +468,8 @@ def test_runtime_docs_require_typed_quantipy_gate_and_no_run_receipt() -> None:
     assert "8 MiB" in normalized
     assert "1 MiB per source file" in normalized
     assert "8 MiB for the notebook" in normalized
-    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment preflight" in normalized
-    assert "env PYTHONDONTWRITEBYTECODE=1 uv run quantipy experiment run" in normalized
+    assert "uv --directory /home/dev/repos/quantipy run --frozen --no-sync" in normalized
+    assert "uv --directory <canonical-runtime-root> run --frozen --no-sync" in normalized
     assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment" not in normalized
     assert "scripts/run-long-task.sh" in normalized
     assert "expected_artifact_path" in normalized

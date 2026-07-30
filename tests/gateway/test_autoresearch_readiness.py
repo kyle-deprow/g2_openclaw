@@ -451,6 +451,8 @@ def _manifest_payload(
         path = tmp_path / f"{evidence_id.value}.json"
         if evidence_id is EvidenceId.XNYS_TRADING_CALENDAR:
             write_xnys_calendar_evidence(path)
+        elif evidence_id is EvidenceId.QUANTIPY_DATA_CONTRACT:
+            path.write_text(json.dumps({"quantipy_commit": "a" * 40}), encoding="utf-8")
         else:
             path.write_text(f"{evidence_id.value}\n", encoding="utf-8")
         evidence[evidence_id.value] = {
@@ -489,6 +491,7 @@ def test_ready_manifest_validates_files_and_pins_identity(tmp_path: Path) -> Non
     assert identity.manifest_id == "manifest-1"
     assert identity.snapshot_id == "snapshot-1"
     assert len(identity.receipt_sha256) == 64
+    assert identity.quantipy_commit == "a" * 40
 
 
 def test_direct_manifest_construction_rejects_boolean_schema_version(tmp_path: Path) -> None:
