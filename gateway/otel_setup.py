@@ -133,7 +133,7 @@ def _get_version() -> str:
     try:
         from importlib.metadata import version
 
-        # Project is named azure-infra-cli in pyproject.toml (historical — infra CLI was first)
-        return version("azure-infra-cli")
+        # Distribution is named g2-openclaw (script name azure-infra-cli retained for the infra CLI)
+        return version("g2-openclaw")
     except Exception:
         return "dev"
