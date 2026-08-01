@@ -4156,7 +4156,9 @@ def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> No
     assert 'if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then' in script
     assert "CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS" in script
     assert "remove_legacy_codex_stage_agents" in script
-    assert "must not override inherited MCP servers" in script
+    assert "must not override inherited MCP servers" in (
+        REPO_ROOT / "gateway/deployment/codex_agents.py"
+    ).read_text(encoding="utf-8")
     for agent_id in STAGE_AGENT_IDS:
         assert f'"{agent_id}"' in script
 
