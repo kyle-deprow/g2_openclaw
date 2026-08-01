@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from gateway.autoresearch.compute import (
     ComputeFitArtifact as ComputeFitArtifact,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_WORKTREE_ROOT as DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
 )
 from gateway.autoresearch.constants import (
     MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS as MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
@@ -50,6 +53,9 @@ from gateway.autoresearch.enums import (
     FixTriggerPhase as FixTriggerPhase,
 )
 from gateway.autoresearch.enums import (
+    InfraGateOutcome as InfraGateOutcome,
+)
+from gateway.autoresearch.enums import (
     MetricDirection as MetricDirection,
 )
 from gateway.autoresearch.enums import (
@@ -60,6 +66,9 @@ from gateway.autoresearch.enums import (
 )
 from gateway.autoresearch.enums import (
     ReviewVerdict as ReviewVerdict,
+)
+from gateway.autoresearch.enums import (
+    VerificationStatus as VerificationStatus,
 )
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
@@ -72,6 +81,12 @@ from gateway.autoresearch.fields import (
 )
 from gateway.autoresearch.fields import (
     _normalise_predicate as _normalise_predicate,
+)
+from gateway.autoresearch.fields import (
+    _optional_float as _optional_float,
+)
+from gateway.autoresearch.fields import (
+    _optional_int as _optional_int,
 )
 from gateway.autoresearch.fields import (
     _optional_string_list as _optional_string_list,
@@ -117,6 +132,27 @@ from gateway.autoresearch.fields import (
 )
 from gateway.autoresearch.manifest import (
     SourceReceipt as SourceReceipt,
+)
+from gateway.autoresearch.receipts import (
+    AggregateCoverageReceipt as AggregateCoverageReceipt,
+)
+from gateway.autoresearch.receipts import (
+    DynamicUniverseCoverageReceipt as DynamicUniverseCoverageReceipt,
+)
+from gateway.autoresearch.receipts import (
+    PriceHydrationReceipt as PriceHydrationReceipt,
+)
+from gateway.autoresearch.receipts import (
+    UniverseVerificationReceipt as UniverseVerificationReceipt,
+)
+from gateway.autoresearch_platform_validation import (
+    PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL as PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,
+)
+from gateway.autoresearch_platform_validation import (
+    DynamicPriceCoverageReceipt as DynamicPriceCoverageReceipt,
+)
+from gateway.autoresearch_platform_validation import (
+    PlatformCoverageStatus as PlatformCoverageStatus,
 )
 
 if TYPE_CHECKING:
@@ -1372,3 +1408,464 @@ class MemoryVerificationReceipt:
             ),
             verified_rows_digest=digest,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ImplementationResultArtifact:
+    summary: str
+    workspace_path: str
+    commit_sha: str
+    module_path: str
+    notebook_path: str
+    tests_added_or_updated: tuple[str, ...]
+    commands_run: tuple[str, ...]
+    experiment_manifest_path: str = str(
+        DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "unverified" / "experiment-manifest.json"
+    )
+    experiment_manifest_sha256: str = "0" * 64
+    compute_fit: ComputeFitArtifact | None = None
+    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ImplementationResultArtifact:
+        data = _ensure_mapping(raw, label="implementation_result")
+        _require_exact_keys(
+            data,
+            label="implementation_result",
+            expected=(
+                "summary",
+                "workspace_path",
+                "commit_sha",
+                "module_path",
+                "notebook_path",
+                "tests_added_or_updated",
+                "commands_run",
+                "experiment_manifest_path",
+                "experiment_manifest_sha256",
+                "compute_fit",
+                "price_hydration_scope_preflight",
+            ),
+        )
+        compute_fit_raw = data.get("compute_fit")
+        preflight_raw = data.get("price_hydration_scope_preflight")
+        artifact = cls(
+            summary=_require_str(data, "summary"),
+            workspace_path=_require_workspace_path(data, "workspace_path"),
+            commit_sha=_require_str(data, "commit_sha"),
+            module_path=_require_str(data, "module_path"),
+            notebook_path=_require_str(data, "notebook_path"),
+            tests_added_or_updated=_require_string_list(data, "tests_added_or_updated"),
+            commands_run=_require_string_list(data, "commands_run"),
+            experiment_manifest_path=_require_workspace_path(data, "experiment_manifest_path"),
+            experiment_manifest_sha256=_require_sha256(data, "experiment_manifest_sha256"),
+            compute_fit=(
+                ComputeFitArtifact.from_dict(compute_fit_raw)
+                if compute_fit_raw is not None
+                else None
+            ),
+            price_hydration_scope_preflight=(
+                PriceHydrationScopePreflight.from_dict(preflight_raw)
+                if preflight_raw is not None
+                else None
+            ),
+        )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        _validate_workspace_path(
+            self.workspace_path,
+            label="implementation_result workspace_path",
+        )
+        if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
+            raise AutoresearchValidationError(
+                "implementation_result commit_sha must be a Git commit SHA"
+            )
+        _validate_workspace_path(
+            self.experiment_manifest_path,
+            label="implementation_result experiment_manifest_path",
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "summary": self.summary,
+            "workspace_path": self.workspace_path,
+            "commit_sha": self.commit_sha,
+            "module_path": self.module_path,
+            "notebook_path": self.notebook_path,
+            "tests_added_or_updated": list(self.tests_added_or_updated),
+            "commands_run": list(self.commands_run),
+            "experiment_manifest_path": self.experiment_manifest_path,
+            "experiment_manifest_sha256": self.experiment_manifest_sha256,
+            "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
+            "price_hydration_scope_preflight": (
+                self.price_hydration_scope_preflight.to_dict()
+                if self.price_hydration_scope_preflight is not None
+                else None
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationResultArtifact:
+    status: VerificationStatus
+    is_walk_forward_sharpe_net: float | None
+    oos_sharpe_net: float | None
+    max_drawdown_pct: float | None
+    win_rate: float | None
+    trade_count: int | None
+    trades_per_day: float | None
+    oos_trading_days: int | None
+    feature_importances_summary: str
+    null_test_summary: str
+    bug_signals: tuple[str, ...]
+    tests_passed: bool
+    commands_run: tuple[str, ...]
+    data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
+    platform_coverage_validation: DynamicPriceCoverageReceipt | None = None
+    infra_gate_outcome: InfraGateOutcome | None = None
+    infra_rationale: str | None = None
+    universe_verification_receipt: UniverseVerificationReceipt | None = None
+    price_hydration_receipt: PriceHydrationReceipt | None = None
+    quantipy_experiment_evidence: QuantipyExperimentEvidence | None = None
+    quantipy_execution_not_started: QuantipyExecutionNotStartedEvidence | None = None
+
+    @classmethod
+    def from_dict(
+        cls,
+        raw: object,
+        *,
+        mode: ResearchMode | None = None,
+    ) -> VerificationResultArtifact:
+        data = _ensure_mapping(raw, label="verification_result")
+        expected_fields: tuple[str, ...] = (
+            "status",
+            "is_walk_forward_sharpe_net",
+            "oos_sharpe_net",
+            "max_drawdown_pct",
+            "win_rate",
+            "trade_count",
+            "trades_per_day",
+            "oos_trading_days",
+            "feature_importances_summary",
+            "null_test_summary",
+            "bug_signals",
+            "tests_passed",
+            "commands_run",
+            "data_coverage",
+            "platform_coverage_validation",
+            "infra_gate_outcome",
+            "infra_rationale",
+            "universe_verification_receipt",
+            "price_hydration_receipt",
+            "quantipy_experiment_evidence",
+            "quantipy_execution_not_started",
+        )
+        _require_exact_keys(
+            data,
+            label="verification_result",
+            expected=expected_fields,
+        )
+        infra_gate_raw = data.get("infra_gate_outcome")
+        infra_rationale = data.get("infra_rationale")
+        if infra_gate_raw is not None and not isinstance(infra_gate_raw, str):
+            raise AutoresearchValidationError("infra_gate_outcome must be a string or null")
+        if infra_rationale is not None and not isinstance(infra_rationale, str):
+            raise AutoresearchValidationError("infra_rationale must be a string or null")
+        if "data_coverage" not in data:
+            raise AutoresearchValidationError("data_coverage must be an object or null")
+        data_coverage_raw = data["data_coverage"]
+        data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
+        if data_coverage_raw is None:
+            data_coverage = None
+        else:
+            coverage_data = _ensure_mapping(data_coverage_raw, label="data_coverage")
+            if mode is ResearchMode.DATA_INFRA_G0:
+                dynamic_keys = {
+                    "member_union_count",
+                    "member_union_digest",
+                    "experiment_start",
+                    "experiment_end",
+                    "oos_start",
+                    "oos_end",
+                    "timeframe",
+                    "market_hours",
+                    "expected_symbol_sessions",
+                    "covered_symbol_sessions",
+                    "missing_symbol_count",
+                    "missing_symbol_sessions",
+                    "default_fold_count",
+                    "fallback_fold_count",
+                }
+                data_coverage = (
+                    DynamicUniverseCoverageReceipt.from_dict(coverage_data)
+                    if set(coverage_data) == dynamic_keys
+                    else AggregateCoverageReceipt.from_dict(coverage_data)
+                )
+            else:
+                data_coverage = DynamicUniverseCoverageReceipt.from_dict(coverage_data)
+        if "universe_verification_receipt" not in data:
+            raise AutoresearchValidationError(
+                "universe_verification_receipt must be an object or null"
+            )
+        if "price_hydration_receipt" not in data:
+            raise AutoresearchValidationError("price_hydration_receipt must be an object or null")
+        universe_receipt_raw = data["universe_verification_receipt"]
+        hydration_receipt_raw = data["price_hydration_receipt"]
+        platform_coverage_raw = data.get("platform_coverage_validation")
+        quantipy_evidence_raw = data.get("quantipy_experiment_evidence")
+        quantipy_not_started_raw = data.get("quantipy_execution_not_started")
+        if platform_coverage_raw is not None and not isinstance(platform_coverage_raw, Mapping):
+            raise AutoresearchValidationError(
+                "platform_coverage_validation must be an object or null"
+            )
+        artifact = cls(
+            status=VerificationStatus(_require_str(data, "status")),
+            is_walk_forward_sharpe_net=_optional_float(data, "is_walk_forward_sharpe_net"),
+            oos_sharpe_net=_optional_float(data, "oos_sharpe_net"),
+            max_drawdown_pct=_optional_float(data, "max_drawdown_pct"),
+            win_rate=_optional_float(data, "win_rate"),
+            trade_count=_optional_int(data, "trade_count"),
+            trades_per_day=_optional_float(data, "trades_per_day"),
+            oos_trading_days=_optional_int(data, "oos_trading_days"),
+            feature_importances_summary=_require_str(data, "feature_importances_summary"),
+            null_test_summary=_require_str(data, "null_test_summary"),
+            bug_signals=_require_string_list(data, "bug_signals"),
+            tests_passed=_require_bool(data, "tests_passed"),
+            commands_run=_require_string_list(data, "commands_run"),
+            data_coverage=data_coverage,
+            platform_coverage_validation=(
+                DynamicPriceCoverageReceipt.from_dict(platform_coverage_raw)
+                if platform_coverage_raw is not None
+                else None
+            ),
+            infra_gate_outcome=InfraGateOutcome(infra_gate_raw)
+            if infra_gate_raw is not None
+            else None,
+            infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
+            universe_verification_receipt=(
+                UniverseVerificationReceipt.from_dict(universe_receipt_raw)
+                if universe_receipt_raw is not None
+                else None
+            ),
+            price_hydration_receipt=(
+                PriceHydrationReceipt.from_dict(hydration_receipt_raw)
+                if hydration_receipt_raw is not None
+                else None
+            ),
+            quantipy_experiment_evidence=(
+                QuantipyExperimentEvidence.from_dict(quantipy_evidence_raw)
+                if quantipy_evidence_raw is not None
+                else None
+            ),
+            quantipy_execution_not_started=(
+                QuantipyExecutionNotStartedEvidence.from_dict(quantipy_not_started_raw)
+                if quantipy_not_started_raw is not None
+                else None
+            ),
+        )
+        artifact.validate(
+            mode=mode,
+        )
+        return artifact
+
+    def validate(
+        self,
+        *,
+        mode: ResearchMode | None = None,
+        infra_gate_outcome: InfraGateOutcome | None = None,
+    ) -> None:
+        if self.status is VerificationStatus.PASS and (self.bug_signals or not self.tests_passed):
+            raise AutoresearchValidationError(
+                "PASS verification cannot include bug signals or failing tests"
+            )
+        if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
+            raise AutoresearchValidationError(
+                "BUG_SIGNAL verification requires at least one bug signal"
+            )
+        if self.status is VerificationStatus.TEST_FAILURE and self.tests_passed:
+            raise AutoresearchValidationError(
+                "TEST_FAILURE verification cannot mark tests_passed=true"
+            )
+        evidence = self.quantipy_experiment_evidence
+        not_started = self.quantipy_execution_not_started
+        if evidence is not None and not_started is not None:
+            raise AutoresearchValidationError(
+                "verification cannot contain both Quantipy runtime and "
+                "execution-not-started evidence"
+            )
+        if self.status is VerificationStatus.PASS and not_started is not None:
+            raise AutoresearchValidationError(
+                "PASS verification cannot contain execution-not-started evidence"
+            )
+        if evidence is not None:
+            evidence.validate()
+        if evidence is None:
+            if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
+                raise AutoresearchValidationError(
+                    "BUG_SIGNAL without a Quantipy run requires an explicit bug signal"
+                )
+            if (
+                self.status is VerificationStatus.TEST_FAILURE
+                and not self.null_test_summary.strip()
+            ):
+                raise AutoresearchValidationError(
+                    "TEST_FAILURE without a Quantipy run requires an explicit rationale"
+                )
+        elif self.status is VerificationStatus.PASS and not evidence.success:
+            raise AutoresearchValidationError(
+                "PASS verification cannot claim a failed Quantipy experiment run"
+            )
+        elif self.status is VerificationStatus.TEST_FAILURE and evidence.success:
+            raise AutoresearchValidationError(
+                "TEST_FAILURE verification cannot claim a successful Quantipy experiment run"
+            )
+        elif (
+            self.status is VerificationStatus.BUG_SIGNAL
+            and evidence.success
+            and not self.tests_passed
+        ):
+            raise AutoresearchValidationError(
+                "BUG_SIGNAL successful Quantipy experiment requires tests_passed=true"
+            )
+        if (
+            self.status is VerificationStatus.PASS
+            and mode is not ResearchMode.DATA_INFRA_G0
+            and (
+                self.is_walk_forward_sharpe_net is None
+                or self.oos_sharpe_net is None
+                or self.max_drawdown_pct is None
+                or self.win_rate is None
+                or self.trade_count is None
+                or self.trades_per_day is None
+                or self.oos_trading_days is None
+                or self.data_coverage is None
+            )
+        ):
+            raise AutoresearchValidationError(
+                "PASS verification requires complete metrics and data_coverage"
+            )
+        if self.data_coverage is not None:
+            self.data_coverage.validate()
+        if self.platform_coverage_validation is not None:
+            self.platform_coverage_validation.validate()
+        if (self.universe_verification_receipt is None) != (self.price_hydration_receipt is None):
+            raise AutoresearchValidationError(
+                "universe and price hydration receipts must both be present or both be null"
+            )
+        if (
+            self.universe_verification_receipt is not None
+            and self.price_hydration_receipt is not None
+        ):
+            self.price_hydration_receipt.validate_against_universe(
+                self.universe_verification_receipt
+            )
+        if self.status is VerificationStatus.PASS and mode is ResearchMode.ALPHA_RESEARCH:
+            if self.universe_verification_receipt is None or self.price_hydration_receipt is None:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH PASS requires universe and price hydration receipts"
+                )
+            if isinstance(self.data_coverage, DynamicUniverseCoverageReceipt):
+                self.data_coverage.validate_against_hydration(
+                    self.price_hydration_receipt, require_complete=True
+                )
+            else:
+                raise AutoresearchValidationError(
+                    "ALPHA_RESEARCH PASS requires compact dynamic universe coverage"
+                )
+        outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
+        if mode is ResearchMode.DATA_INFRA_G0:
+            is_contract_mismatch = (
+                self.status is VerificationStatus.BUG_SIGNAL
+                and self.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
+            )
+            if is_contract_mismatch:
+                if (
+                    outcome is not None
+                    or self.infra_rationale is not None
+                    or self.platform_coverage_validation is not None
+                ):
+                    raise AutoresearchValidationError(
+                        "platform coverage contract mismatch must have null infrastructure "
+                        "outcome, rationale, and receipt"
+                    )
+            else:
+                receipt = self.platform_coverage_validation
+                if self.status is VerificationStatus.PASS and (
+                    receipt is None
+                    or self.universe_verification_receipt is None
+                    or self.price_hydration_receipt is None
+                ):
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 PASS requires paired universe, price hydration, "
+                        "and platform coverage receipts; use "
+                        "platform_coverage_contract_mismatch BUG_SIGNAL when unavailable "
+                        "or mismatched"
+                    )
+                if receipt is None:
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 verification requires platform_coverage_validation"
+                    )
+                elif not receipt.matches_shared_contract:
+                    raise AutoresearchValidationError(
+                        "Quantipy platform coverage scope or source contract mismatch requires "
+                        "the canonical BUG_SIGNAL artifact"
+                    )
+                if outcome is None or not self.infra_rationale:
+                    raise AutoresearchValidationError(
+                        "DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale"
+                    )
+                if self.status is VerificationStatus.PASS and receipt is not None:
+                    expected_status = (
+                        PlatformCoverageStatus.COMPLETE
+                        if outcome is InfraGateOutcome.GATE_PASSED
+                        else PlatformCoverageStatus.REMEDIATION_REQUIRED
+                    )
+                    if receipt.status is not expected_status:
+                        raise AutoresearchValidationError(
+                            "DATA_INFRA_G0 PASS gate outcome must match platform coverage "
+                            "receipt status"
+                        )
+        if mode is ResearchMode.ALPHA_RESEARCH and (outcome is not None or self.infra_rationale):
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH verification cannot contain infrastructure gate outcomes"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "is_walk_forward_sharpe_net": self.is_walk_forward_sharpe_net,
+            "oos_sharpe_net": self.oos_sharpe_net,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "win_rate": self.win_rate,
+            "trade_count": self.trade_count,
+            "trades_per_day": self.trades_per_day,
+            "oos_trading_days": self.oos_trading_days,
+            "feature_importances_summary": self.feature_importances_summary,
+            "null_test_summary": self.null_test_summary,
+            "bug_signals": list(self.bug_signals),
+            "tests_passed": self.tests_passed,
+            "commands_run": list(self.commands_run),
+            "data_coverage": self.data_coverage.to_dict()
+            if self.data_coverage is not None
+            else None,
+            "platform_coverage_validation": self.platform_coverage_validation.to_dict()
+            if self.platform_coverage_validation is not None
+            else None,
+            "infra_gate_outcome": self.infra_gate_outcome.value
+            if self.infra_gate_outcome is not None
+            else None,
+            "infra_rationale": self.infra_rationale,
+            "universe_verification_receipt": self.universe_verification_receipt.to_dict()
+            if self.universe_verification_receipt is not None
+            else None,
+            "price_hydration_receipt": self.price_hydration_receipt.to_dict()
+            if self.price_hydration_receipt is not None
+            else None,
+            "quantipy_experiment_evidence": self.quantipy_experiment_evidence.to_dict()
+            if self.quantipy_experiment_evidence is not None
+            else None,
+            "quantipy_execution_not_started": self.quantipy_execution_not_started.to_dict()
+            if self.quantipy_execution_not_started is not None
+            else None,
+        }

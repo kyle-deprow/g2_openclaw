@@ -9,12 +9,8 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from gateway.autoresearch.errors import AutoresearchValidationError
-
-if TYPE_CHECKING:
-    from gateway.autoresearch.receipts import CoverageReceipt as CoverageReceipt
 
 
 def _ensure_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -187,47 +183,6 @@ def _require_iso_date(raw: Mapping[str, object], field_name: str) -> str:
     value = _require_str(raw, field_name)
     _validate_iso_date_value(value, label=field_name)
     return value
-
-
-def _validate_coverage_values(receipt: CoverageReceipt, *, label: str) -> None:
-    if not (
-        receipt.declared_intended_start
-        <= receipt.actual_common_start
-        <= receipt.actual_common_end
-        <= receipt.declared_intended_end
-    ):
-        raise AutoresearchValidationError(f"{label} actual common range must fit intended range")
-    if not (
-        receipt.actual_common_start
-        <= receipt.oos_start
-        <= receipt.oos_end
-        <= receipt.actual_common_end
-    ):
-        raise AutoresearchValidationError(f"{label} OOS range must fit actual common range")
-    if (
-        receipt.expected_trading_days <= 0
-        or not 0 <= receipt.actual_trading_days <= receipt.expected_trading_days
-    ):
-        raise AutoresearchValidationError(f"{label} trading day counts are invalid")
-    if not 0.0 <= receipt.coverage_percent <= 100.0:
-        raise AutoresearchValidationError(f"{label} coverage_percent must be between 0 and 100")
-    expected_percent = receipt.actual_trading_days / receipt.expected_trading_days * 100.0
-    if abs(receipt.coverage_percent - expected_percent) > 0.01:
-        raise AutoresearchValidationError(f"{label} coverage_percent must match trading day counts")
-    if receipt.actual_trading_days < receipt.expected_trading_days and not receipt.missing_reason:
-        raise AutoresearchValidationError(
-            f"{label} missing_reason is required for missing trading days"
-        )
-    if receipt.actual_trading_days == receipt.expected_trading_days and receipt.missing_reason:
-        raise AutoresearchValidationError(
-            f"{label} missing_reason is only valid for missing trading days"
-        )
-    if receipt.default_fold_count < 0 or receipt.fallback_fold_count < 0:
-        raise AutoresearchValidationError(f"{label} fold counts must be non-negative")
-    if receipt.fixed_sleeve_local_data and receipt.cap_provenance_available:
-        raise AutoresearchValidationError(
-            f"{label} fixed_sleeve_local_data cannot claim cap_provenance_available"
-        )
 
 
 def _sha256_text(text: str) -> str:

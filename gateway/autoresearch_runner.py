@@ -53,6 +53,9 @@ from gateway.autoresearch.artifacts import (
     FixResultArtifact as FixResultArtifact,
 )
 from gateway.autoresearch.artifacts import (
+    ImplementationResultArtifact as ImplementationResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
     MemoryVerificationReceipt as MemoryVerificationReceipt,
 )
 from gateway.autoresearch.artifacts import (
@@ -84,6 +87,9 @@ from gateway.autoresearch.artifacts import (
 )
 from gateway.autoresearch.artifacts import (
     UniversePlanArtifact as UniversePlanArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    VerificationResultArtifact as VerificationResultArtifact,
 )
 from gateway.autoresearch.compute import (
     _GPU_PROBE_MODULES as _GPU_PROBE_MODULES,
@@ -482,9 +488,6 @@ from gateway.autoresearch.fields import (
     _strict_json_string as _strict_json_string,
 )
 from gateway.autoresearch.fields import (
-    _validate_coverage_values as _validate_coverage_values,
-)
-from gateway.autoresearch.fields import (
     _validate_iso_date_value as _validate_iso_date_value,
 )
 from gateway.autoresearch.fields import (
@@ -589,8 +592,20 @@ from gateway.autoresearch.receipts import (
 from gateway.autoresearch.receipts import (
     UniverseVerificationReceipt as UniverseVerificationReceipt,
 )
+from gateway.autoresearch.receipts import (
+    _validate_coverage_values as _validate_coverage_values,
+)
 from gateway.autoresearch.recovery_receipts import (
     CanonicalQuantipyRuntimeAttestation as CanonicalQuantipyRuntimeAttestation,
+)
+from gateway.autoresearch.recovery_receipts import (
+    PlatformRuntimeRecoveryReceipt as PlatformRuntimeRecoveryReceipt,
+)
+from gateway.autoresearch.recovery_receipts import (
+    _deterministic_quantipy_run_id as _deterministic_quantipy_run_id,
+)
+from gateway.autoresearch.recovery_receipts import (
+    _verify_member_union_manifest as _verify_member_union_manifest,
 )
 from gateway.autoresearch.secure_io import (
     _canonical_json_sha256 as _canonical_json_sha256,
@@ -1218,103 +1233,6 @@ def _is_operator_precondition_consensus(
     return all(marker in brief for marker in _OPERATOR_PRECONDITION_BRIEF_MARKERS)
 
 
-# R3c blocker: the default experiment_manifest_path reads DEFAULT_AUTORESEARCH_WORKTREE_ROOT.
-@dataclass(frozen=True, slots=True)
-class ImplementationResultArtifact:
-    summary: str
-    workspace_path: str
-    commit_sha: str
-    module_path: str
-    notebook_path: str
-    tests_added_or_updated: tuple[str, ...]
-    commands_run: tuple[str, ...]
-    experiment_manifest_path: str = str(
-        DEFAULT_AUTORESEARCH_WORKTREE_ROOT / "unverified" / "experiment-manifest.json"
-    )
-    experiment_manifest_sha256: str = "0" * 64
-    compute_fit: ComputeFitArtifact | None = None
-    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
-
-    @classmethod
-    def from_dict(cls, raw: object) -> ImplementationResultArtifact:
-        data = _ensure_mapping(raw, label="implementation_result")
-        _require_exact_keys(
-            data,
-            label="implementation_result",
-            expected=(
-                "summary",
-                "workspace_path",
-                "commit_sha",
-                "module_path",
-                "notebook_path",
-                "tests_added_or_updated",
-                "commands_run",
-                "experiment_manifest_path",
-                "experiment_manifest_sha256",
-                "compute_fit",
-                "price_hydration_scope_preflight",
-            ),
-        )
-        compute_fit_raw = data.get("compute_fit")
-        preflight_raw = data.get("price_hydration_scope_preflight")
-        artifact = cls(
-            summary=_require_str(data, "summary"),
-            workspace_path=_require_workspace_path(data, "workspace_path"),
-            commit_sha=_require_str(data, "commit_sha"),
-            module_path=_require_str(data, "module_path"),
-            notebook_path=_require_str(data, "notebook_path"),
-            tests_added_or_updated=_require_string_list(data, "tests_added_or_updated"),
-            commands_run=_require_string_list(data, "commands_run"),
-            experiment_manifest_path=_require_workspace_path(data, "experiment_manifest_path"),
-            experiment_manifest_sha256=_require_sha256(data, "experiment_manifest_sha256"),
-            compute_fit=(
-                ComputeFitArtifact.from_dict(compute_fit_raw)
-                if compute_fit_raw is not None
-                else None
-            ),
-            price_hydration_scope_preflight=(
-                PriceHydrationScopePreflight.from_dict(preflight_raw)
-                if preflight_raw is not None
-                else None
-            ),
-        )
-        artifact.validate()
-        return artifact
-
-    def validate(self) -> None:
-        _validate_workspace_path(
-            self.workspace_path,
-            label="implementation_result workspace_path",
-        )
-        if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
-            raise AutoresearchValidationError(
-                "implementation_result commit_sha must be a Git commit SHA"
-            )
-        _validate_workspace_path(
-            self.experiment_manifest_path,
-            label="implementation_result experiment_manifest_path",
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "summary": self.summary,
-            "workspace_path": self.workspace_path,
-            "commit_sha": self.commit_sha,
-            "module_path": self.module_path,
-            "notebook_path": self.notebook_path,
-            "tests_added_or_updated": list(self.tests_added_or_updated),
-            "commands_run": list(self.commands_run),
-            "experiment_manifest_path": self.experiment_manifest_path,
-            "experiment_manifest_sha256": self.experiment_manifest_sha256,
-            "compute_fit": self.compute_fit.to_dict() if self.compute_fit is not None else None,
-            "price_hydration_scope_preflight": (
-                self.price_hydration_scope_preflight.to_dict()
-                if self.price_hydration_scope_preflight is not None
-                else None
-            ),
-        }
-
-
 # R3c blocker: this context calls runner-only _verify_member_union_manifest and
 # gateway.autoresearch_readiness APIs.
 @dataclass(frozen=True, slots=True)
@@ -1379,50 +1297,6 @@ class AutoresearchValidationContext:
                     "earliest_execution_date must equal the first actual XNYS session "
                     f"after selection_date ({expected})"
                 )
-
-
-def _verify_member_union_manifest(receipt: UniverseVerificationReceipt) -> tuple[str, ...]:
-    manifest = receipt.member_union_manifest
-    descriptor: int | None = None
-    try:
-        descriptor = os.open(
-            manifest.path,
-            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
-        )
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise AutoresearchValidationError("member union manifest must be a regular file")
-        chunks: list[bytes] = []
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"cannot read member union manifest: {manifest.path}"
-        ) from exc
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-    content = b"".join(chunks)
-    if hashlib.sha256(content).hexdigest() != manifest.sha256:
-        raise AutoresearchValidationError("member union manifest SHA-256 mismatch")
-    try:
-        symbols = content.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise AutoresearchValidationError("member union manifest must be UTF-8") from exc
-    canonical = canonical_member_union_manifest(symbols)
-    if content != canonical:
-        raise AutoresearchValidationError(
-            "member union manifest must be uppercase sorted unique UTF-8 lines "
-            "with one trailing newline"
-        )
-    count, digest = canonical_member_union_digest(symbols)
-    if count != receipt.member_union_count or digest != receipt.member_union_digest:
-        raise AutoresearchValidationError(
-            "member union manifest must recompute the persisted count and digest"
-        )
-    return tuple(symbols)
 
 
 def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> None:
@@ -1654,373 +1528,6 @@ def _requested_sessions_for_preflight(
             "DATA_INFRA_G0 platform preflight session_count must match pinned XNYS sessions"
         )
     return sessions
-
-
-# R3c blocker: this artifact depends on external DynamicPriceCoverageReceipt and
-# PlatformCoverageStatus types plus runner/state-aware validation.
-@dataclass(frozen=True, slots=True)
-class VerificationResultArtifact:
-    status: VerificationStatus
-    is_walk_forward_sharpe_net: float | None
-    oos_sharpe_net: float | None
-    max_drawdown_pct: float | None
-    win_rate: float | None
-    trade_count: int | None
-    trades_per_day: float | None
-    oos_trading_days: int | None
-    feature_importances_summary: str
-    null_test_summary: str
-    bug_signals: tuple[str, ...]
-    tests_passed: bool
-    commands_run: tuple[str, ...]
-    data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
-    platform_coverage_validation: DynamicPriceCoverageReceipt | None = None
-    infra_gate_outcome: InfraGateOutcome | None = None
-    infra_rationale: str | None = None
-    universe_verification_receipt: UniverseVerificationReceipt | None = None
-    price_hydration_receipt: PriceHydrationReceipt | None = None
-    quantipy_experiment_evidence: QuantipyExperimentEvidence | None = None
-    quantipy_execution_not_started: QuantipyExecutionNotStartedEvidence | None = None
-
-    @classmethod
-    def from_dict(
-        cls,
-        raw: object,
-        *,
-        mode: ResearchMode | None = None,
-    ) -> VerificationResultArtifact:
-        data = _ensure_mapping(raw, label="verification_result")
-        expected_fields: tuple[str, ...] = (
-            "status",
-            "is_walk_forward_sharpe_net",
-            "oos_sharpe_net",
-            "max_drawdown_pct",
-            "win_rate",
-            "trade_count",
-            "trades_per_day",
-            "oos_trading_days",
-            "feature_importances_summary",
-            "null_test_summary",
-            "bug_signals",
-            "tests_passed",
-            "commands_run",
-            "data_coverage",
-            "platform_coverage_validation",
-            "infra_gate_outcome",
-            "infra_rationale",
-            "universe_verification_receipt",
-            "price_hydration_receipt",
-            "quantipy_experiment_evidence",
-            "quantipy_execution_not_started",
-        )
-        _require_exact_keys(
-            data,
-            label="verification_result",
-            expected=expected_fields,
-        )
-        infra_gate_raw = data.get("infra_gate_outcome")
-        infra_rationale = data.get("infra_rationale")
-        if infra_gate_raw is not None and not isinstance(infra_gate_raw, str):
-            raise AutoresearchValidationError("infra_gate_outcome must be a string or null")
-        if infra_rationale is not None and not isinstance(infra_rationale, str):
-            raise AutoresearchValidationError("infra_rationale must be a string or null")
-        if "data_coverage" not in data:
-            raise AutoresearchValidationError("data_coverage must be an object or null")
-        data_coverage_raw = data["data_coverage"]
-        data_coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt | None
-        if data_coverage_raw is None:
-            data_coverage = None
-        else:
-            coverage_data = _ensure_mapping(data_coverage_raw, label="data_coverage")
-            if mode is ResearchMode.DATA_INFRA_G0:
-                dynamic_keys = {
-                    "member_union_count",
-                    "member_union_digest",
-                    "experiment_start",
-                    "experiment_end",
-                    "oos_start",
-                    "oos_end",
-                    "timeframe",
-                    "market_hours",
-                    "expected_symbol_sessions",
-                    "covered_symbol_sessions",
-                    "missing_symbol_count",
-                    "missing_symbol_sessions",
-                    "default_fold_count",
-                    "fallback_fold_count",
-                }
-                data_coverage = (
-                    DynamicUniverseCoverageReceipt.from_dict(coverage_data)
-                    if set(coverage_data) == dynamic_keys
-                    else AggregateCoverageReceipt.from_dict(coverage_data)
-                )
-            else:
-                data_coverage = DynamicUniverseCoverageReceipt.from_dict(coverage_data)
-        if "universe_verification_receipt" not in data:
-            raise AutoresearchValidationError(
-                "universe_verification_receipt must be an object or null"
-            )
-        if "price_hydration_receipt" not in data:
-            raise AutoresearchValidationError("price_hydration_receipt must be an object or null")
-        universe_receipt_raw = data["universe_verification_receipt"]
-        hydration_receipt_raw = data["price_hydration_receipt"]
-        platform_coverage_raw = data.get("platform_coverage_validation")
-        quantipy_evidence_raw = data.get("quantipy_experiment_evidence")
-        quantipy_not_started_raw = data.get("quantipy_execution_not_started")
-        if platform_coverage_raw is not None and not isinstance(platform_coverage_raw, Mapping):
-            raise AutoresearchValidationError(
-                "platform_coverage_validation must be an object or null"
-            )
-        artifact = cls(
-            status=VerificationStatus(_require_str(data, "status")),
-            is_walk_forward_sharpe_net=_optional_float(data, "is_walk_forward_sharpe_net"),
-            oos_sharpe_net=_optional_float(data, "oos_sharpe_net"),
-            max_drawdown_pct=_optional_float(data, "max_drawdown_pct"),
-            win_rate=_optional_float(data, "win_rate"),
-            trade_count=_optional_int(data, "trade_count"),
-            trades_per_day=_optional_float(data, "trades_per_day"),
-            oos_trading_days=_optional_int(data, "oos_trading_days"),
-            feature_importances_summary=_require_str(data, "feature_importances_summary"),
-            null_test_summary=_require_str(data, "null_test_summary"),
-            bug_signals=_require_string_list(data, "bug_signals"),
-            tests_passed=_require_bool(data, "tests_passed"),
-            commands_run=_require_string_list(data, "commands_run"),
-            data_coverage=data_coverage,
-            platform_coverage_validation=(
-                DynamicPriceCoverageReceipt.from_dict(platform_coverage_raw)
-                if platform_coverage_raw is not None
-                else None
-            ),
-            infra_gate_outcome=InfraGateOutcome(infra_gate_raw)
-            if infra_gate_raw is not None
-            else None,
-            infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
-            universe_verification_receipt=(
-                UniverseVerificationReceipt.from_dict(universe_receipt_raw)
-                if universe_receipt_raw is not None
-                else None
-            ),
-            price_hydration_receipt=(
-                PriceHydrationReceipt.from_dict(hydration_receipt_raw)
-                if hydration_receipt_raw is not None
-                else None
-            ),
-            quantipy_experiment_evidence=(
-                QuantipyExperimentEvidence.from_dict(quantipy_evidence_raw)
-                if quantipy_evidence_raw is not None
-                else None
-            ),
-            quantipy_execution_not_started=(
-                QuantipyExecutionNotStartedEvidence.from_dict(quantipy_not_started_raw)
-                if quantipy_not_started_raw is not None
-                else None
-            ),
-        )
-        artifact.validate(
-            mode=mode,
-        )
-        return artifact
-
-    def validate(
-        self,
-        *,
-        mode: ResearchMode | None = None,
-        infra_gate_outcome: InfraGateOutcome | None = None,
-    ) -> None:
-        if self.status is VerificationStatus.PASS and (self.bug_signals or not self.tests_passed):
-            raise AutoresearchValidationError(
-                "PASS verification cannot include bug signals or failing tests"
-            )
-        if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
-            raise AutoresearchValidationError(
-                "BUG_SIGNAL verification requires at least one bug signal"
-            )
-        if self.status is VerificationStatus.TEST_FAILURE and self.tests_passed:
-            raise AutoresearchValidationError(
-                "TEST_FAILURE verification cannot mark tests_passed=true"
-            )
-        evidence = self.quantipy_experiment_evidence
-        not_started = self.quantipy_execution_not_started
-        if evidence is not None and not_started is not None:
-            raise AutoresearchValidationError(
-                "verification cannot contain both Quantipy runtime and "
-                "execution-not-started evidence"
-            )
-        if self.status is VerificationStatus.PASS and not_started is not None:
-            raise AutoresearchValidationError(
-                "PASS verification cannot contain execution-not-started evidence"
-            )
-        if evidence is not None:
-            evidence.validate()
-        if evidence is None:
-            if self.status is VerificationStatus.BUG_SIGNAL and not self.bug_signals:
-                raise AutoresearchValidationError(
-                    "BUG_SIGNAL without a Quantipy run requires an explicit bug signal"
-                )
-            if (
-                self.status is VerificationStatus.TEST_FAILURE
-                and not self.null_test_summary.strip()
-            ):
-                raise AutoresearchValidationError(
-                    "TEST_FAILURE without a Quantipy run requires an explicit rationale"
-                )
-        elif self.status is VerificationStatus.PASS and not evidence.success:
-            raise AutoresearchValidationError(
-                "PASS verification cannot claim a failed Quantipy experiment run"
-            )
-        elif self.status is VerificationStatus.TEST_FAILURE and evidence.success:
-            raise AutoresearchValidationError(
-                "TEST_FAILURE verification cannot claim a successful Quantipy experiment run"
-            )
-        elif (
-            self.status is VerificationStatus.BUG_SIGNAL
-            and evidence.success
-            and not self.tests_passed
-        ):
-            raise AutoresearchValidationError(
-                "BUG_SIGNAL successful Quantipy experiment requires tests_passed=true"
-            )
-        if (
-            self.status is VerificationStatus.PASS
-            and mode is not ResearchMode.DATA_INFRA_G0
-            and (
-                self.is_walk_forward_sharpe_net is None
-                or self.oos_sharpe_net is None
-                or self.max_drawdown_pct is None
-                or self.win_rate is None
-                or self.trade_count is None
-                or self.trades_per_day is None
-                or self.oos_trading_days is None
-                or self.data_coverage is None
-            )
-        ):
-            raise AutoresearchValidationError(
-                "PASS verification requires complete metrics and data_coverage"
-            )
-        if self.data_coverage is not None:
-            self.data_coverage.validate()
-        if self.platform_coverage_validation is not None:
-            self.platform_coverage_validation.validate()
-        if (self.universe_verification_receipt is None) != (self.price_hydration_receipt is None):
-            raise AutoresearchValidationError(
-                "universe and price hydration receipts must both be present or both be null"
-            )
-        if (
-            self.universe_verification_receipt is not None
-            and self.price_hydration_receipt is not None
-        ):
-            self.price_hydration_receipt.validate_against_universe(
-                self.universe_verification_receipt
-            )
-        if self.status is VerificationStatus.PASS and mode is ResearchMode.ALPHA_RESEARCH:
-            if self.universe_verification_receipt is None or self.price_hydration_receipt is None:
-                raise AutoresearchValidationError(
-                    "ALPHA_RESEARCH PASS requires universe and price hydration receipts"
-                )
-            if isinstance(self.data_coverage, DynamicUniverseCoverageReceipt):
-                self.data_coverage.validate_against_hydration(
-                    self.price_hydration_receipt, require_complete=True
-                )
-            else:
-                raise AutoresearchValidationError(
-                    "ALPHA_RESEARCH PASS requires compact dynamic universe coverage"
-                )
-        outcome = infra_gate_outcome if infra_gate_outcome is not None else self.infra_gate_outcome
-        if mode is ResearchMode.DATA_INFRA_G0:
-            is_contract_mismatch = (
-                self.status is VerificationStatus.BUG_SIGNAL
-                and self.bug_signals == (PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,)
-            )
-            if is_contract_mismatch:
-                if (
-                    outcome is not None
-                    or self.infra_rationale is not None
-                    or self.platform_coverage_validation is not None
-                ):
-                    raise AutoresearchValidationError(
-                        "platform coverage contract mismatch must have null infrastructure "
-                        "outcome, rationale, and receipt"
-                    )
-            else:
-                receipt = self.platform_coverage_validation
-                if self.status is VerificationStatus.PASS and (
-                    receipt is None
-                    or self.universe_verification_receipt is None
-                    or self.price_hydration_receipt is None
-                ):
-                    raise AutoresearchValidationError(
-                        "DATA_INFRA_G0 PASS requires paired universe, price hydration, "
-                        "and platform coverage receipts; use "
-                        "platform_coverage_contract_mismatch BUG_SIGNAL when unavailable "
-                        "or mismatched"
-                    )
-                if receipt is None:
-                    raise AutoresearchValidationError(
-                        "DATA_INFRA_G0 verification requires platform_coverage_validation"
-                    )
-                elif not receipt.matches_shared_contract:
-                    raise AutoresearchValidationError(
-                        "Quantipy platform coverage scope or source contract mismatch requires "
-                        "the canonical BUG_SIGNAL artifact"
-                    )
-                if outcome is None or not self.infra_rationale:
-                    raise AutoresearchValidationError(
-                        "DATA_INFRA_G0 verification requires infra_gate_outcome and infra_rationale"
-                    )
-                if self.status is VerificationStatus.PASS and receipt is not None:
-                    expected_status = (
-                        PlatformCoverageStatus.COMPLETE
-                        if outcome is InfraGateOutcome.GATE_PASSED
-                        else PlatformCoverageStatus.REMEDIATION_REQUIRED
-                    )
-                    if receipt.status is not expected_status:
-                        raise AutoresearchValidationError(
-                            "DATA_INFRA_G0 PASS gate outcome must match platform coverage "
-                            "receipt status"
-                        )
-        if mode is ResearchMode.ALPHA_RESEARCH and (outcome is not None or self.infra_rationale):
-            raise AutoresearchValidationError(
-                "ALPHA_RESEARCH verification cannot contain infrastructure gate outcomes"
-            )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "status": self.status.value,
-            "is_walk_forward_sharpe_net": self.is_walk_forward_sharpe_net,
-            "oos_sharpe_net": self.oos_sharpe_net,
-            "max_drawdown_pct": self.max_drawdown_pct,
-            "win_rate": self.win_rate,
-            "trade_count": self.trade_count,
-            "trades_per_day": self.trades_per_day,
-            "oos_trading_days": self.oos_trading_days,
-            "feature_importances_summary": self.feature_importances_summary,
-            "null_test_summary": self.null_test_summary,
-            "bug_signals": list(self.bug_signals),
-            "tests_passed": self.tests_passed,
-            "commands_run": list(self.commands_run),
-            "data_coverage": self.data_coverage.to_dict()
-            if self.data_coverage is not None
-            else None,
-            "platform_coverage_validation": self.platform_coverage_validation.to_dict()
-            if self.platform_coverage_validation is not None
-            else None,
-            "infra_gate_outcome": self.infra_gate_outcome.value
-            if self.infra_gate_outcome is not None
-            else None,
-            "infra_rationale": self.infra_rationale,
-            "universe_verification_receipt": self.universe_verification_receipt.to_dict()
-            if self.universe_verification_receipt is not None
-            else None,
-            "price_hydration_receipt": self.price_hydration_receipt.to_dict()
-            if self.price_hydration_receipt is not None
-            else None,
-            "quantipy_experiment_evidence": self.quantipy_experiment_evidence.to_dict()
-            if self.quantipy_experiment_evidence is not None
-            else None,
-            "quantipy_execution_not_started": self.quantipy_execution_not_started.to_dict()
-            if self.quantipy_execution_not_started is not None
-            else None,
-        }
 
 
 # R3c blocker: this recovery receipt depends on the runner-resident
@@ -2459,150 +1966,6 @@ class ExternalVerificationRetryReceipt:
         return receipt
 
 
-# R3c blocker: this recovery receipt depends on the blocked external-retry chain
-# and external ResearchPanelProbeReceipt.
-@dataclass(frozen=True, slots=True)
-class PlatformRuntimeRecoveryReceipt:
-    """Versioned, immutable authorization for the exact historical v4→v5 repair."""
-
-    expected_run_id: str
-    implementation_commit: str
-    implementation_manifest_sha256: str
-    verification_history_sha256: tuple[str, ...]
-    interruption_sha256: str
-    prior_retry_receipt_sha256: str
-    v4_verification_sha256: str
-    v4_detached_run_manifest_sha256: str
-    v4_detached_run_status_sha256: str
-    old_worktree_runtime_commit: str
-    runtime: CanonicalQuantipyRuntimeAttestation
-    execution_command_sha256: str
-    probe: ResearchPanelProbeReceipt
-    operator_reason: str
-    schema_version: int = PLATFORM_RUNTIME_RECOVERY_RECEIPT_SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        if self.schema_version != PLATFORM_RUNTIME_RECOVERY_RECEIPT_SCHEMA_VERSION:
-            raise AutoresearchValidationError(
-                "unsupported platform runtime recovery receipt schema_version"
-            )
-        if (
-            re.fullmatch(r"autoresearch-i[1-9][0-9]*-[0-9a-f]{7,12}-v5", self.expected_run_id)
-            is None
-        ):
-            raise AutoresearchValidationError(
-                "platform runtime recovery receipt expected_run_id is invalid"
-            )
-        if re.fullmatch(r"[0-9a-f]{7,64}", self.implementation_commit) is None:
-            raise AutoresearchValidationError(
-                "platform runtime recovery implementation_commit is invalid"
-            )
-        if re.fullmatch(r"[0-9a-f]{7,64}", self.old_worktree_runtime_commit) is None:
-            raise AutoresearchValidationError(
-                "platform runtime recovery old runtime commit is invalid"
-            )
-        if len(self.verification_history_sha256) != 3:
-            raise AutoresearchValidationError(
-                "platform runtime recovery receipt requires exact v1/v2/v4 verification history"
-            )
-        for index, digest in enumerate(
-            (
-                *self.verification_history_sha256,
-                self.implementation_manifest_sha256,
-                self.interruption_sha256,
-                self.prior_retry_receipt_sha256,
-                self.v4_verification_sha256,
-                self.v4_detached_run_manifest_sha256,
-                self.v4_detached_run_status_sha256,
-                self.execution_command_sha256,
-            ),
-            start=1,
-        ):
-            _validate_sha256(digest, label=f"platform_runtime_recovery_receipt.digest[{index}]")
-        if not isinstance(self.runtime, CanonicalQuantipyRuntimeAttestation):
-            raise AutoresearchValidationError(
-                "platform runtime recovery receipt requires runtime attestation"
-            )
-        if not isinstance(self.probe, ResearchPanelProbeReceipt):
-            raise AutoresearchValidationError(
-                "platform runtime recovery receipt requires a research-panel probe"
-            )
-        if not self.operator_reason or self.operator_reason.strip() != self.operator_reason:
-            raise AutoresearchValidationError(
-                "platform runtime recovery receipt requires a trimmed operator reason"
-            )
-
-    @classmethod
-    def from_dict(cls, raw: object) -> PlatformRuntimeRecoveryReceipt:
-        data = _ensure_mapping(raw, label="platform_runtime_recovery_receipt")
-        _require_exact_keys(
-            data,
-            label="platform_runtime_recovery_receipt",
-            expected=(
-                "expected_run_id",
-                "implementation_commit",
-                "implementation_manifest_sha256",
-                "verification_history_sha256",
-                "interruption_sha256",
-                "prior_retry_receipt_sha256",
-                "v4_verification_sha256",
-                "v4_detached_run_manifest_sha256",
-                "v4_detached_run_status_sha256",
-                "old_worktree_runtime_commit",
-                "runtime",
-                "execution_command_sha256",
-                "probe",
-                "operator_reason",
-                "schema_version",
-            ),
-        )
-        history = data["verification_history_sha256"]
-        if not isinstance(history, list):
-            raise AutoresearchValidationError(
-                "platform runtime recovery verification_history_sha256 must be a list"
-            )
-        return cls(
-            expected_run_id=_require_str(data, "expected_run_id"),
-            implementation_commit=_require_str(data, "implementation_commit"),
-            implementation_manifest_sha256=_require_sha256(data, "implementation_manifest_sha256"),
-            verification_history_sha256=tuple(
-                _require_sha256({"value": digest}, "value") for digest in history
-            ),
-            interruption_sha256=_require_sha256(data, "interruption_sha256"),
-            prior_retry_receipt_sha256=_require_sha256(data, "prior_retry_receipt_sha256"),
-            v4_verification_sha256=_require_sha256(data, "v4_verification_sha256"),
-            v4_detached_run_manifest_sha256=_require_sha256(
-                data, "v4_detached_run_manifest_sha256"
-            ),
-            v4_detached_run_status_sha256=_require_sha256(data, "v4_detached_run_status_sha256"),
-            old_worktree_runtime_commit=_require_str(data, "old_worktree_runtime_commit"),
-            runtime=CanonicalQuantipyRuntimeAttestation.from_dict(data["runtime"]),
-            execution_command_sha256=_require_sha256(data, "execution_command_sha256"),
-            probe=ResearchPanelProbeReceipt.from_dict(data["probe"]),
-            operator_reason=_require_str(data, "operator_reason"),
-            schema_version=_require_int(data, "schema_version"),
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "expected_run_id": self.expected_run_id,
-            "implementation_commit": self.implementation_commit,
-            "implementation_manifest_sha256": self.implementation_manifest_sha256,
-            "verification_history_sha256": list(self.verification_history_sha256),
-            "interruption_sha256": self.interruption_sha256,
-            "prior_retry_receipt_sha256": self.prior_retry_receipt_sha256,
-            "v4_verification_sha256": self.v4_verification_sha256,
-            "v4_detached_run_manifest_sha256": self.v4_detached_run_manifest_sha256,
-            "v4_detached_run_status_sha256": self.v4_detached_run_status_sha256,
-            "old_worktree_runtime_commit": self.old_worktree_runtime_commit,
-            "runtime": self.runtime.to_dict(),
-            "execution_command_sha256": self.execution_command_sha256,
-            "probe": self.probe.to_dict(),
-            "operator_reason": self.operator_reason,
-            "schema_version": self.schema_version,
-        }
-
-
 # R3c blocker: state still references VerificationResultArtifact, the blocked
 # recovery-receipt chain, external ReadinessIdentity, and runner-local _T.
 @dataclass(frozen=True, slots=True)
@@ -2865,17 +2228,6 @@ class AutoresearchState:
                 self.canonical_quantipy_runtime_attestation.to_dict()
             )
         return state
-
-
-def _deterministic_quantipy_run_id(iteration: int, commit_sha: str, *, attempt: int) -> str:
-    if iteration < 1:
-        raise AutoresearchValidationError("iteration must be >= 1")
-    if re.fullmatch(r"[0-9a-f]{7,64}", commit_sha) is None:
-        raise AutoresearchValidationError("implementation_result commit_sha is invalid")
-    if attempt < 1:
-        raise AutoresearchValidationError("Quantipy verification attempt must be >= 1")
-    base = f"autoresearch-i{iteration}-{commit_sha[:12]}"
-    return base if attempt == 1 else f"{base}-v{attempt}"
 
 
 def _expected_quantipy_verification_run_id(state: AutoresearchState, commit_sha: str) -> str:
