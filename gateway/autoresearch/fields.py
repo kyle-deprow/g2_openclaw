@@ -154,6 +154,18 @@ def _parse_timestamp(value: str, *, label: str) -> datetime:
     return parsed
 
 
+def _parse_utc_request_datetime(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise AutoresearchValidationError("panel request datetime is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AutoresearchValidationError("panel request datetime is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise AutoresearchValidationError("panel request datetime must be UTC-aware")
+    return parsed.astimezone(UTC)
+
+
 def _normalise_identifier(value: str) -> str:
     """Return the sole documented identifier form: lowercase kebab-case."""
     normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")

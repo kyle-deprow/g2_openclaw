@@ -25,7 +25,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
 from ctypes.util import find_library  # noqa: F401
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC as UTC
+from datetime import date, datetime
 from enum import StrEnum  # noqa: F401
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -423,6 +424,9 @@ from gateway.autoresearch.fields import (
 )
 from gateway.autoresearch.fields import (
     _parse_timestamp as _parse_timestamp,
+)
+from gateway.autoresearch.fields import (
+    _parse_utc_request_datetime as _parse_utc_request_datetime,
 )
 from gateway.autoresearch.fields import (
     _require_bool as _require_bool,
@@ -2768,18 +2772,6 @@ def _expected_local_research_panel_http_error_message(
         f"ExperimentPanelError: Client error '{status} {reason}' for url '{url}'\n"
         f"For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status}"
     )
-
-
-def _parse_utc_request_datetime(value: object) -> datetime:
-    if not isinstance(value, str):
-        raise AutoresearchValidationError("panel request datetime is invalid")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise AutoresearchValidationError("panel request datetime is invalid") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise AutoresearchValidationError("panel request datetime must be UTC-aware")
-    return parsed.astimezone(UTC)
 
 
 def _verified_panel_request_for_state(state: AutoresearchState) -> Mapping[str, object]:
