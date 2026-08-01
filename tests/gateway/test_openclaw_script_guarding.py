@@ -578,7 +578,9 @@ def _write_push_script_fixture_bin(
     gateway_active_state: str = "inactive",
 ) -> Path:
     mock_bin = home / "mock-bin"
-    codex_package = home / "mock-codex-package"
+    codex_package = (
+        home / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
+    )
     codex_bin = codex_package / "bin"
     codex_bin.mkdir(parents=True)
     (codex_bin / "codex.js").write_text(
@@ -592,6 +594,9 @@ if (process.env.CODEX_DOCTOR_LOG) {
 }
 const codexHome = process.env.CODEX_HOME || "<unset>";
 const packageRoot = process.env.MOCK_CODEX_RESOLVED_PATH || "<unset>";
+const nativePackageRoot = `${packageRoot}-linux-x64/vendor/x86_64-unknown-linux-musl`;
+const npmPackageRoot =
+  process.env.MOCK_CODEX_DOCTOR_NPM_PACKAGE_ROOT || `${codexHome}/npm-global/@openai/codex`;
 const checks = {
   "auth.credentials": {
     id: "auth.credentials",
@@ -616,7 +621,21 @@ const checks = {
     category: "install",
     summary: process.env.MOCK_CODEX_DOCTOR_INSTALL_SUMMARY ||
       "npm install -g @openai/codex would update a different install",
-    details: {"running package root": packageRoot}
+    details: {
+      "PATH codex #1": "/usr/bin/codex",
+      "PATH codex #2": "/bin/codex",
+      "PATH codex entries": "2",
+      "current executable": `${nativePackageRoot}/bin/codex`,
+      "install context":
+        `npm (package ${nativePackageRoot}, bin ${nativePackageRoot}/bin, ` +
+        `resources ${nativePackageRoot}/codex-resources, path ${nativePackageRoot}/codex-path)`,
+      "managed by bun": "false",
+      "managed by npm": "true",
+      "managed by pnpm": "false",
+      "managed package root": packageRoot,
+      "npm package root": npmPackageRoot,
+      "running package root": packageRoot
+    }
   },
   "mcp.config": {
     id: "mcp.config",
@@ -631,10 +650,14 @@ const checks = {
     category: "websocket",
     summary: "Responses WebSocket failed; HTTPS fallback may still work",
     details: {
+      "DNS": "2 IPv4, 0 IPv6, first IPv4",
       "auth mode": process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_AUTH_MODE || "none",
+      "connect timeout": "15000 ms",
       endpoint: "wss://api.openai.com/v1/<redacted>",
+      "handshake transport error": "http 401 Unauthorized: missing bearer",
       "model provider": "openai",
       "provider name": "OpenAI",
+      "proxy env vars": "none",
       "supports websockets": "true",
       "wire API": "responses"
     }
@@ -659,7 +682,15 @@ const checks = {
     category: "updates",
     summary: process.env.MOCK_CODEX_DOCTOR_UPDATE_SUMMARY ||
       "update would target a different npm install",
-    details: {"running package root": packageRoot}
+    details: {
+      "check for update on startup": "true",
+      "latest version": "0.146.0",
+      "latest version status": "newer version is available",
+      "npm package root": npmPackageRoot,
+      "running package root": packageRoot,
+      "update action": "npm install -g @openai/codex",
+      "version cache": [`${codexHome}/version.json`, "missing"]
+    }
   }
 };
 if (process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL) {
@@ -1191,6 +1222,8 @@ fi
         mock_bin / "sqlite3",
         r"""
 printf 'sqlite3 %s\n' "$*" >> "${SQLITE_LOG:-/dev/null}"
+rebuild_sql="DROP INDEX idx_logs_thread_id; CREATE INDEX idx_logs_thread_id ON logs(thread_id); "
+rebuild_sql+="PRAGMA integrity_check;"
 if [[ "${1:-}" == "-json" && "$#" -ge 3 && "$(basename "$2")" == "logs_2.sqlite" ]]; then
   /usr/bin/sqlite3 "$@"
 elif [[ "$#" -ge 2 && "$(basename "$1")" == "logs_2.sqlite" ]]; then
@@ -1207,7 +1240,14 @@ elif [[ "$#" -ge 2 && "$(basename "$1")" == "logs_2.sqlite" ]]; then
       fi
       ;;
     "REINDEX idx_logs_thread_id; PRAGMA integrity_check;")
-      if [[ "${MOCK_CODEX_LOG_DB_REPAIR:-ok}" == "fail" ]]; then
+      if [[ "${MOCK_CODEX_LOG_DB_REINDEX_REPAIR:-fail}" == "fail" ]]; then
+        printf 'row 4135 missing from index idx_logs_thread_id\n'
+      else
+        printf 'ok\n'
+      fi
+      ;;
+    "$rebuild_sql")
+      if [[ "${MOCK_CODEX_LOG_DB_REBUILD:-ok}" == "fail" ]]; then
         printf 'row 4135 missing from index idx_logs_thread_id\n'
       else
         printf 'ok\n'
@@ -1312,7 +1352,10 @@ def _prepare_push_script_home(
             "RM_LOG": str(home / "rm.log"),
             "FIND_LOG": str(home / "find.log"),
             "OPENCLAW_LOG": str(home / "openclaw.log"),
-            "MOCK_CODEX_RESOLVED_PATH": str(home / "mock-codex-package"),
+            "MOCK_CODEX_RESOLVED_PATH": str(
+                home
+                / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
+            ),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
             "SQLITE_LOG": str(home / "sqlite.log"),
             "TEST_ROOT": str(tmp_path),
@@ -2281,7 +2324,7 @@ def test_push_script_rejects_owned_codex_doctor_failures(
     assert "Done. Config pushed successfully." not in result.stdout
 
 
-def test_push_script_accepts_zero_codex_doctor_exit_only_when_all_checks_ok(
+def test_push_script_rejects_zero_codex_doctor_exit_when_codex_auth_is_ok(
     tmp_path: Path,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
@@ -2293,8 +2336,10 @@ def test_push_script_accepts_zero_codex_doctor_exit_only_when_all_checks_ok(
 
     result = _run_push_script(env)
 
-    assert result.returncode == 0, result.stderr
-    assert "Codex doctor non-owned failures ignored" not in result.stdout
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "auth.credentials=ok" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
 
 
 def test_push_script_rejects_zero_codex_doctor_exit_with_allowed_non_owned_checks(
@@ -2334,7 +2379,8 @@ def test_push_script_rejects_one_codex_doctor_exit_without_allowed_non_owned_che
     result = _run_push_script(env)
 
     assert result.returncode != 0
-    assert "doctor exited 1" in result.stderr
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "auth.credentials=ok" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
 
 
@@ -2865,24 +2911,29 @@ def test_push_script_repairs_scoped_codex_log_db_index_corruption(
     sqlite_log = _read_sqlite_log(env)
     assert f"sqlite3 {log_db} PRAGMA integrity_check;" in sqlite_log
     assert f"sqlite3 {log_db} REINDEX idx_logs_thread_id; PRAGMA integrity_check;" in sqlite_log
+    assert (
+        f"sqlite3 {log_db} DROP INDEX idx_logs_thread_id; "
+        "CREATE INDEX idx_logs_thread_id ON logs(thread_id); PRAGMA integrity_check;"
+    ) in sqlite_log
     assert "REINDEX;" not in sqlite_log
+    assert f"Rebuilding scoped Codex log DB idx_logs_thread_id: {log_db}" in result.stdout
     assert f"Repaired scoped Codex log DB idx_logs_thread_id: {log_db}" in result.stdout
 
 
-def test_push_script_fails_when_scoped_codex_log_db_reindex_cannot_repair(
+def test_push_script_fails_when_scoped_codex_log_db_rebuild_cannot_repair(
     tmp_path: Path,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     log_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/logs_2.sqlite"
     _create_codex_logs_db(log_db)
     env["MOCK_CODEX_LOG_DB_INTEGRITY"] = "corrupt"
-    env["MOCK_CODEX_LOG_DB_REPAIR"] = "fail"
+    env["MOCK_CODEX_LOG_DB_REBUILD"] = "fail"
 
     result = _run_push_script(env)
 
     assert result.returncode != 0
     assert f"Scoped Codex log DB validation/repair failed for {log_db}" in result.stderr
-    assert "remains corrupt after REINDEX idx_logs_thread_id" in result.stderr
+    assert "remains corrupt after rebuilding idx_logs_thread_id" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
 
 
