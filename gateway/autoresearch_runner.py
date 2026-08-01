@@ -526,6 +526,9 @@ from gateway.autoresearch.manifest import (
 from gateway.autoresearch.manifest import (
     SourceReceipt as SourceReceipt,
 )
+from gateway.autoresearch.receipts import (
+    MemberUnionManifestReceipt as MemberUnionManifestReceipt,
+)
 from gateway.autoresearch.recovery_receipts import (
     CanonicalQuantipyRuntimeAttestation as CanonicalQuantipyRuntimeAttestation,
 )
@@ -1734,32 +1737,6 @@ class UniverseHistoryBatchReceipt:
             "operation_count": self.operation_count,
             "dates": [receipt.to_dict() for receipt in self.dates],
         }
-
-
-@dataclass(frozen=True, slots=True)
-class MemberUnionManifestReceipt:
-    path: str
-    sha256: str
-
-    @classmethod
-    def from_dict(cls, raw: object) -> MemberUnionManifestReceipt:
-        data = _ensure_mapping(raw, label="member_union_manifest_receipt")
-        _require_exact_keys(
-            data,
-            label="member_union_manifest_receipt",
-            expected=("path", "sha256"),
-        )
-        receipt = cls(path=_require_str(data, "path"), sha256=_require_sha256(data, "sha256"))
-        receipt.validate()
-        return receipt
-
-    def validate(self) -> None:
-        if not Path(self.path).is_absolute():
-            raise AutoresearchValidationError("member union manifest path must be absolute")
-        _validate_sha256(self.sha256, label="member union manifest sha256")
-
-    def to_dict(self) -> dict[str, str]:
-        return {"path": self.path, "sha256": self.sha256}
 
 
 @dataclass(frozen=True, slots=True)
