@@ -117,6 +117,196 @@ CREATE INDEX idx_logs_thread_id_ts ON logs(thread_id, ts DESC, ts_nanos DESC, id
     "ON logs(process_uuid, ts DESC, ts_nanos DESC, id DESC)\n"
     "WHERE thread_id IS NULL;"
 ).strip()
+CODEX_STATE_THREADS_TAIL = (
+    ", cli_version TEXT NOT NULL DEFAULT '', "
+    "first_user_message TEXT NOT NULL DEFAULT '', "
+    "agent_nickname TEXT, agent_role TEXT, "
+    "memory_mode TEXT NOT NULL DEFAULT 'enabled', "
+    "model TEXT, reasoning_effort TEXT, agent_path TEXT, "
+    "created_at_ms INTEGER, updated_at_ms INTEGER, thread_source TEXT, "
+    "preview TEXT NOT NULL DEFAULT '', "
+    "recency_at INTEGER NOT NULL DEFAULT 0, "
+    "recency_at_ms INTEGER NOT NULL DEFAULT 0, "
+    "history_mode TEXT NOT NULL DEFAULT 'legacy'"
+)
+CODEX_STATE_THREADS_ARCHIVED_CWD_CREATED_INDEX = (
+    "CREATE INDEX idx_threads_archived_cwd_created_at_ms "
+    "ON threads(archived, cwd, created_at_ms DESC, id DESC);"
+)
+CODEX_STATE_THREADS_ARCHIVED_CWD_UPDATED_INDEX = (
+    "CREATE INDEX idx_threads_archived_cwd_updated_at_ms "
+    "ON threads(archived, cwd, updated_at_ms DESC, id DESC);"
+)
+CODEX_STATE_DB_SCHEMA = f"""
+CREATE TABLE _sqlx_migrations (
+    version BIGINT PRIMARY KEY,
+    description TEXT NOT NULL,
+    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    success BOOLEAN NOT NULL,
+    checksum BLOB NOT NULL,
+    execution_time BIGINT NOT NULL
+);
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT
+{CODEX_STATE_THREADS_TAIL});
+CREATE INDEX idx_threads_created_at ON threads(created_at DESC, id DESC);
+CREATE INDEX idx_threads_updated_at ON threads(updated_at DESC, id DESC);
+CREATE INDEX idx_threads_archived ON threads(archived);
+CREATE INDEX idx_threads_source ON threads(source);
+CREATE INDEX idx_threads_provider ON threads(model_provider);
+CREATE TABLE thread_dynamic_tools (
+    thread_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    input_schema TEXT NOT NULL, defer_loading INTEGER NOT NULL DEFAULT 0, namespace TEXT,
+    PRIMARY KEY(thread_id, position),
+    FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_thread_dynamic_tools_thread ON thread_dynamic_tools(thread_id);
+CREATE TABLE backfill_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    status TEXT NOT NULL,
+    last_watermark TEXT,
+    last_success_at INTEGER,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE agent_jobs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    output_schema_json TEXT,
+    input_headers_json TEXT NOT NULL,
+    input_csv_path TEXT NOT NULL,
+    output_csv_path TEXT NOT NULL,
+    auto_export INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    started_at INTEGER,
+    completed_at INTEGER,
+    last_error TEXT
+, max_runtime_seconds INTEGER);
+CREATE TABLE agent_job_items (
+    job_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    row_index INTEGER NOT NULL,
+    source_id TEXT,
+    row_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    assigned_thread_id TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    result_json TEXT,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    reported_at INTEGER,
+    PRIMARY KEY (job_id, item_id),
+    FOREIGN KEY(job_id) REFERENCES agent_jobs(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_agent_jobs_status ON agent_jobs(status, updated_at DESC);
+CREATE INDEX idx_agent_job_items_status ON agent_job_items(job_id, status, row_index ASC);
+CREATE TABLE thread_spawn_edges (
+    parent_thread_id TEXT NOT NULL,
+    child_thread_id TEXT NOT NULL PRIMARY KEY,
+    status TEXT NOT NULL
+);
+CREATE INDEX idx_thread_spawn_edges_parent_status
+    ON thread_spawn_edges(parent_thread_id, status);
+CREATE TABLE remote_control_enrollments (
+    websocket_url TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    app_server_client_name TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    environment_id TEXT NOT NULL,
+    server_name TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, remote_control_enabled INTEGER,
+    PRIMARY KEY (websocket_url, account_id, app_server_client_name)
+);
+CREATE TRIGGER threads_created_at_ms_after_insert
+AFTER INSERT ON threads
+WHEN NEW.created_at_ms IS NULL
+BEGIN
+    UPDATE threads
+    SET created_at_ms = NEW.created_at * 1000
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_updated_at_ms_after_insert
+AFTER INSERT ON threads
+WHEN NEW.updated_at_ms IS NULL
+BEGIN
+    UPDATE threads
+    SET updated_at_ms = NEW.updated_at * 1000
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_created_at_ms_after_update
+AFTER UPDATE OF created_at ON threads
+WHEN NEW.created_at != OLD.created_at
+ AND NEW.created_at_ms IS OLD.created_at_ms
+BEGIN
+    UPDATE threads
+    SET created_at_ms = NEW.created_at * 1000
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_updated_at_ms_after_update
+AFTER UPDATE OF updated_at ON threads
+WHEN NEW.updated_at != OLD.updated_at
+ AND NEW.updated_at_ms IS OLD.updated_at_ms
+BEGIN
+    UPDATE threads
+    SET updated_at_ms = NEW.updated_at * 1000
+    WHERE id = NEW.id;
+END;
+CREATE INDEX idx_threads_created_at_ms ON threads(created_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);
+{CODEX_STATE_THREADS_ARCHIVED_CWD_CREATED_INDEX}
+{CODEX_STATE_THREADS_ARCHIVED_CWD_UPDATED_INDEX}
+CREATE INDEX idx_threads_visible_created_at_ms
+    ON threads(archived, created_at_ms DESC)
+    WHERE preview <> '';
+CREATE INDEX idx_threads_visible_updated_at_ms
+    ON threads(archived, updated_at_ms DESC)
+    WHERE preview <> '';
+CREATE TABLE external_agent_config_imports (
+    import_id TEXT PRIMARY KEY,
+    completed_at_ms INTEGER NOT NULL,
+    successes TEXT NOT NULL,
+    failures TEXT NOT NULL
+);
+CREATE TRIGGER threads_recency_at_after_insert
+AFTER INSERT ON threads
+WHEN NEW.recency_at_ms = 0
+BEGIN
+    UPDATE threads
+    SET recency_at = NEW.updated_at,
+        recency_at_ms = COALESCE(NEW.updated_at_ms, NEW.updated_at * 1000)
+    WHERE id = NEW.id;
+END;
+CREATE INDEX idx_threads_recency_at_ms
+    ON threads(recency_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_archived_cwd_recency_at_ms
+    ON threads(archived, cwd, recency_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_visible_recency_at_ms
+    ON threads(archived, recency_at_ms DESC, id DESC)
+    WHERE preview <> '';
+""".strip()
 SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM")
 
 
@@ -586,6 +776,7 @@ def _write_push_script_fixture_bin(
     (codex_bin / "codex.js").write_text(
         """
 const fs = require("fs");
+const childProcess = require("child_process");
 if (process.env.CODEX_DOCTOR_LOG) {
   fs.appendFileSync(
     process.env.CODEX_DOCTOR_LOG,
@@ -710,6 +901,24 @@ if (process.env.MOCK_CODEX_DOCTOR_EXTRA_WARNING) {
     summary: "unexpected warning injected by test",
     details: {}
   };
+}
+if (process.env.MOCK_CODEX_DOCTOR_ROLLOUT_DB_PARITY_STATE_DB) {
+  const stateDb = process.env.MOCK_CODEX_DOCTOR_ROLLOUT_DB_PARITY_STATE_DB;
+  const rows = JSON.parse(childProcess.execFileSync(
+    "/usr/bin/sqlite3",
+    ["-json", stateDb, "SELECT id, rollout_path FROM threads ORDER BY id;"],
+    {encoding: "utf8"}
+  ) || "[]");
+  const staleRows = rows.filter((row) => !fs.existsSync(row.rollout_path));
+  if (staleRows.length > 0) {
+    checks["state.rollout_db_parity"] = {
+      id: "state.rollout_db_parity",
+      status: "warning",
+      category: "state",
+      summary: "thread rows reference missing rollout files",
+      details: {"stale thread rows": String(staleRows.length)}
+    };
+  }
 }
 if (process.env.MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK) {
   const check = checks[process.env.MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK];
@@ -1382,6 +1591,132 @@ def _create_codex_logs_db(path: Path, schema: str = CODEX_LOG_DB_SCHEMA) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(path) as connection:
         connection.executescript(schema)
+
+
+def _create_codex_state_db(path: Path, schema: str = CODEX_STATE_DB_SCHEMA) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.executescript(schema)
+
+
+def _insert_codex_thread(
+    connection: sqlite3.Connection,
+    thread_id: str,
+    rollout_path: Path,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO threads (
+            id,
+            rollout_path,
+            created_at,
+            updated_at,
+            source,
+            model_provider,
+            cwd,
+            title,
+            sandbox_policy,
+            approval_mode
+        ) VALUES (?, ?, 1, 1, 'cli', 'openai', '/tmp', 'test', 'workspace-write', 'never')
+        """,
+        (thread_id, str(rollout_path)),
+    )
+
+
+def _codex_thread_ids(path: Path) -> list[str]:
+    with sqlite3.connect(path) as connection:
+        return [
+            row[0] for row in connection.execute("SELECT id FROM threads ORDER BY id;").fetchall()
+        ]
+
+
+def _insert_codex_agent_job_item(
+    connection: sqlite3.Connection,
+    assigned_thread_id: str,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO agent_jobs (
+            id,
+            name,
+            status,
+            instruction,
+            input_headers_json,
+            input_csv_path,
+            output_csv_path,
+            created_at,
+            updated_at
+        ) VALUES ('job-1', 'job', 'running', 'do work', '[]', '/tmp/in.csv', '/tmp/out.csv', 1, 1)
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO agent_job_items (
+            job_id,
+            item_id,
+            row_index,
+            row_json,
+            status,
+            assigned_thread_id,
+            created_at,
+            updated_at
+        ) VALUES ('job-1', 'item-1', 0, '{}', 'running', ?, 1, 1)
+        """,
+        (assigned_thread_id,),
+    )
+
+
+def _write_sqlite_commit_failure_sitecustomize(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "sitecustomize.py").write_text(
+        """
+import os
+import sqlite3
+
+_original_connect = sqlite3.connect
+
+
+def _matches_target(database):
+    target = os.environ.get("MOCK_CODEX_STATE_DB_COMMIT_FAIL_PATH")
+    if not target:
+        return False
+    try:
+        database_path = os.fspath(database)
+    except TypeError:
+        return False
+    return os.path.abspath(database_path) == os.path.abspath(target)
+
+
+class _CommitFailConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def commit(self):
+        raise sqlite3.OperationalError("injected state DB commit failure")
+
+    def rollback(self):
+        rollback_log = os.environ.get("MOCK_CODEX_STATE_DB_ROLLBACK_LOG")
+        if rollback_log:
+            with open(rollback_log, "a", encoding="utf-8") as handle:
+                handle.write("rollback\\n")
+        return self._connection.rollback()
+
+
+def _connect(database, *args, **kwargs):
+    connection = _original_connect(database, *args, **kwargs)
+    if _matches_target(database):
+        return _CommitFailConnection(connection)
+    return connection
+
+
+sqlite3.connect = _connect
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _read_sqlite_log(env: dict[str, str]) -> str:
@@ -3041,6 +3376,409 @@ def test_push_script_rejects_non_idx_logs_thread_id_corruption(
     assert "non-repairable integrity errors" in result.stderr
     sqlite_log = _read_sqlite_log(env)
     assert "REINDEX idx_logs_thread_id" not in sqlite_log
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_repairs_codex_state_db_stale_missing_rollout_paths(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    missing_rollout = state_db.parent / "sessions/2026/08/01/rollout-missing.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    existing_rollout.write_text("{}\n", encoding="utf-8")
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+        _insert_codex_thread(connection, "stale-thread", missing_rollout)
+        connection.execute(
+            """
+            INSERT INTO thread_dynamic_tools (
+                thread_id,
+                position,
+                name,
+                description,
+                input_schema
+            ) VALUES ('stale-thread', 0, 'stale_tool', 'stale tool', '{}')
+            """
+        )
+    env["MOCK_CODEX_DOCTOR_ROLLOUT_DB_PARITY_STATE_DB"] = str(state_db)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread"]
+    with sqlite3.connect(state_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM thread_dynamic_tools;").fetchone() == (0,)
+        assert connection.execute("PRAGMA integrity_check;").fetchone() == ("ok",)
+    assert (
+        f"Repairing scoped Codex state DB stale thread rows: {state_db} (1 rows)" in result.stdout
+    )
+    assert f"Repaired scoped Codex state DB stale thread rows: {state_db} (1 rows)" in result.stdout
+    assert "state.rollout_db_parity" not in result.stderr
+
+
+def test_push_script_rejects_codex_state_db_stale_rollout_path_outside_expected_tree_before_delete(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    outside_rollout = tmp_path / "outside/rollout-stale.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    existing_rollout.write_text("{}\n", encoding="utf-8")
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+        _insert_codex_thread(connection, "stale-thread", outside_rollout)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "rollout_path is outside expected Codex rollout tree" in result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread", "stale-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("rollout_path", "expected_message"),
+    (
+        (
+            Path("sessions/2026/02/31/rollout-invalid-date.jsonl"),
+            "rollout_path has invalid calendar date",
+        ),
+        (
+            Path("sessions/2026/08/01/not-a-rollout.jsonl"),
+            "rollout_path filename is not rollout-*.jsonl",
+        ),
+    ),
+)
+def test_push_script_rejects_codex_state_db_invalid_rollout_scope_before_delete(
+    tmp_path: Path,
+    rollout_path: Path,
+    expected_message: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    candidate_rollout = state_db.parent / rollout_path
+    candidate_rollout.parent.mkdir(parents=True, exist_ok=True)
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "thread-with-invalid-rollout", candidate_rollout)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert expected_message in result.stderr
+    assert _codex_thread_ids(state_db) == ["thread-with-invalid-rollout"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("existing_kind", "expected_message"),
+    (
+        ("symlink", "existing rollout_path must not be a symlink"),
+        ("directory", "existing rollout_path must be a regular file"),
+    ),
+)
+def test_push_script_rejects_codex_state_db_unusable_existing_rollout_path_before_delete(
+    tmp_path: Path,
+    existing_kind: str,
+    expected_message: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    if existing_kind == "symlink":
+        target = tmp_path / "real-rollout.jsonl"
+        target.write_text("{}\n", encoding="utf-8")
+        existing_rollout.symlink_to(target)
+    else:
+        existing_rollout.mkdir()
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert expected_message in result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_stale_rollout_path_with_symlinked_parent_before_delete(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    month_dir = state_db.parent / "sessions/2026/08"
+    month_dir.mkdir(parents=True)
+    real_day_dir = tmp_path / "real-day-dir"
+    real_day_dir.mkdir()
+    (month_dir / "01").symlink_to(real_day_dir, target_is_directory=True)
+    stale_rollout = month_dir / "01/rollout-stale.jsonl"
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "stale-thread", stale_rollout)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "parent topology is not a normal sessions tree" in result.stderr
+    assert "symlinked day directory" in result.stderr
+    assert _codex_thread_ids(state_db) == ["stale-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("dependent_column", "expected_message"),
+    (
+        ("parent_thread_id", "thread_spawn_edges"),
+        ("child_thread_id", "thread_spawn_edges"),
+    ),
+)
+def test_push_script_rejects_codex_state_db_stale_thread_spawn_edge_reference_before_delete(
+    tmp_path: Path,
+    dependent_column: str,
+    expected_message: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    stale_rollout = state_db.parent / "sessions/2026/08/01/rollout-stale.jsonl"
+    stale_rollout.parent.mkdir(parents=True)
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "stale-thread", stale_rollout)
+        if dependent_column == "parent_thread_id":
+            connection.execute(
+                """
+                INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+                VALUES ('stale-thread', 'child-thread', 'running')
+                """
+            )
+        else:
+            connection.execute(
+                """
+                INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+                VALUES ('parent-thread', 'stale-thread', 'running')
+                """
+            )
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert expected_message in result.stderr
+    assert _codex_thread_ids(state_db) == ["stale-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("edge_parent", "edge_child"),
+    (
+        ("missing-parent", "existing-thread"),
+        ("existing-thread", "missing-child"),
+    ),
+)
+def test_push_script_rejects_codex_state_db_global_orphaned_spawn_edges(
+    tmp_path: Path,
+    edge_parent: str,
+    edge_child: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    existing_rollout.write_text("{}\n", encoding="utf-8")
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+        connection.execute(
+            """
+            INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+            VALUES (?, ?, 'running')
+            """,
+            (edge_parent, edge_child),
+        )
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "orphaned non-cascading thread_spawn_edges" in result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_allows_codex_state_db_global_valid_assigned_job_item_thread(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    existing_rollout.write_text("{}\n", encoding="utf-8")
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+        _insert_codex_agent_job_item(connection, "existing-thread")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread"]
+
+
+def test_push_script_rejects_codex_state_db_global_orphaned_job_item_thread(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    existing_rollout = state_db.parent / "sessions/2026/08/01/rollout-existing.jsonl"
+    existing_rollout.parent.mkdir(parents=True)
+    existing_rollout.write_text("{}\n", encoding="utf-8")
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "existing-thread", existing_rollout)
+        _insert_codex_agent_job_item(connection, "missing-thread")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "orphaned non-cascading agent_job_items.assigned_thread_id" in result.stderr
+    assert _codex_thread_ids(state_db) == ["existing-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_stale_agent_job_item_reference_before_delete(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    stale_rollout = state_db.parent / "sessions/2026/08/01/rollout-stale.jsonl"
+    stale_rollout.parent.mkdir(parents=True)
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "stale-thread", stale_rollout)
+        _insert_codex_agent_job_item(connection, "stale-thread")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "agent_job_items" in result.stderr
+    assert _codex_thread_ids(state_db) == ["stale-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_multi_stale_rows_atomically_on_dependent_reference(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    first_stale_rollout = state_db.parent / "sessions/2026/08/01/rollout-stale-first.jsonl"
+    second_stale_rollout = state_db.parent / "sessions/2026/08/01/rollout-stale-second.jsonl"
+    first_stale_rollout.parent.mkdir(parents=True)
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "stale-a-thread", first_stale_rollout)
+        _insert_codex_thread(connection, "stale-b-thread", second_stale_rollout)
+        _insert_codex_agent_job_item(connection, "stale-b-thread")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "agent_job_items" in result.stderr
+    assert _codex_thread_ids(state_db) == ["stale-a-thread", "stale-b-thread"]
+    assert "Repairing scoped Codex state DB stale thread rows" not in result.stdout
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_with_wrong_schema_before_delete(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    missing_rollout = state_db.parent / "sessions/2026/08/01/rollout-missing.jsonl"
+    _create_codex_state_db(
+        state_db,
+        """
+        CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT NOT NULL
+        );
+        """,
+    )
+    with sqlite3.connect(state_db) as connection:
+        connection.execute(
+            "INSERT INTO threads (id, rollout_path) VALUES ('stale-thread', ?)",
+            (str(missing_rollout),),
+        )
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "state DB schema does not match the pinned state_5.sqlite schema" in result.stderr
+    assert _codex_thread_ids(state_db) == ["stale-thread"]
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_symlink_before_sqlite_access(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    real_db = tmp_path / "real-state.sqlite"
+    _create_codex_state_db(real_db)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    state_db.parent.mkdir(parents=True)
+    state_db.symlink_to(real_db)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Scoped Codex state DB must not be a symlink" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_codex_state_db_hardlink_before_sqlite_access(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    _create_codex_state_db(state_db)
+    hardlink = tmp_path / "state-hardlink.sqlite"
+    hardlink.hardlink_to(state_db)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Scoped Codex state DB must not have hard links" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rolls_back_codex_state_db_transaction_when_commit_fails(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
+    missing_rollout = state_db.parent / "sessions/2026/08/01/rollout-missing.jsonl"
+    rollback_log = tmp_path / "rollback.log"
+    sitecustomize_dir = tmp_path / "sitecustomize"
+    missing_rollout.parent.mkdir(parents=True)
+    _create_codex_state_db(state_db)
+    with sqlite3.connect(state_db) as connection:
+        _insert_codex_thread(connection, "stale-thread", missing_rollout)
+    _write_sqlite_commit_failure_sitecustomize(sitecustomize_dir)
+    env["PYTHONPATH"] = str(sitecustomize_dir)
+    env["MOCK_CODEX_STATE_DB_COMMIT_FAIL_PATH"] = str(state_db)
+    env["MOCK_CODEX_STATE_DB_ROLLBACK_LOG"] = str(rollback_log)
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "injected state DB commit failure" in result.stderr
+    assert rollback_log.read_text(encoding="utf-8") == "rollback\n"
+    assert _codex_thread_ids(state_db) == ["stale-thread"]
     assert "Done. Config pushed successfully." not in result.stdout
 
 
