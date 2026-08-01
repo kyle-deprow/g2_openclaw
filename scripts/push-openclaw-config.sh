@@ -3247,6 +3247,35 @@ def validate_integrity(connection: sqlite3.Connection, context: str) -> None:
         )
 
 
+def validate_foreign_keys(connection: sqlite3.Connection, context: str) -> None:
+    connection.execute("PRAGMA foreign_keys=ON;")
+    status = connection.execute("PRAGMA foreign_keys;").fetchone()
+    if status != (1,):
+        raise SystemExit(
+            f"Scoped Codex state DB could not enable foreign_keys {context}: {status!r}"
+        )
+    rows = connection.execute("PRAGMA foreign_key_check;").fetchall()
+    violations: list[tuple[str, int | None, str, int]] = []
+    for item in rows:
+        if (
+            len(item) != 4
+            or not isinstance(item[0], str)
+            or not (isinstance(item[1], int) or item[1] is None)
+            or not isinstance(item[2], str)
+            or not isinstance(item[3], int)
+        ):
+            raise SystemExit(
+                f"unexpected PRAGMA foreign_key_check row for scoped Codex state DB "
+                f"{context}: {item!r}"
+            )
+        violations.append(item)
+    if violations:
+        raise SystemExit(
+            f"Scoped Codex state DB {state_db} has foreign-key violations "
+            f"{context}: {violations!r}"
+        )
+
+
 def schema_rows(connection: sqlite3.Connection) -> set[tuple[str, str, str, str]]:
     raw = connection.execute(
         "SELECT type, name, tbl_name, sql FROM sqlite_master "
@@ -3437,11 +3466,12 @@ def fail_if_global_non_cascading_references_are_unsafe(
         )
 
 
-def fail_if_stale_threads_have_non_cascading_dependents(
+def collect_stale_thread_spawn_edges_to_delete(
     connection: sqlite3.Connection,
     stale_threads: list[tuple[str, str]],
-) -> None:
+) -> list[tuple[str, str]]:
     thread_ids = [thread_id for thread_id, _ in stale_threads]
+    stale_thread_ids = set(thread_ids)
     placeholders = ",".join("?" for _ in thread_ids)
     spawn_rows = connection.execute(
         f"""
@@ -3453,12 +3483,38 @@ def fail_if_stale_threads_have_non_cascading_dependents(
         """,
         (*thread_ids, *thread_ids),
     ).fetchall()
-    if spawn_rows:
+    mixed_rows: list[tuple[str, str]] = []
+    deletable_rows: list[tuple[str, str]] = []
+    for item in spawn_rows:
+        if (
+            len(item) != 2
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+            or not item[0]
+            or not item[1]
+        ):
+            raise SystemExit(f"unexpected state_5.sqlite thread_spawn_edges row: {item!r}")
+        parent_thread_id, child_thread_id = item
+        parent_is_stale = parent_thread_id in stale_thread_ids
+        child_is_stale = child_thread_id in stale_thread_ids
+        if parent_is_stale and child_is_stale:
+            deletable_rows.append((parent_thread_id, child_thread_id))
+        else:
+            mixed_rows.append((parent_thread_id, child_thread_id))
+    if mixed_rows:
         raise SystemExit(
-            "Scoped Codex state DB stale thread rows are referenced by non-cascading "
-            f"thread_spawn_edges state; refusing delete: {spawn_rows!r}"
+            "Scoped Codex state DB stale thread rows are referenced by mixed stale/non-stale "
+            f"thread_spawn_edges state; refusing delete: {mixed_rows!r}"
         )
+    return deletable_rows
 
+
+def fail_if_stale_threads_have_agent_job_items(
+    connection: sqlite3.Connection,
+    stale_threads: list[tuple[str, str]],
+) -> None:
+    thread_ids = [thread_id for thread_id, _ in stale_threads]
+    placeholders = ",".join("?" for _ in thread_ids)
     job_item_rows = connection.execute(
         f"""
         SELECT job_id, item_id, assigned_thread_id
@@ -3483,6 +3539,7 @@ connection = sqlite3.connect(state_db)
 try:
     validate_schema(connection)
     validate_integrity(connection, "before stale rollout_path repair")
+    validate_foreign_keys(connection, "before stale rollout_path repair")
     fail_if_global_non_cascading_references_are_unsafe(
         connection,
         "before stale rollout_path repair",
@@ -3495,12 +3552,33 @@ try:
         if not rollout_path_is_missing(thread_id, rollout_path):
             raise SystemExit(f"refusing to delete non-stale rollout_path that exists: {rollout_path}")
 
-    fail_if_stale_threads_have_non_cascading_dependents(connection, stale_threads)
-
     print(f"Repairing scoped Codex state DB stale thread rows: {state_db} ({len(stale_threads)} rows)")
     try:
-        connection.execute("PRAGMA foreign_keys=ON;")
         connection.execute("BEGIN IMMEDIATE;")
+        fail_if_global_non_cascading_references_are_unsafe(
+            connection,
+            "inside stale rollout_path repair transaction before delete",
+        )
+        stale_spawn_edges = collect_stale_thread_spawn_edges_to_delete(connection, stale_threads)
+        fail_if_stale_threads_have_agent_job_items(connection, stale_threads)
+
+        edge_deleted = 0
+        for parent_thread_id, child_thread_id in stale_spawn_edges:
+            cursor = connection.execute(
+                """
+                DELETE FROM thread_spawn_edges
+                WHERE parent_thread_id = ?
+                  AND child_thread_id = ?;
+                """,
+                (parent_thread_id, child_thread_id),
+            )
+            edge_deleted += cursor.rowcount
+        if edge_deleted != len(stale_spawn_edges):
+            raise RuntimeError(
+                f"deleted {edge_deleted} stale-to-stale thread_spawn_edges rows, "
+                f"expected {len(stale_spawn_edges)}"
+            )
+
         deleted = 0
         for thread_id, rollout_path in stale_threads:
             if not rollout_path_is_missing(thread_id, rollout_path):
@@ -3525,6 +3603,7 @@ try:
         raise
 
     validate_integrity(connection, "after stale rollout_path repair")
+    validate_foreign_keys(connection, "after stale rollout_path repair")
     validate_schema(connection)
     remaining_stale = missing_rollout_threads(connection)
     if remaining_stale:
@@ -3537,6 +3616,11 @@ try:
     )
     if file_identity() != identity_before:
         raise SystemExit(f"Scoped Codex state DB identity changed during repair: {state_db}")
+    if edge_deleted:
+        print(
+            f"Repaired scoped Codex state DB stale-to-stale thread_spawn_edges: "
+            f"{state_db} ({edge_deleted} rows)"
+        )
     print(f"Repaired scoped Codex state DB stale thread rows: {state_db} ({deleted} rows)")
 finally:
     connection.close()
