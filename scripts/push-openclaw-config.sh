@@ -3650,6 +3650,9 @@ def is_abs_path(value: object) -> bool:
 def is_semver(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", value) is not None
 
+def is_known_curl_timeout(value: object) -> bool:
+    return value == "curl: (28) Resolving timed out after 5000 milliseconds"
+
 def detail_string(details: dict[str, object], key: str) -> str | None:
     value = details.get(key)
     return value if isinstance(value, str) else None
@@ -3775,6 +3778,29 @@ def is_expected_update_probe_failure(check_id: str, check: dict[str, object]) ->
         and details.get("update action") == "npm install -g @openai/codex"
         and details.get("version cache") == [str(codex_home / "version.json"), "missing"]
     )
+    probe_timeout = (
+        check.get("category") == "updates"
+        and check.get("status") == "fail"
+        and check.get("summary") == "update would target a different npm install"
+        and details_have_exact_keys(
+            details,
+            {
+                "check for update on startup",
+                "latest version probe",
+                "npm package root",
+                "running package root",
+                "update action",
+                "version cache",
+            },
+        )
+        and details.get("check for update on startup") == "true"
+        and is_known_curl_timeout(details.get("latest version probe"))
+        and is_abs_path(details.get("npm package root"))
+        and details.get("npm package root") != str(app_server_package_root)
+        and details.get("running package root") == str(app_server_package_root)
+        and details.get("update action") == "npm install -g @openai/codex"
+        and details.get("version cache") == [str(codex_home / "version.json"), "missing"]
+    )
     timeout = has_shape(
         check_id,
         check,
@@ -3783,7 +3809,7 @@ def is_expected_update_probe_failure(check_id: str, check: dict[str, object]) ->
         summary="update check timed out",
         details={"running package root": str(app_server_package_root)},
     )
-    return mismatch or timeout
+    return mismatch or probe_timeout or timeout
 
 def is_expected_missing_auth_websocket_warning(check_id: str, check: dict[str, object]) -> bool:
     if check.get("id") != check_id:

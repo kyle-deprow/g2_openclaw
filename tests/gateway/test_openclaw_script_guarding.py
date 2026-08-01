@@ -884,6 +884,13 @@ const checks = {
     }
   }
 };
+if (process.env.MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE) {
+  const details = checks["updates.status"].details;
+  delete details["latest version"];
+  delete details["latest version status"];
+  details["latest version probe"] =
+    process.env.MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE;
+}
 if (process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL) {
   checks[process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL] = {
     id: process.env.MOCK_CODEX_DOCTOR_EXTRA_FAIL,
@@ -2702,6 +2709,21 @@ def test_push_script_accepts_one_codex_doctor_exit_for_allowed_non_owned_checks(
     assert "Codex doctor non-owned failures ignored" in result.stdout
 
 
+def test_push_script_allows_codex_doctor_update_probe_timeout_with_embedded_root_mismatch(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE"] = (
+        "curl: (28) Resolving timed out after 5000 milliseconds"
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Codex doctor non-owned failures ignored" in result.stdout
+    assert "updates.status" in result.stdout
+
+
 def test_push_script_rejects_one_codex_doctor_exit_without_allowed_non_owned_checks(
     tmp_path: Path,
 ) -> None:
@@ -2755,6 +2777,59 @@ def test_push_script_rejects_unexpected_codex_doctor_warning(tmp_path: Path) -> 
     assert result.returncode != 0
     assert "unexpected fatal Codex doctor checks" in result.stderr
     assert "network.proxy=warning" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        "curl: (28) Resolving timed out after 5001 milliseconds",
+        "curl: (28) Operation timed out after 5000 milliseconds with 0 bytes received",
+        "curl: (6) Could not resolve host: api.openai.com",
+    ],
+)
+def test_push_script_rejects_codex_doctor_update_probe_timeout_shape_drift(
+    tmp_path: Path,
+    probe: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE"] = probe
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "updates.status=fail" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("detail_key", "mutation"),
+    [
+        ("latest version status", "extra"),
+        ("version cache", "missing"),
+    ],
+)
+def test_push_script_rejects_codex_doctor_update_probe_timeout_detail_shape_drift(
+    tmp_path: Path,
+    detail_key: str,
+    mutation: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE"] = (
+        "curl: (28) Resolving timed out after 5000 milliseconds"
+    )
+    env["MOCK_CODEX_DOCTOR_DETAIL_KEY"] = detail_key
+    if mutation == "extra":
+        env["MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK"] = "updates.status"
+    else:
+        env["MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK"] = "updates.status"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "updates.status=fail" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
 
 
