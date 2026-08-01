@@ -11,9 +11,9 @@ import hashlib
 import json
 import math  # noqa: F401
 import os
-import platform
+import platform  # noqa: F401
 import re
-import shutil
+import shutil  # noqa: F401
 import sqlite3
 import stat
 import subprocess
@@ -23,14 +23,44 @@ import tomllib
 from bisect import bisect_right
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, suppress
-from ctypes.util import find_library
+from ctypes.util import find_library  # noqa: F401
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from enum import StrEnum  # noqa: F401
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast
-from urllib.parse import unquote, urlencode, urlparse
+from urllib.parse import unquote, urlencode, urlparse  # noqa: F401
 
+from gateway.autoresearch.compute import (
+    _GPU_PROBE_MODULES as _GPU_PROBE_MODULES,
+)
+from gateway.autoresearch.compute import (
+    ComputeCapabilitySnapshot as ComputeCapabilitySnapshot,
+)
+from gateway.autoresearch.compute import (
+    ComputeFitArtifact as ComputeFitArtifact,
+)
+from gateway.autoresearch.compute import (
+    StageAgentPolicy as StageAgentPolicy,
+)
+from gateway.autoresearch.compute import (
+    _probe_cuda_runtime as _probe_cuda_runtime,
+)
+from gateway.autoresearch.compute import (
+    _probe_installed_gpu_packages as _probe_installed_gpu_packages,
+)
+from gateway.autoresearch.compute import (
+    _probe_nvidia as _probe_nvidia,
+)
+from gateway.autoresearch.compute import (
+    _read_memory_gib as _read_memory_gib,
+)
+from gateway.autoresearch.compute import (
+    _target_python_path as _target_python_path,
+)
+from gateway.autoresearch.compute import (
+    collect_compute_capability_snapshot as collect_compute_capability_snapshot,
+)
 from gateway.autoresearch.constants import (
     _OPERATOR_PRECONDITION_BRIEF_MARKERS as _OPERATOR_PRECONDITION_BRIEF_MARKERS,
 )
@@ -409,6 +439,114 @@ from gateway.autoresearch.fields import (
 from gateway.autoresearch.fields import (
     quantipy_member_union_digest as quantipy_member_union_digest,
 )
+from gateway.autoresearch.gitops import (
+    _path_under_root as _path_under_root,
+)
+from gateway.autoresearch.gitops import (
+    _render_literal as _render_literal,
+)
+from gateway.autoresearch.gitops import (
+    _require_artifact_origin_matches_target as _require_artifact_origin_matches_target,
+)
+from gateway.autoresearch.gitops import (
+    _require_clean_git_worktree as _require_clean_git_worktree,
+)
+from gateway.autoresearch.gitops import (
+    _require_git_descends_from as _require_git_descends_from,
+)
+from gateway.autoresearch.gitops import (
+    _require_git_output as _require_git_output,
+)
+from gateway.autoresearch.gitops import (
+    _require_git_success as _require_git_success,
+)
+from gateway.autoresearch.gitops import (
+    _require_git_worktree_root as _require_git_worktree_root,
+)
+from gateway.autoresearch.gitops import (
+    _require_isolated_git_clone_root as _require_isolated_git_clone_root,
+)
+from gateway.autoresearch.gitops import (
+    _require_strict_canonical_workspace_path as _require_strict_canonical_workspace_path,
+)
+from gateway.autoresearch.gitops import (
+    _require_workspace_under_autoresearch_worktree_root as _require_workspace_under_autoresearch_worktree_root,  # noqa: E501
+)
+from gateway.autoresearch.gitops import (
+    _resolve_git_commit as _resolve_git_commit,
+)
+from gateway.autoresearch.gitops import (
+    _run_git as _run_git,
+)
+from gateway.autoresearch.manifest import (
+    AuthoritativeStateReference as AuthoritativeStateReference,
+)
+from gateway.autoresearch.manifest import (
+    InstructionSourceEntry as InstructionSourceEntry,
+)
+from gateway.autoresearch.manifest import (
+    SourceReceipt as SourceReceipt,
+)
+from gateway.autoresearch.secure_io import (
+    _canonical_json_sha256 as _canonical_json_sha256,
+)
+from gateway.autoresearch.secure_io import (
+    _canonical_utc_text as _canonical_utc_text,
+)
+from gateway.autoresearch.secure_io import (
+    _create_or_normalize_private_directory as _create_or_normalize_private_directory,
+)
+from gateway.autoresearch.secure_io import (
+    _load_json_mapping as _load_json_mapping,
+)
+from gateway.autoresearch.secure_io import (
+    _open_no_follow_directory as _open_no_follow_directory,
+)
+from gateway.autoresearch.secure_io import (
+    _parse_json_snapshot as _parse_json_snapshot,
+)
+from gateway.autoresearch.secure_io import (
+    _path_is_within as _path_is_within,
+)
+from gateway.autoresearch.secure_io import (
+    _provision_private_quantipy_control_plane_ancestors as _provision_private_quantipy_control_plane_ancestors,  # noqa: E501
+)
+from gateway.autoresearch.secure_io import (
+    _require_canonical_absolute_path as _require_canonical_absolute_path,
+)
+from gateway.autoresearch.secure_io import (
+    _require_private_directory as _require_private_directory,
+)
+from gateway.autoresearch.secure_io import (
+    _require_runtime_venv_prefix as _require_runtime_venv_prefix,
+)
+from gateway.autoresearch.secure_io import (
+    _require_sealed_quantipy_panel_directory as _require_sealed_quantipy_panel_directory,
+)
+from gateway.autoresearch.secure_io import (
+    _require_sealed_quantipy_panel_file as _require_sealed_quantipy_panel_file,
+)
+from gateway.autoresearch.secure_io import (
+    _require_strict_regular_file as _require_strict_regular_file,
+)
+from gateway.autoresearch.secure_io import (
+    _secure_open_external_uv_base_interpreter as _secure_open_external_uv_base_interpreter,
+)
+from gateway.autoresearch.secure_io import (
+    _secure_open_snapshot as _secure_open_snapshot,
+)
+from gateway.autoresearch.secure_io import (
+    _SecureFileSnapshot as _SecureFileSnapshot,
+)
+from gateway.autoresearch.secure_io import (
+    _sha256_file as _sha256_file,
+)
+from gateway.autoresearch.secure_io import (
+    _validate_panel_request as _validate_panel_request,
+)
+from gateway.autoresearch.secure_io import (
+    _validate_quantipy_relative_path as _validate_quantipy_relative_path,
+)
 from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
 from gateway.mempalace_finalizer import (
     FINAL_MEMORY_SOURCE_FILE,
@@ -604,11 +742,6 @@ def _validate_persisted_autoresearch_workspace_path(value: str, *, label: str) -
         ) from exc
 
 
-def _render_literal(value: str) -> str:
-    """Render untrusted prompt/error values as a single JSON string literal."""
-    return json.dumps(value, ensure_ascii=True)
-
-
 def _platform_receipt_has_expected_runner_provenance(
     receipt: DynamicPriceCoverageReceipt,
     *,
@@ -729,82 +862,6 @@ def validate_target_worktree_clean(
             f"{details}\n"
             "Stop stale writers and clean or commit the target repo before "
             "launching the next autoresearch stage."
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class SourceReceipt:
-    receipt_id: str
-    path: Path
-    sha256: str
-
-    @property
-    def label(self) -> str:
-        return self.path.name
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "receipt_id": self.receipt_id,
-            "path": str(self.path),
-            "sha256": self.sha256,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class InstructionSourceEntry:
-    receipt_id: str
-    path: str
-    sha256: str
-
-    @classmethod
-    def from_receipt(cls, receipt: SourceReceipt) -> InstructionSourceEntry:
-        return cls(
-            receipt_id=receipt.receipt_id,
-            path=str(receipt.path),
-            sha256=receipt.sha256,
-        )
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "receipt_id": self.receipt_id,
-            "path": self.path,
-            "sha256": self.sha256,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class AuthoritativeStateReference:
-    """Digest-bound location of the complete state required by a stage agent."""
-
-    version: str
-    digest_domain: str
-    path: str
-    state_sha256: str
-    phase: str
-    iteration: int
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "version": self.version,
-            "digest_domain": self.digest_domain,
-            "path": self.path,
-            "state_sha256": self.state_sha256,
-            "phase": self.phase,
-            "iteration": self.iteration,
-        }
-
-    def canonical_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
-
-    def sha256(self) -> str:
-        return _sha256_text(
-            "\n".join(
-                (
-                    AUTHORITATIVE_STATE_REFERENCE_DIGEST_DOMAIN,
-                    self.version,
-                    self.canonical_json(),
-                )
-            )
         )
 
 
@@ -947,211 +1004,6 @@ def _target_repo_root_for_state(state: AutoresearchState) -> Path:
         Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
     )
     return target_repo.expanduser().resolve(strict=False)
-
-
-@dataclass(frozen=True, slots=True)
-class StageAgentPolicy:
-    agent_id: str
-    model: str
-    reasoning: str
-    skills: tuple[str, ...]
-
-    def to_summary(self) -> str:
-        skill_text = ", ".join(self.skills)
-        return f"{self.agent_id}: {self.model} / {self.reasoning} / skills=[{skill_text}]"
-
-
-@dataclass(frozen=True, slots=True)
-class ComputeCapabilitySnapshot:
-    """Read-only host capability probe supplied to research stages."""
-
-    cpu_model: str
-    logical_cpus: int
-    memory_gib: float | None
-    target_python_available: bool
-    gpu_available: bool
-    gpu_name: str | None
-    gpu_vram_gib: float | None
-    cuda_runtime_available: bool
-    installed_gpu_packages: tuple[str, ...]
-    probe_errors: tuple[str, ...]
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "cpu_model": self.cpu_model,
-            "logical_cpus": self.logical_cpus,
-            "memory_gib": self.memory_gib,
-            "target_python_available": self.target_python_available,
-            "gpu_available": self.gpu_available,
-            "gpu_name": self.gpu_name,
-            "gpu_vram_gib": self.gpu_vram_gib,
-            "cuda_runtime_available": self.cuda_runtime_available,
-            "installed_gpu_packages": list(self.installed_gpu_packages),
-            "probe_errors": list(self.probe_errors),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ComputeFitArtifact:
-    """Machine-readable experiment compute choice and its justification."""
-
-    target: ComputeTarget
-    rationale: str
-    required_dependencies: tuple[str, ...]
-    benchmark_plan: str
-
-    @classmethod
-    def from_dict(cls, raw: object) -> ComputeFitArtifact:
-        data = _ensure_mapping(raw, label="compute_fit")
-        _require_exact_keys(
-            data,
-            label="compute_fit",
-            expected=("target", "rationale", "required_dependencies", "benchmark_plan"),
-        )
-        artifact = cls(
-            target=ComputeTarget(_require_str(data, "target")),
-            rationale=_require_str(data, "rationale"),
-            required_dependencies=_require_string_list(data, "required_dependencies"),
-            benchmark_plan=_require_str(data, "benchmark_plan"),
-        )
-        artifact.validate()
-        return artifact
-
-    def validate(self) -> None:
-        if not self.rationale.strip():
-            raise AutoresearchValidationError("compute_fit rationale must be non-empty")
-        if not self.benchmark_plan.strip():
-            raise AutoresearchValidationError("compute_fit benchmark_plan must be non-empty")
-        if self.target is ComputeTarget.NONE and self.required_dependencies:
-            raise AutoresearchValidationError(
-                "compute_fit target=none cannot require compute dependencies"
-            )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "target": self.target.value,
-            "rationale": self.rationale,
-            "required_dependencies": list(self.required_dependencies),
-            "benchmark_plan": self.benchmark_plan,
-        }
-
-
-_GPU_PROBE_MODULES = (
-    "torch",
-    "tensorflow",
-    "jax",
-    "cupy",
-    "cudf",
-    "xgboost",
-    "lightgbm",
-    "catboost",
-)
-
-
-def _probe_installed_gpu_packages(target_repo: Path, errors: list[str]) -> tuple[str, ...]:
-    python = _target_python_path(target_repo)
-    if not python.is_file():
-        errors.append(f"Quantipy virtualenv not found: {python}")
-        return ()
-    code = (
-        "from importlib.util import find_spec; "
-        "mods=('torch','tensorflow','jax','cupy','cudf','xgboost','lightgbm','catboost'); "
-        "print(' '.join(m for m in mods if find_spec(m) is not None))"
-    )
-    try:
-        result = subprocess.run(
-            [str(python), "-c", code],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        errors.append(f"GPU package probe failed: {type(exc).__name__}")
-        return ()
-    if result.returncode != 0:
-        errors.append("GPU package probe returned a nonzero exit code")
-        return ()
-    return tuple(sorted(set(result.stdout.split()) & set(_GPU_PROBE_MODULES)))
-
-
-def _target_python_path(target_repo: Path) -> Path:
-    return target_repo.expanduser().resolve() / ".venv" / "bin" / "python"
-
-
-def _read_memory_gib(errors: list[str]) -> float | None:
-    try:
-        memory_info = Path("/proc/meminfo").read_text(encoding="utf-8")
-    except OSError as exc:
-        errors.append(f"memory probe failed: {type(exc).__name__}")
-        return None
-    match = re.search(r"^MemTotal:\s+(\d+)\s+kB$", memory_info, re.MULTILINE)
-    if match is None:
-        errors.append("memory probe returned no MemTotal")
-        return None
-    return round(int(match.group(1)) / 1024 / 1024, 2)
-
-
-def _probe_nvidia(errors: list[str]) -> tuple[bool, str | None, float | None]:
-    if shutil.which("nvidia-smi") is None:
-        errors.append("nvidia-smi is not installed")
-        return False, None, None
-    try:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=name,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        errors.append(f"nvidia-smi probe failed: {type(exc).__name__}")
-        return False, None, None
-    if result.returncode != 0 or not result.stdout.strip():
-        errors.append("nvidia-smi returned no usable GPU")
-        return False, None, None
-    name, _, memory = result.stdout.strip().splitlines()[0].partition(",")
-    try:
-        vram_gib = round(float(memory.strip()) / 1024, 2)
-    except ValueError:
-        errors.append("nvidia-smi returned an invalid memory value")
-        return False, name.strip() or None, None
-    return True, name.strip() or None, vram_gib
-
-
-def _probe_cuda_runtime(gpu_available: bool, errors: list[str]) -> bool:
-    if not gpu_available:
-        return False
-    if find_library("cuda") is None:
-        errors.append("CUDA driver library is not available")
-        return False
-    return True
-
-
-def collect_compute_capability_snapshot(
-    target_repo: Path = DEFAULT_QUANTIPY_ROOT,
-) -> ComputeCapabilitySnapshot:
-    """Collect non-mutating host and target-venv compute capabilities."""
-    errors: list[str] = []
-    gpu_available, gpu_name, gpu_vram_gib = _probe_nvidia(errors)
-    target_python_available = _target_python_path(target_repo).is_file()
-    cuda_runtime_available = _probe_cuda_runtime(gpu_available, errors)
-    return ComputeCapabilitySnapshot(
-        cpu_model=platform.processor() or platform.machine() or "unknown",
-        logical_cpus=os.cpu_count() or 1,
-        memory_gib=_read_memory_gib(errors),
-        target_python_available=target_python_available,
-        gpu_available=gpu_available,
-        gpu_name=gpu_name,
-        gpu_vram_gib=gpu_vram_gib,
-        cuda_runtime_available=cuda_runtime_available,
-        installed_gpu_packages=_probe_installed_gpu_packages(target_repo, errors),
-        probe_errors=tuple(errors),
-    )
 
 
 def _validate_compute_fit_environment(
@@ -7106,127 +6958,6 @@ def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifac
     )
 
 
-def _run_git(
-    working_directory: Path,
-    arguments: Sequence[str],
-    *,
-    operation: str,
-) -> subprocess.CompletedProcess[str]:
-    try:
-        result = subprocess.run(
-            ["git", *arguments],
-            check=False,
-            capture_output=True,
-            cwd=working_directory,
-            text=True,
-        )
-    except (OSError, RuntimeError) as exc:
-        raise AutoresearchValidationError(
-            f"Git {operation} could not run in {_render_literal(str(working_directory))}"
-        ) from exc
-    return result
-
-
-def _require_git_output(
-    working_directory: Path,
-    arguments: Sequence[str],
-    *,
-    operation: str,
-) -> str:
-    result = _run_git(working_directory, arguments, operation=operation)
-    if result.returncode != 0:
-        raise AutoresearchValidationError(
-            f"Git {operation} failed in {_render_literal(str(working_directory))}"
-        )
-    return result.stdout.strip()
-
-
-def _require_git_worktree_root(path: Path, *, label: str) -> Path:
-    if not path.is_dir():
-        raise AutoresearchValidationError(f"{label} {_render_literal(str(path))} does not exist")
-    resolved_path = path.resolve()
-    top_level = Path(
-        _require_git_output(
-            resolved_path,
-            ("rev-parse", "--show-toplevel"),
-            operation=f"worktree check for {label}",
-        )
-    ).resolve()
-    if top_level != resolved_path:
-        raise AutoresearchValidationError(
-            f"{label} {_render_literal(str(path))} must be the root of a Git worktree"
-        )
-    return resolved_path
-
-
-def _require_isolated_git_clone_root(path: Path, *, label: str) -> Path:
-    root = _require_git_worktree_root(path, label=label)
-    git_metadata = root / ".git"
-    try:
-        metadata = git_metadata.lstat()
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must contain private .git directory metadata"
-        ) from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise AutoresearchValidationError(
-            f"{label} must be an isolated clone with a private .git directory"
-        )
-    _require_private_directory(git_metadata, label=f"{label} .git metadata")
-    return root
-
-
-def _require_artifact_origin_matches_target(
-    workspace: Path,
-    target_checkout: Path,
-    *,
-    label: str,
-) -> None:
-    result = _run_git(
-        workspace,
-        ("config", "--get", "remote.origin.url"),
-        operation=f"origin check for {label}",
-    )
-    origin = result.stdout.strip()
-    if result.returncode != 0 or not origin:
-        raise AutoresearchValidationError(
-            f"Git ancestry check failed in {_render_literal(str(workspace))}"
-        )
-    parsed = urlparse(origin)
-    if parsed.scheme and parsed.scheme != "file":
-        raise AutoresearchValidationError(
-            f"{label} remote.origin.url must be the authoritative local target_repo"
-        )
-    origin_path = Path(unquote(parsed.path if parsed.scheme == "file" else origin)).expanduser()
-    try:
-        resolved_origin = origin_path.resolve(strict=True)
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"{label} remote.origin.url does not resolve to authoritative target_repo"
-        ) from exc
-    if resolved_origin != target_checkout:
-        raise AutoresearchValidationError(
-            f"Git ancestry check failed in {_render_literal(str(workspace))}"
-        )
-
-
-def _require_strict_canonical_workspace_path(value: str, *, label: str) -> Path:
-    declared_path = Path(value).expanduser()
-    try:
-        resolved_path = declared_path.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise AutoresearchValidationError(
-            f"{label} {_render_literal(value)} does not exist or is not a directory"
-        ) from exc
-    if not resolved_path.is_dir():
-        raise AutoresearchValidationError(
-            f"{label} {_render_literal(value)} does not exist or is not a directory"
-        )
-    if value != str(resolved_path):
-        raise AutoresearchValidationError(f"{label} must be its strict canonical resolved path")
-    return resolved_path
-
-
 def _require_autoresearch_worktree_root() -> Path:
     root = _require_strict_canonical_workspace_path(
         str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT),
@@ -7234,14 +6965,6 @@ def _require_autoresearch_worktree_root() -> Path:
     )
     _require_private_directory(root, label="autoresearch worktree root")
     return root
-
-
-def _path_under_root(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
 
 
 def state_has_legacy_autoresearch_workspace(state: AutoresearchState) -> bool:
@@ -7258,76 +6981,6 @@ def state_has_legacy_autoresearch_workspace(state: AutoresearchState) -> bool:
         if _path_under_root(path, LEGACY_AUTORESEARCH_WORKTREE_ROOT):
             return True
     return False
-
-
-def _require_workspace_under_autoresearch_worktree_root(
-    workspace: Path,
-    *,
-    label: str,
-    worktree_root: Path,
-) -> None:
-    try:
-        workspace.relative_to(worktree_root)
-    except ValueError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must be under the canonical autoresearch worktree root"
-        ) from exc
-
-
-def _resolve_git_commit(worktree: Path, commit_sha: str, *, label: str) -> str:
-    result = _run_git(
-        worktree,
-        ("rev-parse", "--verify", f"{commit_sha}^{{commit}}"),
-        operation=f"commit lookup for {label}",
-    )
-    if result.returncode != 0:
-        raise AutoresearchValidationError(
-            f"{label} {_render_literal(commit_sha)} does not exist in the artifact worktree"
-        )
-    return result.stdout.strip()
-
-
-def _require_git_descends_from(
-    worktree: Path,
-    ancestor: str,
-    descendant: str,
-    *,
-    label: str,
-) -> None:
-    result = _run_git(
-        worktree,
-        ("merge-base", "--is-ancestor", ancestor, descendant),
-        operation=f"readiness ancestry check for {label}",
-    )
-    if result.returncode != 0:
-        raise AutoresearchValidationError(
-            f"{label} must descend from the exact readiness-pinned Quantipy commit"
-        )
-
-
-def _require_git_success(
-    working_directory: Path,
-    arguments: Sequence[str],
-    *,
-    operation: str,
-) -> None:
-    result = _run_git(working_directory, arguments, operation=operation)
-    if result.returncode != 0:
-        raise AutoresearchValidationError(
-            f"Git {operation} failed in {_render_literal(str(working_directory))}"
-        )
-
-
-def _require_clean_git_worktree(worktree: Path) -> None:
-    status = _require_git_output(
-        worktree,
-        ("status", "--porcelain=v1", "--untracked-files=all"),
-        operation="status check",
-    )
-    if status:
-        raise AutoresearchValidationError(
-            f"artifact worktree {_render_literal(str(worktree))} must be clean"
-        )
 
 
 def _probe_quantipy_runtime_resolution(runtime_root: Path) -> tuple[Path, Path, str]:
@@ -7593,282 +7246,6 @@ def require_canonical_verification_dispatch_attestation(
         return state
 
 
-@dataclass(frozen=True, slots=True)
-class _SecureFileSnapshot:
-    path: Path
-    content: bytes
-    sha256: str
-    mode: int
-    owner_uid: int
-
-
-def _secure_open_external_uv_base_interpreter(path: Path) -> _SecureFileSnapshot:
-    """Snapshot uv's external owner-controlled base interpreter exactly once."""
-    return _secure_open_snapshot(
-        path,
-        label="canonical Quantipy runtime external uv base interpreter",
-        allow_group_write=True,
-        max_bytes=CANONICAL_QUANTIPY_BASE_INTERPRETER_MAX_BYTES,
-    )
-
-
-def _require_canonical_absolute_path(value: str | Path, *, label: str) -> Path:
-    path = Path(value)
-    declared = os.fspath(value)
-    if not path.is_absolute() or declared != path.as_posix() or str(path) != path.as_posix():
-        raise AutoresearchValidationError(f"{label} must be a canonical absolute path")
-    if any(part in {"", ".", ".."} for part in path.parts[1:]):
-        raise AutoresearchValidationError(f"{label} must be a canonical absolute path")
-    return path
-
-
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
-
-
-def _secure_open_snapshot(
-    value: str | Path,
-    *,
-    label: str,
-    trusted_root: Path | None = None,
-    private: bool = False,
-    allow_group_write: bool = False,
-    max_bytes: int = MAX_ARTIFACT_FILE_BYTES,
-) -> _SecureFileSnapshot:
-    """Open without following links, then hash and parse the same immutable byte snapshot."""
-    path = _require_canonical_absolute_path(value, label=label)
-    if trusted_root is not None:
-        root = _require_canonical_absolute_path(trusted_root, label="trusted Quantipy runs root")
-        try:
-            path.relative_to(root)
-        except ValueError as exc:
-            raise AutoresearchValidationError(
-                f"{label} must be under the trusted runs root"
-            ) from exc
-        _require_private_directory(root, label="trusted Quantipy runs root")
-
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-    directory_fd = os.open("/", directory_flags)
-    try:
-        for component in path.parts[1:-1]:
-            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = next_fd
-        file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must be an existing canonical non-symlink regular file"
-        ) from exc
-    finally:
-        os.close(directory_fd)
-
-    try:
-        before = os.fstat(file_fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise AutoresearchValidationError(f"{label} must be a regular file")
-        if before.st_uid != os.getuid():
-            raise AutoresearchValidationError(f"{label} must be owned by the autoresearch user")
-        prohibited_write_bits = 0o002 if allow_group_write else 0o022
-        if stat.S_IMODE(before.st_mode) & prohibited_write_bits:
-            restriction = "world-writable" if allow_group_write else "group- or world-writable"
-            raise AutoresearchValidationError(f"{label} must not be {restriction}")
-        if private and (stat.S_IMODE(before.st_mode) & 0o077):
-            raise AutoresearchValidationError(f"{label} must not grant group or other access")
-        if private and before.st_nlink != 1:
-            raise AutoresearchValidationError(f"{label} must not be hard-linked")
-        if before.st_size > max_bytes:
-            raise AutoresearchValidationError(f"{label} exceeds the byte limit")
-        chunks: list[bytes] = []
-        remaining = max_bytes + 1
-        while remaining:
-            chunk = os.read(file_fd, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        content = b"".join(chunks)
-        after = os.fstat(file_fd)
-        if len(content) > max_bytes:
-            raise AutoresearchValidationError(f"{label} exceeds the byte limit")
-        if (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        ) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ):
-            raise AutoresearchValidationError(f"{label} changed while it was being read")
-    finally:
-        os.close(file_fd)
-    return _SecureFileSnapshot(
-        path=path,
-        content=content,
-        sha256=hashlib.sha256(content).hexdigest(),
-        mode=stat.S_IMODE(before.st_mode),
-        owner_uid=before.st_uid,
-    )
-
-
-def _require_runtime_venv_prefix(path: Path) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            "canonical Quantipy runtime .venv prefix does not exist"
-        ) from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o002
-    ):
-        raise AutoresearchValidationError(
-            "canonical Quantipy runtime .venv prefix must be owned and not world-writable"
-        )
-
-
-def _require_private_directory(path: Path, *, label: str) -> None:
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise AutoresearchValidationError(f"{label} does not exist") from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o700
-    ):
-        raise AutoresearchValidationError(
-            f"{label} must be an owned mode-0700 non-symlink directory"
-        )
-
-
-def _require_sealed_quantipy_panel_directory(path: Path) -> None:
-    """Require the exact read-only directory mode emitted for completed panels."""
-    try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise AutoresearchValidationError("Quantipy panel directory does not exist") from exc
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_ISLNK(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) != 0o500
-    ):
-        raise AutoresearchValidationError(
-            "Quantipy panel directory must be an owned mode-0500 non-symlink directory"
-        )
-
-
-def _require_sealed_quantipy_panel_file(snapshot: _SecureFileSnapshot, *, label: str) -> None:
-    """Require the exact file mode emitted with completed panel evidence."""
-    if snapshot.owner_uid != os.getuid() or snapshot.mode != 0o400:
-        raise AutoresearchValidationError(f"{label} must be an owned mode-0400 sealed file")
-
-
-def _open_no_follow_directory(path: Path, *, label: str) -> int:
-    """Open an existing canonical directory without traversing symlinks."""
-    canonical_path = _require_canonical_absolute_path(path, label=label)
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    try:
-        descriptor = os.open(canonical_path.anchor, flags)
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must be an existing canonical non-symlink directory"
-        ) from exc
-    try:
-        for component in canonical_path.parts[1:]:
-            next_descriptor = os.open(component, flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = next_descriptor
-    except OSError as exc:
-        os.close(descriptor)
-        raise AutoresearchValidationError(
-            f"{label} must be an existing canonical non-symlink directory"
-        ) from exc
-    return descriptor
-
-
-def _create_or_normalize_private_directory(
-    parent_descriptor: int,
-    *,
-    name: str,
-    label: str,
-) -> int:
-    """Create or normalize one direct user-owned private directory by descriptor."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    try:
-        os.mkdir(name, mode=0o700, dir_fd=parent_descriptor)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise AutoresearchValidationError(f"{label} could not be provisioned") from exc
-    try:
-        descriptor = os.open(name, flags, dir_fd=parent_descriptor)
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must be an owned non-symlink directory"
-        ) from exc
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise AutoresearchValidationError(f"{label} must be an owned non-symlink directory")
-        os.fchmod(descriptor, 0o700)
-        secured = os.fstat(descriptor)
-        if (
-            not stat.S_ISDIR(secured.st_mode)
-            or secured.st_uid != os.getuid()
-            or stat.S_IMODE(secured.st_mode) != 0o700
-        ):
-            raise AutoresearchValidationError(
-                f"{label} must be an owned mode-0700 non-symlink directory"
-            )
-    except AutoresearchValidationError:
-        os.close(descriptor)
-        raise
-    except OSError as exc:
-        os.close(descriptor)
-        raise AutoresearchValidationError(f"{label} could not be secured") from exc
-    return descriptor
-
-
-def _provision_private_quantipy_control_plane_ancestors(root: Path) -> int:
-    """Provision the fixed private control-plane ancestors for the runs root."""
-    control_plane_root = root.parent.parent
-    runs_parent = root.parent
-    base_descriptor = _open_no_follow_directory(
-        control_plane_root.parent,
-        label="trusted Quantipy control-plane base",
-    )
-    try:
-        control_plane_descriptor = _create_or_normalize_private_directory(
-            base_descriptor,
-            name=control_plane_root.name,
-            label="trusted Quantipy control-plane root",
-        )
-    finally:
-        os.close(base_descriptor)
-    try:
-        return _create_or_normalize_private_directory(
-            control_plane_descriptor,
-            name=runs_parent.name,
-            label="trusted Quantipy runs parent",
-        )
-    finally:
-        os.close(control_plane_descriptor)
-
-
 def provision_quantipy_experiment_runs_root() -> Path:
     """Create or validate the one fixed private Quantipy experiment receipt root."""
     root = _require_canonical_absolute_path(
@@ -7910,106 +7287,6 @@ def provision_quantipy_experiment_runs_root() -> Path:
     finally:
         os.close(parent_descriptor)
     return root
-
-
-def _require_strict_regular_file(value: str, *, label: str) -> Path:
-    return _secure_open_snapshot(value, label=label).path
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _load_json_mapping(path: Path, *, label: str) -> Mapping[str, object]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AutoresearchValidationError(f"{label} must be readable JSON") from exc
-    return _ensure_mapping(raw, label=label)
-
-
-def _parse_json_snapshot(snapshot: _SecureFileSnapshot, *, label: str) -> Mapping[str, object]:
-    try:
-        decoded = snapshot.content.decode("utf-8")
-        raw = json.loads(
-            decoded,
-            parse_constant=lambda value: (_ for _ in ()).throw(
-                ValueError(f"non-finite JSON number {value}")
-            ),
-        )
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        raise AutoresearchValidationError(f"{label} must be strict UTF-8 JSON") from exc
-    return _ensure_mapping(raw, label=label)
-
-
-def _canonical_json_sha256(value: Mapping[str, object]) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _canonical_utc_text(value: object, *, label: str) -> str:
-    parsed = _strict_json_datetime(value, label=label, utc_only=True)
-    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _validate_quantipy_relative_path(value: object, *, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or len(value) > QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH
-        or "\\" in value
-    ):
-        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
-    path = Path(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
-    if value != path.as_posix():
-        raise AutoresearchValidationError(f"{label} must be a canonical portable relative path")
-    return value
-
-
-def _validate_panel_request(value: object, *, label: str) -> dict[str, object]:
-    data = _strict_json_keys(
-        value,
-        label=label,
-        expected=("contract_version", "tickers", "start", "end", "timeframe", "market_hours"),
-    )
-    if data["contract_version"] != "research-price-panel-v1":
-        raise AutoresearchValidationError(f"{label}.contract_version is invalid")
-    tickers_raw = data["tickers"]
-    if not isinstance(tickers_raw, list) or not tickers_raw:
-        raise AutoresearchValidationError(f"{label}.tickers must be a non-empty JSON array")
-    tickers = tuple(_strict_json_string(item, label=f"{label}.tickers") for item in tickers_raw)
-    if any(re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", ticker) is None for ticker in tickers):
-        raise AutoresearchValidationError(f"{label}.tickers contains a noncanonical ticker")
-    if tickers != tuple(sorted(tickers)) or len(set(tickers)) != len(tickers):
-        raise AutoresearchValidationError(f"{label}.tickers must be unique and sorted")
-    start = _strict_json_datetime(data["start"], label=f"{label}.start", utc_only=True)
-    end = _strict_json_datetime(data["end"], label=f"{label}.end", utc_only=True)
-    if start > end:
-        raise AutoresearchValidationError(f"{label} start must not be after end")
-    timeframe = _strict_json_enum(
-        data["timeframe"],
-        label=f"{label}.timeframe",
-        allowed=frozenset(("1min", "5min", "15min", "30min", "1h", "4h", "1d")),
-    )
-    market_hours = _strict_json_enum(
-        data["market_hours"],
-        label=f"{label}.market_hours",
-        allowed=frozenset(("all", "regular", "extended")),
-    )
-    return {
-        "contract_version": "research-price-panel-v1",
-        "tickers": list(tickers),
-        "start": _canonical_utc_text(data["start"], label=f"{label}.start"),
-        "end": _canonical_utc_text(data["end"], label=f"{label}.end"),
-        "timeframe": timeframe,
-        "market_hours": market_hours,
-    }
 
 
 def _validate_panel_receipt(value: object, *, label: str) -> dict[str, object]:
