@@ -9,8 +9,12 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from gateway.autoresearch.errors import AutoresearchValidationError
+
+if TYPE_CHECKING:
+    from gateway.autoresearch.receipts import CoverageReceipt as CoverageReceipt
 
 
 def _ensure_mapping(raw: object, *, label: str) -> Mapping[str, object]:
@@ -142,6 +146,88 @@ def _validate_iso_date_value(value: str, *, label: str) -> None:
         date.fromisoformat(value)
     except ValueError as exc:
         raise AutoresearchValidationError(f"{label} must be an ISO-8601 date") from exc
+
+
+def _parse_timestamp(value: str, *, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise AutoresearchValidationError(f"{label} must include a UTC offset")
+    return parsed
+
+
+def _normalise_identifier(value: str) -> str:
+    """Return the sole documented identifier form: lowercase kebab-case."""
+    normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", normalized):
+        raise AutoresearchValidationError(
+            "identifier must normalize to lowercase kebab-case beginning with a letter"
+        )
+    return normalized
+
+
+def _require_canonical_identifier(raw: Mapping[str, object], field_name: str) -> str:
+    value = raw.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise AutoresearchValidationError(f"{field_name} must be a non-empty string")
+    if not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*", value):
+        raise AutoresearchValidationError(
+            f"{field_name} must be canonical lowercase kebab-case beginning with a letter"
+        )
+    return value
+
+
+def _normalise_predicate(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+
+def _require_iso_date(raw: Mapping[str, object], field_name: str) -> str:
+    value = _require_str(raw, field_name)
+    _validate_iso_date_value(value, label=field_name)
+    return value
+
+
+def _validate_coverage_values(receipt: CoverageReceipt, *, label: str) -> None:
+    if not (
+        receipt.declared_intended_start
+        <= receipt.actual_common_start
+        <= receipt.actual_common_end
+        <= receipt.declared_intended_end
+    ):
+        raise AutoresearchValidationError(f"{label} actual common range must fit intended range")
+    if not (
+        receipt.actual_common_start
+        <= receipt.oos_start
+        <= receipt.oos_end
+        <= receipt.actual_common_end
+    ):
+        raise AutoresearchValidationError(f"{label} OOS range must fit actual common range")
+    if (
+        receipt.expected_trading_days <= 0
+        or not 0 <= receipt.actual_trading_days <= receipt.expected_trading_days
+    ):
+        raise AutoresearchValidationError(f"{label} trading day counts are invalid")
+    if not 0.0 <= receipt.coverage_percent <= 100.0:
+        raise AutoresearchValidationError(f"{label} coverage_percent must be between 0 and 100")
+    expected_percent = receipt.actual_trading_days / receipt.expected_trading_days * 100.0
+    if abs(receipt.coverage_percent - expected_percent) > 0.01:
+        raise AutoresearchValidationError(f"{label} coverage_percent must match trading day counts")
+    if receipt.actual_trading_days < receipt.expected_trading_days and not receipt.missing_reason:
+        raise AutoresearchValidationError(
+            f"{label} missing_reason is required for missing trading days"
+        )
+    if receipt.actual_trading_days == receipt.expected_trading_days and receipt.missing_reason:
+        raise AutoresearchValidationError(
+            f"{label} missing_reason is only valid for missing trading days"
+        )
+    if receipt.default_fold_count < 0 or receipt.fallback_fold_count < 0:
+        raise AutoresearchValidationError(f"{label} fold counts must be non-negative")
+    if receipt.fixed_sleeve_local_data and receipt.cap_provenance_available:
+        raise AutoresearchValidationError(
+            f"{label} fixed_sleeve_local_data cannot claim cap_provenance_available"
+        )
 
 
 def _sha256_text(text: str) -> str:

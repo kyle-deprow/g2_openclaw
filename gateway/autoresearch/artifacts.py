@@ -11,6 +11,9 @@ from gateway.autoresearch.compute import (
     ComputeFitArtifact as ComputeFitArtifact,
 )
 from gateway.autoresearch.constants import (
+    MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS as MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
+)
+from gateway.autoresearch.constants import (
     MAX_EXAMPLE_TICKERS as MAX_EXAMPLE_TICKERS,
 )
 from gateway.autoresearch.constants import (
@@ -38,6 +41,15 @@ from gateway.autoresearch.enums import (
     ConsensusStatus as ConsensusStatus,
 )
 from gateway.autoresearch.enums import (
+    FinalDecision as FinalDecision,
+)
+from gateway.autoresearch.enums import (
+    FinalReviewerVerdict as FinalReviewerVerdict,
+)
+from gateway.autoresearch.enums import (
+    FixTriggerPhase as FixTriggerPhase,
+)
+from gateway.autoresearch.enums import (
     MetricDirection as MetricDirection,
 )
 from gateway.autoresearch.enums import (
@@ -56,10 +68,19 @@ from gateway.autoresearch.fields import (
     _ensure_mapping as _ensure_mapping,
 )
 from gateway.autoresearch.fields import (
+    _normalise_identifier as _normalise_identifier,
+)
+from gateway.autoresearch.fields import (
+    _normalise_predicate as _normalise_predicate,
+)
+from gateway.autoresearch.fields import (
     _optional_string_list as _optional_string_list,
 )
 from gateway.autoresearch.fields import (
     _require_bool as _require_bool,
+)
+from gateway.autoresearch.fields import (
+    _require_canonical_identifier as _require_canonical_identifier,
 )
 from gateway.autoresearch.fields import (
     _require_exact_keys as _require_exact_keys,
@@ -69,6 +90,9 @@ from gateway.autoresearch.fields import (
 )
 from gateway.autoresearch.fields import (
     _require_int as _require_int,
+)
+from gateway.autoresearch.fields import (
+    _require_iso_date as _require_iso_date,
 )
 from gateway.autoresearch.fields import (
     _require_sha256 as _require_sha256,
@@ -87,6 +111,9 @@ from gateway.autoresearch.fields import (
 )
 from gateway.autoresearch.fields import (
     _validate_sha256 as _validate_sha256,
+)
+from gateway.autoresearch.fields import (
+    _validate_workspace_path as _validate_workspace_path,
 )
 from gateway.autoresearch.manifest import (
     SourceReceipt as SourceReceipt,
@@ -1029,3 +1056,319 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
     },
     ArtifactType.NEXT_ITERATION: {"required_fields": ["start_next_iteration"]},
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextPacketArtifact:
+    baseline_metric: str
+    current_best_metric: str
+    recent_experiment_outcomes: tuple[str, ...]
+    prior_findings: tuple[str, ...]
+    open_proposals: tuple[str, ...]
+    hard_constraints: tuple[str, ...]
+    available_data_sources: tuple[str, ...]
+    loaded_quantipy_sources: tuple[str, ...]
+    research_mode: ResearchMode
+    mode_rationale: str
+    burned_theory_families: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ContextPacketArtifact:
+        data = _ensure_mapping(raw, label="context_packet")
+        _require_exact_keys(
+            data,
+            label="context_packet",
+            expected=(
+                "baseline_metric",
+                "current_best_metric",
+                "recent_experiment_outcomes",
+                "prior_findings",
+                "open_proposals",
+                "hard_constraints",
+                "available_data_sources",
+                "loaded_quantipy_sources",
+                "research_mode",
+                "mode_rationale",
+                "burned_theory_families",
+            ),
+        )
+        return cls(
+            baseline_metric=_require_str(data, "baseline_metric"),
+            current_best_metric=_require_str(data, "current_best_metric"),
+            recent_experiment_outcomes=_require_string_list(data, "recent_experiment_outcomes"),
+            prior_findings=_require_string_list(data, "prior_findings"),
+            open_proposals=_require_string_list(data, "open_proposals"),
+            hard_constraints=_require_string_list(data, "hard_constraints"),
+            available_data_sources=_require_string_list(data, "available_data_sources"),
+            loaded_quantipy_sources=_require_string_list(data, "loaded_quantipy_sources"),
+            research_mode=ResearchMode(_require_str(data, "research_mode")),
+            mode_rationale=_require_str(data, "mode_rationale"),
+            burned_theory_families=tuple(
+                _normalise_identifier(family)
+                for family in _require_string_list(data, "burned_theory_families")
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "baseline_metric": self.baseline_metric,
+            "current_best_metric": self.current_best_metric,
+            "recent_experiment_outcomes": list(self.recent_experiment_outcomes),
+            "prior_findings": list(self.prior_findings),
+            "open_proposals": list(self.open_proposals),
+            "hard_constraints": list(self.hard_constraints),
+            "available_data_sources": list(self.available_data_sources),
+            "loaded_quantipy_sources": list(self.loaded_quantipy_sources),
+            "research_mode": self.research_mode.value,
+            "mode_rationale": self.mode_rationale,
+            "burned_theory_families": list(self.burned_theory_families),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PriceHydrationScopePreflight:
+    member_union_count: int
+    experiment_start: str
+    experiment_end: str
+    timeframe: str
+    market_hours: str
+    session_count: int
+    planned_symbol_sessions: int
+    within_budget: bool
+
+    @classmethod
+    def from_dict(cls, raw: object) -> PriceHydrationScopePreflight:
+        data = _ensure_mapping(raw, label="price_hydration_scope_preflight")
+        _require_exact_keys(
+            data,
+            label="price_hydration_scope_preflight",
+            expected=(
+                "member_union_count",
+                "experiment_start",
+                "experiment_end",
+                "timeframe",
+                "market_hours",
+                "session_count",
+                "planned_symbol_sessions",
+                "within_budget",
+            ),
+        )
+        receipt = cls(
+            member_union_count=_require_int(data, "member_union_count"),
+            experiment_start=_require_iso_date(data, "experiment_start"),
+            experiment_end=_require_iso_date(data, "experiment_end"),
+            timeframe=_require_str(data, "timeframe"),
+            market_hours=_require_str(data, "market_hours"),
+            session_count=_require_int(data, "session_count"),
+            planned_symbol_sessions=_require_int(data, "planned_symbol_sessions"),
+            within_budget=_require_bool(data, "within_budget"),
+        )
+        receipt.validate()
+        return receipt
+
+    def validate(self) -> None:
+        _validate_iso_date_value(self.experiment_start, label="experiment_start")
+        _validate_iso_date_value(self.experiment_end, label="experiment_end")
+        if self.experiment_start > self.experiment_end:
+            raise AutoresearchValidationError("price preflight experiment range is invalid")
+        if self.member_union_count <= 0:
+            raise AutoresearchValidationError("price preflight member_union_count must be positive")
+        if self.session_count <= 0:
+            raise AutoresearchValidationError("price preflight session_count must be positive")
+        expected = self.member_union_count * self.session_count
+        if self.planned_symbol_sessions != expected:
+            raise AutoresearchValidationError(
+                "price preflight planned_symbol_sessions must equal "
+                "member_union_count * session_count"
+            )
+        expected_within_budget = expected <= MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS
+        if self.within_budget is not expected_within_budget:
+            raise AutoresearchValidationError(
+                "price preflight within_budget must match the alpha hydration budget"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "member_union_count": self.member_union_count,
+            "experiment_start": self.experiment_start,
+            "experiment_end": self.experiment_end,
+            "timeframe": self.timeframe,
+            "market_hours": self.market_hours,
+            "session_count": self.session_count,
+            "planned_symbol_sessions": self.planned_symbol_sessions,
+            "within_budget": self.within_budget,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FixResultArtifact:
+    trigger_phase: FixTriggerPhase
+    summary: str
+    workspace_path: str
+    commit_sha: str
+    fixes_applied: tuple[str, ...]
+    tests_rerun: tuple[str, ...]
+    remaining_issues: tuple[str, ...]
+    price_hydration_scope_preflight: PriceHydrationScopePreflight | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> FixResultArtifact:
+        data = _ensure_mapping(raw, label="fix_result")
+        _require_exact_keys(
+            data,
+            label="fix_result",
+            expected=(
+                "trigger_phase",
+                "summary",
+                "workspace_path",
+                "commit_sha",
+                "fixes_applied",
+                "tests_rerun",
+                "remaining_issues",
+                "price_hydration_scope_preflight",
+            ),
+        )
+        preflight_raw = data.get("price_hydration_scope_preflight")
+        artifact = cls(
+            trigger_phase=FixTriggerPhase(_require_str(data, "trigger_phase")),
+            summary=_require_str(data, "summary"),
+            workspace_path=_require_workspace_path(data, "workspace_path"),
+            commit_sha=_require_str(data, "commit_sha"),
+            fixes_applied=_require_string_list(data, "fixes_applied"),
+            tests_rerun=_require_string_list(data, "tests_rerun"),
+            remaining_issues=_require_string_list(data, "remaining_issues"),
+            price_hydration_scope_preflight=(
+                PriceHydrationScopePreflight.from_dict(preflight_raw)
+                if preflight_raw is not None
+                else None
+            ),
+        )
+        artifact.validate()
+        return artifact
+
+    def validate(self) -> None:
+        _validate_workspace_path(self.workspace_path, label="fix_result workspace_path")
+        if not re.fullmatch(r"[0-9a-f]{7,40}", self.commit_sha):
+            raise AutoresearchValidationError("fix_result commit_sha must be a Git commit SHA")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "trigger_phase": self.trigger_phase.value,
+            "summary": self.summary,
+            "workspace_path": self.workspace_path,
+            "commit_sha": self.commit_sha,
+            "fixes_applied": list(self.fixes_applied),
+            "tests_rerun": list(self.tests_rerun),
+            "remaining_issues": list(self.remaining_issues),
+            "price_hydration_scope_preflight": (
+                self.price_hydration_scope_preflight.to_dict()
+                if self.price_hydration_scope_preflight is not None
+                else None
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class FinalDecisionArtifact:
+    experiment_id: str
+    decision: FinalDecision
+    recommended_metric_name: str
+    recommended_metric_value: float | None
+    reviewer_verdict: FinalReviewerVerdict
+    rationale: str
+    log_summary: str
+    continue_loop: bool
+    memory_write_required: bool
+    infra_rationale: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> FinalDecisionArtifact:
+        data = _ensure_mapping(raw, label="final_decision")
+        _require_exact_keys(
+            data,
+            label="final_decision",
+            expected=(
+                "experiment_id",
+                "decision",
+                "recommended_metric_name",
+                "recommended_metric_value",
+                "reviewer_verdict",
+                "rationale",
+                "log_summary",
+                "continue_loop",
+                "memory_write_required",
+                "infra_rationale",
+            ),
+        )
+        metric_value = data.get("recommended_metric_value")
+        if metric_value is not None and (
+            isinstance(metric_value, bool) or not isinstance(metric_value, int | float)
+        ):
+            raise AutoresearchValidationError("recommended_metric_value must be numeric or null")
+        infra_rationale = data.get("infra_rationale")
+        if infra_rationale is not None and not isinstance(infra_rationale, str):
+            raise AutoresearchValidationError("infra_rationale must be a string or null")
+        return cls(
+            experiment_id=_require_canonical_identifier(data, "experiment_id"),
+            decision=FinalDecision(_require_str(data, "decision")),
+            recommended_metric_name=_require_str(data, "recommended_metric_name"),
+            recommended_metric_value=float(metric_value) if metric_value is not None else None,
+            reviewer_verdict=FinalReviewerVerdict(_require_str(data, "reviewer_verdict")),
+            rationale=_require_str(data, "rationale"),
+            log_summary=_require_str(data, "log_summary"),
+            continue_loop=_require_bool(data, "continue_loop"),
+            memory_write_required=_require_bool(data, "memory_write_required"),
+            infra_rationale=infra_rationale.strip() if isinstance(infra_rationale, str) else None,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "experiment_id": self.experiment_id,
+            "decision": self.decision.value,
+            "recommended_metric_name": self.recommended_metric_name,
+            "recommended_metric_value": self.recommended_metric_value,
+            "reviewer_verdict": self.reviewer_verdict.value,
+            "rationale": self.rationale,
+            "log_summary": self.log_summary,
+            "continue_loop": self.continue_loop,
+            "memory_write_required": self.memory_write_required,
+            "infra_rationale": self.infra_rationale,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryVerificationReceipt:
+    experiment_id: str
+    kg_path: str
+    predicates: tuple[str, ...]
+    verified_rows_digest: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "experiment_id": self.experiment_id,
+            "kg_path": self.kg_path,
+            "predicates": list(self.predicates),
+            "verified_rows_digest": self.verified_rows_digest,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> MemoryVerificationReceipt:
+        data = _ensure_mapping(raw, label="memory_verification_receipt")
+        _require_exact_keys(
+            data,
+            label="memory_verification_receipt",
+            expected=("experiment_id", "kg_path", "predicates", "verified_rows_digest"),
+        )
+        digest = _require_str(data, "verified_rows_digest")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise AutoresearchValidationError("verified_rows_digest must be a SHA-256 hex digest")
+        return cls(
+            experiment_id=_require_canonical_identifier(data, "experiment_id"),
+            kg_path=_require_str(data, "kg_path"),
+            predicates=tuple(
+                sorted(
+                    _normalise_predicate(item) for item in _require_string_list(data, "predicates")
+                )
+            ),
+            verified_rows_digest=digest,
+        )
