@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -167,24 +168,291 @@ fi
     )
 
 
+def _run_bootstrap_tailscale_check(home: Path) -> subprocess.CompletedProcess[str]:
+    command = """
+bootstrap_script="$1"
+set -- --skip-optional
+source "$bootstrap_script"
+SKIP_OPTIONAL=true
+check_tailscale
+"""
+    return subprocess.run(
+        ["bash", "-c", command, "bootstrap-tailscale-test", str(BOOTSTRAP_SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=_base_subprocess_env(home),
+    )
+
+
 def _run_mocked_bootstrap_openclaw_flow(
     tmp_path: Path,
     *,
     daemon_install_exit: int = 0,
+    create_live_config: bool = True,
+    repo_validate_exit: int = 0,
+    candidate_validate_exit: int = 0,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     home = tmp_path / "home"
     flow_log = tmp_path / "bootstrap-flow.log"
     mock_openclaw = tmp_path / "mock-bin/openclaw"
     (home / ".openclaw").mkdir(parents=True)
-    (home / ".openclaw/openclaw.json").write_text("{}\n", encoding="utf-8")
+    if create_live_config:
+        (home / ".openclaw/openclaw.json").write_text("{}\n", encoding="utf-8")
     _write_executable(
         mock_openclaw,
         r"""
+if [[ -v OPENCLAW_HOME ]]; then
+  printf 'leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
+  exit 60
+fi
+if [[ -v OPENCLAW_PUSH_HOME ]]; then
+  printf 'leaked OPENCLAW_PUSH_HOME=%s\n' "$OPENCLAW_PUSH_HOME" >&2
+  exit 61
+fi
+if [[ -n "${NODE_OPTIONS:-}" ]]; then
+  printf 'leaked NODE_OPTIONS=%s\n' "$NODE_OPTIONS" >&2
+  exit 62
+fi
 printf 'openclaw %s\n' "$*" >> "$FLOW_LOG"
+printf '%s\t%s\t%s\n' \
+  "$*" \
+  "${OPENCLAW_STATE_DIR:-<unset>}" \
+  "${OPENCLAW_CONFIG_PATH:-<unset>}" >> "${FLOW_LOG}.contexts"
+is_bootstrap_repo_config() {
+  case "${OPENCLAW_CONFIG_PATH:-}" in
+    "$TEST_ROOT"/g2-openclaw-bootstrap.*/openclaw.repo-preflight.json)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+is_bootstrap_candidate_config() {
+  case "${OPENCLAW_CONFIG_PATH:-}" in
+    "$TEST_ROOT"/g2-openclaw-bootstrap.*/openclaw.candidate.json)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+require_repo_config() {
+  if [[ "${OPENCLAW_CONFIG_PATH:-}" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
+    printf 'repo command used tracked repo overlay\n' >&2
+    exit 65
+  fi
+  case "${OPENCLAW_STATE_DIR:-}" in
+    "$TEST_ROOT"/g2-openclaw-bootstrap.*/state)
+      ;;
+    *)
+      printf 'repo command used unexpected OPENCLAW_STATE_DIR=%s\n' \
+        "${OPENCLAW_STATE_DIR:-<unset>}" >&2
+      exit 69
+      ;;
+  esac
+  if ! is_bootstrap_repo_config; then
+    printf 'unexpected repo OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+    exit 70
+  fi
+  plugin_artifacts_are_complete || {
+    printf 'repo validation ran before disposable plugin availability: %s\n' \
+      "$(plugin_state_dir)" >&2
+    exit 71
+  }
+}
+require_candidate_config() {
+  if [[ "${OPENCLAW_CONFIG_PATH:-}" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
+    printf 'lifecycle command used tracked repo overlay\n' >&2
+    exit 63
+  fi
+  case "${OPENCLAW_STATE_DIR:-}" in
+    "$EXPECTED_LIVE_OPENCLAW_STATE_DIR"|"$TEST_ROOT"/g2-openclaw-bootstrap.*/state)
+      ;;
+    *)
+      printf 'candidate command used unexpected OPENCLAW_STATE_DIR=%s\n' \
+        "${OPENCLAW_STATE_DIR:-<unset>}" >&2
+      exit 66
+      ;;
+  esac
+  if ! is_bootstrap_candidate_config; then
+      printf 'unexpected candidate OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+      exit 64
+  fi
+}
+require_live_config() {
+  if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_LIVE_OPENCLAW_STATE_DIR" ]]; then
+    printf 'live command used non-live OPENCLAW_STATE_DIR=%s\n' "${OPENCLAW_STATE_DIR:-<unset>}" >&2
+    exit 67
+  fi
+  if [[ "${OPENCLAW_CONFIG_PATH:-}" != "$EXPECTED_LIVE_OPENCLAW_CONFIG_PATH" ]]; then
+    printf 'live command used non-live OPENCLAW_CONFIG_PATH=%s\n' \
+      "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+    exit 68
+  fi
+}
+plugin_state_dir() {
+  printf '%s/plugins/codex' "$OPENCLAW_STATE_DIR"
+}
+plugin_artifacts_are_complete() {
+  for artifact in installed updated enabled; do
+    [[ -f "$(plugin_state_dir)/$artifact" ]] || return 1
+  done
+}
+alias_openclaw_config_path() {
+  local mode="$1"
+  local alias_target
+  [[ -n "$mode" ]] || return 0
+  alias_target="$TEST_ROOT/bootstrap-alias-$(basename "$OPENCLAW_CONFIG_PATH").target"
+  cp "$OPENCLAW_CONFIG_PATH" "$alias_target"
+  rm -f "$OPENCLAW_CONFIG_PATH"
+  case "$mode" in
+    symlink)
+      ln -s "$alias_target" "$OPENCLAW_CONFIG_PATH"
+      ;;
+    hardlink)
+      ln "$alias_target" "$OPENCLAW_CONFIG_PATH"
+      ;;
+    *)
+      printf 'unknown bootstrap alias mode: %s\n' "$mode" >&2
+      exit 87
+      ;;
+  esac
+}
+record_plugin_artifact() {
+  local artifact_dir
+  artifact_dir="$(plugin_state_dir)"
+  mkdir -p "$artifact_dir"
+  printf '%s\n' "$*" > "$artifact_dir/$1"
+}
 case "${1:-}" in
+  config)
+    [[ "${2:-}" == "validate" && "${3:-}" == "--json" ]] || exit 90
+    if is_bootstrap_repo_config; then
+      require_repo_config
+      if [[ "${REPO_VALIDATE_PREFIX_INVALID_THEN_VALID:-0}" == "1" ]]; then
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "repo.prefix", "message": "prefix invalidity injected by test"}],
+  "warnings": []
+}
+{"valid":true,"warnings":[]}
+JSON
+        exit 0
+      fi
+      if [[ "${REPO_VALIDATE_PREFIX_WARNING_THEN_VALID:-0}" == "1" ]]; then
+        cat <<'JSON'
+{
+  "valid": true,
+  "warnings": [{"path": "repo.prefix.warning", "message": "prefix warning injected by test"}]
+}
+{"valid":true,"warnings":[]}
+JSON
+        exit 0
+      fi
+      if [[ "$REPO_VALIDATE_EXIT" != "0" ]]; then
+        cat <<'JSON'
+{"valid":false,"errors":[{"path":"repo.injected","message":"invalid repo overlay"}],"warnings":[]}
+JSON
+        exit "$REPO_VALIDATE_EXIT"
+      fi
+      if [[ "${REPO_VALIDATE_WARNINGS:-0}" == "1" ]]; then
+        cat <<'JSON'
+{"valid":true,"warnings":[{"path":"repo.warning","message":"warning injected by test"}]}
+JSON
+      else
+        printf '{"valid":true,"warnings":[]}\n'
+      fi
+      if [[ "${MUTATE_BOOTSTRAP_REPO_COPY:-0}" == "1" ]]; then
+        printf '\n{"mutated":true}\n' >> "$OPENCLAW_CONFIG_PATH"
+      fi
+      alias_openclaw_config_path "${ALIAS_BOOTSTRAP_REPO_CONFIG_AFTER_VALIDATE:-}"
+    elif is_bootstrap_candidate_config; then
+      require_candidate_config "$@"
+      if [[ "${CANDIDATE_VALIDATE_PREFIX_INVALID_THEN_VALID:-0}" == "1" ]]; then
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "candidate.prefix", "message": "prefix invalidity injected by test"}],
+  "warnings": []
+}
+{"valid":true,"warnings":[]}
+JSON
+        exit 0
+      fi
+      if [[ "${CANDIDATE_VALIDATE_PREFIX_WARNING_THEN_VALID:-0}" == "1" ]]; then
+        cat <<'JSON'
+{
+  "valid": true,
+  "warnings": [
+    {"path": "candidate.prefix.warning", "message": "prefix warning injected by test"}
+  ]
+}
+{"valid":true,"warnings":[]}
+JSON
+        exit 0
+      fi
+      if [[ "$CANDIDATE_VALIDATE_EXIT" != "0" ]]; then
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "candidate.injected", "message": "invalid candidate overlay"}],
+  "warnings": []
+}
+JSON
+        exit "$CANDIDATE_VALIDATE_EXIT"
+      fi
+      if [[ "${CANDIDATE_VALIDATE_WARNINGS:-0}" == "1" ]]; then
+        cat <<'JSON'
+{"valid":true,"warnings":[{"path":"candidate.warning","message":"warning injected by test"}]}
+JSON
+      elif ! plugin_artifacts_are_complete; then
+        cat <<'JSON'
+{
+  "valid": true,
+  "warnings": [
+    {
+      "path": "plugins.entries.codex",
+      "message": "plugin codex is declared but is not installed in this validation context"
+    }
+  ]
+}
+JSON
+      else
+        printf '{"valid":true,"warnings":[]}\n'
+      fi
+      alias_openclaw_config_path "${ALIAS_BOOTSTRAP_CANDIDATE_CONFIG_AFTER_VALIDATE:-}"
+    else
+      printf 'validate used unexpected OPENCLAW_CONFIG_PATH=%s\n' \
+        "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+      exit 99
+    fi
+    ;;
   plugins)
-    if [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]]; then
-      cat <<'JSON'
+    require_candidate_config "$@"
+    case "${2:-}" in
+      install)
+        record_plugin_artifact installed "$@"
+        ;;
+      update)
+        [[ -f "$(plugin_state_dir)/installed" ]] || exit 94
+        record_plugin_artifact updated "$@"
+        ;;
+      enable)
+        [[ -f "$(plugin_state_dir)/updated" ]] || exit 95
+        record_plugin_artifact enabled "$@"
+        ;;
+      inspect)
+        [[ "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 96
+        plugin_artifacts_are_complete || {
+          printf 'missing plugin artifact in validation context: %s\n' "$(plugin_state_dir)" >&2
+          exit 97
+        }
+        cat <<'JSON'
 {
   "plugin": {
     "id": "codex",
@@ -197,10 +465,28 @@ case "${1:-}" in
   }
 }
 JSON
-    fi
+        ;;
+      *)
+        exit 98
+        ;;
+    esac
+    ;;
+  onboard)
+    require_live_config "$@"
+    [[ "$*" == "onboard --local" ]] || exit 89
+    mkdir -p "$HOME/.openclaw"
+    printf '{}\n' > "$HOME/.openclaw/openclaw.json"
     ;;
   daemon)
+    require_live_config "$@"
     [[ "$*" == "daemon install --force --port 18789 --json" ]] || exit 91
+    unit="$HOME/.config/systemd/user/openclaw-gateway.service"
+    mkdir -p "$(dirname "$unit")"
+    {
+      printf '[Service]\n'
+      printf 'Environment=OPENCLAW_STATE_DIR=%s\n' "$OPENCLAW_STATE_DIR"
+      printf 'Environment=OPENCLAW_CONFIG_PATH=%s\n' "$OPENCLAW_CONFIG_PATH"
+    } > "$unit"
     exit "$DAEMON_INSTALL_EXIT"
     ;;
   *)
@@ -224,13 +510,22 @@ ensure_openclaw_exact_version() {
   OPENCLAW_VERSION_RESOLVED="$REQUIRED_OPENCLAW_VERSION"
   export OPENCLAW_BIN="$OPENCLAW_BIN_RESOLVED"
 }
+check_prerequisites() { :; }
+install_python_deps() { :; }
+install_ts_deps() { :; }
+generate_env() { :; }
+install_precommit() { :; }
+install_optional_tools() { :; }
+check_tailscale() { :; }
+run_smoke_tests() { :; }
+print_summary() { :; }
 make() {
   printf 'make %s\n' "$*" >> "$FLOW_LOG"
 }
 bash() {
   printf 'push-config %s\n' "$*" >> "$FLOW_LOG"
 }
-setup_openclaw
+main
 """
     result = subprocess.run(
         ["bash", "-c", command, "bootstrap-flow-test", str(BOOTSTRAP_SCRIPT), str(mock_openclaw)],
@@ -242,6 +537,14 @@ setup_openclaw
             {
                 "DAEMON_INSTALL_EXIT": str(daemon_install_exit),
                 "FLOW_LOG": str(flow_log),
+                "REPO_VALIDATE_EXIT": str(repo_validate_exit),
+                "CANDIDATE_VALIDATE_EXIT": str(candidate_validate_exit),
+                "EXPECTED_REPO_OPENCLAW_CONFIG_PATH": str(OPENCLAW_CONFIG),
+                "EXPECTED_LIVE_OPENCLAW_STATE_DIR": str(home / ".openclaw"),
+                "EXPECTED_LIVE_OPENCLAW_CONFIG_PATH": str(home / ".openclaw/openclaw.json"),
+                "TEST_ROOT": str(tmp_path),
+                "TMPDIR": str(tmp_path),
+                **(extra_env or {}),
             },
         ),
     )
@@ -418,13 +721,46 @@ if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_OPENCLAW_STATE_DIR" ]]; then
   exit 68
 fi
 case "${OPENCLAW_CONFIG_PATH:-}" in
-  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
+  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
     ;;
   *)
   printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
   exit 69
     ;;
 esac
+is_guarded_repo_config() {
+  case "${OPENCLAW_CONFIG_PATH:-}" in
+    "$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+is_generated_config() {
+  [[ "${OPENCLAW_CONFIG_PATH:-}" == "$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json ]]
+}
+alias_config_path_if_requested() {
+  local mode="$1"
+  local alias_target
+  [[ -n "$mode" ]] || return 0
+  alias_target="$TEST_ROOT/push-alias-$(basename "$OPENCLAW_CONFIG_PATH").target"
+  cp "$OPENCLAW_CONFIG_PATH" "$alias_target"
+  rm -f "$OPENCLAW_CONFIG_PATH"
+  case "$mode" in
+    symlink)
+      ln -s "$alias_target" "$OPENCLAW_CONFIG_PATH"
+      ;;
+    hardlink)
+      ln "$alias_target" "$OPENCLAW_CONFIG_PATH"
+      ;;
+    *)
+      printf 'unknown push alias mode: %s\n' "$mode" >&2
+      exit 87
+      ;;
+  esac
+}
 printf '%s %s %s %s %s %s\n' \
   "openclaw $*" \
   "OPENCLAW_HOME=<unset>" \
@@ -438,6 +774,56 @@ case "${1:-}" in
     ;;
   config)
     [[ "${2:-}" == "validate" ]] || exit 44
+    if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
+      printf 'refusing tracked repo overlay for external OpenClaw CLI\n' >&2
+      exit 72
+    fi
+    if is_guarded_repo_config \
+      && [[ "${MOCK_REPO_OPENCLAW_CONFIG_PREFIX_INVALID_THEN_VALID:-0}" == "1" ]]; then
+      cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "repo.prefix", "message": "prefix invalidity injected by test"}],
+  "warnings": []
+}
+{"valid":true,"warnings":[]}
+JSON
+      exit 0
+    fi
+    if is_guarded_repo_config \
+      && [[ "${MOCK_REPO_OPENCLAW_CONFIG_PREFIX_WARNING_THEN_VALID:-0}" == "1" ]]; then
+      cat <<'JSON'
+{
+  "valid": true,
+  "warnings": [{"path": "repo.prefix.warning", "message": "prefix warning injected by test"}]
+}
+{"valid":true,"warnings":[]}
+JSON
+      exit 0
+    fi
+    if is_guarded_repo_config && [[ "${MOCK_REPO_OPENCLAW_CONFIG_VALIDATE_FAIL:-0}" == "1" ]]; then
+      if [[ "${3:-}" == "--json" ]]; then
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "repo.injected", "message": "arbitrary repo invalidity"}],
+  "warnings": []
+}
+JSON
+      else
+        printf 'invalid repo config injected by test\n' >&2
+      fi
+      exit 12
+    fi
+    if is_guarded_repo_config && [[ "${MOCK_REPO_OPENCLAW_CONFIG_VALIDATE_WARN:-0}" == "1" ]]; then
+      jq -n --arg path "$OPENCLAW_CONFIG_PATH" \
+        '{
+          "valid": true,
+          "path": $path,
+          "warnings": [{"path": "repo.warning", "message": "warning injected by test"}]
+        }'
+      exit 0
+    fi
     if jq -e '.plugins.entries.codex.config.nativeToolSurfaceEnabled? != null' \
       "$OPENCLAW_CONFIG_PATH" >/dev/null; then
       if [[ "${3:-}" == "--json" ]]; then
@@ -457,22 +843,105 @@ JSON
       fi
       exit 12
     fi
-    if [[ "${MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL:-0}" == "1" ]]; then
+    if is_generated_config && [[ "${MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL:-0}" == "1" ]]; then
       if [[ "${3:-}" == "--json" ]]; then
-        printf '{"valid":false,"errors":[{"path":"injected","message":"test failure"}]}\n'
+        cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "injected", "message": "test failure"}],
+  "warnings": []
+}
+JSON
       else
         printf 'invalid config injected by test\n' >&2
       fi
       exit 12
+    fi
+    if is_generated_config \
+      && [[ "${MOCK_OPENCLAW_CONFIG_PREFIX_INVALID_THEN_VALID:-0}" == "1" ]]; then
+      cat <<'JSON'
+{
+  "valid": false,
+  "errors": [{"path": "generated.prefix", "message": "prefix invalidity injected by test"}],
+  "warnings": []
+}
+{"valid":true,"warnings":[]}
+JSON
+      exit 0
+    fi
+    if is_generated_config \
+      && [[ "${MOCK_OPENCLAW_CONFIG_PREFIX_WARNING_THEN_VALID:-0}" == "1" ]]; then
+      cat <<'JSON'
+{
+  "valid": true,
+  "warnings": [
+    {"path": "generated.prefix.warning", "message": "prefix warning injected by test"}
+  ]
+}
+{"valid":true,"warnings":[]}
+JSON
+      exit 0
+    fi
+    if is_generated_config && [[ "${MOCK_OPENCLAW_CONFIG_VALIDATE_WARN:-0}" == "1" ]]; then
+      jq -n --arg path "$OPENCLAW_CONFIG_PATH" \
+        '{
+          "valid": true,
+          "path": $path,
+          "warnings": [{"path": "generated.warning", "message": "warning injected by test"}]
+        }'
+      exit 0
+    fi
+    if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_OPENCLAW_CONFIG_PATH" \
+      && "${MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN:-0}" == "1" ]]; then
+      jq -n --arg path "$OPENCLAW_CONFIG_PATH" \
+        '{
+          "valid": true,
+          "path": $path,
+          "warnings": [{"path": "live.warning", "message": "warning injected by test"}]
+        }'
+      exit 0
     fi
     if [[ "${3:-}" == "--json" ]]; then
       printf '{"valid":true,"path":"%s","warnings":[]}\n' "$OPENCLAW_CONFIG_PATH"
     else
       printf 'config ok\n'
     fi
+    if is_guarded_repo_config && [[ "${MOCK_MUTATE_REPO_PREFLIGHT_CONFIG:-0}" == "1" ]]; then
+      printf '\n{"mutated":"repo-preflight"}\n' >> "$OPENCLAW_CONFIG_PATH"
+    fi
+    if is_guarded_repo_config; then
+      alias_config_path_if_requested "${MOCK_ALIAS_REPO_PREFLIGHT_CONFIG_AFTER_VALIDATE:-}"
+    fi
+    if is_generated_config && [[ "${MOCK_MUTATE_GENERATED_CONFIG:-0}" == "1" ]]; then
+      printf '\n{"mutated":"generated"}\n' >> "$OPENCLAW_CONFIG_PATH"
+    fi
+    if is_generated_config; then
+      alias_config_path_if_requested "${MOCK_ALIAS_GENERATED_CONFIG_AFTER_VALIDATE:-}"
+    fi
+    if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_OPENCLAW_CONFIG_PATH" \
+      && "${MOCK_MUTATE_LIVE_CONFIG_DURING_VALIDATE:-0}" == "1" ]]; then
+      printf '\n{"mutated":"live"}\n' >> "$OPENCLAW_CONFIG_PATH"
+    fi
+    if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_OPENCLAW_CONFIG_PATH" ]]; then
+      alias_config_path_if_requested "${MOCK_ALIAS_LIVE_CONFIG_AFTER_VALIDATE:-}"
+    fi
     ;;
   plugins)
     [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 45
+    if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
+      printf 'plugin inspect used tracked repo overlay\n' >&2
+      exit 72
+    fi
+    if [[ "${MOCK_REQUIRE_PLUGIN_INSPECT_REPO_CONFIG:-0}" == "1" ]] \
+      && ! is_guarded_repo_config; then
+      printf 'plugin inspect used non-repo config: %s\n' "$OPENCLAW_CONFIG_PATH" >&2
+      exit 70
+    fi
+    if jq -e '.plugins.entries.codex.config.nativeToolSurfaceEnabled? != null' \
+      "$OPENCLAW_CONFIG_PATH" >/dev/null; then
+      printf 'plugin inspect rejected stale nativeToolSurfaceEnabled config\n' >&2
+      exit 71
+    fi
     cat <<JSON
 {
   "plugin": {
@@ -492,6 +961,12 @@ JSON
   }
 }
 JSON
+    if is_guarded_repo_config && [[ "${MOCK_MUTATE_REPO_PREFLIGHT_CONFIG:-0}" == "1" ]]; then
+      printf '\n{"mutated":"repo-preflight-inspect"}\n' >> "$OPENCLAW_CONFIG_PATH"
+    fi
+    if is_guarded_repo_config; then
+      alias_config_path_if_requested "${MOCK_ALIAS_REPO_PREFLIGHT_CONFIG_AFTER_INSPECT:-}"
+    fi
     ;;
   *)
     printf 'unexpected openclaw command: %s\n' "$*" >&2
@@ -519,16 +994,91 @@ esac
     _write_executable(
         mock_bin / "systemctl",
         rf"""
+systemd_c_quote_value() {{
+  local value="$1"
+  local output="" char
+  local index
+  for ((index = 0; index < ${{#value}}; index++)); do
+    char="${{value:index:1}}"
+    case "$char" in
+      $'\n')
+        output="${{output}}\\n"
+        ;;
+      $'\t')
+        output="${{output}}\\t"
+        ;;
+      $'\r')
+        output="${{output}}\\r"
+        ;;
+      $'\b')
+        output="${{output}}\\b"
+        ;;
+      $'\f')
+        output="${{output}}\\f"
+        ;;
+      $'\v')
+        output="${{output}}\\v"
+        ;;
+      $'\a')
+        output="${{output}}\\a"
+        ;;
+      $'\e')
+        output="${{output}}\\e"
+        ;;
+      "\\")
+        output="${{output}}\\\\"
+        ;;
+      "'")
+        output="${{output}}\\'"
+        ;;
+      *)
+        output="${{output}}${{char}}"
+        ;;
+    esac
+  done
+  printf "%s" "$output"
+}}
+manager_node_options_state_dir="${{SYSTEMCTL_STATE_DIR:-$(dirname "$SYSTEMCTL_LOG")}}"
+manager_node_options_unset_marker="$manager_node_options_state_dir/node-options.unset"
+manager_node_options_should_emit() {{
+  if [[ "${{SYSTEMD_MANAGER_NODE_OPTIONS_PERSIST_AFTER_UNSET:-0}}" == "1" ]]; then
+    return 0
+  fi
+  [[ ! -f "$manager_node_options_unset_marker" ]]
+}}
 printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
   "--user show-environment")
-    if [[ -n "${{SYSTEMD_MANAGER_NODE_OPTIONS:-}}" ]]; then
-      printf 'NODE_OPTIONS=%s\n' "$SYSTEMD_MANAGER_NODE_OPTIONS"
+    if [[ -n "${{SYSTEMD_MANAGER_EXTRA_ENV:-}}" ]]; then
+      printf '%s\n' "$SYSTEMD_MANAGER_EXTRA_ENV"
+    fi
+    if [[ -n "${{SYSTEMD_MANAGER_NODE_OPTIONS_RAW:-}}" ]] && manager_node_options_should_emit; then
+      printf '%s\n' "$SYSTEMD_MANAGER_NODE_OPTIONS_RAW"
+      exit 0
+    fi
+    if [[ -n "${{SYSTEMD_MANAGER_NODE_OPTIONS:-}}" ]] && manager_node_options_should_emit; then
+      printf "NODE_OPTIONS=$'%s'\n" "$(systemd_c_quote_value "$SYSTEMD_MANAGER_NODE_OPTIONS")"
     fi
     exit 0
     ;;
   "--user unset-environment NODE_OPTIONS")
     printf 'unset NODE_OPTIONS\n' >> "$SYSTEMCTL_LOG"
+    if [[ "${{FAIL_MANAGER_NODE_OPTIONS_UNSET_AFTER_MUTATION:-0}}" == "1" ]]; then
+      printf 'unset NODE_OPTIONS failed after mutation by test\n' >&2
+      exit 25
+    fi
+    mkdir -p "$(dirname "$manager_node_options_unset_marker")"
+    : > "$manager_node_options_unset_marker"
+    exit 0
+    ;;
+  --user\ set-environment\ NODE_OPTIONS=*)
+    printf 'restore NODE_OPTIONS\n' >> "$SYSTEMCTL_LOG"
+    if [[ "${{FAIL_MANAGER_NODE_OPTIONS_RESTORE:-0}}" == "1" ]]; then
+      printf 'restore NODE_OPTIONS failed by test\n' >&2
+      exit 24
+    fi
+    printf '%s' "${{3#NODE_OPTIONS=}}" > "${{SYSTEMD_MANAGER_RESTORE_VALUE_FILE:-/dev/null}}"
+    rm -f "$manager_node_options_unset_marker"
     exit 0
     ;;
   "--user show openclaw-gateway.service --property=LoadState --property=ActiveState")
@@ -564,6 +1114,7 @@ esac
         mock_bin / "cp",
         r"""
 printf 'cp %s\n' "$*" >> "$CP_LOG"
+src="${@: -2:1}"
 dest="${@: -1}"
 case "$dest" in
   "$TEST_ROOT"/*)
@@ -573,8 +1124,68 @@ case "$dest" in
     exit 88
     ;;
 esac
+if [[ -n "${FAIL_RESTORE_DEST_BASENAME:-}" \
+  && "$(basename "$dest")" == "$FAIL_RESTORE_DEST_BASENAME" \
+  && "$src" == "$TEST_ROOT"*/.push-openclaw-config-*/* ]]; then
+  printf 'restore cp failed by test for %s\n' "$dest" >&2
+  exit 78
+fi
+if [[ -n "${FAIL_STAGE_RESTORE_IF_BACKUP_CONTAINS_BASENAME:-}" \
+  && "$(basename "$dest")" == restore.* \
+  && "$src" == "$TEST_ROOT"*/.push-openclaw-config-*/* \
+  && -e "$src/$FAIL_STAGE_RESTORE_IF_BACKUP_CONTAINS_BASENAME" ]]; then
+  printf 'staged restore cp failed by test for %s\n' "$dest" >&2
+  exit 76
+fi
+if [[ -n "${FAIL_BACKUP_SOURCE_BASENAME:-}" \
+  && "$(basename "$src")" == "$FAIL_BACKUP_SOURCE_BASENAME" \
+  && "$dest" == "$TEST_ROOT"*/.push-openclaw-config-*/* ]]; then
+  printf 'backup cp failed by test for %s\n' "$src" >&2
+  exit 77
+fi
 /usr/bin/cp "$@"
         """.strip(),
+    )
+    _write_executable(
+        mock_bin / "mv",
+        r"""
+printf 'mv %s\n' "$*" >> "${MV_LOG:-/dev/null}"
+src="${@: -2:1}"
+dest="${@: -1}"
+if [[ -n "${FAIL_RESTORE_COMMIT_DEST_BASENAME:-}" \
+  && "$(basename "$dest")" == "$FAIL_RESTORE_COMMIT_DEST_BASENAME" \
+  && "$(basename "$src")" == restore.* ]]; then
+  printf 'restore mv failed by test for %s\n' "$dest" >&2
+  exit 75
+fi
+/usr/bin/mv "$@"
+        """.strip(),
+    )
+    _write_executable(
+        mock_bin / "rm",
+        r"""
+printf 'rm %s\n' "$*" >> "${RM_LOG:-/dev/null}"
+target="${@: -1}"
+if [[ "${FAIL_BACKUP_CLEANUP:-0}" == "1" \
+  && "$target" == "$TEST_ROOT"*/.push-openclaw-config-* ]]; then
+  printf 'backup cleanup failed by test for %s\n' "$target" >&2
+  exit 79
+fi
+/usr/bin/rm "$@"
+        """.strip(),
+    )
+    _write_executable(
+        mock_bin / "find",
+        r"""
+printf 'find %s\n' "$*" >> "${FIND_LOG:-/dev/null}"
+root="${1:-}"
+if [[ -n "${FAIL_FIND_ROOT_BASENAME:-}" \
+  && "$(basename "$root")" == "$FAIL_FIND_ROOT_BASENAME" ]]; then
+  printf 'find failed by test for %s\n' "$root" >&2
+  exit 74
+fi
+/usr/bin/find "$@"
+""".strip(),
     )
     _write_executable(
         mock_bin / "sqlite3",
@@ -684,6 +1295,7 @@ def _prepare_push_script_home(
             "OPENCLAW_CONFIG_PATH": str(leaked_config_path),
             "EXPECTED_OPENCLAW_STATE_DIR": str(openclaw_home),
             "EXPECTED_OPENCLAW_CONFIG_PATH": str(openclaw_home / "openclaw.json"),
+            "EXPECTED_REPO_OPENCLAW_CONFIG_PATH": str(OPENCLAW_CONFIG),
             "OPENCLAW_BIN": str(mock_bin / "openclaw"),
             "OPENCLAW_PROVIDER": "codex",
             "OPENAI_MODEL": "gpt-5.4",
@@ -696,11 +1308,15 @@ def _prepare_push_script_home(
             "MEMPALACE_EXPECTED_EMBEDDING_DIMENSION": "768",
             "SYSTEMCTL_LOG": str(home / "systemctl.log"),
             "CP_LOG": str(home / "cp.log"),
+            "MV_LOG": str(home / "mv.log"),
+            "RM_LOG": str(home / "rm.log"),
+            "FIND_LOG": str(home / "find.log"),
             "OPENCLAW_LOG": str(home / "openclaw.log"),
             "MOCK_CODEX_RESOLVED_PATH": str(home / "mock-codex-package"),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
             "SQLITE_LOG": str(home / "sqlite.log"),
             "TEST_ROOT": str(tmp_path),
+            "TMPDIR": str(tmp_path),
         },
     )
 
@@ -732,6 +1348,21 @@ def _read_sqlite_log(env: dict[str, str]) -> str:
     return sqlite_log.read_text(encoding="utf-8")
 
 
+def _read_cp_log(env: dict[str, str]) -> str:
+    cp_log = Path(env["CP_LOG"])
+    if not cp_log.exists():
+        return ""
+    return cp_log.read_text(encoding="utf-8")
+
+
+def _assert_alias_mode_reported(stderr: str, alias_mode: str) -> None:
+    if alias_mode == "symlink":
+        assert "symlink" in stderr
+    else:
+        assert alias_mode == "hardlink"
+        assert "hard-linked" in stderr
+
+
 def _contains_forbidden_key(value: object, forbidden: set[str]) -> bool:
     if isinstance(value, dict):
         return any(
@@ -760,7 +1391,10 @@ def _assert_missing_gateway_left_managed_destinations_untouched(
     assert not (home / ".config/systemd/user").exists()
     assert not (home / ".mempalace").exists()
     assert not Path(env["FASTEMBED_CACHE_PATH"]).exists()
-    assert not Path(env["CP_LOG"]).exists()
+    cp_log = _read_cp_log(env)
+    assert "openclaw.json.bak" not in cp_log
+    assert "mempalace-readonly-server.py" not in cp_log
+    assert "/gateway/agent_config/" not in cp_log
 
 
 def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
@@ -902,7 +1536,9 @@ def test_bootstrap_reconciles_exact_codex_runtime_and_reinstalls_daemon() -> Non
         'plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin'
     )
     update = script.index("plugins update codex")
-    inspect = script.index("if ! require_codex_plugin_exact; then", update)
+    inspect = script.index(
+        "if ! require_codex_plugin_exact run_openclaw_cli_for_candidate_config; then", update
+    )
     daemon_install = script.index('daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json')
     push = script.index('local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"')
 
@@ -912,19 +1548,361 @@ def test_bootstrap_reconciles_exact_codex_runtime_and_reinstalls_daemon() -> Non
 
 
 def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Path) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
     result, flow_log = _run_mocked_bootstrap_openclaw_flow(tmp_path)
 
     assert result.returncode == 0, result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
         "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
         "openclaw plugins update codex",
         "openclaw plugins enable codex",
+        "openclaw config validate --json",
+        "openclaw config validate --json",
+        "openclaw plugins inspect codex --json",
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
         "openclaw daemon install --force --port 18789 --json",
         f"make -C {REPO_ROOT} mempalace-install",
         f"mempalace {REPO_ROOT}/scripts/check-mempalace-health.py",
         f"push-config {PUSH_SCRIPT}",
     ]
+    context_rows = [
+        line.split("\t")
+        for line in (tmp_path / "bootstrap-flow.log.contexts")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    validate_contexts = [row for row in context_rows if row[0] == "config validate --json"]
+    repo_validate_contexts = [
+        row for row in validate_contexts if row[2].endswith("/openclaw.repo-preflight.json")
+    ]
+    candidate_validate_contexts = [
+        row for row in validate_contexts if row[2].endswith("/openclaw.candidate.json")
+    ]
+    assert len(repo_validate_contexts) == 1
+    assert len(candidate_validate_contexts) == 2
+    assert repo_validate_contexts[0][2] != candidate_validate_contexts[0][2]
+    tracked_config_path = str(OPENCLAW_CONFIG)
+    assert all(tracked_config_path != row[2] for row in context_rows)
+    assert repo_validate_contexts[0][1].endswith("/state")
+    assert {row[1] for row in candidate_validate_contexts} == {
+        repo_validate_contexts[0][1],
+        str(tmp_path / "home/.openclaw"),
+    }
+    live_plugin_state = tmp_path / "home/.openclaw/plugins/codex"
+    assert (live_plugin_state / "installed").is_file()
+    assert (live_plugin_state / "updated").is_file()
+    assert (live_plugin_state / "enabled").is_file()
+    unit = tmp_path / "home/.config/systemd/user/openclaw-gateway.service"
+    unit_text = unit.read_text(encoding="utf-8")
+    assert f"Environment=OPENCLAW_STATE_DIR={tmp_path / 'home/.openclaw'}" in unit_text
+    assert (
+        f"Environment=OPENCLAW_CONFIG_PATH={tmp_path / 'home/.openclaw/openclaw.json'}" in unit_text
+    )
+    assert "g2-openclaw-bootstrap" not in unit_text
+    assert not list(tmp_path.glob("g2-openclaw-bootstrap.*"))
+
+
+def test_bootstrap_invalid_repo_overlay_aborts_before_onboarding_or_live_writes(
+    tmp_path: Path,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        repo_validate_exit=12,
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+    ]
+    expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
+    assert expected_error in result.stdout
+    assert "invalid repo overlay" in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+    assert not list(tmp_path.glob("g2-openclaw-bootstrap.*"))
+
+
+def test_bootstrap_rejects_repo_schema_warnings_before_live_writes(tmp_path: Path) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        extra_env={"REPO_VALIDATE_WARNINGS": "1"},
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+    ]
+    expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
+    assert expected_error in result.stdout
+    assert "repo.warning" in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+
+
+def test_bootstrap_invalid_candidate_overlay_aborts_before_onboarding_or_live_writes(
+    tmp_path: Path,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        candidate_validate_exit=12,
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+        "openclaw config validate --json",
+    ]
+    assert "Candidate OpenClaw config failed schema validation" in result.stdout
+    assert "invalid candidate overlay" in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+
+
+def test_bootstrap_rejects_candidate_schema_warnings_before_inspect_or_daemon(
+    tmp_path: Path,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        extra_env={"CANDIDATE_VALIDATE_WARNINGS": "1"},
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+        "openclaw config validate --json",
+    ]
+    assert "Candidate OpenClaw config failed schema validation" in result.stdout
+    assert "candidate.warning" in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.config/systemd/user/openclaw-gateway.service").exists()
+    assert not any(
+        command.startswith("push-config ")
+        for command in flow_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+@pytest.mark.parametrize("alias_mode", ["symlink", "hardlink"])
+def test_bootstrap_rejects_repo_preflight_topology_replacement_with_identical_bytes(
+    tmp_path: Path,
+    alias_mode: str,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        extra_env={"ALIAS_BOOTSTRAP_REPO_CONFIG_AFTER_VALIDATE": alias_mode},
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+    ]
+    assert "Repo OpenClaw config failed schema validation" in result.stdout
+    assert "Guarded file" in result.stderr
+    _assert_alias_mode_reported(result.stderr, alias_mode)
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+
+
+@pytest.mark.parametrize("alias_mode", ["symlink", "hardlink"])
+def test_bootstrap_rejects_candidate_preflight_topology_replacement_with_identical_bytes(
+    tmp_path: Path,
+    alias_mode: str,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        extra_env={"ALIAS_BOOTSTRAP_CANDIDATE_CONFIG_AFTER_VALIDATE": alias_mode},
+    )
+
+    assert result.returncode == 1
+    assert flow_log.read_text(encoding="utf-8").splitlines() == [
+        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
+        "openclaw plugins update codex",
+        "openclaw plugins enable codex",
+        "openclaw config validate --json",
+        "openclaw config validate --json",
+    ]
+    assert "Candidate OpenClaw config failed schema validation" in result.stdout
+    assert "Guarded file" in result.stderr
+    _assert_alias_mode_reported(result.stderr, alias_mode)
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("extra_env", "expected_error", "expected_detail"),
+    [
+        (
+            {"REPO_VALIDATE_PREFIX_INVALID_THEN_VALID": "1"},
+            "Repo OpenClaw config failed schema validation",
+            "repo.prefix",
+        ),
+        (
+            {"CANDIDATE_VALIDATE_PREFIX_WARNING_THEN_VALID": "1"},
+            "Candidate OpenClaw config failed schema validation",
+            "candidate.prefix.warning",
+        ),
+    ],
+)
+def test_bootstrap_rejects_multi_document_schema_validation_output(
+    tmp_path: Path,
+    extra_env: dict[str, str],
+    expected_error: str,
+    expected_detail: str,
+) -> None:
+    repo_config_before = OPENCLAW_CONFIG.read_bytes()
+
+    result, _flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        create_live_config=False,
+        extra_env=extra_env,
+    )
+
+    assert result.returncode == 1
+    assert expected_error in result.stdout
+    assert expected_detail in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
+    assert not (tmp_path / "home/.openclaw/openclaw.json").exists()
+
+
+def test_bootstrap_openclaw_prewrite_invocations_clear_leaked_env_and_use_candidate_config(
+    tmp_path: Path,
+) -> None:
+    result, _flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        extra_env={
+            "OPENCLAW_HOME": str(tmp_path / "leaked-openclaw-home"),
+            "OPENCLAW_PUSH_HOME": str(tmp_path / "leaked-push-home"),
+            "OPENCLAW_STATE_DIR": str(tmp_path / "leaked-state"),
+            "OPENCLAW_CONFIG_PATH": str(tmp_path / "leaked-config.json"),
+            "NODE_OPTIONS": "--require /tmp/stale-runtime-selector.cjs",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "leaked" not in result.stderr
+    assert "lifecycle command used tracked repo overlay" not in result.stderr
+    assert "non-live OPENCLAW_STATE_DIR" not in result.stderr
+
+
+def test_bootstrap_version_check_uses_isolated_candidate_context(tmp_path: Path) -> None:
+    openclaw = tmp_path / "bin/openclaw"
+    _write_executable(
+        openclaw,
+        r"""
+if [[ -v OPENCLAW_HOME || -v OPENCLAW_PUSH_HOME ]]; then
+  printf 'leaked openclaw home env\n' >&2
+  exit 60
+fi
+if [[ "${OPENCLAW_STATE_DIR:-}" != "$TEST_ROOT"/g2-openclaw-bootstrap.*/state ]]; then
+  printf 'unexpected OPENCLAW_STATE_DIR=%s\n' "${OPENCLAW_STATE_DIR:-<unset>}" >&2
+  exit 61
+fi
+case "${OPENCLAW_CONFIG_PATH:-}" in
+  "$TEST_ROOT"/g2-openclaw-bootstrap.*/openclaw.candidate.json)
+    ;;
+  *)
+    printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
+    exit 62
+    ;;
+esac
+if [[ -n "${NODE_OPTIONS:-}" ]]; then
+  printf 'leaked NODE_OPTIONS=%s\n' "$NODE_OPTIONS" >&2
+  exit 63
+fi
+printf 'openclaw 2026.7.1-2\n'
+""".strip(),
+    )
+
+    result = _run_bootstrap_guard(
+        tmp_path,
+        {
+            "OPENCLAW_BIN": str(openclaw),
+            "OPENCLAW_HOME": str(tmp_path / "leaked-openclaw-home"),
+            "OPENCLAW_PUSH_HOME": str(tmp_path / "leaked-push-home"),
+            "OPENCLAW_STATE_DIR": str(tmp_path / "leaked-state"),
+            "OPENCLAW_CONFIG_PATH": str(tmp_path / "leaked-config.json"),
+            "NODE_OPTIONS": "--require /tmp/stale-runtime-selector.cjs",
+            "TEST_ROOT": str(tmp_path),
+            "TMPDIR": str(tmp_path),
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"RESOLVED={openclaw}" in result.stdout
+
+
+def test_bootstrap_rejects_device_identity_symlink_before_chmod(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state_dir = home / ".openclaw/state"
+    state_dir.mkdir(parents=True)
+    external_target = tmp_path / "external-device-identity.json"
+    external_target.write_text('{"device":"external"}\n', encoding="utf-8")
+    external_target.chmod(0o644)
+    (state_dir / "device-identity.json").symlink_to(external_target)
+
+    result = _run_bootstrap_tailscale_check(home)
+
+    assert result.returncode == 1
+    assert "device identity file permissions" in result.stderr
+    assert "symlink" in result.stderr
+    assert external_target.read_text(encoding="utf-8") == '{"device":"external"}\n'
+    assert _mode(external_target) == 0o644
+
+
+def test_bootstrap_rejects_hardlinked_device_identity_before_chmod(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    state_dir = home / ".openclaw/state"
+    state_dir.mkdir(parents=True)
+    external_alias = tmp_path / "external-device-identity.json"
+    external_alias.write_text('{"device":"external"}\n', encoding="utf-8")
+    external_alias.chmod(0o644)
+    os.link(external_alias, state_dir / "device-identity.json")
+
+    result = _run_bootstrap_tailscale_check(home)
+
+    assert result.returncode == 1
+    assert "device identity file permissions" in result.stderr
+    assert "hard-linked" in result.stderr
+    assert external_alias.read_text(encoding="utf-8") == '{"device":"external"}\n'
+    assert _mode(external_alias) == 0o644
 
 
 def test_mocked_bootstrap_daemon_install_failure_aborts_before_push(tmp_path: Path) -> None:
@@ -968,7 +1946,9 @@ def test_push_script_rejects_non_exact_codex_runtime(
     assert result.returncode != 0
     assert expected_error in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
-    assert not Path(env["CP_LOG"]).exists()
+    cp_log = _read_cp_log(env)
+    assert "openclaw.json.bak" not in cp_log
+    assert "mempalace-readonly-server.py" not in cp_log
 
 
 def test_push_script_installs_but_does_not_start_the_supervisor_service() -> None:
@@ -1033,16 +2013,20 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     ) in script
     assert ('validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}"') in script
     assert (
-        'cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"'
+        'guarded_cp_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" '
+        '"${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" '
+        '"staging managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"'
     ) in script
     assert (
-        'mv "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"'
+        'guarded_mv_replace "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" '
+        '"${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" '
+        '"publishing managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"'
     ) in script
     assert "require_gateway_service_loadable" in script
     assert "prepare_runtime_caps_dropin_dir" in script
     assert ('chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"') in script
     assert ('validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"') in script
-    assert script.count("systemctl --user daemon-reload") == 3
+    assert script.count("systemctl --user daemon-reload") == 4
     assert "GATEWAY_RUNTIME_CAPS_DROPIN" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_DST" in script
@@ -1059,12 +2043,53 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
         'validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" ||'
     ) not in script
     preflight_loadable_check = script.index("if ! require_gateway_service_loadable; then")
-    backup_write = script.index('cp "${LOCAL_CONFIG}" "${BACKUP}"')
-    supervisor_unit_write = script.index('mv "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"')
+    backup_write = script.index(
+        'guarded_copy_path_topology_preserving_final_symlink_topology "${LOCAL_CONFIG}" "${BACKUP}"'
+    )
+    supervisor_unit_write = script.index(
+        'guarded_mv_replace "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"'
+    )
     runtime_caps_dir_prepare = script.rindex("\nprepare_runtime_caps_dropin_dir\n")
     assert preflight_loadable_check < backup_write
     assert preflight_loadable_check < supervisor_unit_write
     assert preflight_loadable_check < runtime_caps_dir_prepare
+
+
+def test_push_script_final_commit_boundary_disarms_only_after_all_finalizers() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    boundary_start = script.index("commit_deployment_boundary() {")
+    boundary_end = script.index("\n}\n\nrestore_local_config_backup", boundary_start)
+    boundary = script[boundary_start:boundary_end]
+    end_sequence = script[script.rindex("if ! systemctl --user daemon-reload; then") :]
+    pre_commit_call = end_sequence[: end_sequence.index("commit_deployment_boundary")]
+    mark_start = script.index("mark_deployment_committed() {")
+    mark_end = script.index("\n}\n\ncleanup_committed_recovery_paths", mark_start)
+    mark = script[mark_start:mark_end]
+
+    assert "trap '' HUP INT TERM" in boundary
+    assert boundary.index("trap '' HUP INT TERM") < boundary.index("finalize_local_config_backup")
+    assert boundary.index("finalize_local_config_backup") < boundary.index(
+        "finalize_managed_unit_transaction"
+    )
+    assert boundary.index("finalize_managed_unit_transaction") < boundary.index(
+        "finalize_managed_artifact_transaction"
+    )
+    assert boundary.index("finalize_managed_artifact_transaction") < boundary.index(
+        "finalize_systemd_manager_environment_snapshot"
+    )
+    assert boundary.index("finalize_systemd_manager_environment_snapshot") < boundary.index(
+        "mark_deployment_committed"
+    )
+    assert boundary.index("mark_deployment_committed") < boundary.index("trap - EXIT")
+    assert boundary.index("trap - EXIT") < boundary.index("cleanup_committed_recovery_paths")
+    assert "ROLLBACK_ARMED=0" not in pre_commit_call
+    assert "MANAGED_UNIT_TRANSACTION_ARMED=0" not in pre_commit_call
+    assert "MANAGED_ARTIFACT_TRANSACTION_ARMED=0" not in pre_commit_call
+    assert "ROLLBACK_ARMED=0" in mark
+    assert "MANAGED_UNIT_TRANSACTION_ARMED=0" in mark
+    assert "MANAGED_ARTIFACT_TRANSACTION_ARMED=0" in mark
+    assert "|| true" not in script
 
 
 def test_push_script_fails_before_dropin_when_gateway_service_missing(tmp_path: Path) -> None:
@@ -1121,18 +2146,39 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 1
     openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
-    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 4
-    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 4
-    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 4
-    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 3
+    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 5
+    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 5
+    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 5
+    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 1
+    assert "OPENCLAW_CONFIG_PATH=" + env["EXPECTED_REPO_OPENCLAW_CONFIG_PATH"] not in openclaw_log
+    assert openclaw_log.count("push-openclaw-config-preflight.") == 3
     assert "config validate --json" in openclaw_log
-    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 4
+    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 5
     assert "inherited-openclaw-home" not in openclaw_log
     assert "inherited-state-dir" not in openclaw_log
     assert "inherited-config.json" not in openclaw_log
     assert "env-file-push-home" not in openclaw_log
     assert "env-file-state-dir" not in openclaw_log
     assert "env-file-config.json" not in openclaw_log
+
+
+def test_push_script_ignores_signal_during_final_commit_boundary(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    checkpoint_log = tmp_path / "checkpoints.log"
+    env["OPENCLAW_PUSH_TEST_CHECKPOINT_LOG"] = str(checkpoint_log)
+    env["OPENCLAW_PUSH_TEST_SIGNAL_AT"] = "commit-boundary-entered"
+    env["OPENCLAW_PUSH_TEST_SIGNAL"] = "INT"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert checkpoint_log.read_text(encoding="utf-8").splitlines() == [
+        "before-config-publication",
+        "commit-boundary-entered",
+    ]
+    assert "Done. Config pushed successfully." in result.stdout
 
 
 def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspaces(
@@ -1344,6 +2390,389 @@ def test_push_script_validates_generated_openclaw_config_before_write(tmp_path: 
     assert "config validate --json" in Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
     assert openclaw_config.read_text(encoding="utf-8") == initial_config
     assert "Done. Config pushed successfully." not in result.stdout
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob(".openclaw.generated.*.json"))
+
+
+@pytest.mark.parametrize("alias_mode", ["symlink", "hardlink"])
+def test_push_script_rejects_repo_preflight_topology_replacement_with_identical_bytes(
+    tmp_path: Path,
+    alias_mode: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_ALIAS_REPO_PREFLIGHT_CONFIG_AFTER_VALIDATE"] = alias_mode
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Repo OpenClaw config failed schema validation before runtime preflight" in (
+        result.stderr
+    )
+    assert "Guarded file" in result.stderr
+    _assert_alias_mode_reported(result.stderr, alias_mode)
+    assert openclaw_config.read_bytes() == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize("alias_mode", ["symlink", "hardlink"])
+def test_push_script_rejects_generated_config_topology_replacement_with_identical_bytes(
+    tmp_path: Path,
+    alias_mode: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_ALIAS_GENERATED_CONFIG_AFTER_VALIDATE"] = alias_mode
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "changed generated config identity/topology during validation" in result.stderr
+    _assert_alias_mode_reported(result.stderr, alias_mode)
+    assert openclaw_config.read_bytes() == initial_config
+    assert "Atomically published validated repo config" not in result.stdout
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_generated_openclaw_config_warnings_before_write(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env["MOCK_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Generated OpenClaw config failed schema validation before write" in result.stderr
+    assert "generated.warning" in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob(".openclaw.generated.*.json"))
+
+
+@pytest.mark.parametrize(
+    ("env_name", "expected_detail"),
+    [
+        ("MOCK_OPENCLAW_CONFIG_PREFIX_INVALID_THEN_VALID", "generated.prefix"),
+        ("MOCK_OPENCLAW_CONFIG_PREFIX_WARNING_THEN_VALID", "generated.prefix.warning"),
+    ],
+)
+def test_push_script_rejects_multi_document_generated_schema_validation(
+    tmp_path: Path,
+    env_name: str,
+    expected_detail: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env[env_name] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Generated OpenClaw config failed schema validation before write" in result.stderr
+    assert expected_detail in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob(".openclaw.generated.*.json"))
+
+
+def test_push_script_cleans_generated_config_without_leaking_openrouter_secret(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    fixture_value = "fixture-key-1234567890abcdef"
+    env["OPENCLAW_PROVIDER"] = "openrouter"
+    env["OPENROUTER_API_KEY"] = fixture_value
+    env["MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Generated OpenClaw config failed schema validation before write" in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert not list(openclaw_home.glob(".openclaw.generated.*.json"))
+    assert fixture_value not in result.stdout
+    assert fixture_value not in result.stderr
+    assert fixture_value not in Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
+
+
+def test_push_script_uses_repo_config_for_runtime_preflight_and_replaces_stale_live_config(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    openclaw_config.write_text(
+        json.dumps(
+            {
+                "plugins": {
+                    "entries": {
+                        "codex": {
+                            "config": {
+                                "nativeToolSurfaceEnabled": True,
+                            },
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    env["MOCK_REQUIRE_PLUGIN_INSPECT_REPO_CONFIG"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
+    assert "nativeToolSurfaceEnabled" not in deployed["plugins"]["entries"]["codex"]["config"]
+    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {"main", "autoresearch-pm"}
+    openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
+    assert (
+        "openclaw plugins inspect codex --json "
+        f"OPENCLAW_HOME=<unset> OPENCLAW_PUSH_HOME=<unset> "
+        f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']} "
+        "OPENCLAW_CONFIG_PATH="
+    ) in openclaw_log
+    assert "push-openclaw-config-preflight." in openclaw_log
+    assert env["EXPECTED_REPO_OPENCLAW_CONFIG_PATH"] not in openclaw_log
+
+
+def test_push_script_rejects_arbitrary_repo_config_invalidity_before_live_write(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env["MOCK_REPO_OPENCLAW_CONFIG_VALIDATE_FAIL"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Repo OpenClaw config failed schema validation before runtime preflight" in result.stderr
+    assert "arbitrary repo invalidity" in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_repo_config_warnings_before_live_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env["MOCK_REPO_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Repo OpenClaw config failed schema validation before runtime preflight" in result.stderr
+    assert "repo.warning" in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_bootstrap_rejects_external_mutation_of_guarded_repo_config_copy(
+    tmp_path: Path,
+) -> None:
+    tracked_before = OPENCLAW_CONFIG.read_bytes()
+    result, _flow_log = _run_mocked_bootstrap_openclaw_flow(
+        tmp_path,
+        extra_env={"MUTATE_BOOTSTRAP_REPO_COPY": "1"},
+    )
+
+    assert result.returncode != 0
+    assert "modified guarded repo config copy" in result.stderr
+    assert OPENCLAW_CONFIG.read_bytes() == tracked_before
+    assert not list(tmp_path.glob("g2-openclaw-bootstrap.*"))
+
+
+def test_push_script_rejects_external_mutation_of_guarded_repo_config_copy(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    tracked_before = OPENCLAW_CONFIG.read_bytes()
+    env["MOCK_MUTATE_REPO_PREFLIGHT_CONFIG"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "modified guarded repo config copy" in result.stderr
+    assert openclaw_config.read_bytes() == initial_config
+    assert OPENCLAW_CONFIG.read_bytes() == tracked_before
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_generated_config_mutation_before_publication(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_MUTATE_GENERATED_CONFIG"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "modified generated config during validation" in result.stderr
+    assert openclaw_config.read_bytes() == initial_config
+    assert "Atomically published validated repo config" not in result.stdout
+
+
+def test_push_script_publishes_exact_generated_bytes_validated_by_openclaw(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    published = openclaw_config.read_bytes()
+    published_hash = hashlib.sha256(published).hexdigest()
+    assert f"({len(published)} bytes, sha256 {published_hash})" in result.stdout
+    assert "Atomically published validated repo config" in result.stdout
+
+
+def test_push_script_signal_before_publication_rolls_back_without_publishing(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    checkpoint_log = tmp_path / "checkpoints.log"
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    initial_mode = _mode(openclaw_config)
+    env["OPENCLAW_PUSH_TEST_CHECKPOINT_LOG"] = str(checkpoint_log)
+    env["OPENCLAW_PUSH_TEST_SIGNAL_AT"] = "before-config-publication"
+    env["OPENCLAW_PUSH_TEST_SIGNAL"] = "INT"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 130
+    assert checkpoint_log.read_text(encoding="utf-8").splitlines() == ["before-config-publication"]
+    assert openclaw_config.read_bytes() == initial_config
+    assert _mode(openclaw_config) == initial_mode
+    assert "Atomically published validated repo config" not in result.stdout
+
+
+def test_push_script_rejects_final_live_config_warnings_and_rolls_back(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    initial_config = openclaw_config.read_text(encoding="utf-8")
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "config validate --json" in result.stderr
+    assert "live.warning" in result.stderr
+    assert openclaw_config.read_text(encoding="utf-8") == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not (openclaw_home / "skills").exists()
+    assert not (openclaw_home / "workspace").exists()
+    assert not list(openclaw_home.glob("workspace-*"))
+    assert not (openclaw_home / "agents/autoresearch-pm/agent").exists()
+    assert not (openclaw_home / "agents/reviewer/agent").exists()
+    assert not _supervisor_unit_dst(home).exists()
+    assert not _runtime_caps_dropin_dst(home).exists()
+    assert not _codex_runtime_dropin_dst(home).exists()
+    assert not _native_crash_hardening_dropin_dst(home).exists()
+
+
+def test_push_script_rejects_live_config_mutation_during_final_validation(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_MUTATE_LIVE_CONFIG_DURING_VALIDATE"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "modified live config during final validation" in result.stderr
+    assert openclaw_config.read_bytes() == initial_config
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize("alias_mode", ["symlink", "hardlink"])
+def test_push_script_rejects_live_config_topology_replacement_during_final_validation(
+    tmp_path: Path,
+    alias_mode: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_ALIAS_LIVE_CONFIG_AFTER_VALIDATE"] = alias_mode
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "changed live config identity/topology during final validation" in result.stderr
+    _assert_alias_mode_reported(result.stderr, alias_mode)
+    assert openclaw_config.read_bytes() == initial_config
+    assert not openclaw_config.is_symlink()
+    assert openclaw_config.stat().st_nlink == 1
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_local_config_rollback_preserves_mode_and_bytes(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    openclaw_config.write_bytes(b'{"local":"before"}\n')
+    openclaw_config.chmod(0o640)
+    initial_config = openclaw_config.read_bytes()
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert openclaw_config.read_bytes() == initial_config
+    assert _mode(openclaw_config) == 0o640
+    cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
+    assert f"cp -aT -- {openclaw_config} " in cp_log
+    assert ".openclaw.rollback." in cp_log
+
+
+def test_push_script_local_config_rollback_preserves_symlink_topology(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    symlink_target = openclaw_home / "openclaw-target.json"
+    initial_config = b'{"local":"symlink-target"}\n'
+    symlink_target.write_bytes(initial_config)
+    symlink_target.chmod(0o640)
+    openclaw_config.unlink()
+    openclaw_config.symlink_to(symlink_target)
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "live.warning" in result.stderr
+    assert openclaw_config.is_symlink()
+    assert os.readlink(openclaw_config) == str(symlink_target)
+    assert openclaw_config.read_bytes() == initial_config
+    assert symlink_target.read_bytes() == initial_config
+    assert _mode(symlink_target) == 0o640
+    assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not _supervisor_unit_dst(home).exists()
+    cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
+    assert f"cp -aT -- {openclaw_config} {openclaw_config}.bak." in cp_log
+    assert ".openclaw.rollback." in cp_log
 
 
 @pytest.mark.parametrize(
@@ -1737,6 +3166,303 @@ def test_push_script_codex_removes_stale_azure_node_options_from_gateway_unit(
     assert systemctl_log.count("systemctl --user daemon-reload") == 2
 
 
+def test_push_script_codex_rewrites_only_stale_node_options_assignment_lines(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["SYSTEMD_MANAGER_EXTRA_ENV"] = "\n".join(
+        [
+            "OTHER=--require /home/dev/.openclaw/azure-api-version-preload.cjs",
+            "ANOTHER=1",
+        ]
+    )
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    service_path.parent.mkdir(parents=True)
+    unrelated_env_line = (
+        'Environment="OTHER=--require /home/dev/.openclaw/azure-api-version-preload.cjs"'
+    )
+    exec_line = (
+        "ExecStart=/usr/bin/node "
+        "/home/dev/.openclaw/azure-api-version-preload.cjs --not-node-options"
+    )
+    service_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                unrelated_env_line,
+                'Environment="NODE_OPTIONS=--require '
+                '/home/dev/.openclaw/azure-api-version-preload.cjs"',
+                exec_line,
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    service_lines = service_path.read_text(encoding="utf-8").splitlines()
+    assert unrelated_env_line in service_lines
+    assert exec_line in service_lines
+    assert not any("NODE_OPTIONS=" in line for line in service_lines)
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" not in systemctl_log
+    assert "restore NODE_OPTIONS" not in systemctl_log
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
+
+
+def test_push_script_codex_rewrites_compound_environment_node_options_assignment(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    service_path.parent.mkdir(parents=True)
+    compound_line = (
+        'Environment="KEEP=1" "NODE_OPTIONS=--require '
+        '$HOME/.openclaw/azure-api-version-preload.cjs" "ALSO=two words"'
+    )
+    service_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                compound_line,
+                "Environment=UNCHANGED=1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    service_lines = service_path.read_text(encoding="utf-8").splitlines()
+    assert 'Environment="KEEP=1" "ALSO=two words"' in service_lines
+    assert "Environment=UNCHANGED=1" in service_lines
+    assert not any("NODE_OPTIONS=" in line for line in service_lines)
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" not in systemctl_log
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
+
+
+def test_push_script_codex_rewrites_multiline_environment_node_options_assignment(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    service_path.parent.mkdir(parents=True)
+    unrelated_stale_path_line = (
+        'Environment="OTHER=/home/dev/.openclaw/azure-api-version-preload.cjs"'
+    )
+    service_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                'Environment="KEEP=1" \\',
+                '  "NODE_OPTIONS=--require \\',
+                '  /home/dev/.openclaw/azure-api-version-preload.cjs" \\',
+                '  "ALSO=two words"',
+                unrelated_stale_path_line,
+                "Environment=UNCHANGED=1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    service_text = service_path.read_text(encoding="utf-8")
+    assert "NODE_OPTIONS=" not in service_text
+    assert '"KEEP=1"' in service_text
+    assert '"ALSO=two words"' in service_text
+    assert unrelated_stale_path_line in service_text
+    assert "Environment=UNCHANGED=1" in service_text
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" not in systemctl_log
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
+
+
+def test_push_script_codex_rewrites_multiline_environment_across_comment_and_blank(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    service_path.parent.mkdir(parents=True)
+    service_path.write_text(
+        "\n".join(
+            [
+                "[Service]",
+                'Environment="KEEP=1" \\',
+                "  # ignored inside a systemd continuation",
+                "",
+                '  "NODE_OPTIONS=--require \\',
+                '  /home/dev/.openclaw/azure-api-version-preload.cjs" \\',
+                '  "ALSO=two words"',
+                "Environment=UNCHANGED=1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    service_text = service_path.read_text(encoding="utf-8")
+    assert "NODE_OPTIONS=" not in service_text
+    assert '"KEEP=1"' in service_text
+    assert '"ALSO=two words"' in service_text
+    assert "# ignored inside a systemd continuation" in service_text
+    assert "Environment=UNCHANGED=1" in service_text
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" not in systemctl_log
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
+
+
+def test_push_script_rolls_back_original_manager_node_options_on_failure(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    original_node_options = "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+    env["SYSTEMD_MANAGER_NODE_OPTIONS"] = original_node_options
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    unset = "systemctl --user unset-environment NODE_OPTIONS"
+    restore = f"systemctl --user set-environment NODE_OPTIONS={original_node_options}"
+    assert unset in systemctl_log
+    assert restore in systemctl_log
+    assert f"NODE_OPTIONS=$'{original_node_options}'" not in systemctl_log
+    assert systemctl_log.index(unset) < systemctl_log.index(restore)
+    assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
+        initial_config
+    )
+
+
+def test_push_script_restores_manager_node_options_if_unset_fails_after_mutation(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    original_node_options = "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+    env["SYSTEMD_MANAGER_NODE_OPTIONS"] = original_node_options
+    env["FAIL_MANAGER_NODE_OPTIONS_UNSET_AFTER_MUTATION"] = "1"
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "unset NODE_OPTIONS failed after mutation by test" in result.stderr
+    assert "Failed to unset stale Azure NODE_OPTIONS" in result.stderr
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    unset = "systemctl --user unset-environment NODE_OPTIONS"
+    restore = f"systemctl --user set-environment NODE_OPTIONS={original_node_options}"
+    assert unset in systemctl_log
+    assert restore in systemctl_log
+    assert f"NODE_OPTIONS=$'{original_node_options}'" not in systemctl_log
+    assert systemctl_log.index(unset) < systemctl_log.index(restore)
+    assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
+        initial_config
+    )
+
+
+def test_push_script_fails_closed_when_manager_node_options_persists_after_unset(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    original_node_options = "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+    env["SYSTEMD_MANAGER_NODE_OPTIONS"] = original_node_options
+    env["SYSTEMD_MANAGER_NODE_OPTIONS_PERSIST_AFTER_UNSET"] = "1"
+    initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "still exposes stale Azure NODE_OPTIONS after unset-environment" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" in systemctl_log
+    assert systemctl_log.count("systemctl --user show-environment") >= 2
+    assert "systemctl --user set-environment NODE_OPTIONS=" in systemctl_log
+    assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
+        initial_config
+    )
+
+
+def test_push_script_restores_c_style_manager_node_options_escapes_exactly(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    restore_value_file = tmp_path / "restored-node-options.bin"
+    original_node_options = (
+        "--require\t/home/dev/.openclaw/azure-api-version-preload.cjs\n"
+        "quote=' double=\" backslash=\\ bell=\a esc=\x1b octal=S"
+    )
+    env["SYSTEMD_MANAGER_NODE_OPTIONS_RAW"] = (
+        r"NODE_OPTIONS=$'--require\t/home/dev/.openclaw/azure-api-version-preload.cjs\n"
+        r"quote=\' double=\" backslash=\\ bell=\a esc=\e octal=\123'"
+    )
+    env["SYSTEMD_MANAGER_RESTORE_VALUE_FILE"] = str(restore_value_file)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert restore_value_file.read_bytes() == original_node_options.encode()
+
+
+def test_push_script_refuses_malformed_manager_node_options_encoding(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["SYSTEMD_MANAGER_NODE_OPTIONS_RAW"] = (
+        r"NODE_OPTIONS=$'--require\x0G/home/dev/.openclaw/azure-api-version-preload.cjs'"
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Could not safely decode systemd user manager NODE_OPTIONS assignment" in result.stderr
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "systemctl --user unset-environment NODE_OPTIONS" not in systemctl_log
+
+
+def test_push_script_manager_node_options_restore_failure_retains_recovery_dir(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["SYSTEMD_MANAGER_NODE_OPTIONS"] = (
+        "--require /home/dev/.openclaw/azure-api-version-preload.cjs"
+    )
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    env["FAIL_MANAGER_NODE_OPTIONS_RESTORE"] = "1"
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    initial_config = (openclaw_home / "openclaw.json").read_text(encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "restore NODE_OPTIONS failed by test" in result.stderr
+    assert "Failed to restore systemd user manager NODE_OPTIONS during rollback" in result.stderr
+    recovery_dirs = sorted(openclaw_home.glob(".push-openclaw-config-artifacts.*"))
+    assert len(recovery_dirs) == 1
+    assert (
+        f"Managed OpenClaw artifact recovery directory preserved at {recovery_dirs[0]}"
+        in result.stderr
+    )
+    assert (openclaw_home / "openclaw.json").read_text(encoding="utf-8") == initial_config
+
+
 def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     env = _prepare_push_script_home(tmp_path)
     home = Path(env["HOME"])
@@ -1781,9 +3507,10 @@ def test_push_script_daemon_reload_runs_after_dropin_install_and_failure_aborts(
 
     result = _run_push_script(env)
 
-    assert result.returncode == 23
+    assert result.returncode == 1
     assert "daemon-reload failed by test" in result.stderr
     assert "Restoring managed systemd files after failed publication." in result.stderr
+    assert "Failed to reload user systemd units after managed-file rollback" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     assert not _supervisor_unit_dst(home).exists()
     assert not _runtime_caps_dropin_dst(home).exists()
@@ -1821,13 +3548,620 @@ def test_push_script_managed_systemd_publication_rolls_back_existing_files(
 
     result = _run_push_script(env)
 
-    assert result.returncode == 23
+    assert result.returncode == 1
     assert "Restoring managed systemd files after failed publication." in result.stderr
+    assert "Failed to reload user systemd units after managed-file rollback" in result.stderr
     for path, content in prior_files.items():
         assert path.read_text(encoding="utf-8") == content
         assert _mode(path) == 0o600
     assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
         initial_config
+    )
+
+
+def test_push_script_final_daemon_reload_runs_after_systemd_artifact_restore(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+    home = Path(env["HOME"])
+    service_path = home / ".config/systemd/user/openclaw-gateway.service"
+    dropin_dir = service_path.parent / "openclaw-gateway.service.d"
+    legacy_dropin = dropin_dir / "05-legacy-azure.conf"
+    service_path.parent.mkdir(parents=True)
+    dropin_dir.mkdir()
+    service_text = "\n".join(
+        [
+            "[Service]",
+            'Environment="NODE_OPTIONS=--require '
+            '/home/dev/.openclaw/azure-api-version-preload.cjs"',
+            "",
+        ]
+    )
+    dropin_text = "\n".join(
+        [
+            "[Service]",
+            'Environment="NODE_OPTIONS=--require '
+            '/home/dev/.openclaw/azure-api-version-preload.cjs"',
+            "",
+        ]
+    )
+    service_path.write_text(service_text, encoding="utf-8")
+    legacy_dropin.write_text(dropin_text, encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert service_path.read_text(encoding="utf-8") == service_text
+    assert legacy_dropin.read_text(encoding="utf-8") == dropin_text
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert systemctl_log.count("systemctl --user daemon-reload") == 2
+    assert "Failed final user systemd daemon-reload" not in result.stderr
+
+
+def test_push_script_failed_unit_snapshot_state_retains_original_unit(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_BACKUP_SOURCE_BASENAME"] = "20-openclaw-codex-runtime.conf"
+    home = Path(env["HOME"])
+    codex_dropin = _codex_runtime_dropin_dst(home)
+    codex_dropin.parent.mkdir(parents=True)
+    prior_text = "[Service]\nExecStartPre=/bin/true\n"
+    codex_dropin.write_text(prior_text, encoding="utf-8")
+    codex_dropin.chmod(0o600)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Failed to snapshot managed systemd file" in result.stderr
+    assert "managed systemd snapshot did not complete" in result.stderr
+    assert "Failed to remove newly installed managed systemd file" not in result.stderr
+    assert codex_dropin.read_text(encoding="utf-8") == prior_text
+    assert _mode(codex_dropin) == 0o600
+    recovery_dirs = sorted((home / ".config/systemd/user").glob(".push-openclaw-config-units.*"))
+    assert len(recovery_dirs) == 1
+
+
+def test_push_script_managed_systemd_symlink_fails_closed_and_rolls_back_artifacts(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    wrapper = openclaw_home / "mempalace-readonly-server.py"
+    wrapper.write_text("prior wrapper\n", encoding="utf-8")
+    codex_dropin = _codex_runtime_dropin_dst(home)
+    codex_target = home / "linked-codex-runtime.conf"
+    codex_dropin.parent.mkdir(parents=True)
+    codex_target.write_text("[Service]\nExecStartPre=/bin/true\n", encoding="utf-8")
+    codex_target.chmod(0o600)
+    codex_dropin.symlink_to(codex_target)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert f"Managed systemd file {codex_dropin} is a symlink" in result.stderr
+    assert "Refusing before mutating managed systemd files" in result.stderr
+    assert "Restoring managed OpenClaw artifacts after failed publication." in result.stderr
+    assert codex_dropin.is_symlink()
+    assert os.readlink(codex_dropin) == str(codex_target)
+    assert codex_target.read_text(encoding="utf-8") == "[Service]\nExecStartPre=/bin/true\n"
+    assert _mode(codex_target) == 0o600
+    assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
+    assert openclaw_config.read_bytes() == initial_config
+
+
+def test_push_script_systemd_restore_failure_keeps_recovery_dir_and_rolls_back_artifacts(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    env["FAIL_RESTORE_COMMIT_DEST_BASENAME"] = "20-openclaw-codex-runtime.conf"
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    wrapper = openclaw_home / "mempalace-readonly-server.py"
+    wrapper.write_text("prior wrapper\n", encoding="utf-8")
+    prior_files = {
+        _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
+        _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
+        _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
+        _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",
+    }
+    for path, content in prior_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    recovery_dirs = sorted((home / ".config/systemd/user").glob(".push-openclaw-config-units.*"))
+    assert len(recovery_dirs) == 1
+    assert f"Managed systemd recovery directory preserved at {recovery_dirs[0]}" in result.stderr
+    assert "restore mv failed by test" in result.stderr
+    assert (
+        _supervisor_unit_dst(home).read_text(encoding="utf-8")
+        == prior_files[_supervisor_unit_dst(home)]
+    )
+    assert (
+        _runtime_caps_dropin_dst(home).read_text(encoding="utf-8")
+        == prior_files[_runtime_caps_dropin_dst(home)]
+    )
+    assert (
+        _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8")
+        == prior_files[_native_crash_hardening_dropin_dst(home)]
+    )
+    assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
+
+
+def test_push_script_artifact_restore_failure_keeps_recovery_dir_and_continues_paths(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+    env["FAIL_RESTORE_COMMIT_DEST_BASENAME"] = "skills"
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    wrapper = openclaw_home / "mempalace-readonly-server.py"
+    skills = openclaw_home / "skills"
+    wrapper.write_text("prior wrapper\n", encoding="utf-8")
+    skills.mkdir()
+    (skills / "prior.txt").write_text("prior skills\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    recovery_dirs = sorted(openclaw_home.glob(".push-openclaw-config-artifacts.*"))
+    assert len(recovery_dirs) == 1
+    assert (
+        f"Managed OpenClaw artifact recovery directory preserved at {recovery_dirs[0]}"
+        in result.stderr
+    )
+    assert "restore mv failed by test" in result.stderr
+    assert "staged restore copy preserved" in result.stderr
+    assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
+    assert not skills.exists()
+    staged_restores = sorted(recovery_dirs[0].glob("restore.*"))
+    assert staged_restores
+
+
+def test_push_script_artifact_stage_copy_failure_preserves_original_path(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+    env["FAIL_STAGE_RESTORE_IF_BACKUP_CONTAINS_BASENAME"] = "prior.txt"
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    skills = openclaw_home / "skills"
+    skills.mkdir()
+    skills.chmod(0o750)
+    prior = skills / "prior.txt"
+    prior.write_text("prior skills\n", encoding="utf-8")
+    prior.chmod(0o640)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "staged restore cp failed by test" in result.stderr
+    assert "Original artifact path left intact" in result.stderr
+    assert skills.is_dir()
+    assert _mode(skills) == 0o750
+    assert prior.read_text(encoding="utf-8") == "prior skills\n"
+    assert _mode(prior) == 0o640
+
+
+def test_push_script_failed_artifact_snapshot_never_overwrites_original_and_continues_rollback(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_BACKUP_SOURCE_BASENAME"] = "skills"
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    wrapper = openclaw_home / "mempalace-readonly-server.py"
+    wrapper.write_bytes(b"prior wrapper bytes\n")
+    wrapper.chmod(0o640)
+    skills = openclaw_home / "skills"
+    skills.mkdir()
+    skills.chmod(0o750)
+    skill_file = skills / "prior.bin"
+    skill_file.write_bytes(b"\x00prior skills bytes\n")
+    skill_file.chmod(0o640)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "backup cp failed by test" in result.stderr
+    assert "Failed to snapshot managed OpenClaw artifact" in result.stderr
+    assert "Skipping rollback" in result.stderr
+    recovery_dirs = sorted(openclaw_home.glob(".push-openclaw-config-artifacts.*"))
+    assert len(recovery_dirs) == 1
+    assert (
+        f"Managed OpenClaw artifact recovery directory preserved at {recovery_dirs[0]}"
+        in result.stderr
+    )
+    assert skills.is_dir()
+    assert _mode(skills) == 0o750
+    assert skill_file.read_bytes() == b"\x00prior skills bytes\n"
+    assert _mode(skill_file) == 0o640
+    assert wrapper.read_bytes() == b"prior wrapper bytes\n"
+    assert _mode(wrapper) == 0o640
+    assert openclaw_config.read_bytes() == initial_config
+    cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
+    assert ".openclaw.rollback." in cp_log
+
+
+def test_push_script_managed_artifact_symlink_fails_closed_and_rolls_back_prior_paths(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    wrapper = openclaw_home / "mempalace-readonly-server.py"
+    wrapper.write_text("prior wrapper\n", encoding="utf-8")
+    skills = openclaw_home / "skills"
+    skills_target = tmp_path / "external-skills-target"
+    skills_target.mkdir()
+    target_file = skills_target / "target.txt"
+    target_file.write_text("external target stays unmanaged\n", encoding="utf-8")
+    skills.symlink_to(skills_target, target_is_directory=True)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert f"Managed OpenClaw artifact {skills} is a symlink" in result.stderr
+    assert "Refusing before mutating the managed artifact path" in result.stderr
+    assert "Restoring managed OpenClaw artifacts after failed publication." in result.stderr
+    assert skills.is_symlink()
+    assert os.readlink(skills) == str(skills_target)
+    assert target_file.read_text(encoding="utf-8") == "external target stays unmanaged\n"
+    assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
+    assert openclaw_config.read_bytes() == initial_config
+
+
+def test_push_script_nested_workspace_bootstrap_symlink_fails_closed_before_copy(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    workspace = openclaw_home / "workspace"
+    workspace.mkdir()
+    external_target = tmp_path / "external-workspace-agents.md"
+    external_bytes = b"external workspace bootstrap target\n"
+    external_target.write_bytes(external_bytes)
+    nested_symlink = workspace / "AGENTS.md"
+    nested_symlink.symlink_to(external_target)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path chain contains symlink" in result.stderr
+    assert str(nested_symlink) in result.stderr
+    assert "copying managed bootstrap file" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert nested_symlink.is_symlink()
+    assert os.readlink(nested_symlink) == str(external_target)
+    assert external_target.read_bytes() == external_bytes
+    assert not (workspace / "SOUL.md").exists()
+    assert not (workspace / "TOOLS.md").exists()
+    assert not (workspace / "BOOTSTRAP.md").exists()
+    assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not _supervisor_unit_dst(home).exists()
+    assert openclaw_config.read_bytes() == initial_config
+
+
+def test_push_script_workspace_bootstrap_directory_destination_fails_before_cp(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    workspace = openclaw_home / "workspace"
+    agents_destination = workspace / "AGENTS.md"
+    workspace.mkdir()
+    agents_destination.mkdir()
+    marker = agents_destination / "marker.txt"
+    marker.write_text("directory destination stays untouched\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path is an existing directory" in result.stderr
+    assert "Refusing before cp to avoid source-to-destination-directory behavior" in result.stderr
+    assert "copying managed bootstrap file" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert marker.read_text(encoding="utf-8") == "directory destination stays untouched\n"
+    assert not (workspace / "SOUL.md").exists()
+    cp_log = _read_cp_log(env)
+    assert f"cp {REPO_ROOT}/gateway/agent_config/AGENTS.md {agents_destination}" not in cp_log
+
+
+@pytest.mark.parametrize(
+    ("path_parts", "expected_context"),
+    [
+        (("workspace", "AGENTS.md"), "copying managed bootstrap file"),
+        (
+            ("agents", "main", "agent", "codex-home", "config.toml"),
+            "writing managed Codex runtime config",
+        ),
+        (
+            (
+                "agents",
+                "autoresearch-pm",
+                "agent",
+                "codex-home",
+                "agents",
+                "context_curator.toml",
+            ),
+            "copying managed Codex runtime agent",
+        ),
+    ],
+)
+def test_push_script_rejects_hardlinked_managed_file_destinations_before_mutation(
+    tmp_path: Path,
+    path_parts: tuple[str, ...],
+    expected_context: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    hardlinked_destination = openclaw_home / Path(*path_parts)
+    hardlinked_destination.parent.mkdir(parents=True)
+    external_alias = tmp_path / ("external-" + "-".join(path_parts).replace("/", "-"))
+    external_alias.write_bytes(b"external hard-link alias bytes\n")
+    external_alias.chmod(0o640)
+    os.link(external_alias, hardlinked_destination)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path is a hard-linked regular file" in result.stderr
+    assert str(hardlinked_destination) in result.stderr
+    assert expected_context in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert external_alias.read_bytes() == b"external hard-link alias bytes\n"
+    assert _mode(external_alias) == 0o640
+
+
+def test_push_script_rejects_hardlinked_managed_sqlite_auth_store_before_mutation(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    target_db = openclaw_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+    target_db.parent.mkdir(parents=True)
+    external_alias = tmp_path / "external-openclaw-agent.sqlite"
+    external_alias.write_bytes(b"external sqlite alias bytes\n")
+    external_alias.chmod(0o640)
+    os.link(external_alias, target_db)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path is a hard-linked regular file" in result.stderr
+    assert str(target_db) in result.stderr
+    assert "syncing managed OpenClaw agent auth database" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert external_alias.read_bytes() == b"external sqlite alias bytes\n"
+    assert _mode(external_alias) == 0o640
+    assert f"sqlite3 {target_db}" not in _read_sqlite_log(env)
+
+
+def test_push_script_rejects_hardlinked_managed_systemd_file_before_chmod_or_publish(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    codex_dropin = _codex_runtime_dropin_dst(home)
+    codex_dropin.parent.mkdir(parents=True)
+    external_alias = tmp_path / "external-codex-runtime.conf"
+    external_alias.write_text("[Service]\nExecStartPre=/bin/true\n", encoding="utf-8")
+    external_alias.chmod(0o640)
+    os.link(external_alias, codex_dropin)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path is a hard-linked regular file" in result.stderr
+    assert str(codex_dropin) in result.stderr
+    assert "rewriting managed systemd environment file" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert "Codex runtime verifier" not in result.stdout
+    assert external_alias.read_text(encoding="utf-8") == "[Service]\nExecStartPre=/bin/true\n"
+    assert _mode(external_alias) == 0o640
+    mv_log = Path(env["MV_LOG"])
+    if mv_log.exists():
+        assert str(codex_dropin) not in mv_log.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("path_parts", "expected_context"),
+    [
+        (
+            ("main", "agent", "codex-home", "config.toml"),
+            "writing managed Codex runtime config",
+        ),
+        (
+            (
+                "autoresearch-pm",
+                "agent",
+                "codex-home",
+                "agents",
+                "context_curator.toml",
+            ),
+            "copying managed Codex runtime agent",
+        ),
+    ],
+)
+def test_push_script_nested_codex_runtime_symlink_fails_closed_before_write(
+    tmp_path: Path,
+    path_parts: tuple[str, ...],
+    expected_context: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    external_target = tmp_path / "external-codex-runtime-target"
+    external_bytes = b"external codex runtime target\n"
+    external_target.write_bytes(external_bytes)
+    nested_symlink = openclaw_home / "agents" / Path(*path_parts)
+    nested_symlink.parent.mkdir(parents=True)
+    nested_symlink.symlink_to(external_target)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path chain contains symlink" in result.stderr
+    assert str(nested_symlink) in result.stderr
+    assert expected_context in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert nested_symlink.is_symlink()
+    assert os.readlink(nested_symlink) == str(external_target)
+    assert external_target.read_bytes() == external_bytes
+    assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not (openclaw_home / "workspace").exists()
+    assert not list(openclaw_home.glob("workspace-*"))
+    assert not _supervisor_unit_dst(home).exists()
+    assert openclaw_config.read_bytes() == initial_config
+
+
+def test_push_script_nested_skill_file_symlink_fails_closed_before_copy(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+    initial_config = openclaw_config.read_bytes()
+    skill_dir = openclaw_home / "skills" / "autoresearch"
+    skill_dir.mkdir(parents=True)
+    external_target = tmp_path / "external-skill.md"
+    external_bytes = b"external skill target\n"
+    external_target.write_bytes(external_bytes)
+    nested_symlink = skill_dir / "SKILL.md"
+    nested_symlink.symlink_to(external_target)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "Destination path chain contains symlink" in result.stderr
+    assert str(nested_symlink) in result.stderr
+    assert "copying managed skill file" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert nested_symlink.is_symlink()
+    assert os.readlink(nested_symlink) == str(external_target)
+    assert external_target.read_bytes() == external_bytes
+    assert not (openclaw_home / "skills/codex-subagents").exists()
+    assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not (openclaw_home / "workspace").exists()
+    assert not list(openclaw_home.glob("workspace-*"))
+    assert not _supervisor_unit_dst(home).exists()
+    assert openclaw_config.read_bytes() == initial_config
+
+
+@pytest.mark.parametrize(
+    ("fail_root_basename", "stale_path_parts", "expected_context"),
+    [
+        (
+            "openclaw-gateway.service.d",
+            (
+                ".config",
+                "systemd",
+                "user",
+                "openclaw-gateway.service.d",
+                "05-legacy-azure.conf",
+            ),
+            "scanning managed systemd drop-in directory",
+        ),
+        (
+            "agents",
+            (
+                "isolated push root with spaces $literal",
+                "agents",
+                "main",
+                "agent",
+                "codex-home",
+                "agents",
+                "stale-main.toml",
+            ),
+            "scanning stale main Codex runtime agents",
+        ),
+    ],
+)
+def test_push_script_find_scan_failures_abort_without_silently_leaving_stale_files(
+    tmp_path: Path,
+    fail_root_basename: str,
+    stale_path_parts: tuple[str, ...],
+    expected_context: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    stale_path = home / Path(*stale_path_parts)
+    stale_path.parent.mkdir(parents=True)
+    stale_path.write_text("stale managed file\n", encoding="utf-8")
+    env["FAIL_FIND_ROOT_BASENAME"] = fail_root_basename
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "find failed by test" in result.stderr
+    assert "Failed to scan" in result.stderr
+    assert expected_context in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert stale_path.read_text(encoding="utf-8") == "stale managed file\n"
+
+
+def test_push_script_managed_find_scans_are_status_propagating() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    assert "< <(find" not in script
+    assert "collect_find_results_null" in script
+    assert "refusing to continue with partial results" in script
+
+
+def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_BACKUP_CLEANUP"] = "1"
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    openclaw_config = openclaw_home / "openclaw.json"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    unit_recovery_dirs = sorted(
+        (home / ".config/systemd/user").glob(".push-openclaw-config-units.*")
+    )
+    artifact_recovery_dirs = sorted(openclaw_home.glob(".push-openclaw-config-artifacts.*"))
+    assert len(unit_recovery_dirs) == 1
+    assert len(artifact_recovery_dirs) == 1
+    assert f"Managed systemd recovery directory preserved at {unit_recovery_dirs[0]}" in (
+        result.stderr
+    )
+    assert (
+        f"Managed OpenClaw artifact recovery directory preserved at {artifact_recovery_dirs[0]}"
+        in result.stderr
+    )
+    assert "backup cleanup failed by test" in result.stderr
+    assert "Restoring managed systemd files after failed publication." not in result.stderr
+    assert "Restoring managed OpenClaw artifacts after failed publication." not in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
+    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {"main", "autoresearch-pm"}
+    assert _runtime_caps_dropin_dst(home).read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
+    assert _codex_runtime_dropin_dst(home).read_text(encoding="utf-8") == (
+        EXPECTED_CODEX_RUNTIME_TEXT
+    )
+    assert _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8") == (
+        EXPECTED_NATIVE_CRASH_HARDENING_TEXT
     )
 
 

@@ -15,6 +15,7 @@ set -euo pipefail
 # ── Resolve repo root ────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+REPO_OPENCLAW_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 
 # ── Flags ─────────────────────────────────────────────────────────────────────
 SKIP_OPTIONAL=false
@@ -28,6 +29,19 @@ OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 OPENCLAW_INSTALLED_PATH=""
+OPENCLAW_LIVE_STATE_DIR="${HOME}/.openclaw"
+OPENCLAW_LIVE_CONFIG="${OPENCLAW_LIVE_STATE_DIR}/openclaw.json"
+OPENCLAW_PREFLIGHT_DIR=""
+OPENCLAW_PREFLIGHT_STATE_DIR=""
+OPENCLAW_PREFLIGHT_REPO_CONFIG=""
+OPENCLAW_PREFLIGHT_REPO_CONFIG_HASH=""
+OPENCLAW_PREFLIGHT_REPO_CONFIG_BYTES=""
+OPENCLAW_PREFLIGHT_REPO_CONFIG_IDENTITY=""
+OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG=""
+OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_HASH=""
+OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_BYTES=""
+OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_IDENTITY=""
+OPENCLAW_PREFLIGHT_CLEANUP_TRAP_INSTALLED=0
 
 for arg in "$@"; do
   case "$arg" in
@@ -150,7 +164,8 @@ resolve_openclaw_bin() {
 read_openclaw_version() {
   local version_line
   [[ -n "${OPENCLAW_BIN_RESOLVED}" ]] || return 1
-  if ! version_line="$("${OPENCLAW_BIN_RESOLVED}" --version 2>&1)"; then
+  prepare_openclaw_preflight_context || return 1
+  if ! version_line="$(run_openclaw_cli_for_candidate_config --version 2>&1)"; then
     OPENCLAW_VERSION_RESOLVED=""
     return 1
   fi
@@ -244,9 +259,283 @@ preflight_openclaw_override() {
   fi
 }
 
+cleanup_openclaw_preflight_context() {
+  if [[ -n "${OPENCLAW_PREFLIGHT_DIR:-}" ]]; then
+    rm -rf "${OPENCLAW_PREFLIGHT_DIR}"
+  fi
+  OPENCLAW_PREFLIGHT_DIR=""
+  OPENCLAW_PREFLIGHT_STATE_DIR=""
+  OPENCLAW_PREFLIGHT_REPO_CONFIG=""
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_HASH=""
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_BYTES=""
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_IDENTITY=""
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG=""
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_HASH=""
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_BYTES=""
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_IDENTITY=""
+}
+
+install_openclaw_preflight_cleanup_traps() {
+  if [[ "${OPENCLAW_PREFLIGHT_CLEANUP_TRAP_INSTALLED}" -eq 1 ]]; then
+    return 0
+  fi
+  trap cleanup_openclaw_preflight_context EXIT
+  trap 'cleanup_openclaw_preflight_context; exit 129' HUP
+  trap 'cleanup_openclaw_preflight_context; exit 130' INT
+  trap 'cleanup_openclaw_preflight_context; exit 143' TERM
+  OPENCLAW_PREFLIGHT_CLEANUP_TRAP_INSTALLED=1
+}
+
+guarded_regular_file_identity() {
+  local path="$1"
+  local context="$2"
+  local identity nlink
+
+  if [[ -L "${path}" ]]; then
+    echo "ERROR: Guarded file is a symlink while ${context}: ${path} -> $(readlink "${path}" 2>/dev/null || printf '<unreadable>')" >&2
+    echo "       Refusing to trust followed bytes for guarded OpenClaw state." >&2
+    return 1
+  fi
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Guarded file is not a regular file while ${context}: ${path}" >&2
+    echo "       Refusing to trust followed bytes for guarded OpenClaw state." >&2
+    return 1
+  fi
+  if ! identity="$(stat -c '%d:%i:%f:%h' -- "${path}")"; then
+    echo "ERROR: Could not capture lstat identity while ${context}: ${path}" >&2
+    return 1
+  fi
+  nlink="${identity##*:}"
+  if [[ "${nlink}" != "1" ]]; then
+    echo "ERROR: Guarded file is hard-linked while ${context}: ${path} (link count ${nlink})." >&2
+    echo "       Refusing to trust followed bytes for guarded OpenClaw state." >&2
+    return 1
+  fi
+  printf '%s\n' "${identity}"
+}
+
+verify_guarded_regular_file_identity_unchanged() {
+  local path="$1"
+  local expected_identity="$2"
+  local context="$3"
+  local current_identity
+
+  if ! current_identity="$(guarded_regular_file_identity "${path}" "${context}")"; then
+    return 1
+  fi
+  if [[ "${current_identity}" != "${expected_identity}" ]]; then
+    echo "ERROR: Guarded file identity/topology changed during ${context}: ${path}" >&2
+    echo "       expected lstat ${expected_identity}; got ${current_identity}" >&2
+    return 1
+  fi
+}
+
+prepare_openclaw_preflight_context() {
+  if [[ -n "${OPENCLAW_PREFLIGHT_DIR:-}" ]]; then
+    return 0
+  fi
+  guarded_regular_file_identity "${REPO_OPENCLAW_CONFIG}" "creating guarded OpenClaw preflight config copies from ${REPO_OPENCLAW_CONFIG}" >/dev/null || return 1
+  OPENCLAW_PREFLIGHT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/g2-openclaw-bootstrap.XXXXXX")"
+  install_openclaw_preflight_cleanup_traps
+  OPENCLAW_PREFLIGHT_STATE_DIR="${OPENCLAW_PREFLIGHT_DIR}/state"
+  OPENCLAW_PREFLIGHT_REPO_CONFIG="${OPENCLAW_PREFLIGHT_DIR}/openclaw.repo-preflight.json"
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG="${OPENCLAW_PREFLIGHT_DIR}/openclaw.candidate.json"
+  mkdir -p "${OPENCLAW_PREFLIGHT_STATE_DIR}"
+  cp -p "${REPO_OPENCLAW_CONFIG}" "${OPENCLAW_PREFLIGHT_REPO_CONFIG}"
+  cp -p "${REPO_OPENCLAW_CONFIG}" "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}"
+  chmod 0600 "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}"
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_IDENTITY="$(guarded_regular_file_identity "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" "capturing guarded OpenClaw preflight repo config identity ${OPENCLAW_PREFLIGHT_REPO_CONFIG}")" || return 1
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_HASH="$(sha256sum "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" | awk '{print $1}')"
+  OPENCLAW_PREFLIGHT_REPO_CONFIG_BYTES="$(wc -c < "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" | tr -d '[:space:]')"
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_IDENTITY="$(guarded_regular_file_identity "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" "capturing guarded OpenClaw preflight candidate config identity ${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}")" || return 1
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_HASH="$(sha256sum "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" | awk '{print $1}')"
+  OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_BYTES="$(wc -c < "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" | tr -d '[:space:]')"
+}
+
+verify_openclaw_preflight_repo_config_unchanged() {
+  local context="$1"
+  local current_hash current_bytes
+  if [[ -z "${OPENCLAW_PREFLIGHT_REPO_CONFIG:-}" ]]; then
+    fail "Guarded OpenClaw preflight config copy is missing after ${context}"
+    return 1
+  fi
+  if ! verify_guarded_regular_file_identity_unchanged "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" "${OPENCLAW_PREFLIGHT_REPO_CONFIG_IDENTITY}" "${context}"; then
+    return 1
+  fi
+  current_hash="$(sha256sum "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" | awk '{print $1}')"
+  current_bytes="$(wc -c < "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" | tr -d '[:space:]')"
+  if [[ "${current_hash}" != "${OPENCLAW_PREFLIGHT_REPO_CONFIG_HASH}" || "${current_bytes}" != "${OPENCLAW_PREFLIGHT_REPO_CONFIG_BYTES}" ]]; then
+    fail "External OpenClaw CLI modified guarded repo config copy during ${context}"
+    echo "       expected ${OPENCLAW_PREFLIGHT_REPO_CONFIG_BYTES} bytes sha256 ${OPENCLAW_PREFLIGHT_REPO_CONFIG_HASH}; got ${current_bytes} bytes sha256 ${current_hash}" >&2
+    return 1
+  fi
+}
+
+verify_openclaw_preflight_candidate_config_unchanged() {
+  local context="$1"
+  local current_hash current_bytes
+  if [[ -z "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG:-}" ]]; then
+    fail "Guarded OpenClaw candidate config copy is missing after ${context}"
+    return 1
+  fi
+  if ! verify_guarded_regular_file_identity_unchanged "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_IDENTITY}" "${context}"; then
+    return 1
+  fi
+  current_hash="$(sha256sum "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" | awk '{print $1}')"
+  current_bytes="$(wc -c < "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" | tr -d '[:space:]')"
+  if [[ "${current_hash}" != "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_HASH}" || "${current_bytes}" != "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_BYTES}" ]]; then
+    fail "External OpenClaw CLI modified guarded candidate config copy during ${context}"
+    echo "       expected ${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_BYTES} bytes sha256 ${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG_HASH}; got ${current_bytes} bytes sha256 ${current_hash}" >&2
+    return 1
+  fi
+}
+
+run_openclaw_cli_for_config() {
+  local state_dir="$1"
+  local config_path="$2"
+  shift 2
+  env \
+    -u OPENCLAW_HOME \
+    -u OPENCLAW_PUSH_HOME \
+    -u OPENCLAW_STATE_DIR \
+    -u OPENCLAW_CONFIG_PATH \
+    -u NODE_OPTIONS \
+    OPENCLAW_STATE_DIR="${state_dir}" \
+    OPENCLAW_CONFIG_PATH="${config_path}" \
+    "${OPENCLAW_BIN_RESOLVED}" "$@"
+}
+
+run_openclaw_cli_for_guarded_repo_config() {
+  local state_dir="$1"
+  local status
+  shift
+  prepare_openclaw_preflight_context || return 1
+  if run_openclaw_cli_for_config "${state_dir}" "${OPENCLAW_PREFLIGHT_REPO_CONFIG}" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  if ! verify_openclaw_preflight_repo_config_unchanged "openclaw $*"; then
+    return 1
+  fi
+  return "${status}"
+}
+
+run_openclaw_cli_for_candidate_config() {
+  local status
+  prepare_openclaw_preflight_context || return 1
+  if run_openclaw_cli_for_config "${OPENCLAW_PREFLIGHT_STATE_DIR}" "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  if ! verify_openclaw_preflight_candidate_config_unchanged "openclaw $*"; then
+    return 1
+  fi
+  return "${status}"
+}
+
+run_openclaw_cli_for_live_state_candidate_config() {
+  local status
+  prepare_openclaw_preflight_context || return 1
+  if run_openclaw_cli_for_config "${OPENCLAW_LIVE_STATE_DIR}" "${OPENCLAW_PREFLIGHT_CANDIDATE_CONFIG}" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  if ! verify_openclaw_preflight_candidate_config_unchanged "openclaw $*"; then
+    return 1
+  fi
+  return "${status}"
+}
+
+run_openclaw_cli_for_repo_config() {
+  prepare_openclaw_preflight_context || return 1
+  run_openclaw_cli_for_guarded_repo_config "${OPENCLAW_PREFLIGHT_STATE_DIR}" "$@"
+}
+
+run_openclaw_cli_for_live_config() {
+  run_openclaw_cli_for_config "${OPENCLAW_LIVE_STATE_DIR}" "${OPENCLAW_LIVE_CONFIG}" "$@"
+}
+
+openclaw_schema_validation_is_clean() {
+  jq -se '
+    length == 1
+    and (.[0] | type == "object")
+    and (.[0].valid == true)
+    and (.[0].warnings | type == "array" and length == 0)
+  ' >/dev/null 2>&1
+}
+
+validate_repo_openclaw_config_for_preflight() {
+  local validate_json validate_status
+  prepare_openclaw_preflight_context || return 1
+  if validate_json="$(run_openclaw_cli_for_repo_config config validate --json 2>&1)"; then
+    validate_status=0
+  else
+    validate_status=$?
+  fi
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | openclaw_schema_validation_is_clean; then
+    fail "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
+    printf '%s\n' "${validate_json}" >&2
+    return 1
+  fi
+  ok "Repo OpenClaw config schema validated"
+}
+
+validate_candidate_openclaw_config_for_preflight() {
+  local validate_json validate_status
+  prepare_openclaw_preflight_context || return 1
+  if validate_json="$(run_openclaw_cli_for_candidate_config config validate --json 2>&1)"; then
+    validate_status=0
+  else
+    validate_status=$?
+  fi
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | openclaw_schema_validation_is_clean; then
+    fail "Candidate OpenClaw config failed schema validation after plugin/runtime reconciliation"
+    printf '%s\n' "${validate_json}" >&2
+    return 1
+  fi
+  ok "Candidate OpenClaw config schema validated"
+}
+
+validate_live_state_candidate_openclaw_config_for_preflight() {
+  local validate_json validate_status
+  prepare_openclaw_preflight_context || return 1
+  if validate_json="$(run_openclaw_cli_for_live_state_candidate_config config validate --json 2>&1)"; then
+    validate_status=0
+  else
+    validate_status=$?
+  fi
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | openclaw_schema_validation_is_clean; then
+    fail "Live-state candidate OpenClaw config failed schema validation after plugin/runtime reconciliation"
+    printf '%s\n' "${validate_json}" >&2
+    return 1
+  fi
+  ok "Live-state candidate OpenClaw config schema validated"
+}
+
+reconcile_codex_plugin_in_context() {
+  local runner="$1"
+  if ! "${runner}" plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin; then
+    fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
+    return 1
+  fi
+  if ! "${runner}" plugins update codex; then
+    fail "Codex plugin update reconciliation failed"
+    return 1
+  fi
+  if ! "${runner}" plugins enable codex; then
+    fail "Codex plugin enable failed"
+    return 1
+  fi
+}
+
 require_codex_plugin_exact() {
+  local runner="${1:-run_openclaw_cli_for_live_state_candidate_config}"
   local inspect_json plugin_version app_server_version
-  if ! inspect_json="$("${OPENCLAW_BIN_RESOLVED}" plugins inspect codex --json)"; then
+  prepare_openclaw_preflight_context || return 1
+  if ! inspect_json="$("${runner}" plugins inspect codex --json)"; then
     fail "Could not inspect the required Codex plugin"
     return 1
   fi
@@ -417,11 +706,26 @@ setup_openclaw() {
   fi
   summary_add "OpenClaw: ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
 
+  # Validate the tracked overlay before onboarding or mutating live OpenClaw state.
+  info "Using OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
+  if ! reconcile_codex_plugin_in_context run_openclaw_cli_for_candidate_config; then
+    exit 1
+  fi
+  if ! validate_repo_openclaw_config_for_preflight; then
+    exit 1
+  fi
+  if ! validate_candidate_openclaw_config_for_preflight; then
+    exit 1
+  fi
+  if ! require_codex_plugin_exact run_openclaw_cli_for_candidate_config; then
+    exit 1
+  fi
+
   # --- Check if onboarded ---
   local oc_config="$HOME/.openclaw/openclaw.json"
   if [[ ! -f "$oc_config" ]]; then
     info "OpenClaw not onboarded yet (~/.openclaw/openclaw.json not found)"
-    "${OPENCLAW_BIN_RESOLVED}" onboard --local
+    run_openclaw_cli_for_live_config onboard --local
     if [[ -f "$oc_config" ]]; then
       ok "OpenClaw onboarded"
       summary_add "OpenClaw: onboarded"
@@ -433,24 +737,20 @@ setup_openclaw() {
     ok "OpenClaw config found: $oc_config"
   fi
 
-  # --- Reconcile the exact Codex plugin/runtime tuple ---
-  info "Using OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED}"
-  if ! "${OPENCLAW_BIN_RESOLVED}" plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin; then
-    fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
+  # --- Reconcile the exact Codex plugin/runtime tuple in persistent live state ---
+  if ! reconcile_codex_plugin_in_context run_openclaw_cli_for_live_state_candidate_config; then
     exit 1
   fi
-  if ! "${OPENCLAW_BIN_RESOLVED}" plugins update codex; then
-    fail "Codex plugin update reconciliation failed"
+  if ! validate_live_state_candidate_openclaw_config_for_preflight; then
     exit 1
   fi
-  "${OPENCLAW_BIN_RESOLVED}" plugins enable codex
-  if ! require_codex_plugin_exact; then
+  if ! require_codex_plugin_exact run_openclaw_cli_for_live_state_candidate_config; then
     exit 1
   fi
   summary_add "OpenClaw: Codex plugin ${REQUIRED_CODEX_PLUGIN_VERSION} (@openai/codex ${REQUIRED_CODEX_APP_SERVER_VERSION})"
 
   # Core package upgrades can leave the unit's ExecStart on the old package path.
-  if ! "${OPENCLAW_BIN_RESOLVED}" daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json; then
+  if ! run_openclaw_cli_for_live_config daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json; then
     fail "OpenClaw gateway service installation failed"
     exit 1
   fi
@@ -584,14 +884,18 @@ check_tailscale() {
 
   # --- Device identity file permissions ---
   local id_file="$HOME/.openclaw/state/device-identity.json"
-  if [[ -f "$id_file" ]]; then
-    local perms
+  if [[ -e "$id_file" || -L "$id_file" ]]; then
+    local perms id_identity
+    if ! id_identity="$(guarded_regular_file_identity "$id_file" "checking device identity file permissions")"; then
+      return 1
+    fi
     perms="$(stat -c '%a' "$id_file" 2>/dev/null || stat -f '%Lp' "$id_file" 2>/dev/null || echo "unknown")"
     if [[ "$perms" == "600" ]]; then
       ok "Device identity file permissions: $perms"
     else
       warn "Device identity file permissions: $perms (should be 600) — fixing"
       chmod 600 "$id_file"
+      verify_guarded_regular_file_identity_unchanged "$id_file" "$id_identity" "chmod device identity file permissions" || return 1
       ok "Fixed device identity file permissions to 600"
       summary_add "Security: fixed device-identity.json permissions"
     fi
@@ -680,6 +984,7 @@ print_summary() {
 # Main
 # ══════════════════════════════════════════════════════════════════════════════
 main() {
+  install_openclaw_preflight_cleanup_traps
   if ! preflight_openclaw_override; then
     return 1
   fi

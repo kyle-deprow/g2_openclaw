@@ -176,11 +176,12 @@ sync_managed_agent_codex_auth() {
       echo "  ${AGENT_ID} → ${target_db} (source)"
       continue
     fi
-    mkdir -p "${agent_dir}"
+    guarded_mkdir_p "${agent_dir}" "creating managed OpenClaw agent auth directory ${agent_dir}"
     if [[ -f "${source_profiles}" ]]; then
-      cp "${source_profiles}" "${agent_dir}/auth-profiles.json"
-      chmod 0600 "${agent_dir}/auth-profiles.json"
+      guarded_cp_file "${source_profiles}" "${agent_dir}/auth-profiles.json" "copying managed OpenClaw auth profile to ${agent_dir}/auth-profiles.json"
+      guarded_chmod 0600 "${agent_dir}/auth-profiles.json" "chmod managed OpenClaw auth profile ${agent_dir}/auth-profiles.json"
     fi
+    guard_destination_path_chain "${target_db}" "syncing managed OpenClaw agent auth database ${target_db}"
     sqlite3 "${target_db}" <<SQL
 ATTACH DATABASE ${source_db_sql} AS source_auth;
 BEGIN IMMEDIATE;
@@ -200,7 +201,7 @@ DELETE FROM auth_profile_state;
 INSERT INTO auth_profile_state SELECT state_key, state_json, updated_at FROM source_auth.auth_profile_state;
 COMMIT;
 SQL
-    chmod 0600 "${target_db}"
+    guarded_chmod 0600 "${target_db}" "chmod managed OpenClaw agent auth database ${target_db}"
     if ! sqlite3 "${target_db}" \
       "select 1 from auth_profile_store where store_json like '%\"provider\":\"openai\"%' limit 1;" \
       | grep -qx '1'; then
@@ -245,9 +246,23 @@ expand_user_path() {
 
 OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
+GENERATED_OPENCLAW_CONFIG_TMP=""
+GENERATED_OPENCLAW_CONFIG_HASH=""
+GENERATED_OPENCLAW_CONFIG_BYTES=""
+GENERATED_OPENCLAW_CONFIG_IDENTITY=""
+REPO_CONFIG_PREFLIGHT_COPY=""
+REPO_CONFIG_PREFLIGHT_DIR=""
+REPO_CONFIG_PREFLIGHT_HASH=""
+REPO_CONFIG_PREFLIGHT_BYTES=""
+REPO_CONFIG_PREFLIGHT_IDENTITY=""
+PUBLISHED_OPENCLAW_CONFIG_IDENTITY=""
 
 run_openclaw_cli() {
   run_openclaw_cli_for_config "${LOCAL_CONFIG}" "$@"
+}
+
+run_openclaw_cli_for_repo_config() {
+  run_openclaw_cli_for_guarded_repo_config "$@"
 }
 
 run_openclaw_cli_for_config() {
@@ -258,15 +273,379 @@ run_openclaw_cli_for_config() {
     -u OPENCLAW_PUSH_HOME
     -u OPENCLAW_STATE_DIR
     -u OPENCLAW_CONFIG_PATH
+    -u NODE_OPTIONS
   )
-  if [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" ]]; then
-    env_args+=(-u NODE_OPTIONS)
-  fi
   env \
     "${env_args[@]}" \
     OPENCLAW_STATE_DIR="${OPENCLAW_PUSH_HOME}" \
     OPENCLAW_CONFIG_PATH="${config_path}" \
     "${OPENCLAW_BIN_RESOLVED}" "$@"
+}
+
+openclaw_schema_validation_is_clean() {
+  jq -se '
+    length == 1
+    and (.[0] | type == "object")
+    and (.[0].valid == true)
+    and (.[0].warnings | type == "array" and length == 0)
+  ' >/dev/null 2>&1
+}
+
+file_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+file_bytes() {
+  wc -c < "$1" | tr -d '[:space:]'
+}
+
+path_exists_or_symlink() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+file_link_count() {
+  stat -c '%h' -- "$1"
+}
+
+guarded_regular_file_identity() {
+  local path="$1"
+  local context="$2"
+  local identity nlink
+
+  if [[ -L "${path}" ]]; then
+    echo "ERROR: Guarded file is a symlink while ${context}: ${path} -> $(readlink "${path}" 2>/dev/null || printf '<unreadable>')" >&2
+    echo "       Refusing to trust followed bytes for guarded config publication." >&2
+    return 1
+  fi
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Guarded file is not a regular file while ${context}: ${path}" >&2
+    echo "       Refusing to trust followed bytes for guarded config publication." >&2
+    return 1
+  fi
+  if ! identity="$(stat -c '%d:%i:%f:%h' -- "${path}")"; then
+    echo "ERROR: Could not capture lstat identity while ${context}: ${path}" >&2
+    return 1
+  fi
+  nlink="${identity##*:}"
+  if [[ "${nlink}" != "1" ]]; then
+    echo "ERROR: Guarded file is hard-linked while ${context}: ${path} (link count ${nlink})." >&2
+    echo "       Refusing to trust followed bytes for guarded config publication." >&2
+    return 1
+  fi
+  printf '%s\n' "${identity}"
+}
+
+verify_guarded_regular_file_identity_unchanged() {
+  local path="$1"
+  local expected_identity="$2"
+  local context="$3"
+  local current_identity
+
+  if ! current_identity="$(guarded_regular_file_identity "${path}" "${context}")"; then
+    return 1
+  fi
+  if [[ "${current_identity}" != "${expected_identity}" ]]; then
+    echo "ERROR: Guarded file identity/topology changed during ${context}: ${path}." >&2
+    echo "       expected lstat ${expected_identity}; got ${current_identity}." >&2
+    return 1
+  fi
+}
+
+guard_no_hardlinked_regular_file() {
+  local path="$1"
+  local context="$2"
+  local link_count
+  if [[ -f "${path}" && ! -L "${path}" ]]; then
+    if ! link_count="$(file_link_count "${path}")"; then
+      echo "ERROR: Could not inspect link count for destination while ${context}: ${path}" >&2
+      echo "       Refusing before mutation." >&2
+      return 1
+    fi
+    if ((link_count > 1)); then
+      echo "ERROR: Destination path is a hard-linked regular file while ${context}: ${path} (link count ${link_count})." >&2
+      echo "       Refusing before mutation to avoid modifying external hard-link aliases." >&2
+      return 1
+    fi
+  fi
+}
+
+guard_destination_path_chain() {
+  local path="$1"
+  local context="$2"
+  local current component target
+  local -a PATH_CHAIN_COMPONENTS
+
+  if [[ -z "${path}" ]]; then
+    echo "ERROR: Empty destination path while ${context}; refusing before mutation." >&2
+    return 1
+  fi
+  if [[ "${path}" != /* ]]; then
+    echo "ERROR: Destination path is not absolute while ${context}: ${path}" >&2
+    echo "       Refusing before mutation." >&2
+    return 1
+  fi
+
+  current=""
+  IFS='/' read -ra PATH_CHAIN_COMPONENTS <<< "${path#/}"
+  for component in "${PATH_CHAIN_COMPONENTS[@]}"; do
+    [[ -n "${component}" && "${component}" != "." ]] || continue
+    if [[ "${component}" == ".." ]]; then
+      echo "ERROR: Destination path contains '..' while ${context}: ${path}" >&2
+      echo "       Refusing before mutation." >&2
+      return 1
+    fi
+    current="${current}/${component}"
+    if [[ -L "${current}" ]]; then
+      target="$(readlink "${current}" 2>/dev/null || printf '<unreadable>')"
+      echo "ERROR: Destination path chain contains symlink while ${context}: ${current} -> ${target}" >&2
+      echo "       Full destination: ${path}" >&2
+      echo "       Refusing before mutation to avoid following nested symlinks outside the managed root." >&2
+      return 1
+    fi
+    guard_no_hardlinked_regular_file "${current}" "${context}" || return 1
+  done
+}
+
+guard_destination_parent_path_chain() {
+  local path="$1"
+  local context="$2"
+  local parent_path
+
+  if [[ -z "${path}" ]]; then
+    echo "ERROR: Empty destination path while ${context}; refusing before mutation." >&2
+    return 1
+  fi
+  parent_path="$(dirname "${path}")"
+  guard_destination_path_chain "${parent_path}" "${context}" || return 1
+}
+
+guarded_mkdir_p() {
+  local destination_path="$1"
+  local context="$2"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  mkdir -p "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+copy_path_topology() {
+  local source_path="$1"
+  local destination_path="$2"
+  cp -aT -- "${source_path}" "${destination_path}"
+}
+
+guarded_copy_path_topology() {
+  local source_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  copy_path_topology "${source_path}" "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+guarded_copy_path_topology_preserving_final_symlink_topology() {
+  local source_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+  copy_path_topology "${source_path}" "${destination_path}" || return 1
+  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+}
+
+guarded_cp_file() {
+  local source_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  if [[ -d "${destination_path}" && ! -L "${destination_path}" ]]; then
+    echo "ERROR: Destination path is an existing directory while ${context}: ${destination_path}" >&2
+    echo "       Refusing before cp to avoid source-to-destination-directory behavior." >&2
+    return 1
+  fi
+  cp "${source_path}" "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+guarded_chmod() {
+  local mode="$1"
+  local destination_path="$2"
+  local context="$3"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  chmod "${mode}" "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+guarded_chmod_reference() {
+  local reference_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  chmod --reference="${reference_path}" "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+collect_find_results_null() {
+  local output_path="$1"
+  local scan_root="$2"
+  local context="$3"
+  shift 3
+
+  if ! find "${scan_root}" "$@" -print0 > "${output_path}"; then
+    echo "ERROR: Failed to scan ${scan_root} while ${context}; refusing to continue with partial results." >&2
+    if ! guarded_rm_f "${output_path}" "removing failed managed scan output ${output_path}"; then
+      echo "ERROR: Failed to remove failed managed scan output ${output_path}." >&2
+      echo "Managed scan output preserved at ${output_path}" >&2
+    fi
+    return 1
+  fi
+}
+
+guarded_rm_rf() {
+  local destination_path="$1"
+  local context="$2"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  rm -rf -- "${destination_path}"
+}
+
+guarded_rm_f() {
+  local destination_path="$1"
+  local context="$2"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  rm -f -- "${destination_path}"
+}
+
+guarded_rm() {
+  local destination_path="$1"
+  local context="$2"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  rm -- "${destination_path}"
+}
+
+guarded_rmdir() {
+  local destination_path="$1"
+  local context="$2"
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  rmdir "${destination_path}"
+}
+
+guarded_mv_replace() {
+  local source_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  shift 3
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  mv "$@" "${source_path}" "${destination_path}" || return 1
+  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+}
+
+guarded_mv_replace_preserving_final_symlink_topology() {
+  local source_path="$1"
+  local destination_path="$2"
+  local context="$3"
+  shift 3
+  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+  mv "$@" "${source_path}" "${destination_path}" || return 1
+  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+}
+
+restore_path_topology_from_backup() {
+  local backup_path="$1"
+  local destination_path="$2"
+  local restore_stage="$3"
+  local destination_parent
+
+  if ! guarded_rm_rf "${restore_stage}" "clearing staged restore path ${restore_stage}"; then
+    echo "ERROR: Failed to clear staged restore path ${restore_stage} during rollback." >&2
+    return 1
+  fi
+  if ! guarded_copy_path_topology "${backup_path}" "${restore_stage}" "staging rollback restore for ${destination_path}"; then
+    echo "ERROR: Failed to stage backup ${backup_path} for rollback to ${destination_path}." >&2
+    echo "       Original artifact path left intact; recoverable backup preserved at ${backup_path}." >&2
+    return 1
+  fi
+  destination_parent="$(dirname "${destination_path}")"
+  if ! guarded_mkdir_p "${destination_parent}" "recreating parent directory ${destination_parent} during rollback"; then
+    echo "ERROR: Failed to recreate parent directory ${destination_parent} during rollback." >&2
+    echo "       staged restore copy preserved at ${restore_stage}." >&2
+    return 1
+  fi
+  if ! guarded_rm_rf "${destination_path}" "removing changed path ${destination_path} during rollback"; then
+    echo "ERROR: Failed to remove changed path ${destination_path} during rollback." >&2
+    echo "       staged restore copy preserved at ${restore_stage}." >&2
+    return 1
+  fi
+  if ! guarded_mv_replace "${restore_stage}" "${destination_path}" "restoring ${destination_path} from rollback stage" -T; then
+    echo "ERROR: Failed to replace ${destination_path} with staged restore ${restore_stage}." >&2
+    echo "       Recoverable backup preserved at ${backup_path}; staged restore copy preserved at ${restore_stage}." >&2
+    return 1
+  fi
+}
+
+prepare_repo_config_preflight_copy() {
+  if [[ -n "${REPO_CONFIG_PREFLIGHT_COPY:-}" ]]; then
+    return 0
+  fi
+  REPO_CONFIG_PREFLIGHT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/push-openclaw-config-preflight.XXXXXX")"
+  REPO_CONFIG_PREFLIGHT_COPY="${REPO_CONFIG_PREFLIGHT_DIR}/openclaw.repo-preflight.json"
+  guarded_regular_file_identity "${REPO_CONFIG}" "creating guarded repo OpenClaw config copy from ${REPO_CONFIG}" >/dev/null || return 1
+  if ! copy_path_topology "${REPO_CONFIG}" "${REPO_CONFIG_PREFLIGHT_COPY}"; then
+    echo "ERROR: Failed to create guarded repo OpenClaw config copy at ${REPO_CONFIG_PREFLIGHT_COPY}." >&2
+    return 1
+  fi
+  guarded_chmod 0600 "${REPO_CONFIG_PREFLIGHT_COPY}" "chmod guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_COPY}"
+  REPO_CONFIG_PREFLIGHT_IDENTITY="$(guarded_regular_file_identity "${REPO_CONFIG_PREFLIGHT_COPY}" "capturing guarded repo OpenClaw config copy identity ${REPO_CONFIG_PREFLIGHT_COPY}")" || return 1
+  REPO_CONFIG_PREFLIGHT_HASH="$(file_sha256 "${REPO_CONFIG_PREFLIGHT_COPY}")"
+  REPO_CONFIG_PREFLIGHT_BYTES="$(file_bytes "${REPO_CONFIG_PREFLIGHT_COPY}")"
+}
+
+verify_repo_config_preflight_copy_unchanged() {
+  local context="$1"
+  local current_hash current_bytes
+  if [[ -z "${REPO_CONFIG_PREFLIGHT_COPY:-}" ]]; then
+    echo "ERROR: Guarded repo OpenClaw config copy is missing after ${context}: ${REPO_CONFIG_PREFLIGHT_COPY:-<unset>}." >&2
+    return 1
+  fi
+  if ! verify_guarded_regular_file_identity_unchanged "${REPO_CONFIG_PREFLIGHT_COPY}" "${REPO_CONFIG_PREFLIGHT_IDENTITY}" "${context}"; then
+    return 1
+  fi
+  current_hash="$(file_sha256 "${REPO_CONFIG_PREFLIGHT_COPY}")"
+  current_bytes="$(file_bytes "${REPO_CONFIG_PREFLIGHT_COPY}")"
+  if [[ "${current_hash}" != "${REPO_CONFIG_PREFLIGHT_HASH}" || "${current_bytes}" != "${REPO_CONFIG_PREFLIGHT_BYTES}" ]]; then
+    echo "ERROR: External OpenClaw CLI modified guarded repo config copy during ${context}." >&2
+    echo "       expected ${REPO_CONFIG_PREFLIGHT_BYTES} bytes sha256 ${REPO_CONFIG_PREFLIGHT_HASH}; got ${current_bytes} bytes sha256 ${current_hash}." >&2
+    return 1
+  fi
+}
+
+run_openclaw_cli_for_guarded_repo_config() {
+  local status
+  prepare_repo_config_preflight_copy || return 1
+  if run_openclaw_cli_for_config "${REPO_CONFIG_PREFLIGHT_COPY}" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  if ! verify_repo_config_preflight_copy_unchanged "openclaw $*"; then
+    return 1
+  fi
+  return "${status}"
+}
+
+cleanup_repo_config_preflight_copy() {
+  if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
+    guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "cleaning guarded repo OpenClaw config preflight directory ${REPO_CONFIG_PREFLIGHT_DIR}" || return 1
+  fi
+  REPO_CONFIG_PREFLIGHT_COPY=""
+  REPO_CONFIG_PREFLIGHT_DIR=""
+}
+
+push_test_checkpoint() {
+  local name="$1"
+  if [[ -n "${OPENCLAW_PUSH_TEST_CHECKPOINT_LOG:-}" ]]; then
+    printf '%s\n' "${name}" >> "${OPENCLAW_PUSH_TEST_CHECKPOINT_LOG}"
+  fi
+  if [[ "${OPENCLAW_PUSH_TEST_SIGNAL_AT:-}" == "${name}" ]]; then
+    kill "-${OPENCLAW_PUSH_TEST_SIGNAL:-INT}" "$$"
+  fi
 }
 
 validate_runtime_caps_dropin_file() {
@@ -349,24 +728,174 @@ require_gateway_service_loadable() {
 }
 
 prepare_runtime_caps_dropin_dir() {
-  mkdir -p "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+  guarded_mkdir_p "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "creating managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
   if [[ ! -O "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
     echo "ERROR: Runtime caps drop-in directory is not owned by the current user: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
     return 1
   fi
-  chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+  guarded_chmod 0755 "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "chmod managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+}
+
+decode_systemd_show_environment_word() {
+  local encoded="$1"
+  local decoded="" char next i len escape_digits code
+
+  if [[ "${encoded}" == \$\'* ]]; then
+    len="${#encoded}"
+    i=2
+    while ((i < len)); do
+      char="${encoded:i:1}"
+      if [[ "${char}" == "'" ]]; then
+        ((i++))
+        [[ "${i}" -eq "${len}" ]] || return 1
+        printf '%s' "${decoded}"
+        return 0
+      fi
+      if [[ "${char}" == '\' ]]; then
+        ((i++))
+        ((i < len)) || return 1
+        next="${encoded:i:1}"
+        case "${next}" in
+          "n")
+            decoded+=$'\n'
+            ;;
+          "t")
+            decoded+=$'\t'
+            ;;
+          "r")
+            decoded+=$'\r'
+            ;;
+          "b")
+            decoded+=$'\b'
+            ;;
+          "f")
+            decoded+=$'\f'
+            ;;
+          "v")
+            decoded+=$'\v'
+            ;;
+          "a")
+            decoded+=$'\a'
+            ;;
+          "e"|"E")
+            decoded+=$'\e'
+            ;;
+          "\\"|"'"|'"'|"?")
+            decoded+="${next}"
+            ;;
+          "x")
+            ((i + 2 < len)) || return 1
+            escape_digits="${encoded:i+1:2}"
+            [[ "${escape_digits}" =~ ^[[:xdigit:]]{2}$ ]] || return 1
+            if ((i + 3 < len)) && [[ "${encoded:i+3:1}" =~ [[:xdigit:]] ]]; then
+              return 1
+            fi
+            code=$((16#${escape_digits}))
+            ((code != 0)) || return 1
+            printf -v char "\\$(printf '%03o' "${code}")"
+            decoded+="${char}"
+            ((i += 2))
+            ;;
+          [0-7])
+            ((i + 2 < len)) || return 1
+            escape_digits="${encoded:i:3}"
+            [[ "${escape_digits}" =~ ^[0-7]{3}$ ]] || return 1
+            code=$((8#${escape_digits}))
+            ((code != 0 && code <= 255)) || return 1
+            printf -v char "\\$(printf '%03o' "${code}")"
+            decoded+="${char}"
+            ((i += 2))
+            ;;
+          *)
+            return 1
+            ;;
+        esac
+      else
+        decoded+="${char}"
+      fi
+      ((i++))
+    done
+    return 1
+  fi
+
+  if [[ "${encoded}" == "'"*"'" ]]; then
+    decoded="${encoded:1:${#encoded}-2}"
+    [[ "${decoded}" != *"'"* ]] || return 1
+    printf '%s' "${decoded}"
+    return 0
+  fi
+
+  if [[ "${encoded}" =~ ^[-._~/:@%+=,A-Za-z0-9]*$ ]]; then
+    printf '%s' "${encoded}"
+    return 0
+  fi
+
+  return 1
+}
+
+decode_systemd_show_environment_node_options() {
+  local manager_env="$1"
+  local manager_line decoded_node_options=""
+  SYSTEMD_DECODED_NODE_OPTIONS_PRESENT=0
+  SYSTEMD_DECODED_NODE_OPTIONS_VALUE=""
+  while IFS= read -r manager_line; do
+    case "${manager_line}" in
+      NODE_OPTIONS=*)
+        if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 ]]; then
+          echo "ERROR: systemd user manager emitted multiple NODE_OPTIONS assignments; refusing ambiguous cleanup." >&2
+          return 1
+        fi
+        SYSTEMD_DECODED_NODE_OPTIONS_PRESENT=1
+        if ! decoded_node_options="$(decode_systemd_show_environment_word "${manager_line#NODE_OPTIONS=}")"; then
+          echo "ERROR: Could not safely decode systemd user manager NODE_OPTIONS assignment; refusing ambiguous cleanup." >&2
+          return 1
+        fi
+        SYSTEMD_DECODED_NODE_OPTIONS_VALUE="${decoded_node_options}"
+        ;;
+    esac
+  done <<< "${manager_env}"
+}
+
+verify_systemd_manager_node_options_stale_preload_absent() {
+  local manager_env
+  if ! manager_env="$(systemctl --user show-environment 2>/dev/null)"; then
+    echo "ERROR: Could not re-check systemd user manager environment after unsetting NODE_OPTIONS." >&2
+    return 1
+  fi
+  if ! decode_systemd_show_environment_node_options "${manager_env}"; then
+    return 1
+  fi
+  if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 \
+    && "${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}" == *"${STALE_AZURE_PRELOAD_PATTERN}"* ]]; then
+    echo "ERROR: systemd user manager still exposes stale Azure NODE_OPTIONS after unset-environment; refusing to continue." >&2
+    return 1
+  fi
 }
 
 remove_stale_azure_node_options_for_codex() {
   local changed=0
-  local path temp
+  local path temp rewrite_status
   local manager_env
   local service_path="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
+  local dropin_scan_output=""
   local -a candidates=()
 
   if manager_env="$(systemctl --user show-environment 2>/dev/null)"; then
-    if printf '%s\n' "${manager_env}" | grep -Fq "${STALE_AZURE_PRELOAD_PATTERN}"; then
-      systemctl --user unset-environment NODE_OPTIONS
+    if ! decode_systemd_show_environment_node_options "${manager_env}"; then
+      return 1
+    fi
+    if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 \
+      && "${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}" == *"${STALE_AZURE_PRELOAD_PATTERN}"* ]]; then
+      SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=1
+      SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL="${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}"
+      SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=1
+      if ! systemctl --user unset-environment NODE_OPTIONS; then
+        echo "ERROR: Failed to unset stale Azure NODE_OPTIONS from systemd user manager environment." >&2
+        return 1
+      fi
+      if ! verify_systemd_manager_node_options_stale_preload_absent; then
+        return 1
+      fi
       changed=1
       echo "Unset stale Azure NODE_OPTIONS from systemd user manager environment"
     fi
@@ -379,21 +908,200 @@ remove_stale_azure_node_options_for_codex() {
     candidates+=("${service_path}")
   fi
   if [[ -d "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    guard_destination_path_chain "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "scanning managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || return 1
+    dropin_scan_output="$(mktemp "${TMPDIR:-/tmp}/push-openclaw-systemd-dropins.XXXXXX")"
+    guard_destination_path_chain "${dropin_scan_output}" "creating managed systemd scan output ${dropin_scan_output}" || return 1
+    if ! collect_find_results_null \
+      "${dropin_scan_output}" \
+      "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" \
+      "scanning managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" \
+      -maxdepth 1 -type f -name '*.conf'; then
+      return 1
+    fi
     while IFS= read -r -d '' path; do
       candidates+=("${path}")
-    done < <(find "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" -maxdepth 1 -type f -name '*.conf' -print0)
+    done < "${dropin_scan_output}"
+    guarded_rm_f "${dropin_scan_output}" "removing managed systemd scan output ${dropin_scan_output}" || return 1
   fi
 
   for path in "${candidates[@]}"; do
-    if ! grep -Fq "${STALE_AZURE_PRELOAD_PATTERN}" "${path}"; then
-      continue
-    fi
+    guard_destination_path_chain "${path}" "rewriting managed systemd environment file ${path}" || return 1
     temp="$(mktemp "${path}.XXXXXX")"
-    grep -Fv "${STALE_AZURE_PRELOAD_PATTERN}" "${path}" > "${temp}"
-    chmod --reference="${path}" "${temp}"
-    mv "${temp}" "${path}"
+    guard_destination_path_chain "${temp}" "creating temporary managed systemd rewrite file ${temp}" || return 1
+    if awk -v stale="${STALE_AZURE_PRELOAD_PATTERN}" '
+      function append_char(value, char) {
+        return value char
+      }
+      function read_environment_token(rest, start, result,    pos, len, char, quote, next_char) {
+        pos = start
+        len = length(rest)
+        quote = ""
+        token_raw = ""
+        token_value = ""
+        while (pos <= len) {
+          char = substr(rest, pos, 1)
+          if (quote == "" && char ~ /[[:space:]]/) {
+            break
+          }
+          token_raw = append_char(token_raw, char)
+          if (quote != "") {
+            if (char == "\\") {
+              if (pos < len) {
+                next_char = substr(rest, pos + 1, 1)
+                token_raw = append_char(token_raw, next_char)
+                token_value = append_char(token_value, next_char)
+                pos += 2
+                continue
+              }
+            } else if (char == quote) {
+              quote = ""
+              pos++
+              continue
+            } else {
+              token_value = append_char(token_value, char)
+            }
+          } else if (char == "\"" || char == "'"'"'") {
+            quote = char
+          } else if (char == "\\") {
+            if (pos < len) {
+              next_char = substr(rest, pos + 1, 1)
+              token_raw = append_char(token_raw, next_char)
+              token_value = append_char(token_value, next_char)
+              pos += 2
+              continue
+            }
+          } else {
+            token_value = append_char(token_value, char)
+          }
+          pos++
+        }
+        result["raw"] = token_raw
+        result["value"] = token_value
+        result["next"] = pos
+        result["ok"] = quote == "" && token_raw != ""
+      }
+      function rewrite_environment_line(line,    prefix, rest, output, kept, removed, pos, ws_start, whitespace) {
+        rewrite_output = ""
+        if (!match(line, /^[[:space:]]*Environment=/)) {
+          return 0
+        }
+        prefix = substr(line, 1, RLENGTH)
+        rest = substr(line, RLENGTH + 1)
+        output = ""
+        kept = 0
+        removed = 0
+        pos = 1
+        while (pos <= length(rest)) {
+          ws_start = pos
+          while (pos <= length(rest) && substr(rest, pos, 1) ~ /[[:space:]]/) {
+            pos++
+          }
+          whitespace = substr(rest, ws_start, pos - ws_start)
+          if (pos > length(rest)) {
+            break
+          }
+          delete token
+          read_environment_token(rest, pos, token)
+          if (!token["ok"]) {
+            if (index(line, stale) > 0) {
+              parse_error = 1
+            }
+            return 0
+          }
+          if (token["value"] ~ /^NODE_OPTIONS=/ && index(token["value"], stale) > 0) {
+            removed = 1
+          } else if (kept == 0) {
+            output = prefix token["raw"]
+            kept = 1
+          } else {
+            output = output whitespace token["raw"]
+          }
+          pos = token["next"]
+        }
+        if (removed) {
+          rewrite_output = output
+          return 1
+        }
+        return 0
+      }
+      function flush_block() {
+        if (rewrite_environment_line(logical)) {
+          changed = 1
+          if (rewrite_output != "") {
+            print rewrite_output
+          }
+          printf "%s", ignored_block
+        } else {
+          printf "%s", block
+        }
+        block = ""
+        logical = ""
+        ignored_block = ""
+      }
+      function is_ignored_continuation_line(line) {
+        return line ~ /^[[:space:]]*($|#|;)/
+      }
+      {
+        if (logical != "" && is_ignored_continuation_line($0)) {
+          block = block $0 ORS
+          ignored_block = ignored_block $0 ORS
+          next
+        }
+        if (logical == "" && is_ignored_continuation_line($0)) {
+          print
+          next
+        }
+        continued = $0 ~ /\\$/
+        part = continued ? substr($0, 1, length($0) - 1) : $0
+        block = block $0 ORS
+        if (logical == "") {
+          logical = part
+        } else {
+          logical = logical " " part
+        }
+        if (!continued) {
+          flush_block()
+        }
+      }
+      END {
+        if (block != "") {
+          parse_error = 1
+        }
+        if (parse_error) {
+          exit 20
+        }
+        exit changed ? 10 : 0
+      }
+    ' "${path}" > "${temp}"; then
+      rewrite_status=0
+    else
+      rewrite_status=$?
+    fi
+    case "${rewrite_status}" in
+      0)
+        guarded_rm_f "${temp}" "removing unchanged temporary systemd rewrite file ${temp}"
+        continue
+        ;;
+      10)
+        ;;
+      *)
+        guarded_rm_f "${temp}" "removing failed temporary systemd rewrite file ${temp}"
+        echo "ERROR: Failed to inspect ${path} for stale Azure NODE_OPTIONS assignment lines." >&2
+        return 1
+        ;;
+    esac
+    if ! guarded_chmod_reference "${path}" "${temp}" "preserving permissions while rewriting ${path} via ${temp}"; then
+      guarded_rm_f "${temp}" "removing temporary systemd rewrite file ${temp} after chmod failure"
+      echo "ERROR: Failed to preserve permissions while rewriting ${path}." >&2
+      return 1
+    fi
+    if ! guarded_mv_replace "${temp}" "${path}" "publishing rewritten managed systemd environment file ${path}"; then
+      guarded_rm_f "${temp}" "removing temporary systemd rewrite file ${temp} after publish failure"
+      echo "ERROR: Failed to rewrite stale Azure NODE_OPTIONS assignment lines in ${path}." >&2
+      return 1
+    fi
     changed=1
-    echo "Removed stale Azure NODE_OPTIONS preload from ${path}"
+    echo "Removed stale Azure NODE_OPTIONS assignment line from ${path}"
   done
 
   if [[ "${changed}" -eq 1 ]]; then
@@ -445,7 +1153,7 @@ require_openclaw_supported() {
   if ! resolve_openclaw_bin; then
     return 1
   fi
-  if ! version_line="$(run_openclaw_cli --version 2>&1)"; then
+  if ! version_line="$(run_openclaw_cli_for_repo_config --version 2>&1)"; then
     echo "ERROR: OpenClaw version check failed for ${OPENCLAW_BIN_RESOLVED}" >&2
     return 1
   fi
@@ -466,7 +1174,7 @@ require_openclaw_supported() {
 
 require_codex_runtime_exact() {
   local inspect_json plugin_version app_server_version app_server_path
-  if ! inspect_json="$(run_openclaw_cli plugins inspect codex --json)"; then
+  if ! inspect_json="$(run_openclaw_cli_for_repo_config plugins inspect codex --json)"; then
     echo "ERROR: Could not inspect the required Codex plugin." >&2
     return 1
   fi
@@ -508,7 +1216,25 @@ require_codex_runtime_exact() {
   echo "Codex runtime validated: @openclaw/codex ${plugin_version} embeds @openai/codex ${app_server_version}"
 }
 
+validate_repo_openclaw_config() {
+  local validate_json validate_status
+  if validate_json="$(run_openclaw_cli_for_repo_config config validate --json 2>&1)"; then
+    validate_status=0
+  else
+    validate_status=$?
+  fi
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | openclaw_schema_validation_is_clean; then
+    echo "ERROR: Repo OpenClaw config failed schema validation before runtime preflight." >&2
+    printf '%s\n' "${validate_json}" >&2
+    return 1
+  fi
+  echo "Repo OpenClaw config schema validated with ${OPENCLAW_BIN_RESOLVED} config validate --json."
+}
+
 ROLLBACK_ARMED=0
+ROLLBACK_FAILED=0
+DEPLOYMENT_COMMITTED=0
+POST_COMMIT_CLEANUP_FAILED=0
 MANAGED_UNIT_TRANSACTION_ARMED=0
 MANAGED_UNIT_BACKUP_DIR=""
 MANAGED_UNIT_PATHS=(
@@ -518,79 +1244,601 @@ MANAGED_UNIT_PATHS=(
   "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 )
 MANAGED_UNIT_WAS_PRESENT=()
+MANAGED_UNIT_SNAPSHOT_STATE=()
+MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+MANAGED_ARTIFACT_BACKUP_DIR=""
+MANAGED_ARTIFACT_PATHS=()
+MANAGED_ARTIFACT_WAS_PRESENT=()
+MANAGED_ARTIFACT_SNAPSHOT_STATE=()
+declare -A MANAGED_ARTIFACT_SEEN=()
+MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
+SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
+SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
+
+cleanup_deployment_temp_file() {
+  local path="${1:-}"
+  [[ -n "${path}" ]] || return 0
+  if ! guarded_rm_f "${path}" "removing temporary deployment file ${path}"; then
+    echo "ERROR: Failed to remove temporary deployment file ${path}." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+}
 
 begin_managed_unit_transaction() {
-  local index path backup_path
+  local index path backup_path transaction_failed=0
 
+  guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
   MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
+  guard_destination_path_chain "${MANAGED_UNIT_BACKUP_DIR}" "created managed systemd transaction backup directory ${MANAGED_UNIT_BACKUP_DIR}" || return 1
   for index in "${!MANAGED_UNIT_PATHS[@]}"; do
     path="${MANAGED_UNIT_PATHS[${index}]}"
     backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    if [[ -f "${path}" ]]; then
-      cp -p "${path}" "${backup_path}"
+    MANAGED_UNIT_SNAPSHOT_STATE[${index}]="failed"
+    if path_exists_or_symlink "${path}"; then
+      if [[ -L "${path}" ]]; then
+        echo "ERROR: Managed systemd file ${path} is a symlink to $(readlink "${path}"); this publication path cannot preserve symlink topology safely." >&2
+        echo "       Refusing before mutating managed systemd files." >&2
+        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+        continue
+      fi
+      if [[ ! -f "${path}" ]]; then
+        echo "ERROR: Managed systemd file ${path} exists but is not a regular file; refusing before mutation." >&2
+        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+        continue
+      fi
+      if ! guard_destination_path_chain "${path}" "snapshotting managed systemd file ${path}"; then
+        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+        continue
+      fi
+      if ! guarded_copy_path_topology "${path}" "${backup_path}" "snapshotting managed systemd file ${path}"; then
+        echo "ERROR: Failed to snapshot managed systemd file ${path} to ${backup_path}." >&2
+        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+        continue
+      fi
       MANAGED_UNIT_WAS_PRESENT[${index}]=1
+      MANAGED_UNIT_SNAPSHOT_STATE[${index}]="present"
     else
       MANAGED_UNIT_WAS_PRESENT[${index}]=0
+      MANAGED_UNIT_SNAPSHOT_STATE[${index}]="absent"
     fi
   done
   MANAGED_UNIT_TRANSACTION_ARMED=1
+  if [[ "${transaction_failed}" -ne 0 ]]; then
+    return 1
+  fi
 }
 
 rollback_managed_unit_transaction() {
-  local index path backup_path
+  local index path backup_path state transaction_failed=0
 
   if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
-    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-      rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
-    fi
-    return
+    return 0
   fi
 
   echo "Restoring managed systemd files after failed publication." >&2
   for index in "${!MANAGED_UNIT_PATHS[@]}"; do
     path="${MANAGED_UNIT_PATHS[${index}]}"
     backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    if [[ "${MANAGED_UNIT_WAS_PRESENT[${index}]:-0}" -eq 1 ]]; then
-      if ! cp -p "${backup_path}" "${path}"; then
+    state="${MANAGED_UNIT_SNAPSHOT_STATE[${index}]:-failed}"
+    if [[ "${state}" == "failed" ]]; then
+      echo "ERROR: Skipping rollback for ${path}; its managed systemd snapshot did not complete." >&2
+      ROLLBACK_FAILED=1
+      transaction_failed=1
+      continue
+    fi
+    if [[ "${state}" == "present" ]]; then
+      if ! restore_path_topology_from_backup "${backup_path}" "${path}" "${MANAGED_UNIT_BACKUP_DIR}/restore.${index}"; then
         echo "ERROR: Failed to restore managed systemd file ${path}." >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
       fi
-    elif ! rm -f "${path}"; then
-      echo "ERROR: Failed to remove newly installed managed systemd file ${path}." >&2
+    elif [[ "${state}" == "absent" ]]; then
+      if ! guarded_rm_f "${path}" "removing newly installed managed systemd file ${path} during rollback"; then
+        echo "ERROR: Failed to remove newly installed managed systemd file ${path}." >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+      fi
+    else
+      echo "ERROR: Unknown managed systemd snapshot state ${state} for ${path}; leaving it untouched." >&2
+      ROLLBACK_FAILED=1
+      transaction_failed=1
     fi
   done
   if ! systemctl --user daemon-reload; then
     echo "ERROR: Failed to reload user systemd units after managed-file rollback." >&2
+    ROLLBACK_FAILED=1
+    transaction_failed=1
   fi
-  rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
-  MANAGED_UNIT_BACKUP_DIR=""
+  if [[ "${transaction_failed}" -eq 1 ]]; then
+    echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+    return 1
+  fi
   MANAGED_UNIT_TRANSACTION_ARMED=0
 }
 
-commit_managed_unit_transaction() {
+finalize_managed_unit_transaction() {
+  local index backup_path state
+  if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+    echo "ERROR: Managed systemd transaction was not armed at deployment commit." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if [[ -z "${MANAGED_UNIT_BACKUP_DIR:-}" || ! -d "${MANAGED_UNIT_BACKUP_DIR}" ]]; then
+    echo "ERROR: Managed systemd backup directory is missing at deployment commit: ${MANAGED_UNIT_BACKUP_DIR:-<unset>}" >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
+    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
+    state="${MANAGED_UNIT_SNAPSHOT_STATE[${index}]:-failed}"
+    case "${state}" in
+      present)
+        if ! path_exists_or_symlink "${backup_path}"; then
+          echo "ERROR: Managed systemd backup component is missing at deployment commit: ${backup_path}" >&2
+          ROLLBACK_FAILED=1
+          return 1
+        fi
+        ;;
+      absent)
+        ;;
+      failed)
+        echo "ERROR: Managed systemd snapshot did not complete before deployment commit: ${MANAGED_UNIT_PATHS[${index}]}" >&2
+        ROLLBACK_FAILED=1
+        return 1
+        ;;
+      *)
+        echo "ERROR: Managed systemd snapshot state is invalid for ${MANAGED_UNIT_PATHS[${index}]}: ${state}" >&2
+        ROLLBACK_FAILED=1
+        return 1
+        ;;
+    esac
+  done
+}
+
+cleanup_managed_unit_backup_dir() {
   if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-    rm -rf "${MANAGED_UNIT_BACKUP_DIR}"
+    if ! guarded_rm_rf "${MANAGED_UNIT_BACKUP_DIR}" "removing managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}"; then
+      echo "ERROR: Failed to remove managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}." >&2
+      echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+      POST_COMMIT_CLEANUP_FAILED=1
+      return 1
+    fi
   fi
   MANAGED_UNIT_BACKUP_DIR=""
-  MANAGED_UNIT_TRANSACTION_ARMED=0
+  MANAGED_UNIT_WAS_PRESENT=()
+  MANAGED_UNIT_SNAPSHOT_STATE=()
 }
 
-rollback_local_config_on_exit() {
-  local exit_status=$?
-  trap - EXIT
-  rm -f "${SUPERVISOR_UNIT_TMP:-}"
-  rm -f "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"
-  rm -f "${CODEX_RUNTIME_DROPIN_TMP:-}"
-  rm -f "${NATIVE_CRASH_HARDENING_DROPIN_TMP:-}"
-  rollback_managed_unit_transaction
-  if [[ "${ROLLBACK_ARMED:-0}" -eq 1 ]] && [[ "${exit_status}" -ne 0 ]]; then
-    if ! cp "${BACKUP}" "${LOCAL_CONFIG}"; then
-      echo "ERROR: Failed to restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
+begin_managed_artifact_transaction() {
+  if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -eq 1 ]]; then
+    return 0
+  fi
+  guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw artifact backup directory under ${OPENCLAW_PUSH_HOME}" || return 1
+  MANAGED_ARTIFACT_BACKUP_DIR="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.push-openclaw-config-artifacts.XXXXXX")"
+  guard_destination_path_chain "${MANAGED_ARTIFACT_BACKUP_DIR}" "created managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}" || return 1
+  MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+}
+
+snapshot_managed_artifact_path() {
+  local path="$1"
+  local index backup_path state
+
+  begin_managed_artifact_transaction || return 1
+  if [[ -n "${MANAGED_ARTIFACT_SEEN[${path}]+x}" ]]; then
+    index="${MANAGED_ARTIFACT_SEEN[${path}]}"
+    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
+    if [[ "${state}" == "failed" ]]; then
+      return 1
     fi
+    return 0
+  fi
+  index="${#MANAGED_ARTIFACT_PATHS[@]}"
+  MANAGED_ARTIFACT_PATHS+=("${path}")
+  MANAGED_ARTIFACT_SEEN["${path}"]="${index}"
+  MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="failed"
+  backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
+  if path_exists_or_symlink "${path}"; then
+    if [[ -L "${path}" ]]; then
+      echo "ERROR: Managed OpenClaw artifact ${path} is a symlink to $(readlink "${path}"); this publication path cannot preserve symlink topology safely." >&2
+      echo "       Refusing before mutating the managed artifact path." >&2
+      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    if ! guard_destination_path_chain "${path}" "snapshotting managed OpenClaw artifact ${path}"; then
+      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    if ! guarded_copy_path_topology "${path}" "${backup_path}" "snapshotting managed OpenClaw artifact ${path}"; then
+      echo "ERROR: Failed to snapshot managed OpenClaw artifact ${path} to ${backup_path}." >&2
+      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    MANAGED_ARTIFACT_WAS_PRESENT[${index}]=1
+    MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="present"
+  else
+    MANAGED_ARTIFACT_WAS_PRESENT[${index}]=0
+    MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="absent"
+  fi
+}
+
+is_systemd_managed_artifact_path() {
+  local path="$1"
+  [[ "${path}" == "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}" \
+    || "${path}" == "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" \
+    || "${path}" == "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/"* ]]
+}
+
+rollback_managed_artifact_transaction() {
+  local index path backup_path restore_stage state transaction_failed=0
+
+  if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+    return 0
+  fi
+
+  echo "Restoring managed OpenClaw artifacts after failed publication." >&2
+  for ((index=${#MANAGED_ARTIFACT_PATHS[@]} - 1; index >= 0; index--)); do
+    path="${MANAGED_ARTIFACT_PATHS[${index}]}"
+    backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
+    restore_stage="${MANAGED_ARTIFACT_BACKUP_DIR}/restore.${index}"
+    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
+    if [[ "${state}" == "failed" ]]; then
+      echo "ERROR: Skipping rollback for ${path}; its managed artifact snapshot did not complete." >&2
+      ROLLBACK_FAILED=1
+      transaction_failed=1
+      continue
+    fi
+    if [[ "${state}" == "present" ]]; then
+      if ! path_exists_or_symlink "${backup_path}"; then
+        echo "ERROR: Managed artifact backup is missing for ${path}: ${backup_path}" >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+        continue
+      fi
+      if is_systemd_managed_artifact_path "${path}"; then
+        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
+      fi
+      if ! restore_path_topology_from_backup "${backup_path}" "${path}" "${restore_stage}"; then
+        echo "ERROR: Failed to restore managed artifact ${path}." >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+      fi
+    elif [[ "${state}" == "absent" ]]; then
+      if is_systemd_managed_artifact_path "${path}"; then
+        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
+      fi
+      if ! guarded_rm_rf "${path}" "removing newly installed managed artifact ${path} during rollback"; then
+        echo "ERROR: Failed to remove newly installed managed artifact ${path} during rollback." >&2
+        ROLLBACK_FAILED=1
+        transaction_failed=1
+      fi
+    else
+      echo "ERROR: Unknown managed artifact snapshot state ${state} for ${path}; leaving it untouched." >&2
+      ROLLBACK_FAILED=1
+      transaction_failed=1
+    fi
+  done
+  if [[ "${transaction_failed}" -eq 1 ]]; then
+    echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+    return 1
+  fi
+  MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+}
+
+final_systemd_reload_after_artifact_rollback() {
+  if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  if ! systemctl --user daemon-reload; then
+    echo "ERROR: Failed final user systemd daemon-reload after managed artifact rollback restored systemd files." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+}
+
+finalize_managed_artifact_transaction() {
+  local index backup_path path state
+  if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+    echo "ERROR: Managed OpenClaw artifact transaction was not armed at deployment commit." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if [[ -z "${MANAGED_ARTIFACT_BACKUP_DIR:-}" || ! -d "${MANAGED_ARTIFACT_BACKUP_DIR}" ]]; then
+    echo "ERROR: Managed OpenClaw artifact backup directory is missing at deployment commit: ${MANAGED_ARTIFACT_BACKUP_DIR:-<unset>}" >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  for index in "${!MANAGED_ARTIFACT_PATHS[@]}"; do
+    path="${MANAGED_ARTIFACT_PATHS[${index}]}"
+    backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
+    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
+    case "${state}" in
+      present)
+        if ! path_exists_or_symlink "${backup_path}"; then
+          echo "ERROR: Managed OpenClaw artifact backup component is missing at deployment commit: ${backup_path}" >&2
+          ROLLBACK_FAILED=1
+          return 1
+        fi
+        ;;
+      absent)
+        ;;
+      failed)
+        echo "ERROR: Managed OpenClaw artifact snapshot did not complete before deployment commit: ${path}" >&2
+        ROLLBACK_FAILED=1
+        return 1
+        ;;
+      *)
+        echo "ERROR: Managed OpenClaw artifact snapshot state is invalid for ${path}: ${state}" >&2
+        ROLLBACK_FAILED=1
+        return 1
+        ;;
+    esac
+  done
+}
+
+cleanup_managed_artifact_backup_dir() {
+  if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
+    if ! guarded_rm_rf "${MANAGED_ARTIFACT_BACKUP_DIR}" "removing managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}"; then
+      echo "ERROR: Failed to remove managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}." >&2
+      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+      POST_COMMIT_CLEANUP_FAILED=1
+      return 1
+    fi
+  fi
+  MANAGED_ARTIFACT_BACKUP_DIR=""
+  MANAGED_ARTIFACT_PATHS=()
+  MANAGED_ARTIFACT_WAS_PRESENT=()
+  MANAGED_ARTIFACT_SNAPSHOT_STATE=()
+  MANAGED_ARTIFACT_SEEN=()
+  MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+}
+
+restore_systemd_manager_environment_snapshot() {
+  if [[ "${SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  if [[ "${SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT:-0}" -eq 1 ]]; then
+    if ! systemctl --user set-environment "NODE_OPTIONS=${SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL}"; then
+      echo "ERROR: Failed to restore systemd user manager NODE_OPTIONS during rollback." >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+  elif ! systemctl --user unset-environment NODE_OPTIONS; then
+    echo "ERROR: Failed to unset systemd user manager NODE_OPTIONS during rollback." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
+  SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
+  SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
+}
+
+finalize_systemd_manager_environment_snapshot() {
+  return 0
+}
+
+finalize_local_config_backup() {
+  if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
+    echo "ERROR: Local OpenClaw config rollback was not armed at deployment commit." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if [[ -z "${BACKUP:-}" ]] || ! path_exists_or_symlink "${BACKUP}"; then
+    echo "ERROR: Local OpenClaw config backup is missing at deployment commit: ${BACKUP:-<unset>}" >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if [[ ! -f "${LOCAL_CONFIG}" ]]; then
+    echo "ERROR: Local OpenClaw config is missing at deployment commit: ${LOCAL_CONFIG}" >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+}
+
+mark_deployment_committed() {
+  ROLLBACK_ARMED=0
+  MANAGED_UNIT_TRANSACTION_ARMED=0
+  MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+  SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
+  SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
+  SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
+  DEPLOYMENT_COMMITTED=1
+}
+
+cleanup_committed_recovery_paths() {
+  local cleanup_failed=0
+
+  if ! cleanup_repo_config_preflight_copy; then
+    echo "ERROR: Failed to remove guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR:-<unset>}." >&2
+    POST_COMMIT_CLEANUP_FAILED=1
+    cleanup_failed=1
+  fi
+  if ! cleanup_managed_unit_backup_dir; then
+    cleanup_failed=1
+  fi
+  if ! cleanup_managed_artifact_backup_dir; then
+    cleanup_failed=1
+  fi
+  if [[ "${POST_COMMIT_CLEANUP_FAILED:-0}" -ne 0 || "${cleanup_failed}" -ne 0 ]]; then
+    return 1
+  fi
+}
+
+cleanup_rollback_recovery_paths() {
+  local cleanup_failed=0
+
+  if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+    if ! guarded_rm_rf "${MANAGED_UNIT_BACKUP_DIR}" "removing managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR} after rollback"; then
+      echo "ERROR: Failed to remove managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR} after rollback." >&2
+      echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+      ROLLBACK_FAILED=1
+      cleanup_failed=1
+    else
+      MANAGED_UNIT_BACKUP_DIR=""
+    fi
+  fi
+  if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
+    if ! guarded_rm_rf "${MANAGED_ARTIFACT_BACKUP_DIR}" "removing managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR} after rollback"; then
+      echo "ERROR: Failed to remove managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR} after rollback." >&2
+      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+      ROLLBACK_FAILED=1
+      cleanup_failed=1
+    else
+      MANAGED_ARTIFACT_BACKUP_DIR=""
+    fi
+  fi
+  if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
+    if ! guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "removing guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback"; then
+      echo "ERROR: Failed to remove guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback." >&2
+      ROLLBACK_FAILED=1
+      cleanup_failed=1
+    else
+      REPO_CONFIG_PREFLIGHT_COPY=""
+      REPO_CONFIG_PREFLIGHT_DIR=""
+    fi
+  fi
+  return "${cleanup_failed}"
+}
+
+report_retained_recovery_paths() {
+  if [[ "${ROLLBACK_ARMED:-0}" -eq 1 && -n "${BACKUP:-}" ]] && path_exists_or_symlink "${BACKUP}"; then
+    echo "Local OpenClaw config recoverable backup preserved at ${BACKUP}" >&2
+  fi
+  if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" && -d "${MANAGED_UNIT_BACKUP_DIR}" ]]; then
+    echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+  fi
+  if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" && -d "${MANAGED_ARTIFACT_BACKUP_DIR}" ]]; then
+    echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+  fi
+  if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" && -d "${REPO_CONFIG_PREFLIGHT_DIR}" ]]; then
+    echo "Guarded repo OpenClaw config copy preserved at ${REPO_CONFIG_PREFLIGHT_DIR}" >&2
+  fi
+}
+
+commit_deployment_boundary() {
+  local finalize_failed=0
+
+  trap '' HUP INT TERM
+  push_test_checkpoint "commit-boundary-entered"
+  finalize_local_config_backup || finalize_failed=1
+  finalize_managed_unit_transaction || finalize_failed=1
+  finalize_managed_artifact_transaction || finalize_failed=1
+  finalize_systemd_manager_environment_snapshot || finalize_failed=1
+  if [[ "${finalize_failed}" -ne 0 ]]; then
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    return 1
+  fi
+
+  mark_deployment_committed
+  trap - EXIT
+  trap - HUP INT TERM
+
+  cleanup_committed_recovery_paths
+}
+
+restore_local_config_backup() {
+  local restore_stage restore_stage_dir
+  if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
+    return 0
+  fi
+  guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating local OpenClaw config rollback staging directory under ${OPENCLAW_PUSH_HOME}" || return 1
+  restore_stage_dir="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.openclaw.rollback.XXXXXX")"
+  guard_destination_path_chain "${restore_stage_dir}" "created local OpenClaw config rollback staging directory ${restore_stage_dir}" || return 1
+  restore_stage="${restore_stage_dir}/openclaw.json"
+  if ! guarded_copy_path_topology_preserving_final_symlink_topology "${BACKUP}" "${restore_stage}" "staging local OpenClaw config rollback file ${restore_stage}"; then
+    echo "ERROR: Failed to stage backup ${BACKUP} for rollback to ${LOCAL_CONFIG}." >&2
+    if ! guarded_rm_rf "${restore_stage_dir}" "removing local OpenClaw config rollback staging directory ${restore_stage_dir} after stage failure"; then
+      echo "ERROR: Failed to remove local OpenClaw config rollback staging directory ${restore_stage_dir} after stage failure." >&2
+    fi
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if ! guarded_mv_replace_preserving_final_symlink_topology "${restore_stage}" "${LOCAL_CONFIG}" "restoring local OpenClaw config ${LOCAL_CONFIG} from rollback stage" -Tf; then
+    echo "ERROR: Failed to atomically restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
+    echo "       Recoverable backup preserved at ${BACKUP}; staged rollback file preserved at ${restore_stage}." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  if ! guarded_rmdir "${restore_stage_dir}" "removing local OpenClaw config rollback staging directory ${restore_stage_dir} after restoring ${LOCAL_CONFIG}"; then
+    echo "ERROR: Failed to remove local OpenClaw config rollback staging directory ${restore_stage_dir} after restoring ${LOCAL_CONFIG}." >&2
+    echo "       Recoverable backup preserved at ${BACKUP}; rollback staging directory preserved at ${restore_stage_dir}." >&2
+    ROLLBACK_FAILED=1
+    return 1
+  fi
+  ROLLBACK_ARMED=0
+}
+
+run_deployment_rollback_and_exit() {
+  local exit_status="$1"
+  local rollback_step_failed=0
+  trap - EXIT
+  trap - HUP INT TERM
+  if ! cleanup_deployment_temp_file "${GENERATED_OPENCLAW_CONFIG_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! cleanup_deployment_temp_file "${SUPERVISOR_UNIT_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! cleanup_deployment_temp_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! cleanup_deployment_temp_file "${CODEX_RUNTIME_DROPIN_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! cleanup_deployment_temp_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! rollback_managed_unit_transaction; then
+    rollback_step_failed=1
+  fi
+  if ! rollback_managed_artifact_transaction; then
+    rollback_step_failed=1
+  fi
+  if ! final_systemd_reload_after_artifact_rollback; then
+    rollback_step_failed=1
+  fi
+  if ! restore_systemd_manager_environment_snapshot; then
+    rollback_step_failed=1
+  fi
+  if ! restore_local_config_backup; then
+    rollback_step_failed=1
+  fi
+  if [[ "${ROLLBACK_FAILED:-0}" -ne 0 || "${rollback_step_failed}" -ne 0 ]]; then
+    report_retained_recovery_paths
+    exit 1
+  fi
+  if ! cleanup_rollback_recovery_paths; then
+    exit 1
   fi
   exit "${exit_status}"
 }
 
+rollback_local_config_on_exit() {
+  local exit_status=$?
+  run_deployment_rollback_and_exit "${exit_status}"
+}
+
 # ── Pre-flight checks ───────────────────────────────────────────────────────
+trap 'cleanup_repo_config_preflight_copy' EXIT
+trap 'cleanup_repo_config_preflight_copy; exit 129' HUP
+trap 'cleanup_repo_config_preflight_copy; exit 130' INT
+trap 'cleanup_repo_config_preflight_copy; exit 143' TERM
+
 if ! require_openclaw_supported; then
   exit 1
 fi
@@ -777,8 +2025,12 @@ if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_AP
   exit 1
 fi
 
+if ! validate_repo_openclaw_config; then
+  exit 1
+fi
+
 if [[ "${OPENCLAW_PROVIDER:-codex}" == "codex" ]]; then
-  echo "Running preflight: ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
+  echo "Running preflight: guarded repo OpenClaw config copy with ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
   if ! require_codex_runtime_exact; then
     exit 1
   fi
@@ -787,10 +2039,16 @@ fi
 # ── Backup ───────────────────────────────────────────────────────────────────
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 BACKUP="${LOCAL_CONFIG}.bak.${TIMESTAMP}"
-cp "${LOCAL_CONFIG}" "${BACKUP}"
+guard_destination_parent_path_chain "${LOCAL_CONFIG}" "snapshotting local OpenClaw config ${LOCAL_CONFIG}" || exit 1
+guard_destination_parent_path_chain "${BACKUP}" "creating local OpenClaw config backup ${BACKUP}" || exit 1
+guarded_copy_path_topology_preserving_final_symlink_topology "${LOCAL_CONFIG}" "${BACKUP}" "creating local OpenClaw config backup ${BACKUP}"
 ROLLBACK_ARMED=1
 trap 'rollback_local_config_on_exit' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "Backed up local config → ${BACKUP}"
+begin_managed_artifact_transaction
 
 # ── Deep merge ───────────────────────────────────────────────────────────────
 # jq's * operator does recursive object merge (right wins on conflicts).
@@ -828,8 +2086,8 @@ if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; the
   exit 1
 fi
 
-mkdir -p "${MEMPALACE_PALACE}"
-mkdir -p "${FASTEMBED_CACHE_PATH}"
+guarded_mkdir_p "${MEMPALACE_PALACE}" "creating managed MemPalace palace directory ${MEMPALACE_PALACE}"
+guarded_mkdir_p "${FASTEMBED_CACHE_PATH}" "creating managed FastEmbed cache directory ${FASTEMBED_CACHE_PATH}"
 
 if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
   echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
@@ -837,8 +2095,9 @@ if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; the
   exit 1
 fi
 
-mkdir -p "${OPENCLAW_PUSH_HOME}"
-cp "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}"
+guarded_mkdir_p "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw home ${OPENCLAW_PUSH_HOME}"
+snapshot_managed_artifact_path "${MEMPALACE_READONLY_WRAPPER_DST}"
+guarded_cp_file "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}" "installing MemPalace read-only wrapper ${MEMPALACE_READONLY_WRAPPER_DST}"
 echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
 
 MERGED=$(echo "${MERGED}" | jq \
@@ -1145,28 +2404,48 @@ fi
 echo "Managed invariants validated: main interface split, read-only-only MemPalace projection, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, Quantipy methodology skill, built-in memory disabled."
 
 validate_generated_openclaw_config() {
-  local temp_config validate_json validate_status
+  local temp_config validate_json validate_status current_hash current_bytes
+  guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating generated OpenClaw config temp file under ${OPENCLAW_PUSH_HOME}" || exit 1
   temp_config="$(mktemp "${OPENCLAW_PUSH_HOME}/.openclaw.generated.XXXXXX.json")"
+  GENERATED_OPENCLAW_CONFIG_TMP="${temp_config}"
+  guard_destination_path_chain "${temp_config}" "writing generated OpenClaw config temp file ${temp_config}" || exit 1
   printf '%s\n' "${MERGED}" | jq . > "${temp_config}"
+  guard_destination_path_chain "${temp_config}" "wrote generated OpenClaw config temp file ${temp_config}" || exit 1
+  guarded_chmod 0600 "${temp_config}" "chmod generated OpenClaw config temp file ${temp_config}"
+  GENERATED_OPENCLAW_CONFIG_IDENTITY="$(guarded_regular_file_identity "${temp_config}" "capturing generated OpenClaw config identity before validation ${temp_config}")" || exit 1
+  GENERATED_OPENCLAW_CONFIG_HASH="$(file_sha256 "${temp_config}")"
+  GENERATED_OPENCLAW_CONFIG_BYTES="$(file_bytes "${temp_config}")"
   if validate_json="$(run_openclaw_cli_for_config "${temp_config}" config validate --json 2>&1)"; then
     validate_status=0
   else
     validate_status=$?
   fi
-  rm -f "${temp_config}"
-  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | jq -e '.valid == true' >/dev/null 2>&1; then
+  if ! verify_guarded_regular_file_identity_unchanged "${temp_config}" "${GENERATED_OPENCLAW_CONFIG_IDENTITY}" "generated config validation"; then
+    echo "ERROR: External OpenClaw CLI changed generated config identity/topology during validation: ${temp_config}." >&2
+    exit 1
+  fi
+  current_hash="$(file_sha256 "${temp_config}")"
+  current_bytes="$(file_bytes "${temp_config}")"
+  if [[ "${current_hash}" != "${GENERATED_OPENCLAW_CONFIG_HASH}" || "${current_bytes}" != "${GENERATED_OPENCLAW_CONFIG_BYTES}" ]]; then
+    echo "ERROR: External OpenClaw CLI modified generated config during validation." >&2
+    echo "       expected ${GENERATED_OPENCLAW_CONFIG_BYTES} bytes sha256 ${GENERATED_OPENCLAW_CONFIG_HASH}; got ${current_bytes} bytes sha256 ${current_hash}." >&2
+    exit 1
+  fi
+  if [[ "${validate_status}" -ne 0 ]] || ! printf '%s\n' "${validate_json}" | openclaw_schema_validation_is_clean; then
     echo "ERROR: Generated OpenClaw config failed schema validation before write." >&2
     printf '%s\n' "${validate_json}" >&2
     exit 1
   fi
-  echo "Generated OpenClaw config schema validated with ${OPENCLAW_BIN_RESOLVED} config validate --json."
+  echo "Generated OpenClaw config schema validated with ${OPENCLAW_BIN_RESOLVED} config validate --json (${GENERATED_OPENCLAW_CONFIG_BYTES} bytes, sha256 ${GENERATED_OPENCLAW_CONFIG_HASH})."
 }
 
 validate_generated_openclaw_config
 
-# ── Write merged config ─────────────────────────────────────────────────────
-echo "${MERGED}" | jq . > "${LOCAL_CONFIG}"
-echo "Merged repo config into ${LOCAL_CONFIG}"
+# ── Publish validated config ────────────────────────────────────────────────
+push_test_checkpoint "before-config-publication"
+guarded_mv_replace_preserving_final_symlink_topology "${GENERATED_OPENCLAW_CONFIG_TMP}" "${LOCAL_CONFIG}" "publishing validated local OpenClaw config ${LOCAL_CONFIG}" -f
+GENERATED_OPENCLAW_CONFIG_TMP=""
+echo "Atomically published validated repo config to ${LOCAL_CONFIG}"
 
 # ── Copy bootstrap files ────────────────────────────────────────────────────
 # OpenClaw uses ~/.openclaw/workspace for the main agent when no workspace is
@@ -1249,7 +2528,8 @@ PY
 write_codex_runtime_config() {
   local codex_home="$1"
   local agent_id="$2"
-  mkdir -p "${codex_home}"
+  guarded_mkdir_p "${codex_home}" "creating managed Codex runtime home ${codex_home}"
+  guard_destination_path_chain "${codex_home}/config.toml" "writing managed Codex runtime config ${codex_home}/config.toml"
   CODEX_RUNTIME_AGENT_ID="${agent_id}" \
   CODEX_RUNTIME_CONFIG_PATH="${codex_home}/config.toml" \
   CODEX_RUNTIME_MEMPALACE_PYTHON="${MEMPALACE_PYTHON}" \
@@ -1330,6 +2610,7 @@ for server_name in sorted(servers):
     lines.append("")
 config_path.write_text("\n".join(lines), encoding="utf-8")
 PY
+  guard_destination_path_chain "${codex_home}/config.toml" "wrote managed Codex runtime config ${codex_home}/config.toml"
 }
 
 validate_codex_runtime_config() {
@@ -1815,8 +3096,8 @@ remove_legacy_codex_stage_agents() {
   [[ -d "${agents_dir}" ]] || return 0
   for agent_id in "${CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS[@]}"; do
     local stale_path="${agents_dir}/${agent_id}.toml"
-    if [[ -f "${stale_path}" ]]; then
-      rm -- "${stale_path}"
+    if [[ -f "${stale_path}" || -L "${stale_path}" ]]; then
+      guarded_rm "${stale_path}" "removing stale native Codex stage agent ${stale_path}"
       echo "Removed stale native Codex stage agent ${stale_path}"
     fi
   done
@@ -1852,17 +3133,18 @@ echo "Copying managed bootstrap files to ${#BOOTSTRAP_TARGETS[@]} configured Ope
 for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
   IFS=$'\t' read -r WORKSPACE_ID AGENTS <<< "${TARGET}"
   BOOTSTRAP_DST="$(workspace_dir_for_target "${WORKSPACE_ID}")"
+  snapshot_managed_artifact_path "${BOOTSTRAP_DST}"
   BOOTSTRAP_TARGET_DIRS["${BOOTSTRAP_DST}"]=1
-  mkdir -p "${BOOTSTRAP_DST}"
+  guarded_mkdir_p "${BOOTSTRAP_DST}" "creating managed OpenClaw workspace ${BOOTSTRAP_DST}"
   for FILE in "${BOOTSTRAP_FILES[@]}"; do
-    cp "${REPO_ROOT}/gateway/agent_config/${FILE}" "${BOOTSTRAP_DST}/${FILE}"
+    guarded_cp_file "${REPO_ROOT}/gateway/agent_config/${FILE}" "${BOOTSTRAP_DST}/${FILE}" "copying managed bootstrap file ${BOOTSTRAP_DST}/${FILE}"
   done
   if workspace_has_autoresearch_agent "${AGENTS}"; then
     CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
-    mkdir -p "${CODEX_AGENTS_DST}"
+    guarded_mkdir_p "${CODEX_AGENTS_DST}" "creating managed workspace Codex agents directory ${CODEX_AGENTS_DST}"
     remove_legacy_codex_stage_agents "${CODEX_AGENTS_DST}"
     for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
-      cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_AGENTS_DST}/${AGENT_ID}.toml"
+      guarded_cp_file "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_AGENTS_DST}/${AGENT_ID}.toml" "copying managed workspace Codex agent ${CODEX_AGENTS_DST}/${AGENT_ID}.toml"
     done
     validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"
   fi
@@ -1874,18 +3156,45 @@ echo "Local workspace files such as USER.md and IDENTITY.md were left untouched.
 # CODEX_HOME, not from the OpenClaw workspace. Keep that runtime source
 # synchronized for the PM and every configured stage agent.
 CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "autoresearch-pm" "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}")
+declare -A MANAGED_AGENT_DIR_SNAPSHOT_IDS=()
+for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
+  MANAGED_AGENT_DIR_SNAPSHOT_IDS["${CODEX_RUNTIME_AGENT_ID}"]=1
+done
+mapfile -t OPENAI_AGENT_IDS_FOR_SNAPSHOT < <(jq -r '
+  .agents.list[]?
+  | select((.model.primary // "") | startswith("openai/"))
+  | .id
+' "${REPO_CONFIG}")
+for OPENAI_AGENT_ID_FOR_SNAPSHOT in "${OPENAI_AGENT_IDS_FOR_SNAPSHOT[@]}"; do
+  MANAGED_AGENT_DIR_SNAPSHOT_IDS["${OPENAI_AGENT_ID_FOR_SNAPSHOT}"]=1
+done
+for MANAGED_AGENT_ID_FOR_SNAPSHOT in "${!MANAGED_AGENT_DIR_SNAPSHOT_IDS[@]}"; do
+  snapshot_managed_artifact_path "${OPENCLAW_PUSH_HOME}/agents/${MANAGED_AGENT_ID_FOR_SNAPSHOT}/agent"
+done
 echo "Copying native Codex stage agents to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
 for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
   CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
-  mkdir -p "${CODEX_RUNTIME_AGENTS_DST}"
+  guarded_mkdir_p "${CODEX_RUNTIME_AGENTS_DST}" "creating managed Codex runtime agents directory ${CODEX_RUNTIME_AGENTS_DST}"
   write_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
   remove_legacy_codex_stage_agents "${CODEX_RUNTIME_AGENTS_DST}"
   if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then
-    find "${CODEX_RUNTIME_AGENTS_DST}" -mindepth 1 -maxdepth 1 -type f -name '*.toml' -delete
+    STALE_CODEX_AGENT_SCAN_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/push-openclaw-main-codex-agents.XXXXXX")"
+    guard_destination_path_chain "${STALE_CODEX_AGENT_SCAN_OUTPUT}" "creating stale main Codex runtime agent scan output ${STALE_CODEX_AGENT_SCAN_OUTPUT}" || exit 1
+    if ! collect_find_results_null \
+      "${STALE_CODEX_AGENT_SCAN_OUTPUT}" \
+      "${CODEX_RUNTIME_AGENTS_DST}" \
+      "scanning stale main Codex runtime agents in ${CODEX_RUNTIME_AGENTS_DST}" \
+      -mindepth 1 -maxdepth 1 -type f -name '*.toml'; then
+      exit 1
+    fi
+    while IFS= read -r -d '' STALE_CODEX_AGENT_FILE; do
+      guarded_rm "${STALE_CODEX_AGENT_FILE}" "removing stale main Codex runtime agent ${STALE_CODEX_AGENT_FILE}"
+    done < "${STALE_CODEX_AGENT_SCAN_OUTPUT}"
+    guarded_rm_f "${STALE_CODEX_AGENT_SCAN_OUTPUT}" "removing stale main Codex runtime agent scan output ${STALE_CODEX_AGENT_SCAN_OUTPUT}" || exit 1
   else
     for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
-      cp "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
+      guarded_cp_file "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml" "copying managed Codex runtime agent ${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
     done
   fi
   validate_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
@@ -1905,7 +3214,12 @@ for FILE in "${BOOTSTRAP_FILES[@]}"; do
   for STALE_DIR in "${STALE_BOOTSTRAP_DIRS[@]}"; do
     STALE="${STALE_DIR}/${FILE}"
     if [[ -f "${STALE}" ]] && [[ -z "${BOOTSTRAP_TARGET_DIRS[${STALE_DIR}]:-}" ]]; then
-      rm "${STALE}"
+      if [[ "${STALE_DIR}" == "${OPENCLAW_PUSH_HOME}" ]]; then
+        snapshot_managed_artifact_path "${STALE}"
+      else
+        snapshot_managed_artifact_path "${STALE_DIR}"
+      fi
+      guarded_rm "${STALE}" "removing stale managed bootstrap file ${STALE}"
       echo "Removed stale ${STALE}"
     fi
   done
@@ -1914,20 +3228,23 @@ done
 # ── Copy repo skills ─────────────────────────────────────────────────────────
 SKILLS_DST="${OPENCLAW_PUSH_HOME}/skills"
 if [[ -d "${SKILLS_SRC}" ]]; then
+  snapshot_managed_artifact_path "${SKILLS_DST}"
   # Copy repo skills to local
   for SKILL_DIR in "${SKILLS_SRC}"/*/; do
     SKILL_NAME="$(basename "${SKILL_DIR}")"
     if [[ ! -f "${SKILL_DIR}SKILL.md" ]]; then
       continue
     fi
-    mkdir -p "${SKILLS_DST}/${SKILL_NAME}"
-    cp "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
+    snapshot_managed_artifact_path "${SKILLS_DST}/${SKILL_NAME}"
+    guarded_mkdir_p "${SKILLS_DST}/${SKILL_NAME}" "creating managed skill directory ${SKILLS_DST}/${SKILL_NAME}"
+    guarded_cp_file "${SKILL_DIR}"SKILL.md "${SKILLS_DST}/${SKILL_NAME}/SKILL.md" "copying managed skill file ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
     echo "Copied skill ${SKILL_NAME} → ${SKILLS_DST}/${SKILL_NAME}/SKILL.md"
   done
 fi
 STALE_MEMPALACE_WRITE_SKILL_DST="${SKILLS_DST}/mempalace"
 if [[ -d "${STALE_MEMPALACE_WRITE_SKILL_DST}" ]]; then
-  rm -rf -- "${STALE_MEMPALACE_WRITE_SKILL_DST}"
+  snapshot_managed_artifact_path "${STALE_MEMPALACE_WRITE_SKILL_DST}"
+  guarded_rm_rf "${STALE_MEMPALACE_WRITE_SKILL_DST}" "removing stale write-capable MemPalace skill ${STALE_MEMPALACE_WRITE_SKILL_DST}"
   echo "Removed stale write-capable MemPalace skill ${STALE_MEMPALACE_WRITE_SKILL_DST}"
 fi
 
@@ -1935,14 +3252,18 @@ fi
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
 PRELOAD_DST="${OPENCLAW_PUSH_HOME}/azure-api-version-preload.cjs"
 if [[ "${OPENCLAW_PROVIDER:-codex}" == "azure" && -f "${PRELOAD_SRC}" ]]; then
-  cp "${PRELOAD_SRC}" "${PRELOAD_DST}"
+  snapshot_managed_artifact_path "${PRELOAD_DST}"
+  guarded_cp_file "${PRELOAD_SRC}" "${PRELOAD_DST}" "copying managed Azure preload artifact ${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
 elif [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" && -f "${PRELOAD_DST}" ]]; then
-  rm "${PRELOAD_DST}"
+  snapshot_managed_artifact_path "${PRELOAD_DST}"
+  guarded_rm "${PRELOAD_DST}" "removing managed Azure preload artifact ${PRELOAD_DST}"
   echo "Removed Azure preload artifact from Codex/OpenRouter route: ${PRELOAD_DST}"
 fi
 
 if [[ "${PROVIDER}" == "codex" ]]; then
+  snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
+  snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
   remove_stale_azure_node_options_for_codex
   sync_managed_agent_codex_auth
 fi
@@ -1950,22 +3271,45 @@ fi
 # ── Validate ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Validating config ──"
-echo "Running: ${OPENCLAW_BIN_RESOLVED} config validate"
-if ! run_openclaw_cli config validate; then
-  echo "ERROR: '${OPENCLAW_BIN_RESOLVED} config validate' failed. Restored backup ${BACKUP}." >&2
-  exit 1
+echo "Running: ${OPENCLAW_BIN_RESOLVED} config validate --json"
+PUBLISHED_OPENCLAW_CONFIG_IDENTITY="$(guarded_regular_file_identity "${LOCAL_CONFIG}" "capturing live OpenClaw config identity before final validation ${LOCAL_CONFIG}")" || run_deployment_rollback_and_exit 1
+PUBLISHED_OPENCLAW_CONFIG_HASH="$(file_sha256 "${LOCAL_CONFIG}")"
+PUBLISHED_OPENCLAW_CONFIG_BYTES="$(file_bytes "${LOCAL_CONFIG}")"
+if live_validate_json="$(run_openclaw_cli config validate --json 2>&1)"; then
+  live_validate_status=0
+else
+  live_validate_status=$?
+fi
+if [[ "${live_validate_status}" -ne 0 ]] || ! printf '%s\n' "${live_validate_json}" | openclaw_schema_validation_is_clean; then
+  echo "ERROR: '${OPENCLAW_BIN_RESOLVED} config validate --json' failed. Rolling back managed deployment from backup ${BACKUP}." >&2
+  printf '%s\n' "${live_validate_json}" >&2
+  run_deployment_rollback_and_exit 1
+fi
+if ! verify_guarded_regular_file_identity_unchanged "${LOCAL_CONFIG}" "${PUBLISHED_OPENCLAW_CONFIG_IDENTITY}" "final live config validation"; then
+  echo "ERROR: External OpenClaw CLI changed live config identity/topology during final validation: ${LOCAL_CONFIG}. Rolling back managed deployment from backup ${BACKUP}." >&2
+  run_deployment_rollback_and_exit 1
+fi
+current_live_config_hash="$(file_sha256 "${LOCAL_CONFIG}")"
+current_live_config_bytes="$(file_bytes "${LOCAL_CONFIG}")"
+if [[ "${current_live_config_hash}" != "${PUBLISHED_OPENCLAW_CONFIG_HASH}" \
+  || "${current_live_config_bytes}" != "${PUBLISHED_OPENCLAW_CONFIG_BYTES}" ]]; then
+  echo "ERROR: External OpenClaw CLI modified live config during final validation. Rolling back managed deployment from backup ${BACKUP}." >&2
+  echo "       expected ${PUBLISHED_OPENCLAW_CONFIG_BYTES} bytes sha256 ${PUBLISHED_OPENCLAW_CONFIG_HASH}; got ${current_live_config_bytes} bytes sha256 ${current_live_config_hash}." >&2
+  run_deployment_rollback_and_exit 1
 fi
 
 # Install the supervisor definition without starting autonomous work. The
 # human-facing control command owns enable/start and stop transitions.
-mkdir -p "${SYSTEMD_USER_DIR}"
+guarded_mkdir_p "${SYSTEMD_USER_DIR}" "creating managed systemd user directory ${SYSTEMD_USER_DIR}"
 SUPERVISOR_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${SUPERVISOR_SERVICE_NAME}.XXXXXX")"
+guard_destination_path_chain "${SUPERVISOR_UNIT_TMP}" "writing generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
 sed \
   -e "s|@REPO_ROOT@|$(escape_sed_replacement "${REPO_ROOT}")|g" \
   -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
   -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
   -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
   "${SUPERVISOR_UNIT_TEMPLATE}" > "${SUPERVISOR_UNIT_TMP}"
+guard_destination_path_chain "${SUPERVISOR_UNIT_TMP}" "wrote generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
 if grep -q '@[A-Z_][A-Z_]*@' "${SUPERVISOR_UNIT_TMP}"; then
   echo "ERROR: Unresolved placeholder in generated ${SUPERVISOR_SERVICE_NAME}." >&2
   exit 1
@@ -1973,9 +3317,9 @@ fi
 if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TMP}"; then
   exit 1
 fi
-chmod 0644 "${SUPERVISOR_UNIT_TMP}"
+guarded_chmod 0644 "${SUPERVISOR_UNIT_TMP}" "chmod generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
 begin_managed_unit_transaction
-mv "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"
+guarded_mv_replace "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}" "publishing managed supervisor unit ${SUPERVISOR_UNIT_DST}"
 SUPERVISOR_UNIT_TMP=""
 echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
 
@@ -1984,35 +3328,42 @@ echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
 # thread counts. This is shared operator infrastructure, not agent-owned state.
 prepare_runtime_caps_dropin_dir
 GATEWAY_RUNTIME_CAPS_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}.XXXXXX")"
-cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
-chmod 0644 "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
+guarded_cp_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "staging managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
+guarded_chmod 0644 "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "chmod staged managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
 validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
-mv "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
+guarded_mv_replace "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" "publishing managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 GATEWAY_RUNTIME_CAPS_DROPIN_TMP=""
 validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 CODEX_RUNTIME_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${CODEX_RUNTIME_DROPIN_NAME}.XXXXXX")"
-cp "${CODEX_RUNTIME_DROPIN_SRC}" "${CODEX_RUNTIME_DROPIN_TMP}"
-chmod 0644 "${CODEX_RUNTIME_DROPIN_TMP}"
+guarded_cp_file "${CODEX_RUNTIME_DROPIN_SRC}" "${CODEX_RUNTIME_DROPIN_TMP}" "staging managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_TMP}"
+guarded_chmod 0644 "${CODEX_RUNTIME_DROPIN_TMP}" "chmod staged managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_TMP}"
 validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_TMP}"
-mv "${CODEX_RUNTIME_DROPIN_TMP}" "${CODEX_RUNTIME_DROPIN_DST}"
+guarded_mv_replace "${CODEX_RUNTIME_DROPIN_TMP}" "${CODEX_RUNTIME_DROPIN_DST}" "publishing managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_DST}"
 CODEX_RUNTIME_DROPIN_TMP=""
 validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${NATIVE_CRASH_HARDENING_DROPIN_NAME}.XXXXXX")"
-cp "${NATIVE_CRASH_HARDENING_DROPIN_SRC}" "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
-chmod 0644 "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
+guarded_cp_file "${NATIVE_CRASH_HARDENING_DROPIN_SRC}" "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "staging managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
+guarded_chmod 0644 "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "chmod staged managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
 validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
-mv "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+guarded_mv_replace "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}" "publishing managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP=""
 validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
-systemctl --user daemon-reload
-commit_managed_unit_transaction
+if ! systemctl --user daemon-reload; then
+  run_deployment_rollback_and_exit 1
+fi
+if ! commit_deployment_boundary; then
+  if [[ "${DEPLOYMENT_COMMITTED:-0}" -eq 1 ]]; then
+    exit 1
+  fi
+  run_deployment_rollback_and_exit 1
+fi
+if [[ "${POST_COMMIT_CLEANUP_FAILED:-0}" -ne 0 ]]; then
+  exit 1
+fi
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} Codex runtime verifier → ${CODEX_RUNTIME_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} native-crash hardening → ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
-
-ROLLBACK_ARMED=0
-trap - EXIT
 
 echo ""
 echo "Done. Config pushed successfully."
