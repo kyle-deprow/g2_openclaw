@@ -590,16 +590,15 @@ the top, oldest at the bottom.
 
 ```typescript
 // Format conversation with newest first
+// (mirrors ConversationHistory.formatReverse in g2_app/src/conversation.ts)
+const SEPARATOR = '\n─ ─ ─ ─ ─ ─ ─ ─\n';
+
 function formatReverse(entries: { role: string; text: string }[]): string {
-  const lines: string[] = [];
-  // Iterate backwards — newest entry first
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    const prefix = e.role === 'user' ? '> ' : '';
-    lines.push(`${prefix}${e.text}`);
-    if (i > 0) lines.push('---');
-  }
-  return lines.join('\n');
+  return [...entries].reverse().map((e) => {
+    if (e.role === 'user') return `» ${e.text}`;
+    if (e.role === 'system') return `[${e.text}]`;
+    return stripMarkdown(e.text) || '...';
+  }).join(SEPARATOR);
 }
 ```
 
@@ -608,8 +607,9 @@ Key rules:
 - During streaming, call `replaceTranscript(formatReverse(...))` on each delta
   flush — not `appendDelta()`, because the entire layout must be re-rendered
   in the new order.
-- User messages are prefixed with `> ` for visual distinction.
-- Entries are separated by `---` dividers.
+- User messages are prefixed with `» ` for visual distinction; system messages
+  are wrapped in `[brackets]`.
+- Entries are separated by `─ ─ ─ ─ ─ ─ ─ ─` dividers (the `SEPARATOR` constant).
 
 > **Reference:** `g2_app/src/conversation.ts` — `formatReverse()` implementation.
 
@@ -728,8 +728,6 @@ Understanding the boundaries prevents wasted effort and impossible designs.
 
 - [docs/reference/g2-platform/evenhub_sdk.md](docs/reference/g2-platform/evenhub_sdk.md) — Full SDK container reference
 - [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Hardware display reference
-- [docs/design/display-layouts.md](docs/design/display-layouts.md) — Display layout design for this project
-- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
 - [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
 - [g2_app/src/utils.ts](g2_app/src/utils.ts) — Utility helpers (`stripMarkdown`, etc.)
 - [g2_app/src/conversation.ts](g2_app/src/conversation.ts) — Conversation rendering (uses `stripMarkdown`)

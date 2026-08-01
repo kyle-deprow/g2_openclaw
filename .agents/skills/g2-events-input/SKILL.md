@@ -640,9 +640,6 @@ The gateway enforces a **90-second maximum recording duration**
 If the user starts recording but never taps again to stop, the server
 automatically closes the audio session after 90 s.
 
-> **Reference:** See `docs/decisions/002-tap-to-toggle.md` for the full
-> architectural decision record.
-
 ---
 
 ## 12. Compatible Event Data Formats
@@ -773,8 +770,4 @@ LIFECYCLE:           FG_ENTER → resume, FG_EXIT → pause, ABNORMAL → cleanu
 - `g2_app/src/conversation.ts` — Conversation history and formatting
 - `g2_app/src/utils.ts` — Utility functions (stripMarkdown, etc.)
 - `g2_app/src/state.ts` — State machine
-- `docs/decisions/002-tap-to-toggle.md` — Tap-to-toggle ADR
-- `docs/implementation/phase-2-audio-pipeline.md` — Audio pipeline implementation plan
-- `docs/archive/spikes/phase0-sdk-findings.md` — SDK spike findings
-- `docs/design/g2-app.md` — G2 app design (event×state dispatch table in §7)
 - `docs/reference/g2-platform/evenhub_sdk.md` — Full SDK reference

@@ -109,6 +109,10 @@ policies to compensate:
 This prevents tool calls that a provider's model can't handle well, without
 affecting other providers.
 
+> **Deployment policy (this repo):** single provider — OpenAI/Codex app-server
+> via OAuth only (no Copilot path, no fallback). `providerPolicy` is not
+> applicable here.
+
 ### `tools-groups-fine-control`
 Tool groups provide category-level control without listing individual tools:
 
@@ -131,6 +135,11 @@ Tool groups provide category-level control without listing individual tools:
 ```
 
 Use groups for broad category toggles; use allow/deny for individual tools.
+
+> **Deployment policy (this repo):** `memory_search`/`memory_get` are globally
+> denied and `main` uses tools.profile `minimal` with an exact allowlist
+> (3 `g2-control__*` + 19 `mempalace-readonly__*` tools), denying `exec` and
+> all `sessions_*` tools. Do not broaden these outside a reviewed config change.
 
 ---
 
@@ -177,8 +186,10 @@ Never hardcode secrets in MCP config. Use `env:VAR_NAME` syntax:
 The `env:` prefix resolves at runtime from the Gateway's environment.
 
 ### `mcp-tool-naming`
-MCP tools appear with their server name as prefix: `github_create_issue`,
-`filesystem_read_file`. Choose short, descriptive server names:
+MCP tools appear with their server name as prefix (double underscore):
+`github__create_issue`, `filesystem__read_file` — e.g. this repo's
+`g2-control__g2_autoresearch_status`, `mempalace-readonly__mempalace_search`.
+Choose short, descriptive server names:
 
 ```json
 // ✅ Clean prefixes
@@ -386,6 +397,11 @@ Skills come from three sources with descending priority:
 
 A workspace skill overrides a managed skill with the same name. Use workspace
 for customization, managed for community packages.
+
+> **Deployment policy (this repo):** never hand-edit `~/.openclaw/` locations.
+> All config/skill changes are made in `gateway/openclaw_config/` or
+> `gateway/agent_config/` and deployed only via
+> `bash scripts/push-openclaw-config.sh` (guarded, transactional, fail-closed).
 
 ### `skill-per-agent`
 Assign skills per agent to create specialists:

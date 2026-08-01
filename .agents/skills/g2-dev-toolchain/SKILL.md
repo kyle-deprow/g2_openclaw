@@ -391,11 +391,15 @@ uv run python -m gateway launch --restart
 
 ### What `make sim` does (in order):
 
-1. **Stop** — kills any running gateway, Vite, and simulator processes
-2. **Start OpenClaw daemon** — `openclaw daemon start` (if not already running)
-3. **Start Gateway** — Python WebSocket server on port 8765
-4. **Start Vite** — G2 app dev server on port 5173
-5. **Start Simulator** — `evenhub-simulator http://localhost:5173`
+1. **Start OTel stack** — `otel-up` Makefile dependency runs
+   `docker compose -f docker-compose.otel.yml up -d` (Grafana, Jaeger, Prometheus)
+2. **Stop** — kills any running gateway, Vite, and simulator processes
+3. **Start OpenClaw daemon** — `openclaw daemon start` (if not already running)
+4. **Start Gateway** — Python WebSocket server on port 8765
+5. **Start Vite** — G2 app dev server on port 5173
+6. **Start Simulator** — `evenhub-simulator http://localhost:5173`
+
+Use `make sim-lite` for G2 + OpenClaw only (no OTel Docker stack).
 
 ### Individual Controls
 
@@ -492,8 +496,3 @@ React 19 component library for settings/config WebView pages (NOT glasses displa
 - [docs/reference/g2-platform/evenhub_cli.md](docs/reference/g2-platform/evenhub_cli.md) — Full CLI analysis
 - [docs/reference/g2-platform/evenhub_simulator.md](docs/reference/g2-platform/evenhub_simulator.md) — Full simulator analysis
 - [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Comprehensive G2 reference
-- [docs/archive/spikes/phase0-manifest-findings.md](docs/archive/spikes/phase0-manifest-findings.md) — Manifest verification findings
-- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
-- [docs/design/g2-app.md](docs/design/g2-app.md) — G2 app design document
-- [docs/guides/getting-started.md](docs/guides/getting-started.md) — Getting started guide
-- [docs/guides/development.md](docs/guides/development.md) — Development guide

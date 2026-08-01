@@ -13,8 +13,8 @@ description:
 Control the G2 app running inside the EvenHub simulator through HTTP endpoints
 served by the loopback-only Vite simulator server on **port 5173**. The API plugin
 (`g2_app/dev-api.ts`) bridges external HTTP calls to `window.__g2Api` inside the
-simulator's webview. This control API is for the user or Codex only. It is not a
-phone/G2 feature and must never be exposed to another machine.
+simulator's webview. This control API is for the user or local coding agents
+only. It is not a phone/G2 feature and must never be exposed to another machine.
 
 ## Starting the Stack
 
@@ -41,7 +41,7 @@ Base URL: `http://localhost:5173`
 
 The API accepts a supplied `Origin` only when it is exactly
 `http://127.0.0.1:5173` or `http://localhost:5173` (using the active Vite port).
-Origin-less same-host curl/Codex requests remain supported. Never send the API
+Origin-less same-host requests (curl, local coding agents) remain supported. Never send the API
 to a phone, G2 device, LAN host, or remote browser.
 
 | Endpoint              | Method | Purpose                                  |

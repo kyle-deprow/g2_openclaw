@@ -85,6 +85,13 @@ Preserve explicit repo-managed model selections for each role. Change model
 refs only through reviewed config updates; do not substitute generic aliases in
 prompts or per-spawn overrides.
 
+> **Deployment policy (this repo):** models are pinned in
+> `gateway/openclaw_config/openclaw.json` — `main`=openai/gpt-5.4;
+> `autoresearch-pm`/`consensus_arbiter`/`reviewer`=gpt-5.6-sol;
+> `debater_data`=gpt-5.6-terra; `debater_microstructure`/`debater_skeptic`=
+> gpt-5.5; others gpt-5.4 — on a single OpenAI/Codex OAuth provider with no
+> fallback. Example models elsewhere in this file are illustrative only.
+
 ### `agent-per-agent-identity`
 Each agent should have its own IDENTITY.md and SOUL.md overrides:
 
@@ -131,6 +138,12 @@ Configure shared defaults, then override per agent:
 ---
 
 ## 2. Session Tools — Inter-Agent Communication (CRITICAL)
+
+> **Deployment policy (this repo):** `main` denies `exec` and ALL `sessions_*`
+> tools; `autoresearch-pm` denies `sessions_spawn`/`sessions_yield`/
+> `sessions_list`/`sessions_history`/`agents_list`. Delegation uses native Codex
+> `spawn_agent` instead of OpenClaw session spawning — the `sessions_send`/
+> `sessions_spawn` patterns below do not apply to those agents.
 
 ### `st-four-tools`
 Four session tools enable inter-agent communication:
@@ -252,6 +265,10 @@ Input: {
   }
 }
 ```
+
+> **Deployment policy (this repo):** `memory_search` is globally denied
+> (`tools.deny`) — do not allowlist it per spawn; memory reads go through the
+> `mempalace-readonly__*` MCP tools.
 
 ### `sub-sandbox-visibility`
 Control which sessions a subagent can discover:
@@ -385,6 +402,9 @@ Output: [
 
 The coordinator uses this to decide which agent to delegate to based on the
 user's request.
+
+> **Deployment policy (this repo):** `agents_list` is denied for
+> `autoresearch-pm`; delegation targets are fixed in config, not discovered.
 
 ---
 

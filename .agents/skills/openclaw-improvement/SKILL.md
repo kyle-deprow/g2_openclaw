@@ -44,7 +44,7 @@ Every change to `gateway/agent_config/` or `gateway/openclaw_config/`:
 
 1. Edit source files in the repo (never `~/.openclaw/` directly)
 2. Run `bash scripts/push-openclaw-config.sh` — copies config + auto-corrects per-agent models.json
-3. Run `openclaw daemon restart` — picks up new config
+3. Run `systemctl --user restart openclaw-gateway.service` — picks up new config
 4. Verify: `openclaw config validate`
 5. Commit the source file changes to git
 
@@ -307,7 +307,9 @@ after cleanup with `df -h /tmp /home/dev`.
 |-------|----------|---------|
 | codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, detached runs, resume, debugging |
 | autoresearch | `gateway/agent_config/skills/autoresearch/` | Autonomous research loop protocol |
-| quantipy-methodology | `gateway/agent_config/skills/quantipy-methodology/` | Stage-agent preflight for loading live Quantipy AGENTS, skills, and Codex agent definitions |
+| mempalace-readonly | `gateway/agent_config/skills/mempalace-readonly/` | Read-only MemPalace context access (search, diary, traversal, KG query) for model threads |
+| quantipy-data-contract | `gateway/agent_config/skills/quantipy-data-contract/` | Runtime data-access and point-in-time contract for Quantipy autoresearch stages |
+| quantipy-methodology | `gateway/agent_config/skills/quantipy-methodology/` | Deterministic source-of-truth routing for Quantipy autoresearch stages |
 | *(this skill)* | `.agents/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |
 
 When creating new skills for OpenClaw, place them at `gateway/agent_config/skills/<name>/SKILL.md`.

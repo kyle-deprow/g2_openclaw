@@ -567,7 +567,7 @@ Event data from the Flutter host may arrive in several shapes. The SDK accepts a
 | `ImageContainerProperty.width` range | 20–200 pixels. |
 | `ImageContainerProperty.height` range | 20–100 pixels. |
 | `ListItemContainerProperty.itemName` char limit | Max 64 characters per item name. |
-| `CLICK_EVENT = 0` → `undefined` | SDK's `fromJson` normalizes `0` to `undefined`. Always check: `eventType === OsEventTypeList.CLICK_EVENT \|\| eventType === undefined`. Guard against empty events first. | `g2_app/src/input.ts` |
+| `CLICK_EVENT = 0` → `undefined` | SDK's `fromJson` normalizes `0` to `undefined`. Always check: `eventType === OsEventTypeList.CLICK_EVENT \|\| eventType === undefined`. Guard against empty events first. See `g2_app/src/input.ts`. |
 
 ## Complete Import Reference
 
@@ -642,8 +642,6 @@ import {
 
 - [docs/reference/g2-platform/evenhub_sdk.md](docs/reference/g2-platform/evenhub_sdk.md) — Full SDK analysis
 - [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Comprehensive G2 reference
-- [docs/archive/spikes/phase0-sdk-findings.md](docs/archive/spikes/phase0-sdk-findings.md) — SDK verification findings
-- [docs/design/g2-app.md](docs/design/g2-app.md) — G2 app design (SDK usage patterns)
 - [g2_app/src/display.ts](g2_app/src/display.ts) — Display implementation
 - [g2_app/src/input.ts](g2_app/src/input.ts) — Input and audio control implementation
 - [g2_app/src/utils.ts](g2_app/src/utils.ts) — Utility functions

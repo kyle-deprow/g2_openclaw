@@ -129,6 +129,14 @@ Use explicit configured models for scheduled tasks:
 Preserve repo-managed model selections unless an operator explicitly changes
 the scheduled job model.
 
+> **Deployment policy (this repo):** the example model above is illustrative
+> only. Models are pinned in `gateway/openclaw_config/openclaw.json`
+> (`main`=openai/gpt-5.4; `autoresearch-pm`/`consensus_arbiter`/`reviewer`=
+> gpt-5.6-sol; `debater_data`=gpt-5.6-terra; `debater_microstructure`/
+> `debater_skeptic`=gpt-5.5; others gpt-5.4) on a single OpenAI/Codex OAuth
+> provider — no alias-based model guidance applies. Config is deployed only via
+> `bash scripts/push-openclaw-config.sh`; never hand-edit `~/.openclaw/`.
+
 ### `cron-agent-binding`
 Bind cron jobs to specific agents in multi-agent setups:
 
@@ -264,6 +272,11 @@ OpenClaw ships with these hooks — understand what they do before building cust
 | `bootstrap-extra-files`   | Loads additional files into bootstrap context     |
 | `command-logger`          | Logs all slash commands for debugging             |
 | `boot-md`                 | Processes BOOT.md files at startup               |
+
+> **Deployment policy (this repo):** the `session-memory` hook (transcript
+> indexing into vector memory) is off-policy — `memorySearch.enabled` is
+> `false`, `memory_search`/`memory_get` are denied, and memory writes go only
+> through the non-model MemPalace finalizer. Do not enable it here.
 
 ### `hook-discovery-order`
 Hooks load from three locations (highest priority first):

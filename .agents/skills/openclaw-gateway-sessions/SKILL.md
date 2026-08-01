@@ -171,6 +171,11 @@ Sessions live at `~/.openclaw/agents/<agentId>/sessions/`:
 Back up the `sessions/` directory for durability. Transcript JSONL files are the
 source of truth — the in-memory session can always be rebuilt from them.
 
+> **Deployment policy (this repo):** never hand-edit `~/.openclaw/` files.
+> Config changes are made in `gateway/openclaw_config/` or
+> `gateway/agent_config/` and deployed only via
+> `bash scripts/push-openclaw-config.sh` (guarded, transactional, fail-closed).
+
 ---
 
 ## 3. Context Management (HIGH)
@@ -229,6 +234,11 @@ Choose pruning mode based on usage pattern:
 }
 ```
 
+> **Deployment policy (this repo):** the provider is the OpenAI/Codex app-server
+> via OAuth only (no Anthropic path), so the "Anthropic cache is stale"
+> rationale for `cache-ttl` does not transfer directly. Treat pruning changes as
+> reviewed edits to `gateway/openclaw_config/openclaw.json`.
+
 ### `pruning-what-gets-trimmed`
 Only `toolResult` messages are pruned. User and assistant messages are **never**
 modified. The last N assistant messages (default 3) are fully protected.
@@ -261,6 +271,11 @@ Before auto-compaction, enable the memory flush to avoid losing critical context
 
 The flush gives the agent one silent turn to persist important information before
 the session is summarized. Without it, nuanced context is lost to compaction.
+
+> **Deployment policy (this repo):** `compaction.memoryFlush.enabled` is `false`
+> deliberately. The ONLY memory writer is the non-model MemPalace finalizer
+> (`gateway/mempalace_finalizer.py`) driven by the autoresearch supervisor —
+> do NOT enable the flush here.
 
 ### `pruning-manual-compact`
 Users can trigger compaction manually with `/compact` (optional instructions).
@@ -324,6 +339,9 @@ Use `seq` to detect missed events and request replay if needed.
 ---
 
 ## Quick Config Template
+
+> **Deployment policy (this repo):** generic template — the repo baseline sets
+> `compaction.memoryFlush.enabled: false` (see note above).
 
 ```json
 {

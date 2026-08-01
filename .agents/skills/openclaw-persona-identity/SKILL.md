@@ -62,6 +62,9 @@ Bootstrap files → unchanged, re-read on next session start
 Memory files → unchanged, searchable via memory_search
 ```
 
+**Deployment policy (this repo):** `memory_search`/`memory_get` are globally
+denied. Retrieval is via the read-only mempalace-readonly MCP server instead.
+
 ### `boot-token-budget`
 Every token in bootstrap files counts against the context window. Budget guide:
 
@@ -77,6 +80,9 @@ Every token in bootstrap files counts against the context window. Budget guide:
 
 If combined bootstrap exceeds 2,000 tokens, the agent loses conversational depth.
 Prune ruthlessly — the agent can always `memory_search` for details.
+
+**Deployment policy (this repo):** `memory_search` is globally denied; agents
+retrieve details through the read-only mempalace-readonly MCP tools instead.
 
 ### `boot-per-agent-overrides`
 In multi-agent setups, each agent can have its own bootstrap directory:
@@ -273,6 +279,12 @@ Update USER.md when:
 Update MEMORY.md when:
 - A fact is critical across all future sessions
 ```
+
+**Deployment policy (this repo):** no model writes memory. The sole memory
+writer is the non-model finalizer `gateway/mempalace_finalizer.py`; agents get
+read-only mempalace-readonly MCP retrieval only, `memory_search`/`memory_get`
+are globally denied, and `compaction.memoryFlush` is disabled deliberately. Do
+not add memory-writing instructions to agent files in this deployment.
 
 ### `agents-safety-rules`
 Non-negotiable safety rules belong in AGENTS.md, not SOUL.md:

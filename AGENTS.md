@@ -1,4 +1,4 @@
-# G2 OpenClaw Codex Instructions
+# G2 OpenClaw Agent Instructions
 
 ## Project Overview
 
@@ -20,9 +20,10 @@ The current agent path is Codex based. OpenClaw agent turns use the OpenAI provi
 - `gateway/agent_config/` contains the OpenClaw PM persona, tools, bootstrap docs, and runtime skills deployed to `~/.openclaw/`.
 - `gateway/openclaw_config/` contains the repo-managed OpenClaw config overlay and provider selection template.
 - `g2_app/` contains the TypeScript G2 WebView app, protocol client, display manager, input handler, and state machine.
-- `docs/` contains design notes, reference docs, and the Quantipy autonomous research plan.
-- `.agents/skills/` contains Codex repo skills. Codex discovers repo skills from this path.
+- `docs/` contains reference docs (`docs/reference/`) and the Quantipy autonomous research plan.
+- `.agents/skills/` contains canonical repo skills. Codex discovers repo skills from this path.
 - `.codex/agents/` contains Codex custom subagent definitions in TOML.
+- `.claude/skills/` contains distilled Claude Code mirrors of the canonical repo skills; `.claude/agents/` mirrors `.codex/agents/`. `CLAUDE.md` imports this file. Keep mirrors in sync when either side changes.
 
 ## G2 Rules
 

@@ -38,13 +38,17 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2021-02-01' = {
 
 ```bicep
 // Stable GA API version — verified before adoption
-resource sqlServer 'Microsoft.Sql/servers@2023-08-01-preview' = {
-  // Exception: documented — no GA version available yet for required feature
+resource sqlServer 'Microsoft.Sql/servers@2021-11-01' = {
   name: sqlServerName
   location: location
   properties: {
-    administratorLogin: 'sqladmin'
-    administratorLoginPassword: adminPassword
+    administrators: {
+      administratorType: 'ActiveDirectory'
+      azureADOnlyAuthentication: true
+      login: sqlAdminGroupName
+      sid: sqlAdminGroupObjectId
+      tenantId: tenant().tenantId
+    }
   }
 }
 
@@ -62,5 +66,19 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 // Document API version policy in a comment or ADR
 // API versions last reviewed: 2025-12-15
 ```
+
+**Documented exception:** if a required feature exists only in a `-preview` API
+version, using it is acceptable only with an inline comment stating the feature
+that forces it and a review date for revisiting once a GA version ships:
+
+```bicep
+// Exception: no GA API version exposes <feature> yet — revisit 2026-06-01
+resource example 'Microsoft.Example/things@2025-10-01-preview' = {
+  ...
+}
+```
+
+Note: server credentials use Entra ID (`azureADOnlyAuthentication`) rather than
+an admin password — see `security-managed-identity`.
 
 Reference: [Azure resource API versions — Microsoft Learn](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/resource-providers-and-types)

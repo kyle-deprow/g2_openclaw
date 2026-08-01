@@ -6,49 +6,37 @@ G2 OpenClaw bridges [Even Realities G2](https://www.evenrealities.com/) AR smart
 
 | What | Where |
 |------|-------|
-| System architecture | [design/architecture.md](design/architecture.md) |
-| WebSocket protocol spec | [design/protocol.md](design/protocol.md) |
-| Onboarding guide | [guides/getting-started.md](guides/getting-started.md) |
-| Dev workflow & testing | [guides/development.md](guides/development.md) |
-| OpenClaw research | [reference/openclaw/](reference/openclaw/) |
+| System architecture & data flow | [../README.md](../README.md) (root README) |
+| Agent instructions & repo rules | [../AGENTS.md](../AGENTS.md), [../CLAUDE.md](../CLAUDE.md) |
+| OpenClaw platform reference | [reference/openclaw/](reference/openclaw/) |
+| G2 hardware & EvenHub SDK reference | [reference/g2-platform/](reference/g2-platform/) |
+| Quantipy autonomous research plan | [reference/quantipy-autonomous-research-plan.md](reference/quantipy-autonomous-research-plan.md) |
 
 ## Directory Structure
 
 ```
 docs/
 ├── README.md                          ← You are here
-├── design/                            # Design: what we're building
-│   ├── architecture.md                # System architecture & data-flow diagrams
-│   ├── protocol.md                    # Canonical WebSocket protocol spec (message types, frames)
-│   ├── gateway.md                     # PC Gateway design (Python, Whisper, session mgmt)
-│   ├── g2-app.md                      # G2 App thin-client design (TypeScript, BLE relay)
-│   ├── display-layouts.md             # Pixel-level display specs (576×288, 4-bit greyscale)
-│   └── azure-infrastructure.md        # Azure infra design (Bicep modules, AI Hub, KeyVault)
-├── guides/                            # How-to guides
-│   ├── getting-started.md             # Zero-to-working onboarding for new developers
-│   └── development.md                 # Dev workflow: testing, linting, uv commands
-├── reference/                         # Reference material
-│   ├── openclaw/                      # OpenClaw research (8 files covering agents, tools, memory, etc.)
-│   └── g2-platform/                   # G2 hardware constraints & EvenHub SDK reference
-├── decisions/                         # Architecture Decision Records (ADRs)
-└── archive/                           # Historical: completed spikes & old reviews
-    ├── spikes/                        # Phase-0 spike results and findings
-    └── reviews/                       # Past architecture reviews
+└── reference/                         # Reference material
+    ├── openclaw/                      # OpenClaw research (agents, context, personas, tools/MCP)
+    ├── g2-platform/                   # G2 hardware constraints & EvenHub CLI/SDK/simulator reference
+    └── quantipy-autonomous-research-plan.md  # The autoresearch loop plan of record
 ```
+
+Design/how-to knowledge that used to live in separate docs now lives closer to where agents consume it:
+
+- **Architecture and data flow** — root [README.md](../README.md).
+- **Display, input, SDK, and toolchain rules** — repo skills under [`.agents/skills/g2-*`](../.agents/skills/) (distilled Claude mirrors in [`.claude/skills/`](../.claude/skills/)).
+- **OpenClaw operations, sessions, memory, automation** — repo skills under [`.agents/skills/openclaw-*`](../.agents/skills/).
+- **Runtime agent behavior** (PM persona, autoresearch protocol, data contracts) — [`gateway/agent_config/`](../gateway/agent_config/) and its `skills/`.
+- **Deployment checkpoint** — `.archive/OPENCLAW_DEPLOYMENT_STATUS.md`.
 
 ## Reading Order
 
 New to the project? Read these in order:
 
-1. **[design/architecture.md](design/architecture.md)** — Understand the overall system: glasses → iPhone → gateway → OpenClaw.
-2. **[design/protocol.md](design/protocol.md)** — Learn the WebSocket message types that glue components together.
-3. **[design/gateway.md](design/gateway.md)** — Dive into the PC Gateway (the brains of the system).
-4. **[design/g2-app.md](design/g2-app.md)** — See how the iPhone thin client relays audio and renders text.
-5. **[design/display-layouts.md](design/display-layouts.md)** — Understand the 576×288 micro-LED display constraints.
-6. **[guides/getting-started.md](guides/getting-started.md)** — Get a local dev environment running.
-
-For deeper context, browse [reference/openclaw/](reference/openclaw/) for OpenClaw internals and [reference/g2-platform/](reference/g2-platform/) for G2 hardware details.
-
-## Archive
-
-The `archive/` folder contains historical material — completed spike results, phase reviews, and superseded design notes. These are kept for provenance but are **not** actively maintained. Prefer the `design/` docs for current truth.
+1. **[../README.md](../README.md)** — the overall system: glasses → iPhone → gateway → OpenClaw, plus the autoresearch loop summary.
+2. **[../AGENTS.md](../AGENTS.md)** — stack, layout, rules, and guardrails for working in this repo.
+3. **[reference/g2-platform/g2_reference_guide.md](reference/g2-platform/g2_reference_guide.md)** — G2 hardware constraints.
+4. **[reference/openclaw/](reference/openclaw/)** — OpenClaw internals (overview, agent architecture, personas, tools/MCP).
+5. **[reference/quantipy-autonomous-research-plan.md](reference/quantipy-autonomous-research-plan.md)** — the autonomous research loop design.

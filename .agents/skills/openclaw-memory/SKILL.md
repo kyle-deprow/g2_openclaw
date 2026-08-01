@@ -333,6 +333,14 @@ Two tools for memory access during conversations:
 The agent uses `memory_search` when it needs to recall something from the past,
 and `memory_get` to read a specific day's notes.
 
+> **Deployment policy (this repo):** `memory_search` and `memory_get` are
+> globally denied (`gateway/openclaw_config/openclaw.json` `tools.deny`) and
+> `agents.defaults.memorySearch.enabled` is `false` — deliberately. Agents read
+> memory only via the read-only MemPalace MCP (`mempalace-readonly__*` tools);
+> the ONLY memory writer is the non-model finalizer
+> (`gateway/mempalace_finalizer.py` / `mempalace_finalizer_script.py`) driven by
+> the autoresearch supervisor. Do not re-enable these tools.
+
 ### `workflow-precompaction-flush`
 The most important memory workflow: automatic flush before compaction.
 
@@ -354,6 +362,10 @@ agent to write durable memories before compaction summarizes and compresses:
 
 **Always enable this.** Without it, nuanced session context is lost to
 compaction's summarization.
+
+> **Deployment policy (this repo):** `compaction.memoryFlush.enabled` is set to
+> `false` deliberately — models never write memory here; the MemPalace finalizer
+> is the sole writer. Do NOT enable the pre-compaction flush in this repo.
 
 ### `workflow-session-memory-indexing`
 Experimental: index session transcripts (.jsonl) into vector search:
@@ -393,6 +405,10 @@ Before writing to memory, search for existing entries on the topic.
 If similar information exists, update rather than duplicate.
 ```
 
+> **Deployment policy (this repo):** inapplicable — agents have no memory write
+> path and `memory_search` is denied. Write-path changes mean modifying the
+> finalizer, not agent instructions.
+
 ---
 
 ## Anti-Patterns
@@ -411,11 +427,16 @@ If similar information exists, update rather than duplicate.
 
 ---
 
-## Quick Config Template (v2026.3.2)
+## Quick Config Template (v2026.7.1-2)
 
 > **IMPORTANT**: Memory search config goes under `agents.defaults.memorySearch`,
 > NOT under a top-level `memory` key. The top-level `memory` key only accepts
 > `backend` ("builtin"|"qmd"), `citations`, and `qmd`.
+
+> **Deployment policy (this repo):** this template is a generic default. The
+> repo baseline sets `agents.defaults.memorySearch.enabled: false` and
+> `compaction.memoryFlush.enabled: false`; config is deployed only via
+> `bash scripts/push-openclaw-config.sh` — never hand-edit `~/.openclaw/` files.
 
 ```json
 {
