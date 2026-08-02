@@ -29,7 +29,7 @@ from datetime import UTC as UTC
 from datetime import date, datetime
 from enum import StrEnum  # noqa: F401
 from pathlib import Path
-from typing import TYPE_CHECKING, TypeVar, cast
+from typing import TYPE_CHECKING, TypeVar, cast  # noqa: F401
 from urllib.parse import unquote, urlencode, urlparse  # noqa: F401
 
 from gateway.autoresearch.artifacts import (
@@ -401,6 +401,63 @@ from gateway.autoresearch.errors import (
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
 )
+from gateway.autoresearch.evidence import (
+    QuantipyExecutionContract as QuantipyExecutionContract,
+)
+from gateway.autoresearch.evidence import (
+    _build_historical_v2_quantipy_execution_contract as _build_historical_v2_quantipy_execution_contract,  # noqa: E501
+)
+from gateway.autoresearch.evidence import (
+    _canonical_quantipy_manifest_sha256 as _canonical_quantipy_manifest_sha256,
+)
+from gateway.autoresearch.evidence import (
+    _expected_local_research_panel_http_error_message as _expected_local_research_panel_http_error_message,  # noqa: E501
+)
+from gateway.autoresearch.evidence import (
+    _git_show_committed_bytes as _git_show_committed_bytes,
+)
+from gateway.autoresearch.evidence import (
+    _git_tree_file_paths as _git_tree_file_paths,
+)
+from gateway.autoresearch.evidence import (
+    _is_quantipy_package_source_path as _is_quantipy_package_source_path,
+)
+from gateway.autoresearch.evidence import (
+    _quantipy_experiment_source_digest as _quantipy_experiment_source_digest,
+)
+from gateway.autoresearch.evidence import (
+    _reserve_quantipy_execution_not_started as _reserve_quantipy_execution_not_started,
+)
+from gateway.autoresearch.evidence import (
+    _run_failure_from_mapping as _run_failure_from_mapping,
+)
+from gateway.autoresearch.evidence import (
+    _secure_package_file_paths as _secure_package_file_paths,
+)
+from gateway.autoresearch.evidence import (
+    _target_repo_root_for_state as _target_repo_root_for_state,
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_committed_sources as _validate_quantipy_committed_sources,
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_execution_source_against_commit as _validate_quantipy_execution_source_against_commit,  # noqa: E501
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_failure as _validate_quantipy_failure,
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_run_source as _validate_quantipy_run_source,
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_v2_manifest as _validate_quantipy_v2_manifest,
+)
+from gateway.autoresearch.evidence import (
+    _verified_panel_request_for_state as _verified_panel_request_for_state,
+)
+from gateway.autoresearch.evidence import (
+    build_quantipy_execution_contract as build_quantipy_execution_contract,
+)
 from gateway.autoresearch.fields import (
     _canonical_json_digest as _canonical_json_digest,
 )
@@ -609,6 +666,24 @@ from gateway.autoresearch.recovery_receipts import (
     _deterministic_quantipy_run_id as _deterministic_quantipy_run_id,
 )
 from gateway.autoresearch.recovery_receipts import (
+    _expected_quantipy_verification_run_id as _expected_quantipy_verification_run_id,
+)
+from gateway.autoresearch.recovery_receipts import (
+    _is_historically_authorized_local_research_panel_http_404 as _is_historically_authorized_local_research_panel_http_404,  # noqa: E501
+)
+from gateway.autoresearch.recovery_receipts import (
+    _is_manifest_bound_legacy_local_research_panel_http_413 as _is_manifest_bound_legacy_local_research_panel_http_413,  # noqa: E501
+)
+from gateway.autoresearch.recovery_receipts import (
+    _validate_external_verification_retry_eligibility as _validate_external_verification_retry_eligibility,  # noqa: E501
+)
+from gateway.autoresearch.recovery_receipts import (
+    _validate_external_verification_retry_history as _validate_external_verification_retry_history,
+)
+from gateway.autoresearch.recovery_receipts import (
+    _validate_external_verification_retry_history_artifact as _validate_external_verification_retry_history_artifact,  # noqa: E501
+)
+from gateway.autoresearch.recovery_receipts import (
     _verify_member_union_manifest as _verify_member_union_manifest,
 )
 from gateway.autoresearch.secure_io import (
@@ -706,92 +781,6 @@ G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
 QUANTIPY_PANEL_RECEIPT_MAX_BYTES = PANEL_RECEIPT_MAX_BYTES
 QUANTIPY_RUN_ENVELOPE_MAX_BYTES = RUN_ENVELOPE_MAX_BYTES
 _T = TypeVar("_T")
-
-
-@dataclass(frozen=True, slots=True)
-class QuantipyExecutionContract:
-    """The sole argv/cwd contract for a canonical Quantipy runtime launch."""
-
-    runtime_root: Path
-    manifest_path: Path
-    output_root: Path
-    run_id: str
-
-    @property
-    def working_directory(self) -> Path:
-        return self.runtime_root
-
-    @property
-    def command(self) -> tuple[str, ...]:
-        return (
-            "env",
-            "PYTHONDONTWRITEBYTECODE=1",
-            "uv",
-            "--directory",
-            str(self.runtime_root),
-            "run",
-            "--frozen",
-            "--no-sync",
-            "quantipy",
-            "experiment",
-            "run",
-            str(self.manifest_path),
-            "--output-root",
-            str(self.output_root),
-            "--run-id",
-            self.run_id,
-        )
-
-
-def build_quantipy_execution_contract(
-    *,
-    runtime_root: Path,
-    manifest_path: Path,
-    output_root: Path,
-    run_id: str,
-) -> QuantipyExecutionContract:
-    """Build the direct-argv canonical-runtime execution contract once."""
-    canonical_runtime = _require_canonical_absolute_path(
-        runtime_root, label="canonical Quantipy runtime root"
-    )
-    canonical_manifest = _require_canonical_absolute_path(
-        manifest_path, label="immutable Quantipy experiment manifest"
-    )
-    canonical_output = _require_canonical_absolute_path(
-        output_root, label="trusted Quantipy runs root"
-    )
-    if re.fullmatch(r"autoresearch-i[1-9][0-9]*-[0-9a-f]{7,12}(?:-v5)?", run_id) is None:
-        raise AutoresearchValidationError("Quantipy execution contract run_id is invalid")
-    return QuantipyExecutionContract(
-        runtime_root=canonical_runtime,
-        manifest_path=canonical_manifest,
-        output_root=canonical_output,
-        run_id=run_id,
-    )
-
-
-def _build_historical_v2_quantipy_execution_contract(
-    *,
-    runtime_root: Path,
-    manifest_path: Path,
-    output_root: Path,
-    run_id: str,
-) -> QuantipyExecutionContract:
-    """Reconstruct only the exact retired v2 command for sealed recovery evidence."""
-    if re.fullmatch(r"autoresearch-i[1-9][0-9]*-[0-9a-f]{7,12}-v2", run_id) is None:
-        raise AutoresearchValidationError("historical Quantipy v2 run_id is invalid")
-    return QuantipyExecutionContract(
-        runtime_root=_require_canonical_absolute_path(
-            runtime_root, label="historical canonical Quantipy runtime root"
-        ),
-        manifest_path=_require_canonical_absolute_path(
-            manifest_path, label="historical immutable Quantipy experiment manifest"
-        ),
-        output_root=_require_canonical_absolute_path(
-            output_root, label="historical trusted Quantipy runs root"
-        ),
-        run_id=run_id,
-    )
 
 
 OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES = frozenset(
@@ -1086,13 +1075,6 @@ def expected_instruction_manifest_sha256(
         state_path=state_path,
         receipts=required_receipts,
     )
-
-
-def _target_repo_root_for_state(state: AutoresearchState) -> Path:
-    target_repo = (
-        Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
-    )
-    return target_repo.expanduser().resolve(strict=False)
 
 
 def _validate_compute_fit_environment(
@@ -2234,100 +2216,6 @@ class AutoresearchState:
         return state
 
 
-def _expected_quantipy_verification_run_id(state: AutoresearchState, commit_sha: str) -> str:
-    receipt = state.external_verification_retry_receipt
-    if receipt is not None:
-        expected = _deterministic_quantipy_run_id(
-            state.iteration,
-            commit_sha,
-            attempt=receipt.retry_attempt,
-        )
-        if receipt.expected_run_id != expected:
-            raise AutoresearchValidationError(
-                "external verification retry receipt run ID is stale for the implementation commit"
-            )
-        return receipt.expected_run_id
-    return _deterministic_quantipy_run_id(state.iteration, commit_sha, attempt=1)
-
-
-def _validate_external_verification_retry_eligibility(state: AutoresearchState) -> int:
-    if state.phase is not Phase.FIX_TEST:
-        raise AutoresearchValidationError("external verification retry requires fix_test phase")
-    if state.mode is not ResearchMode.ALPHA_RESEARCH:
-        raise AutoresearchValidationError(
-            "external verification retry requires an ALPHA_RESEARCH iteration"
-        )
-    if state.pending_fix_trigger is not FixTriggerPhase.VERIFICATION:
-        raise AutoresearchValidationError(
-            "external verification retry requires a verification-triggered fix_test"
-        )
-    if state.implementation_result is None:
-        raise AutoresearchValidationError(
-            "external verification retry requires the preserved implementation_result"
-        )
-    if (
-        state.latest_verification is None
-        or state.latest_verification.status is not VerificationStatus.TEST_FAILURE
-    ):
-        raise AutoresearchValidationError(
-            "external verification retry requires a typed TEST_FAILURE verification"
-        )
-    current_receipt = state.external_verification_retry_receipt
-    if current_receipt is not None:
-        _validate_external_verification_retry_history(state, current_receipt)
-    evidence = state.latest_verification.quantipy_experiment_evidence
-    if evidence is None:
-        raise AutoresearchValidationError(
-            "external verification retry requires a completed failed Quantipy run artifact"
-        )
-    failure = evidence.failure
-    if current_receipt is None:
-        if (
-            len(state.verification_history) != 1
-            or state.fix_history
-            or state.verification_fix_attempts
-        ):
-            raise AutoresearchValidationError(
-                "external verification retry without a prior retry requires the initial "
-                "panel failure"
-            )
-        if (
-            failure is None
-            or failure.category != "panel"
-            or not _is_historically_authorized_local_research_panel_http_404(state, failure.message)
-        ):
-            raise AutoresearchValidationError(
-                "external verification retry requires the historical local research-panel HTTP "
-                "404 failure"
-            )
-        return 2
-    if (
-        failure is None
-        or failure.category != "panel"
-        or not _is_manifest_bound_legacy_local_research_panel_http_413(state, failure.message)
-    ):
-        raise AutoresearchValidationError(
-            "external verification retry requires the exact local research-panel HTTP 413 failure"
-        )
-    if current_receipt.retry_attempt == 3:
-        raise AutoresearchValidationError(
-            "interrupted verification recovery accepts only the exact pending v3 topology"
-        )
-    if current_receipt.retry_attempt == 4:
-        raise AutoresearchValidationError(
-            "v4 platform receipt failure requires operator platform runtime recovery"
-        )
-    if evidence.success or evidence.panel is not None or evidence.completed_stages:
-        raise AutoresearchValidationError(
-            "external verification retry requires a failed pre-stage panel run without evidence"
-        )
-    if evidence.run_id != current_receipt.expected_run_id:
-        raise AutoresearchValidationError(
-            "external verification retry requires the prior expected Quantipy run artifact"
-        )
-    return current_receipt.retry_attempt + 1
-
-
 def _validate_external_verification_retry_receipt(
     state: AutoresearchState,
     validation_context: AutoresearchValidationContext | None,
@@ -2574,227 +2462,6 @@ def _validate_interrupted_verification_history(
         raise AutoresearchValidationError(
             "interrupted verification receipt detached v3 manifest/status digest does not match"
         )
-
-
-def _validate_external_verification_retry_history(
-    state: AutoresearchState,
-    receipt: ExternalVerificationRetryReceipt,
-) -> None:
-    """Fail closed unless every sealed retry artifact forms one exact chain."""
-    interruptions = state.interrupted_verification_history
-    if (
-        interruptions
-        and receipt.schema_version != INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
-    ):
-        raise AutoresearchValidationError(
-            "interrupted verification history requires the interruption-aware retry receipt"
-        )
-    if (
-        not interruptions
-        and receipt.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
-    ):
-        raise AutoresearchValidationError(
-            "interruption-aware retry receipt requires an interruption history"
-        )
-    interruption_count = len(interruptions)
-    pending_history_length = receipt.retry_attempt - 1 - interruption_count
-    sealed_history_length = receipt.retry_attempt - interruption_count
-    if pending_history_length < 1:
-        raise AutoresearchValidationError(
-            "external verification retry interruption topology is invalid"
-        )
-    history_length = len(state.verification_history)
-    if history_length not in (pending_history_length, sealed_history_length):
-        raise AutoresearchValidationError(
-            "external verification retry verification history topology is invalid"
-        )
-    if history_length == pending_history_length and state.phase is not Phase.VERIFICATION:
-        raise AutoresearchValidationError(
-            "external verification retry pending verification history topology is invalid"
-        )
-    if history_length == sealed_history_length and state.phase is Phase.VERIFICATION:
-        raise AutoresearchValidationError(
-            "external verification retry sealed verification history topology is invalid"
-        )
-    if state.fix_history or state.verification_fix_attempts:
-        raise AutoresearchValidationError(
-            "external verification retry verification history topology permits no fixer attempts"
-        )
-    implementation = state.implementation_result
-    assert implementation is not None
-    interruption_attempts = tuple(
-        interruption.interrupted_attempt for interruption in interruptions
-    )
-    if interruption_attempts != tuple(sorted(interruption_attempts)) or len(
-        set(interruption_attempts)
-    ) != len(interruption_attempts):
-        raise AutoresearchValidationError(
-            "interrupted verification history attempts must be ordered and unique"
-        )
-    for index, artifact in enumerate(state.verification_history, start=1):
-        attempt = index + sum(
-            1 for interruption_attempt in interruption_attempts if interruption_attempt <= index
-        )
-        _validate_external_verification_retry_history_artifact(
-            state,
-            artifact,
-            attempt=attempt,
-            implementation=implementation,
-        )
-    prior = state.verification_history[pending_history_length - 1]
-    if receipt.prior_verification_sha256 != _canonical_json_digest(prior.to_dict()):
-        raise AutoresearchValidationError(
-            "external verification retry receipt does not bind the immediately prior artifact"
-        )
-    if receipt.schema_version == LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
-        return
-    expected_history_sha256 = tuple(
-        _canonical_json_digest(artifact.to_dict())
-        for artifact in state.verification_history[:pending_history_length]
-    )
-    if receipt.verification_history_sha256 != expected_history_sha256:
-        raise AutoresearchValidationError(
-            "external verification retry receipt does not bind the complete ordered "
-            "verification history"
-        )
-    expected_interruption_history_sha256 = tuple(
-        _canonical_json_digest(interruption.to_dict()) for interruption in interruptions
-    )
-    if receipt.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION and (
-        receipt.interruption_history_sha256 != expected_interruption_history_sha256
-    ):
-        raise AutoresearchValidationError(
-            "external verification retry receipt does not bind the complete ordered "
-            "interruption history"
-        )
-
-
-def _validate_external_verification_retry_history_artifact(
-    state: AutoresearchState,
-    artifact: VerificationResultArtifact,
-    *,
-    attempt: int,
-    implementation: ImplementationResultArtifact,
-) -> None:
-    evidence = artifact.quantipy_experiment_evidence
-    failure = evidence.failure if evidence is not None else None
-    if (
-        artifact.status is not VerificationStatus.TEST_FAILURE
-        or evidence is None
-        or evidence.run_id
-        != _deterministic_quantipy_run_id(
-            state.iteration, implementation.commit_sha, attempt=attempt
-        )
-        or evidence.success
-        or evidence.panel is not None
-        or evidence.completed_stages
-        or evidence.terminal_stage is not None
-        or evidence.terminal_status is not None
-        or failure is None
-        or failure.category != "panel"
-    ):
-        raise AutoresearchValidationError(
-            "external verification retry verification history topology is invalid"
-        )
-    if attempt == 4 and state.platform_runtime_recovery_receipt is not None:
-        exact_failure = (
-            failure.message == "ExperimentPanelError: Research panel receipt is invalid."
-        )
-        status = "exact platform runtime v4 panel receipt"
-    else:
-        exact_failure = (
-            _is_historically_authorized_local_research_panel_http_404
-            if attempt == 1
-            else _is_manifest_bound_legacy_local_research_panel_http_413
-        )(state, failure.message)
-        status = (
-            "historical local research-panel HTTP 404"
-            if attempt == 1
-            else "exact local research-panel HTTP 413"
-        )
-    if not exact_failure:
-        raise AutoresearchValidationError(
-            f"external verification retry verification history requires the {status} failure"
-        )
-
-
-def _is_manifest_bound_legacy_local_research_panel_http_413(
-    state: AutoresearchState,
-    message: str,
-) -> bool:
-    """Accept solely the manifest-bound httpx 413 text from the preserved v2 artifact."""
-    expected = _expected_local_research_panel_http_error_message(
-        state,
-        status=413,
-        reason="Request Entity Too Large",
-    )
-    return expected is not None and message == expected
-
-
-def _is_historically_authorized_local_research_panel_http_404(
-    state: AutoresearchState,
-    message: str,
-) -> bool:
-    """Validate the narrow 404 contract used only to issue the original v2 receipt."""
-    expected = _expected_local_research_panel_http_error_message(
-        state,
-        status=404,
-        reason="Not Found",
-    )
-    return expected is not None and message == expected
-
-
-def _expected_local_research_panel_http_error_message(
-    state: AutoresearchState,
-    *,
-    status: int,
-    reason: str,
-) -> str | None:
-    try:
-        request = _verified_panel_request_for_state(state)
-        tickers = request["tickers"]
-        start = _parse_utc_request_datetime(request["start"])
-        end = _parse_utc_request_datetime(request["end"])
-    except AutoresearchValidationError:
-        return None
-    if not isinstance(tickers, list):
-        return None
-    url = "http://127.0.0.1:8000/price-data/research-panel?" + urlencode(
-        (
-            ("tickers", ",".join(tickers)),
-            ("start", start.isoformat()),
-            ("end", end.isoformat()),
-            ("timeframe", request["timeframe"]),
-            ("market_hours", request["market_hours"]),
-        )
-    )
-    return (
-        f"ExperimentPanelError: Client error '{status} {reason}' for url '{url}'\n"
-        f"For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/{status}"
-    )
-
-
-def _verified_panel_request_for_state(state: AutoresearchState) -> Mapping[str, object]:
-    implementation = state.implementation_result
-    if implementation is None:
-        raise AutoresearchValidationError("panel request requires implementation_result")
-    snapshot = _secure_open_snapshot(
-        Path(implementation.experiment_manifest_path),
-        label="implementation_result experiment_manifest_path",
-    )
-    manifest = _validate_quantipy_v2_manifest(
-        snapshot,
-        workspace=Path(implementation.workspace_path),
-        commit_sha=implementation.commit_sha,
-        expected_sha256=implementation.experiment_manifest_sha256,
-    )
-    panel = manifest.get("panel")
-    if not isinstance(panel, Mapping):
-        raise AutoresearchValidationError("experiment manifest must contain a panel request")
-    request = panel.get("request")
-    if not isinstance(request, Mapping):
-        raise AutoresearchValidationError("experiment manifest panel request is invalid")
-    return _validate_panel_request(request, label="experiment manifest panel request")
 
 
 def retry_external_verification(
@@ -4271,514 +3938,6 @@ def _validate_panel_receipt(value: object, *, label: str) -> dict[str, object]:
         raise AutoresearchValidationError(str(exc)) from exc
 
 
-def _validate_quantipy_v2_manifest(
-    manifest_snapshot: _SecureFileSnapshot,
-    *,
-    workspace: Path,
-    commit_sha: str,
-    expected_sha256: str,
-) -> Mapping[str, object]:
-    manifest_path = manifest_snapshot.path
-    try:
-        relative_manifest = manifest_path.relative_to(workspace)
-    except ValueError as exc:
-        raise AutoresearchValidationError(
-            "implementation_result experiment_manifest_path must be under its workspace"
-        ) from exc
-    if manifest_snapshot.sha256 != expected_sha256:
-        raise AutoresearchValidationError(
-            "implementation_result experiment_manifest_sha256 does not match its file"
-        )
-    committed = _run_git(
-        workspace,
-        ("show", f"{commit_sha}:{relative_manifest.as_posix()}"),
-        operation="experiment manifest commit check",
-    )
-    if committed.returncode != 0 or committed.stdout.encode("utf-8") != manifest_snapshot.content:
-        raise AutoresearchValidationError(
-            "implementation_result experiment manifest must be committed unchanged at commit_sha"
-        )
-    raw_manifest = _parse_json_snapshot(manifest_snapshot, label="Quantipy experiment manifest")
-    allowed = frozenset(
-        ("schema_version", "experiment_id", "package_path", "notebook_path", "stage_files", "panel")
-    )
-    required = frozenset(("schema_version", "experiment_id", "package_path", "stage_files"))
-    if set(raw_manifest) - allowed or not required <= set(raw_manifest):
-        raise AutoresearchValidationError("Quantipy experiment manifest is not the exact v2 shape")
-    manifest = dict(raw_manifest)
-    if "notebook_path" not in manifest:
-        manifest["notebook_path"] = None
-    if "panel" not in manifest:
-        manifest["panel"] = None
-    if manifest.get("schema_version") != QUANTIPY_EXPERIMENT_SCHEMA_VERSION:
-        raise AutoresearchValidationError(
-            "Quantipy experiment manifest must use quantipy-experiment-v2"
-        )
-    experiment_id = manifest.get("experiment_id")
-    if (
-        not isinstance(experiment_id, str)
-        or re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", experiment_id) is None
-    ):
-        raise AutoresearchValidationError("Quantipy experiment manifest experiment_id is invalid")
-    _validate_quantipy_relative_path(manifest.get("package_path"), label="manifest package_path")
-    notebook_path = manifest.get("notebook_path")
-    if notebook_path is not None:
-        _validate_quantipy_relative_path(notebook_path, label="manifest notebook_path")
-    stages = manifest.get("stage_files")
-    if not isinstance(stages, list) or len(stages) != 4:
-        raise AutoresearchValidationError("Quantipy experiment manifest requires four stage_files")
-    stage_names: list[str] = []
-    stage_paths: list[str] = []
-    stage_entrypoints: list[str] = []
-    for stage in stages:
-        stage_data = _ensure_mapping(stage, label="manifest stage_file")
-        _require_exact_keys(
-            stage_data,
-            label="manifest stage_file",
-            expected=("name", "file_path", "entrypoint"),
-        )
-        name = _require_str(stage_data, "name")
-        stage_names.append(name)
-        stage_path = _validate_quantipy_relative_path(
-            stage_data.get("file_path"), label="manifest stage_file"
-        )
-        stage_paths.append(stage_path)
-        entrypoint = _strict_json_string(
-            stage_data["entrypoint"],
-            label="manifest stage_file entrypoint",
-            maximum=QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH,
-        )
-        stage_entrypoints.append(entrypoint)
-        if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*", entrypoint) is None:
-            raise AutoresearchValidationError(
-                "Quantipy experiment manifest stage entrypoint is invalid"
-            )
-    if tuple(stage_names) != QUANTIPY_EXPERIMENT_STAGE_ORDER:
-        raise AutoresearchValidationError(
-            "Quantipy experiment manifest stage_files must be prepare, smoke, feasibility, model"
-        )
-    if len(set(stage_paths)) != 4 or len(set(stage_entrypoints)) != 4:
-        raise AutoresearchValidationError(
-            "Quantipy experiment manifest requires unique stage files and entrypoints"
-        )
-    panel = manifest["panel"]
-    if panel is not None:
-        panel_data = _strict_json_keys(
-            panel, label="manifest panel", expected=("api_url", "request")
-        )
-        api_url = _strict_json_string(
-            panel_data["api_url"],
-            label="manifest panel api_url",
-            maximum=2048,
-        )
-        if re.fullmatch(r"https?://[^/]+(?:/.*)?", api_url) is None:
-            raise AutoresearchValidationError("manifest panel api_url is invalid")
-        manifest["panel"] = {
-            "api_url": api_url,
-            "request": _validate_panel_request(
-                panel_data["request"], label="manifest panel request"
-            ),
-        }
-    _validate_quantipy_committed_sources(
-        manifest,
-        manifest_path=manifest_path,
-        workspace=workspace,
-        commit_sha=commit_sha,
-    )
-    return manifest
-
-
-def _git_show_committed_bytes(workspace: Path, commit_sha: str, relative_path: Path) -> bytes:
-    try:
-        result = subprocess.run(
-            ("git", "-C", str(workspace), "show", f"{commit_sha}:{relative_path.as_posix()}"),
-            check=False,
-            capture_output=True,
-        )
-    except OSError as exc:
-        raise AutoresearchValidationError("Git is unavailable for source binding") from exc
-    if result.returncode != 0:
-        raise AutoresearchValidationError(
-            f"experiment source {relative_path.as_posix()} is not committed at commit_sha"
-        )
-    return result.stdout
-
-
-def _validate_quantipy_committed_sources(
-    manifest: Mapping[str, object],
-    *,
-    manifest_path: Path,
-    workspace: Path,
-    commit_sha: str,
-) -> None:
-    source_root = manifest_path.parent
-    package_relative = Path(
-        _validate_quantipy_relative_path(manifest["package_path"], label="manifest package_path")
-    )
-    package_root = source_root / package_relative
-    try:
-        package_workspace_relative = package_root.relative_to(workspace)
-    except ValueError as exc:
-        raise AutoresearchValidationError(
-            "manifest package_path must remain under the implementation workspace"
-        ) from exc
-    committed_paths = _git_tree_file_paths(
-        workspace,
-        commit_sha=commit_sha,
-        package_path=package_workspace_relative,
-    )
-    actual_paths = _secure_package_file_paths(package_root, workspace=workspace)
-    if actual_paths != committed_paths:
-        extra = sorted(path.as_posix() for path in actual_paths - committed_paths)
-        missing = sorted(path.as_posix() for path in committed_paths - actual_paths)
-        if extra:
-            raise AutoresearchValidationError(
-                f"experiment package contains an untracked or ignored package file: {extra[0]}"
-            )
-        raise AutoresearchValidationError(
-            f"experiment package is missing committed source: {missing[0]}"
-        )
-    stages = manifest["stage_files"]
-    assert isinstance(stages, list)
-    for stage_raw in stages:
-        stage = _ensure_mapping(stage_raw, label="manifest stage_file")
-        declared_stage = (
-            package_root
-            / _validate_quantipy_relative_path(stage["file_path"], label="manifest stage_file")
-        ).relative_to(workspace)
-        if declared_stage not in actual_paths:
-            raise AutoresearchValidationError(
-                f"declared experiment stage is not a committed package file: "
-                f"{declared_stage.as_posix()}"
-            )
-    for relative_path in sorted(actual_paths):
-        snapshot = _secure_open_snapshot(
-            workspace / relative_path,
-            label=f"experiment package source {relative_path.as_posix()}",
-            max_bytes=QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES,
-        )
-        if snapshot.content != _git_show_committed_bytes(workspace, commit_sha, relative_path):
-            raise AutoresearchValidationError(
-                f"experiment package source {relative_path.as_posix()} "
-                "must match commit_sha exactly"
-            )
-
-    source_paths: list[Path] = []
-    notebook = manifest["notebook_path"]
-    if notebook is not None:
-        source_paths.append(
-            source_root / _validate_quantipy_relative_path(notebook, label="manifest notebook_path")
-        )
-    for source_path in source_paths:
-        try:
-            relative_path = source_path.relative_to(workspace)
-        except ValueError as exc:
-            raise AutoresearchValidationError(
-                "manifest notebook_path must remain under the implementation workspace"
-            ) from exc
-        snapshot = _secure_open_snapshot(
-            source_path,
-            label=f"experiment notebook {relative_path.as_posix()}",
-            max_bytes=QUANTIPY_EXPERIMENT_NOTEBOOK_MAX_BYTES,
-        )
-        if snapshot.content != _git_show_committed_bytes(workspace, commit_sha, relative_path):
-            raise AutoresearchValidationError(
-                f"experiment source {relative_path.as_posix()} must match commit_sha exactly"
-            )
-
-
-def _secure_package_file_paths(package_root: Path, *, workspace: Path) -> frozenset[Path]:
-    pending = [package_root]
-    files: set[Path] = set()
-    while pending:
-        directory = pending.pop()
-        try:
-            metadata = directory.lstat()
-        except OSError as exc:
-            raise AutoresearchValidationError(
-                "experiment package directory is unavailable"
-            ) from exc
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) & 0o022
-        ):
-            raise AutoresearchValidationError(
-                "experiment package directories must be owned, non-symlink, and non-writable "
-                "by group or other"
-            )
-        try:
-            entries = list(os.scandir(directory))
-        except OSError as exc:
-            raise AutoresearchValidationError("experiment package cannot be enumerated") from exc
-        for entry in entries:
-            path = Path(entry.path)
-            package_relative = path.relative_to(package_root)
-            try:
-                entry_metadata = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise AutoresearchValidationError(
-                    "experiment package entry changed during enumeration"
-                ) from exc
-            if stat.S_ISDIR(entry_metadata.st_mode):
-                if entry.name == "__pycache__":
-                    continue
-                pending.append(path)
-            elif stat.S_ISREG(entry_metadata.st_mode):
-                if not _is_quantipy_package_source_path(package_relative):
-                    continue
-                try:
-                    files.add(path.relative_to(workspace))
-                except ValueError as exc:
-                    raise AutoresearchValidationError(
-                        "experiment package entry escaped the workspace"
-                    ) from exc
-            else:
-                raise AutoresearchValidationError(
-                    "experiment package may contain only regular files and directories"
-                )
-    return frozenset(files)
-
-
-def _is_quantipy_package_source_path(path: Path) -> bool:
-    return "__pycache__" not in path.parts and path.suffix in {".py", ".pyi"}
-
-
-def _git_tree_file_paths(
-    workspace: Path,
-    *,
-    commit_sha: str,
-    package_path: Path,
-) -> frozenset[Path]:
-    try:
-        result = subprocess.run(
-            (
-                "git",
-                "-C",
-                str(workspace),
-                "ls-tree",
-                "-rz",
-                "--name-only",
-                commit_sha,
-                "--",
-                package_path.as_posix(),
-            ),
-            check=False,
-            capture_output=True,
-        )
-    except OSError as exc:
-        raise AutoresearchValidationError("Git is unavailable for package provenance") from exc
-    if result.returncode != 0:
-        raise AutoresearchValidationError("experiment package commit tree lookup failed")
-    committed_paths: set[Path] = set()
-    for raw_path in result.stdout.split(b"\0"):
-        if not raw_path:
-            continue
-        workspace_relative = Path(os.fsdecode(raw_path))
-        try:
-            package_relative = workspace_relative.relative_to(package_path)
-        except ValueError as exc:
-            raise AutoresearchValidationError(
-                "experiment package commit tree lookup escaped the package root"
-            ) from exc
-        if _is_quantipy_package_source_path(package_relative):
-            committed_paths.add(workspace_relative)
-    return frozenset(committed_paths)
-
-
-def _canonical_quantipy_manifest_sha256(manifest: Mapping[str, object]) -> str:
-    return _sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
-
-
-def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, str]:
-    data = _strict_json_keys(value, label=label, expected=("category", "message"))
-    return {
-        "category": _strict_json_enum(
-            data["category"],
-            label=f"{label}.category",
-            allowed=QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES,
-        ),
-        "message": _strict_json_string(
-            data["message"],
-            label=f"{label}.message",
-            minimum=1,
-            maximum=QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH,
-        ),
-    }
-
-
-def _quantipy_experiment_source_digest(files: Sequence[Mapping[str, object]]) -> str:
-    payload = {
-        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
-        "files": [
-            {
-                "path": item["path"],
-                "sha256": item["sha256"],
-                "size_bytes": item["size_bytes"],
-            }
-            for item in sorted(files, key=lambda item: str(item["path"]))
-        ],
-    }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _validate_quantipy_run_source(value: object, *, label: str) -> dict[str, object]:
-    data = _strict_json_keys(
-        value,
-        label=label,
-        expected=("algorithm", "domain", "files", "total_bytes", "sha256"),
-    )
-    if data["algorithm"] != "sha256":
-        raise AutoresearchValidationError(f"{label}.algorithm is invalid")
-    if data["domain"] != QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN:
-        raise AutoresearchValidationError(f"{label}.domain is invalid")
-    files_raw = data["files"]
-    if (
-        not isinstance(files_raw, list)
-        or not 1 <= len(files_raw) <= QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT
-    ):
-        raise AutoresearchValidationError(
-            f"{label}.files must contain 1 to "
-            f"{QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT} source files"
-        )
-    files: list[dict[str, object]] = []
-    for index, raw_file in enumerate(files_raw):
-        file_label = f"{label}.files[{index}]"
-        source_file = _strict_json_keys(
-            raw_file,
-            label=file_label,
-            expected=("path", "sha256", "size_bytes"),
-        )
-        path = _validate_quantipy_relative_path(
-            source_file["path"],
-            label=f"{file_label}.path",
-        )
-        if Path(path).suffix != ".py":
-            raise AutoresearchValidationError(f"{file_label}.path must name Python source")
-        size_bytes = _strict_json_int(
-            source_file["size_bytes"],
-            label=f"{file_label}.size_bytes",
-        )
-        if size_bytes > QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES:
-            raise AutoresearchValidationError(f"{file_label}.size_bytes exceeds its limit")
-        files.append(
-            {
-                "path": path,
-                "sha256": _strict_json_sha256(
-                    source_file["sha256"],
-                    label=f"{file_label}.sha256",
-                ),
-                "size_bytes": size_bytes,
-            }
-        )
-    paths = tuple(str(item["path"]) for item in files)
-    if paths != tuple(sorted(paths)) or len(paths) != len(set(paths)):
-        raise AutoresearchValidationError(f"{label}.files must be uniquely ordered by path")
-    total_bytes = _strict_json_int(data["total_bytes"], label=f"{label}.total_bytes")
-    if total_bytes > QUANTIPY_EXPERIMENT_SOURCE_TOTAL_MAX_BYTES or total_bytes != sum(
-        cast(int, item["size_bytes"]) for item in files
-    ):
-        raise AutoresearchValidationError(
-            f"{label}.total_bytes does not bind its bounded file inventory"
-        )
-    digest = _strict_json_sha256(data["sha256"], label=f"{label}.sha256")
-    if digest != _quantipy_experiment_source_digest(files):
-        raise AutoresearchValidationError(
-            f"{label}.sha256 does not match its canonical source inventory"
-        )
-    return {
-        "algorithm": "sha256",
-        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
-        "files": files,
-        "total_bytes": total_bytes,
-        "sha256": digest,
-    }
-
-
-def _validate_quantipy_execution_source_against_commit(
-    source: Mapping[str, object],
-    *,
-    manifest: Mapping[str, object],
-    source_root: Path,
-    workspace: Path,
-    commit_sha: str,
-) -> None:
-    files_raw = source["files"]
-    assert isinstance(files_raw, list)
-    package_relative = Path(str(manifest["package_path"]))
-    package_root = source_root / package_relative
-    try:
-        source_root_relative = source_root.relative_to(workspace)
-        package_workspace_relative = package_root.relative_to(workspace)
-    except ValueError as exc:
-        raise AutoresearchValidationError(
-            "Quantipy run source evidence escaped the implementation workspace"
-        ) from exc
-    committed_source_paths = sorted(
-        path
-        for path in _git_tree_file_paths(
-            workspace,
-            commit_sha=commit_sha,
-            package_path=package_workspace_relative,
-        )
-        if path.suffix == ".py"
-    )
-    expected_files: list[dict[str, object]] = []
-    for workspace_relative in committed_source_paths:
-        committed_bytes = _git_show_committed_bytes(
-            workspace,
-            commit_sha,
-            workspace_relative,
-        )
-        try:
-            source_relative = workspace_relative.relative_to(source_root_relative)
-            source_relative.relative_to(package_relative)
-        except ValueError as exc:
-            raise AutoresearchValidationError(
-                "committed Quantipy package source escaped the manifest source root"
-            ) from exc
-        expected_files.append(
-            {
-                "path": source_relative.as_posix(),
-                "sha256": hashlib.sha256(committed_bytes).hexdigest(),
-                "size_bytes": len(committed_bytes),
-            }
-        )
-    expected_source: dict[str, object] = {
-        "algorithm": "sha256",
-        "domain": QUANTIPY_EXPERIMENT_SOURCE_DIGEST_DOMAIN,
-        "files": expected_files,
-        "total_bytes": sum(cast(int, item["size_bytes"]) for item in expected_files),
-        "sha256": _quantipy_experiment_source_digest(expected_files),
-    }
-    if dict(source) != expected_source:
-        reported_by_path = {
-            str(_ensure_mapping(item, label="Quantipy run.json source file")["path"]): item
-            for item in files_raw
-        }
-        expected_by_path = {str(item["path"]): item for item in expected_files}
-        if reported_by_path.keys() == expected_by_path.keys():
-            mismatched_path = next(
-                path
-                for path in sorted(expected_by_path)
-                if reported_by_path[path] != expected_by_path[path]
-            )
-            raise AutoresearchValidationError(
-                "Quantipy execution-time source evidence does not match implementation commit: "
-                f"{mismatched_path}"
-            )
-        raise AutoresearchValidationError(
-            "Quantipy run source inventory does not exactly match implementation commit"
-        )
-
-
 def _validate_quantipy_run_panel(value: object, *, label: str) -> dict[str, object]:
     data = _strict_json_keys(
         value,
@@ -5149,12 +4308,6 @@ def _validate_quantipy_run_envelope(
             "Quantipy run.json canonical envelope exceeds its size limit"
         )
     return normalized_run
-
-
-def _run_failure_from_mapping(raw: object) -> QuantipyExperimentFailureEvidence | None:
-    if raw is None:
-        return None
-    return QuantipyExperimentFailureEvidence.from_dict(raw)
 
 
 def _legacy_quantipy_bash_command(
@@ -5568,68 +4721,6 @@ def _validate_quantipy_experiment_evidence(
             raise AutoresearchValidationError(
                 "Quantipy panel receipt request does not match manifest request"
             )
-
-
-def _reserve_quantipy_execution_not_started(
-    evidence: QuantipyExecutionNotStartedEvidence,
-    *,
-    runs_root: Path,
-) -> None:
-    """Reserve the deterministic run directory so a concurrent run cannot start later."""
-    _require_private_directory(runs_root, label="trusted Quantipy runs root")
-    root_fd = os.open(
-        runs_root,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-    )
-    try:
-        try:
-            os.mkdir(evidence.expected_run_id, mode=0o700, dir_fd=root_fd)
-        except FileExistsError as exc:
-            raise AutoresearchValidationError(
-                "execution-not-started is false because expected run directory already exists"
-            ) from exc
-        except OSError as exc:
-            raise AutoresearchValidationError(
-                "cannot atomically reserve the execution-not-started run directory"
-            ) from exc
-        run_fd = os.open(
-            evidence.expected_run_id,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=root_fd,
-        )
-        try:
-            marker_fd = os.open(
-                QUANTIPY_EXECUTION_NOT_STARTED_TOMBSTONE,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=run_fd,
-            )
-            try:
-                payload = json.dumps(
-                    {
-                        "schema_version": "g2-quantipy-execution-not-started-v1",
-                        **evidence.to_dict(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                offset = 0
-                while offset < len(payload):
-                    written = os.write(marker_fd, payload[offset:])
-                    if written <= 0:
-                        raise AutoresearchValidationError(
-                            "execution-not-started tombstone write was incomplete"
-                        )
-                    offset += written
-                os.fsync(marker_fd)
-            finally:
-                os.close(marker_fd)
-            os.fsync(run_fd)
-        finally:
-            os.close(run_fd)
-        os.fsync(root_fd)
-    finally:
-        os.close(root_fd)
 
 
 def _require_ancestor(
