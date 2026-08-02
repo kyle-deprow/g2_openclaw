@@ -6,6 +6,15 @@ import os
 import re
 from pathlib import Path
 
+from gateway.autoresearch_panel_receipts import (
+    PANEL_RECEIPT_MAX_BYTES as PANEL_RECEIPT_MAX_BYTES,
+)
+from gateway.autoresearch_panel_receipts import (
+    RUN_ENVELOPE_MAX_BYTES as RUN_ENVELOPE_MAX_BYTES,
+)
+
+QUANTIPY_PANEL_RECEIPT_MAX_BYTES = PANEL_RECEIPT_MAX_BYTES
+QUANTIPY_RUN_ENVELOPE_MAX_BYTES = RUN_ENVELOPE_MAX_BYTES
 DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT = Path(

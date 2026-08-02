@@ -6,7 +6,7 @@ import hashlib
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,6 +15,9 @@ from gateway.autoresearch.constants import (
 )
 from gateway.autoresearch.constants import (
     CANONICAL_QUANTIPY_ENTRYPOINT_MAX_BYTES as CANONICAL_QUANTIPY_ENTRYPOINT_MAX_BYTES,
+)
+from gateway.autoresearch.constants import (
+    EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION as EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,  # noqa: E501
 )
 from gateway.autoresearch.constants import (
     INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION as INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,  # noqa: E501
@@ -90,11 +93,8 @@ if TYPE_CHECKING:
     from gateway.autoresearch.receipts import (
         UniverseVerificationReceipt as UniverseVerificationReceipt,
     )
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.state import (
         AutoresearchState as AutoresearchState,
-    )
-    from gateway.autoresearch_runner import (
-        ExternalVerificationRetryReceipt as ExternalVerificationRetryReceipt,
     )
 
 
@@ -759,3 +759,435 @@ def _validate_external_verification_retry_eligibility(state: AutoresearchState) 
             "external verification retry requires the prior expected Quantipy run artifact"
         )
     return current_receipt.retry_attempt + 1
+
+
+@dataclass(frozen=True, slots=True)
+class InterruptedVerificationAttemptReceipt:
+    """Immutable proof that one exact detached verification attempt was stopped."""
+
+    expected_run_id: str
+    interrupted_attempt: int
+    implementation_commit: str
+    implementation_manifest_sha256: str
+    detached_run_directory: str
+    detached_run_manifest_sha256: str
+    detached_run_status_sha256: str
+    state_sha256: str
+    state_reference_sha256: str
+    instruction_manifest_sha256: str
+    prior_retry_receipt_sha256: str
+    prior_retry_receipt: ExternalVerificationRetryReceipt
+    verification_history_sha256: tuple[str, ...]
+    operator_reason: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if self.schema_version != 1:
+            raise AutoresearchValidationError(
+                "unsupported interrupted verification attempt receipt schema_version"
+            )
+        if self.interrupted_attempt != 3:
+            raise AutoresearchValidationError(
+                "interrupted verification recovery accepts only the current v3 attempt"
+            )
+        if (
+            re.fullmatch(
+                rf"autoresearch-i[1-9][0-9]*-{self.implementation_commit[:12]}-v{self.interrupted_attempt}",
+                self.expected_run_id,
+            )
+            is None
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt expected_run_id is invalid"
+            )
+        if (
+            not isinstance(self.detached_run_directory, str)
+            or not Path(self.detached_run_directory).is_absolute()
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt detached_run_directory must be absolute"
+            )
+        if re.fullmatch(r"[0-9a-f]{7,64}", self.implementation_commit) is None:
+            raise AutoresearchValidationError(
+                "interrupted verification receipt implementation_commit is invalid"
+            )
+        for label, digest in (
+            ("implementation_manifest_sha256", self.implementation_manifest_sha256),
+            ("detached_run_manifest_sha256", self.detached_run_manifest_sha256),
+            ("detached_run_status_sha256", self.detached_run_status_sha256),
+            ("state_sha256", self.state_sha256),
+            ("state_reference_sha256", self.state_reference_sha256),
+            ("instruction_manifest_sha256", self.instruction_manifest_sha256),
+            ("prior_retry_receipt_sha256", self.prior_retry_receipt_sha256),
+        ):
+            _validate_sha256(digest, label=f"interrupted_verification_attempt_receipt.{label}")
+        if not isinstance(self.prior_retry_receipt, ExternalVerificationRetryReceipt):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires the immutable prior retry receipt"
+            )
+        if (
+            self.prior_retry_receipt.schema_version
+            != EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires a schema-v2 prior retry receipt"
+            )
+        if (
+            self.prior_retry_receipt.retry_attempt != self.interrupted_attempt
+            or self.prior_retry_receipt.expected_run_id != self.expected_run_id
+            or self.prior_retry_receipt.implementation_commit != self.implementation_commit
+            or self.prior_retry_receipt.manifest_sha256 != self.implementation_manifest_sha256
+            or self.prior_retry_receipt_sha256
+            != _canonical_json_digest(self.prior_retry_receipt.to_dict())
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt prior retry receipt binding is invalid"
+            )
+        if (
+            not isinstance(self.verification_history_sha256, tuple)
+            or len(self.verification_history_sha256) != 2
+        ):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires the ordered v1/v2 history"
+            )
+        for index, digest in enumerate(self.verification_history_sha256, start=1):
+            _validate_sha256(
+                digest,
+                label=(
+                    f"interrupted_verification_attempt_receipt.verification_history_sha256[{index}]"
+                ),
+            )
+        if not self.operator_reason or self.operator_reason.strip() != self.operator_reason:
+            raise AutoresearchValidationError(
+                "interrupted verification receipt requires a trimmed operator reason"
+            )
+
+    @classmethod
+    def from_dict(cls, raw: object) -> InterruptedVerificationAttemptReceipt:
+        data = _ensure_mapping(raw, label="interrupted_verification_attempt_receipt")
+        _require_exact_keys(
+            data,
+            label="interrupted_verification_attempt_receipt",
+            expected=(
+                "expected_run_id",
+                "interrupted_attempt",
+                "implementation_commit",
+                "implementation_manifest_sha256",
+                "detached_run_directory",
+                "detached_run_manifest_sha256",
+                "detached_run_status_sha256",
+                "state_sha256",
+                "state_reference_sha256",
+                "instruction_manifest_sha256",
+                "prior_retry_receipt_sha256",
+                "prior_retry_receipt",
+                "verification_history_sha256",
+                "operator_reason",
+                "schema_version",
+            ),
+        )
+        history = data["verification_history_sha256"]
+        if not isinstance(history, list):
+            raise AutoresearchValidationError(
+                "interrupted verification receipt verification_history_sha256 must be a list"
+            )
+        return cls(
+            expected_run_id=_require_str(data, "expected_run_id"),
+            interrupted_attempt=_require_int(data, "interrupted_attempt"),
+            implementation_commit=_require_str(data, "implementation_commit"),
+            implementation_manifest_sha256=_require_sha256(data, "implementation_manifest_sha256"),
+            detached_run_directory=_require_str(data, "detached_run_directory"),
+            detached_run_manifest_sha256=_require_sha256(data, "detached_run_manifest_sha256"),
+            detached_run_status_sha256=_require_sha256(data, "detached_run_status_sha256"),
+            state_sha256=_require_sha256(data, "state_sha256"),
+            state_reference_sha256=_require_sha256(data, "state_reference_sha256"),
+            instruction_manifest_sha256=_require_sha256(data, "instruction_manifest_sha256"),
+            prior_retry_receipt_sha256=_require_sha256(data, "prior_retry_receipt_sha256"),
+            prior_retry_receipt=ExternalVerificationRetryReceipt.from_dict(
+                data["prior_retry_receipt"]
+            ),
+            verification_history_sha256=tuple(
+                _require_sha256({"value": digest}, "value") for digest in history
+            ),
+            operator_reason=_require_str(data, "operator_reason"),
+            schema_version=_require_int(data, "schema_version"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "expected_run_id": self.expected_run_id,
+            "interrupted_attempt": self.interrupted_attempt,
+            "implementation_commit": self.implementation_commit,
+            "implementation_manifest_sha256": self.implementation_manifest_sha256,
+            "detached_run_directory": self.detached_run_directory,
+            "detached_run_manifest_sha256": self.detached_run_manifest_sha256,
+            "detached_run_status_sha256": self.detached_run_status_sha256,
+            "state_sha256": self.state_sha256,
+            "state_reference_sha256": self.state_reference_sha256,
+            "instruction_manifest_sha256": self.instruction_manifest_sha256,
+            "prior_retry_receipt_sha256": self.prior_retry_receipt_sha256,
+            "prior_retry_receipt": self.prior_retry_receipt.to_dict(),
+            "verification_history_sha256": list(self.verification_history_sha256),
+            "operator_reason": self.operator_reason,
+            "schema_version": self.schema_version,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalVerificationRetryReceipt:
+    """One operator-authorized retry of an externally failed verification run."""
+
+    expected_run_id: str
+    prior_verification_sha256: str
+    probe: ResearchPanelProbeReceipt
+    retry_attempt: int
+    implementation_commit: str
+    manifest_sha256: str
+    readiness_manifest_id: str
+    readiness_snapshot_id: str
+    operator_reason: str
+    verification_history_sha256: tuple[str, ...] = field(default_factory=tuple)
+    interruption_history_sha256: tuple[str, ...] = field(default_factory=tuple)
+    schema_version: int = EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.schema_version not in {
+            LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
+            raise AutoresearchValidationError(
+                "unsupported external verification retry receipt schema_version"
+            )
+        if self.retry_attempt not in {2, 3, 4, 5}:
+            raise AutoresearchValidationError(
+                "external verification retry receipt attempt is not supported"
+            )
+        _validate_sha256(
+            self.prior_verification_sha256,
+            label="external_verification_retry_receipt.prior_verification_sha256",
+        )
+        if not isinstance(self.verification_history_sha256, tuple):
+            raise AutoresearchValidationError(
+                "external verification retry receipt verification_history_sha256 must be a tuple"
+            )
+        if self.schema_version == LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            if (
+                self.retry_attempt != 2
+                or self.verification_history_sha256
+                or self.interruption_history_sha256
+            ):
+                raise AutoresearchValidationError(
+                    "legacy external verification retry receipt only accepts the live v2 bootstrap"
+                )
+        elif self.schema_version == EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            if self.retry_attempt not in {2, 3}:
+                raise AutoresearchValidationError(
+                    "schema-v2 external verification retry receipt only accepts v2 or v3"
+                )
+            if len(self.verification_history_sha256) != self.retry_attempt - 1:
+                raise AutoresearchValidationError(
+                    "external verification retry receipt must bind every prior verification "
+                    "artifact"
+                )
+            if self.interruption_history_sha256:
+                raise AutoresearchValidationError(
+                    "schema-v2 external verification retry receipt cannot bind interruptions"
+                )
+        else:
+            if self.retry_attempt not in {4, 5}:
+                raise AutoresearchValidationError(
+                    "interrupted external verification retry receipt only accepts v4 or v5"
+                )
+            if not isinstance(self.interruption_history_sha256, tuple):
+                raise AutoresearchValidationError(
+                    "interrupted external verification retry receipt interruption "
+                    "history must be a tuple"
+                )
+            if (
+                len(self.verification_history_sha256) + len(self.interruption_history_sha256)
+                != self.retry_attempt - 1
+            ):
+                raise AutoresearchValidationError(
+                    "interrupted external verification retry receipt must bind every prior attempt"
+                )
+            for history_name, history in (
+                ("verification_history_sha256", self.verification_history_sha256),
+                ("interruption_history_sha256", self.interruption_history_sha256),
+            ):
+                for index, digest in enumerate(history, start=1):
+                    _validate_sha256(
+                        digest,
+                        label=f"external_verification_retry_receipt.{history_name}[{index}]",
+                    )
+            for index, digest in enumerate(self.verification_history_sha256, start=1):
+                _validate_sha256(
+                    digest,
+                    label=(
+                        f"external_verification_retry_receipt.verification_history_sha256[{index}]"
+                    ),
+                )
+        if re.fullmatch(r"[0-9a-f]{7,64}", self.implementation_commit) is None:
+            raise AutoresearchValidationError("implementation_commit is invalid")
+        _validate_sha256(self.manifest_sha256, label="manifest_sha256")
+        if not self.readiness_manifest_id or not self.readiness_snapshot_id:
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires readiness identities"
+            )
+        if not self.operator_reason or self.operator_reason.strip() != self.operator_reason:
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires a trimmed operator reason"
+            )
+        if (
+            re.fullmatch(
+                rf"autoresearch-i[1-9][0-9]*-[0-9a-f]{{7,12}}-v{self.retry_attempt}",
+                self.expected_run_id,
+            )
+            is None
+        ):
+            raise AutoresearchValidationError(
+                "external verification retry receipt expected_run_id is invalid"
+            )
+        if not isinstance(self.probe, ResearchPanelProbeReceipt):
+            raise AutoresearchValidationError(
+                "external verification retry receipt requires a research-panel probe"
+            )
+
+    @classmethod
+    def for_state(
+        cls,
+        state: AutoresearchState,
+        probe: ResearchPanelProbeReceipt,
+        operator_reason: str,
+    ) -> ExternalVerificationRetryReceipt:
+        attempt = _validate_external_verification_retry_eligibility(state)
+        assert state.implementation_result is not None
+        assert state.latest_verification is not None
+        assert state.platform_readiness is not None
+        commit_sha = state.implementation_result.commit_sha
+        return cls(
+            expected_run_id=_deterministic_quantipy_run_id(
+                state.iteration,
+                commit_sha,
+                attempt=attempt,
+            ),
+            prior_verification_sha256=_canonical_json_digest(state.latest_verification.to_dict()),
+            probe=probe,
+            retry_attempt=attempt,
+            implementation_commit=commit_sha,
+            manifest_sha256=state.implementation_result.experiment_manifest_sha256,
+            readiness_manifest_id=state.platform_readiness.manifest_id,
+            readiness_snapshot_id=state.platform_readiness.snapshot_id,
+            operator_reason=operator_reason,
+            verification_history_sha256=tuple(
+                _canonical_json_digest(artifact.to_dict())
+                for artifact in state.verification_history
+            ),
+            interruption_history_sha256=tuple(
+                _canonical_json_digest(interruption.to_dict())
+                for interruption in state.interrupted_verification_history
+            ),
+            schema_version=(
+                INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+                if state.interrupted_verification_history
+                else EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+            ),
+        )
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ExternalVerificationRetryReceipt:
+        data = _ensure_mapping(raw, label="external_verification_retry_receipt")
+        schema_version = _require_int(data, "schema_version")
+        expected: tuple[str, ...] = (
+            "expected_run_id",
+            "prior_verification_sha256",
+            "probe",
+            "retry_attempt",
+            "implementation_commit",
+            "manifest_sha256",
+            "readiness_manifest_id",
+            "readiness_snapshot_id",
+            "operator_reason",
+            "schema_version",
+        )
+        if schema_version in {
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
+            expected = (*expected, "verification_history_sha256")
+        if schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            expected = (*expected, "interruption_history_sha256")
+        if schema_version not in {
+            LEGACY_EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
+            raise AutoresearchValidationError(
+                "unsupported external verification retry receipt schema_version"
+            )
+        _require_exact_keys(
+            data,
+            label="external_verification_retry_receipt",
+            expected=expected,
+        )
+        history_raw = data.get("verification_history_sha256", [])
+        if not isinstance(history_raw, list):
+            raise AutoresearchValidationError(
+                "external verification retry receipt verification_history_sha256 must be a list"
+            )
+        history: list[str] = []
+        for index, digest in enumerate(history_raw):
+            if not isinstance(digest, str):
+                raise AutoresearchValidationError(
+                    "external verification retry receipt verification_history_sha256 "
+                    f"entry {index} must be a SHA-256"
+                )
+            _validate_sha256(
+                digest,
+                label=(f"external_verification_retry_receipt.verification_history_sha256[{index}]"),
+            )
+            history.append(digest)
+        interruptions_raw = data.get("interruption_history_sha256", [])
+        if not isinstance(interruptions_raw, list):
+            raise AutoresearchValidationError(
+                "external verification retry receipt interruption_history_sha256 must be a list"
+            )
+        interruptions = tuple(
+            _require_sha256({"value": digest}, "value") for digest in interruptions_raw
+        )
+        return cls(
+            expected_run_id=_require_str(data, "expected_run_id"),
+            prior_verification_sha256=_require_sha256(data, "prior_verification_sha256"),
+            probe=ResearchPanelProbeReceipt.from_dict(data["probe"]),
+            retry_attempt=_require_int(data, "retry_attempt"),
+            implementation_commit=_require_str(data, "implementation_commit"),
+            manifest_sha256=_require_sha256(data, "manifest_sha256"),
+            readiness_manifest_id=_require_str(data, "readiness_manifest_id"),
+            readiness_snapshot_id=_require_str(data, "readiness_snapshot_id"),
+            operator_reason=_require_str(data, "operator_reason"),
+            verification_history_sha256=tuple(history),
+            interruption_history_sha256=interruptions,
+            schema_version=schema_version,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        receipt = {
+            "expected_run_id": self.expected_run_id,
+            "prior_verification_sha256": self.prior_verification_sha256,
+            "probe": self.probe.to_dict(),
+            "retry_attempt": self.retry_attempt,
+            "implementation_commit": self.implementation_commit,
+            "manifest_sha256": self.manifest_sha256,
+            "readiness_manifest_id": self.readiness_manifest_id,
+            "readiness_snapshot_id": self.readiness_snapshot_id,
+            "operator_reason": self.operator_reason,
+            "schema_version": self.schema_version,
+        }
+        if self.schema_version in {
+            EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+        }:
+            receipt["verification_history_sha256"] = list(self.verification_history_sha256)
+        if self.schema_version == INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION:
+            receipt["interruption_history_sha256"] = list(self.interruption_history_sha256)
+        return receipt
