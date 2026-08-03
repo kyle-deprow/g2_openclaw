@@ -35,6 +35,7 @@ from gateway.autoresearch_runner import (
     QuantipyExperimentFailureEvidence,
     ReceiptCatalog,
     ResearchMode,
+    ReviewVerdict,
     VerificationStatus,
     build_receipt_catalog,
     expected_instruction_manifest_sha256,
@@ -60,8 +61,11 @@ from tests.gateway.autoresearch.builders import (
     _no_consensus,
     _prepare_real_canonical_runtime,
     _ready_manifest,
+    _review_result,
+    _runtime_verification_context,
     _runtime_verification_state,
     _setup_artifact,
+    _state_to_consensus,
     _state_to_decision,
     _state_to_g0_decision,
     _verification_result,
@@ -668,3 +672,144 @@ def successful_quantipy_evidence() -> QuantipyExperimentEvidence:
     evidence = _verification_result(VerificationStatus.PASS).quantipy_experiment_evidence
     assert evidence is not None
     return evidence
+
+
+@pytest.fixture()
+def alpha_memory_state(policy: AutoresearchPolicy) -> AutoresearchState:
+    long_rationale = "The completed experiment has a durable methodology limitation. " * 5
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            max_drawdown_pct=34.0,
+            oos_sharpe_net=0.92,
+            is_walk_forward_sharpe_net=0.84,
+        ),
+        policy,
+    )
+    state = advance_state(state, _review_result(ReviewVerdict.PASS, policy), policy)
+    return advance_state(
+        state,
+        replace(
+            _final_decision(),
+            experiment_id="alpha-discard-1",
+            decision=FinalDecision.DISCARD,
+            recommended_metric_value=0.92,
+            rationale=long_rationale,
+            log_summary="Discarded after a durable methodology limitation.",
+        ),
+        policy,
+    )
+
+
+@pytest.fixture()
+def live_v2_http_413_state_file(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> tuple[
+    Path,
+    ResearchPanelProbeReceipt,
+    AutoresearchValidationContext,
+    tuple[tuple[Path, str], ...],
+]:
+    """A private copy of the live stale-state plus attested v2 artifact shape."""
+    state, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    manifest = json.loads(Path(evidence.manifest_path).read_text(encoding="utf-8"))
+    panel = cast(dict[str, object], manifest["panel"])
+    request = cast(dict[str, object], panel["request"])
+    expected_url = "http://127.0.0.1:8000/price-data/research-panel?" + urlencode(
+        (
+            ("tickers", ",".join(cast(list[str], request["tickers"]))),
+            ("start", "2026-07-28T12:00:00+00:00"),
+            ("end", "2026-07-28T13:00:00+00:00"),
+            ("timeframe", cast(str, request["timeframe"])),
+            ("market_hours", cast(str, request["market_hours"])),
+        )
+    )
+    initial = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        quantipy_experiment_evidence=replace(
+            evidence,
+            success=False,
+            completed_stages=(),
+            terminal_stage=None,
+            terminal_status=None,
+            failure=QuantipyExperimentFailureEvidence(
+                category="panel",
+                message=(
+                    "ExperimentPanelError: Client error '404 Not Found' for url "
+                    f"'{expected_url}'\n"
+                    "For more information check: "
+                    "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+                ),
+            ),
+            panel=None,
+        ),
+    )
+    failed_initial = advance_state(state, initial, policy)
+    probe = ResearchPanelProbeReceipt(
+        endpoint="http://127.0.0.1:8000/price-data/research-panel",
+        observed_at="2026-07-29T12:00:00Z",
+        response_bytes=18,
+        response_sha256="a" * 64,
+        session_date="2022-01-03",
+        symbol="AAPL",
+    )
+    v2_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_initial, probe, "Raised the gateway receipt limit."
+    )
+    stale_state = retry_external_verification(failed_initial, v2_receipt)
+    v2_run_path = trusted_quantipy_runs_root / v2_receipt.expected_run_id / "run.json"
+    run = json.loads(Path(evidence.run_json_path).read_text(encoding="utf-8"))
+    run.update(
+        run_id=v2_receipt.expected_run_id,
+        success=False,
+        panel_requested=True,
+        panel=None,
+        stage_receipts=[],
+        failure={
+            "category": "panel",
+            "message": (
+                "ExperimentPanelError: Client error '413 Request Entity Too Large' for url "
+                f"'{expected_url}'\nFor more information check: "
+                "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
+            ),
+        },
+    )
+    v2_run_path.parent.mkdir(mode=0o700)
+    v2_run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    v2_run_path.write_bytes(v2_run_bytes)
+    v2_run_path.chmod(0o600)
+    detached_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{stale_state.iteration}-verification-r1-a{v2_receipt.retry_attempt}-"
+        f"{v2_receipt.implementation_commit[:12]}-v{v2_receipt.retry_attempt}"
+    )
+    _write_quantipy_detached_run_record(
+        workspace=git_worktree.workspace,
+        runtime_root=git_worktree.target_checkout,
+        manifest_path=evidence.manifest_path,
+        run_id=v2_receipt.expected_run_id,
+        run_path=v2_run_path,
+        detached_run_dir=detached_run_dir,
+    )
+    state_path = tmp_path / "live-v2-http-413-state.json"
+    state_path.write_text(json.dumps(stale_state.to_dict()), encoding="utf-8")
+    immutable_hashes = tuple(
+        (path, sha256(path.read_bytes()).hexdigest())
+        for root in (v2_run_path.parent, detached_run_dir)
+        for path in sorted(path for path in root.rglob("*") if path.is_file())
+    )
+    return state_path, probe, _runtime_verification_context(stale_state), immutable_hashes

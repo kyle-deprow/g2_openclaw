@@ -33,7 +33,9 @@ from gateway.autoresearch_readiness import (
 )
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
+    DEFAULT_OPENCLAW_CONFIG_PATH,
     MEMBER_UNION_DIGEST_ALGORITHM,
+    MEMPALACE_READONLY_SERVER_ID,
     AggregateCoverageReceipt,
     AuthoritativeSnapshotReceipt,
     AutoresearchPolicy,
@@ -1817,3 +1819,202 @@ def _runtime_verification_state(
         panel=panel_evidence,
     )
     return state, state_path, evidence
+
+
+@dataclass
+class _StateDerivedMemoryWriter:
+    kg_path: Path
+    request_experiment_id: str | None = None
+
+    def write(self, request: FinalMemoryWriteRequest) -> Path:
+        self.request_experiment_id = request.experiment_id
+        _write_active_mempalace_facts(
+            self.kg_path,
+            subject=request.experiment_id,
+            facts=request.facts,
+        )
+        _write_committed_finalization_journal(self.kg_path, request)
+        return self.kg_path
+
+
+def _legacy_migration_state(
+    git_worktree: GitWorktree,
+    legacy_root: Path,
+    policy: AutoresearchPolicy,
+) -> tuple[AutoresearchState, str, str]:
+    manifest_path, manifest_sha256, _, _, commit_sha, _ = _write_quantipy_v2_run(git_worktree)
+    legacy_workspace = legacy_root / "iteration-1"
+    legacy_root.mkdir(mode=0o700, parents=True)
+    legacy_root.chmod(0o700)
+    _git(
+        git_worktree.target_checkout,
+        "worktree",
+        "add",
+        "--detach",
+        str(legacy_workspace),
+        commit_sha,
+    )
+    legacy_workspace.chmod(0o700)
+    relative_manifest = Path(manifest_path).relative_to(git_worktree.workspace)
+    implementation = replace(
+        _implementation_result(),
+        workspace_path=str(legacy_workspace),
+        commit_sha=commit_sha,
+        experiment_manifest_path=str(legacy_workspace / relative_manifest),
+        experiment_manifest_sha256=manifest_sha256,
+    )
+    state = _state_to_consensus(policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(state, setup=_workspace_setup(git_worktree.target_checkout))
+    return advance_state(state, implementation, policy), commit_sha, str(legacy_workspace)
+
+
+def _load_config() -> dict[str, object]:
+    raw: object = json.loads(DEFAULT_OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
+    return cast(dict[str, object], raw)
+
+
+def _set_openai_api(config: dict[str, object]) -> None:
+    models = cast(dict[str, object], config["models"])
+    providers = cast(dict[str, object], models["providers"])
+    openai = cast(dict[str, object], providers["openai"])
+    openai["api"] = "openai-completions"
+
+
+def _drop_codex_plugin_allow(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    plugins["allow"] = []
+
+
+def _set_agent_runtime_id(config: dict[str, object]) -> None:
+    models = cast(dict[str, object], config["models"])
+    providers = cast(dict[str, object], models["providers"])
+    openai = cast(dict[str, object], providers["openai"])
+    runtime = cast(dict[str, object], openai["agentRuntime"])
+    runtime["id"] = "other"
+
+
+def _set_codex_danger_full_access(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["sandbox"] = "danger-full-access"
+
+
+def _drop_codex_app_server_sandbox(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    del app_server["sandbox"]
+
+
+def _set_codex_wrong_default_workspace(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["defaultWorkspaceDir"] = "/home/dev/repos/g2_openclaw"
+
+
+def _add_codex_network_proxy(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    app_server = cast(dict[str, object], plugin_config["appServer"])
+    app_server["networkProxy"] = {"enabled": True}
+
+
+def _add_codex_native_tool_surface_key(config: dict[str, object]) -> None:
+    plugins = cast(dict[str, object], config["plugins"])
+    entries = cast(dict[str, object], plugins["entries"])
+    codex = cast(dict[str, object], entries["codex"])
+    plugin_config = cast(dict[str, object], codex["config"])
+    plugin_config["nativeToolSurfaceEnabled"] = False
+
+
+def _set_safeguard_compaction(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    compaction = cast(dict[str, object], defaults["compaction"])
+    compaction["mode"] = "safeguard"
+
+
+def _raise_agent_run_concurrency(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    defaults["maxConcurrent"] = 4
+
+
+def _raise_subagent_concurrency(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    subagents = cast(dict[str, object], defaults["subagents"])
+    subagents["maxConcurrent"] = 3
+
+
+def _set_rejecting_subagent_child_cap(config: dict[str, object]) -> None:
+    agents_root = cast(dict[str, object], config["agents"])
+    defaults = cast(dict[str, object], agents_root["defaults"])
+    subagents = cast(dict[str, object], defaults["subagents"])
+    subagents["maxChildrenPerAgent"] = 1
+
+
+def _agent(config: dict[str, object], agent_id: str) -> dict[str, object]:
+    agents_root = cast(dict[str, object], config["agents"])
+    agents = cast(list[dict[str, object]], agents_root["list"])
+    return next(agent for agent in agents if agent["id"] == agent_id)
+
+
+def _drop_pm_mempalace_skill(config: dict[str, object]) -> None:
+    _agent(config, "autoresearch-pm")["skills"] = ["autoresearch"]
+
+
+def _remove_pm_native_codex_delegation_deny(config: dict[str, object]) -> None:
+    tools = cast(dict[str, object], _agent(config, "autoresearch-pm")["tools"])
+    tools["deny"] = []
+
+
+def _add_pm_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
+    _agent(config, "autoresearch-pm")["subagents"] = {"allowAgents": ["reviewer"]}
+
+
+def _add_stage_openclaw_subagent_allowlist(config: dict[str, object]) -> None:
+    _agent(config, "consensus_arbiter")["subagents"] = {"allowAgents": ["reviewer"]}
+
+
+def _give_main_a_pm_skill(config: dict[str, object]) -> None:
+    _agent(config, "main")["skills"] = ["autoresearch"]
+
+
+def _set_main_full_profile(config: dict[str, object]) -> None:
+    tools = cast(dict[str, object], _agent(config, "main")["tools"])
+    tools["profile"] = "full"
+
+
+def _give_stage_agent_write_skill(config: dict[str, object]) -> None:
+    _agent(config, "context_curator")["skills"] = ["mempalace", "quantipy-methodology"]
+
+
+def _drop_mempalace_readonly_server(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    del servers[MEMPALACE_READONLY_SERVER_ID]
+
+
+def _add_forbidden_full_mempalace_server(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    servers["mempalace"] = {}
+
+
+def _break_readonly_server_args(config: dict[str, object]) -> None:
+    mcp = cast(dict[str, object], config["mcp"])
+    servers = cast(dict[str, object], mcp["servers"])
+    readonly = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
+    readonly["args"] = ["-m", "mempalace.mcp_server", "--palace", "/tmp/palace"]
