@@ -6,7 +6,6 @@
 #
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
-#   - sqlite3 CLI
 #   - OpenClaw CLI exactly 2026.7.1-2
 #   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai' for main;
@@ -142,74 +141,9 @@ sync_managed_agent_codex_auth() {
   local source_agent_dir="${OPENCLAW_PUSH_HOME}/agents/main/agent"
   local source_db="${source_agent_dir}/openclaw-agent.sqlite"
   local source_profiles="${source_agent_dir}/auth-profiles.json"
-
-  if [[ ! -f "${source_db}" ]]; then
-    echo "ERROR: Missing main OpenClaw auth store ${source_db}." >&2
-    echo "       Run: ${OPENCLAW_BIN_RESOLVED} models auth login --provider openai" >&2
-    exit 1
-  fi
-  if ! sqlite3 "${source_db}" \
-    "select 1 from auth_profile_store where store_json like '%\"provider\":\"openai\"%' limit 1;" \
-    | grep -qx '1'; then
-    echo "ERROR: Main OpenClaw auth store has no OpenAI/Codex OAuth profile." >&2
-    echo "       Run: ${OPENCLAW_BIN_RESOLVED} models auth login --provider openai" >&2
-    exit 1
-  fi
-
-  mapfile -t OPENAI_AGENT_IDS < <(jq -r '
-    .agents.list[]?
-    | select((.model.primary // "") | startswith("openai/"))
-    | .id
-  ' "${REPO_CONFIG}")
-  if [[ "${#OPENAI_AGENT_IDS[@]}" -eq 0 ]]; then
-    echo "ERROR: No OpenAI/Codex-managed agents found in ${REPO_CONFIG}" >&2
-    exit 1
-  fi
-
-  echo "Syncing OpenClaw-managed Codex OAuth profile to ${#OPENAI_AGENT_IDS[@]} agent auth stores:"
-  local source_db_sql
-  source_db_sql="$(quote_sqlite_literal "${source_db}")"
-  for AGENT_ID in "${OPENAI_AGENT_IDS[@]}"; do
-    local agent_dir="${OPENCLAW_PUSH_HOME}/agents/${AGENT_ID}/agent"
-    local target_db="${agent_dir}/openclaw-agent.sqlite"
-    if [[ "${AGENT_ID}" == "main" ]]; then
-      echo "  ${AGENT_ID} → ${target_db} (source)"
-      continue
-    fi
-    guarded_mkdir_p "${agent_dir}" "creating managed OpenClaw agent auth directory ${agent_dir}"
-    if [[ -f "${source_profiles}" ]]; then
-      guarded_cp_file "${source_profiles}" "${agent_dir}/auth-profiles.json" "copying managed OpenClaw auth profile to ${agent_dir}/auth-profiles.json"
-      guarded_chmod 0600 "${agent_dir}/auth-profiles.json" "chmod managed OpenClaw auth profile ${agent_dir}/auth-profiles.json"
-    fi
-    guard_destination_path_chain "${target_db}" "syncing managed OpenClaw agent auth database ${target_db}"
-    sqlite3 "${target_db}" <<SQL
-ATTACH DATABASE ${source_db_sql} AS source_auth;
-BEGIN IMMEDIATE;
-CREATE TABLE IF NOT EXISTS auth_profile_store (
-  store_key TEXT NOT NULL PRIMARY KEY,
-  store_json TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS auth_profile_state (
-  state_key TEXT NOT NULL PRIMARY KEY,
-  state_json TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-DELETE FROM auth_profile_store;
-INSERT INTO auth_profile_store SELECT store_key, store_json, updated_at FROM source_auth.auth_profile_store;
-DELETE FROM auth_profile_state;
-INSERT INTO auth_profile_state SELECT state_key, state_json, updated_at FROM source_auth.auth_profile_state;
-COMMIT;
-SQL
-    guarded_chmod 0600 "${target_db}" "chmod managed OpenClaw agent auth database ${target_db}"
-    if ! sqlite3 "${target_db}" \
-      "select 1 from auth_profile_store where store_json like '%\"provider\":\"openai\"%' limit 1;" \
-      | grep -qx '1'; then
-      echo "ERROR: Failed to sync OpenAI/Codex auth into ${target_db}" >&2
-      exit 1
-    fi
-    echo "  ${AGENT_ID} → ${target_db}"
-  done
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.auth_sync sync \
+    "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}" "${OPENCLAW_BIN_RESOLVED}"
 }
 
 build_string_array_json() {
@@ -738,136 +672,33 @@ prepare_runtime_caps_dropin_dir() {
 
 decode_systemd_show_environment_word() {
   local encoded="$1"
-  local decoded="" char next i len escape_digits code
-
-  if [[ "${encoded}" == \$\'* ]]; then
-    len="${#encoded}"
-    i=2
-    while ((i < len)); do
-      char="${encoded:i:1}"
-      if [[ "${char}" == "'" ]]; then
-        ((i++))
-        [[ "${i}" -eq "${len}" ]] || return 1
-        printf '%s' "${decoded}"
-        return 0
-      fi
-      if [[ "${char}" == '\' ]]; then
-        ((i++))
-        ((i < len)) || return 1
-        next="${encoded:i:1}"
-        case "${next}" in
-          "n")
-            decoded+=$'\n'
-            ;;
-          "t")
-            decoded+=$'\t'
-            ;;
-          "r")
-            decoded+=$'\r'
-            ;;
-          "b")
-            decoded+=$'\b'
-            ;;
-          "f")
-            decoded+=$'\f'
-            ;;
-          "v")
-            decoded+=$'\v'
-            ;;
-          "a")
-            decoded+=$'\a'
-            ;;
-          "e"|"E")
-            decoded+=$'\e'
-            ;;
-          "\\"|"'"|'"'|"?")
-            decoded+="${next}"
-            ;;
-          "x")
-            ((i + 2 < len)) || return 1
-            escape_digits="${encoded:i+1:2}"
-            [[ "${escape_digits}" =~ ^[[:xdigit:]]{2}$ ]] || return 1
-            if ((i + 3 < len)) && [[ "${encoded:i+3:1}" =~ [[:xdigit:]] ]]; then
-              return 1
-            fi
-            code=$((16#${escape_digits}))
-            ((code != 0)) || return 1
-            printf -v char "\\$(printf '%03o' "${code}")"
-            decoded+="${char}"
-            ((i += 2))
-            ;;
-          [0-7])
-            ((i + 2 < len)) || return 1
-            escape_digits="${encoded:i:3}"
-            [[ "${escape_digits}" =~ ^[0-7]{3}$ ]] || return 1
-            code=$((8#${escape_digits}))
-            ((code != 0 && code <= 255)) || return 1
-            printf -v char "\\$(printf '%03o' "${code}")"
-            decoded+="${char}"
-            ((i += 2))
-            ;;
-          *)
-            return 1
-            ;;
-        esac
-      else
-        decoded+="${char}"
-      fi
-      ((i++))
-    done
-    return 1
-  fi
-
-  if [[ "${encoded}" == "'"*"'" ]]; then
-    decoded="${encoded:1:${#encoded}-2}"
-    [[ "${decoded}" != *"'"* ]] || return 1
-    printf '%s' "${decoded}"
-    return 0
-  fi
-
-  if [[ "${encoded}" =~ ^[-._~/:@%+=,A-Za-z0-9]*$ ]]; then
-    printf '%s' "${encoded}"
-    return 0
-  fi
-
-  return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-word "${encoded}"
 }
 
 decode_systemd_show_environment_node_options() {
   local manager_env="$1"
-  local manager_line decoded_node_options=""
+  local result present encoded
   SYSTEMD_DECODED_NODE_OPTIONS_PRESENT=0
   SYSTEMD_DECODED_NODE_OPTIONS_VALUE=""
-  while IFS= read -r manager_line; do
-    case "${manager_line}" in
-      NODE_OPTIONS=*)
-        if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 ]]; then
-          echo "ERROR: systemd user manager emitted multiple NODE_OPTIONS assignments; refusing ambiguous cleanup." >&2
-          return 1
-        fi
-        SYSTEMD_DECODED_NODE_OPTIONS_PRESENT=1
-        if ! decoded_node_options="$(decode_systemd_show_environment_word "${manager_line#NODE_OPTIONS=}")"; then
-          echo "ERROR: Could not safely decode systemd user manager NODE_OPTIONS assignment; refusing ambiguous cleanup." >&2
-          return 1
-        fi
-        SYSTEMD_DECODED_NODE_OPTIONS_VALUE="${decoded_node_options}"
-        ;;
-    esac
-  done <<< "${manager_env}"
+  if ! result="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-node-options "${manager_env}" 2>&1)"; then
+    printf '%s\n' "${result}" >&2
+    return 1
+  fi
+  IFS=$'\t' read -r present encoded <<< "${result}"
+  SYSTEMD_DECODED_NODE_OPTIONS_PRESENT="${present}"
+  if [[ "${present}" -eq 1 ]]; then
+    SYSTEMD_DECODED_NODE_OPTIONS_VALUE="$(printf '%s' "${encoded}" | base64 -d)"
+  fi
 }
 
 verify_systemd_manager_node_options_stale_preload_absent() {
-  local manager_env
-  if ! manager_env="$(systemctl --user show-environment 2>/dev/null)"; then
-    echo "ERROR: Could not re-check systemd user manager environment after unsetting NODE_OPTIONS." >&2
-    return 1
-  fi
-  if ! decode_systemd_show_environment_node_options "${manager_env}"; then
-    return 1
-  fi
-  if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 \
-    && "${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}" == *"${STALE_AZURE_PRELOAD_PATTERN}"* ]]; then
-    echo "ERROR: systemd user manager still exposes stale Azure NODE_OPTIONS after unset-environment; refusing to continue." >&2
+  local result
+  if ! result="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env verify-node-options \
+    "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
+    printf '%s\n' "${result}" >&2
     return 1
   fi
 }
@@ -879,273 +710,51 @@ remove_stale_azure_node_options_for_codex() {
   local service_path="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
   local dropin_scan_output=""
   local -a candidates=()
+  local module_output module_status line marker present state_changed encoded
+  # systemctl --user daemon-reload is performed by the deployment helper.
 
-  if manager_env="$(systemctl --user show-environment 2>/dev/null)"; then
-    if ! decode_systemd_show_environment_node_options "${manager_env}"; then
-      return 1
-    fi
-    if [[ "${SYSTEMD_DECODED_NODE_OPTIONS_PRESENT}" -eq 1 \
-      && "${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}" == *"${STALE_AZURE_PRELOAD_PATTERN}"* ]]; then
-      SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=1
-      SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL="${SYSTEMD_DECODED_NODE_OPTIONS_VALUE}"
-      SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=1
-      if ! systemctl --user unset-environment NODE_OPTIONS; then
-        echo "ERROR: Failed to unset stale Azure NODE_OPTIONS from systemd user manager environment." >&2
-        return 1
-      fi
-      if ! verify_systemd_manager_node_options_stale_preload_absent; then
-        return 1
-      fi
-      changed=1
-      echo "Unset stale Azure NODE_OPTIONS from systemd user manager environment"
-    fi
+  if module_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env remove-stale-azure-node-options \
+    "${service_path}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
+    module_status=0
   else
-    echo "ERROR: Could not inspect systemd user manager environment for stale Azure NODE_OPTIONS." >&2
-    return 1
+    module_status=$?
   fi
 
-  if [[ -f "${service_path}" ]]; then
-    candidates+=("${service_path}")
+  if [[ -n "${module_output}" ]]; then
+    while IFS= read -r line; do
+      case "${line}" in
+        __G2_SYSTEMD_ENV_STATE__$'\t'*)
+          IFS=$'\t' read -r marker present state_changed encoded <<< "${line}"
+          SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT="${present}"
+          SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED="${state_changed}"
+          SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL="$(printf '%s' "${encoded}" | base64 -d)"
+          ;;
+        *)
+          if [[ "${module_status}" -eq 0 ]]; then
+            printf '%s\n' "${line}"
+          else
+            printf '%s\n' "${line}" >&2
+          fi
+          ;;
+      esac
+    done <<< "${module_output}"
   fi
-  if [[ -d "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
-    guard_destination_path_chain "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "scanning managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || return 1
-    dropin_scan_output="$(mktemp "${TMPDIR:-/tmp}/push-openclaw-systemd-dropins.XXXXXX")"
-    guard_destination_path_chain "${dropin_scan_output}" "creating managed systemd scan output ${dropin_scan_output}" || return 1
-    if ! collect_find_results_null \
-      "${dropin_scan_output}" \
-      "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" \
-      "scanning managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" \
-      -maxdepth 1 -type f -name '*.conf'; then
-      return 1
-    fi
-    while IFS= read -r -d '' path; do
-      candidates+=("${path}")
-    done < "${dropin_scan_output}"
-    guarded_rm_f "${dropin_scan_output}" "removing managed systemd scan output ${dropin_scan_output}" || return 1
-  fi
-
-  for path in "${candidates[@]}"; do
-    guard_destination_path_chain "${path}" "rewriting managed systemd environment file ${path}" || return 1
-    temp="$(mktemp "${path}.XXXXXX")"
-    guard_destination_path_chain "${temp}" "creating temporary managed systemd rewrite file ${temp}" || return 1
-    if awk -v stale="${STALE_AZURE_PRELOAD_PATTERN}" '
-      function append_char(value, char) {
-        return value char
-      }
-      function read_environment_token(rest, start, result,    pos, len, char, quote, next_char) {
-        pos = start
-        len = length(rest)
-        quote = ""
-        token_raw = ""
-        token_value = ""
-        while (pos <= len) {
-          char = substr(rest, pos, 1)
-          if (quote == "" && char ~ /[[:space:]]/) {
-            break
-          }
-          token_raw = append_char(token_raw, char)
-          if (quote != "") {
-            if (char == "\\") {
-              if (pos < len) {
-                next_char = substr(rest, pos + 1, 1)
-                token_raw = append_char(token_raw, next_char)
-                token_value = append_char(token_value, next_char)
-                pos += 2
-                continue
-              }
-            } else if (char == quote) {
-              quote = ""
-              pos++
-              continue
-            } else {
-              token_value = append_char(token_value, char)
-            }
-          } else if (char == "\"" || char == "'"'"'") {
-            quote = char
-          } else if (char == "\\") {
-            if (pos < len) {
-              next_char = substr(rest, pos + 1, 1)
-              token_raw = append_char(token_raw, next_char)
-              token_value = append_char(token_value, next_char)
-              pos += 2
-              continue
-            }
-          } else {
-            token_value = append_char(token_value, char)
-          }
-          pos++
-        }
-        result["raw"] = token_raw
-        result["value"] = token_value
-        result["next"] = pos
-        result["ok"] = quote == "" && token_raw != ""
-      }
-      function rewrite_environment_line(line,    prefix, rest, output, kept, removed, pos, ws_start, whitespace) {
-        rewrite_output = ""
-        if (!match(line, /^[[:space:]]*Environment=/)) {
-          return 0
-        }
-        prefix = substr(line, 1, RLENGTH)
-        rest = substr(line, RLENGTH + 1)
-        output = ""
-        kept = 0
-        removed = 0
-        pos = 1
-        while (pos <= length(rest)) {
-          ws_start = pos
-          while (pos <= length(rest) && substr(rest, pos, 1) ~ /[[:space:]]/) {
-            pos++
-          }
-          whitespace = substr(rest, ws_start, pos - ws_start)
-          if (pos > length(rest)) {
-            break
-          }
-          delete token
-          read_environment_token(rest, pos, token)
-          if (!token["ok"]) {
-            if (index(line, stale) > 0) {
-              parse_error = 1
-            }
-            return 0
-          }
-          if (token["value"] ~ /^NODE_OPTIONS=/ && index(token["value"], stale) > 0) {
-            removed = 1
-          } else if (kept == 0) {
-            output = prefix token["raw"]
-            kept = 1
-          } else {
-            output = output whitespace token["raw"]
-          }
-          pos = token["next"]
-        }
-        if (removed) {
-          rewrite_output = output
-          return 1
-        }
-        return 0
-      }
-      function flush_block() {
-        if (rewrite_environment_line(logical)) {
-          changed = 1
-          if (rewrite_output != "") {
-            print rewrite_output
-          }
-          printf "%s", ignored_block
-        } else {
-          printf "%s", block
-        }
-        block = ""
-        logical = ""
-        ignored_block = ""
-      }
-      function is_ignored_continuation_line(line) {
-        return line ~ /^[[:space:]]*($|#|;)/
-      }
-      {
-        if (logical != "" && is_ignored_continuation_line($0)) {
-          block = block $0 ORS
-          ignored_block = ignored_block $0 ORS
-          next
-        }
-        if (logical == "" && is_ignored_continuation_line($0)) {
-          print
-          next
-        }
-        continued = $0 ~ /\\$/
-        part = continued ? substr($0, 1, length($0) - 1) : $0
-        block = block $0 ORS
-        if (logical == "") {
-          logical = part
-        } else {
-          logical = logical " " part
-        }
-        if (!continued) {
-          flush_block()
-        }
-      }
-      END {
-        if (block != "") {
-          parse_error = 1
-        }
-        if (parse_error) {
-          exit 20
-        }
-        exit changed ? 10 : 0
-      }
-    ' "${path}" > "${temp}"; then
-      rewrite_status=0
-    else
-      rewrite_status=$?
-    fi
-    case "${rewrite_status}" in
-      0)
-        guarded_rm_f "${temp}" "removing unchanged temporary systemd rewrite file ${temp}"
-        continue
-        ;;
-      10)
-        ;;
-      *)
-        guarded_rm_f "${temp}" "removing failed temporary systemd rewrite file ${temp}"
-        echo "ERROR: Failed to inspect ${path} for stale Azure NODE_OPTIONS assignment lines." >&2
-        return 1
-        ;;
-    esac
-    if ! guarded_chmod_reference "${path}" "${temp}" "preserving permissions while rewriting ${path} via ${temp}"; then
-      guarded_rm_f "${temp}" "removing temporary systemd rewrite file ${temp} after chmod failure"
-      echo "ERROR: Failed to preserve permissions while rewriting ${path}." >&2
-      return 1
-    fi
-    if ! guarded_mv_replace "${temp}" "${path}" "publishing rewritten managed systemd environment file ${path}"; then
-      guarded_rm_f "${temp}" "removing temporary systemd rewrite file ${temp} after publish failure"
-      echo "ERROR: Failed to rewrite stale Azure NODE_OPTIONS assignment lines in ${path}." >&2
-      return 1
-    fi
-    changed=1
-    echo "Removed stale Azure NODE_OPTIONS assignment line from ${path}"
-  done
-
-  if [[ "${changed}" -eq 1 ]]; then
-    systemctl --user daemon-reload
-  fi
+  return "${module_status}"
 }
-
 resolve_openclaw_bin() {
   local -a candidates=()
   local candidate path_entry
   declare -A seen=()
+  local resolved
 
-  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
-    candidates+=("$(expand_user_path "${OPENCLAW_BIN}")")
-  else
-    candidates+=(
-      "${HOME}/.local/share/pnpm/openclaw"
-      "${HOME}/.local/bin/openclaw"
-    )
-    IFS=':' read -r -a path_entries <<< "${PATH:-}"
-    for path_entry in "${path_entries[@]}"; do
-      [[ -n "${path_entry}" ]] || continue
-      candidates+=("${path_entry}/openclaw")
-    done
+  if ! resolved="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.versions resolve-openclaw-bin 2>&1)"; then
+    printf '%s\n' "${resolved}" >&2
+    return 1
   fi
-
-  for candidate in "${candidates[@]}"; do
-    [[ -n "${candidate}" ]] || continue
-    if [[ -n "${seen[${candidate}]+x}" ]]; then
-      continue
-    fi
-    seen["${candidate}"]=1
-    if [[ -f "${candidate}" && -x "${candidate}" ]]; then
-      OPENCLAW_BIN_RESOLVED="${candidate}"
-      return 0
-    fi
-  done
-
-  if [[ -n "${OPENCLAW_BIN:-}" ]]; then
-    echo "ERROR: OPENCLAW_BIN points to a missing or non-executable path: $(expand_user_path "${OPENCLAW_BIN}")" >&2
-  else
-    echo "ERROR: OpenClaw executable not found. Checked ${HOME}/.local/share/pnpm/openclaw, ${HOME}/.local/bin/openclaw, and PATH entries." >&2
-  fi
-  return 1
+  OPENCLAW_BIN_RESOLVED="${resolved}"
+  return 0
 }
 
 require_openclaw_supported() {
@@ -1153,69 +762,47 @@ require_openclaw_supported() {
   if ! resolve_openclaw_bin; then
     return 1
   fi
-  if ! version_line="$(run_openclaw_cli_for_repo_config --version 2>&1)"; then
-    echo "ERROR: OpenClaw version check failed for ${OPENCLAW_BIN_RESOLVED}" >&2
+  if ! prepare_repo_config_preflight_copy; then
     return 1
   fi
-  version_line="${version_line%%$'\n'*}"
-  if [[ "${version_line}" =~ (^|[[:space:]])([0-9]+\.[0-9]+\.[0-9]+[^[:space:]]*)($|[[:space:]]) ]]; then
-    OPENCLAW_VERSION_RESOLVED="${BASH_REMATCH[2]}"
-  else
-    echo "ERROR: Could not parse OpenClaw version from ${OPENCLAW_BIN_RESOLVED}: ${version_line:-<empty>}" >&2
+  if ! version_line="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.versions require-openclaw-supported \
+    "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
+    if ! verify_repo_config_preflight_copy_unchanged "openclaw --version"; then
+      return 1
+    fi
+    printf '%s\n' "${version_line}" >&2
     return 1
   fi
-  if [[ "${OPENCLAW_VERSION_RESOLVED}" != "${REQUIRED_OPENCLAW_VERSION}" ]]; then
-    echo "ERROR: OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} is unsupported; need exactly ${REQUIRED_OPENCLAW_VERSION}." >&2
+  if ! verify_repo_config_preflight_copy_unchanged "openclaw --version"; then
     return 1
   fi
+  OPENCLAW_VERSION_RESOLVED="${version_line}"
   export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
   return 0
 }
 
 require_codex_runtime_exact() {
   local inspect_json plugin_version app_server_version app_server_path
-  if ! inspect_json="$(run_openclaw_cli_for_repo_config plugins inspect codex --json)"; then
-    echo "ERROR: Could not inspect the required Codex plugin." >&2
+  if ! prepare_repo_config_preflight_copy; then
     return 1
   fi
-  if ! echo "${inspect_json}" | jq -e '
-    .plugin.id == "codex"
-    and .plugin.enabled == true
-    and .plugin.status == "loaded"
-  ' >/dev/null; then
-    echo "ERROR: Required Codex plugin is not installed, enabled, and loaded." >&2
-    echo "       Run bootstrap to reconcile the exact OpenClaw/Codex runtime tuple." >&2
+  if ! inspect_json="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.versions require-codex-runtime-exact \
+    "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
+    if ! verify_repo_config_preflight_copy_unchanged "openclaw plugins inspect codex --json"; then
+      return 1
+    fi
+    printf '%s\n' "${inspect_json}" >&2
     return 1
   fi
-  plugin_version="$(echo "${inspect_json}" | jq -r '.plugin.version // empty')"
-  app_server_version="$(echo "${inspect_json}" | jq -r '
-    .plugin.dependencyStatus.dependencies[]?
-    | select(.name == "@openai/codex")
-    | .spec
-  ' | head -n1)"
-  app_server_path="$(echo "${inspect_json}" | jq -r '
-    .plugin.dependencyStatus.dependencies[]?
-    | select(.name == "@openai/codex")
-    | .resolvedPath // empty
-  ' | head -n1)"
-  if [[ "${plugin_version}" != "${REQUIRED_CODEX_PLUGIN_VERSION}" ]]; then
-    echo "ERROR: Codex plugin ${plugin_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_PLUGIN_VERSION}." >&2
-    echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
+  if ! verify_repo_config_preflight_copy_unchanged "openclaw plugins inspect codex --json"; then
     return 1
   fi
-  if [[ "${app_server_version}" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
-    echo "ERROR: Embedded @openai/codex ${app_server_version:-<unknown>} is unsupported; need exactly ${REQUIRED_CODEX_APP_SERVER_VERSION}." >&2
-    echo "       Run bootstrap to reinstall the pinned plugin and gateway service." >&2
-    return 1
-  fi
+  IFS=$'\t' read -r plugin_version app_server_version app_server_path <<< "${inspect_json}"
   CODEX_APP_SERVER_CLI_RESOLVED="${app_server_path}/bin/codex.js"
-  if [[ ! -f "${CODEX_APP_SERVER_CLI_RESOLVED}" ]]; then
-    echo "ERROR: Embedded Codex CLI not found at ${CODEX_APP_SERVER_CLI_RESOLVED}." >&2
-    return 1
-  fi
   echo "Codex runtime validated: @openclaw/codex ${plugin_version} embeds @openai/codex ${app_server_version}"
 }
-
 validate_repo_openclaw_config() {
   local validate_json validate_status
   if validate_json="$(run_openclaw_cli_for_repo_config config validate --json 2>&1)"; then
