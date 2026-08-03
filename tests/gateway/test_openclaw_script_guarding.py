@@ -3070,7 +3070,7 @@ def test_push_script_cleans_generated_config_without_leaking_openrouter_secret(
 
 
 def test_push_script_uses_repo_config_for_runtime_preflight_and_replaces_stale_live_config(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
@@ -3092,7 +3092,7 @@ def test_push_script_uses_repo_config_for_runtime_preflight_and_replaces_stale_l
     )
     env["MOCK_REQUIRE_PLUGIN_INSPECT_REPO_CONFIG"] = "1"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 0, result.stderr
     deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
@@ -4187,7 +4187,7 @@ def test_repo_native_codex_stage_agents_have_no_mcp_overrides() -> None:
 
 
 def test_push_script_removes_stale_copilot_provider_keys_from_local_config(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
@@ -4221,7 +4221,7 @@ def test_push_script_removes_stale_copilot_provider_keys_from_local_config(
     }
     openclaw_config.write_text(json.dumps(stale_config), encoding="utf-8")
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 0, result.stderr
     published = json.loads(openclaw_config.read_text(encoding="utf-8"))

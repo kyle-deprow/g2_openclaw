@@ -1721,6 +1721,102 @@ trap 'exit 143' TERM
 echo "Backed up local config → ${BACKUP}"
 begin_managed_artifact_transaction
 
+assemble_openclaw_config() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
+    MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
+    MEMPALACE_PALACE="${HOME}/.mempalace/palace"
+    MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_PUSH_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
+    MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
+    MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
+    MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
+    FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-${HOME}/.cache/fastembed}"
+    HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+    export FASTEMBED_CACHE_PATH MEMPALACE_EMBEDDING_MODEL
+    export MEMPALACE_EXPECTED_EMBEDDING_MODEL MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+    export HF_HUB_OFFLINE
+
+    if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
+      echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
+      echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
+      return 1
+    fi
+
+    if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
+      echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
+      echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
+      return 1
+    fi
+
+    guarded_mkdir_p "${MEMPALACE_PALACE}" "creating managed MemPalace palace directory ${MEMPALACE_PALACE}"
+    guarded_mkdir_p "${FASTEMBED_CACHE_PATH}" "creating managed FastEmbed cache directory ${FASTEMBED_CACHE_PATH}"
+
+    if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
+      echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
+      echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
+      return 1
+    fi
+
+    guarded_mkdir_p "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw home ${OPENCLAW_PUSH_HOME}"
+    snapshot_managed_artifact_path "${MEMPALACE_READONLY_WRAPPER_DST}"
+    guarded_cp_file "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}" "installing MemPalace read-only wrapper ${MEMPALACE_READONLY_WRAPPER_DST}"
+    echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
+
+    PROVIDER="${OPENCLAW_PROVIDER:-codex}"
+    case "${PROVIDER}" in
+      codex)
+        MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
+        MODEL_PROVIDER="openai"
+        MODEL_ID="${OPENAI_MODEL:-gpt-5.4}"
+        ;;
+      azure)
+        MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
+        MODEL_PROVIDER="azure-oai-g2"
+        MODEL_ID="gpt-5.4"
+        ;;
+      openrouter)
+        MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+        MODEL_PROVIDER="openrouter"
+        MODEL_ID="${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+        ;;
+      *)
+        echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
+        return 1
+        ;;
+    esac
+
+    if ! PM_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.config_merge pm-model \
+      -- "${REPO_CONFIG}")"; then
+      return 1
+    fi
+    if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
+      echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
+      return 1
+    fi
+    PM_MODEL_ID="${PM_MODEL_PRIMARY#openai/}"
+    if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
+      echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
+      return 1
+    fi
+
+    if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
+      -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
+      "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
+      "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
+      "${G2_CONTROL_MCP_MODULE}" "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+      "${G2_CONTROL_SERVER_AGENT_IDS_JSON}")"; then
+      return 1
+    fi
+    echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
+    echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
+    if [[ "${PROVIDER}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+      echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
+    fi
+    echo "Sanitized stale coding-provider config keys: ${STALE_CODING_PROVIDER_KEYS[*]}"
+    echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
+  else
 # ── Deep merge ───────────────────────────────────────────────────────────────
 # jq's * operator does recursive object merge (right wins on conflicts).
 # We read the local config as base and overlay the repo config on top.
@@ -1959,6 +2055,10 @@ MERGED=$(echo "${MERGED}" | jq '
 ')
 
 echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
+  fi
+}
+
+assemble_openclaw_config
 
 # No model thread is projected a write-capable MemPalace server. The platform
 # finalizer is the sole write boundary, so stage tool-deny compatibility lists
@@ -2080,7 +2180,11 @@ validate_generated_openclaw_config() {
   temp_config="$(mktemp "${OPENCLAW_PUSH_HOME}/.openclaw.generated.XXXXXX.json")"
   GENERATED_OPENCLAW_CONFIG_TMP="${temp_config}"
   guard_destination_path_chain "${temp_config}" "writing generated OpenClaw config temp file ${temp_config}" || exit 1
-  printf '%s\n' "${MERGED}" | jq . > "${temp_config}"
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    printf '%s\n' "${MERGED}" > "${temp_config}"
+  else
+    printf '%s\n' "${MERGED}" | jq . > "${temp_config}"
+  fi
   guard_destination_path_chain "${temp_config}" "wrote generated OpenClaw config temp file ${temp_config}" || exit 1
   guarded_chmod 0600 "${temp_config}" "chmod generated OpenClaw config temp file ${temp_config}"
   GENERATED_OPENCLAW_CONFIG_IDENTITY="$(guarded_regular_file_identity "${temp_config}" "capturing generated OpenClaw config identity before validation ${temp_config}")" || exit 1

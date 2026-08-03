@@ -220,12 +220,15 @@ def _run_committed_bash_guard(
         "status=$?\n"
         "printf '__GUARD_STATUS__=%s\\n' \"$status\"\n"
     )
+    environment = os.environ.copy()
+    environment["PYTHON_BIN"] = str(REPO_ROOT / ".venv/bin/python")
     return subprocess.run(
         ["bash", "-c", command, "guard-differential", *arguments],
         check=False,
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
+        env=environment,
     )
 
 
