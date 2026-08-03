@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import gateway.autoresearch_runner as autoresearch_runner
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
+from gateway.autoresearch import constants
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
@@ -266,6 +267,7 @@ def mempalace_kg_path(tmp_path: Path) -> Path:
 @pytest.fixture()
 def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     worktree_root = tmp_path / "operator-controlled" / "model-workspaces"
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", worktree_root)
     monkeypatch.setattr(
         autoresearch_runner,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
@@ -318,6 +320,7 @@ def git_worktree(tmp_path: Path, autoresearch_worktree_root: Path) -> GitWorktre
 def trusted_quantipy_runs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "trusted-quantipy-runs"
     root.mkdir(mode=0o700)
+    monkeypatch.setattr(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", root)
     monkeypatch.setattr(autoresearch_runner, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", root)
     detached_root = tmp_path / "trusted-detached-runs"
     monkeypatch.setattr(

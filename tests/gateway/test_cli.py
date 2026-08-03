@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
 from dotenv import dotenv_values
+from gateway.autoresearch import constants
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -821,6 +822,7 @@ def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     worktree_root = tmp_path / "operator-controlled" / "worktrees"
     worktree_root.mkdir(mode=0o700, parents=True)
     worktree_root.chmod(0o700)
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", worktree_root)
     monkeypatch.setattr(
         autoresearch_runner,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
