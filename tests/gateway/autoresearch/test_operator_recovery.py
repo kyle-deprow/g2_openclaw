@@ -16,6 +16,7 @@ import gateway.autoresearch.attestation as runtime_attestation
 import gateway.autoresearch_runner as autoresearch_runner
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
+from gateway.autoresearch import constants
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
@@ -1668,7 +1669,7 @@ def test_platform_v5_recovery_rejects_a_partial_expected_artifact_directory(
     detached_root.mkdir(mode=0o700)
     run_id = "autoresearch-i1-aaaaaaaaaaaa-v5"
     (artifact_root / run_id).mkdir(mode=0o700)
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", artifact_root)
+    monkeypatch.setattr(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", artifact_root)
     monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
 
     # Act / Assert
@@ -1712,7 +1713,7 @@ def test_platform_v5_recovery_rejects_alternate_detached_manifest_for_same_run(
     )
     manifest_path.chmod(0o400)
     alternate_dir.chmod(0o500)
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", artifact_root)
+    monkeypatch.setattr(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", artifact_root)
     monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
 
     # Act / Assert

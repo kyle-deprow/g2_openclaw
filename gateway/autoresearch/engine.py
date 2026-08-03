@@ -6,8 +6,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from gateway.autoresearch import compute, constants
+from gateway.autoresearch import manifest_runtime as manifest_runtime_module
+from gateway.autoresearch import transitions as transitions_module
 from gateway.autoresearch.artifacts import (
     ARTIFACT_CONTRACTS as ARTIFACT_CONTRACTS,
+)
+from gateway.autoresearch.artifacts import (
+    NextAction as NextAction,
 )
 from gateway.autoresearch.artifacts import (
     PriceHydrationScopePreflight as PriceHydrationScopePreflight,
@@ -42,6 +47,9 @@ from gateway.autoresearch.manifest import (
 from gateway.autoresearch.policy import (
     AutoresearchPolicy as AutoresearchPolicy,
 )
+from gateway.autoresearch.policy import (
+    ReceiptCatalog as ReceiptCatalog,
+)
 from gateway.autoresearch.prompts import (
     _compute_fit_contract as _compute_fit_contract,
 )
@@ -60,11 +68,17 @@ from gateway.autoresearch.prompts import (
 from gateway.autoresearch.prompts import (
     _render_instruction_source_manifest as _render_instruction_source_manifest,
 )
+from gateway.autoresearch.prompts import (
+    _select_phase_target as _select_phase_target,
+)
 from gateway.autoresearch.recovery_receipts import (
     _expected_quantipy_verification_run_id as _expected_quantipy_verification_run_id,
 )
 from gateway.autoresearch.state import (
     AutoresearchState as AutoresearchState,
+)
+from gateway.autoresearch.state import (
+    AutoresearchValidationContext as AutoresearchValidationContext,
 )
 from gateway.autoresearch.transitions import (
     _latest_verification_is_price_scope_bug_signal as _latest_verification_is_price_scope_bug_signal,  # noqa: E501
@@ -558,3 +572,79 @@ def _build_prompt_text(
         "and cannot advance. Artifact maximum: "
         f"{MAX_ARTIFACT_FILE_BYTES} bytes; compact, never truncate.\n"
     )
+
+
+def next_action(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    readiness: PlatformReadinessManifest,
+    *,
+    state_path: Path = constants.DEFAULT_AUTORESEARCH_STATE_PATH,
+) -> NextAction:
+    try:
+        validation_context = AutoresearchValidationContext.from_readiness(readiness)
+        validation_context.validate_for_state(state)
+        transitions_module._validate_state(state, policy, validation_context)
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    if state.suspended:
+        raise AutoresearchValidationError(
+            "autoresearch is suspended on an infrastructure blocker; "
+            "run autoresearch-resume after platform readiness changes"
+        )
+    if state.phase is not Phase.REVIEW:
+        transitions_module._revalidate_accepted_member_union_manifests(state)
+    transitions_module._validate_alpha_verification_price_preflight(state)
+    target = _select_phase_target(state, policy)
+    required_receipts = receipts.require(manifest_runtime_module.PHASE_RECEIPTS[state.phase])
+    instruction_source_manifest = manifest_runtime_module.build_instruction_source_manifest(
+        phase=state.phase,
+        expected_artifact_type=target.artifact_type,
+        target_agent_ids=target.agent_ids,
+        target_repo_root=_target_repo_root_for_state(state),
+        state=state,
+        state_path=state_path,
+        receipts=required_receipts,
+    )
+    source_manifest_sha256 = instruction_source_manifest.sha256()
+    state_reference_sha256 = instruction_source_manifest.state_reference.sha256()
+    prompt_text = _build_prompt_text(
+        state=state,
+        policy=policy,
+        phase=state.phase,
+        expected_artifact_type=target.artifact_type,
+        agent_ids=target.agent_ids,
+        instruction_source_manifest=instruction_source_manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        state_reference_sha256=state_reference_sha256,
+        readiness=readiness,
+    )
+    prompt_bytes = len(prompt_text.encode("utf-8"))
+    if prompt_bytes > constants.MAX_NEXT_ACTION_PROMPT_BYTES:
+        raise AutoresearchValidationError(
+            "autoresearch prompt exceeds hard byte budget: "
+            f"{prompt_bytes} > {constants.MAX_NEXT_ACTION_PROMPT_BYTES} bytes for phase "
+            f"{state.phase.value}; compact accepted artifact/state fields before dispatch"
+        )
+    if prompt_bytes > constants.NEXT_ACTION_PROMPT_TARGET_BYTES:
+        raise AutoresearchValidationError(
+            "autoresearch prompt exceeds operational byte target: "
+            f"{prompt_bytes} > {constants.NEXT_ACTION_PROMPT_TARGET_BYTES} bytes for phase "
+            f"{state.phase.value}; preserve the {constants.MAX_NEXT_ACTION_PROMPT_BYTES}-byte hard "
+            "limit reserve before dispatch"
+        )
+    action = NextAction(
+        phase=state.phase,
+        next_agent_ids=target.agent_ids,
+        expected_artifact_type=target.artifact_type,
+        required_receipts=required_receipts,
+        instruction_source_manifest=instruction_source_manifest,
+        source_manifest_sha256=source_manifest_sha256,
+        state_reference_sha256=state_reference_sha256,
+        prompt_text=prompt_text,
+    )
+    if state.phase is Phase.REVIEW:
+        # Keep this external-file check adjacent to review dispatch.
+        transitions_module._revalidate_accepted_member_union_manifests(state)
+    return action

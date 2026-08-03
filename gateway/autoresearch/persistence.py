@@ -49,6 +49,15 @@ from gateway.autoresearch.artifacts import (
 from gateway.autoresearch.enums import (
     ArtifactType as ArtifactType,
 )
+from gateway.autoresearch.enums import (
+    Phase as Phase,
+)
+from gateway.autoresearch.enums import (
+    ResearchMode as ResearchMode,
+)
+from gateway.autoresearch.enums import (
+    VerificationStatus as VerificationStatus,
+)
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
 )
@@ -78,6 +87,12 @@ from gateway.autoresearch.policy import (
 )
 from gateway.autoresearch.prompts import (
     _select_phase_target as _select_phase_target,
+)
+from gateway.autoresearch.secure_io import (
+    _provision_private_quantipy_control_plane_ancestors as _provision_private_quantipy_control_plane_ancestors,  # noqa: E501
+)
+from gateway.autoresearch.secure_io import (
+    _require_canonical_absolute_path as _require_canonical_absolute_path,
 )
 from gateway.autoresearch.state import (
     AutoresearchState as AutoresearchState,
@@ -910,3 +925,122 @@ def _atomic_save_state_file(
     finally:
         if temporary_path is not None and temporary_path.exists():
             temporary_path.unlink()
+
+
+def validate_authoritative_state_reference(
+    reference: AuthoritativeStateReference,
+) -> AutoresearchState:
+    """Load the referenced state and reject any content, phase, or path mismatch."""
+    if reference.version != constants.AUTHORITATIVE_STATE_REFERENCE_VERSION:
+        raise AutoresearchValidationError("authoritative state reference version is invalid")
+    if reference.digest_domain != constants.AUTHORITATIVE_STATE_DIGEST_DOMAIN:
+        raise AutoresearchValidationError("authoritative state reference domain is invalid")
+    _validate_sha256(reference.state_sha256, label="authoritative state reference state_sha256")
+    state_path = Path(reference.path).expanduser().resolve(strict=False)
+    state = persistence_module.load_state_file(state_path)
+    expected = transitions_module.build_authoritative_state_reference(state, state_path=state_path)
+    if expected != reference:
+        raise AutoresearchValidationError(
+            "authoritative state reference does not match the current state file"
+        )
+    return state
+
+
+def provision_quantipy_experiment_runs_root() -> Path:
+    """Create or validate the one fixed private Quantipy experiment receipt root."""
+    root = _require_canonical_absolute_path(
+        constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        label="trusted Quantipy runs root",
+    )
+    parent_descriptor = _provision_private_quantipy_control_plane_ancestors(root)
+    try:
+        try:
+            os.mkdir(root.name, mode=0o700, dir_fd=parent_descriptor)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "trusted Quantipy runs root could not be provisioned"
+            ) from exc
+        try:
+            descriptor = os.open(
+                root.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+        except OSError as exc:
+            raise AutoresearchValidationError(
+                "trusted Quantipy runs root must be an owned mode-0700 non-symlink directory"
+            ) from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+            ):
+                raise AutoresearchValidationError(
+                    "trusted Quantipy runs root must be an owned mode-0700 non-symlink directory"
+                )
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent_descriptor)
+    return root
+
+
+def advance_infrastructure_verification_failure(
+    *,
+    state_path: Path,
+    state_reference_sha256: str,
+    instruction_manifest_sha256: str,
+    artifact: VerificationResultArtifact,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    validation_context: AutoresearchValidationContext | None,
+) -> AutoresearchState:
+    """Atomically advance only a manifest-bound infrastructure verification failure."""
+    _validate_sha256(state_reference_sha256, label="state_reference_sha256")
+    _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
+    resolved_path = state_path.expanduser().resolve(strict=False)
+    with persistence_module._exclusive_state_locks((resolved_path,)):
+        state = persistence_module.load_state_file(resolved_path)
+        current_reference = transitions_module.build_authoritative_state_reference(
+            state,
+            state_path=resolved_path,
+        ).sha256()
+        if current_reference != state_reference_sha256:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure state reference is stale"
+            )
+        current_instruction_manifest = manifest_runtime_module.expected_instruction_manifest_sha256(
+            state,
+            policy,
+            receipts,
+            state_path=resolved_path,
+        )
+        if current_instruction_manifest != instruction_manifest_sha256:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure instruction manifest is stale"
+            )
+        if state.phase is not Phase.VERIFICATION:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure requires verification phase"
+            )
+        if state.mode is not ResearchMode.ALPHA_RESEARCH:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure is valid only for ALPHA_RESEARCH"
+            )
+        if artifact.status is not VerificationStatus.TEST_FAILURE:
+            raise AutoresearchValidationError(
+                "infrastructure verification failure requires TEST_FAILURE status"
+            )
+        advanced = transitions_module.advance_state(
+            state,
+            artifact,
+            policy,
+            validation_context=validation_context,
+            state_path=resolved_path,
+        )
+        persistence_module._atomic_save_state_file(resolved_path, advanced)
+        return advanced

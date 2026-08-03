@@ -14,6 +14,7 @@ _ALLOWED_EXTERNAL_IMPORTS = frozenset(
         "gateway.mempalace_finalizer",
         "gateway.autoresearch_runs",
         "gateway.autoresearch_decision_receipts",
+        "gateway.autoresearch_systemd",
     }
 )
 

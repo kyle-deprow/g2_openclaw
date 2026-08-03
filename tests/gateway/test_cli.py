@@ -346,10 +346,8 @@ def test_autoresearch_init_state_pins_readiness(tmp_path: Path) -> None:
     _write_readiness_manifest(readiness_path, readiness)
     output = tmp_path / "pristine-v4.json"
     runs_root = tmp_path / "openclaw" / "autoresearch" / "quantipy-experiment-runs"
-    with patch.object(
-        autoresearch_runner,
-        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-        runs_root,
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
     ):
         result = runner.invoke(
             app,
@@ -385,10 +383,8 @@ def test_autoresearch_init_state_normalizes_user_owned_control_plane_ancestors(
     runs_parent.chmod(0o775)
     runs_root = runs_parent / "quantipy-experiment-runs"
 
-    with patch.object(
-        autoresearch_runner,
-        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-        runs_root,
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
     ):
         result = runner.invoke(
             app,
@@ -418,10 +414,8 @@ def test_autoresearch_init_state_securely_creates_control_plane_ancestors_with_u
 
     original_umask = os.umask(0)
     try:
-        with patch.object(
-            autoresearch_runner,
-            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-            runs_root,
+        with (
+            patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
         ):
             result = runner.invoke(
                 app,
@@ -453,11 +447,7 @@ def test_autoresearch_init_state_rejects_untrusted_control_plane_root_before_cre
     runs_root = runs_parent / "quantipy-experiment-runs"
 
     with (
-        patch.object(
-            autoresearch_runner,
-            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-            runs_root,
-        ),
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
         patch(
             "gateway.autoresearch_runner.os.getuid",
             return_value=os.getuid() + 1,
@@ -497,10 +487,8 @@ def test_autoresearch_init_state_rejects_existing_nonprivate_quantipy_runs_root(
     runs_root.mkdir(parents=True, mode=0o755)
     runs_root.chmod(0o755)
 
-    with patch.object(
-        autoresearch_runner,
-        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-        runs_root,
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
     ):
         result = runner.invoke(
             app,
@@ -528,10 +516,8 @@ def test_autoresearch_init_state_rejects_symlink_quantipy_runs_root(
     runs_root = tmp_path / "quantipy-experiment-runs"
     runs_root.symlink_to(private_target, target_is_directory=True)
 
-    with patch.object(
-        autoresearch_runner,
-        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-        runs_root,
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
     ):
         result = runner.invoke(
             app,
@@ -560,10 +546,8 @@ def test_autoresearch_init_state_rejects_symlinked_quantipy_runs_parent(
     linked_parent.symlink_to(private_target, target_is_directory=True)
     runs_root = linked_parent / "quantipy-experiment-runs"
 
-    with patch.object(
-        autoresearch_runner,
-        "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-        runs_root,
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
     ):
         result = runner.invoke(
             app,
@@ -591,11 +575,7 @@ def test_autoresearch_init_state_rejects_wrong_owner_quantipy_runs_root(
     runs_root.mkdir(mode=0o700)
 
     with (
-        patch.object(
-            autoresearch_runner,
-            "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT",
-            runs_root,
-        ),
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
         patch(
             "gateway.autoresearch_runner.os.getuid",
             return_value=os.getuid() + 1,

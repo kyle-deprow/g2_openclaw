@@ -203,3 +203,26 @@ def resume_suspended_iteration(
         setup=state.setup,
         platform_readiness=identity,
     )
+
+
+def pin_platform_readiness(
+    state: AutoresearchState,
+    readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    """Initialize readiness or repin an active state to the same contract IDs."""
+    try:
+        identity = readiness.require_ready()
+    except ValueError as exc:
+        raise AutoresearchValidationError(str(exc)) from exc
+    if state.suspended:
+        raise AutoresearchValidationError(
+            "suspended readiness must continue through autoresearch-resume"
+        )
+    pinned = state.platform_readiness
+    if pinned is not None and (
+        pinned.manifest_id != identity.manifest_id or pinned.snapshot_id != identity.snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "state readiness manifest_id or snapshot_id changed; same-ID repin required"
+        )
+    return replace(state, platform_readiness=identity)

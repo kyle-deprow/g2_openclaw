@@ -37,6 +37,9 @@ from gateway.autoresearch.fields import (
 from gateway.autoresearch.fields import (
     _validate_sha256 as _validate_sha256,
 )
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy as AutoresearchPolicy,
+)
 from gateway.autoresearch.receipts import (
     AggregateCoverageReceipt as AggregateCoverageReceipt,
 )
@@ -45,6 +48,9 @@ from gateway.autoresearch.receipts import (
 )
 from gateway.autoresearch.state import (
     AutoresearchState as AutoresearchState,
+)
+from gateway.autoresearch.state import (
+    AutoresearchValidationContext as AutoresearchValidationContext,
 )
 from gateway.autoresearch.transitions import (
     KEEP_DECISIONS as KEEP_DECISIONS,
@@ -390,3 +396,25 @@ def mark_memory_written(
     if state.final_decision is None or receipt.experiment_id != state.final_decision.experiment_id:
         raise AutoresearchValidationError("memory receipt must match final decision experiment_id")
     return replace(state, memory_written=True, memory_verification_receipt=receipt)
+
+
+def finalize_repeat_memory_state_file(
+    state_path: Path,
+    *,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None,
+    writer: FinalMemoryWriter | None = None,
+) -> AutoresearchState:
+    """Finalize and atomically mark the current repeat state under its state lock."""
+    from gateway.autoresearch import memory as memory_module
+    from gateway.autoresearch import persistence as persistence_module
+    from gateway.autoresearch import transitions as transitions_module
+
+    resolved_state_path = state_path.expanduser().resolve(strict=False)
+    with persistence_module._exclusive_state_lock(resolved_state_path):
+        state = persistence_module.load_state_file(resolved_state_path)
+        transitions_module._validate_state(state, policy, validation_context)
+        finalized = memory_module.finalize_repeat_memory(state, writer=writer)
+        transitions_module._validate_state(finalized, policy, validation_context)
+        persistence_module._atomic_save_state_file(resolved_state_path, finalized)
+        return finalized

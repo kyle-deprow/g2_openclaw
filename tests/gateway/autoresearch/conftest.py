@@ -635,11 +635,7 @@ def public_platform_v4_recovery_fixture(
     }
     assert persisted_live.get("canonical_quantipy_runtime_attestation") is None
     assert persisted_live.get("platform_runtime_recovery_receipt") is None
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "DEFAULT_AUTORESEARCH_STATE_PATH",
-        live_state_path,
-    )
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_STATE_PATH", live_state_path)
     artifact_hashes = tuple(
         (path, sha256(path.read_bytes()).hexdigest())
         for root in (

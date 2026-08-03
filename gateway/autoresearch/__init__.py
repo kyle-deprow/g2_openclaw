@@ -9,9 +9,11 @@ The only allowed external runtime dependencies are
 ``gateway.autoresearch_runs`` (stdlib plus ``gateway.autoresearch.enums`` only);
 the sixth sanctioned leaf is ``gateway.autoresearch_decision_receipts`` (stdlib
 plus package-native constants, errors, enums, state, and transitions only).
+The seventh sanctioned leaf is ``gateway.autoresearch_systemd`` (stdlib
+``subprocess`` and ``collections.abc`` only).
 The first four are verified never to import the monolithic control-plane
 module or this package, while ``gateway.autoresearch_runs`` is verified never
 to import the monolithic control-plane module and imports only
 ``gateway.autoresearch.enums`` from this package. The sixth leaf is verified
-not to import ``gateway.autoresearch_runner``.
+not to import the monolithic control-plane module.
 """
