@@ -14,7 +14,7 @@ import os
 import platform  # noqa: F401
 import re
 import shutil  # noqa: F401
-import sqlite3
+import sqlite3  # noqa: F401
 import stat
 import subprocess
 import tempfile
@@ -629,6 +629,18 @@ from gateway.autoresearch.gitops import (
 from gateway.autoresearch.gitops import (
     _run_git as _run_git,
 )
+from gateway.autoresearch.lifecycle import (
+    OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES as OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES,  # noqa: E501
+)
+from gateway.autoresearch.lifecycle import (
+    resume_suspended_iteration as resume_suspended_iteration,
+)
+from gateway.autoresearch.lifecycle import (
+    start_next_iteration as start_next_iteration,
+)
+from gateway.autoresearch.lifecycle import (
+    suspend_for_infrastructure as suspend_for_infrastructure,
+)
 from gateway.autoresearch.manifest import (
     AuthoritativeStateReference as AuthoritativeStateReference,
 )
@@ -636,7 +648,76 @@ from gateway.autoresearch.manifest import (
     InstructionSourceEntry as InstructionSourceEntry,
 )
 from gateway.autoresearch.manifest import (
+    InstructionSourceManifest as InstructionSourceManifest,
+)
+from gateway.autoresearch.manifest import (
     SourceReceipt as SourceReceipt,
+)
+from gateway.autoresearch.memory import (
+    G2_OPENCLAW_REPO_ROOT as G2_OPENCLAW_REPO_ROOT,
+)
+from gateway.autoresearch.memory import (
+    _committed_finalization_journal_drawer_id as _committed_finalization_journal_drawer_id,
+)
+from gateway.autoresearch.memory import (
+    _default_mempalace_kg_path as _default_mempalace_kg_path,
+)
+from gateway.autoresearch.memory import (
+    _is_explicit_no_memory_transition as _is_explicit_no_memory_transition,
+)
+from gateway.autoresearch.memory import (
+    _standard_data_window_object as _standard_data_window_object,
+)
+from gateway.autoresearch.memory import (
+    _standard_metric_object as _standard_metric_object,
+)
+from gateway.autoresearch.memory import (
+    build_final_memory_write_request as build_final_memory_write_request,
+)
+from gateway.autoresearch.memory import (
+    can_write_memory as can_write_memory,
+)
+from gateway.autoresearch.memory import (
+    finalize_repeat_memory as finalize_repeat_memory,
+)
+from gateway.autoresearch.memory import (
+    mark_memory_written as mark_memory_written,
+)
+from gateway.autoresearch.memory import (
+    standardize_mempalace_kg_object as standardize_mempalace_kg_object,
+)
+from gateway.autoresearch.memory import (
+    standardized_mempalace_kg_facts as standardized_mempalace_kg_facts,
+)
+from gateway.autoresearch.memory import (
+    verify_mempalace_final_decision as verify_mempalace_final_decision,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy as AutoresearchPolicy,
+)
+from gateway.autoresearch.policy import (
+    ReceiptCatalog as ReceiptCatalog,
+)
+from gateway.autoresearch.prompts import (
+    _compute_fit_contract as _compute_fit_contract,
+)
+from gateway.autoresearch.prompts import (
+    _json_block as _json_block,
+)
+from gateway.autoresearch.prompts import (
+    _mempalace_kg_fact_instruction as _mempalace_kg_fact_instruction,
+)
+from gateway.autoresearch.prompts import (
+    _mode_contract as _mode_contract,
+)
+from gateway.autoresearch.prompts import (
+    _operator_precondition_decision_instruction as _operator_precondition_decision_instruction,
+)
+from gateway.autoresearch.prompts import (
+    _render_instruction_source_manifest as _render_instruction_source_manifest,
+)
+from gateway.autoresearch.prompts import (
+    _select_phase_target as _select_phase_target,
 )
 from gateway.autoresearch.receipts import (
     AggregateCoverageReceipt as AggregateCoverageReceipt,
@@ -871,12 +952,12 @@ from gateway.autoresearch.workspace import (
 )
 from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
 from gateway.mempalace_finalizer import (
-    FINAL_MEMORY_SOURCE_FILE,
+    FINAL_MEMORY_SOURCE_FILE,  # noqa: F401
     FinalMemoryWriter,
-    FinalMemoryWriteRequest,
-    MempalaceFinalizationError,
-    SubprocessFinalMemoryWriter,
-    finalization_journal_path,
+    FinalMemoryWriteRequest,  # noqa: F401
+    MempalaceFinalizationError,  # noqa: F401
+    SubprocessFinalMemoryWriter,  # noqa: F401
+    finalization_journal_path,  # noqa: F401
 )
 
 if TYPE_CHECKING:
@@ -898,21 +979,6 @@ from gateway.autoresearch_readiness import (
     ReadinessIdentity,
     ResearchPanelProbeReceipt,
     load_xnys_calendar_evidence,  # noqa: F401
-)
-
-G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES = frozenset(
-    (
-        Phase.DEBATE,
-        Phase.CONSENSUS,
-        Phase.IMPLEMENTATION,
-        Phase.VERIFICATION,
-        Phase.REVIEW,
-        Phase.FIX_TEST,
-        Phase.DECISION_LOG,
-    )
 )
 
 
@@ -968,87 +1034,6 @@ def _validate_persisted_autoresearch_workspace_path(value: str, *, label: str) -
         raise AutoresearchValidationError(
             f"{label} must be under the canonical autoresearch worktree root"
         ) from exc
-
-
-def standardize_mempalace_kg_object(value: str) -> str:
-    """Normalize a KG object and compact it to MemPalace's 128-character limit."""
-    normalized = _normalise_predicate(value)
-    if len(normalized) <= MEMPALACE_KG_OBJECT_MAX_LENGTH:
-        return normalized
-    prefix_length = MEMPALACE_KG_OBJECT_MAX_LENGTH - MEMPALACE_KG_OBJECT_SHA256_LENGTH - 1
-    return f"{normalized[:prefix_length]}_{_sha256_text(normalized)}"
-
-
-@dataclass(frozen=True, slots=True)
-class InstructionSourceManifest:
-    version: str
-    digest_domain: str
-    phase: str
-    expected_artifact_type: str
-    target_agent_ids: tuple[str, ...]
-    target_repo_root: str
-    state_reference: AuthoritativeStateReference
-    sources: tuple[InstructionSourceEntry, ...]
-
-    @classmethod
-    def from_context(
-        cls,
-        *,
-        phase: Phase,
-        expected_artifact_type: ArtifactType,
-        target_agent_ids: Sequence[str],
-        target_repo_root: Path,
-        state: AutoresearchState,
-        state_path: Path,
-        receipts: Sequence[SourceReceipt],
-    ) -> InstructionSourceManifest:
-        seen: set[str] = set()
-        duplicates: set[str] = set()
-        for receipt in receipts:
-            if receipt.receipt_id in seen:
-                duplicates.add(receipt.receipt_id)
-            seen.add(receipt.receipt_id)
-        if duplicates:
-            raise AutoresearchReceiptError(
-                "duplicate instruction source receipt ids: " + ", ".join(sorted(duplicates))
-            )
-        ordered = tuple(sorted(receipts, key=lambda receipt: receipt.receipt_id))
-        return cls(
-            version=INSTRUCTION_SOURCE_MANIFEST_VERSION,
-            digest_domain=INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
-            phase=phase.value,
-            expected_artifact_type=expected_artifact_type.value,
-            target_agent_ids=tuple(target_agent_ids),
-            target_repo_root=str(target_repo_root.expanduser().resolve(strict=False)),
-            state_reference=build_authoritative_state_reference(state, state_path=state_path),
-            sources=tuple(InstructionSourceEntry.from_receipt(item) for item in ordered),
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "version": self.version,
-            "digest_domain": self.digest_domain,
-            "phase": self.phase,
-            "expected_artifact_type": self.expected_artifact_type,
-            "target_agent_ids": list(self.target_agent_ids),
-            "target_repo_root": self.target_repo_root,
-            "state_reference": self.state_reference.to_dict(),
-            "sources": [source.to_dict() for source in self.sources],
-        }
-
-    def canonical_json(self) -> str:
-        return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
-
-    def sha256(self) -> str:
-        return _sha256_text(
-            "\n".join(
-                (
-                    self.digest_domain,
-                    self.version,
-                    self.canonical_json(),
-                )
-            )
-        )
 
 
 def build_instruction_source_manifest(
@@ -1148,91 +1133,6 @@ def _validate_compute_fit_environment(
             "compute_fit selected GPU execution with unavailable dependencies: "
             + ", ".join(missing)
         )
-
-
-@dataclass(frozen=True, slots=True)
-class AutoresearchPolicy:
-    pm: StageAgentPolicy
-    main_interface: StageAgentPolicy
-    context_curator: StageAgentPolicy
-    debate_agents: tuple[StageAgentPolicy, ...]
-    consensus: StageAgentPolicy
-    implementer: StageAgentPolicy
-    reviewer: StageAgentPolicy
-    fixer: StageAgentPolicy
-
-    @property
-    def debate_agent_ids(self) -> tuple[str, ...]:
-        return tuple(agent.agent_id for agent in self.debate_agents)
-
-    @property
-    def all_stage_agent_ids(self) -> tuple[str, ...]:
-        return (
-            self.context_curator.agent_id,
-            *self.debate_agent_ids,
-            self.consensus.agent_id,
-            self.implementer.agent_id,
-            self.reviewer.agent_id,
-            self.fixer.agent_id,
-        )
-
-    def model_policy_summary(self) -> str:
-        """Render an indexed, lossless policy without repeating shared values."""
-        agents = (
-            self.pm,
-            self.main_interface,
-            self.context_curator,
-            *self.debate_agents,
-            self.consensus,
-            self.implementer,
-            self.reviewer,
-            self.fixer,
-        )
-        skill_sets: list[tuple[str, ...]] = []
-        models: list[str] = []
-        reasoning_levels: list[str] = []
-        for agent in agents:
-            if agent.skills not in skill_sets:
-                skill_sets.append(agent.skills)
-            if agent.model not in models:
-                models.append(agent.model)
-            if agent.reasoning not in reasoning_levels:
-                reasoning_levels.append(agent.reasoning)
-        payload: dict[str, object] = {
-            "agent_format": (
-                "agent_id",
-                "model_index",
-                "reasoning_index",
-                "skill_set_index",
-            ),
-            "models": models,
-            "reasoning_levels": reasoning_levels,
-            "skill_sets": skill_sets,
-            "agents": [
-                (
-                    agent.agent_id,
-                    models.index(agent.model),
-                    reasoning_levels.index(agent.reasoning),
-                    skill_sets.index(agent.skills),
-                )
-                for agent in agents
-            ],
-        }
-        return _compact_json_block(payload)
-
-
-@dataclass(frozen=True, slots=True)
-class ReceiptCatalog:
-    receipts: dict[str, SourceReceipt]
-
-    def require(self, receipt_ids: Sequence[str]) -> tuple[SourceReceipt, ...]:
-        ordered: list[SourceReceipt] = []
-        for receipt_id in receipt_ids:
-            try:
-                ordered.append(self.receipts[receipt_id])
-            except KeyError as exc:
-                raise AutoresearchReceiptError(f"missing receipt id: {receipt_id}") from exc
-        return tuple(ordered)
 
 
 def _validate_external_verification_retry_receipt(
@@ -3276,54 +3176,6 @@ def validate_artifact_workspace(
     _require_private_directory(workspace, label="artifact workspace_path")
 
 
-def _json_block(payload: Mapping[str, object], *, compact: bool = False) -> str:
-    if compact:
-        return _compact_json_block(payload)
-    return json.dumps(payload, indent=2, sort_keys=True)
-
-
-def _render_instruction_source_manifest(manifest: InstructionSourceManifest) -> str:
-    return _compact_json_block(manifest.to_dict())
-
-
-def _select_phase_target(
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-) -> PhaseTarget:
-    if state.phase is Phase.SETUP_CONTEXT:
-        if state.setup is None:
-            return PhaseTarget((policy.pm.agent_id,), ArtifactType.SETUP)
-        return PhaseTarget((policy.context_curator.agent_id,), ArtifactType.CONTEXT_PACKET)
-    if state.phase is Phase.DEBATE:
-        return PhaseTarget(policy.debate_agent_ids, ArtifactType.DEBATE_RESULT)
-    if state.phase is Phase.CONSENSUS:
-        return PhaseTarget((policy.consensus.agent_id,), ArtifactType.CONSENSUS_RESULT)
-    if state.phase is Phase.IMPLEMENTATION:
-        if (
-            state.latest_consensus is None
-            or state.latest_consensus.status is not ConsensusStatus.MAJORITY
-        ):
-            raise AutoresearchValidationError(
-                "implementation next action requires a majority consensus"
-            )
-        return PhaseTarget((policy.implementer.agent_id,), ArtifactType.IMPLEMENTATION_RESULT)
-    if state.phase is Phase.VERIFICATION:
-        return PhaseTarget((policy.pm.agent_id,), ArtifactType.VERIFICATION_RESULT)
-    if state.phase is Phase.REVIEW:
-        return PhaseTarget((policy.reviewer.agent_id,), ArtifactType.REVIEW_RESULT)
-    if state.phase is Phase.FIX_TEST:
-        return PhaseTarget((policy.fixer.agent_id,), ArtifactType.FIX_RESULT)
-    if state.phase is Phase.DECISION_LOG:
-        return PhaseTarget((policy.pm.agent_id,), ArtifactType.FINAL_DECISION)
-    if state.final_decision is not None and state.final_decision.memory_write_required:
-        if state.memory_written:
-            return PhaseTarget((), ArtifactType.NEXT_ITERATION)
-        return PhaseTarget((), ArtifactType.MEMORY_WRITE)
-    if _is_explicit_no_memory_transition(state):
-        return PhaseTarget((), ArtifactType.NEXT_ITERATION)
-    raise AutoresearchValidationError("repeat phase has no valid memory transition")
-
-
 def _phase_instruction(
     state: AutoresearchState,
     phase: Phase,
@@ -3473,94 +3325,6 @@ def _phase_instruction(
         f"{operator_precondition_instruction}"
         f"{context_source_instruction}"
         f"ARTIFACT_CONTRACT={contract}\n"
-    )
-
-
-def _compute_fit_contract(
-    state: AutoresearchState,
-    phase: Phase,
-    expected_artifact_type: ArtifactType,
-) -> str:
-    if expected_artifact_type not in {
-        ArtifactType.DEBATE_RESULT,
-        ArtifactType.IMPLEMENTATION_RESULT,
-    }:
-        if phase is not Phase.VERIFICATION:
-            return ""
-        if (
-            state.implementation_result is not None
-            and state.implementation_result.compute_fit is None
-        ):
-            return (
-                "Compute execution contract:\n"
-                "- This is a legacy implementation_result without compute_fit. Do not infer "
-                "or silently assign a CPU/GPU target. Verify the exact recorded commands, "
-                "report compute-fit evidence as unavailable, and surface any mismatch or "
-                "migration blocker explicitly.\n\n"
-            )
-        return (
-            "Compute execution contract:\n"
-            "- Treat implementation_result.compute_fit as the declared execution target. "
-            "Verify the actual run against it and report any mismatch as a concrete failure; "
-            "never silently switch CPU/GPU execution.\n\n"
-        )
-    return (
-        "Compute-fit contract:\n"
-        "- Choose exactly one compute_fit.target: none, cpu, gpu, or mixed. The control plane "
-        "does not prefer GPU or CPU; choose based on the hypothesis, data scale, reproducibility, "
-        "and measured or planned cost.\n"
-        "- Return compute_fit with target, non-empty rationale, required_dependencies, and "
-        "benchmark_plan. Use importable package names for dependencies and `cuda_runtime` for "
-        "the CUDA runtime.\n"
-        "- A gpu or mixed choice is valid only when the supplied capability snapshot proves a "
-        "usable GPU/CUDA runtime and every declared dependency is installed. If not, choose "
-        "cpu/none or surface the exact infrastructure blocker; never install dependencies, "
-        "silently fall back, or pretend the GPU path ran.\n\n"
-    )
-
-
-def _operator_precondition_decision_instruction(
-    state: AutoresearchState,
-    phase: Phase,
-    expected_artifact_type: ArtifactType,
-) -> str:
-    if (
-        phase is Phase.DECISION_LOG
-        and expected_artifact_type is ArtifactType.FINAL_DECISION
-        and _is_operator_precondition_consensus(state.latest_consensus)
-        and state.implementation_result is None
-        and state.latest_verification is None
-    ):
-        return (
-            "Operator-precondition final decision contract:\n"
-            "- The latest consensus is a no-code operator precondition, not an "
-            "implemented experiment.\n"
-            "- Emit final_decision=INFRA_BLOCKED, reviewer_verdict=NOT_RUN, "
-            "recommended_metric_value=null, and a concrete infra_rationale.\n"
-            "- Set memory_write_required=false. Do not write MemPalace facts for "
-            "this no-code transition because no verification_result exists.\n\n"
-        )
-    return ""
-
-
-def _mode_contract(state: AutoresearchState) -> str:
-    if state.mode is None:
-        return (
-            "Mode contract:\n"
-            "- The context packet must choose exactly alpha_research or data_infra_g0 and give "
-            "a nonempty rationale plus burned theory families.\n\n"
-        )
-    if state.mode is ResearchMode.DATA_INFRA_G0:
-        return (
-            "Mode contract: DATA_INFRA_G0\n"
-            "- Repair data/provenance/folds only. Verification must emit an explicit "
-            "infrastructure gate outcome; do not claim alpha performance validation.\n\n"
-        )
-    return (
-        "mode=ALPHA_RESEARCH; strategy experiment. Burned theory families require materially "
-        "new evidence. Consensus freezes a strict universe_plan. Persist compact universe, "
-        "hydration, and coverage identities/counts/digests only; never full membership arrays. "
-        "No fixed-sleeve or per-symbol coverage alternative.\n"
     )
 
 
@@ -3844,22 +3608,6 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         f"{price_scope_fix_contract}"
         "- Preserve unrelated user files such as "
         "docs/quantipy_experiment_mempalace_preload.md.\n\n"
-    )
-
-
-def _mempalace_kg_fact_instruction(
-    state: AutoresearchState,
-    expected_artifact_type: ArtifactType,
-) -> str:
-    if expected_artifact_type is not ArtifactType.MEMORY_WRITE:
-        return ""
-    if state.final_decision is None:
-        raise AutoresearchValidationError("MemPalace memory write requires final_decision")
-    return (
-        "Required standardized MemPalace KG facts:\n"
-        "- From the verified authoritative state, derive the exact standardized predicate/object "
-        "pairs and final decision subject with the installed runner. Do not re-normalize, "
-        "shorten, or regenerate their objects.\n\n"
     )
 
 
@@ -4271,144 +4019,6 @@ def advance_state(
     )
 
 
-def can_write_memory(state: AutoresearchState) -> bool:
-    return (
-        state.phase is Phase.REPEAT
-        and state.final_decision is not None
-        and state.final_decision.memory_write_required
-        and _final_decision_requires_memory_write(state, state.final_decision)
-    )
-
-
-def _is_explicit_no_memory_transition(state: AutoresearchState) -> bool:
-    decision = state.final_decision
-    return (
-        state.phase is Phase.REPEAT
-        and decision is not None
-        and _is_authorized_no_memory_final_decision(state)
-        and not state.memory_written
-        and state.memory_verification_receipt is None
-    )
-
-
-def _default_mempalace_kg_path() -> Path:
-    palace_root = Path(
-        os.environ.get("MEMPALACE_PALACE", str(Path.home() / ".mempalace/palace"))
-    ).expanduser()
-    return palace_root / "knowledge_graph.sqlite3"
-
-
-def _standard_metric_object(decision: FinalDecisionArtifact) -> str:
-    if decision.recommended_metric_value is None:
-        return standardize_mempalace_kg_object(decision.recommended_metric_name)
-    metric = f"{decision.recommended_metric_name}_{decision.recommended_metric_value:g}"
-    return standardize_mempalace_kg_object(metric)
-
-
-def _standard_data_window_object(
-    coverage: DynamicUniverseCoverageReceipt | AggregateCoverageReceipt,
-) -> str:
-    """Return the normalized common data/OOS window token required in MemPalace."""
-    if isinstance(coverage, DynamicUniverseCoverageReceipt):
-        return standardize_mempalace_kg_object(
-            f"{coverage.experiment_start}_to_{coverage.experiment_end}_oos_"
-            f"{coverage.oos_start}_to_{coverage.oos_end}"
-        )
-    return standardize_mempalace_kg_object(
-        f"{coverage.actual_common_start}_to_{coverage.actual_common_end}_oos_"
-        f"{coverage.oos_start}_to_{coverage.oos_end}"
-    )
-
-
-def standardized_mempalace_kg_facts(state: AutoresearchState) -> dict[str, str]:
-    """Return the exact standardized KG facts required for a final decision."""
-    if state.final_decision is None or state.mode is None:
-        raise AutoresearchValidationError(
-            "standardized MemPalace facts require final_decision and mode"
-        )
-    if not _final_decision_requires_memory_write(state, state.final_decision):
-        raise AutoresearchValidationError(
-            "standardized MemPalace facts are allowed only for retention-eligible final decisions"
-        )
-    verification = state.latest_verification
-    if verification is None:
-        raise AutoresearchValidationError(
-            "standardized MemPalace facts require the final decision's verification_result"
-        )
-    decision = state.final_decision
-    data_window = (
-        standardize_mempalace_kg_object("unavailable")
-        if verification.data_coverage is None
-        else _standard_data_window_object(verification.data_coverage)
-    )
-    facts = {
-        "decision": standardize_mempalace_kg_object(decision.decision.value),
-        "research_mode": standardize_mempalace_kg_object(state.mode.value),
-        "data_window": data_window,
-        "reviewer_verdict": standardize_mempalace_kg_object(decision.reviewer_verdict.value),
-    }
-    if state.mode is ResearchMode.ALPHA_RESEARCH:
-        facts["alpha_decision_metric"] = _standard_metric_object(decision)
-        facts["keeper_rationale" if decision.decision in KEEP_DECISIONS else "failed_due_to"] = (
-            standardize_mempalace_kg_object(decision.rationale)
-        )
-        return facts
-    if verification.infra_gate_outcome is None or decision.infra_rationale is None:
-        raise AutoresearchValidationError(
-            "DATA_INFRA_G0 standardized MemPalace facts require gate outcome and infra_rationale"
-        )
-    facts["infra_gate_outcome"] = standardize_mempalace_kg_object(
-        verification.infra_gate_outcome.value
-    )
-    facts["infra_rationale"] = standardize_mempalace_kg_object(decision.infra_rationale)
-    return facts
-
-
-def build_final_memory_write_request(state: AutoresearchState) -> FinalMemoryWriteRequest:
-    """Derive the only MemPalace write payload from a validated final state."""
-    if not can_write_memory(state) or state.final_decision is None or state.mode is None:
-        raise AutoresearchValidationError(
-            "final MemPalace persistence requires a retention-eligible repeat decision"
-        )
-    verification = state.latest_verification
-    if verification is None:
-        raise AutoresearchValidationError(
-            "final MemPalace persistence requires the final verification result"
-        )
-    drawer_content = _compact_json_block(
-        {
-            "experiment_id": state.final_decision.experiment_id,
-            "final_decision": state.final_decision.to_dict(),
-            "research_mode": state.mode.value,
-            "schema": "g2-openclaw.autoresearch.final-memory.v1",
-            "verification_result": verification.to_dict(),
-        }
-    )
-    return FinalMemoryWriteRequest(
-        experiment_id=state.final_decision.experiment_id,
-        drawer_content=drawer_content,
-        facts=standardized_mempalace_kg_facts(state),
-    )
-
-
-def finalize_repeat_memory(
-    state: AutoresearchState,
-    *,
-    writer: FinalMemoryWriter | None = None,
-) -> AutoresearchState:
-    """Write, verify, and mark the state-owned final decision exactly once."""
-    request = build_final_memory_write_request(state)
-    finalizer = writer or SubprocessFinalMemoryWriter.from_environment(
-        repository_root=G2_OPENCLAW_REPO_ROOT
-    )
-    try:
-        kg_path = finalizer.write(request)
-    except MempalaceFinalizationError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
-    receipt = verify_mempalace_final_decision(state, kg_path)
-    return mark_memory_written(state, receipt)
-
-
 def finalize_repeat_memory_state_file(
     state_path: Path,
     *,
@@ -4425,268 +4035,6 @@ def finalize_repeat_memory_state_file(
         _validate_state(finalized, policy, validation_context)
         _atomic_save_state_file(resolved_state_path, finalized)
         return finalized
-
-
-def _committed_finalization_journal_drawer_id(
-    journal: object,
-    *,
-    expected_request_sha256: str,
-) -> str:
-    _validate_sha256(expected_request_sha256, label="expected_request_sha256")
-    if not isinstance(journal, Mapping):
-        raise AutoresearchValidationError("MemPalace finalization journal must be an object")
-    if set(journal) != {"status", "request_sha256", "drawer_id"}:
-        raise AutoresearchValidationError(
-            "MemPalace committed finalization journal schema is invalid"
-        )
-    if journal.get("status") != "committed":
-        raise AutoresearchValidationError("MemPalace finalization journal is not committed")
-    request_sha256 = journal.get("request_sha256")
-    if not isinstance(request_sha256, str):
-        raise AutoresearchValidationError(
-            "MemPalace finalization journal request_sha256 is invalid"
-        )
-    try:
-        _validate_sha256(request_sha256, label="request_sha256")
-    except AutoresearchValidationError as exc:
-        raise AutoresearchValidationError(
-            "MemPalace finalization journal request_sha256 is invalid"
-        ) from exc
-    if request_sha256 != expected_request_sha256:
-        raise AutoresearchValidationError("MemPalace finalization journal does not match state")
-    drawer_id = journal.get("drawer_id")
-    if not isinstance(drawer_id, str) or not drawer_id.strip():
-        raise AutoresearchValidationError(
-            "MemPalace finalization journal lacks canonical drawer ID"
-        )
-    return drawer_id
-
-
-def verify_mempalace_final_decision(
-    state: AutoresearchState,
-    kg_path: Path | None = None,
-) -> MemoryVerificationReceipt:
-    """Read and attest KG facts; this function never mutates MemPalace."""
-    if state.final_decision is None or state.mode is None:
-        raise AutoresearchValidationError("MemPalace verification requires final_decision and mode")
-    if not _final_decision_requires_memory_write(state, state.final_decision):
-        raise AutoresearchValidationError(
-            "MemPalace verification is prohibited for a non-retention final decision"
-        )
-    if not state.final_decision.memory_write_required:
-        raise AutoresearchValidationError(
-            "MemPalace verification is not required for this final decision"
-        )
-    path = (kg_path if kg_path is not None else _default_mempalace_kg_path()).expanduser()
-    if not path.is_file():
-        raise AutoresearchValidationError(f"MemPalace KG does not exist: {path}")
-    decision = state.final_decision
-    expected_objects = standardized_mempalace_kg_facts(state)
-    request = build_final_memory_write_request(state)
-    journal_path = finalization_journal_path(path.parent, decision.experiment_id)
-    try:
-        journal: object = json.loads(journal_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise AutoresearchValidationError("MemPalace finalization journal is unavailable") from exc
-    expected_journal_digest = _sha256_text(
-        json.dumps(request.to_dict(), separators=(",", ":"), sort_keys=True)
-    )
-    expected_drawer_id = _committed_finalization_journal_drawer_id(
-        journal,
-        expected_request_sha256=expected_journal_digest,
-    )
-    required = set(expected_objects)
-    connection: sqlite3.Connection | None = None
-    try:
-        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(triples)").fetchall()}
-        required_columns = {
-            "id",
-            "subject",
-            "predicate",
-            "object",
-            "valid_from",
-            "valid_to",
-            "source_file",
-            "source_drawer_id",
-        }
-        if not required_columns <= columns:
-            raise AutoresearchValidationError("MemPalace KG triples schema is incomplete")
-        rows = connection.execute(
-            """
-            SELECT id, subject, predicate, object, valid_from, valid_to,
-                   source_file, source_drawer_id
-            FROM triples WHERE subject = ? AND valid_to IS NULL
-            """,
-            (decision.experiment_id,),
-        ).fetchall()
-    except sqlite3.Error as exc:
-        raise AutoresearchValidationError(f"cannot read MemPalace KG: {exc}") from exc
-    finally:
-        if connection is not None:
-            connection.close()
-
-    facts: dict[str, list[tuple[str, str, str, str, str, str, str, str]]] = {}
-    for row in rows:
-        normalized_predicate = _normalise_predicate(str(row[2]))
-        if normalized_predicate not in required:
-            continue
-        source_file = str(row[6] or "").strip()
-        source_drawer_id = str(row[7] or "").strip()
-        if source_file != FINAL_MEMORY_SOURCE_FILE or source_drawer_id != expected_drawer_id:
-            raise AutoresearchValidationError(
-                "MemPalace standardized facts require exact canonical finalizer provenance"
-            )
-        if not str(row[3]).strip():
-            raise AutoresearchValidationError(
-                "MemPalace standardized facts require non-empty objects"
-            )
-        normalized_row = (
-            "" if row[0] is None else str(row[0]),
-            "" if row[1] is None else str(row[1]),
-            "" if row[2] is None else str(row[2]),
-            "" if row[3] is None else str(row[3]),
-            "" if row[4] is None else str(row[4]),
-            "" if row[5] is None else str(row[5]),
-            "" if row[6] is None else str(row[6]),
-            "" if row[7] is None else str(row[7]),
-        )
-        facts.setdefault(normalized_predicate, []).append(normalized_row)
-    missing = sorted(required - facts.keys())
-    if missing:
-        raise AutoresearchValidationError(
-            "MemPalace required standardized facts are missing: " + ", ".join(missing)
-        )
-
-    for predicate, expected_object in expected_objects.items():
-        if any(row[3] != expected_object for row in facts[predicate]):
-            raise AutoresearchValidationError(
-                f"MemPalace {predicate} fact does not match final decision artifact"
-            )
-    stable_rows = sorted(row for predicate_rows in facts.values() for row in predicate_rows)
-    digest = _sha256_text(json.dumps(stable_rows, separators=(",", ":"), ensure_ascii=True))
-    return MemoryVerificationReceipt(
-        experiment_id=decision.experiment_id,
-        kg_path=str(path),
-        predicates=tuple(sorted(facts)),
-        verified_rows_digest=digest,
-    )
-
-
-def mark_memory_written(
-    state: AutoresearchState,
-    receipt: MemoryVerificationReceipt,
-) -> AutoresearchState:
-    if not can_write_memory(state):
-        raise AutoresearchValidationError(
-            "memory write is allowed only after final decision that requires memory"
-        )
-    if state.final_decision is None or receipt.experiment_id != state.final_decision.experiment_id:
-        raise AutoresearchValidationError("memory receipt must match final decision experiment_id")
-    return replace(state, memory_written=True, memory_verification_receipt=receipt)
-
-
-def suspend_for_infrastructure(state: AutoresearchState, reason: str) -> AutoresearchState:
-    """Durably suspend an active alpha iteration for operator-owned infra repair."""
-    if not reason or not reason.strip():
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension requires a non-empty reason"
-        )
-    if reason != reason.strip():
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension reason must not have leading or trailing whitespace"
-        )
-    if state.suspended:
-        raise AutoresearchValidationError("autoresearch state is already suspended")
-    if state.phase is Phase.REPEAT or state.final_decision is not None:
-        raise AutoresearchValidationError(
-            "autoresearch state is already finalized or in repeat phase"
-        )
-    if state.mode is not ResearchMode.ALPHA_RESEARCH:
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension requires an active ALPHA_RESEARCH iteration"
-        )
-    if state.phase not in OPERATOR_INFRASTRUCTURE_SUSPENSION_ACTIVE_PHASES:
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension requires a coherent active ALPHA_RESEARCH phase"
-        )
-    if state.setup is None or state.context_packet is None or state.platform_readiness is None:
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension requires setup, context packet, and "
-            "pinned platform readiness"
-        )
-    if state.context_packet.research_mode is not ResearchMode.ALPHA_RESEARCH:
-        raise AutoresearchValidationError(
-            "operator infrastructure suspension requires an ALPHA_RESEARCH context packet"
-        )
-
-    decision = FinalDecisionArtifact(
-        experiment_id=_canonical_iteration_experiment_id(state.iteration),
-        decision=FinalDecision.INFRA_BLOCKED,
-        recommended_metric_name=OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
-        recommended_metric_value=None,
-        reviewer_verdict=(
-            FinalReviewerVerdict(state.latest_review.verdict.value)
-            if state.latest_review is not None
-            else FinalReviewerVerdict.NOT_RUN
-        ),
-        rationale=OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
-        log_summary=OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
-        continue_loop=True,
-        memory_write_required=False,
-        infra_rationale=reason,
-    )
-    return replace(
-        state,
-        phase=Phase.REPEAT,
-        pending_fix_trigger=None,
-        final_decision=decision,
-        memory_written=False,
-        memory_verification_receipt=None,
-        suspended=True,
-        suspension_reason=reason,
-    )
-
-
-def start_next_iteration(
-    state: AutoresearchState,
-    *,
-    readiness: PlatformReadinessManifest | None = None,
-) -> AutoresearchState:
-    """Begin a completed iteration's successor with a newly validated READY receipt."""
-    if state.setup is None or state.final_decision is None:
-        raise AutoresearchValidationError("next iteration requires completed current iteration")
-    _validate_operator_precondition_infra_blocked_suspension(state)
-    if state.suspended:
-        raise AutoresearchValidationError(
-            "suspended INFRA_BLOCKED state requires explicit autoresearch-resume"
-        )
-    if state.phase is not Phase.REPEAT:
-        raise AutoresearchValidationError("start_next_iteration requires a completed repeat phase")
-    if readiness is None:
-        raise AutoresearchValidationError(
-            "start_next_iteration requires an explicit platform readiness manifest"
-        )
-    if state.platform_readiness is None:
-        raise AutoresearchValidationError(
-            "autoresearch state has no pinned platform readiness receipt; "
-            "run autoresearch-pin-readiness explicitly before dispatch"
-        )
-    if not state.memory_written and not _is_explicit_no_memory_transition(state):
-        raise AutoresearchValidationError(
-            "cannot start next iteration before a verified MemPalace write or a "
-            "policy-approved no-memory final decision"
-        )
-    try:
-        readiness_identity = readiness.require_ready()
-    except ValueError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
-    return AutoresearchState(
-        phase=Phase.SETUP_CONTEXT,
-        iteration=state.iteration + 1,
-        setup=state.setup,
-        platform_readiness=readiness_identity,
-    )
 
 
 def pin_platform_readiness(
@@ -4710,45 +4058,6 @@ def pin_platform_readiness(
             "state readiness manifest_id or snapshot_id changed; same-ID repin required"
         )
     return replace(state, platform_readiness=identity)
-
-
-def resume_suspended_iteration(
-    state: AutoresearchState,
-    readiness: PlatformReadinessManifest,
-) -> AutoresearchState:
-    """Explicitly recheck readiness and resume after a durable infrastructure pause."""
-    if not state.suspended or state.final_decision is None:
-        raise AutoresearchValidationError("autoresearch state is not suspended")
-    if state.final_decision.decision is not FinalDecision.INFRA_BLOCKED:
-        raise AutoresearchValidationError("only an INFRA_BLOCKED state can be resumed explicitly")
-    if state.setup is None:
-        raise AutoresearchValidationError("suspended state is missing setup context")
-    try:
-        identity = readiness.require_ready()
-    except ValueError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
-    if (
-        state.final_decision.recommended_metric_name
-        == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME
-    ):
-        if not _is_operator_infrastructure_suspension_state(state):
-            raise AutoresearchValidationError(
-                "operator infrastructure suspension state has an invalid contract"
-            )
-        if state.platform_readiness is None:
-            raise AutoresearchValidationError(
-                "operator infrastructure suspension has no pinned readiness identity to replace"
-            )
-        if state.platform_readiness == identity:
-            raise AutoresearchValidationError(
-                "autoresearch-resume requires a changed READY platform readiness manifest"
-            )
-    return AutoresearchState(
-        phase=Phase.SETUP_CONTEXT,
-        iteration=state.iteration + 1,
-        setup=state.setup,
-        platform_readiness=identity,
-    )
 
 
 def _rewrite_workspace_prefix(value: str, *, old_root: Path, new_root: Path) -> str:

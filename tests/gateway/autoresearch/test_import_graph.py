@@ -1,8 +1,36 @@
+import ast
 import pkgutil
 import subprocess
 import sys
+from pathlib import Path
 
 import gateway.autoresearch
+
+
+def test_autoresearch_modules_do_not_import_runner_or_detached_runs_statically() -> None:
+    package_root = Path(next(iter(gateway.autoresearch.__path__)))
+    banned_modules = (
+        "gateway.autoresearch_runner",
+        "gateway.autoresearch_runs",
+    )
+    violations: list[str] = []
+    for path in sorted(package_root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            imported_names: tuple[str, ...]
+            if isinstance(node, ast.Import):
+                imported_names = tuple(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported_names = (node.module,) if node.module is not None else ()
+            else:
+                continue
+            for imported_name in imported_names:
+                if any(
+                    imported_name == banned or imported_name.startswith(f"{banned}.")
+                    for banned in banned_modules
+                ):
+                    violations.append(f"{path}:{node.lineno}: {imported_name}")
+    assert not violations, "forbidden autoresearch package imports:\n" + "\n".join(violations)
 
 
 def test_autoresearch_modules_do_not_import_runner() -> None:
