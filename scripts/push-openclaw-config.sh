@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # push-openclaw-config.sh — Merge repo-maintained OpenClaw config into the local installation.
 #
+# Architecture:
+#   Bash owns orchestration, temporary recovery directories, and trap/signal wiring.
+#   gateway/deployment owns all deployment logic; switched functions below are
+#   single-path Python wrappers.
+#
 # Usage (from repo root):
 #   bash scripts/push-openclaw-config.sh
 #
@@ -14,6 +19,12 @@
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
 set -euo pipefail
+
+OPENCLAW_PUSH_IMPL="${OPENCLAW_PUSH_IMPL:-python}"
+if [[ "${OPENCLAW_PUSH_IMPL}" != "python" ]]; then
+  echo "ERROR: the bash implementation was removed in the P4 cutover; unset OPENCLAW_PUSH_IMPL." >&2
+  exit 1
+fi
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -126,12 +137,6 @@ NATIVE_CRASH_HARDENING_LINES=(
   "OOMPolicy=kill"
   "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
 )
-STALE_CODING_PROVIDER_KEYS=(
-  "github-copilot"
-  "copilot-proxy"
-  "copilot-cli"
-)
-
 quote_sqlite_literal() {
   local value="$1"
   printf "'%s'" "${value//\'/\'\'}"
@@ -148,21 +153,6 @@ sync_managed_agent_codex_auth() {
 
 build_string_array_json() {
   printf '%s\n' "$@" | jq -Rsc 'split("\n")[:-1]'
-}
-
-sanitize_stale_coding_provider_keys() {
-  local stale_keys_json
-  stale_keys_json="$(build_string_array_json "${STALE_CODING_PROVIDER_KEYS[@]}")"
-  MERGED=$(echo "${MERGED}" | jq --argjson stale_keys "${stale_keys_json}" '
-    walk(
-      if type == "object" then
-        with_entries(select((.key as $key | $stale_keys | index($key)) | not))
-      else
-        .
-      end
-    )
-  ')
-  echo "Sanitized stale coding-provider config keys: ${STALE_CODING_PROVIDER_KEYS[*]}"
 }
 
 escape_sed_replacement() {
@@ -678,14 +668,8 @@ MANAGED_UNIT_PATHS=(
   "${CODEX_RUNTIME_DROPIN_DST}"
   "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 )
-MANAGED_UNIT_WAS_PRESENT=()
-MANAGED_UNIT_SNAPSHOT_STATE=()
 MANAGED_ARTIFACT_TRANSACTION_ARMED=0
 MANAGED_ARTIFACT_BACKUP_DIR=""
-MANAGED_ARTIFACT_PATHS=()
-MANAGED_ARTIFACT_WAS_PRESENT=()
-MANAGED_ARTIFACT_SNAPSHOT_STATE=()
-declare -A MANAGED_ARTIFACT_SEEN=()
 MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
 SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
 SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
@@ -702,310 +686,100 @@ cleanup_deployment_temp_file() {
 }
 
 begin_managed_unit_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
-    MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
-    guard_destination_path_chain "${MANAGED_UNIT_BACKUP_DIR}" "created managed systemd transaction backup directory ${MANAGED_UNIT_BACKUP_DIR}" || return 1
-    local transaction_status
-    if PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions begin-unit-tx \
-      -- "${MANAGED_UNIT_BACKUP_DIR}" "${MANAGED_UNIT_PATHS[@]}"; then
-      transaction_status=0
-    else
-      transaction_status=$?
-    fi
-    if [[ "${transaction_status}" -eq 0 ]]; then
-      local path
-      for path in "${MANAGED_UNIT_PATHS[@]}"; do
-        if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-          "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-unit \
-          -- "${MANAGED_UNIT_BACKUP_DIR}" "${path}"; then
-          transaction_status=1
-        fi
-      done
-    fi
-    MANAGED_UNIT_TRANSACTION_ARMED=1
-    if [[ "${transaction_status}" -ne 0 ]]; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
-  local index path backup_path transaction_failed=0
-
   guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
   MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
   guard_destination_path_chain "${MANAGED_UNIT_BACKUP_DIR}" "created managed systemd transaction backup directory ${MANAGED_UNIT_BACKUP_DIR}" || return 1
-  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
-    path="${MANAGED_UNIT_PATHS[${index}]}"
-    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    MANAGED_UNIT_SNAPSHOT_STATE[${index}]="failed"
-    if path_exists_or_symlink "${path}"; then
-      if [[ -L "${path}" ]]; then
-        echo "ERROR: Managed systemd file ${path} is a symlink to $(readlink "${path}"); this publication path cannot preserve symlink topology safely." >&2
-        echo "       Refusing before mutating managed systemd files." >&2
-        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-        continue
+  local transaction_status
+  if PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions begin-unit-tx \
+    -- "${MANAGED_UNIT_BACKUP_DIR}" "${MANAGED_UNIT_PATHS[@]}"; then
+    transaction_status=0
+  else
+    transaction_status=$?
+  fi
+  if [[ "${transaction_status}" -eq 0 ]]; then
+    local path
+    for path in "${MANAGED_UNIT_PATHS[@]}"; do
+      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-unit \
+        -- "${MANAGED_UNIT_BACKUP_DIR}" "${path}"; then
+        transaction_status=1
       fi
-      if [[ ! -f "${path}" ]]; then
-        echo "ERROR: Managed systemd file ${path} exists but is not a regular file; refusing before mutation." >&2
-        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-        continue
-      fi
-      if ! guard_destination_path_chain "${path}" "snapshotting managed systemd file ${path}"; then
-        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-        continue
-      fi
-      if ! guarded_copy_path_topology "${path}" "${backup_path}" "snapshotting managed systemd file ${path}"; then
-        echo "ERROR: Failed to snapshot managed systemd file ${path} to ${backup_path}." >&2
-        echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-        continue
-      fi
-      MANAGED_UNIT_WAS_PRESENT[${index}]=1
-      MANAGED_UNIT_SNAPSHOT_STATE[${index}]="present"
-    else
-      MANAGED_UNIT_WAS_PRESENT[${index}]=0
-      MANAGED_UNIT_SNAPSHOT_STATE[${index}]="absent"
-    fi
-  done
+    done
+  fi
   MANAGED_UNIT_TRANSACTION_ARMED=1
-  if [[ "${transaction_failed}" -ne 0 ]]; then
+  if [[ "${transaction_status}" -ne 0 ]]; then
+    ROLLBACK_FAILED=1
     return 1
   fi
-  fi
+  return 0
 }
 
 rollback_managed_unit_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
-      return 0
-    fi
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-unit-tx \
-      -- "${MANAGED_UNIT_BACKUP_DIR}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    MANAGED_UNIT_TRANSACTION_ARMED=0
-    return 0
-  else
-  local index path backup_path state transaction_failed=0
-
   if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
     return 0
   fi
-
-  echo "Restoring managed systemd files after failed publication." >&2
-  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
-    path="${MANAGED_UNIT_PATHS[${index}]}"
-    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    state="${MANAGED_UNIT_SNAPSHOT_STATE[${index}]:-failed}"
-    if [[ "${state}" == "failed" ]]; then
-      echo "ERROR: Skipping rollback for ${path}; its managed systemd snapshot did not complete." >&2
-      ROLLBACK_FAILED=1
-      transaction_failed=1
-      continue
-    fi
-    if [[ "${state}" == "present" ]]; then
-      if ! restore_path_topology_from_backup "${backup_path}" "${path}" "${MANAGED_UNIT_BACKUP_DIR}/restore.${index}"; then
-        echo "ERROR: Failed to restore managed systemd file ${path}." >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-      fi
-    elif [[ "${state}" == "absent" ]]; then
-      if ! guarded_rm_f "${path}" "removing newly installed managed systemd file ${path} during rollback"; then
-        echo "ERROR: Failed to remove newly installed managed systemd file ${path}." >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-      fi
-    else
-      echo "ERROR: Unknown managed systemd snapshot state ${state} for ${path}; leaving it untouched." >&2
-      ROLLBACK_FAILED=1
-      transaction_failed=1
-    fi
-  done
-  if ! systemctl --user daemon-reload; then
-    echo "ERROR: Failed to reload user systemd units after managed-file rollback." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-unit-tx \
+    -- "${MANAGED_UNIT_BACKUP_DIR}"; then
     ROLLBACK_FAILED=1
-    transaction_failed=1
-  fi
-  if [[ "${transaction_failed}" -eq 1 ]]; then
-    echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
     return 1
   fi
   MANAGED_UNIT_TRANSACTION_ARMED=0
-  fi
+  return 0
 }
 
 finalize_managed_unit_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-unit-tx \
-      -- "${MANAGED_UNIT_BACKUP_DIR:-}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
-  local index backup_path state
-  if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
-    echo "ERROR: Managed systemd transaction was not armed at deployment commit." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-unit-tx \
+    -- "${MANAGED_UNIT_BACKUP_DIR:-}"; then
     ROLLBACK_FAILED=1
     return 1
   fi
-  if [[ -z "${MANAGED_UNIT_BACKUP_DIR:-}" || ! -d "${MANAGED_UNIT_BACKUP_DIR}" ]]; then
-    echo "ERROR: Managed systemd backup directory is missing at deployment commit: ${MANAGED_UNIT_BACKUP_DIR:-<unset>}" >&2
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  for index in "${!MANAGED_UNIT_PATHS[@]}"; do
-    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    state="${MANAGED_UNIT_SNAPSHOT_STATE[${index}]:-failed}"
-    case "${state}" in
-      present)
-        if ! path_exists_or_symlink "${backup_path}"; then
-          echo "ERROR: Managed systemd backup component is missing at deployment commit: ${backup_path}" >&2
-          ROLLBACK_FAILED=1
-          return 1
-        fi
-        ;;
-      absent)
-        ;;
-      failed)
-        echo "ERROR: Managed systemd snapshot did not complete before deployment commit: ${MANAGED_UNIT_PATHS[${index}]}" >&2
-        ROLLBACK_FAILED=1
-        return 1
-        ;;
-      *)
-        echo "ERROR: Managed systemd snapshot state is invalid for ${MANAGED_UNIT_PATHS[${index}]}: ${state}" >&2
-        ROLLBACK_FAILED=1
-        return 1
-        ;;
-    esac
-  done
-  fi
+  return 0
 }
 
 cleanup_managed_unit_backup_dir() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
-        -- unit committed "${MANAGED_UNIT_BACKUP_DIR}"; then
-        POST_COMMIT_CLEANUP_FAILED=1
-        return 1
-      fi
-    fi
-    MANAGED_UNIT_BACKUP_DIR=""
-    MANAGED_UNIT_WAS_PRESENT=()
-    MANAGED_UNIT_SNAPSHOT_STATE=()
-    return 0
-  else
   if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-    if ! guarded_rm_rf "${MANAGED_UNIT_BACKUP_DIR}" "removing managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}"; then
-      echo "ERROR: Failed to remove managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}." >&2
-      echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+      -- unit committed "${MANAGED_UNIT_BACKUP_DIR}"; then
       POST_COMMIT_CLEANUP_FAILED=1
       return 1
     fi
   fi
   MANAGED_UNIT_BACKUP_DIR=""
-  MANAGED_UNIT_WAS_PRESENT=()
-  MANAGED_UNIT_SNAPSHOT_STATE=()
-  fi
+  return 0
 }
 
 begin_managed_artifact_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -eq 1 ]]; then
-      return 0
-    fi
-    guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw artifact backup directory under ${OPENCLAW_PUSH_HOME}" || return 1
-    MANAGED_ARTIFACT_BACKUP_DIR="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.push-openclaw-config-artifacts.XXXXXX")"
-    guard_destination_path_chain "${MANAGED_ARTIFACT_BACKUP_DIR}" "created managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}" || return 1
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions begin-artifact-tx \
-      -- "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
-      ROLLBACK_FAILED=1
-      MANAGED_ARTIFACT_TRANSACTION_ARMED=1
-      return 1
-    fi
-    MANAGED_ARTIFACT_TRANSACTION_ARMED=1
-    return 0
-  else
   if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -eq 1 ]]; then
     return 0
   fi
   guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw artifact backup directory under ${OPENCLAW_PUSH_HOME}" || return 1
   MANAGED_ARTIFACT_BACKUP_DIR="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.push-openclaw-config-artifacts.XXXXXX")"
   guard_destination_path_chain "${MANAGED_ARTIFACT_BACKUP_DIR}" "created managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}" || return 1
-  MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions begin-artifact-tx \
+    -- "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
+    ROLLBACK_FAILED=1
+    MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+    return 1
   fi
+  MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+  return 0
 }
 
 snapshot_managed_artifact_path() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    local path="${1}"
-    begin_managed_artifact_transaction || return 1
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-artifact \
-      -- "${MANAGED_ARTIFACT_BACKUP_DIR}" "${path}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
-  local path="$1"
-  local index backup_path state
-
+  local path="${1}"
   begin_managed_artifact_transaction || return 1
-  if [[ -n "${MANAGED_ARTIFACT_SEEN[${path}]+x}" ]]; then
-    index="${MANAGED_ARTIFACT_SEEN[${path}]}"
-    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
-    if [[ "${state}" == "failed" ]]; then
-      return 1
-    fi
-    return 0
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-artifact \
+    -- "${MANAGED_ARTIFACT_BACKUP_DIR}" "${path}"; then
+    ROLLBACK_FAILED=1
+    return 1
   fi
-  index="${#MANAGED_ARTIFACT_PATHS[@]}"
-  MANAGED_ARTIFACT_PATHS+=("${path}")
-  MANAGED_ARTIFACT_SEEN["${path}"]="${index}"
-  MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="failed"
-  backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
-  if path_exists_or_symlink "${path}"; then
-    if [[ -L "${path}" ]]; then
-      echo "ERROR: Managed OpenClaw artifact ${path} is a symlink to $(readlink "${path}"); this publication path cannot preserve symlink topology safely." >&2
-      echo "       Refusing before mutating the managed artifact path." >&2
-      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    if ! guard_destination_path_chain "${path}" "snapshotting managed OpenClaw artifact ${path}"; then
-      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    if ! guarded_copy_path_topology "${path}" "${backup_path}" "snapshotting managed OpenClaw artifact ${path}"; then
-      echo "ERROR: Failed to snapshot managed OpenClaw artifact ${path} to ${backup_path}." >&2
-      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    MANAGED_ARTIFACT_WAS_PRESENT[${index}]=1
-    MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="present"
-  else
-    MANAGED_ARTIFACT_WAS_PRESENT[${index}]=0
-    MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="absent"
-  fi
-  fi
+  return 0
 }
 
 is_systemd_managed_artifact_path() {
@@ -1016,194 +790,65 @@ is_systemd_managed_artifact_path() {
 }
 
 rollback_managed_artifact_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
-      return 0
-    fi
-    local module_output
-    if ! module_output="$(SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR}" \
-      GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME}" \
-      PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-artifact-tx \
-      -- "${MANAGED_ARTIFACT_BACKUP_DIR}")"; then
-      ROLLBACK_FAILED=1
-      if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
-        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
-      fi
-      return 1
-    fi
-    if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
-      MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
-    fi
-    MANAGED_ARTIFACT_TRANSACTION_ARMED=0
-    return 0
-  else
-  local index path backup_path restore_stage state transaction_failed=0
-
   if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
     return 0
   fi
-
-  echo "Restoring managed OpenClaw artifacts after failed publication." >&2
-  for ((index=${#MANAGED_ARTIFACT_PATHS[@]} - 1; index >= 0; index--)); do
-    path="${MANAGED_ARTIFACT_PATHS[${index}]}"
-    backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
-    restore_stage="${MANAGED_ARTIFACT_BACKUP_DIR}/restore.${index}"
-    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
-    if [[ "${state}" == "failed" ]]; then
-      echo "ERROR: Skipping rollback for ${path}; its managed artifact snapshot did not complete." >&2
-      ROLLBACK_FAILED=1
-      transaction_failed=1
-      continue
+  local module_output
+  if ! module_output="$(SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR}" \
+    GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME}" \
+    PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-artifact-tx \
+    -- "${MANAGED_ARTIFACT_BACKUP_DIR}")"; then
+    ROLLBACK_FAILED=1
+    if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
+      MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
     fi
-    if [[ "${state}" == "present" ]]; then
-      if ! path_exists_or_symlink "${backup_path}"; then
-        echo "ERROR: Managed artifact backup is missing for ${path}: ${backup_path}" >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-        continue
-      fi
-      if is_systemd_managed_artifact_path "${path}"; then
-        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
-      fi
-      if ! restore_path_topology_from_backup "${backup_path}" "${path}" "${restore_stage}"; then
-        echo "ERROR: Failed to restore managed artifact ${path}." >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-      fi
-    elif [[ "${state}" == "absent" ]]; then
-      if is_systemd_managed_artifact_path "${path}"; then
-        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
-      fi
-      if ! guarded_rm_rf "${path}" "removing newly installed managed artifact ${path} during rollback"; then
-        echo "ERROR: Failed to remove newly installed managed artifact ${path} during rollback." >&2
-        ROLLBACK_FAILED=1
-        transaction_failed=1
-      fi
-    else
-      echo "ERROR: Unknown managed artifact snapshot state ${state} for ${path}; leaving it untouched." >&2
-      ROLLBACK_FAILED=1
-      transaction_failed=1
-    fi
-  done
-  if [[ "${transaction_failed}" -eq 1 ]]; then
-    echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
     return 1
   fi
-  MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+  if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
+    MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
   fi
+  MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+  return 0
 }
 
 final_systemd_reload_after_artifact_rollback() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
-      return 0
-    fi
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions \
-      final-systemd-reload-after-artifact-rollback \
-      -- "${MANAGED_ARTIFACT_RESTORED_SYSTEMD}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
-    return 0
-  else
   if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
     return 0
   fi
-  if ! systemctl --user daemon-reload; then
-    echo "ERROR: Failed final user systemd daemon-reload after managed artifact rollback restored systemd files." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions \
+    final-systemd-reload-after-artifact-rollback \
+    -- "${MANAGED_ARTIFACT_RESTORED_SYSTEMD}"; then
     ROLLBACK_FAILED=1
     return 1
   fi
   MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
-  fi
+  return 0
 }
 
 finalize_managed_artifact_transaction() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-artifact-tx \
-      -- "${MANAGED_ARTIFACT_BACKUP_DIR:-}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
-  local index backup_path path state
-  if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
-    echo "ERROR: Managed OpenClaw artifact transaction was not armed at deployment commit." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-artifact-tx \
+    -- "${MANAGED_ARTIFACT_BACKUP_DIR:-}"; then
     ROLLBACK_FAILED=1
     return 1
   fi
-  if [[ -z "${MANAGED_ARTIFACT_BACKUP_DIR:-}" || ! -d "${MANAGED_ARTIFACT_BACKUP_DIR}" ]]; then
-    echo "ERROR: Managed OpenClaw artifact backup directory is missing at deployment commit: ${MANAGED_ARTIFACT_BACKUP_DIR:-<unset>}" >&2
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  for index in "${!MANAGED_ARTIFACT_PATHS[@]}"; do
-    path="${MANAGED_ARTIFACT_PATHS[${index}]}"
-    backup_path="${MANAGED_ARTIFACT_BACKUP_DIR}/${index}"
-    state="${MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]:-failed}"
-    case "${state}" in
-      present)
-        if ! path_exists_or_symlink "${backup_path}"; then
-          echo "ERROR: Managed OpenClaw artifact backup component is missing at deployment commit: ${backup_path}" >&2
-          ROLLBACK_FAILED=1
-          return 1
-        fi
-        ;;
-      absent)
-        ;;
-      failed)
-        echo "ERROR: Managed OpenClaw artifact snapshot did not complete before deployment commit: ${path}" >&2
-        ROLLBACK_FAILED=1
-        return 1
-        ;;
-      *)
-        echo "ERROR: Managed OpenClaw artifact snapshot state is invalid for ${path}: ${state}" >&2
-        ROLLBACK_FAILED=1
-        return 1
-        ;;
-    esac
-  done
-  fi
+  return 0
 }
 
 cleanup_managed_artifact_backup_dir() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
-      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
-        -- artifact committed "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
-        POST_COMMIT_CLEANUP_FAILED=1
-        return 1
-      fi
-    fi
-    MANAGED_ARTIFACT_BACKUP_DIR=""
-    MANAGED_ARTIFACT_PATHS=()
-    MANAGED_ARTIFACT_WAS_PRESENT=()
-    MANAGED_ARTIFACT_SNAPSHOT_STATE=()
-    MANAGED_ARTIFACT_SEEN=()
-    MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
-    return 0
-  else
   if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
-    if ! guarded_rm_rf "${MANAGED_ARTIFACT_BACKUP_DIR}" "removing managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}"; then
-      echo "ERROR: Failed to remove managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}." >&2
-      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+      -- artifact committed "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
       POST_COMMIT_CLEANUP_FAILED=1
       return 1
     fi
   fi
   MANAGED_ARTIFACT_BACKUP_DIR=""
-  MANAGED_ARTIFACT_PATHS=()
-  MANAGED_ARTIFACT_WAS_PRESENT=()
-  MANAGED_ARTIFACT_SNAPSHOT_STATE=()
-  MANAGED_ARTIFACT_SEEN=()
   MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
-  fi
+  return 0
 }
 
 restore_systemd_manager_environment_snapshot() {
@@ -1231,31 +876,13 @@ finalize_systemd_manager_environment_snapshot() {
 }
 
 finalize_local_config_backup() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions validate-local-config \
-      -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" "${LOCAL_CONFIG}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
-  if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
-    echo "ERROR: Local OpenClaw config rollback was not armed at deployment commit." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions validate-local-config \
+    -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" "${LOCAL_CONFIG}"; then
     ROLLBACK_FAILED=1
     return 1
   fi
-  if [[ -z "${BACKUP:-}" ]] || ! path_exists_or_symlink "${BACKUP}"; then
-    echo "ERROR: Local OpenClaw config backup is missing at deployment commit: ${BACKUP:-<unset>}" >&2
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  if [[ ! -f "${LOCAL_CONFIG}" ]]; then
-    echo "ERROR: Local OpenClaw config is missing at deployment commit: ${LOCAL_CONFIG}" >&2
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  fi
+  return 0
 }
 
 mark_deployment_committed() {
@@ -1288,58 +915,20 @@ cleanup_committed_recovery_paths() {
 }
 
 cleanup_rollback_recovery_paths() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    local cleanup_failed=0
-    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
-        -- unit rollback "${MANAGED_UNIT_BACKUP_DIR}"; then
-        cleanup_failed=1
-      else
-        MANAGED_UNIT_BACKUP_DIR=""
-      fi
-    fi
-    if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
-      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
-        -- artifact rollback "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
-        cleanup_failed=1
-      else
-        MANAGED_ARTIFACT_BACKUP_DIR=""
-      fi
-    fi
-    if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
-      if ! guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "removing guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback"; then
-        echo "ERROR: Failed to remove guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback." >&2
-        cleanup_failed=1
-      else
-        REPO_CONFIG_PREFLIGHT_COPY=""
-        REPO_CONFIG_PREFLIGHT_DIR=""
-      fi
-    fi
-    if [[ "${cleanup_failed}" -ne 0 ]]; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    return 0
-  else
   local cleanup_failed=0
-
   if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-    if ! guarded_rm_rf "${MANAGED_UNIT_BACKUP_DIR}" "removing managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR} after rollback"; then
-      echo "ERROR: Failed to remove managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR} after rollback." >&2
-      echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-      ROLLBACK_FAILED=1
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+      -- unit rollback "${MANAGED_UNIT_BACKUP_DIR}"; then
       cleanup_failed=1
     else
       MANAGED_UNIT_BACKUP_DIR=""
     fi
   fi
   if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
-    if ! guarded_rm_rf "${MANAGED_ARTIFACT_BACKUP_DIR}" "removing managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR} after rollback"; then
-      echo "ERROR: Failed to remove managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR} after rollback." >&2
-      echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
-      ROLLBACK_FAILED=1
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+      -- artifact rollback "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
       cleanup_failed=1
     else
       MANAGED_ARTIFACT_BACKUP_DIR=""
@@ -1348,41 +937,28 @@ cleanup_rollback_recovery_paths() {
   if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
     if ! guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "removing guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback"; then
       echo "ERROR: Failed to remove guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback." >&2
-      ROLLBACK_FAILED=1
       cleanup_failed=1
     else
       REPO_CONFIG_PREFLIGHT_COPY=""
       REPO_CONFIG_PREFLIGHT_DIR=""
     fi
   fi
-  return "${cleanup_failed}"
+  if [[ "${cleanup_failed}" -ne 0 ]]; then
+    ROLLBACK_FAILED=1
+    return 1
   fi
+  return 0
 }
 
 report_retained_recovery_paths() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions report-retained-recovery-paths \
-      -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" \
-      "${MANAGED_UNIT_BACKUP_DIR:-}" "${MANAGED_ARTIFACT_BACKUP_DIR:-}" \
-      "${REPO_CONFIG_PREFLIGHT_DIR:-}"; then
-      :
-    fi
-    return 0
-  else
-  if [[ "${ROLLBACK_ARMED:-0}" -eq 1 && -n "${BACKUP:-}" ]] && path_exists_or_symlink "${BACKUP}"; then
-    echo "Local OpenClaw config recoverable backup preserved at ${BACKUP}" >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions report-retained-recovery-paths \
+    -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" \
+    "${MANAGED_UNIT_BACKUP_DIR:-}" "${MANAGED_ARTIFACT_BACKUP_DIR:-}" \
+    "${REPO_CONFIG_PREFLIGHT_DIR:-}"; then
+    :
   fi
-  if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" && -d "${MANAGED_UNIT_BACKUP_DIR}" ]]; then
-    echo "Managed systemd recovery directory preserved at ${MANAGED_UNIT_BACKUP_DIR}" >&2
-  fi
-  if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" && -d "${MANAGED_ARTIFACT_BACKUP_DIR}" ]]; then
-    echo "Managed OpenClaw artifact recovery directory preserved at ${MANAGED_ARTIFACT_BACKUP_DIR}" >&2
-  fi
-  if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" && -d "${REPO_CONFIG_PREFLIGHT_DIR}" ]]; then
-    echo "Guarded repo OpenClaw config copy preserved at ${REPO_CONFIG_PREFLIGHT_DIR}" >&2
-  fi
-  fi
+  return 0
 }
 
 commit_deployment_boundary() {
@@ -1409,49 +985,17 @@ commit_deployment_boundary() {
 }
 
 restore_local_config_backup() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
-      return 0
-    fi
-    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.transactions restore-local-config \
-      -- "${BACKUP}" "${LOCAL_CONFIG}" "${OPENCLAW_PUSH_HOME}"; then
-      ROLLBACK_FAILED=1
-      return 1
-    fi
-    ROLLBACK_ARMED=0
-    return 0
-  else
-  local restore_stage restore_stage_dir
   if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
     return 0
   fi
-  guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating local OpenClaw config rollback staging directory under ${OPENCLAW_PUSH_HOME}" || return 1
-  restore_stage_dir="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.openclaw.rollback.XXXXXX")"
-  guard_destination_path_chain "${restore_stage_dir}" "created local OpenClaw config rollback staging directory ${restore_stage_dir}" || return 1
-  restore_stage="${restore_stage_dir}/openclaw.json"
-  if ! guarded_copy_path_topology_preserving_final_symlink_topology "${BACKUP}" "${restore_stage}" "staging local OpenClaw config rollback file ${restore_stage}"; then
-    echo "ERROR: Failed to stage backup ${BACKUP} for rollback to ${LOCAL_CONFIG}." >&2
-    if ! guarded_rm_rf "${restore_stage_dir}" "removing local OpenClaw config rollback staging directory ${restore_stage_dir} after stage failure"; then
-      echo "ERROR: Failed to remove local OpenClaw config rollback staging directory ${restore_stage_dir} after stage failure." >&2
-    fi
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  if ! guarded_mv_replace_preserving_final_symlink_topology "${restore_stage}" "${LOCAL_CONFIG}" "restoring local OpenClaw config ${LOCAL_CONFIG} from rollback stage" -Tf; then
-    echo "ERROR: Failed to atomically restore backup ${BACKUP} to ${LOCAL_CONFIG} during rollback." >&2
-    echo "       Recoverable backup preserved at ${BACKUP}; staged rollback file preserved at ${restore_stage}." >&2
-    ROLLBACK_FAILED=1
-    return 1
-  fi
-  if ! guarded_rmdir "${restore_stage_dir}" "removing local OpenClaw config rollback staging directory ${restore_stage_dir} after restoring ${LOCAL_CONFIG}"; then
-    echo "ERROR: Failed to remove local OpenClaw config rollback staging directory ${restore_stage_dir} after restoring ${LOCAL_CONFIG}." >&2
-    echo "       Recoverable backup preserved at ${BACKUP}; rollback staging directory preserved at ${restore_stage_dir}." >&2
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.transactions restore-local-config \
+    -- "${BACKUP}" "${LOCAL_CONFIG}" "${OPENCLAW_PUSH_HOME}"; then
     ROLLBACK_FAILED=1
     return 1
   fi
   ROLLBACK_ARMED=0
-  fi
+  return 0
 }
 
 run_deployment_rollback_and_exit() {
@@ -1722,340 +1266,92 @@ echo "Backed up local config → ${BACKUP}"
 begin_managed_artifact_transaction
 
 assemble_openclaw_config() {
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
-    MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
-    MEMPALACE_PALACE="${HOME}/.mempalace/palace"
-    MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_PUSH_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
-    MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
-    MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
-    MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
-    FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-${HOME}/.cache/fastembed}"
-    HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
-    export FASTEMBED_CACHE_PATH MEMPALACE_EMBEDDING_MODEL
-    export MEMPALACE_EXPECTED_EMBEDDING_MODEL MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
-    export HF_HUB_OFFLINE
+  MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
+  MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
+  MEMPALACE_PALACE="${HOME}/.mempalace/palace"
+  MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_PUSH_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
+  MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
+  MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
+  MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
+  FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-${HOME}/.cache/fastembed}"
+  HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+  export FASTEMBED_CACHE_PATH MEMPALACE_EMBEDDING_MODEL
+  export MEMPALACE_EXPECTED_EMBEDDING_MODEL MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+  export HF_HUB_OFFLINE
 
-    if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
-      echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
-      echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
-      return 1
-    fi
-
-    if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
-      echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
-      echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
-      return 1
-    fi
-
-    guarded_mkdir_p "${MEMPALACE_PALACE}" "creating managed MemPalace palace directory ${MEMPALACE_PALACE}"
-    guarded_mkdir_p "${FASTEMBED_CACHE_PATH}" "creating managed FastEmbed cache directory ${FASTEMBED_CACHE_PATH}"
-
-    if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
-      echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
-      echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
-      return 1
-    fi
-
-    guarded_mkdir_p "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw home ${OPENCLAW_PUSH_HOME}"
-    snapshot_managed_artifact_path "${MEMPALACE_READONLY_WRAPPER_DST}"
-    guarded_cp_file "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}" "installing MemPalace read-only wrapper ${MEMPALACE_READONLY_WRAPPER_DST}"
-    echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
-
-    PROVIDER="${OPENCLAW_PROVIDER:-codex}"
-    case "${PROVIDER}" in
-      codex)
-        MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
-        MODEL_PROVIDER="openai"
-        MODEL_ID="${OPENAI_MODEL:-gpt-5.4}"
-        ;;
-      azure)
-        MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
-        MODEL_PROVIDER="azure-oai-g2"
-        MODEL_ID="gpt-5.4"
-        ;;
-      openrouter)
-        MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
-        MODEL_PROVIDER="openrouter"
-        MODEL_ID="${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
-        ;;
-      *)
-        echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
-        return 1
-        ;;
-    esac
-
-    if ! PM_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.config_merge pm-model \
-      -- "${REPO_CONFIG}")"; then
-      return 1
-    fi
-    if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
-      echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
-      return 1
-    fi
-    PM_MODEL_ID="${PM_MODEL_PRIMARY#openai/}"
-    if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
-      echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
-      return 1
-    fi
-
-    if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-      "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
-      -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
-      "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
-      "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
-      "${G2_CONTROL_MCP_MODULE}" "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
-      "${G2_CONTROL_SERVER_AGENT_IDS_JSON}")"; then
-      return 1
-    fi
-    echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
-    echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
-    if [[ "${PROVIDER}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-      echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
-    fi
-    echo "Sanitized stale coding-provider config keys: ${STALE_CODING_PROVIDER_KEYS[*]}"
-    echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
-  else
-# ── Deep merge ───────────────────────────────────────────────────────────────
-# jq's * operator does recursive object merge (right wins on conflicts).
-# We read the local config as base and overlay the repo config on top.
-# Later provider selection installs a strict selected-model allowlist.
-REPO_PRIMARY=$(jq -r '.agents.defaults.model.primary // empty' "${REPO_CONFIG}")
-MERGED=$(jq -s --arg primary "${REPO_PRIMARY}" '
-  .[0] * .[1]
-  | del(.mcp)
-' "${LOCAL_CONFIG}" "${REPO_CONFIG}")
-
-# ── Resolve required MemPalace MCP server path ────────────────────────────────
-MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
-MEMPALACE_PYTHON="${MEMPALACE_VENV}/bin/python"
-MEMPALACE_PALACE="${HOME}/.mempalace/palace"
-MEMPALACE_READONLY_WRAPPER_DST="${OPENCLAW_PUSH_HOME}/${MEMPALACE_READONLY_WRAPPER_BASENAME}"
-MEMPALACE_EMBEDDING_MODEL="${MEMPALACE_EMBEDDING_MODEL:-bge-base}"
-MEMPALACE_EXPECTED_EMBEDDING_MODEL="${MEMPALACE_EXPECTED_EMBEDDING_MODEL:-${MEMPALACE_EMBEDDING_MODEL}}"
-MEMPALACE_EXPECTED_EMBEDDING_DIMENSION="${MEMPALACE_EXPECTED_EMBEDDING_DIMENSION:-768}"
-FASTEMBED_CACHE_PATH="${FASTEMBED_CACHE_PATH:-${HOME}/.cache/fastembed}"
-HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
-export FASTEMBED_CACHE_PATH MEMPALACE_EMBEDDING_MODEL
-export MEMPALACE_EXPECTED_EMBEDDING_MODEL MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
-export HF_HUB_OFFLINE
-
-if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
-  echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
-  echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
-  exit 1
-fi
-
-if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
-  echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
-  echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
-  exit 1
-fi
-
-guarded_mkdir_p "${MEMPALACE_PALACE}" "creating managed MemPalace palace directory ${MEMPALACE_PALACE}"
-guarded_mkdir_p "${FASTEMBED_CACHE_PATH}" "creating managed FastEmbed cache directory ${FASTEMBED_CACHE_PATH}"
-
-if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
-  echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
-  echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
-  exit 1
-fi
-
-guarded_mkdir_p "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw home ${OPENCLAW_PUSH_HOME}"
-snapshot_managed_artifact_path "${MEMPALACE_READONLY_WRAPPER_DST}"
-guarded_cp_file "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}" "installing MemPalace read-only wrapper ${MEMPALACE_READONLY_WRAPPER_DST}"
-echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
-
-MERGED=$(echo "${MERGED}" | jq \
-  --arg cmd "${MEMPALACE_PYTHON}" \
-  --arg palace "${MEMPALACE_PALACE}" \
-  --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
-  --arg cache "${FASTEMBED_CACHE_PATH}" \
-  --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
-  --arg offline "${HF_HUB_OFFLINE}" \
-  --arg repo "${REPO_ROOT}" \
-  --arg python "${PYTHON_BIN}" \
-  --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
-  --argjson readonly_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
-  --argjson g2_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" '
-  .mcp.servers = {
-    "mempalace-readonly": {
-      "command": $cmd,
-      "args": [$wrapper, "--palace", $palace],
-      "codex": {
-        "agents": $readonly_agents
-      },
-      "env": {
-        "FASTEMBED_CACHE_PATH": $cache,
-        "MEMPALACE_EMBEDDING_MODEL": $model,
-        "HF_HUB_OFFLINE": $offline
-      }
-    },
-    "g2-control": {
-      "command": $python,
-      "args": ["-m", $g2_module],
-      "codex": {
-        "agents": $g2_agents,
-        "defaultToolsApprovalMode": "approve"
-      },
-      "env": {
-        "PYTHONPATH": $repo
-      }
-    }
-  }
-')
-echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
-echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
-
-# ── Force-set tools section from repo config ─────────────────────────────────
-# Deep merge preserves stale keys (e.g. tools.allow from a previous push).
-# Overwrite the entire tools section with the repo's version to avoid drift.
-REPO_TOOLS=$(jq '.tools // empty' "${REPO_CONFIG}")
-if [[ -n "${REPO_TOOLS}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --argjson tools "${REPO_TOOLS}" '.tools = $tools')
-fi
-
-# ── Force-set memory section from repo config ────────────────────────────────
-# Deep merge preserves stale keys from old memory schemas.
-# Overwrite the entire memory section with the repo's version.
-REPO_MEMORY=$(jq '.memory // empty' "${REPO_CONFIG}")
-if [[ -n "${REPO_MEMORY}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --argjson memory "${REPO_MEMORY}" '.memory = $memory')
-fi
-
-# ── Force-set disabled built-in agent memory controls ────────────────────────
-# Recursive merge keeps stale vector-search/session-memory children even when
-# memorySearch.enabled is false. Replace the managed memory controls exactly so
-# MemPalace remains the only durable research memory layer.
-REPO_AGENT_MEMORY_SEARCH=$(jq '.agents.defaults.memorySearch // empty' "${REPO_CONFIG}")
-if [[ -n "${REPO_AGENT_MEMORY_SEARCH}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --argjson memory_search "${REPO_AGENT_MEMORY_SEARCH}" '
-    .agents.defaults.memorySearch = $memory_search
-  ')
-fi
-
-REPO_AGENT_MEMORY_FLUSH=$(jq '.agents.defaults.compaction.memoryFlush // empty' "${REPO_CONFIG}")
-if [[ -n "${REPO_AGENT_MEMORY_FLUSH}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --argjson memory_flush "${REPO_AGENT_MEMORY_FLUSH}" '
-    .agents.defaults.compaction.memoryFlush = $memory_flush
-  ')
-fi
-
-# ── Force-set managed agent roster ──────────────────────────────────────────
-# Autoresearch stage models, skills, native Codex delegation guards, and tool denies are
-# repo-owned. Replace the local roster so hand edits in ~/.openclaw cannot alter
-# the loop topology or silently change stage models.
-REPO_AGENTS_LIST=$(jq '.agents.list // empty' "${REPO_CONFIG}")
-if [[ -n "${REPO_AGENTS_LIST}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --argjson agents_list "${REPO_AGENTS_LIST}" '
-    .agents.list = $agents_list
-  ')
-fi
-
-# ── Resolve env: references in provider apiKey fields ────────────────────────
-# The repo config uses "env:VAR_NAME" placeholders for secrets. OpenClaw does
-# NOT resolve these natively for custom provider apiKey fields — the literal
-# string is passed to the SDK. We must substitute the actual value here.
-# Note: Azure OpenAI uses Entra ID auth (injected by the preload) — no apiKey needed.
-if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-  MERGED=$(echo "${MERGED}" | jq --arg key "${OPENROUTER_API_KEY}" '
-    (.models.providers // {}) |= with_entries(
-      if .value.apiKey == "env:OPENROUTER_API_KEY" then
-        .value.apiKey = $key
-      else . end
-    )
-  ')
-  echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
-fi
-
-# ── Propagate Azure API key to all azure-oai-* providers ─────────────────────
-# The primary azure-oai-g2 provider gets an apiKey during onboarding or from
-# the local config. Secondary Azure providers (e.g., azure-oai-g2-mini) share
-# the same Azure resource and need the same key. The Entra preload overrides
-# the key at HTTP time with a bearer token — the stored key just passes
-# OpenClaw's internal provider auth validation.
-MERGED=$(echo "${MERGED}" | jq '
-  (.models.providers // {}) as $provs |
-  ($provs | to_entries | map(select(.key | startswith("azure-oai-"))) | map(select(.value.apiKey != null and .value.apiKey != "")) | .[0].value.apiKey // null) as $azureKey |
-  if $azureKey != null then
-    .models.providers |= with_entries(
-      if (.key | startswith("azure-oai-")) and (.value.apiKey == null or .value.apiKey == "") then
-        .value.apiKey = $azureKey
-      else . end
-    )
-  else . end
-')
-
-# ── Provider selection ───────────────────────────────────────────────────────
-PROVIDER="${OPENCLAW_PROVIDER:-codex}"
-case "${PROVIDER}" in
-  codex)
-    MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
-    MODEL_PROVIDER="openai"
-    MODEL_ID="${OPENAI_MODEL:-gpt-5.4}"
-    ;;
-  azure)
-    MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
-    MODEL_PROVIDER="azure-oai-g2"
-    MODEL_ID="gpt-5.4"
-    ;;
-  openrouter)
-    MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
-    MODEL_PROVIDER="openrouter"
-    MODEL_ID="${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
-    ;;
-  *)
-    echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
-    exit 1
-    ;;
-esac
-
-if ! echo "${MERGED}" | jq -e --arg provider "${MODEL_PROVIDER}" --arg model "${MODEL_ID}" '
-  any(.models.providers[$provider].models[]?; .id == $model)
-' >/dev/null; then
-  echo "ERROR: Selected model '${MODEL_PRIMARY}' is not declared in repo config." >&2
-  echo "       Add it to gateway/openclaw_config/openclaw.json or choose a configured model." >&2
-  exit 1
-fi
-
-PM_MODEL_PRIMARY=$(jq -r '.agents.list[] | select(.id == "autoresearch-pm") | .model.primary // empty' "${REPO_CONFIG}")
-if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
-  echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
-  exit 1
-fi
-PM_MODEL_ID="${PM_MODEL_PRIMARY#openai/}"
-if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
-  echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
-  exit 1
-fi
-if ! echo "${MERGED}" | jq -e --arg model "${PM_MODEL_ID}" '
-  any(.models.providers.openai.models[]?; .id == $model)
-' >/dev/null; then
-  echo "ERROR: PM model '${PM_MODEL_PRIMARY}' is not declared in repo config." >&2
-  echo "       Add it to gateway/openclaw_config/openclaw.json before pushing." >&2
-  exit 1
-fi
-
-MERGED=$(echo "${MERGED}" | jq --arg primary "${MODEL_PRIMARY}" '
-  .agents.defaults.model.primary = $primary
-  | .agents.defaults.models = { ($primary): {} }
-')
-
-MERGED=$(echo "${MERGED}" | jq --arg pm "${PM_MODEL_PRIMARY}" '
-  (.agents.list[] | select(.id == "autoresearch-pm") | .model.primary) = $pm
-  | (.agents.list[] | select(.id == "autoresearch-pm") | .thinkingDefault) = "high"
-')
-
-sanitize_stale_coding_provider_keys
-
-MERGED=$(echo "${MERGED}" | jq '
-  del(.plugins.entries.codex.config.codexDynamicToolsExclude)
-  | del(.plugins.entries.codex.config.nativeToolSurfaceEnabled)
-')
-
-echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
+  if [[ ! -x "${MEMPALACE_PYTHON}" ]]; then
+    echo "ERROR: MemPalace is required at ${MEMPALACE_VENV}." >&2
+    echo "       Run 'make mempalace-install' before pushing OpenClaw config." >&2
+    return 1
   fi
+
+  if ! "${MEMPALACE_PYTHON}" -c 'import mempalace.mcp_server' >/dev/null 2>&1; then
+    echo "ERROR: MemPalace is installed but the MCP server module cannot be imported." >&2
+    echo "       Run 'make mempalace-install' to upgrade/reinstall MemPalace." >&2
+    return 1
+  fi
+
+  guarded_mkdir_p "${MEMPALACE_PALACE}" "creating managed MemPalace palace directory ${MEMPALACE_PALACE}"
+  guarded_mkdir_p "${FASTEMBED_CACHE_PATH}" "creating managed FastEmbed cache directory ${FASTEMBED_CACHE_PATH}"
+
+  if ! "${MEMPALACE_PYTHON}" "${REPO_ROOT}/scripts/check-mempalace-health.py"; then
+    echo "ERROR: MemPalace healthcheck failed. Refusing to push OpenClaw config." >&2
+    echo "       Fix the palace explicitly; startup will not auto-repair or fall back." >&2
+    return 1
+  fi
+
+  guarded_mkdir_p "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw home ${OPENCLAW_PUSH_HOME}"
+  snapshot_managed_artifact_path "${MEMPALACE_READONLY_WRAPPER_DST}"
+  guarded_cp_file "${MEMPALACE_READONLY_WRAPPER_SRC}" "${MEMPALACE_READONLY_WRAPPER_DST}" "installing MemPalace read-only wrapper ${MEMPALACE_READONLY_WRAPPER_DST}"
+  echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
+
+  PROVIDER="${OPENCLAW_PROVIDER:-codex}"
+  case "${PROVIDER}" in
+    codex)
+      MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
+      ;;
+    azure)
+      MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
+      ;;
+    openrouter)
+      MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+      ;;
+    *)
+      echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
+      return 1
+      ;;
+  esac
+
+  if ! PM_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.config_merge pm-model \
+    -- "${REPO_CONFIG}")"; then
+    return 1
+  fi
+  if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
+    echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
+    return 1
+  fi
+  if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
+    echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
+    return 1
+  fi
+
+  if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
+    -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
+    "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
+    "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
+    "${G2_CONTROL_MCP_MODULE}" "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+    "${G2_CONTROL_SERVER_AGENT_IDS_JSON}")"; then
+    return 1
+  fi
+  echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
+  echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
+  if [[ "${PROVIDER}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
+    echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
+  fi
+  echo "Sanitized stale coding-provider config keys: github-copilot copilot-proxy copilot-cli"
+  echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
 }
 
 assemble_openclaw_config
@@ -2180,11 +1476,7 @@ validate_generated_openclaw_config() {
   temp_config="$(mktemp "${OPENCLAW_PUSH_HOME}/.openclaw.generated.XXXXXX.json")"
   GENERATED_OPENCLAW_CONFIG_TMP="${temp_config}"
   guard_destination_path_chain "${temp_config}" "writing generated OpenClaw config temp file ${temp_config}" || exit 1
-  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
-    printf '%s\n' "${MERGED}" > "${temp_config}"
-  else
-    printf '%s\n' "${MERGED}" | jq . > "${temp_config}"
-  fi
+  printf '%s\n' "${MERGED}" > "${temp_config}"
   guard_destination_path_chain "${temp_config}" "wrote generated OpenClaw config temp file ${temp_config}" || exit 1
   guarded_chmod 0600 "${temp_config}" "chmod generated OpenClaw config temp file ${temp_config}"
   GENERATED_OPENCLAW_CONFIG_IDENTITY="$(guarded_regular_file_identity "${temp_config}" "capturing generated OpenClaw config identity before validation ${temp_config}")" || exit 1

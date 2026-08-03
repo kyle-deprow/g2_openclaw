@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +12,6 @@ from typing import cast
 
 import pytest
 from gateway.deployment.config_merge import (
-    STALE_CODING_PROVIDER_KEYS,
     AssemblyInputs,
     JsonObject,
     JsonValue,
@@ -430,15 +428,6 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     assert result.returncode == 0, result.stderr
     published = json.loads(result.stdout)
     assert published["agents"]["defaults"]["model"]["primary"] == "openai/gpt-5.4"
-
-
-def test_stale_coding_provider_key_lists_do_not_drift() -> None:
-    script = (REPO_ROOT / "scripts/push-openclaw-config.sh").read_text(encoding="utf-8")
-    match = re.search(r"STALE_CODING_PROVIDER_KEYS=\(\n(?P<body>.*?)\n\)", script, flags=re.DOTALL)
-    assert match is not None
-    script_keys = frozenset(re.findall(r'^\s+"([^"]+)"$', match.group("body"), re.MULTILINE))
-
-    assert script_keys == STALE_CODING_PROVIDER_KEYS
 
 
 def test_python_serializer_uses_jq_style_unicode_and_newline() -> None:
