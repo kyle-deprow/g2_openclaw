@@ -1,19 +1,29 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import replace
+from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlencode
 
 import gateway.autoresearch_runner as autoresearch_runner
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
-from gateway.autoresearch_readiness import PlatformReadinessManifest
+from gateway.autoresearch_readiness import (
+    PlatformReadinessManifest,
+    ReadinessIdentity,
+    ResearchPanelProbeReceipt,
+)
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     QUANTIPY_RECEIPT_PATHS,
     AutoresearchPolicy,
     AutoresearchState,
+    AutoresearchValidationContext,
+    ExternalVerificationRetryReceipt,
     FinalDecision,
     FinalDecisionArtifact,
     FinalReviewerVerdict,
@@ -22,16 +32,23 @@ from gateway.autoresearch_runner import (
     MemoryVerificationReceipt,
     Phase,
     QuantipyExperimentEvidence,
+    QuantipyExperimentFailureEvidence,
     ReceiptCatalog,
     ResearchMode,
     VerificationStatus,
     build_receipt_catalog,
+    expected_instruction_manifest_sha256,
     load_autoresearch_policy,
     mark_memory_written,
+    retry_external_verification,
+    retry_external_verification_state_file,
+    save_state_file,
 )
+from gateway.autoresearch_runner import advance_state as _runner_advance_state
 
 from tests.gateway.autoresearch.builders import (
     GitWorktree,
+    PublicPlatformRecoveryFixture,
     _context_artifact,
     _debate_result,
     _final_decision,
@@ -41,11 +58,14 @@ from tests.gateway.autoresearch.builders import (
     _implementation_result,
     _majority_consensus,
     _no_consensus,
+    _prepare_real_canonical_runtime,
     _ready_manifest,
+    _runtime_verification_state,
     _setup_artifact,
     _state_to_decision,
     _state_to_g0_decision,
     _verification_result,
+    _write_quantipy_detached_run_record,
     advance_state,
 )
 
@@ -302,6 +322,345 @@ def trusted_quantipy_runs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         detached_root,
     )
     return root
+
+
+@pytest.fixture()
+def public_platform_v4_recovery_fixture(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> PublicPlatformRecoveryFixture:
+    readiness_commit = _prepare_real_canonical_runtime(git_worktree)
+    readiness = _ready_manifest(
+        tmp_path / "strict-platform-readiness",
+        quantipy_commit=readiness_commit,
+    )
+    state, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    validation_context = AutoresearchValidationContext.from_readiness(readiness)
+    current_identity = validation_context.readiness_identity
+    assert current_identity is not None
+    assert current_identity.quantipy_commit == readiness_commit
+    historical_identity = ReadinessIdentity(
+        manifest_id=current_identity.manifest_id,
+        snapshot_id=current_identity.snapshot_id,
+        receipt_sha256=current_identity.receipt_sha256,
+    )
+    historical_validation_context = replace(
+        validation_context,
+        readiness_identity=historical_identity,
+    )
+    state = replace(state, platform_readiness=historical_identity)
+    manifest = json.loads(Path(evidence.manifest_path).read_text(encoding="utf-8"))
+    panel = cast(dict[str, object], manifest["panel"])
+    request = cast(dict[str, object], panel["request"])
+    expected_url = "http://127.0.0.1:8000/price-data/research-panel?" + urlencode(
+        (
+            ("tickers", ",".join(cast(list[str], request["tickers"]))),
+            ("start", "2026-07-28T12:00:00+00:00"),
+            ("end", "2026-07-28T13:00:00+00:00"),
+            ("timeframe", cast(str, request["timeframe"])),
+            ("market_hours", cast(str, request["market_hours"])),
+        )
+    )
+    initial = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE, external_panel_failure=True),
+        data_coverage=None,
+        platform_coverage_validation=None,
+        universe_verification_receipt=None,
+        price_hydration_receipt=None,
+        quantipy_experiment_evidence=replace(
+            evidence,
+            success=False,
+            completed_stages=(),
+            terminal_stage=None,
+            terminal_status=None,
+            failure=QuantipyExperimentFailureEvidence(
+                category="panel",
+                message=(
+                    "ExperimentPanelError: Client error '404 Not Found' for url "
+                    f"'{expected_url}'\nFor more information check: "
+                    "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404"
+                ),
+            ),
+            panel=None,
+        ),
+    )
+    failed_initial = _runner_advance_state(
+        state,
+        initial,
+        policy,
+        validation_context=historical_validation_context,
+    )
+    probe = ResearchPanelProbeReceipt(
+        endpoint="http://127.0.0.1:8000/price-data/research-panel",
+        observed_at="2026-07-29T12:00:00Z",
+        response_bytes=18,
+        response_sha256="a" * 64,
+        session_date="2022-01-03",
+        symbol="AAPL",
+    )
+    v2_receipt = ExternalVerificationRetryReceipt.for_state(
+        failed_initial,
+        probe,
+        "Raised the gateway receipt limit.",
+    )
+    v2_state = retry_external_verification(failed_initial, v2_receipt)
+    v2_run_path = trusted_quantipy_runs_root / v2_receipt.expected_run_id / "run.json"
+    run = json.loads(Path(evidence.run_json_path).read_text(encoding="utf-8"))
+    run.update(
+        run_id=v2_receipt.expected_run_id,
+        success=False,
+        panel_requested=True,
+        panel=None,
+        stage_receipts=[],
+        failure={
+            "category": "panel",
+            "message": (
+                "ExperimentPanelError: Client error '413 Request Entity Too Large' for url "
+                f"'{expected_url}'\nFor more information check: "
+                "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413"
+            ),
+        },
+    )
+    v2_run_path.parent.mkdir(mode=0o700)
+    v2_run_path.write_bytes(json.dumps(run, sort_keys=True, separators=(",", ":")).encode())
+    v2_run_path.chmod(0o600)
+    v2_detached_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{v2_state.iteration}-verification-r1-a2-{v2_receipt.implementation_commit[:12]}-v2"
+    )
+    _write_quantipy_detached_run_record(
+        workspace=git_worktree.workspace,
+        runtime_root=git_worktree.target_checkout,
+        manifest_path=evidence.manifest_path,
+        run_id=v2_receipt.expected_run_id,
+        run_path=v2_run_path,
+        detached_run_dir=v2_detached_dir,
+    )
+    live_state_path = tmp_path / "authoritative-live-v4.json"
+    save_state_file(live_state_path, v2_state)
+    v3_state = retry_external_verification_state_file(
+        live_state_path,
+        probe,
+        operator_reason="Raised the gateway receipt limit again.",
+        policy=policy,
+        validation_context=historical_validation_context,
+    )
+    v3_receipt = v3_state.external_verification_retry_receipt
+    implementation = v3_state.implementation_result
+    assert v3_receipt is not None
+    assert implementation is not None
+    v3_run_path = trusted_quantipy_runs_root / v3_receipt.expected_run_id / "run.json"
+    v3_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
+    )
+    v3_command = autoresearch_runner._legacy_quantipy_bash_command(
+        implementation,
+        run_id=v3_receipt.expected_run_id,
+    )
+    v3_manifest_path = tmp_path / "v3-detached-manifest.json"
+    v3_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": v3_state.iteration,
+                "phase": "verification",
+                "attempt": 3,
+                "task_label": (
+                    f"autoresearch-i{v3_state.iteration}-verification-r1-a3-"
+                    f"{implementation.commit_sha[:12]}-v3"
+                ),
+                "state_reference_sha256": (
+                    autoresearch_runner.build_authoritative_state_reference(
+                        v3_state,
+                        state_path=live_state_path,
+                    ).sha256()
+                ),
+                "instruction_manifest_sha256": expected_instruction_manifest_sha256(
+                    v3_state,
+                    policy,
+                    receipts,
+                    state_path=live_state_path,
+                ),
+                "run_directory": str(v3_run_dir),
+                "working_directory": implementation.workspace_path,
+                "command_sha256": autoresearch_runs.command_sha256(v3_command),
+                "expected_artifact_path": str(v3_run_path),
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=v3_manifest_path,
+        run_dir=v3_run_dir,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        command=v3_command,
+    )
+    autoresearch_runs.prepare_output_capture(
+        run_dir=v3_run_dir,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    for stream in autoresearch_runs.RunOutputStream:
+        autoresearch_runs.capture_output_stream(
+            run_dir=v3_run_dir,
+            runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+            stream=stream,
+            source=BytesIO(b""),
+        )
+    autoresearch_runs.start_run(
+        run_dir=v3_run_dir,
+        pid=999_999,
+        systemd_unit="openclaw-long-task-1-1.service",
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.complete_run(
+        run_dir=v3_run_dir,
+        exit_code=143,
+        signal_number=None,
+        peak_rss_bytes=None,
+        failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    v4_state = autoresearch_runner.recover_interrupted_verification_state_file(
+        live_state_path,
+        operator_reason="Stopped the detached v3 process before it produced run.json.",
+        policy=policy,
+        receipts=receipts,
+        validation_context=historical_validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=tmp_path / "proc",
+    )
+    v4_receipt = v4_state.external_verification_retry_receipt
+    assert v4_receipt is not None
+    v4_run_path = trusted_quantipy_runs_root / v4_receipt.expected_run_id / "run.json"
+    run.update(
+        run_id=v4_receipt.expected_run_id,
+        failure={
+            "category": "panel",
+            "message": "ExperimentPanelError: Research panel receipt is invalid.",
+        },
+    )
+    v4_run_path.parent.mkdir(mode=0o700)
+    v4_run_path.write_bytes(json.dumps(run, sort_keys=True, separators=(",", ":")).encode())
+    v4_run_path.chmod(0o600)
+    v4_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"i{v4_state.iteration}-verification-r1-a4-{implementation.commit_sha[:12]}-v4"
+    )
+    v4_command = autoresearch_runner._legacy_quantipy_bash_command(
+        implementation,
+        run_id=v4_receipt.expected_run_id,
+    )
+    v4_manifest_path = tmp_path / "v4-detached-manifest.json"
+    v4_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": v4_state.iteration,
+                "phase": "verification",
+                "attempt": 4,
+                "task_label": (
+                    f"autoresearch-i{v4_state.iteration}-verification-r1-a4-"
+                    f"{implementation.commit_sha[:12]}-v4"
+                ),
+                "state_reference_sha256": (
+                    autoresearch_runner.build_authoritative_state_reference(
+                        v4_state,
+                        state_path=live_state_path,
+                    ).sha256()
+                ),
+                "instruction_manifest_sha256": expected_instruction_manifest_sha256(
+                    v4_state,
+                    policy,
+                    receipts,
+                    state_path=live_state_path,
+                ),
+                "run_directory": str(v4_run_dir),
+                "working_directory": implementation.workspace_path,
+                "command_sha256": autoresearch_runs.command_sha256(v4_command),
+                "expected_artifact_path": str(v4_run_path),
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=v4_manifest_path,
+        run_dir=v4_run_dir,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        command=v4_command,
+    )
+    autoresearch_runs.prepare_output_capture(
+        run_dir=v4_run_dir,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    for stream in autoresearch_runs.RunOutputStream:
+        autoresearch_runs.capture_output_stream(
+            run_dir=v4_run_dir,
+            runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+            stream=stream,
+            source=BytesIO(b""),
+        )
+    autoresearch_runs.start_run(
+        run_dir=v4_run_dir,
+        pid=999_999,
+        systemd_unit="openclaw-long-task-2-2.service",
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    autoresearch_runs.complete_run(
+        run_dir=v4_run_dir,
+        exit_code=1,
+        signal_number=None,
+        peak_rss_bytes=None,
+        failure_classification=autoresearch_runs.RunFailureClassification.PROCESS_ERROR,
+        runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    )
+    copied_state_path = tmp_path / "copied-live-v4.json"
+    copied_state_path.write_bytes(live_state_path.read_bytes())
+    persisted_live = json.loads(live_state_path.read_text(encoding="utf-8"))
+    assert set(cast(dict[str, object], persisted_live["platform_readiness"])) == {
+        "manifest_id",
+        "snapshot_id",
+        "receipt_sha256",
+    }
+    assert persisted_live.get("canonical_quantipy_runtime_attestation") is None
+    assert persisted_live.get("platform_runtime_recovery_receipt") is None
+    monkeypatch.setattr(
+        autoresearch_runner,
+        "DEFAULT_AUTORESEARCH_STATE_PATH",
+        live_state_path,
+    )
+    artifact_hashes = tuple(
+        (path, sha256(path.read_bytes()).hexdigest())
+        for root in (
+            v2_run_path.parent,
+            v2_detached_dir,
+            v3_run_dir,
+            v4_run_path.parent,
+            v4_run_dir,
+        )
+        for path in sorted(path for path in root.rglob("*") if path.is_file())
+    )
+    return PublicPlatformRecoveryFixture(
+        live_state_path=live_state_path,
+        copied_state_path=copied_state_path,
+        probe=replace(probe, response_bytes=19, response_sha256="b" * 64),
+        readiness=readiness,
+        validation_context=validation_context,
+        live_state_bytes=live_state_path.read_bytes(),
+        artifact_hashes=artifact_hashes,
+        successful_run_template_path=Path(evidence.run_json_path),
+        failed_run_template_path=v4_run_path,
+    )
 
 
 @pytest.fixture()

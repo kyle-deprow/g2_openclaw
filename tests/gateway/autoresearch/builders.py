@@ -29,6 +29,7 @@ from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
+    ResearchPanelProbeReceipt,
 )
 from gateway.autoresearch_runner import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
@@ -62,6 +63,7 @@ from gateway.autoresearch_runner import (
     QuantipyExperimentEvidence,
     QuantipyExperimentFailureEvidence,
     QuantipyExperimentPanelEvidence,
+    ReceiptCatalog,
     ResearchMode,
     ReviewResultArtifact,
     ReviewVerdict,
@@ -72,6 +74,7 @@ from gateway.autoresearch_runner import (
     UniverseVerificationReceipt,
     VerificationResultArtifact,
     VerificationStatus,
+    next_action,
     price_hydration_coverage_digest,
     price_hydration_request_digest,
     validate_artifact_workspace,
@@ -1538,6 +1541,189 @@ def _rewrite_test_detached_status(
     )
     status_path.chmod(0o400)
     detached_run_directory.chmod(0o500)
+
+
+@dataclass(frozen=True, slots=True)
+class PublicPlatformRecoveryFixture:
+    live_state_path: Path
+    copied_state_path: Path
+    probe: ResearchPanelProbeReceipt
+    readiness: PlatformReadinessManifest
+    validation_context: AutoresearchValidationContext
+    live_state_bytes: bytes
+    artifact_hashes: tuple[tuple[Path, str], ...]
+    successful_run_template_path: Path
+    failed_run_template_path: Path
+
+
+def _write_public_v5_verification_artifact(
+    *,
+    fixture: PublicPlatformRecoveryFixture,
+    recovered: AutoresearchState,
+    status: VerificationStatus,
+    successful_bug_signal: bool = False,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    tmp_path: Path,
+) -> tuple[Path, autoresearch_runner.NextAction]:
+    retry = recovered.external_verification_retry_receipt
+    implementation = recovered.implementation_result
+    setup = recovered.setup
+    assert retry is not None
+    assert implementation is not None
+    assert setup is not None
+    template_path = (
+        fixture.successful_run_template_path
+        if status is VerificationStatus.PASS or successful_bug_signal
+        else fixture.failed_run_template_path
+    )
+    run = json.loads(template_path.read_text(encoding="utf-8"))
+    run["run_id"] = retry.expected_run_id
+    run_path = (
+        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        / retry.expected_run_id
+        / "run.json"
+    )
+    run_path.parent.mkdir(mode=0o700)
+    panel = run["panel"]
+    if isinstance(panel, dict):
+        for relative_path in (panel["panel_path"], panel["receipt_path"]):
+            source = template_path.parent / cast(str, relative_path)
+            destination = run_path.parent / cast(str, relative_path)
+            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            destination.write_bytes(source.read_bytes())
+            destination.chmod(0o400)
+    run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    run_path.write_bytes(run_bytes)
+    run_path.chmod(0o600)
+    detached_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
+        f"public-{status.value.lower()}-v5"
+    )
+    detached_directory, detached_manifest_sha256 = _write_quantipy_detached_run_record(
+        workspace=Path(implementation.workspace_path),
+        runtime_root=Path(setup.target_repo),
+        manifest_path=implementation.experiment_manifest_path,
+        run_id=retry.expected_run_id,
+        run_path=run_path,
+        detached_run_dir=detached_run_dir,
+    )
+    if isinstance(panel, dict):
+        (run_path.parent / "panel").chmod(0o500)
+    if isinstance(panel, dict):
+        panel_evidence = QuantipyExperimentPanelEvidence(
+            panel_path=cast(str, panel["panel_path"]),
+            panel_sha256=cast(str, panel["panel_sha256"]),
+            receipt_path=cast(str, panel["receipt_path"]),
+            receipt_sha256=cast(str, panel["receipt_sha256"]),
+            request_sha256=cast(str, panel["request_sha256"]),
+            coverage_sha256=cast(str, panel["coverage_sha256"]),
+        )
+    else:
+        panel_evidence = None
+    stage_receipts = cast(list[dict[str, object]], run["stage_receipts"])
+    completed_stages = tuple(
+        cast(str, receipt["stage"])
+        for receipt in stage_receipts
+        if receipt["status"] == "completed"
+    )
+    terminal = next(
+        (receipt for receipt in stage_receipts if receipt["status"] != "completed"),
+        None,
+    )
+    run_failure = run["failure"]
+    evidence = QuantipyExperimentEvidence(
+        manifest_path=implementation.experiment_manifest_path,
+        manifest_sha256=implementation.experiment_manifest_sha256,
+        detached_run_directory=detached_directory,
+        detached_run_manifest_sha256=detached_manifest_sha256,
+        run_id=retry.expected_run_id,
+        run_json_path=str(run_path),
+        run_json_sha256=sha256(run_bytes).hexdigest(),
+        success=cast(bool, run["success"]),
+        completed_stages=completed_stages,
+        terminal_stage=cast(str, terminal["stage"]) if terminal is not None else None,
+        terminal_status=cast(str, terminal["status"]) if terminal is not None else None,
+        failure=(
+            QuantipyExperimentFailureEvidence.from_dict(run_failure)
+            if run_failure is not None
+            else None
+        ),
+        panel=panel_evidence,
+    )
+    artifact = replace(
+        _verification_result(status, external_panel_failure=status is not VerificationStatus.PASS),
+        quantipy_experiment_evidence=evidence,
+    )
+    if status is VerificationStatus.PASS:
+        universe = artifact.universe_verification_receipt
+        assert universe is not None
+        artifact = replace(
+            artifact,
+            universe_verification_receipt=replace(
+                universe,
+                batches=tuple(
+                    replace(
+                        batch,
+                        dates=tuple(
+                            replace(
+                                date_receipt,
+                                calendar_digest=fixture.validation_context.xnys_evidence_digest,
+                            )
+                            for date_receipt in batch.dates
+                        ),
+                    )
+                    for batch in universe.batches
+                ),
+            ),
+        )
+    else:
+        artifact = replace(
+            artifact,
+            is_walk_forward_sharpe_net=None,
+            oos_sharpe_net=None,
+            max_drawdown_pct=None,
+            win_rate=None,
+            trade_count=None,
+            trades_per_day=None,
+            oos_trading_days=None,
+            bug_signals=(
+                ("quantipy_runtime_missing_alpha_metrics",)
+                if successful_bug_signal
+                else artifact.bug_signals
+            ),
+            data_coverage=None,
+            platform_coverage_validation=None,
+            universe_verification_receipt=None,
+            price_hydration_receipt=None,
+        )
+    action = next_action(
+        recovered,
+        policy,
+        receipts,
+        fixture.readiness,
+        state_path=fixture.copied_state_path,
+    )
+    expected_command = autoresearch_runner.build_quantipy_execution_contract(
+        runtime_root=Path(setup.target_repo),
+        manifest_path=Path(implementation.experiment_manifest_path),
+        output_root=autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        run_id=retry.expected_run_id,
+    ).command
+    assert " ".join(expected_command) in action.prompt_text
+    artifact_path = tmp_path / f"{status.value.lower()}-verification.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": action.source_manifest_sha256,
+                "state_reference_sha256": action.state_reference_sha256,
+                "artifact": artifact.to_dict(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    return artifact_path, action
 
 
 def _runtime_verification_context(state: AutoresearchState) -> AutoresearchValidationContext:
