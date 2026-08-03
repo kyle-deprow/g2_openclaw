@@ -5222,10 +5222,11 @@ def test_push_script_find_scan_failures_abort_without_silently_leaving_stale_fil
 
 def test_push_script_managed_find_scans_are_status_propagating() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
+    guarded_fs = (REPO_ROOT / "gateway/deployment/guarded_fs.py").read_text(encoding="utf-8")
 
     assert "< <(find" not in script
     assert "collect_find_results_null" in script
-    assert "refusing to continue with partial results" in script
+    assert "refusing to continue with partial results" in guarded_fs
 
 
 def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(

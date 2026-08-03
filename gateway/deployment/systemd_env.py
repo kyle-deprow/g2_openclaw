@@ -13,6 +13,11 @@ import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
+from .guarded_fs import (
+    _guarded_unlink,
+    guard_destination_path_chain,
+)
+
 STATE_MARKER = "__G2_SYSTEMD_ENV_STATE__"
 
 
@@ -192,64 +197,6 @@ def _verify_manager_node_options_stale_preload_absent(stale_pattern: str) -> Non
             "ERROR: systemd user manager still exposes stale Azure NODE_OPTIONS after "
             "unset-environment; refusing to continue."
         )
-
-
-def _guard_no_hardlinked_regular_file(path: str, context: str) -> None:
-    try:
-        path_stat = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
-        return
-    if path_stat.st_nlink > 1:
-        raise RuntimeError(
-            f"ERROR: Destination path is a hard-linked regular file while {context}: {path} "
-            f"(link count {path_stat.st_nlink}).\n"
-            "       Refusing before mutation to avoid modifying external hard-link aliases."
-        )
-
-
-def guard_destination_path_chain(path: str, context: str) -> None:
-    if not path:
-        raise RuntimeError(
-            f"ERROR: Empty destination path while {context}; refusing before mutation."
-        )
-    if not os.path.isabs(path):
-        raise RuntimeError(
-            f"ERROR: Destination path is not absolute while {context}: {path}\n"
-            "       Refusing before mutation."
-        )
-    current = ""
-    for component in path[1:].split("/"):
-        if not component or component == ".":
-            continue
-        if component == "..":
-            raise RuntimeError(
-                f"ERROR: Destination path contains '..' while {context}: {path}\n"
-                "       Refusing before mutation."
-            )
-        current += f"/{component}"
-        if os.path.islink(current):
-            try:
-                target = os.readlink(current)
-            except OSError:
-                target = "<unreadable>"
-            raise RuntimeError(
-                f"ERROR: Destination path chain contains symlink while {context}: "
-                f"{current} -> {target}\n"
-                f"       Full destination: {path}\n"
-                "       Refusing before mutation to avoid following nested symlinks outside "
-                "the managed root."
-            )
-        _guard_no_hardlinked_regular_file(current, context)
-
-
-def _guarded_unlink(path: str, context: str) -> None:
-    guard_destination_path_chain(path, context)
-    try:
-        os.unlink(path)
-    except FileNotFoundError:
-        return
 
 
 _C_LOCALE_WHITESPACE = frozenset(" \t\n\v\f\r")

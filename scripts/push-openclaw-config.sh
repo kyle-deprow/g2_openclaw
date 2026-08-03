@@ -143,7 +143,7 @@ sync_managed_agent_codex_auth() {
   local source_profiles="${source_agent_dir}/auth-profiles.json"
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.auth_sync sync \
-    "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}" "${OPENCLAW_BIN_RESOLVED}"
+    -- "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}" "${OPENCLAW_BIN_RESOLVED}"
 }
 
 build_string_array_json() {
@@ -226,195 +226,80 @@ openclaw_schema_validation_is_clean() {
 }
 
 file_sha256() {
-  sha256sum "$1" | awk '{print $1}'
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.identity file-sha256 -- "$1"
 }
 
 file_bytes() {
-  wc -c < "$1" | tr -d '[:space:]'
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.identity file-bytes -- "$1"
 }
 
 path_exists_or_symlink() {
-  [[ -e "$1" || -L "$1" ]]
-}
-
-file_link_count() {
-  stat -c '%h' -- "$1"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs path-exists-or-symlink -- "$1"
 }
 
 guarded_regular_file_identity() {
-  local path="$1"
-  local context="$2"
-  local identity nlink
-
-  if [[ -L "${path}" ]]; then
-    echo "ERROR: Guarded file is a symlink while ${context}: ${path} -> $(readlink "${path}" 2>/dev/null || printf '<unreadable>')" >&2
-    echo "       Refusing to trust followed bytes for guarded config publication." >&2
-    return 1
-  fi
-  if [[ ! -f "${path}" ]]; then
-    echo "ERROR: Guarded file is not a regular file while ${context}: ${path}" >&2
-    echo "       Refusing to trust followed bytes for guarded config publication." >&2
-    return 1
-  fi
-  if ! identity="$(stat -c '%d:%i:%f:%h' -- "${path}")"; then
-    echo "ERROR: Could not capture lstat identity while ${context}: ${path}" >&2
-    return 1
-  fi
-  nlink="${identity##*:}"
-  if [[ "${nlink}" != "1" ]]; then
-    echo "ERROR: Guarded file is hard-linked while ${context}: ${path} (link count ${nlink})." >&2
-    echo "       Refusing to trust followed bytes for guarded config publication." >&2
-    return 1
-  fi
-  printf '%s\n' "${identity}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.identity guarded-regular-file-identity -- "$1" "$2"
 }
 
 verify_guarded_regular_file_identity_unchanged() {
-  local path="$1"
-  local expected_identity="$2"
-  local context="$3"
-  local current_identity
-
-  if ! current_identity="$(guarded_regular_file_identity "${path}" "${context}")"; then
-    return 1
-  fi
-  if [[ "${current_identity}" != "${expected_identity}" ]]; then
-    echo "ERROR: Guarded file identity/topology changed during ${context}: ${path}." >&2
-    echo "       expected lstat ${expected_identity}; got ${current_identity}." >&2
-    return 1
-  fi
-}
-
-guard_no_hardlinked_regular_file() {
-  local path="$1"
-  local context="$2"
-  local link_count
-  if [[ -f "${path}" && ! -L "${path}" ]]; then
-    if ! link_count="$(file_link_count "${path}")"; then
-      echo "ERROR: Could not inspect link count for destination while ${context}: ${path}" >&2
-      echo "       Refusing before mutation." >&2
-      return 1
-    fi
-    if ((link_count > 1)); then
-      echo "ERROR: Destination path is a hard-linked regular file while ${context}: ${path} (link count ${link_count})." >&2
-      echo "       Refusing before mutation to avoid modifying external hard-link aliases." >&2
-      return 1
-    fi
-  fi
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.identity \
+    verify-guarded-regular-file-identity-unchanged -- "$1" "$2" "$3"
 }
 
 guard_destination_path_chain() {
-  local path="$1"
-  local context="$2"
-  local current component target
-  local -a PATH_CHAIN_COMPONENTS
-
-  if [[ -z "${path}" ]]; then
-    echo "ERROR: Empty destination path while ${context}; refusing before mutation." >&2
-    return 1
-  fi
-  if [[ "${path}" != /* ]]; then
-    echo "ERROR: Destination path is not absolute while ${context}: ${path}" >&2
-    echo "       Refusing before mutation." >&2
-    return 1
-  fi
-
-  current=""
-  IFS='/' read -ra PATH_CHAIN_COMPONENTS <<< "${path#/}"
-  for component in "${PATH_CHAIN_COMPONENTS[@]}"; do
-    [[ -n "${component}" && "${component}" != "." ]] || continue
-    if [[ "${component}" == ".." ]]; then
-      echo "ERROR: Destination path contains '..' while ${context}: ${path}" >&2
-      echo "       Refusing before mutation." >&2
-      return 1
-    fi
-    current="${current}/${component}"
-    if [[ -L "${current}" ]]; then
-      target="$(readlink "${current}" 2>/dev/null || printf '<unreadable>')"
-      echo "ERROR: Destination path chain contains symlink while ${context}: ${current} -> ${target}" >&2
-      echo "       Full destination: ${path}" >&2
-      echo "       Refusing before mutation to avoid following nested symlinks outside the managed root." >&2
-      return 1
-    fi
-    guard_no_hardlinked_regular_file "${current}" "${context}" || return 1
-  done
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guard-destination-path-chain -- "$1" "$2"
 }
 
 guard_destination_parent_path_chain() {
-  local path="$1"
-  local context="$2"
-  local parent_path
-
-  if [[ -z "${path}" ]]; then
-    echo "ERROR: Empty destination path while ${context}; refusing before mutation." >&2
-    return 1
-  fi
-  parent_path="$(dirname "${path}")"
-  guard_destination_path_chain "${parent_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guard-destination-parent-path-chain -- "$1" "$2"
 }
 
 guarded_mkdir_p() {
-  local destination_path="$1"
-  local context="$2"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  mkdir -p "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-mkdir-p -- "$1" "$2"
 }
 
 copy_path_topology() {
-  local source_path="$1"
-  local destination_path="$2"
-  cp -aT -- "${source_path}" "${destination_path}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs copy-path-topology -- "$1" "$2"
 }
 
 guarded_copy_path_topology() {
-  local source_path="$1"
-  local destination_path="$2"
-  local context="$3"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  copy_path_topology "${source_path}" "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-copy-path-topology -- "$1" "$2" "$3"
 }
 
 guarded_copy_path_topology_preserving_final_symlink_topology() {
-  local source_path="$1"
-  local destination_path="$2"
-  local context="$3"
-  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
-  copy_path_topology "${source_path}" "${destination_path}" || return 1
-  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-copy-path-topology-preserving-final-symlink-topology -- "$1" "$2" "$3"
 }
 
 guarded_cp_file() {
-  local source_path="$1"
-  local destination_path="$2"
-  local context="$3"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  if [[ -d "${destination_path}" && ! -L "${destination_path}" ]]; then
-    echo "ERROR: Destination path is an existing directory while ${context}: ${destination_path}" >&2
-    echo "       Refusing before cp to avoid source-to-destination-directory behavior." >&2
-    return 1
-  fi
-  cp "${source_path}" "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-cp-file -- "$1" "$2" "$3"
 }
 
 guarded_chmod() {
-  local mode="$1"
-  local destination_path="$2"
-  local context="$3"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  chmod "${mode}" "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-chmod -- "$1" "$2" "$3"
 }
 
 guarded_chmod_reference() {
-  local reference_path="$1"
-  local destination_path="$2"
-  local context="$3"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  chmod --reference="${reference_path}" "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-chmod-reference -- "$1" "$2" "$3"
 }
 
 collect_find_results_null() {
@@ -423,42 +308,29 @@ collect_find_results_null() {
   local context="$3"
   shift 3
 
-  if ! find "${scan_root}" "$@" -print0 > "${output_path}"; then
-    echo "ERROR: Failed to scan ${scan_root} while ${context}; refusing to continue with partial results." >&2
-    if ! guarded_rm_f "${output_path}" "removing failed managed scan output ${output_path}"; then
-      echo "ERROR: Failed to remove failed managed scan output ${output_path}." >&2
-      echo "Managed scan output preserved at ${output_path}" >&2
-    fi
-    return 1
-  fi
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    collect-find-results-null -- "${output_path}" "${scan_root}" "${context}" "$@"
 }
 
 guarded_rm_rf() {
-  local destination_path="$1"
-  local context="$2"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  rm -rf -- "${destination_path}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-rm-rf -- "$1" "$2"
 }
 
 guarded_rm_f() {
-  local destination_path="$1"
-  local context="$2"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  rm -f -- "${destination_path}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-rm-f -- "$1" "$2"
 }
 
 guarded_rm() {
-  local destination_path="$1"
-  local context="$2"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  rm -- "${destination_path}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-rm -- "$1" "$2"
 }
 
 guarded_rmdir() {
-  local destination_path="$1"
-  local context="$2"
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  rmdir "${destination_path}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-rmdir -- "$1" "$2"
 }
 
 guarded_mv_replace() {
@@ -466,9 +338,9 @@ guarded_mv_replace() {
   local destination_path="$2"
   local context="$3"
   shift 3
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
-  mv "$@" "${source_path}" "${destination_path}" || return 1
-  guard_destination_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-mv-replace -- "${source_path}" "${destination_path}" "${context}" "$@"
 }
 
 guarded_mv_replace_preserving_final_symlink_topology() {
@@ -476,42 +348,16 @@ guarded_mv_replace_preserving_final_symlink_topology() {
   local destination_path="$2"
   local context="$3"
   shift 3
-  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
-  mv "$@" "${source_path}" "${destination_path}" || return 1
-  guard_destination_parent_path_chain "${destination_path}" "${context}" || return 1
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    guarded-mv-replace-preserving-final-symlink-topology \
+    -- "${source_path}" "${destination_path}" "${context}" "$@"
 }
 
 restore_path_topology_from_backup() {
-  local backup_path="$1"
-  local destination_path="$2"
-  local restore_stage="$3"
-  local destination_parent
-
-  if ! guarded_rm_rf "${restore_stage}" "clearing staged restore path ${restore_stage}"; then
-    echo "ERROR: Failed to clear staged restore path ${restore_stage} during rollback." >&2
-    return 1
-  fi
-  if ! guarded_copy_path_topology "${backup_path}" "${restore_stage}" "staging rollback restore for ${destination_path}"; then
-    echo "ERROR: Failed to stage backup ${backup_path} for rollback to ${destination_path}." >&2
-    echo "       Original artifact path left intact; recoverable backup preserved at ${backup_path}." >&2
-    return 1
-  fi
-  destination_parent="$(dirname "${destination_path}")"
-  if ! guarded_mkdir_p "${destination_parent}" "recreating parent directory ${destination_parent} during rollback"; then
-    echo "ERROR: Failed to recreate parent directory ${destination_parent} during rollback." >&2
-    echo "       staged restore copy preserved at ${restore_stage}." >&2
-    return 1
-  fi
-  if ! guarded_rm_rf "${destination_path}" "removing changed path ${destination_path} during rollback"; then
-    echo "ERROR: Failed to remove changed path ${destination_path} during rollback." >&2
-    echo "       staged restore copy preserved at ${restore_stage}." >&2
-    return 1
-  fi
-  if ! guarded_mv_replace "${restore_stage}" "${destination_path}" "restoring ${destination_path} from rollback stage" -T; then
-    echo "ERROR: Failed to replace ${destination_path} with staged restore ${restore_stage}." >&2
-    echo "       Recoverable backup preserved at ${backup_path}; staged restore copy preserved at ${restore_stage}." >&2
-    return 1
-  fi
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
+    restore-path-topology-from-backup -- "$1" "$2" "$3"
 }
 
 prepare_repo_config_preflight_copy() {
@@ -663,7 +509,9 @@ require_gateway_service_loadable() {
 
 prepare_runtime_caps_dropin_dir() {
   guarded_mkdir_p "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "creating managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
-  if [[ ! -O "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs path-owned-by-effective-user \
+    -- "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"; then
     echo "ERROR: Runtime caps drop-in directory is not owned by the current user: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
     return 1
   fi
@@ -673,7 +521,7 @@ prepare_runtime_caps_dropin_dir() {
 decode_systemd_show_environment_word() {
   local encoded="$1"
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-word "${encoded}"
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-word -- "${encoded}"
 }
 
 decode_systemd_show_environment_node_options() {
@@ -682,7 +530,7 @@ decode_systemd_show_environment_node_options() {
   SYSTEMD_DECODED_NODE_OPTIONS_PRESENT=0
   SYSTEMD_DECODED_NODE_OPTIONS_VALUE=""
   if ! result="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-node-options "${manager_env}" 2>&1)"; then
+    "${PYTHON_BIN}" -m gateway.deployment.systemd_env decode-node-options -- "${manager_env}" 2>&1)"; then
     printf '%s\n' "${result}" >&2
     return 1
   fi
@@ -697,7 +545,7 @@ verify_systemd_manager_node_options_stale_preload_absent() {
   local result
   if ! result="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.systemd_env verify-node-options \
-    "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
+    -- "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
     printf '%s\n' "${result}" >&2
     return 1
   fi
@@ -715,7 +563,7 @@ remove_stale_azure_node_options_for_codex() {
 
   if module_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.systemd_env remove-stale-azure-node-options \
-    "${service_path}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
+    -- "${service_path}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "${STALE_AZURE_PRELOAD_PATTERN}" 2>&1)"; then
     module_status=0
   else
     module_status=$?
@@ -767,7 +615,7 @@ require_openclaw_supported() {
   fi
   if ! version_line="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.versions require-openclaw-supported \
-    "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
+    -- "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
     if ! verify_repo_config_preflight_copy_unchanged "openclaw --version"; then
       return 1
     fi
@@ -789,7 +637,7 @@ require_codex_runtime_exact() {
   fi
   if ! inspect_json="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.versions require-codex-runtime-exact \
-    "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
+    -- "${OPENCLAW_BIN_RESOLVED}" "${REPO_CONFIG_PREFLIGHT_COPY}" "${OPENCLAW_PUSH_HOME}" 2>&1)"; then
     if ! verify_repo_config_preflight_copy_unchanged "openclaw plugins inspect codex --json"; then
       return 1
     fi
@@ -2072,7 +1920,7 @@ workspace_has_autoresearch_agent() {
 
 validate_codex_native_stage_agents_dir() {
   local agents_dir="$1"
-  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-stage-agents "${agents_dir}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-stage-agents -- "${agents_dir}"
 }
 
 write_codex_runtime_config() {
@@ -2103,7 +1951,7 @@ validate_codex_runtime_config() {
   local config_path="${codex_home}/config.toml"
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-mcp-wiring \
-    "${config_path}" "${agent_id}" \
+    -- "${config_path}" "${agent_id}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_READONLY_WRAPPER_DST}" "${MEMPALACE_PALACE}" \
     "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}"
   repair_codex_runtime_log_db "${codex_home}"
@@ -2116,7 +1964,7 @@ repair_codex_runtime_log_db() {
   local log_db="${codex_home}/logs_2.sqlite"
   local repair_output
 
-  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-log-db "${log_db}" 2>&1)"; then
+  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-log-db -- "${log_db}" 2>&1)"; then
     echo "ERROR: Scoped Codex log DB validation/repair failed for ${log_db}." >&2
     printf '%s\n' "${repair_output}" >&2
     exit 1
@@ -2131,7 +1979,7 @@ repair_codex_runtime_state_db() {
   local state_db="${codex_home}/state_5.sqlite"
   local repair_output
 
-  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-state-db "${state_db}" 2>&1)"; then
+  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-state-db -- "${state_db}" 2>&1)"; then
     echo "ERROR: Scoped Codex state DB validation/repair failed for ${state_db}." >&2
     printf '%s\n' "${repair_output}" >&2
     exit 1
@@ -2157,7 +2005,7 @@ validate_codex_doctor_owned_checks() {
     doctor_status=$?
   fi
 
-  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.doctor validate "${doctor_stdout}" "${doctor_stderr}" "${codex_home}" "${config_path}" "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${app_server_package_root}" "${doctor_status}"
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.doctor validate -- "${doctor_stdout}" "${doctor_stderr}" "${codex_home}" "${config_path}" "${REQUIRED_CODEX_APP_SERVER_VERSION}" "${app_server_package_root}" "${doctor_status}"
   then
     echo "ERROR: Embedded Codex owned validation failed for ${config_path}" >&2
     cat "${doctor_stderr}" >&2

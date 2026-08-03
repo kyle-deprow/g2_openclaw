@@ -7,12 +7,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import sqlite3
-import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+
+from .guarded_fs import (
+    guard_destination_path_chain,
+    guarded_chmod,
+    guarded_cp_file,
+    guarded_mkdir_p,
+)
 
 AUTH_PROFILE_QUERY = (
     'select 1 from auth_profile_store where store_json like \'%"provider":"openai"%\' limit 1;'
@@ -43,79 +48,19 @@ def quote_sqlite_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _guard_no_hardlinked_regular_file(path: str, context: str) -> None:
-    try:
-        path_stat = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
-        return
-    if path_stat.st_nlink > 1:
-        raise RuntimeError(
-            f"ERROR: Destination path is a hard-linked regular file while {context}: {path} "
-            f"(link count {path_stat.st_nlink}).\n"
-            "       Refusing before mutation to avoid modifying external hard-link aliases."
-        )
-
-
-def guard_destination_path_chain(path: str, context: str) -> None:
-    """Mirror the push script's destination-chain guard for auth destinations."""
-
-    if not path:
-        raise RuntimeError(
-            f"ERROR: Empty destination path while {context}; refusing before mutation."
-        )
-    if not os.path.isabs(path):
-        raise RuntimeError(
-            f"ERROR: Destination path is not absolute while {context}: {path}\n"
-            "       Refusing before mutation."
-        )
-    current = ""
-    for component in path[1:].split("/"):
-        if not component or component == ".":
-            continue
-        if component == "..":
-            raise RuntimeError(
-                f"ERROR: Destination path contains '..' while {context}: {path}\n"
-                "       Refusing before mutation."
-            )
-        current += f"/{component}"
-        if os.path.islink(current):
-            try:
-                target = os.readlink(current)
-            except OSError:
-                target = "<unreadable>"
-            raise RuntimeError(
-                f"ERROR: Destination path chain contains symlink while {context}: "
-                f"{current} -> {target}\n"
-                f"       Full destination: {path}\n"
-                "       Refusing before mutation to avoid following nested symlinks outside "
-                "the managed root."
-            )
-        _guard_no_hardlinked_regular_file(current, context)
-
-
 def _guarded_mkdir(path: str, context: str) -> None:
-    guard_destination_path_chain(path, context)
-    os.makedirs(path, exist_ok=True)
-    guard_destination_path_chain(path, context)
+    if guarded_mkdir_p(path, context) != 0:
+        raise RuntimeError(f"ERROR: Failed to create managed directory {path}.")
 
 
 def _guarded_copy_file(source: str, destination: str, context: str) -> None:
-    guard_destination_path_chain(destination, context)
-    if os.path.isdir(destination) and not os.path.islink(destination):
-        raise RuntimeError(
-            f"ERROR: Destination path is an existing directory while {context}: {destination}\n"
-            "       Refusing before cp to avoid source-to-destination-directory behavior."
-        )
-    shutil.copyfile(source, destination)
-    guard_destination_path_chain(destination, context)
+    if guarded_cp_file(source, destination, context) != 0:
+        raise RuntimeError(f"ERROR: Failed to copy managed auth file to {destination}.")
 
 
 def _guarded_chmod(mode: int, destination: str, context: str) -> None:
-    guard_destination_path_chain(destination, context)
-    os.chmod(destination, mode)
-    guard_destination_path_chain(destination, context)
+    if guarded_chmod(format(mode, "04o"), destination, context) != 0:
+        raise RuntimeError(f"ERROR: Failed to chmod managed auth file {destination}.")
 
 
 def _has_openai_profile(database: str) -> bool:
