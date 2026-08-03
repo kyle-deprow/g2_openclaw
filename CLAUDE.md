@@ -44,10 +44,10 @@ The live autoresearch loop spawns the **Codex-native** stage agents via `spawn_a
 
 ## Orchestration model: Claude orchestrates, Codex workers implement
 
-Claude (Fable, the main session) is the **orchestrator**. Implementation work is dispatched to **Codex CLI workers** using `gpt-5.6-luna` at `xhigh` reasoning effort with `--yolo`:
+Claude (Fable, the main session) is the **orchestrator**. Implementation work is dispatched to **Codex CLI workers** using `gpt-5.6-luna` at `xhigh` reasoning effort with `--yolo` and `fast_mode` enabled:
 
 ```bash
-codex exec --yolo -m gpt-5.6-luna -c model_reasoning_effort="xhigh" \
+codex exec --yolo -m gpt-5.6-luna -c model_reasoning_effort="xhigh" -c features.fast_mode=true \
   --cd <workdir> -o <run-dir>/last-message.txt "<strict prompt>"
 ```
 

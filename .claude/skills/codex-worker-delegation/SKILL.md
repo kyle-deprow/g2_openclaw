@@ -7,7 +7,7 @@ description: Delegate implementation work from Claude (orchestrator) to Codex CL
 
 Claude (Fable) is the **orchestrator**; implementation work is dispatched to **Codex CLI workers** running `gpt-5.6-luna` at `xhigh` reasoning effort. Luna is dirt cheap, so liberal delegation and multiple review rounds are affordable — but it requires strict guidance, explicit requirements, and reasonably scoped work. The orchestrator plans, scopes, dispatches, reviews, and integrates; it does not hand-implement work a worker can do.
 
-**Verified against:** codex-cli `0.144.4` (smoketested 2026-08-01 in this environment).
+**Verified against:** codex-cli `0.144.4` (smoketested 2026-08-01; `fast_mode` smoketested 2026-08-03 in this environment).
 
 ## Canonical invocation
 
@@ -15,6 +15,7 @@ Claude (Fable) is the **orchestrator**; implementation work is dispatched to **C
 codex exec --yolo \
   -m gpt-5.6-luna \
   -c model_reasoning_effort="xhigh" \
+  -c features.fast_mode=true \
   --cd <absolute-workdir> \
   -o <run-dir>/last-message.txt \
   "<strict prompt>"
@@ -22,6 +23,7 @@ codex exec --yolo \
 
 - `--yolo` is a hidden but working alias for `--dangerously-bypass-approvals-and-sandbox` on `codex exec` — no approval prompts, no sandbox. It works precisely because the orchestrator supplies the guardrails: tight prompt, pinned `--cd`, post-run review.
 - `-c model_reasoning_effort="xhigh"` — config override, TOML-parsed value.
+- `-c features.fast_mode=true` — enables codex's `fast_mode` feature (a `stable`-stage flag, see `codex features list`) for this invocation only. Pass it inline rather than `codex features enable fast_mode`, which persists to the global `~/.codex/config.toml` — that's not this delegation path's config to change.
 - `--cd <dir>` pins the worker's working root. Add extra writable roots only with `--add-dir`.
 - `-o <file>` captures the worker's final message for mechanical checking (e.g. a `DONE` sentinel).
 - Outside a git repo add `--skip-git-repo-check`. Use `--output-schema <file.json>` when you need a structured JSON artifact instead of prose. `--ephemeral` for throwaway probes.
