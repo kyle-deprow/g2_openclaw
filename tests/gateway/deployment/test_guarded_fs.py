@@ -196,7 +196,9 @@ def test_effective_owner_predicate_matches_bash_o_test(tmp_path: Path) -> None:
 
 def _committed_bash_guard_functions() -> str:
     completed = subprocess.run(
-        ["git", "show", "HEAD:scripts/push-openclaw-config.sh"],
+        # HEAD contains the P0 Python wrappers; compare against the immediate
+        # pre-P0 Bash implementation for the differential guard contract.
+        ["git", "show", "HEAD^:scripts/push-openclaw-config.sh"],
         check=True,
         capture_output=True,
         text=True,

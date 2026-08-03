@@ -10,6 +10,7 @@ import stat
 import subprocess
 import tomllib
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -307,7 +308,7 @@ CREATE INDEX idx_threads_visible_recency_at_ms
     ON threads(archived, recency_at_ms DESC, id DESC)
     WHERE preview <> '';
 """.strip()
-SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM")
+SUBPROCESS_ENV_ALLOWLIST = ("LANG", "LC_ALL", "TZ", "TERM", "OPENCLAW_PUSH_IMPL")
 
 
 def _base_subprocess_env(home: Path, env: dict[str, str] | None = None) -> dict[str, str]:
@@ -1580,13 +1581,23 @@ def _prepare_push_script_home(
     )
 
 
-def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+@pytest.fixture(params=[None, "python"], ids=["bash", "python"])
+def transaction_push_impl(request: pytest.FixtureRequest) -> str | None:
+    return cast(str | None, request.param)
+
+
+def _run_push_script(
+    env: dict[str, str], transaction_impl: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    script_env = env.copy()
+    if transaction_impl is not None:
+        script_env["OPENCLAW_PUSH_IMPL"] = transaction_impl
     return subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
         check=False,
         capture_output=True,
         text=True,
-        env=env,
+        env=script_env,
     )
 
 
@@ -2647,6 +2658,7 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
 
 def test_push_script_ignores_signal_during_final_commit_boundary(
     tmp_path: Path,
+    transaction_push_impl: str | None,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     checkpoint_log = tmp_path / "checkpoints.log"
@@ -2654,7 +2666,7 @@ def test_push_script_ignores_signal_during_final_commit_boundary(
     env["OPENCLAW_PUSH_TEST_SIGNAL_AT"] = "commit-boundary-entered"
     env["OPENCLAW_PUSH_TEST_SIGNAL"] = "INT"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 0, result.stderr
     assert checkpoint_log.read_text(encoding="utf-8").splitlines() == [
@@ -3194,7 +3206,7 @@ def test_push_script_publishes_exact_generated_bytes_validated_by_openclaw(
 
 
 def test_push_script_signal_before_publication_rolls_back_without_publishing(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     checkpoint_log = tmp_path / "checkpoints.log"
@@ -3205,7 +3217,7 @@ def test_push_script_signal_before_publication_rolls_back_without_publishing(
     env["OPENCLAW_PUSH_TEST_SIGNAL_AT"] = "before-config-publication"
     env["OPENCLAW_PUSH_TEST_SIGNAL"] = "INT"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 130
     assert checkpoint_log.read_text(encoding="utf-8").splitlines() == ["before-config-publication"]
@@ -3280,7 +3292,9 @@ def test_push_script_rejects_live_config_topology_replacement_during_final_valid
     assert "Done. Config pushed successfully." not in result.stdout
 
 
-def test_push_script_local_config_rollback_preserves_mode_and_bytes(tmp_path: Path) -> None:
+def test_push_script_local_config_rollback_preserves_mode_and_bytes(
+    tmp_path: Path, transaction_push_impl: str | None
+) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
     openclaw_config.write_bytes(b'{"local":"before"}\n')
@@ -3288,7 +3302,7 @@ def test_push_script_local_config_rollback_preserves_mode_and_bytes(tmp_path: Pa
     initial_config = openclaw_config.read_bytes()
     env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode != 0
     assert openclaw_config.read_bytes() == initial_config
@@ -3300,6 +3314,7 @@ def test_push_script_local_config_rollback_preserves_mode_and_bytes(tmp_path: Pa
 
 def test_push_script_local_config_rollback_preserves_symlink_topology(
     tmp_path: Path,
+    transaction_push_impl: str | None,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     home = Path(env["HOME"])
@@ -3313,7 +3328,7 @@ def test_push_script_local_config_rollback_preserves_symlink_topology(
     openclaw_config.symlink_to(symlink_target)
     env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 1
     assert "live.warning" in result.stderr
@@ -3998,6 +4013,7 @@ def test_push_script_rejects_codex_state_db_hardlink_before_sqlite_access(
 
 def test_push_script_rolls_back_codex_state_db_transaction_when_commit_fails(
     tmp_path: Path,
+    transaction_push_impl: str | None,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     state_db = Path(env["OPENCLAW_PUSH_HOME"]) / "agents/main/agent/codex-home/state_5.sqlite"
@@ -4013,7 +4029,7 @@ def test_push_script_rolls_back_codex_state_db_transaction_when_commit_fails(
     env["MOCK_CODEX_STATE_DB_COMMIT_FAIL_PATH"] = str(state_db)
     env["MOCK_CODEX_STATE_DB_ROLLBACK_LOG"] = str(rollback_log)
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode != 0
     assert "injected state DB commit failure" in result.stderr
@@ -4703,7 +4719,7 @@ def test_push_script_final_daemon_reload_runs_after_systemd_artifact_restore(
 
 
 def test_push_script_failed_unit_snapshot_state_retains_original_unit(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["FAIL_BACKUP_SOURCE_BASENAME"] = "20-openclaw-codex-runtime.conf"
@@ -4714,7 +4730,7 @@ def test_push_script_failed_unit_snapshot_state_retains_original_unit(
     codex_dropin.write_text(prior_text, encoding="utf-8")
     codex_dropin.chmod(0o600)
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 1
     assert "Failed to snapshot managed systemd file" in result.stderr
@@ -4856,7 +4872,7 @@ def test_push_script_artifact_stage_copy_failure_preserves_original_path(
 
 
 def test_push_script_failed_artifact_snapshot_never_overwrites_original_and_continues_rollback(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["FAIL_BACKUP_SOURCE_BASENAME"] = "skills"
@@ -4873,7 +4889,7 @@ def test_push_script_failed_artifact_snapshot_never_overwrites_original_and_cont
     skill_file.write_bytes(b"\x00prior skills bytes\n")
     skill_file.chmod(0o640)
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 1
     assert "backup cp failed by test" in result.stderr
@@ -5230,7 +5246,7 @@ def test_push_script_managed_find_scans_are_status_propagating() -> None:
 
 
 def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
-    tmp_path: Path,
+    tmp_path: Path, transaction_push_impl: str | None
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["FAIL_BACKUP_CLEANUP"] = "1"
@@ -5238,7 +5254,7 @@ def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
     openclaw_config = openclaw_home / "openclaw.json"
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, transaction_push_impl)
 
     assert result.returncode == 1
     unit_recovery_dirs = sorted(

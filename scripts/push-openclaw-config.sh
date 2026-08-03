@@ -702,6 +702,35 @@ cleanup_deployment_temp_file() {
 }
 
 begin_managed_unit_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
+    MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
+    guard_destination_path_chain "${MANAGED_UNIT_BACKUP_DIR}" "created managed systemd transaction backup directory ${MANAGED_UNIT_BACKUP_DIR}" || return 1
+    local transaction_status
+    if PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions begin-unit-tx \
+      -- "${MANAGED_UNIT_BACKUP_DIR}" "${MANAGED_UNIT_PATHS[@]}"; then
+      transaction_status=0
+    else
+      transaction_status=$?
+    fi
+    if [[ "${transaction_status}" -eq 0 ]]; then
+      local path
+      for path in "${MANAGED_UNIT_PATHS[@]}"; do
+        if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+          "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-unit \
+          -- "${MANAGED_UNIT_BACKUP_DIR}" "${path}"; then
+          transaction_status=1
+        fi
+      done
+    fi
+    MANAGED_UNIT_TRANSACTION_ARMED=1
+    if [[ "${transaction_status}" -ne 0 ]]; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   local index path backup_path transaction_failed=0
 
   guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
@@ -751,9 +780,23 @@ begin_managed_unit_transaction() {
   if [[ "${transaction_failed}" -ne 0 ]]; then
     return 1
   fi
+  fi
 }
 
 rollback_managed_unit_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+      return 0
+    fi
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-unit-tx \
+      -- "${MANAGED_UNIT_BACKUP_DIR}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    MANAGED_UNIT_TRANSACTION_ARMED=0
+    return 0
+  else
   local index path backup_path state transaction_failed=0
 
   if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
@@ -799,9 +842,19 @@ rollback_managed_unit_transaction() {
     return 1
   fi
   MANAGED_UNIT_TRANSACTION_ARMED=0
+  fi
 }
 
 finalize_managed_unit_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-unit-tx \
+      -- "${MANAGED_UNIT_BACKUP_DIR:-}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   local index backup_path state
   if [[ "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
     echo "ERROR: Managed systemd transaction was not armed at deployment commit." >&2
@@ -838,9 +891,24 @@ finalize_managed_unit_transaction() {
         ;;
     esac
   done
+  fi
 }
 
 cleanup_managed_unit_backup_dir() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+        -- unit committed "${MANAGED_UNIT_BACKUP_DIR}"; then
+        POST_COMMIT_CLEANUP_FAILED=1
+        return 1
+      fi
+    fi
+    MANAGED_UNIT_BACKUP_DIR=""
+    MANAGED_UNIT_WAS_PRESENT=()
+    MANAGED_UNIT_SNAPSHOT_STATE=()
+    return 0
+  else
   if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
     if ! guarded_rm_rf "${MANAGED_UNIT_BACKUP_DIR}" "removing managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}"; then
       echo "ERROR: Failed to remove managed systemd backup directory ${MANAGED_UNIT_BACKUP_DIR}." >&2
@@ -852,9 +920,27 @@ cleanup_managed_unit_backup_dir() {
   MANAGED_UNIT_BACKUP_DIR=""
   MANAGED_UNIT_WAS_PRESENT=()
   MANAGED_UNIT_SNAPSHOT_STATE=()
+  fi
 }
 
 begin_managed_artifact_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -eq 1 ]]; then
+      return 0
+    fi
+    guard_destination_path_chain "${OPENCLAW_PUSH_HOME}" "creating managed OpenClaw artifact backup directory under ${OPENCLAW_PUSH_HOME}" || return 1
+    MANAGED_ARTIFACT_BACKUP_DIR="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.push-openclaw-config-artifacts.XXXXXX")"
+    guard_destination_path_chain "${MANAGED_ARTIFACT_BACKUP_DIR}" "created managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}" || return 1
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions begin-artifact-tx \
+      -- "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
+      ROLLBACK_FAILED=1
+      MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+      return 1
+    fi
+    MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+    return 0
+  else
   if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -eq 1 ]]; then
     return 0
   fi
@@ -862,9 +948,21 @@ begin_managed_artifact_transaction() {
   MANAGED_ARTIFACT_BACKUP_DIR="$(mktemp -d "${OPENCLAW_PUSH_HOME}/.push-openclaw-config-artifacts.XXXXXX")"
   guard_destination_path_chain "${MANAGED_ARTIFACT_BACKUP_DIR}" "created managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}" || return 1
   MANAGED_ARTIFACT_TRANSACTION_ARMED=1
+  fi
 }
 
 snapshot_managed_artifact_path() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    local path="${1}"
+    begin_managed_artifact_transaction || return 1
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions snapshot-artifact \
+      -- "${MANAGED_ARTIFACT_BACKUP_DIR}" "${path}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   local path="$1"
   local index backup_path state
 
@@ -907,6 +1005,7 @@ snapshot_managed_artifact_path() {
     MANAGED_ARTIFACT_WAS_PRESENT[${index}]=0
     MANAGED_ARTIFACT_SNAPSHOT_STATE[${index}]="absent"
   fi
+  fi
 }
 
 is_systemd_managed_artifact_path() {
@@ -917,6 +1016,28 @@ is_systemd_managed_artifact_path() {
 }
 
 rollback_managed_artifact_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+      return 0
+    fi
+    local module_output
+    if ! module_output="$(SYSTEMD_USER_DIR="${SYSTEMD_USER_DIR}" \
+      GATEWAY_SERVICE_NAME="${GATEWAY_SERVICE_NAME}" \
+      PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions rollback-artifact-tx \
+      -- "${MANAGED_ARTIFACT_BACKUP_DIR}")"; then
+      ROLLBACK_FAILED=1
+      if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
+        MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
+      fi
+      return 1
+    fi
+    if [[ "${module_output}" == "${ARTIFACT_SYSTEMD_MARKER:-__G2_ARTIFACT_RESTORED_SYSTEMD__}" ]]; then
+      MANAGED_ARTIFACT_RESTORED_SYSTEMD=1
+    fi
+    MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+    return 0
+  else
   local index path backup_path restore_stage state transaction_failed=0
 
   if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
@@ -970,9 +1091,24 @@ rollback_managed_artifact_transaction() {
     return 1
   fi
   MANAGED_ARTIFACT_TRANSACTION_ARMED=0
+  fi
 }
 
 final_systemd_reload_after_artifact_rollback() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
+      return 0
+    fi
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions \
+      final-systemd-reload-after-artifact-rollback \
+      -- "${MANAGED_ARTIFACT_RESTORED_SYSTEMD}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+    return 0
+  else
   if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
     return 0
   fi
@@ -982,9 +1118,19 @@ final_systemd_reload_after_artifact_rollback() {
     return 1
   fi
   MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+  fi
 }
 
 finalize_managed_artifact_transaction() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-artifact-tx \
+      -- "${MANAGED_ARTIFACT_BACKUP_DIR:-}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   local index backup_path path state
   if [[ "${MANAGED_ARTIFACT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
     echo "ERROR: Managed OpenClaw artifact transaction was not armed at deployment commit." >&2
@@ -1022,9 +1168,27 @@ finalize_managed_artifact_transaction() {
         ;;
     esac
   done
+  fi
 }
 
 cleanup_managed_artifact_backup_dir() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
+      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+        -- artifact committed "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
+        POST_COMMIT_CLEANUP_FAILED=1
+        return 1
+      fi
+    fi
+    MANAGED_ARTIFACT_BACKUP_DIR=""
+    MANAGED_ARTIFACT_PATHS=()
+    MANAGED_ARTIFACT_WAS_PRESENT=()
+    MANAGED_ARTIFACT_SNAPSHOT_STATE=()
+    MANAGED_ARTIFACT_SEEN=()
+    MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+    return 0
+  else
   if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
     if ! guarded_rm_rf "${MANAGED_ARTIFACT_BACKUP_DIR}" "removing managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}"; then
       echo "ERROR: Failed to remove managed OpenClaw artifact backup directory ${MANAGED_ARTIFACT_BACKUP_DIR}." >&2
@@ -1039,6 +1203,7 @@ cleanup_managed_artifact_backup_dir() {
   MANAGED_ARTIFACT_SNAPSHOT_STATE=()
   MANAGED_ARTIFACT_SEEN=()
   MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+  fi
 }
 
 restore_systemd_manager_environment_snapshot() {
@@ -1066,6 +1231,15 @@ finalize_systemd_manager_environment_snapshot() {
 }
 
 finalize_local_config_backup() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions validate-local-config \
+      -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" "${LOCAL_CONFIG}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
     echo "ERROR: Local OpenClaw config rollback was not armed at deployment commit." >&2
     ROLLBACK_FAILED=1
@@ -1080,6 +1254,7 @@ finalize_local_config_backup() {
     echo "ERROR: Local OpenClaw config is missing at deployment commit: ${LOCAL_CONFIG}" >&2
     ROLLBACK_FAILED=1
     return 1
+  fi
   fi
 }
 
@@ -1113,6 +1288,41 @@ cleanup_committed_recovery_paths() {
 }
 
 cleanup_rollback_recovery_paths() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    local cleanup_failed=0
+    if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+        -- unit rollback "${MANAGED_UNIT_BACKUP_DIR}"; then
+        cleanup_failed=1
+      else
+        MANAGED_UNIT_BACKUP_DIR=""
+      fi
+    fi
+    if [[ -n "${MANAGED_ARTIFACT_BACKUP_DIR:-}" ]]; then
+      if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "${PYTHON_BIN}" -m gateway.deployment.transactions cleanup-tx \
+        -- artifact rollback "${MANAGED_ARTIFACT_BACKUP_DIR}"; then
+        cleanup_failed=1
+      else
+        MANAGED_ARTIFACT_BACKUP_DIR=""
+      fi
+    fi
+    if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
+      if ! guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "removing guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback"; then
+        echo "ERROR: Failed to remove guarded repo OpenClaw config copy ${REPO_CONFIG_PREFLIGHT_DIR} after rollback." >&2
+        cleanup_failed=1
+      else
+        REPO_CONFIG_PREFLIGHT_COPY=""
+        REPO_CONFIG_PREFLIGHT_DIR=""
+      fi
+    fi
+    if [[ "${cleanup_failed}" -ne 0 ]]; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  else
   local cleanup_failed=0
 
   if [[ -n "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
@@ -1146,9 +1356,20 @@ cleanup_rollback_recovery_paths() {
     fi
   fi
   return "${cleanup_failed}"
+  fi
 }
 
 report_retained_recovery_paths() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions report-retained-recovery-paths \
+      -- "${ROLLBACK_ARMED:-0}" "${BACKUP:-}" \
+      "${MANAGED_UNIT_BACKUP_DIR:-}" "${MANAGED_ARTIFACT_BACKUP_DIR:-}" \
+      "${REPO_CONFIG_PREFLIGHT_DIR:-}"; then
+      :
+    fi
+    return 0
+  else
   if [[ "${ROLLBACK_ARMED:-0}" -eq 1 && -n "${BACKUP:-}" ]] && path_exists_or_symlink "${BACKUP}"; then
     echo "Local OpenClaw config recoverable backup preserved at ${BACKUP}" >&2
   fi
@@ -1160,6 +1381,7 @@ report_retained_recovery_paths() {
   fi
   if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" && -d "${REPO_CONFIG_PREFLIGHT_DIR}" ]]; then
     echo "Guarded repo OpenClaw config copy preserved at ${REPO_CONFIG_PREFLIGHT_DIR}" >&2
+  fi
   fi
 }
 
@@ -1187,6 +1409,19 @@ commit_deployment_boundary() {
 }
 
 restore_local_config_backup() {
+  if [[ "${OPENCLAW_PUSH_IMPL:-bash}" == "python" ]]; then
+    if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
+      return 0
+    fi
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.transactions restore-local-config \
+      -- "${BACKUP}" "${LOCAL_CONFIG}" "${OPENCLAW_PUSH_HOME}"; then
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    ROLLBACK_ARMED=0
+    return 0
+  else
   local restore_stage restore_stage_dir
   if [[ "${ROLLBACK_ARMED:-0}" -ne 1 ]]; then
     return 0
@@ -1216,6 +1451,7 @@ restore_local_config_backup() {
     return 1
   fi
   ROLLBACK_ARMED=0
+  fi
 }
 
 run_deployment_rollback_and_exit() {
