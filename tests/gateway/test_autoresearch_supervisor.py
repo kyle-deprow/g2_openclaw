@@ -1384,6 +1384,10 @@ def test_supervisor_persists_repeat_successor_before_wake(
         lambda *_: object(),
     )
     monkeypatch.setattr(
+        "gateway.autoresearch.manifest_runtime.build_receipt_catalog",
+        lambda *_: object(),
+    )
+    monkeypatch.setattr(
         "gateway.autoresearch_supervisor.expected_instruction_manifest_sha256",
         lambda *_, **__: "d" * 64,
     )

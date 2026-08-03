@@ -12,14 +12,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.constants import (
     AUTHORITATIVE_STATE_REFERENCE_DIGEST_DOMAIN,
     AUTHORITATIVE_STATE_REFERENCE_VERSION,
-    AutoresearchState,
-    AutoresearchValidationError,
-    Phase,
-    build_authoritative_state_reference,
 )
+from gateway.autoresearch.enums import Phase
+from gateway.autoresearch.errors import AutoresearchValidationError
+from gateway.autoresearch.state import AutoresearchState
+from gateway.autoresearch.transitions import build_authoritative_state_reference
 
 DECISION_RECEIPT_SCHEMA_VERSION = 1
 DECISION_RECEIPT_TYPE = "g2-openclaw.autoresearch.decision-receipt"

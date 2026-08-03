@@ -1,22 +1,17 @@
-"""Canonical Quantipy runtime attestation and verification dispatch guards.
-
-The state-file operations use a deliberately narrow dependency-injection seam:
-the runner configures these five callables at import time. This module is
-intentionally inert without a configurator; the seam disappears when
-persistence moves into the package.
-"""
+"""Canonical Quantipy runtime attestation and verification dispatch guards."""
 
 from __future__ import annotations
 
 import json
 import re
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractContextManager
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
 from gateway.autoresearch import attestation as attestation_module
+from gateway.autoresearch import persistence as persistence_module
+from gateway.autoresearch import transitions as transitions_module
 from gateway.autoresearch.artifacts import (
     FixResultArtifact as FixResultArtifact,
 )
@@ -92,84 +87,6 @@ from gateway.autoresearch.state import (
 from gateway.autoresearch.transitions import (
     build_authoritative_state_reference as build_authoritative_state_reference,
 )
-
-_LoadStateFile = Callable[[Path], AutoresearchState]
-_ValidateState = Callable[
-    [AutoresearchState, AutoresearchPolicy, AutoresearchValidationContext | None],
-    None,
-]
-_ValidateArtifactWorkspace = Callable[
-    [AutoresearchState, ImplementationResultArtifact | FixResultArtifact],
-    None,
-]
-_ExclusiveStateLocks = Callable[[Sequence[Path]], AbstractContextManager[None]]
-_AtomicSaveStateFile = Callable[[Path, AutoresearchState], None]
-
-_load_state_file_dependency: _LoadStateFile | None = None
-_validate_state_dependency: _ValidateState | None = None
-_validate_artifact_workspace_dependency: _ValidateArtifactWorkspace | None = None
-_exclusive_state_locks_dependency: _ExclusiveStateLocks | None = None
-_atomic_save_state_file_dependency: _AtomicSaveStateFile | None = None
-
-
-def load_state_file(path: Path) -> AutoresearchState:
-    dependency = _load_state_file_dependency
-    if dependency is None:
-        raise RuntimeError("canonical verification state-file dependencies unavailable")
-    return dependency(path)
-
-
-def _validate_state(
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None,
-) -> None:
-    dependency = _validate_state_dependency
-    if dependency is None:
-        raise RuntimeError("canonical verification state-file dependencies unavailable")
-    dependency(state, policy, validation_context)
-
-
-def validate_artifact_workspace(
-    state: AutoresearchState,
-    artifact: ImplementationResultArtifact | FixResultArtifact,
-) -> None:
-    dependency = _validate_artifact_workspace_dependency
-    if dependency is None:
-        raise RuntimeError("canonical verification state-file dependencies unavailable")
-    dependency(state, artifact)
-
-
-def _exclusive_state_locks(paths: Sequence[Path]) -> AbstractContextManager[None]:
-    dependency = _exclusive_state_locks_dependency
-    if dependency is None:
-        raise RuntimeError("canonical verification state-file dependencies unavailable")
-    return dependency(paths)
-
-
-def _atomic_save_state_file(path: Path, state: AutoresearchState) -> None:
-    dependency = _atomic_save_state_file_dependency
-    if dependency is None:
-        raise RuntimeError("canonical verification state-file dependencies unavailable")
-    dependency(path, state)
-
-
-def _configure_state_file_dependencies(
-    *,
-    load_state_file: _LoadStateFile,
-    validate_state: _ValidateState,
-    validate_artifact_workspace: _ValidateArtifactWorkspace,
-    exclusive_state_locks: _ExclusiveStateLocks,
-    atomic_save_state_file: _AtomicSaveStateFile,
-) -> None:
-    global _load_state_file_dependency, _validate_state_dependency
-    global _validate_artifact_workspace_dependency, _exclusive_state_locks_dependency
-    global _atomic_save_state_file_dependency
-    _load_state_file_dependency = load_state_file
-    _validate_state_dependency = validate_state
-    _validate_artifact_workspace_dependency = validate_artifact_workspace
-    _exclusive_state_locks_dependency = exclusive_state_locks
-    _atomic_save_state_file_dependency = atomic_save_state_file
 
 
 def _probe_quantipy_runtime_resolution(runtime_root: Path) -> tuple[Path, Path, str]:
@@ -374,9 +291,9 @@ def seal_canonical_verification_dispatch_state_file(
 ) -> AutoresearchState:
     """Atomically seal the runtime identity before dispatching a verification agent."""
     resolved_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_path,)):
-        state = load_state_file(resolved_path)
-        _validate_state(state, policy, validation_context)
+    with persistence_module._exclusive_state_locks((resolved_path,)):
+        state = persistence_module.load_state_file(resolved_path)
+        transitions_module._validate_state(state, policy, validation_context)
         if state.phase is not Phase.VERIFICATION or state.implementation_result is None:
             raise AutoresearchValidationError(
                 "canonical verification runtime sealing requires a verification implementation"
@@ -386,7 +303,7 @@ def seal_canonical_verification_dispatch_state_file(
                 "canonical verification runtime sealing requires the readiness-pinned "
                 "Quantipy commit"
             )
-        validate_artifact_workspace(state, state.implementation_result)
+        transitions_module.validate_artifact_workspace(state, state.implementation_result)
         attestation = attestation_module._attest_canonical_quantipy_runtime(
             state,
             state.implementation_result,
@@ -397,7 +314,7 @@ def seal_canonical_verification_dispatch_state_file(
             sealed,
             validation_context=validation_context,
         )
-        _atomic_save_state_file(resolved_path, sealed)
+        persistence_module._atomic_save_state_file(resolved_path, sealed)
         return sealed
 
 
@@ -410,15 +327,15 @@ def require_canonical_verification_dispatch_attestation(
 ) -> AutoresearchState:
     """Read-only production guard for a verification dispatch or result publication."""
     resolved_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_path,)):
-        state = load_state_file(resolved_path)
-        _validate_state(state, policy, validation_context)
+    with persistence_module._exclusive_state_locks((resolved_path,)):
+        state = persistence_module.load_state_file(resolved_path)
+        transitions_module._validate_state(state, policy, validation_context)
         attestation_module._require_canonical_verification_runtime_attestation(
             state,
             validation_context=validation_context,
         )
         if state.implementation_result is not None:
-            validate_artifact_workspace(state, state.implementation_result)
+            transitions_module.validate_artifact_workspace(state, state.implementation_result)
         if expected_state_reference_sha256 is not None:
             _validate_sha256(
                 expected_state_reference_sha256,

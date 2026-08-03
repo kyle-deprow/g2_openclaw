@@ -8,6 +8,7 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch import compute as compute_module
 from gateway.autoresearch_runner import (
     MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
     MEMPALACE_READONLY_SERVER_ID,
@@ -72,6 +73,11 @@ def test_gpu_compute_fit_fails_closed_when_dependency_is_unavailable(
         "collect_compute_capability_snapshot",
         lambda _target_repo: snapshot,
     )
+    monkeypatch.setattr(
+        compute_module,
+        "collect_compute_capability_snapshot",
+        lambda _target_repo: snapshot,
+    )
     compute_fit = ComputeFitArtifact(
         target=ComputeTarget.GPU,
         rationale="The proposed model requires GPU acceleration.",
@@ -101,6 +107,11 @@ def test_gpu_compute_fit_fails_closed_without_target_virtualenv(
     )
     monkeypatch.setattr(
         autoresearch_runner,
+        "collect_compute_capability_snapshot",
+        lambda _target_repo: snapshot,
+    )
+    monkeypatch.setattr(
+        compute_module,
         "collect_compute_capability_snapshot",
         lambda _target_repo: snapshot,
     )

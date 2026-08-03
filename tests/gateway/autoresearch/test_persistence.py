@@ -17,6 +17,10 @@ from typing import cast
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch import constants
+from gateway.autoresearch import manifest_runtime as manifest_runtime_module
+from gateway.autoresearch import persistence as persistence_module
+from gateway.autoresearch import transitions as transitions_module
 from gateway.autoresearch_readiness import PlatformReadinessManifest
 from gateway.autoresearch_runner import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
@@ -431,7 +435,7 @@ def test_public_v5_artifact_advancement_rejects_races_at_atomic_publication(
     payload = cast(dict[str, object], json.loads(artifact_path.read_text(encoding="utf-8")))
     artifact = cast(dict[str, object], payload["artifact"])
     evidence = cast(dict[str, object], artifact["quantipy_experiment_evidence"])
-    original_atomic_save = autoresearch_runner._atomic_save_state_file
+    original_atomic_save = persistence_module._atomic_save_state_file
     mutation_applied = False
 
     def mutate_at_atomic_publication(
@@ -479,7 +483,7 @@ def test_public_v5_artifact_advancement_rejects_races_at_atomic_publication(
         )
 
     monkeypatch.setattr(
-        autoresearch_runner,
+        persistence_module,
         "_atomic_save_state_file",
         mutate_at_atomic_publication,
     )
@@ -593,7 +597,7 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
             assert allow_lock_acquisition.wait(timeout=2)
         return result
 
-    monkeypatch.setattr(autoresearch_runner, "advance_state", pause_after_initial_derivation)
+    monkeypatch.setattr(transitions_module, "advance_state", pause_after_initial_derivation)
 
     def advance() -> None:
         try:
@@ -665,7 +669,7 @@ def test_stage_submission_inbox_validates_then_supervisor_advances(
 
     assert submission_path.parent == inbox_path
     assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
-    monkeypatch.setattr(autoresearch_runner, "build_receipt_catalog", lambda _: receipts)
+    monkeypatch.setattr(manifest_runtime_module, "build_receipt_catalog", lambda _: receipts)
     advanced = autoresearch_runner.consume_stage_submission_inbox(
         state_path=state_path,
         output_path=state_path,
@@ -1046,8 +1050,10 @@ def test_state_output_inside_lock_namespace_fails_closed(
 
 def test_insecure_existing_lock_namespace_fails_closed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    namespace_path = autoresearch_runner.AUTORESEARCH_LOCK_NAMESPACE
+    namespace_path = constants.AUTORESEARCH_LOCK_NAMESPACE
+    monkeypatch.setattr(constants, "AUTORESEARCH_LOCK_NAMESPACE", namespace_path)
     namespace_path.mkdir(mode=0o755)
     namespace_path.chmod(0o755)
 
@@ -1088,7 +1094,7 @@ def test_old_adjacent_sidecar_output_cannot_break_concurrent_source_coordination
     first_published = Event()
     release_first = Event()
     second_completed = Event()
-    original_atomic_save = autoresearch_runner._atomic_save_state_file
+    original_atomic_save = persistence_module._atomic_save_state_file
 
     def pause_after_old_sidecar_publication(
         path: Path,
@@ -1100,7 +1106,7 @@ def test_old_adjacent_sidecar_output_cannot_break_concurrent_source_coordination
             release_first.wait(timeout=2)
 
     monkeypatch.setattr(
-        autoresearch_runner,
+        persistence_module,
         "_atomic_save_state_file",
         pause_after_old_sidecar_publication,
     )

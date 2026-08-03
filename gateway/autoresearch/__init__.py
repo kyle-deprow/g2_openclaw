@@ -7,8 +7,11 @@ The only allowed external runtime dependencies are
 ``gateway.autoresearch_panel_receipts`` itself. The fourth sanctioned leaf is
 ``gateway.mempalace_finalizer``. The fifth sanctioned leaf is
 ``gateway.autoresearch_runs`` (stdlib plus ``gateway.autoresearch.enums`` only);
-the first four are verified never to import the monolithic control-plane
+the sixth sanctioned leaf is ``gateway.autoresearch_decision_receipts`` (stdlib
+plus package-native constants, errors, enums, state, and transitions only).
+The first four are verified never to import the monolithic control-plane
 module or this package, while ``gateway.autoresearch_runs`` is verified never
 to import the monolithic control-plane module and imports only
-``gateway.autoresearch.enums`` from this package.
+``gateway.autoresearch.enums`` from this package. The sixth leaf is verified
+not to import ``gateway.autoresearch_runner``.
 """

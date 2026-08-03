@@ -5,10 +5,44 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gateway.autoresearch import compute as compute_module
+from gateway.autoresearch import constants
+from gateway.autoresearch import transitions as transitions_module
+from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact as ConsensusResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    ContextPacketArtifact as ContextPacketArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    DebateResultArtifact as DebateResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    FinalDecisionArtifact as FinalDecisionArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    FixResultArtifact as FixResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    ImplementationResultArtifact as ImplementationResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    ReviewResultArtifact as ReviewResultArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    SetupContextArtifact as SetupContextArtifact,
+)
+from gateway.autoresearch.artifacts import (
+    VerificationResultArtifact as VerificationResultArtifact,
+)
+from gateway.autoresearch.compute import (
+    ComputeFitArtifact as ComputeFitArtifact,
+)
 from gateway.autoresearch.constants import (
     _OPERATOR_PRECONDITION_BRIEF_MARKERS as _OPERATOR_PRECONDITION_BRIEF_MARKERS,
 )
@@ -40,6 +74,9 @@ from gateway.autoresearch.constants import (
     OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE as OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
 )
 from gateway.autoresearch.enums import (
+    ComputeTarget as ComputeTarget,
+)
+from gateway.autoresearch.enums import (
     ConsensusStatus as ConsensusStatus,
 )
 from gateway.autoresearch.enums import (
@@ -47,6 +84,9 @@ from gateway.autoresearch.enums import (
 )
 from gateway.autoresearch.enums import (
     FinalReviewerVerdict as FinalReviewerVerdict,
+)
+from gateway.autoresearch.enums import (
+    FixTriggerPhase as FixTriggerPhase,
 )
 from gateway.autoresearch.enums import (
     InfraGateOutcome as InfraGateOutcome,
@@ -66,11 +106,42 @@ from gateway.autoresearch.enums import (
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
 )
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_experiment_evidence as _validate_quantipy_experiment_evidence,
+)
+from gateway.autoresearch.evidence import (
+    _validate_quantipy_v2_manifest as _validate_quantipy_v2_manifest,
+)
+from gateway.autoresearch.fields import (
+    _normalise_identifier as _normalise_identifier,
+)
 from gateway.autoresearch.fields import (
     _sha256_text as _sha256_text,
 )
 from gateway.autoresearch.fields import (
+    _validate_workspace_path as _validate_workspace_path,
+)
+from gateway.autoresearch.fields import (
     quantipy_member_union_digest as quantipy_member_union_digest,
+)
+from gateway.autoresearch.gitops import (
+    _require_artifact_origin_matches_target as _require_artifact_origin_matches_target,
+)
+from gateway.autoresearch.gitops import (
+    _require_clean_git_worktree as _require_clean_git_worktree,
+)
+from gateway.autoresearch.gitops import (
+    _require_git_worktree_root as _require_git_worktree_root,
+)
+from gateway.autoresearch.gitops import (
+    _require_isolated_git_clone_root as _require_isolated_git_clone_root,
+)
+from gateway.autoresearch.gitops import (
+    _require_strict_canonical_workspace_path as _require_strict_canonical_workspace_path,
+)
+from gateway.autoresearch.gitops import _require_workspace_under_autoresearch_worktree_root
+from gateway.autoresearch.gitops import (
+    _resolve_git_commit as _resolve_git_commit,
 )
 from gateway.autoresearch.manifest import (
     AuthoritativeStateReference as AuthoritativeStateReference,
@@ -79,10 +150,22 @@ from gateway.autoresearch.receipts import (
     DynamicUniverseCoverageReceipt as DynamicUniverseCoverageReceipt,
 )
 from gateway.autoresearch.recovery_receipts import (
+    _validate_external_verification_retry_receipt as _validate_external_verification_retry_receipt,
+)
+from gateway.autoresearch.recovery_receipts import (
     _verify_member_union_manifest as _verify_member_union_manifest,
+)
+from gateway.autoresearch.secure_io import (
+    _require_private_directory as _require_private_directory,
+)
+from gateway.autoresearch.secure_io import (
+    _secure_open_snapshot as _secure_open_snapshot,
 )
 from gateway.autoresearch.state import (
     AutoresearchState as AutoresearchState,
+)
+from gateway.autoresearch.workspace import (
+    _require_ancestor as _require_ancestor,
 )
 from gateway.autoresearch_platform_validation import (
     PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL as PLATFORM_COVERAGE_CONTRACT_MISMATCH_SIGNAL,
@@ -109,6 +192,9 @@ if TYPE_CHECKING:
     )
     from gateway.autoresearch.artifacts import (
         VerificationResultArtifact as VerificationResultArtifact,
+    )
+    from gateway.autoresearch.policy import (
+        AutoresearchPolicy as AutoresearchPolicy,
     )
     from gateway.autoresearch.receipts import (
         PriceHydrationReceipt as PriceHydrationReceipt,
@@ -987,3 +1073,811 @@ def _validate_final_decision_artifact(
         raise AutoresearchValidationError(
             "non-improving Sharpe must end with final_decision=DISCARD"
         )
+
+
+def _validate_persisted_autoresearch_workspace_path(value: str, *, label: str) -> None:
+    """Apply a filesystem-free lexical policy to persisted workspace evidence."""
+    _validate_workspace_path(value, label=label)
+    workspace_path = Path(value)
+    if (
+        not workspace_path.is_absolute()
+        or value != str(workspace_path)
+        or any(part in {".", ".."} for part in workspace_path.parts)
+    ):
+        raise AutoresearchValidationError(f"{label} must be an absolute lexically canonical path")
+    try:
+        workspace_path.relative_to(constants.DEFAULT_AUTORESEARCH_WORKTREE_ROOT)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            f"{label} must be under the canonical autoresearch worktree root"
+        ) from exc
+
+
+def _validate_compute_fit_environment(
+    compute_fit: ComputeFitArtifact,
+    target_repo: Path,
+) -> None:
+    compute_fit.validate()
+    if compute_fit.target not in {ComputeTarget.GPU, ComputeTarget.MIXED}:
+        return
+    snapshot = compute_module.collect_compute_capability_snapshot(target_repo)
+    if snapshot.probe_errors:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the capability probe failed: "
+            + "; ".join(snapshot.probe_errors)
+        )
+    if not snapshot.target_python_available:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the target Quantipy virtualenv is unavailable"
+        )
+    if not snapshot.gpu_available or not snapshot.cuda_runtime_available:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution, but the capability probe found no "
+            "usable GPU/CUDA runtime"
+        )
+    available = set(snapshot.installed_gpu_packages)
+    if snapshot.cuda_runtime_available:
+        available.add("cuda_runtime")
+    missing = sorted(
+        dependency
+        for dependency in compute_fit.required_dependencies
+        if dependency not in available
+    )
+    if missing:
+        raise AutoresearchValidationError(
+            "compute_fit selected GPU execution with unavailable dependencies: "
+            + ", ".join(missing)
+        )
+
+
+def _validate_persisted_state_matches(
+    state: AutoresearchState,
+    *,
+    state_path: Path,
+) -> AutoresearchState:
+    """Reject an artifact handoff if its input state changed after dispatch."""
+    supplied_reference = build_authoritative_state_reference(state, state_path=state_path)
+    from gateway.autoresearch import persistence as persistence_module
+
+    persisted_state = persistence_module.load_state_file(state_path)
+    persisted_reference = build_authoritative_state_reference(
+        persisted_state,
+        state_path=state_path,
+    )
+    if persisted_reference != supplied_reference:
+        raise AutoresearchValidationError(
+            "persisted state does not match the supplied authoritative state"
+        )
+    return persisted_state
+
+
+def _validate_state(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    if validation_context is not None:
+        validation_context.validate_for_state(state)
+    if state.iteration < 1:
+        raise AutoresearchValidationError("iteration must be >= 1")
+    if state.suspended:
+        decision = state.final_decision
+        if state.phase is not Phase.REPEAT or decision is None:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state must be in repeat phase with a final decision"
+            )
+        if decision.decision is not FinalDecision.INFRA_BLOCKED:
+            raise AutoresearchValidationError(
+                "suspended autoresearch state requires final_decision=INFRA_BLOCKED"
+            )
+        if not state.suspension_reason or not state.suspension_reason.strip():
+            raise AutoresearchValidationError(
+                "suspended autoresearch state requires suspension_reason"
+            )
+        if (
+            decision.memory_write_required
+            or state.memory_written
+            or state.memory_verification_receipt is not None
+        ):
+            raise AutoresearchValidationError(
+                "suspended autoresearch state cannot require or record a memory write"
+            )
+    elif state.suspension_reason is not None:
+        raise AutoresearchValidationError("suspension_reason requires suspended=true")
+    if state.consensus_retry_count not in (0, 1):
+        raise AutoresearchValidationError("consensus_retry_count must be 0 or 1")
+    if state.context_packet is not None and state.setup is None:
+        raise AutoresearchValidationError("context_packet requires setup first")
+    if state.context_packet is not None and state.mode is None:
+        raise AutoresearchValidationError("mode must be explicit after a context_packet exists")
+    if state.context_packet is not None and state.mode is not state.context_packet.research_mode:
+        raise AutoresearchValidationError("state mode must match context_packet research_mode")
+    _validate_external_verification_retry_receipt(state, validation_context)
+    if state.debate_rounds and state.context_packet is None:
+        raise AutoresearchValidationError("debate history requires a context_packet")
+    if state.consensus_history and state.latest_debate is None:
+        raise AutoresearchValidationError("consensus history requires a debate_result")
+    _validate_consensus_history_universe_plans(state)
+    if (
+        state.suspended
+        and state.mode is ResearchMode.DATA_INFRA_G0
+        and state.latest_verification is not None
+    ):
+        raise AutoresearchValidationError(
+            "DATA_INFRA_G0 remediation must end in non-suspending DISCARD"
+        )
+    _validate_alpha_universe_chain(state)
+    if state.memory_written and state.final_decision is None:
+        raise AutoresearchValidationError("memory_written cannot be true before final_decision")
+    if (
+        state.memory_written
+        and state.final_decision is not None
+        and not state.final_decision.memory_write_required
+    ):
+        raise AutoresearchValidationError(
+            "memory_written is invalid when final_decision.memory_write_required=false"
+        )
+    if state.memory_written and state.memory_verification_receipt is None:
+        raise AutoresearchValidationError("memory_written requires a memory_verification_receipt")
+    if not state.memory_written and state.memory_verification_receipt is not None:
+        raise AutoresearchValidationError(
+            "memory_verification_receipt requires memory_written=true"
+        )
+    if (
+        state.memory_verification_receipt is not None
+        and state.final_decision is not None
+        and state.memory_verification_receipt.experiment_id != state.final_decision.experiment_id
+    ):
+        raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
+    if state.final_decision is not None:
+        decision = state.final_decision
+        _validate_final_decision_memory_requirement(state, decision)
+        _validate_no_consensus_completion(state)
+        _validate_operator_precondition_infra_blocked_suspension(state)
+        is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
+        if decision.decision is FinalDecision.NO_CONSENSUS:
+            if decision.memory_write_required:
+                raise AutoresearchValidationError(
+                    "NO_CONSENSUS requires final_decision.memory_write_required=false"
+                )
+            if state.memory_verification_receipt is not None:
+                raise AutoresearchValidationError(
+                    "NO_CONSENSUS must not have a memory_verification_receipt"
+                )
+        if not is_operator_infrastructure_suspension:
+            _validate_final_decision_artifact(decision, state, validation_context)
+        if not decision.memory_write_required and not _is_authorized_no_memory_final_decision(
+            state
+        ):
+            raise AutoresearchValidationError(
+                "final_decision.memory_write_required=false requires an authorized "
+                "no-memory terminal path"
+            )
+    if state.implementation_result and (
+        state.latest_consensus is None
+        or state.latest_consensus.status is not ConsensusStatus.MAJORITY
+    ):
+        raise AutoresearchValidationError("implementation_result requires a majority consensus")
+    if state.implementation_result:
+        _validate_persisted_autoresearch_workspace_path(
+            state.implementation_result.workspace_path,
+            label="implementation_result workspace_path",
+        )
+        transitions_module._validate_implementation_workspace(state, state.implementation_result)
+    if state.fix_history and state.implementation_result is None:
+        raise AutoresearchValidationError("fix history requires an implementation_result")
+    for fix in state.fix_history:
+        fix.validate()
+        _validate_persisted_autoresearch_workspace_path(
+            fix.workspace_path,
+            label="fix_history workspace_path",
+        )
+        if state.implementation_result is not None and (
+            fix.workspace_path != state.implementation_result.workspace_path
+        ):
+            raise AutoresearchValidationError(
+                "fix_history workspace_path must exactly match implementation_result workspace_path"
+            )
+    if state.verification_history and state.implementation_result is None:
+        raise AutoresearchValidationError("verification history requires an implementation_result")
+    if state.review_history and not state.verification_history:
+        raise AutoresearchValidationError("review history requires a verification_result")
+    if state.pending_fix_trigger is not None and state.phase is not Phase.FIX_TEST:
+        raise AutoresearchValidationError("pending_fix_trigger is only valid during fix_test")
+    if state.final_decision is not None and state.phase is not Phase.REPEAT:
+        raise AutoresearchValidationError("final_decision requires repeat phase")
+    for debate in state.debate_rounds:
+        transitions_module._validate_debate_result(
+            debate, policy, mode=state.mode, context=state.context_packet
+        )
+    for verification in state.verification_history:
+        verification.validate(
+            mode=state.mode,
+        )
+    for review in state.review_history:
+        transitions_module._validate_review_result(review, policy)
+    if state.phase is Phase.DEBATE and state.context_packet is None:
+        raise AutoresearchValidationError("debate phase requires a context_packet")
+    if state.phase is Phase.CONSENSUS and state.latest_debate is None:
+        raise AutoresearchValidationError("consensus phase requires a debate_result")
+    if state.phase is Phase.IMPLEMENTATION and (
+        state.latest_consensus is None
+        or state.latest_consensus.status is not ConsensusStatus.MAJORITY
+    ):
+        raise AutoresearchValidationError("implementation phase requires a majority consensus")
+    if state.phase is Phase.IMPLEMENTATION and _is_operator_precondition_consensus(
+        state.latest_consensus
+    ):
+        raise AutoresearchValidationError(
+            "operator-precondition consensus must route to decision_log, not implementation"
+        )
+    if state.phase is Phase.VERIFICATION and state.implementation_result is None:
+        raise AutoresearchValidationError("verification phase requires an implementation_result")
+    if state.phase is Phase.REVIEW:
+        if not state.verification_history:
+            raise AutoresearchValidationError("review phase requires a verification_result")
+        if (
+            state.latest_verification is None
+            or state.latest_verification.status is not VerificationStatus.PASS
+        ):
+            raise AutoresearchValidationError("review phase requires a passing verification_result")
+    if state.phase is Phase.FIX_TEST:
+        if state.pending_fix_trigger is None:
+            raise AutoresearchValidationError("fix_test phase requires pending_fix_trigger")
+        if state.pending_fix_trigger is FixTriggerPhase.VERIFICATION and (
+            state.latest_verification is None
+            or state.latest_verification.status is VerificationStatus.PASS
+        ):
+            raise AutoresearchValidationError(
+                "verification-triggered fix_test requires a failing verification_result"
+            )
+        if state.pending_fix_trigger is FixTriggerPhase.REVIEW:
+            latest_review = state.latest_review
+            if latest_review is None or (
+                latest_review.verdict is not ReviewVerdict.FAIL
+                and not latest_review.critical_issues
+            ):
+                raise AutoresearchValidationError(
+                    "review-triggered fix_test requires a failing review_result"
+                )
+    if state.phase is Phase.DECISION_LOG and (
+        state.latest_consensus is None
+        and state.latest_review is None
+        and state.latest_verification is None
+    ):
+        raise AutoresearchValidationError("decision_log phase requires prior artifacts")
+    if state.phase is Phase.REPEAT and state.final_decision is None:
+        raise AutoresearchValidationError("repeat phase requires final_decision")
+
+
+def validate_state(
+    state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> None:
+    transitions_module._validate_state(state, policy, validation_context)
+
+
+def _validate_debate_result(
+    debate: DebateResultArtifact,
+    policy: AutoresearchPolicy,
+    *,
+    mode: ResearchMode | None = None,
+    context: ContextPacketArtifact | None = None,
+    target_repo: Path | None = None,
+    require_compute_fit: bool = False,
+) -> None:
+    expected_ids = set(policy.debate_agent_ids)
+    actual_ids = {submission.agent_id for submission in debate.submissions}
+    if actual_ids != expected_ids:
+        raise AutoresearchValidationError(
+            "debate_result must contain exactly the configured five debate agents"
+        )
+    if mode is ResearchMode.ALPHA_RESEARCH and context is not None:
+        burned = set(context.burned_theory_families)
+        for submission in debate.submissions:
+            family = _normalise_identifier(submission.theory_family)
+            if family in burned and not submission.materially_new_evidence:
+                raise AutoresearchValidationError(
+                    "alpha debate theory_family is burned and requires materially_new_evidence"
+                )
+    for submission in debate.submissions:
+        if require_compute_fit and submission.compute_fit is None:
+            raise AutoresearchValidationError(
+                "new debate submissions must include a compute_fit artifact"
+            )
+        if submission.compute_fit is not None:
+            submission.compute_fit.validate()
+            if target_repo is not None:
+                transitions_module._validate_compute_fit_environment(
+                    submission.compute_fit, target_repo
+                )
+
+
+def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPolicy) -> None:
+    if review.reviewer_agent_id != policy.reviewer.agent_id:
+        raise AutoresearchValidationError(
+            "review_result must come from the single configured reviewer"
+        )
+
+
+def _validate_implementation_workspace(
+    state: AutoresearchState,
+    artifact: ImplementationResultArtifact,
+    *,
+    require_compute_fit: bool = False,
+) -> None:
+    artifact.validate()
+    if require_compute_fit and artifact.compute_fit is None:
+        raise AutoresearchValidationError(
+            "new implementation_result artifacts must include a compute_fit artifact"
+        )
+    if artifact.compute_fit is not None:
+        artifact.compute_fit.validate()
+        if state.setup is not None:
+            transitions_module._validate_compute_fit_environment(
+                artifact.compute_fit,
+                Path(state.setup.target_repo),
+            )
+    _validate_persisted_autoresearch_workspace_path(
+        artifact.workspace_path,
+        label="implementation_result workspace_path",
+    )
+    if state.setup is None:
+        return
+    workspace_path = Path(artifact.workspace_path).expanduser().resolve()
+    target_repo = Path(state.setup.target_repo).expanduser().resolve()
+    if workspace_path == target_repo:
+        raise AutoresearchValidationError(
+            "implementation_result workspace_path must be an isolated worktree, "
+            "not the main target_repo"
+        )
+
+
+def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifact) -> None:
+    artifact.validate()
+    _validate_price_scope_fix_result_commands(state, artifact)
+    _validate_persisted_autoresearch_workspace_path(
+        artifact.workspace_path,
+        label="fix_result workspace_path",
+    )
+    if state.implementation_result is None:
+        raise AutoresearchValidationError("fix_result requires implementation_result")
+    _validate_persisted_autoresearch_workspace_path(
+        state.implementation_result.workspace_path,
+        label="implementation_result workspace_path",
+    )
+    if artifact.workspace_path != state.implementation_result.workspace_path:
+        raise AutoresearchValidationError(
+            "fix_result workspace_path must match implementation_result workspace_path"
+        )
+    candidate_implementation = replace(
+        state.implementation_result,
+        commit_sha=artifact.commit_sha,
+        price_hydration_scope_preflight=(
+            artifact.price_hydration_scope_preflight
+            if artifact.price_hydration_scope_preflight is not None
+            else state.implementation_result.price_hydration_scope_preflight
+        ),
+    )
+    transitions_module._validate_implementation_workspace(
+        state,
+        candidate_implementation,
+    )
+
+
+def _require_autoresearch_worktree_root() -> Path:
+    root = _require_strict_canonical_workspace_path(
+        str(constants.DEFAULT_AUTORESEARCH_WORKTREE_ROOT),
+        label="autoresearch worktree root",
+    )
+    _require_private_directory(root, label="autoresearch worktree root")
+    return root
+
+
+def validate_artifact_workspace(
+    state: AutoresearchState,
+    artifact: ImplementationResultArtifact | FixResultArtifact,
+) -> None:
+    """Mechanically validate a committed artifact at the CLI advancement boundary.
+
+    This intentionally performs filesystem and Git checks only at artifact
+    advancement; deserializing persisted state remains pure and portable.
+    """
+    artifact.validate()
+    if state.setup is None:
+        raise AutoresearchValidationError("artifact workspace validation requires setup")
+    workspace = _require_strict_canonical_workspace_path(
+        artifact.workspace_path,
+        label="artifact workspace_path",
+    )
+    worktree_root = _require_autoresearch_worktree_root()
+    if isinstance(artifact, FixResultArtifact):
+        if state.implementation_result is None:
+            raise AutoresearchValidationError("fix_result requires implementation_result")
+        state.implementation_result.validate()
+        implementation_workspace = _require_strict_canonical_workspace_path(
+            state.implementation_result.workspace_path,
+            label="persisted implementation_result workspace_path",
+        )
+        _require_workspace_under_autoresearch_worktree_root(
+            implementation_workspace,
+            label="persisted implementation_result workspace_path",
+            worktree_root=worktree_root,
+        )
+        _require_workspace_under_autoresearch_worktree_root(
+            workspace,
+            label="fix_result workspace_path",
+            worktree_root=worktree_root,
+        )
+        if artifact.workspace_path != state.implementation_result.workspace_path:
+            raise AutoresearchValidationError(
+                "fix_result workspace_path must exactly match implementation_result workspace_path"
+            )
+        if workspace != implementation_workspace:
+            raise AutoresearchValidationError(
+                "fix_result workspace_path must identify the persisted implementation worktree"
+            )
+        transitions_module._validate_fix_workspace(state, artifact)
+    else:
+        _require_workspace_under_autoresearch_worktree_root(
+            workspace,
+            label="implementation_result workspace_path",
+            worktree_root=worktree_root,
+        )
+        transitions_module._validate_implementation_workspace(state, artifact)
+
+    workspace = _require_isolated_git_clone_root(workspace, label="artifact workspace_path")
+    target_checkout = _require_git_worktree_root(
+        Path(state.setup.target_repo).expanduser(),
+        label="authoritative target_repo",
+    )
+    if workspace == target_checkout:
+        raise AutoresearchValidationError(
+            "artifact workspace_path must be distinct from authoritative target_repo"
+        )
+    _require_artifact_origin_matches_target(
+        workspace,
+        target_checkout,
+        label="artifact workspace_path",
+    )
+    artifact_commit = _resolve_git_commit(
+        workspace,
+        artifact.commit_sha,
+        label="artifact commit_sha",
+    )
+    worktree_head = _resolve_git_commit(workspace, "HEAD", label="worktree HEAD")
+    if artifact_commit != worktree_head:
+        raise AutoresearchValidationError("artifact commit_sha must equal worktree HEAD")
+    _require_clean_git_worktree(workspace)
+
+    if isinstance(artifact, FixResultArtifact):
+        assert state.implementation_result is not None
+        _require_ancestor(
+            workspace,
+            state.implementation_result.commit_sha,
+            artifact_commit,
+            error_message="prior implementation commit_sha is not an ancestor of final fix commit",
+            missing_is_not_ancestor=True,
+        )
+        authoritative_head = _resolve_git_commit(
+            target_checkout,
+            "HEAD",
+            label="authoritative target_repo HEAD",
+        )
+        _require_ancestor(
+            workspace,
+            authoritative_head,
+            artifact_commit,
+            error_message=("authoritative target_repo HEAD is not an ancestor of final fix commit"),
+            missing_is_not_ancestor=True,
+        )
+    else:
+        authoritative_head = _resolve_git_commit(
+            target_checkout,
+            "HEAD",
+            label="authoritative target_repo HEAD",
+        )
+        _require_ancestor(
+            workspace,
+            authoritative_head,
+            artifact_commit,
+            error_message=(
+                "authoritative target_repo HEAD is not an ancestor of implementation commit"
+            ),
+            missing_is_not_ancestor=True,
+        )
+        manifest_snapshot = _secure_open_snapshot(
+            artifact.experiment_manifest_path,
+            label="implementation_result experiment_manifest_path",
+        )
+        _validate_quantipy_v2_manifest(
+            manifest_snapshot,
+            workspace=workspace,
+            commit_sha=artifact_commit,
+            expected_sha256=artifact.experiment_manifest_sha256,
+        )
+    _require_private_directory(workspace, label="artifact workspace_path")
+
+
+def _clear_consumed_platform_runtime_receipts(state: AutoresearchState) -> AutoresearchState:
+    """Remove active v5 authorization material once its result is in history."""
+    receipt = state.external_verification_retry_receipt
+    if receipt is None:
+        return replace(state, canonical_quantipy_runtime_attestation=None)
+    if receipt.retry_attempt != 5:
+        return replace(state, canonical_quantipy_runtime_attestation=None)
+    if state.platform_runtime_recovery_receipt is None:
+        raise AutoresearchValidationError("v5 verification requires its runtime recovery receipt")
+    if state.latest_verification is None:
+        raise AutoresearchValidationError("v5 receipt cannot be consumed without a result")
+    return replace(
+        state,
+        external_verification_retry_receipt=None,
+        interrupted_verification_history=(),
+        platform_runtime_recovery_receipt=None,
+        canonical_quantipy_runtime_attestation=None,
+    )
+
+
+def advance_state(
+    state: AutoresearchState,
+    artifact: SetupContextArtifact
+    | ContextPacketArtifact
+    | DebateResultArtifact
+    | ConsensusResultArtifact
+    | ImplementationResultArtifact
+    | VerificationResultArtifact
+    | ReviewResultArtifact
+    | FixResultArtifact
+    | FinalDecisionArtifact,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+    *,
+    state_path: Path | None = None,
+) -> AutoresearchState:
+    if state_path is not None:
+        state = transitions_module._validate_persisted_state_matches(state, state_path=state_path)
+    transitions_module._validate_state(state, policy, validation_context)
+    if state.mode in (ResearchMode.ALPHA_RESEARCH, ResearchMode.DATA_INFRA_G0) and (
+        state.phase is Phase.VERIFICATION
+        or (state.mode is ResearchMode.DATA_INFRA_G0 and state.phase is Phase.DECISION_LOG)
+    ):
+        if validation_context is None:
+            raise AutoresearchValidationError(
+                f"{state.mode.name} artifact advancement requires a strict readiness "
+                "validation context"
+            )
+        validation_context.validate_for_state(state)
+
+    if state.phase is Phase.SETUP_CONTEXT:
+        if isinstance(artifact, SetupContextArtifact):
+            if state.setup is not None:
+                raise AutoresearchValidationError("setup artifact already exists")
+            return replace(state, setup=artifact)
+        if isinstance(artifact, ContextPacketArtifact):
+            if state.setup is None:
+                raise AutoresearchValidationError("context packet requires setup first")
+            return replace(
+                state,
+                context_packet=artifact,
+                mode=artifact.research_mode,
+                phase=Phase.DEBATE,
+            )
+        raise AutoresearchValidationError(
+            "setup_context phase accepts setup or context_packet artifacts only"
+        )
+
+    if state.phase is Phase.DEBATE:
+        if not isinstance(artifact, DebateResultArtifact):
+            raise AutoresearchValidationError("debate phase accepts debate_result only")
+        transitions_module._validate_debate_result(
+            artifact,
+            policy,
+            mode=state.mode,
+            context=state.context_packet,
+            target_repo=Path(state.setup.target_repo) if state.setup is not None else None,
+            require_compute_fit=True,
+        )
+        expected_round = len(state.debate_rounds) + 1
+        if artifact.round_number != expected_round:
+            raise AutoresearchValidationError(
+                f"debate round must be {expected_round}, got {artifact.round_number}"
+            )
+        return replace(
+            state,
+            debate_rounds=(*state.debate_rounds, artifact),
+            phase=Phase.CONSENSUS,
+        )
+
+    if state.phase is Phase.CONSENSUS:
+        if not isinstance(artifact, ConsensusResultArtifact):
+            raise AutoresearchValidationError("consensus phase accepts consensus_result only")
+        latest_debate = state.latest_debate
+        if latest_debate is None:
+            raise AutoresearchValidationError("consensus requires a debate_result first")
+        if artifact.round_number != latest_debate.round_number:
+            raise AutoresearchValidationError(
+                "consensus round_number must match the latest debate round"
+            )
+        next_consensus_history = (*state.consensus_history, artifact)
+        if artifact.status is ConsensusStatus.MAJORITY:
+            if _is_operator_precondition_consensus(artifact):
+                return replace(
+                    state,
+                    consensus_history=next_consensus_history,
+                    phase=Phase.DECISION_LOG,
+                )
+            if artifact.universe_plan is None:
+                raise AutoresearchValidationError(
+                    "non-operator majority consensus requires a frozen universe_plan"
+                )
+            artifact.universe_plan.validate()
+            return replace(
+                state,
+                consensus_history=next_consensus_history,
+                phase=Phase.IMPLEMENTATION,
+            )
+        if state.consensus_retry_count == 0:
+            return replace(
+                state,
+                consensus_history=next_consensus_history,
+                consensus_retry_count=1,
+                phase=Phase.DEBATE,
+            )
+        return replace(
+            state,
+            consensus_history=next_consensus_history,
+            phase=Phase.DECISION_LOG,
+        )
+
+    if state.phase is Phase.IMPLEMENTATION:
+        if not isinstance(artifact, ImplementationResultArtifact):
+            raise AutoresearchValidationError(
+                "implementation phase accepts implementation_result only"
+            )
+        if (
+            state.latest_consensus is None
+            or state.latest_consensus.status is not ConsensusStatus.MAJORITY
+        ):
+            raise AutoresearchValidationError(
+                "cannot advance implementation without consensus majority"
+            )
+        if state_path is not None:
+            transitions_module.validate_artifact_workspace(state, artifact)
+        transitions_module._validate_implementation_workspace(
+            state, artifact, require_compute_fit=True
+        )
+        _validate_alpha_implementation_price_preflight(state, artifact)
+        next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
+        _validate_alpha_universe_chain(next_state)
+        return next_state
+
+    if state.phase is Phase.VERIFICATION:
+        if not isinstance(artifact, VerificationResultArtifact):
+            raise AutoresearchValidationError("verification phase accepts verification_result only")
+        if state.implementation_result is None:
+            raise AutoresearchValidationError("verification requires implementation_result")
+        artifact.validate(mode=state.mode)
+        _validate_alpha_price_scope_verification(state, artifact)
+        _require_g0_platform_provenance(state, artifact, validation_context)
+        if state_path is not None:
+            _validate_quantipy_experiment_evidence(
+                state,
+                artifact,
+                validation_context=validation_context,
+            )
+        next_verification_history = (*state.verification_history, artifact)
+        consumed_runtime_recovery = transitions_module._clear_consumed_platform_runtime_receipts(
+            replace(state, verification_history=next_verification_history)
+        )
+        if artifact.status is VerificationStatus.PASS:
+            next_state = replace(
+                consumed_runtime_recovery,
+                pending_fix_trigger=None,
+                phase=Phase.REVIEW,
+            )
+            _validate_alpha_universe_chain(next_state, validation_context)
+            return next_state
+        if (
+            artifact.status in (VerificationStatus.TEST_FAILURE, VerificationStatus.BUG_SIGNAL)
+            and state.verification_fix_attempts >= 2
+        ):
+            next_state = replace(
+                consumed_runtime_recovery,
+                pending_fix_trigger=None,
+                phase=Phase.DECISION_LOG,
+            )
+            _validate_alpha_universe_chain(next_state, validation_context)
+            return next_state
+        next_state = replace(
+            consumed_runtime_recovery,
+            pending_fix_trigger=FixTriggerPhase.VERIFICATION,
+            phase=Phase.FIX_TEST,
+        )
+        _validate_alpha_universe_chain(next_state, validation_context)
+        return next_state
+
+    if state.phase is Phase.REVIEW:
+        if not isinstance(artifact, ReviewResultArtifact):
+            raise AutoresearchValidationError("review phase accepts review_result only")
+        transitions_module._validate_review_result(artifact, policy)
+        next_review_history = (*state.review_history, artifact)
+        if artifact.verdict is ReviewVerdict.FAIL or artifact.critical_issues:
+            return replace(
+                state,
+                review_history=next_review_history,
+                pending_fix_trigger=FixTriggerPhase.REVIEW,
+                phase=Phase.FIX_TEST,
+            )
+        return replace(
+            state,
+            review_history=next_review_history,
+            pending_fix_trigger=None,
+            phase=Phase.DECISION_LOG,
+        )
+
+    if state.phase is Phase.FIX_TEST:
+        if not isinstance(artifact, FixResultArtifact):
+            raise AutoresearchValidationError("fix_test phase accepts fix_result only")
+        if state.pending_fix_trigger is None:
+            raise AutoresearchValidationError("fix_test phase requires pending_fix_trigger")
+        if artifact.trigger_phase is not state.pending_fix_trigger:
+            raise AutoresearchValidationError(
+                "fix_result trigger_phase must match the pending fix source"
+            )
+        if artifact.trigger_phase is FixTriggerPhase.VERIFICATION:
+            next_attempts = state.verification_fix_attempts + 1
+        else:
+            next_attempts = state.verification_fix_attempts
+        if state_path is not None:
+            transitions_module.validate_artifact_workspace(state, artifact)
+        transitions_module._validate_fix_workspace(state, artifact)
+        assert state.implementation_result is not None
+        next_implementation = replace(
+            state.implementation_result,
+            commit_sha=artifact.commit_sha,
+            price_hydration_scope_preflight=(
+                artifact.price_hydration_scope_preflight
+                if artifact.price_hydration_scope_preflight is not None
+                else state.implementation_result.price_hydration_scope_preflight
+            ),
+        )
+        return replace(
+            state,
+            implementation_result=next_implementation,
+            fix_history=(*state.fix_history, artifact),
+            external_verification_retry_receipt=None,
+            interrupted_verification_history=(),
+            platform_runtime_recovery_receipt=None,
+            verification_fix_attempts=next_attempts,
+            pending_fix_trigger=None,
+            phase=Phase.VERIFICATION,
+        )
+
+    if state.phase is Phase.DECISION_LOG:
+        if not isinstance(artifact, FinalDecisionArtifact):
+            raise AutoresearchValidationError("decision_log phase accepts final_decision only")
+        if (
+            state.latest_consensus is None
+            and state.latest_review is None
+            and state.latest_verification is None
+        ):
+            raise AutoresearchValidationError("final_decision requires prior artifacts")
+        _validate_final_decision_artifact(artifact, state, validation_context)
+        if artifact.decision is FinalDecision.INFRA_BLOCKED:
+            next_state = replace(
+                state,
+                final_decision=artifact,
+                phase=Phase.REPEAT,
+                suspended=True,
+                suspension_reason=artifact.infra_rationale,
+            )
+        else:
+            next_state = replace(state, final_decision=artifact, phase=Phase.REPEAT)
+        transitions_module._validate_state(next_state, policy, validation_context)
+        return next_state
+
+    raise AutoresearchValidationError(
+        "repeat phase does not accept artifacts; mark memory or start next iteration"
+    )

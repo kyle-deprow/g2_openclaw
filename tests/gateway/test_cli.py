@@ -139,7 +139,7 @@ def isolated_autoresearch_lock_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        autoresearch_runner,
+        constants,
         "AUTORESEARCH_LOCK_NAMESPACE",
         tmp_path / "autoresearch-locks",
     )
@@ -823,11 +823,6 @@ def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     worktree_root.mkdir(mode=0o700, parents=True)
     worktree_root.chmod(0o700)
     monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", worktree_root)
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
-        worktree_root,
-    )
     return worktree_root
 
 
@@ -1998,6 +1993,10 @@ class TestAutoresearchCliCommands:
         )
         monkeypatch.setattr("gateway.autoresearch_runner.build_receipt_catalog", lambda _: object())
         monkeypatch.setattr(
+            "gateway.autoresearch.manifest_runtime.build_receipt_catalog",
+            lambda _: object(),
+        )
+        monkeypatch.setattr(
             "gateway.autoresearch_runner.next_action", lambda *_, **__: FakeAction()
         )
         monkeypatch.setattr("gateway.cli._active_target_writer_processes", lambda _: ())
@@ -2040,9 +2039,12 @@ class TestAutoresearchCliCommands:
 
         with (
             patch("gateway.autoresearch_runner.load_state_file", return_value=state),
+            patch("gateway.autoresearch.persistence.load_state_file", return_value=state),
             patch("gateway.autoresearch_runner.load_autoresearch_policy"),
+            patch("gateway.autoresearch.configuration.load_autoresearch_policy"),
             patch("gateway.cli.load_platform_readiness"),
             patch("gateway.autoresearch_runner.build_receipt_catalog"),
+            patch("gateway.autoresearch.manifest_runtime.build_receipt_catalog"),
             patch("gateway.autoresearch_runner.next_action", return_value=action),
             patch("gateway.autoresearch_runner.AutoresearchValidationContext.from_readiness"),
             patch(

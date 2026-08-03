@@ -6,9 +6,9 @@ skill/source receipts, artifact validation, and next-action selection.
 
 from __future__ import annotations
 
-import fcntl
+import fcntl  # noqa: F401
 import hashlib
-import json
+import json  # noqa: F401
 import math  # noqa: F401
 import os
 import platform  # noqa: F401
@@ -17,12 +17,31 @@ import shutil  # noqa: F401
 import sqlite3  # noqa: F401
 import stat
 import subprocess
-import tempfile
-import time
-import tomllib
+import tempfile  # noqa: F401
+import time  # noqa: F401
+import tomllib  # noqa: F401
 from bisect import bisect_right  # noqa: F401
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager, suppress
+from collections.abc import (
+    Callable as Callable,
+)
+from collections.abc import (
+    Iterator as Iterator,
+)
+from collections.abc import (
+    Mapping as Mapping,
+)
+from collections.abc import (
+    Sequence as Sequence,
+)
+from contextlib import (
+    ExitStack as ExitStack,
+)
+from contextlib import (
+    contextmanager as contextmanager,
+)
+from contextlib import (
+    suppress as suppress,
+)
 from ctypes.util import find_library  # noqa: F401
 from dataclasses import dataclass, field, replace  # noqa: F401
 from datetime import UTC as UTC
@@ -32,6 +51,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar, cast  # noqa: F401
 from urllib.parse import unquote, urlencode, urlparse  # noqa: F401
 
+from gateway.autoresearch import constants as _constants
+from gateway.autoresearch import manifest_runtime as _manifest_runtime_module
+from gateway.autoresearch import persistence as _persistence_module
+from gateway.autoresearch import transitions as _transitions_module
 from gateway.autoresearch.artifacts import (
     ARTIFACT_CONTRACTS as ARTIFACT_CONTRACTS,
 )
@@ -96,9 +119,6 @@ from gateway.autoresearch.attestation import (
     _attest_canonical_quantipy_runtime as _attest_canonical_quantipy_runtime,
 )
 from gateway.autoresearch.attestation import (
-    _configure_state_file_dependencies as _configure_state_file_dependencies,
-)
-from gateway.autoresearch.attestation import (
     _probe_quantipy_runtime_resolution as _probe_quantipy_runtime_resolution,
 )
 from gateway.autoresearch.attestation import (
@@ -139,6 +159,60 @@ from gateway.autoresearch.compute import (
 )
 from gateway.autoresearch.compute import (
     collect_compute_capability_snapshot as collect_compute_capability_snapshot,
+)
+from gateway.autoresearch.configuration import (
+    G2_CONTROL_DISPLAY_TOOL_IDS as G2_CONTROL_DISPLAY_TOOL_IDS,
+)
+from gateway.autoresearch.configuration import (
+    G2_CONTROL_RUNTIME_TOOL_IDS as G2_CONTROL_RUNTIME_TOOL_IDS,
+)
+from gateway.autoresearch.configuration import (
+    MAIN_ALLOWED_TOOL_IDS as MAIN_ALLOWED_TOOL_IDS,
+)
+from gateway.autoresearch.configuration import (
+    MAIN_OPENCLAW_TOOL_ALLOW_POLICY as MAIN_OPENCLAW_TOOL_ALLOW_POLICY,
+)
+from gateway.autoresearch.configuration import (
+    MEMPALACE_READONLY_DISPLAY_TOOL_IDS as MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
+)
+from gateway.autoresearch.configuration import (
+    MEMPALACE_READONLY_RUNTIME_TOOL_IDS as MEMPALACE_READONLY_RUNTIME_TOOL_IDS,
+)
+from gateway.autoresearch.configuration import (
+    _agent_policy_from_json as _agent_policy_from_json,
+)
+from gateway.autoresearch.configuration import (
+    _codex_agent_model as _codex_agent_model,
+)
+from gateway.autoresearch.configuration import (
+    _compile_codex_mcp_runtime_tool_ids as _compile_codex_mcp_runtime_tool_ids,
+)
+from gateway.autoresearch.configuration import (
+    _compile_mempalace_codex_display_tool_ids as _compile_mempalace_codex_display_tool_ids,
+)
+from gateway.autoresearch.configuration import (
+    _load_codex_agent_toml as _load_codex_agent_toml,
+)
+from gateway.autoresearch.configuration import (
+    _load_json as _load_json,
+)
+from gateway.autoresearch.configuration import (
+    _validate_codex_app_server_sandbox as _validate_codex_app_server_sandbox,
+)
+from gateway.autoresearch.configuration import (
+    _validate_codex_native_stage_agents as _validate_codex_native_stage_agents,
+)
+from gateway.autoresearch.configuration import (
+    _validate_mempalace_server as _validate_mempalace_server,
+)
+from gateway.autoresearch.configuration import (
+    _validate_mempalace_server_split as _validate_mempalace_server_split,
+)
+from gateway.autoresearch.configuration import (
+    _validate_policy as _validate_policy,
+)
+from gateway.autoresearch.configuration import (
+    load_autoresearch_policy as load_autoresearch_policy,
 )
 from gateway.autoresearch.constants import (
     _OPERATOR_PRECONDITION_BRIEF_MARKERS as _OPERATOR_PRECONDITION_BRIEF_MARKERS,
@@ -692,6 +766,33 @@ from gateway.autoresearch.manifest import (
 from gateway.autoresearch.manifest import (
     SourceReceipt as SourceReceipt,
 )
+from gateway.autoresearch.manifest_runtime import (
+    LOCAL_RECEIPT_PATHS as LOCAL_RECEIPT_PATHS,
+)
+from gateway.autoresearch.manifest_runtime import (
+    PHASE_RECEIPTS as PHASE_RECEIPTS,
+)
+from gateway.autoresearch.manifest_runtime import (
+    QUANTIPY_RECEIPT_PATHS as QUANTIPY_RECEIPT_PATHS,
+)
+from gateway.autoresearch.manifest_runtime import (
+    _canonical_receipt_path as _canonical_receipt_path,
+)
+from gateway.autoresearch.manifest_runtime import (
+    _load_receipt as _load_receipt,
+)
+from gateway.autoresearch.manifest_runtime import (
+    build_instruction_source_manifest as build_instruction_source_manifest,
+)
+from gateway.autoresearch.manifest_runtime import (
+    build_receipt_catalog as build_receipt_catalog,
+)
+from gateway.autoresearch.manifest_runtime import (
+    expected_instruction_manifest_sha256 as expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.manifest_runtime import (
+    instruction_source_manifest_sha256 as instruction_source_manifest_sha256,
+)
 from gateway.autoresearch.memory import (
     G2_OPENCLAW_REPO_ROOT as G2_OPENCLAW_REPO_ROOT,
 )
@@ -730,6 +831,72 @@ from gateway.autoresearch.memory import (
 )
 from gateway.autoresearch.memory import (
     verify_mempalace_final_decision as verify_mempalace_final_decision,
+)
+from gateway.autoresearch.persistence import (
+    _ArtifactAdvancePublicationGuard as _ArtifactAdvancePublicationGuard,
+)
+from gateway.autoresearch.persistence import (
+    _atomic_save_state_file as _atomic_save_state_file,
+)
+from gateway.autoresearch.persistence import (
+    _canonical_state_paths as _canonical_state_paths,
+)
+from gateway.autoresearch.persistence import (
+    _exclusive_state_lock as _exclusive_state_lock,
+)
+from gateway.autoresearch.persistence import (
+    _exclusive_state_locks as _exclusive_state_locks,
+)
+from gateway.autoresearch.persistence import (
+    _load_state_raw as _load_state_raw,
+)
+from gateway.autoresearch.persistence import (
+    _move_stage_inbox_entry_no_replace as _move_stage_inbox_entry_no_replace,
+)
+from gateway.autoresearch.persistence import (
+    _open_stage_inbox_child_directory as _open_stage_inbox_child_directory,
+)
+from gateway.autoresearch.persistence import (
+    _open_state_lock_file as _open_state_lock_file,
+)
+from gateway.autoresearch.persistence import (
+    _prepare_lock_namespace as _prepare_lock_namespace,
+)
+from gateway.autoresearch.persistence import (
+    _revalidate_artifact_advance_for_atomic_publication as _revalidate_artifact_advance_for_atomic_publication,  # noqa: E501
+)
+from gateway.autoresearch.persistence import (
+    _state_lock_path as _state_lock_path,
+)
+from gateway.autoresearch.persistence import (
+    _validate_stage_inbox_directory_fd as _validate_stage_inbox_directory_fd,
+)
+from gateway.autoresearch.persistence import (
+    advance_artifact_state_file as advance_artifact_state_file,
+)
+from gateway.autoresearch.persistence import (
+    consume_stage_submission_inbox as consume_stage_submission_inbox,
+)
+from gateway.autoresearch.persistence import (
+    initialize_state as initialize_state,
+)
+from gateway.autoresearch.persistence import (
+    load_artifact_file as load_artifact_file,
+)
+from gateway.autoresearch.persistence import (
+    load_state_file as load_state_file,
+)
+from gateway.autoresearch.persistence import (
+    persist_derived_state as persist_derived_state,
+)
+from gateway.autoresearch.persistence import (
+    persist_next_iteration_state as persist_next_iteration_state,
+)
+from gateway.autoresearch.persistence import (
+    save_state_file as save_state_file,
+)
+from gateway.autoresearch.persistence import (
+    submit_stage_artifact_file as submit_stage_artifact_file,
 )
 from gateway.autoresearch.policy import (
     AutoresearchPolicy as AutoresearchPolicy,
@@ -915,6 +1082,9 @@ from gateway.autoresearch.transitions import (
     _canonical_iteration_experiment_id as _canonical_iteration_experiment_id,
 )
 from gateway.autoresearch.transitions import (
+    _clear_consumed_platform_runtime_receipts as _clear_consumed_platform_runtime_receipts,
+)
+from gateway.autoresearch.transitions import (
     _compact_json_block as _compact_json_block,
 )
 from gateway.autoresearch.transitions import (
@@ -948,6 +1118,9 @@ from gateway.autoresearch.transitions import (
     _requested_sessions_for_preflight as _requested_sessions_for_preflight,
 )
 from gateway.autoresearch.transitions import (
+    _require_autoresearch_worktree_root as _require_autoresearch_worktree_root,
+)
+from gateway.autoresearch.transitions import (
     _require_g0_platform_provenance as _require_g0_platform_provenance,
 )
 from gateway.autoresearch.transitions import (
@@ -969,7 +1142,13 @@ from gateway.autoresearch.transitions import (
     _validate_alpha_verification_price_preflight as _validate_alpha_verification_price_preflight,
 )
 from gateway.autoresearch.transitions import (
+    _validate_compute_fit_environment as _validate_compute_fit_environment,
+)
+from gateway.autoresearch.transitions import (
     _validate_consensus_history_universe_plans as _validate_consensus_history_universe_plans,
+)
+from gateway.autoresearch.transitions import (
+    _validate_debate_result as _validate_debate_result,
 )
 from gateway.autoresearch.transitions import (
     _validate_final_decision_artifact as _validate_final_decision_artifact,
@@ -978,16 +1157,43 @@ from gateway.autoresearch.transitions import (
     _validate_final_decision_memory_requirement as _validate_final_decision_memory_requirement,
 )
 from gateway.autoresearch.transitions import (
+    _validate_fix_workspace as _validate_fix_workspace,
+)
+from gateway.autoresearch.transitions import (
+    _validate_implementation_workspace as _validate_implementation_workspace,
+)
+from gateway.autoresearch.transitions import (
     _validate_no_consensus_completion as _validate_no_consensus_completion,
 )
 from gateway.autoresearch.transitions import (
     _validate_operator_precondition_infra_blocked_suspension as _validate_operator_precondition_infra_blocked_suspension,  # noqa: E501
 )
 from gateway.autoresearch.transitions import (
+    _validate_persisted_autoresearch_workspace_path as _validate_persisted_autoresearch_workspace_path,  # noqa: E501
+)
+from gateway.autoresearch.transitions import (
+    _validate_persisted_state_matches as _validate_persisted_state_matches,
+)
+from gateway.autoresearch.transitions import (
     _validate_price_scope_fix_result_commands as _validate_price_scope_fix_result_commands,
 )
 from gateway.autoresearch.transitions import (
+    _validate_review_result as _validate_review_result,
+)
+from gateway.autoresearch.transitions import (
+    _validate_state as _validate_state,
+)
+from gateway.autoresearch.transitions import (
+    advance_state as advance_state,
+)
+from gateway.autoresearch.transitions import (
     build_authoritative_state_reference as build_authoritative_state_reference,
+)
+from gateway.autoresearch.transitions import (
+    validate_artifact_workspace as validate_artifact_workspace,
+)
+from gateway.autoresearch.transitions import (
+    validate_state as validate_state,
 )
 from gateway.autoresearch.workspace import (
     _common_git_base as _common_git_base,
@@ -1030,159 +1236,6 @@ from gateway.autoresearch_readiness import (
 )
 
 
-def _compile_mempalace_codex_display_tool_ids(
-    tool_names: Sequence[str],
-    *,
-    namespace: str,
-) -> tuple[str, ...]:
-    return tuple(f"{namespace}.{tool_name}" for tool_name in tool_names)
-
-
-def _compile_codex_mcp_runtime_tool_ids(
-    tool_names: Sequence[str],
-    *,
-    namespace: str,
-) -> tuple[str, ...]:
-    return tuple(f"{namespace}__{tool_name}" for tool_name in tool_names)
-
-
-MEMPALACE_READONLY_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
-    MEMPALACE_READONLY_TOOL_NAMES,
-    namespace=MEMPALACE_READONLY_DISPLAY_NAMESPACE,
-)
-G2_CONTROL_DISPLAY_TOOL_IDS = _compile_mempalace_codex_display_tool_ids(
-    G2_CONTROL_TOOL_NAMES,
-    namespace=G2_CONTROL_SERVER_ID,
-)
-MEMPALACE_READONLY_RUNTIME_TOOL_IDS = _compile_codex_mcp_runtime_tool_ids(
-    MEMPALACE_READONLY_TOOL_NAMES,
-    namespace=MEMPALACE_READONLY_RUNTIME_NAMESPACE,
-)
-G2_CONTROL_RUNTIME_TOOL_IDS = _compile_codex_mcp_runtime_tool_ids(
-    G2_CONTROL_TOOL_NAMES,
-    namespace=G2_CONTROL_RUNTIME_NAMESPACE,
-)
-MAIN_ALLOWED_TOOL_IDS = (*G2_CONTROL_RUNTIME_TOOL_IDS, *MEMPALACE_READONLY_RUNTIME_TOOL_IDS)
-MAIN_OPENCLAW_TOOL_ALLOW_POLICY = MAIN_ALLOWED_TOOL_IDS
-
-
-def _validate_persisted_autoresearch_workspace_path(value: str, *, label: str) -> None:
-    """Apply a filesystem-free lexical policy to persisted workspace evidence."""
-    _validate_workspace_path(value, label=label)
-    workspace_path = Path(value)
-    if (
-        not workspace_path.is_absolute()
-        or value != str(workspace_path)
-        or any(part in {".", ".."} for part in workspace_path.parts)
-    ):
-        raise AutoresearchValidationError(f"{label} must be an absolute lexically canonical path")
-    try:
-        workspace_path.relative_to(DEFAULT_AUTORESEARCH_WORKTREE_ROOT)
-    except ValueError as exc:
-        raise AutoresearchValidationError(
-            f"{label} must be under the canonical autoresearch worktree root"
-        ) from exc
-
-
-def build_instruction_source_manifest(
-    *,
-    phase: Phase,
-    expected_artifact_type: ArtifactType,
-    target_agent_ids: Sequence[str],
-    target_repo_root: Path,
-    state: AutoresearchState,
-    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
-    receipts: Sequence[SourceReceipt],
-) -> InstructionSourceManifest:
-    return InstructionSourceManifest.from_context(
-        phase=phase,
-        expected_artifact_type=expected_artifact_type,
-        target_agent_ids=target_agent_ids,
-        target_repo_root=target_repo_root,
-        state=state,
-        state_path=state_path,
-        receipts=receipts,
-    )
-
-
-def instruction_source_manifest_sha256(
-    *,
-    phase: Phase,
-    expected_artifact_type: ArtifactType,
-    target_agent_ids: Sequence[str],
-    target_repo_root: Path,
-    state: AutoresearchState,
-    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
-    receipts: Sequence[SourceReceipt],
-) -> str:
-    return build_instruction_source_manifest(
-        phase=phase,
-        expected_artifact_type=expected_artifact_type,
-        target_agent_ids=target_agent_ids,
-        target_repo_root=target_repo_root,
-        state=state,
-        state_path=state_path,
-        receipts=receipts,
-    ).sha256()
-
-
-def expected_instruction_manifest_sha256(
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-    receipts: ReceiptCatalog,
-    *,
-    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
-) -> str:
-    target = _select_phase_target(state, policy)
-    required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
-    return instruction_source_manifest_sha256(
-        phase=state.phase,
-        expected_artifact_type=target.artifact_type,
-        target_agent_ids=target.agent_ids,
-        target_repo_root=_target_repo_root_for_state(state),
-        state=state,
-        state_path=state_path,
-        receipts=required_receipts,
-    )
-
-
-def _validate_compute_fit_environment(
-    compute_fit: ComputeFitArtifact,
-    target_repo: Path,
-) -> None:
-    compute_fit.validate()
-    if compute_fit.target not in {ComputeTarget.GPU, ComputeTarget.MIXED}:
-        return
-    snapshot = collect_compute_capability_snapshot(target_repo)
-    if snapshot.probe_errors:
-        raise AutoresearchValidationError(
-            "compute_fit selected GPU execution, but the capability probe failed: "
-            + "; ".join(snapshot.probe_errors)
-        )
-    if not snapshot.target_python_available:
-        raise AutoresearchValidationError(
-            "compute_fit selected GPU execution, but the target Quantipy virtualenv is unavailable"
-        )
-    if not snapshot.gpu_available or not snapshot.cuda_runtime_available:
-        raise AutoresearchValidationError(
-            "compute_fit selected GPU execution, but the capability probe found no "
-            "usable GPU/CUDA runtime"
-        )
-    available = set(snapshot.installed_gpu_packages)
-    if snapshot.cuda_runtime_available:
-        available.add("cuda_runtime")
-    missing = sorted(
-        dependency
-        for dependency in compute_fit.required_dependencies
-        if dependency not in available
-    )
-    if missing:
-        raise AutoresearchValidationError(
-            "compute_fit selected GPU execution with unavailable dependencies: "
-            + ", ".join(missing)
-        )
-
-
 def retry_external_verification(
     state: AutoresearchState,
     receipt: ExternalVerificationRetryReceipt,
@@ -1216,904 +1269,13 @@ def validate_authoritative_state_reference(
         raise AutoresearchValidationError("authoritative state reference domain is invalid")
     _validate_sha256(reference.state_sha256, label="authoritative state reference state_sha256")
     state_path = Path(reference.path).expanduser().resolve(strict=False)
-    state = load_state_file(state_path)
-    expected = build_authoritative_state_reference(state, state_path=state_path)
+    state = _persistence_module.load_state_file(state_path)
+    expected = _transitions_module.build_authoritative_state_reference(state, state_path=state_path)
     if expected != reference:
         raise AutoresearchValidationError(
             "authoritative state reference does not match the current state file"
         )
     return state
-
-
-def _validate_persisted_state_matches(
-    state: AutoresearchState,
-    *,
-    state_path: Path,
-) -> AutoresearchState:
-    """Reject an artifact handoff if its input state changed after dispatch."""
-    supplied_reference = build_authoritative_state_reference(state, state_path=state_path)
-    persisted_state = load_state_file(state_path)
-    persisted_reference = build_authoritative_state_reference(
-        persisted_state,
-        state_path=state_path,
-    )
-    if persisted_reference != supplied_reference:
-        raise AutoresearchValidationError(
-            "persisted state does not match the supplied authoritative state"
-        )
-    return persisted_state
-
-
-LOCAL_RECEIPT_PATHS: dict[str, Path] = {
-    "g2.autoresearch_skill": Path("gateway/agent_config/skills/autoresearch/SKILL.md"),
-    "g2.quantipy_methodology": Path("gateway/agent_config/skills/quantipy-methodology/SKILL.md"),
-    "g2.quantipy_data_contract": Path(
-        "gateway/agent_config/skills/quantipy-data-contract/SKILL.md"
-    ),
-}
-
-QUANTIPY_RECEIPT_PATHS: dict[str, Path] = {
-    "quantipy.agents": Path("AGENTS.md"),
-    "quantipy.skill.backend_python": Path(".agents/skills/backend-python/SKILL.md"),
-    "quantipy.skill.backtesting": Path(".agents/skills/backtesting/SKILL.md"),
-    "quantipy.skill.data_collection": Path(".agents/skills/data-collection/SKILL.md"),
-    "quantipy.skill.data_querying": Path(".agents/skills/data-querying/SKILL.md"),
-    "quantipy.skill.experiment_data": Path(".agents/skills/experiment-data/SKILL.md"),
-    "quantipy.agent.backend_python": Path(".codex/agents/backend-python.toml"),
-    "quantipy.agent.contrarian": Path(".codex/agents/contrarian.toml"),
-    "quantipy.agent.explorer": Path(".codex/agents/explorer.toml"),
-    "quantipy.agent.orchestrator": Path(".codex/agents/orchestrator.toml"),
-    "quantipy.agent.researcher": Path(".codex/agents/researcher.toml"),
-    "quantipy.agent.reviewer": Path(".codex/agents/reviewer.toml"),
-    "quantipy.agent.theorist": Path(".codex/agents/theorist.toml"),
-}
-
-PHASE_RECEIPTS: dict[Phase, tuple[str, ...]] = {
-    Phase.SETUP_CONTEXT: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.experiment_data",
-        "quantipy.skill.data_querying",
-        "quantipy.agent.explorer",
-        "quantipy.agent.researcher",
-    ),
-    Phase.DEBATE: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backend_python",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_collection",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.backend_python",
-        "quantipy.agent.contrarian",
-        "quantipy.agent.orchestrator",
-        "quantipy.agent.researcher",
-        "quantipy.agent.reviewer",
-        "quantipy.agent.theorist",
-    ),
-    Phase.CONSENSUS: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_collection",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.contrarian",
-        "quantipy.agent.researcher",
-        "quantipy.agent.reviewer",
-        "quantipy.agent.theorist",
-    ),
-    Phase.IMPLEMENTATION: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backend_python",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.backend_python",
-        "quantipy.agent.orchestrator",
-    ),
-    Phase.VERIFICATION: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.reviewer",
-    ),
-    Phase.REVIEW: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.contrarian",
-        "quantipy.agent.reviewer",
-    ),
-    Phase.FIX_TEST: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-        "quantipy.skill.backend_python",
-        "quantipy.skill.backtesting",
-        "quantipy.skill.data_querying",
-        "quantipy.skill.experiment_data",
-        "quantipy.agent.backend_python",
-        "quantipy.agent.orchestrator",
-        "quantipy.agent.reviewer",
-    ),
-    Phase.DECISION_LOG: (
-        "g2.autoresearch_skill",
-        "g2.quantipy_methodology",
-        "g2.quantipy_data_contract",
-        "quantipy.agents",
-    ),
-    Phase.REPEAT: (
-        "g2.autoresearch_skill",
-        "quantipy.agents",
-    ),
-}
-
-
-def _canonical_receipt_path(path: Path) -> Path:
-    try:
-        canonical = path.expanduser().resolve(strict=True)
-    except OSError as exc:
-        raise AutoresearchReceiptError(f"missing required receipt source: {path}") from exc
-    if not canonical.is_file():
-        raise AutoresearchReceiptError(f"missing required receipt source: {canonical}")
-    return canonical
-
-
-def _load_receipt(receipt_id: str, path: Path) -> SourceReceipt:
-    canonical = _canonical_receipt_path(path)
-    try:
-        content = canonical.read_bytes()
-    except OSError as exc:
-        raise AutoresearchReceiptError(f"unreadable required receipt source: {canonical}") from exc
-    return SourceReceipt(
-        receipt_id=receipt_id,
-        path=canonical,
-        sha256=hashlib.sha256(content).hexdigest(),
-    )
-
-
-def build_receipt_catalog(quantipy_root: Path = DEFAULT_QUANTIPY_ROOT) -> ReceiptCatalog:
-    receipts: dict[str, SourceReceipt] = {}
-    for receipt_id, path in LOCAL_RECEIPT_PATHS.items():
-        receipts[receipt_id] = _load_receipt(receipt_id, G2_OPENCLAW_REPO_ROOT / path)
-    for receipt_id, relative_path in QUANTIPY_RECEIPT_PATHS.items():
-        receipts[receipt_id] = _load_receipt(receipt_id, quantipy_root / relative_path)
-    return ReceiptCatalog(receipts=receipts)
-
-
-def _load_json(path: Path) -> Mapping[str, object]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise AutoresearchConfigError(f"missing config file: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise AutoresearchConfigError(f"invalid JSON in config file: {path}") from exc
-    return _ensure_mapping(raw, label=str(path))
-
-
-def _agent_policy_from_json(
-    agent_map: Mapping[str, Mapping[str, object]], agent_id: str
-) -> StageAgentPolicy:
-    try:
-        raw = agent_map[agent_id]
-    except KeyError as exc:
-        raise AutoresearchConfigError(f"missing configured agent: {agent_id}") from exc
-    model = _ensure_mapping(raw.get("model"), label=f"{agent_id}.model")
-    skills = _require_string_list(raw, "skills")
-    return StageAgentPolicy(
-        agent_id=agent_id,
-        model=_require_str(model, "primary"),
-        reasoning=_require_str(raw, "thinkingDefault"),
-        skills=skills,
-    )
-
-
-def _codex_agent_model(model: str) -> str:
-    prefix = "openai/"
-    if not model.startswith(prefix):
-        raise AutoresearchConfigError(f"stage model must use OpenAI provider ref: {model}")
-    return model.removeprefix(prefix)
-
-
-def _load_codex_agent_toml(path: Path) -> Mapping[str, object]:
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise AutoresearchConfigError(f"missing native Codex stage agent file: {path}") from exc
-    except tomllib.TOMLDecodeError as exc:
-        raise AutoresearchConfigError(f"invalid native Codex stage agent TOML: {path}") from exc
-    return _ensure_mapping(data, label=str(path))
-
-
-def _validate_codex_native_stage_agents(policy: AutoresearchPolicy) -> None:
-    for stage in (
-        policy.context_curator,
-        *policy.debate_agents,
-        policy.consensus,
-        policy.implementer,
-        policy.reviewer,
-        policy.fixer,
-    ):
-        path = G2_OPENCLAW_REPO_ROOT / ".codex" / "agents" / f"{stage.agent_id}.toml"
-        data = _load_codex_agent_toml(path)
-        if _require_str(data, "name") != stage.agent_id:
-            raise AutoresearchConfigError(
-                f"native Codex stage agent {path} must be named {stage.agent_id}"
-            )
-        if _require_str(data, "model") != _codex_agent_model(stage.model):
-            raise AutoresearchConfigError(
-                f"native Codex stage agent {stage.agent_id} must use {stage.model}"
-            )
-        if _require_str(data, "model_reasoning_effort") != stage.reasoning:
-            raise AutoresearchConfigError(
-                f"native Codex stage agent {stage.agent_id} must use {stage.reasoning} reasoning"
-            )
-        if "mcp_servers" in data:
-            raise AutoresearchConfigError(
-                f"native Codex stage agent {stage.agent_id} must not override inherited MCP servers"
-            )
-
-
-def load_autoresearch_policy(
-    config_path: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
-) -> AutoresearchPolicy:
-    config = _load_json(config_path)
-    plugins = _ensure_mapping(config.get("plugins"), label="plugins")
-    try:
-        plugin_allow = _require_string_list(plugins, "allow")
-    except AutoresearchValidationError as exc:
-        raise AutoresearchConfigError("plugins.allow must explicitly include codex") from exc
-    if "codex" not in plugin_allow:
-        raise AutoresearchConfigError("plugins.allow must explicitly include codex")
-    agents = _ensure_mapping(config.get("agents"), label="agents")
-    defaults = _ensure_mapping(agents.get("defaults"), label="agents.defaults")
-    compaction = _ensure_mapping(defaults.get("compaction"), label="agents.defaults.compaction")
-    if _require_str(compaction, "mode") != "default":
-        raise AutoresearchConfigError(
-            "agents.defaults.compaction.mode must be default for the Codex OAuth route"
-        )
-    if defaults.get("maxConcurrent") != 2:
-        raise AutoresearchConfigError(
-            "agents.defaults.maxConcurrent must be 2 to cap the main lane with PM headroom"
-        )
-    default_subagents = _ensure_mapping(
-        defaults.get("subagents"), label="agents.defaults.subagents"
-    )
-    if default_subagents.get("maxConcurrent") != 1:
-        raise AutoresearchConfigError(
-            "agents.defaults.subagents.maxConcurrent must be 1 to serialize heavy Codex stages"
-        )
-    if "maxChildrenPerAgent" in default_subagents:
-        raise AutoresearchConfigError(
-            "agents.defaults.subagents.maxChildrenPerAgent must not be configured"
-        )
-    models = _ensure_mapping(config.get("models"), label="models")
-    providers = _ensure_mapping(models.get("providers"), label="providers")
-    openai_provider = _ensure_mapping(providers.get("openai"), label="providers.openai")
-    if _require_str(openai_provider, "api") != "openai-responses":
-        raise AutoresearchConfigError("providers.openai.api must be openai-responses")
-    agent_runtime = _ensure_mapping(
-        openai_provider.get("agentRuntime"), label="providers.openai.agentRuntime"
-    )
-    if _require_str(agent_runtime, "id") != "codex":
-        raise AutoresearchConfigError("providers.openai.agentRuntime.id must be codex")
-    openai_models_raw = openai_provider.get("models")
-    if not isinstance(openai_models_raw, Sequence) or isinstance(openai_models_raw, str | bytes):
-        raise AutoresearchConfigError("providers.openai.models must be a list")
-    model_caps: dict[str, bool] = {}
-    for item in openai_models_raw:
-        data = _ensure_mapping(item, label="provider_model")
-        model_caps[_require_str(data, "id")] = _require_bool(data, "reasoning")
-    for required_model in ("gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra"):
-        if model_caps.get(required_model) is not True:
-            raise AutoresearchConfigError(f"openai/{required_model} must exist with reasoning=true")
-
-    agent_list_raw = agents.get("list")
-    if not isinstance(agent_list_raw, Sequence) or isinstance(agent_list_raw, str | bytes):
-        raise AutoresearchConfigError("agents.list must be a list")
-    agent_map: dict[str, Mapping[str, object]] = {}
-    for item in agent_list_raw:
-        data = _ensure_mapping(item, label="agent")
-        agent_map[_require_str(data, "id")] = data
-
-    policy = AutoresearchPolicy(
-        pm=_agent_policy_from_json(agent_map, "autoresearch-pm"),
-        main_interface=_agent_policy_from_json(agent_map, "main"),
-        context_curator=_agent_policy_from_json(agent_map, "context_curator"),
-        debate_agents=tuple(
-            _agent_policy_from_json(agent_map, agent_id)
-            for agent_id in (
-                "debater_microstructure",
-                "debater_data",
-                "debater_skeptic",
-                "debater_theory",
-                "debater_implementation",
-            )
-        ),
-        consensus=_agent_policy_from_json(agent_map, "consensus_arbiter"),
-        implementer=_agent_policy_from_json(agent_map, "implementer"),
-        reviewer=_agent_policy_from_json(agent_map, "reviewer"),
-        fixer=_agent_policy_from_json(agent_map, "fixer"),
-    )
-    _validate_policy(policy, agent_map, config)
-    return policy
-
-
-def _validate_policy(
-    policy: AutoresearchPolicy,
-    agent_map: Mapping[str, Mapping[str, object]],
-    config: Mapping[str, object],
-) -> None:
-    if policy.main_interface.model != "openai/gpt-5.4" or policy.main_interface.reasoning != "high":
-        raise AutoresearchConfigError("main must be openai/gpt-5.4 with high reasoning")
-    if tuple(policy.main_interface.skills) != ("mempalace-readonly",):
-        raise AutoresearchConfigError("main must load exactly mempalace-readonly")
-    main_raw = agent_map["main"]
-    if main_raw.get("subagents") is not None:
-        raise AutoresearchConfigError("main must not declare a subagent allowlist")
-    main_tools = _ensure_mapping(main_raw.get("tools"), label="main.tools")
-    if main_tools.get("profile") != "minimal":
-        raise AutoresearchConfigError("main.tools.profile must be minimal")
-    main_allowed_tool_list = _require_string_list(main_tools, "allow")
-    if tuple(main_allowed_tool_list) != MAIN_OPENCLAW_TOOL_ALLOW_POLICY:
-        raise AutoresearchConfigError(
-            "main must allow exactly the direct Codex MCP control/read-only tools"
-        )
-    try:
-        plugins = _ensure_mapping(config.get("plugins"), label="plugins")
-        entries = _ensure_mapping(plugins.get("entries"), label="plugins.entries")
-        codex = _ensure_mapping(entries.get("codex"), label="plugins.entries.codex")
-        plugin_config = _ensure_mapping(codex.get("config"), label="plugins.entries.codex.config")
-    except AutoresearchValidationError as exc:
-        raise AutoresearchConfigError(str(exc)) from exc
-    if "nativeToolSurfaceEnabled" in plugin_config:
-        raise AutoresearchConfigError(
-            "nativeToolSurfaceEnabled is not supported by the current Codex plugin schema"
-        )
-    if "codexDynamicToolsExclude" in plugin_config:
-        raise AutoresearchConfigError(
-            "codexDynamicToolsExclude must not be used as a native Codex tool guard"
-        )
-    main_denied_tool_list = set(_require_string_list(main_tools, "deny"))
-    required_main_denies = {
-        "exec",
-        "sessions_spawn",
-        "sessions_yield",
-        "sessions_send",
-        "sessions_list",
-        "sessions_history",
-        "agents_list",
-    }
-    if not required_main_denies <= main_denied_tool_list:
-        raise AutoresearchConfigError("main must deny native exec and OpenClaw session/agent tools")
-    if policy.pm.model != "openai/gpt-5.6-sol" or policy.pm.reasoning != "high":
-        raise AutoresearchConfigError("PM must be openai/gpt-5.6-sol with high reasoning")
-    if (
-        policy.context_curator.model != "openai/gpt-5.4"
-        or policy.context_curator.reasoning != "high"
-    ):
-        raise AutoresearchConfigError("context_curator must be openai/gpt-5.4 with high reasoning")
-
-    expected_debate_models = {
-        "debater_microstructure": "openai/gpt-5.5",
-        "debater_data": "openai/gpt-5.6-terra",
-        "debater_skeptic": "openai/gpt-5.5",
-        "debater_theory": "openai/gpt-5.4",
-        "debater_implementation": "openai/gpt-5.4",
-    }
-    for agent in policy.debate_agents:
-        if agent.reasoning != "high":
-            raise AutoresearchConfigError(f"{agent.agent_id} must use high reasoning")
-        if agent.model != expected_debate_models[agent.agent_id]:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must be {expected_debate_models[agent.agent_id]} "
-                "with high reasoning"
-            )
-
-    if policy.consensus.model != "openai/gpt-5.6-sol" or policy.consensus.reasoning != "high":
-        raise AutoresearchConfigError(
-            "consensus_arbiter must be openai/gpt-5.6-sol with high reasoning"
-        )
-    for agent in (policy.implementer, policy.fixer):
-        if agent.model != "openai/gpt-5.4" or agent.reasoning != "high":
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must be openai/gpt-5.4 with high reasoning"
-            )
-    if policy.reviewer.model != "openai/gpt-5.6-sol" or policy.reviewer.reasoning != "high":
-        raise AutoresearchConfigError("reviewer must be exactly one openai/gpt-5.6-sol high agent")
-    if policy.reviewer.agent_id != "reviewer":
-        raise AutoresearchConfigError("reviewer stage must be configured as agent id 'reviewer'")
-
-    if tuple(policy.pm.skills) != ("mempalace-readonly", "autoresearch"):
-        raise AutoresearchConfigError("PM must load exactly mempalace-readonly and autoresearch")
-    pm_raw = agent_map["autoresearch-pm"]
-    pm_tools = _ensure_mapping(pm_raw.get("tools"), label="autoresearch-pm.tools")
-    pm_denied_tool_list = _require_string_list(pm_tools, "deny")
-    if tuple(pm_denied_tool_list) != PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS:
-        raise AutoresearchConfigError(
-            "PM must deny OpenClaw/session discovery and delegation tools "
-            "for native Codex delegation"
-        )
-    if pm_raw.get("subagents") is not None:
-        raise AutoresearchConfigError("PM must not declare OpenClaw subagents")
-    _validate_codex_app_server_sandbox(config)
-    _validate_mempalace_server_split(config, policy)
-    _validate_codex_native_stage_agents(policy)
-    for agent in (
-        policy.context_curator,
-        *policy.debate_agents,
-        policy.consensus,
-        policy.implementer,
-        policy.reviewer,
-        policy.fixer,
-    ):
-        if tuple(agent.skills) != (
-            "mempalace-readonly",
-            "quantipy-methodology",
-            "quantipy-data-contract",
-        ):
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must load exactly mempalace-readonly, "
-                "quantipy-methodology, and quantipy-data-contract"
-            )
-        if agent_map[agent.agent_id].get("subagents") is not None:
-            raise AutoresearchConfigError(f"{agent.agent_id} must not declare OpenClaw subagents")
-        if agent_map[agent.agent_id].get("tools") is not None:
-            raise AutoresearchConfigError(
-                f"{agent.agent_id} must not carry MemPalace write-tool policy remnants"
-            )
-
-
-def _validate_codex_app_server_sandbox(config: Mapping[str, object]) -> None:
-    try:
-        plugins = _ensure_mapping(config.get("plugins"), label="plugins")
-        entries = _ensure_mapping(plugins.get("entries"), label="plugins.entries")
-        codex = _ensure_mapping(entries.get("codex"), label="plugins.entries.codex")
-        plugin_config = _ensure_mapping(codex.get("config"), label="plugins.entries.codex.config")
-        app_server = _ensure_mapping(
-            plugin_config.get("appServer"),
-            label="plugins.entries.codex.config.appServer",
-        )
-    except AutoresearchValidationError as exc:
-        raise AutoresearchConfigError(str(exc)) from exc
-    if app_server.get("sandbox") != "workspace-write":
-        raise AutoresearchConfigError("Codex app-server sandbox must be workspace-write")
-    if app_server.get("defaultWorkspaceDir") != str(DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT):
-        raise AutoresearchConfigError(
-            "Codex app-server defaultWorkspaceDir must be "
-            f"{DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT}"
-        )
-    if app_server.get("networkProxy") is not None:
-        raise AutoresearchConfigError(
-            "Codex app-server networkProxy must not be configured; pinned Codex 0.144.3 "
-            "rejects the plugin-generated :project_roots permissions profile"
-        )
-
-
-def _validate_mempalace_server_split(
-    config: Mapping[str, object],
-    policy: AutoresearchPolicy,
-) -> None:
-    try:
-        mcp = _ensure_mapping(config.get("mcp"), label="mcp")
-        servers = _ensure_mapping(mcp.get("servers"), label="mcp.servers")
-        if set(servers) != {MEMPALACE_READONLY_SERVER_ID, G2_CONTROL_SERVER_ID}:
-            raise AutoresearchConfigError(
-                "mcp.servers must expose exactly mempalace-readonly and g2-control"
-            )
-        readonly_server = _ensure_mapping(
-            servers.get(MEMPALACE_READONLY_SERVER_ID),
-            label=f"mcp.servers.{MEMPALACE_READONLY_SERVER_ID}",
-        )
-        control_server = _ensure_mapping(
-            servers.get(G2_CONTROL_SERVER_ID),
-            label=f"mcp.servers.{G2_CONTROL_SERVER_ID}",
-        )
-        _validate_mempalace_server(
-            readonly_server,
-            server_id=MEMPALACE_READONLY_SERVER_ID,
-            expected_agents=(
-                policy.main_interface.agent_id,
-                policy.pm.agent_id,
-                *policy.all_stage_agent_ids,
-            ),
-            expected_args_prefix=(MEMPALACE_READONLY_WRAPPER_BASENAME, "--palace"),
-        )
-        _validate_mempalace_server(
-            control_server,
-            server_id=G2_CONTROL_SERVER_ID,
-            expected_agents=(policy.main_interface.agent_id,),
-            expected_args_prefix=("-m", G2_CONTROL_MODULE),
-        )
-    except AutoresearchValidationError as exc:
-        raise AutoresearchConfigError(str(exc)) from exc
-
-
-def _validate_mempalace_server(
-    server: Mapping[str, object],
-    *,
-    server_id: str,
-    expected_agents: tuple[str, ...],
-    expected_args_prefix: tuple[str, ...],
-) -> None:
-    _require_str(server, "command")
-    args = _require_string_sequence(server.get("args"), label=f"mcp.servers.{server_id}.args")
-    codex = _ensure_mapping(server.get("codex"), label=f"mcp.servers.{server_id}.codex")
-    agents = _require_string_list(codex, "agents")
-    if tuple(agents) != expected_agents:
-        raise AutoresearchConfigError(
-            f"mcp.servers.{server_id}.codex.agents must exactly match {expected_agents}"
-        )
-    if server_id == G2_CONTROL_SERVER_ID:
-        if tuple(args) != expected_args_prefix:
-            raise AutoresearchConfigError(
-                "mcp.servers.g2-control.args must be ['-m', 'gateway.g2_control_mcp_server']"
-            )
-        if codex.get("defaultToolsApprovalMode") != "approve":
-            raise AutoresearchConfigError(
-                "mcp.servers.g2-control.codex.defaultToolsApprovalMode must be approve"
-            )
-        return
-    if len(args) != 3 or args[1] != "--palace":
-        raise AutoresearchConfigError(
-            "mcp.servers.mempalace-readonly.args must be ['<wrapper>', '--palace', '<path>']"
-        )
-    readonly_entrypoint = args[0].strip()
-    if not readonly_entrypoint:
-        raise AutoresearchConfigError(
-            "mcp.servers.mempalace-readonly.args[0] must be a wrapper path"
-        )
-    if readonly_entrypoint != MEMPALACE_CONFIG_PLACEHOLDER and (
-        Path(readonly_entrypoint).name != MEMPALACE_READONLY_WRAPPER_BASENAME
-    ):
-        raise AutoresearchConfigError(
-            "mcp.servers.mempalace-readonly.args[0] must point to "
-            f"{MEMPALACE_READONLY_WRAPPER_BASENAME}"
-        )
-    if not args[2].strip():
-        raise AutoresearchConfigError(
-            "mcp.servers.mempalace-readonly.args[2] must be a palace path"
-        )
-
-
-def _validate_state(
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None = None,
-) -> None:
-    if validation_context is not None:
-        validation_context.validate_for_state(state)
-    if state.iteration < 1:
-        raise AutoresearchValidationError("iteration must be >= 1")
-    if state.suspended:
-        decision = state.final_decision
-        if state.phase is not Phase.REPEAT or decision is None:
-            raise AutoresearchValidationError(
-                "suspended autoresearch state must be in repeat phase with a final decision"
-            )
-        if decision.decision is not FinalDecision.INFRA_BLOCKED:
-            raise AutoresearchValidationError(
-                "suspended autoresearch state requires final_decision=INFRA_BLOCKED"
-            )
-        if not state.suspension_reason or not state.suspension_reason.strip():
-            raise AutoresearchValidationError(
-                "suspended autoresearch state requires suspension_reason"
-            )
-        if (
-            decision.memory_write_required
-            or state.memory_written
-            or state.memory_verification_receipt is not None
-        ):
-            raise AutoresearchValidationError(
-                "suspended autoresearch state cannot require or record a memory write"
-            )
-    elif state.suspension_reason is not None:
-        raise AutoresearchValidationError("suspension_reason requires suspended=true")
-    if state.consensus_retry_count not in (0, 1):
-        raise AutoresearchValidationError("consensus_retry_count must be 0 or 1")
-    if state.context_packet is not None and state.setup is None:
-        raise AutoresearchValidationError("context_packet requires setup first")
-    if state.context_packet is not None and state.mode is None:
-        raise AutoresearchValidationError("mode must be explicit after a context_packet exists")
-    if state.context_packet is not None and state.mode is not state.context_packet.research_mode:
-        raise AutoresearchValidationError("state mode must match context_packet research_mode")
-    _validate_external_verification_retry_receipt(state, validation_context)
-    if state.debate_rounds and state.context_packet is None:
-        raise AutoresearchValidationError("debate history requires a context_packet")
-    if state.consensus_history and state.latest_debate is None:
-        raise AutoresearchValidationError("consensus history requires a debate_result")
-    _validate_consensus_history_universe_plans(state)
-    if (
-        state.suspended
-        and state.mode is ResearchMode.DATA_INFRA_G0
-        and state.latest_verification is not None
-    ):
-        raise AutoresearchValidationError(
-            "DATA_INFRA_G0 remediation must end in non-suspending DISCARD"
-        )
-    _validate_alpha_universe_chain(state)
-    if state.memory_written and state.final_decision is None:
-        raise AutoresearchValidationError("memory_written cannot be true before final_decision")
-    if (
-        state.memory_written
-        and state.final_decision is not None
-        and not state.final_decision.memory_write_required
-    ):
-        raise AutoresearchValidationError(
-            "memory_written is invalid when final_decision.memory_write_required=false"
-        )
-    if state.memory_written and state.memory_verification_receipt is None:
-        raise AutoresearchValidationError("memory_written requires a memory_verification_receipt")
-    if not state.memory_written and state.memory_verification_receipt is not None:
-        raise AutoresearchValidationError(
-            "memory_verification_receipt requires memory_written=true"
-        )
-    if (
-        state.memory_verification_receipt is not None
-        and state.final_decision is not None
-        and state.memory_verification_receipt.experiment_id != state.final_decision.experiment_id
-    ):
-        raise AutoresearchValidationError("memory receipt experiment_id must match final_decision")
-    if state.final_decision is not None:
-        decision = state.final_decision
-        _validate_final_decision_memory_requirement(state, decision)
-        _validate_no_consensus_completion(state)
-        _validate_operator_precondition_infra_blocked_suspension(state)
-        is_operator_infrastructure_suspension = _is_operator_infrastructure_suspension_state(state)
-        if decision.decision is FinalDecision.NO_CONSENSUS:
-            if decision.memory_write_required:
-                raise AutoresearchValidationError(
-                    "NO_CONSENSUS requires final_decision.memory_write_required=false"
-                )
-            if state.memory_verification_receipt is not None:
-                raise AutoresearchValidationError(
-                    "NO_CONSENSUS must not have a memory_verification_receipt"
-                )
-        if not is_operator_infrastructure_suspension:
-            _validate_final_decision_artifact(decision, state, validation_context)
-        if not decision.memory_write_required and not _is_authorized_no_memory_final_decision(
-            state
-        ):
-            raise AutoresearchValidationError(
-                "final_decision.memory_write_required=false requires an authorized "
-                "no-memory terminal path"
-            )
-    if state.implementation_result and (
-        state.latest_consensus is None
-        or state.latest_consensus.status is not ConsensusStatus.MAJORITY
-    ):
-        raise AutoresearchValidationError("implementation_result requires a majority consensus")
-    if state.implementation_result:
-        _validate_persisted_autoresearch_workspace_path(
-            state.implementation_result.workspace_path,
-            label="implementation_result workspace_path",
-        )
-        _validate_implementation_workspace(state, state.implementation_result)
-    if state.fix_history and state.implementation_result is None:
-        raise AutoresearchValidationError("fix history requires an implementation_result")
-    for fix in state.fix_history:
-        fix.validate()
-        _validate_persisted_autoresearch_workspace_path(
-            fix.workspace_path,
-            label="fix_history workspace_path",
-        )
-        if state.implementation_result is not None and (
-            fix.workspace_path != state.implementation_result.workspace_path
-        ):
-            raise AutoresearchValidationError(
-                "fix_history workspace_path must exactly match implementation_result workspace_path"
-            )
-    if state.verification_history and state.implementation_result is None:
-        raise AutoresearchValidationError("verification history requires an implementation_result")
-    if state.review_history and not state.verification_history:
-        raise AutoresearchValidationError("review history requires a verification_result")
-    if state.pending_fix_trigger is not None and state.phase is not Phase.FIX_TEST:
-        raise AutoresearchValidationError("pending_fix_trigger is only valid during fix_test")
-    if state.final_decision is not None and state.phase is not Phase.REPEAT:
-        raise AutoresearchValidationError("final_decision requires repeat phase")
-    for debate in state.debate_rounds:
-        _validate_debate_result(debate, policy, mode=state.mode, context=state.context_packet)
-    for verification in state.verification_history:
-        verification.validate(
-            mode=state.mode,
-        )
-    for review in state.review_history:
-        _validate_review_result(review, policy)
-    if state.phase is Phase.DEBATE and state.context_packet is None:
-        raise AutoresearchValidationError("debate phase requires a context_packet")
-    if state.phase is Phase.CONSENSUS and state.latest_debate is None:
-        raise AutoresearchValidationError("consensus phase requires a debate_result")
-    if state.phase is Phase.IMPLEMENTATION and (
-        state.latest_consensus is None
-        or state.latest_consensus.status is not ConsensusStatus.MAJORITY
-    ):
-        raise AutoresearchValidationError("implementation phase requires a majority consensus")
-    if state.phase is Phase.IMPLEMENTATION and _is_operator_precondition_consensus(
-        state.latest_consensus
-    ):
-        raise AutoresearchValidationError(
-            "operator-precondition consensus must route to decision_log, not implementation"
-        )
-    if state.phase is Phase.VERIFICATION and state.implementation_result is None:
-        raise AutoresearchValidationError("verification phase requires an implementation_result")
-    if state.phase is Phase.REVIEW:
-        if not state.verification_history:
-            raise AutoresearchValidationError("review phase requires a verification_result")
-        if (
-            state.latest_verification is None
-            or state.latest_verification.status is not VerificationStatus.PASS
-        ):
-            raise AutoresearchValidationError("review phase requires a passing verification_result")
-    if state.phase is Phase.FIX_TEST:
-        if state.pending_fix_trigger is None:
-            raise AutoresearchValidationError("fix_test phase requires pending_fix_trigger")
-        if state.pending_fix_trigger is FixTriggerPhase.VERIFICATION and (
-            state.latest_verification is None
-            or state.latest_verification.status is VerificationStatus.PASS
-        ):
-            raise AutoresearchValidationError(
-                "verification-triggered fix_test requires a failing verification_result"
-            )
-        if state.pending_fix_trigger is FixTriggerPhase.REVIEW:
-            latest_review = state.latest_review
-            if latest_review is None or (
-                latest_review.verdict is not ReviewVerdict.FAIL
-                and not latest_review.critical_issues
-            ):
-                raise AutoresearchValidationError(
-                    "review-triggered fix_test requires a failing review_result"
-                )
-    if state.phase is Phase.DECISION_LOG and (
-        state.latest_consensus is None
-        and state.latest_review is None
-        and state.latest_verification is None
-    ):
-        raise AutoresearchValidationError("decision_log phase requires prior artifacts")
-    if state.phase is Phase.REPEAT and state.final_decision is None:
-        raise AutoresearchValidationError("repeat phase requires final_decision")
-
-
-def validate_state(
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None = None,
-) -> None:
-    _validate_state(state, policy, validation_context)
-
-
-def _validate_debate_result(
-    debate: DebateResultArtifact,
-    policy: AutoresearchPolicy,
-    *,
-    mode: ResearchMode | None = None,
-    context: ContextPacketArtifact | None = None,
-    target_repo: Path | None = None,
-    require_compute_fit: bool = False,
-) -> None:
-    expected_ids = set(policy.debate_agent_ids)
-    actual_ids = {submission.agent_id for submission in debate.submissions}
-    if actual_ids != expected_ids:
-        raise AutoresearchValidationError(
-            "debate_result must contain exactly the configured five debate agents"
-        )
-    if mode is ResearchMode.ALPHA_RESEARCH and context is not None:
-        burned = set(context.burned_theory_families)
-        for submission in debate.submissions:
-            family = _normalise_identifier(submission.theory_family)
-            if family in burned and not submission.materially_new_evidence:
-                raise AutoresearchValidationError(
-                    "alpha debate theory_family is burned and requires materially_new_evidence"
-                )
-    for submission in debate.submissions:
-        if require_compute_fit and submission.compute_fit is None:
-            raise AutoresearchValidationError(
-                "new debate submissions must include a compute_fit artifact"
-            )
-        if submission.compute_fit is not None:
-            submission.compute_fit.validate()
-            if target_repo is not None:
-                _validate_compute_fit_environment(submission.compute_fit, target_repo)
-
-
-def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPolicy) -> None:
-    if review.reviewer_agent_id != policy.reviewer.agent_id:
-        raise AutoresearchValidationError(
-            "review_result must come from the single configured reviewer"
-        )
-
-
-def _validate_implementation_workspace(
-    state: AutoresearchState,
-    artifact: ImplementationResultArtifact,
-    *,
-    require_compute_fit: bool = False,
-) -> None:
-    artifact.validate()
-    if require_compute_fit and artifact.compute_fit is None:
-        raise AutoresearchValidationError(
-            "new implementation_result artifacts must include a compute_fit artifact"
-        )
-    if artifact.compute_fit is not None:
-        artifact.compute_fit.validate()
-        if state.setup is not None:
-            _validate_compute_fit_environment(
-                artifact.compute_fit,
-                Path(state.setup.target_repo),
-            )
-    _validate_persisted_autoresearch_workspace_path(
-        artifact.workspace_path,
-        label="implementation_result workspace_path",
-    )
-    if state.setup is None:
-        return
-    workspace_path = Path(artifact.workspace_path).expanduser().resolve()
-    target_repo = Path(state.setup.target_repo).expanduser().resolve()
-    if workspace_path == target_repo:
-        raise AutoresearchValidationError(
-            "implementation_result workspace_path must be an isolated worktree, "
-            "not the main target_repo"
-        )
-
-
-def _validate_fix_workspace(state: AutoresearchState, artifact: FixResultArtifact) -> None:
-    artifact.validate()
-    _validate_price_scope_fix_result_commands(state, artifact)
-    _validate_persisted_autoresearch_workspace_path(
-        artifact.workspace_path,
-        label="fix_result workspace_path",
-    )
-    if state.implementation_result is None:
-        raise AutoresearchValidationError("fix_result requires implementation_result")
-    _validate_persisted_autoresearch_workspace_path(
-        state.implementation_result.workspace_path,
-        label="implementation_result workspace_path",
-    )
-    if artifact.workspace_path != state.implementation_result.workspace_path:
-        raise AutoresearchValidationError(
-            "fix_result workspace_path must match implementation_result workspace_path"
-        )
-    candidate_implementation = replace(
-        state.implementation_result,
-        commit_sha=artifact.commit_sha,
-        price_hydration_scope_preflight=(
-            artifact.price_hydration_scope_preflight
-            if artifact.price_hydration_scope_preflight is not None
-            else state.implementation_result.price_hydration_scope_preflight
-        ),
-    )
-    _validate_implementation_workspace(
-        state,
-        candidate_implementation,
-    )
-
-
-def _require_autoresearch_worktree_root() -> Path:
-    root = _require_strict_canonical_workspace_path(
-        str(DEFAULT_AUTORESEARCH_WORKTREE_ROOT),
-        label="autoresearch worktree root",
-    )
-    _require_private_directory(root, label="autoresearch worktree root")
-    return root
 
 
 def state_has_legacy_autoresearch_workspace(state: AutoresearchState) -> bool:
@@ -2127,7 +1289,7 @@ def state_has_legacy_autoresearch_workspace(state: AutoresearchState) -> bool:
             path = Path(value).expanduser().resolve(strict=False)
         except RuntimeError:
             return True
-        if _path_under_root(path, LEGACY_AUTORESEARCH_WORKTREE_ROOT):
+        if _path_under_root(path, _constants.LEGACY_AUTORESEARCH_WORKTREE_ROOT):
             return True
     return False
 
@@ -2175,131 +1337,6 @@ def provision_quantipy_experiment_runs_root() -> Path:
     return root
 
 
-def validate_artifact_workspace(
-    state: AutoresearchState,
-    artifact: ImplementationResultArtifact | FixResultArtifact,
-) -> None:
-    """Mechanically validate a committed artifact at the CLI advancement boundary.
-
-    This intentionally performs filesystem and Git checks only at artifact
-    advancement; deserializing persisted state remains pure and portable.
-    """
-    artifact.validate()
-    if state.setup is None:
-        raise AutoresearchValidationError("artifact workspace validation requires setup")
-    workspace = _require_strict_canonical_workspace_path(
-        artifact.workspace_path,
-        label="artifact workspace_path",
-    )
-    worktree_root = _require_autoresearch_worktree_root()
-    if isinstance(artifact, FixResultArtifact):
-        if state.implementation_result is None:
-            raise AutoresearchValidationError("fix_result requires implementation_result")
-        state.implementation_result.validate()
-        implementation_workspace = _require_strict_canonical_workspace_path(
-            state.implementation_result.workspace_path,
-            label="persisted implementation_result workspace_path",
-        )
-        _require_workspace_under_autoresearch_worktree_root(
-            implementation_workspace,
-            label="persisted implementation_result workspace_path",
-            worktree_root=worktree_root,
-        )
-        _require_workspace_under_autoresearch_worktree_root(
-            workspace,
-            label="fix_result workspace_path",
-            worktree_root=worktree_root,
-        )
-        if artifact.workspace_path != state.implementation_result.workspace_path:
-            raise AutoresearchValidationError(
-                "fix_result workspace_path must exactly match implementation_result workspace_path"
-            )
-        if workspace != implementation_workspace:
-            raise AutoresearchValidationError(
-                "fix_result workspace_path must identify the persisted implementation worktree"
-            )
-        _validate_fix_workspace(state, artifact)
-    else:
-        _require_workspace_under_autoresearch_worktree_root(
-            workspace,
-            label="implementation_result workspace_path",
-            worktree_root=worktree_root,
-        )
-        _validate_implementation_workspace(state, artifact)
-
-    workspace = _require_isolated_git_clone_root(workspace, label="artifact workspace_path")
-    target_checkout = _require_git_worktree_root(
-        Path(state.setup.target_repo).expanduser(),
-        label="authoritative target_repo",
-    )
-    if workspace == target_checkout:
-        raise AutoresearchValidationError(
-            "artifact workspace_path must be distinct from authoritative target_repo"
-        )
-    _require_artifact_origin_matches_target(
-        workspace,
-        target_checkout,
-        label="artifact workspace_path",
-    )
-    artifact_commit = _resolve_git_commit(
-        workspace,
-        artifact.commit_sha,
-        label="artifact commit_sha",
-    )
-    worktree_head = _resolve_git_commit(workspace, "HEAD", label="worktree HEAD")
-    if artifact_commit != worktree_head:
-        raise AutoresearchValidationError("artifact commit_sha must equal worktree HEAD")
-    _require_clean_git_worktree(workspace)
-
-    if isinstance(artifact, FixResultArtifact):
-        assert state.implementation_result is not None
-        _require_ancestor(
-            workspace,
-            state.implementation_result.commit_sha,
-            artifact_commit,
-            error_message="prior implementation commit_sha is not an ancestor of final fix commit",
-            missing_is_not_ancestor=True,
-        )
-        authoritative_head = _resolve_git_commit(
-            target_checkout,
-            "HEAD",
-            label="authoritative target_repo HEAD",
-        )
-        _require_ancestor(
-            workspace,
-            authoritative_head,
-            artifact_commit,
-            error_message=("authoritative target_repo HEAD is not an ancestor of final fix commit"),
-            missing_is_not_ancestor=True,
-        )
-    else:
-        authoritative_head = _resolve_git_commit(
-            target_checkout,
-            "HEAD",
-            label="authoritative target_repo HEAD",
-        )
-        _require_ancestor(
-            workspace,
-            authoritative_head,
-            artifact_commit,
-            error_message=(
-                "authoritative target_repo HEAD is not an ancestor of implementation commit"
-            ),
-            missing_is_not_ancestor=True,
-        )
-        manifest_snapshot = _secure_open_snapshot(
-            artifact.experiment_manifest_path,
-            label="implementation_result experiment_manifest_path",
-        )
-        _validate_quantipy_v2_manifest(
-            manifest_snapshot,
-            workspace=workspace,
-            commit_sha=artifact_commit,
-            expected_sha256=artifact.experiment_manifest_sha256,
-        )
-    _require_private_directory(workspace, label="artifact workspace_path")
-
-
 def next_action(
     state: AutoresearchState,
     policy: AutoresearchPolicy,
@@ -2311,7 +1348,7 @@ def next_action(
     try:
         validation_context = AutoresearchValidationContext.from_readiness(readiness)
         validation_context.validate_for_state(state)
-        _validate_state(state, policy, validation_context)
+        _transitions_module._validate_state(state, policy, validation_context)
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
     if state.suspended:
@@ -2324,7 +1361,7 @@ def next_action(
     _validate_alpha_verification_price_preflight(state)
     target = _select_phase_target(state, policy)
     required_receipts = receipts.require(PHASE_RECEIPTS[state.phase])
-    instruction_source_manifest = build_instruction_source_manifest(
+    instruction_source_manifest = _manifest_runtime_module.build_instruction_source_manifest(
         phase=state.phase,
         expected_artifact_type=target.artifact_type,
         target_agent_ids=target.agent_ids,
@@ -2376,287 +1413,6 @@ def next_action(
     return action
 
 
-def _clear_consumed_platform_runtime_receipts(state: AutoresearchState) -> AutoresearchState:
-    """Remove active v5 authorization material once its result is in history."""
-    receipt = state.external_verification_retry_receipt
-    if receipt is None:
-        return replace(state, canonical_quantipy_runtime_attestation=None)
-    if receipt.retry_attempt != 5:
-        return replace(state, canonical_quantipy_runtime_attestation=None)
-    if state.platform_runtime_recovery_receipt is None:
-        raise AutoresearchValidationError("v5 verification requires its runtime recovery receipt")
-    if state.latest_verification is None:
-        raise AutoresearchValidationError("v5 receipt cannot be consumed without a result")
-    return replace(
-        state,
-        external_verification_retry_receipt=None,
-        interrupted_verification_history=(),
-        platform_runtime_recovery_receipt=None,
-        canonical_quantipy_runtime_attestation=None,
-    )
-
-
-def advance_state(
-    state: AutoresearchState,
-    artifact: SetupContextArtifact
-    | ContextPacketArtifact
-    | DebateResultArtifact
-    | ConsensusResultArtifact
-    | ImplementationResultArtifact
-    | VerificationResultArtifact
-    | ReviewResultArtifact
-    | FixResultArtifact
-    | FinalDecisionArtifact,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None = None,
-    *,
-    state_path: Path | None = None,
-) -> AutoresearchState:
-    if state_path is not None:
-        state = _validate_persisted_state_matches(state, state_path=state_path)
-    _validate_state(state, policy, validation_context)
-    if state.mode in (ResearchMode.ALPHA_RESEARCH, ResearchMode.DATA_INFRA_G0) and (
-        state.phase is Phase.VERIFICATION
-        or (state.mode is ResearchMode.DATA_INFRA_G0 and state.phase is Phase.DECISION_LOG)
-    ):
-        if validation_context is None:
-            raise AutoresearchValidationError(
-                f"{state.mode.name} artifact advancement requires a strict readiness "
-                "validation context"
-            )
-        validation_context.validate_for_state(state)
-
-    if state.phase is Phase.SETUP_CONTEXT:
-        if isinstance(artifact, SetupContextArtifact):
-            if state.setup is not None:
-                raise AutoresearchValidationError("setup artifact already exists")
-            return replace(state, setup=artifact)
-        if isinstance(artifact, ContextPacketArtifact):
-            if state.setup is None:
-                raise AutoresearchValidationError("context packet requires setup first")
-            return replace(
-                state,
-                context_packet=artifact,
-                mode=artifact.research_mode,
-                phase=Phase.DEBATE,
-            )
-        raise AutoresearchValidationError(
-            "setup_context phase accepts setup or context_packet artifacts only"
-        )
-
-    if state.phase is Phase.DEBATE:
-        if not isinstance(artifact, DebateResultArtifact):
-            raise AutoresearchValidationError("debate phase accepts debate_result only")
-        _validate_debate_result(
-            artifact,
-            policy,
-            mode=state.mode,
-            context=state.context_packet,
-            target_repo=Path(state.setup.target_repo) if state.setup is not None else None,
-            require_compute_fit=True,
-        )
-        expected_round = len(state.debate_rounds) + 1
-        if artifact.round_number != expected_round:
-            raise AutoresearchValidationError(
-                f"debate round must be {expected_round}, got {artifact.round_number}"
-            )
-        return replace(
-            state,
-            debate_rounds=(*state.debate_rounds, artifact),
-            phase=Phase.CONSENSUS,
-        )
-
-    if state.phase is Phase.CONSENSUS:
-        if not isinstance(artifact, ConsensusResultArtifact):
-            raise AutoresearchValidationError("consensus phase accepts consensus_result only")
-        latest_debate = state.latest_debate
-        if latest_debate is None:
-            raise AutoresearchValidationError("consensus requires a debate_result first")
-        if artifact.round_number != latest_debate.round_number:
-            raise AutoresearchValidationError(
-                "consensus round_number must match the latest debate round"
-            )
-        next_consensus_history = (*state.consensus_history, artifact)
-        if artifact.status is ConsensusStatus.MAJORITY:
-            if _is_operator_precondition_consensus(artifact):
-                return replace(
-                    state,
-                    consensus_history=next_consensus_history,
-                    phase=Phase.DECISION_LOG,
-                )
-            if artifact.universe_plan is None:
-                raise AutoresearchValidationError(
-                    "non-operator majority consensus requires a frozen universe_plan"
-                )
-            artifact.universe_plan.validate()
-            return replace(
-                state,
-                consensus_history=next_consensus_history,
-                phase=Phase.IMPLEMENTATION,
-            )
-        if state.consensus_retry_count == 0:
-            return replace(
-                state,
-                consensus_history=next_consensus_history,
-                consensus_retry_count=1,
-                phase=Phase.DEBATE,
-            )
-        return replace(
-            state,
-            consensus_history=next_consensus_history,
-            phase=Phase.DECISION_LOG,
-        )
-
-    if state.phase is Phase.IMPLEMENTATION:
-        if not isinstance(artifact, ImplementationResultArtifact):
-            raise AutoresearchValidationError(
-                "implementation phase accepts implementation_result only"
-            )
-        if (
-            state.latest_consensus is None
-            or state.latest_consensus.status is not ConsensusStatus.MAJORITY
-        ):
-            raise AutoresearchValidationError(
-                "cannot advance implementation without consensus majority"
-            )
-        if state_path is not None:
-            validate_artifact_workspace(state, artifact)
-        _validate_implementation_workspace(state, artifact, require_compute_fit=True)
-        _validate_alpha_implementation_price_preflight(state, artifact)
-        next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
-        _validate_alpha_universe_chain(next_state)
-        return next_state
-
-    if state.phase is Phase.VERIFICATION:
-        if not isinstance(artifact, VerificationResultArtifact):
-            raise AutoresearchValidationError("verification phase accepts verification_result only")
-        if state.implementation_result is None:
-            raise AutoresearchValidationError("verification requires implementation_result")
-        artifact.validate(mode=state.mode)
-        _validate_alpha_price_scope_verification(state, artifact)
-        _require_g0_platform_provenance(state, artifact, validation_context)
-        if state_path is not None:
-            _validate_quantipy_experiment_evidence(
-                state,
-                artifact,
-                validation_context=validation_context,
-            )
-        next_verification_history = (*state.verification_history, artifact)
-        consumed_runtime_recovery = _clear_consumed_platform_runtime_receipts(
-            replace(state, verification_history=next_verification_history)
-        )
-        if artifact.status is VerificationStatus.PASS:
-            next_state = replace(
-                consumed_runtime_recovery,
-                pending_fix_trigger=None,
-                phase=Phase.REVIEW,
-            )
-            _validate_alpha_universe_chain(next_state, validation_context)
-            return next_state
-        if (
-            artifact.status in (VerificationStatus.TEST_FAILURE, VerificationStatus.BUG_SIGNAL)
-            and state.verification_fix_attempts >= 2
-        ):
-            next_state = replace(
-                consumed_runtime_recovery,
-                pending_fix_trigger=None,
-                phase=Phase.DECISION_LOG,
-            )
-            _validate_alpha_universe_chain(next_state, validation_context)
-            return next_state
-        next_state = replace(
-            consumed_runtime_recovery,
-            pending_fix_trigger=FixTriggerPhase.VERIFICATION,
-            phase=Phase.FIX_TEST,
-        )
-        _validate_alpha_universe_chain(next_state, validation_context)
-        return next_state
-
-    if state.phase is Phase.REVIEW:
-        if not isinstance(artifact, ReviewResultArtifact):
-            raise AutoresearchValidationError("review phase accepts review_result only")
-        _validate_review_result(artifact, policy)
-        next_review_history = (*state.review_history, artifact)
-        if artifact.verdict is ReviewVerdict.FAIL or artifact.critical_issues:
-            return replace(
-                state,
-                review_history=next_review_history,
-                pending_fix_trigger=FixTriggerPhase.REVIEW,
-                phase=Phase.FIX_TEST,
-            )
-        return replace(
-            state,
-            review_history=next_review_history,
-            pending_fix_trigger=None,
-            phase=Phase.DECISION_LOG,
-        )
-
-    if state.phase is Phase.FIX_TEST:
-        if not isinstance(artifact, FixResultArtifact):
-            raise AutoresearchValidationError("fix_test phase accepts fix_result only")
-        if state.pending_fix_trigger is None:
-            raise AutoresearchValidationError("fix_test phase requires pending_fix_trigger")
-        if artifact.trigger_phase is not state.pending_fix_trigger:
-            raise AutoresearchValidationError(
-                "fix_result trigger_phase must match the pending fix source"
-            )
-        if artifact.trigger_phase is FixTriggerPhase.VERIFICATION:
-            next_attempts = state.verification_fix_attempts + 1
-        else:
-            next_attempts = state.verification_fix_attempts
-        if state_path is not None:
-            validate_artifact_workspace(state, artifact)
-        _validate_fix_workspace(state, artifact)
-        assert state.implementation_result is not None
-        next_implementation = replace(
-            state.implementation_result,
-            commit_sha=artifact.commit_sha,
-            price_hydration_scope_preflight=(
-                artifact.price_hydration_scope_preflight
-                if artifact.price_hydration_scope_preflight is not None
-                else state.implementation_result.price_hydration_scope_preflight
-            ),
-        )
-        return replace(
-            state,
-            implementation_result=next_implementation,
-            fix_history=(*state.fix_history, artifact),
-            external_verification_retry_receipt=None,
-            interrupted_verification_history=(),
-            platform_runtime_recovery_receipt=None,
-            verification_fix_attempts=next_attempts,
-            pending_fix_trigger=None,
-            phase=Phase.VERIFICATION,
-        )
-
-    if state.phase is Phase.DECISION_LOG:
-        if not isinstance(artifact, FinalDecisionArtifact):
-            raise AutoresearchValidationError("decision_log phase accepts final_decision only")
-        if (
-            state.latest_consensus is None
-            and state.latest_review is None
-            and state.latest_verification is None
-        ):
-            raise AutoresearchValidationError("final_decision requires prior artifacts")
-        _validate_final_decision_artifact(artifact, state, validation_context)
-        if artifact.decision is FinalDecision.INFRA_BLOCKED:
-            next_state = replace(
-                state,
-                final_decision=artifact,
-                phase=Phase.REPEAT,
-                suspended=True,
-                suspension_reason=artifact.infra_rationale,
-            )
-        else:
-            next_state = replace(state, final_decision=artifact, phase=Phase.REPEAT)
-        _validate_state(next_state, policy, validation_context)
-        return next_state
-
-    raise AutoresearchValidationError(
-        "repeat phase does not accept artifacts; mark memory or start next iteration"
-    )
-
-
 def finalize_repeat_memory_state_file(
     state_path: Path,
     *,
@@ -2666,12 +1422,12 @@ def finalize_repeat_memory_state_file(
 ) -> AutoresearchState:
     """Finalize and atomically mark the current repeat state under its state lock."""
     resolved_state_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_lock(resolved_state_path):
-        state = load_state_file(resolved_state_path)
-        _validate_state(state, policy, validation_context)
+    with _persistence_module._exclusive_state_lock(resolved_state_path):
+        state = _persistence_module.load_state_file(resolved_state_path)
+        _transitions_module._validate_state(state, policy, validation_context)
         finalized = finalize_repeat_memory(state, writer=writer)
-        _validate_state(finalized, policy, validation_context)
-        _atomic_save_state_file(resolved_state_path, finalized)
+        _transitions_module._validate_state(finalized, policy, validation_context)
+        _persistence_module._atomic_save_state_file(resolved_state_path, finalized)
         return finalized
 
 
@@ -2856,8 +1612,8 @@ def migrate_legacy_autoresearch_workspace_state_file(
     another model write to that legacy workspace.
     """
     resolved_state_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_lock(resolved_state_path):
-        state = load_state_file(resolved_state_path)
+    with _persistence_module._exclusive_state_lock(resolved_state_path):
+        state = _persistence_module.load_state_file(resolved_state_path)
         if not state_has_legacy_autoresearch_workspace(state):
             return state
         implementation = state.implementation_result
@@ -2865,7 +1621,7 @@ def migrate_legacy_autoresearch_workspace_state_file(
             raise AutoresearchValidationError(
                 "legacy workspace migration requires implementation_result"
             )
-        old_root = LEGACY_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
+        old_root = _constants.LEGACY_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
         old_workspace = Path(implementation.workspace_path).expanduser().resolve(strict=True)
         if not _path_under_root(old_workspace, old_root):
             raise AutoresearchValidationError(
@@ -2907,7 +1663,7 @@ def migrate_legacy_autoresearch_workspace_state_file(
             raise AutoresearchValidationError(
                 "legacy workspace migration requires implementation commit at HEAD"
             )
-        new_root = DEFAULT_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
+        new_root = _constants.DEFAULT_AUTORESEARCH_WORKTREE_ROOT.resolve(strict=False)
         new_workspace = new_root / old_workspace.relative_to(old_root)
         _clone_legacy_workspace_for_state(
             legacy_workspace=old_workspace,
@@ -2940,124 +1696,15 @@ def migrate_legacy_autoresearch_workspace_state_file(
             implementation_result=migrated_implementation,
             fix_history=migrated_fixes,
         )
-        validate_artifact_workspace(
+        _transitions_module.validate_artifact_workspace(
             replace(migrated, implementation_result=None, fix_history=()),
             migrated_implementation,
         )
         for fix in migrated.fix_history:
-            validate_artifact_workspace(migrated, fix)
-        _validate_state(migrated, policy, validation_context)
-        _atomic_save_state_file(resolved_state_path, migrated)
+            _transitions_module.validate_artifact_workspace(migrated, fix)
+        _transitions_module._validate_state(migrated, policy, validation_context)
+        _persistence_module._atomic_save_state_file(resolved_state_path, migrated)
         return migrated
-
-
-def load_artifact_file(
-    path: Path,
-    state: AutoresearchState,
-    policy: AutoresearchPolicy,
-    *,
-    instruction_manifest_sha256: str,
-    validation_context: AutoresearchValidationContext | None = None,
-    state_reference_sha256: str | None = None,
-    state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
-) -> (
-    SetupContextArtifact
-    | ContextPacketArtifact
-    | DebateResultArtifact
-    | ConsensusResultArtifact
-    | ImplementationResultArtifact
-    | VerificationResultArtifact
-    | ReviewResultArtifact
-    | FixResultArtifact
-    | FinalDecisionArtifact
-):
-    try:
-        raw_bytes = path.read_bytes()
-    except FileNotFoundError as exc:
-        raise AutoresearchValidationError(f"missing artifact file: {path}") from exc
-    if len(raw_bytes) > MAX_ARTIFACT_FILE_BYTES:
-        raise AutoresearchValidationError(
-            "artifact file exceeds hard byte budget: "
-            f"{len(raw_bytes)} > {MAX_ARTIFACT_FILE_BYTES} bytes; compact the "
-            "phase artifact and write the strict manifest/state-reference envelope"
-        )
-    try:
-        raw = json.loads(raw_bytes.decode("utf-8"))
-    except UnicodeDecodeError as exc:
-        raise AutoresearchValidationError(f"artifact JSON is not UTF-8: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise AutoresearchValidationError(f"invalid artifact JSON: {path}") from exc
-
-    _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
-    if state_reference_sha256 is not None:
-        _validate_sha256(state_reference_sha256, label="state_reference_sha256")
-    data = _ensure_mapping(raw, label="artifact_file")
-    _require_exact_keys(
-        data,
-        label="artifact_file",
-        expected=("instruction_manifest_sha256", "state_reference_sha256", "artifact"),
-    )
-    envelope_digest = _require_sha256(data, "instruction_manifest_sha256")
-    if envelope_digest != instruction_manifest_sha256:
-        raise AutoresearchValidationError(
-            "artifact instruction_manifest_sha256 does not match dispatched manifest"
-        )
-    state = _validate_persisted_state_matches(state, state_path=state_path)
-    expected_state_reference_sha256 = build_authoritative_state_reference(
-        state,
-        state_path=state_path,
-    ).sha256()
-    envelope_state_reference_sha256 = _require_sha256(data, "state_reference_sha256")
-    if (
-        state_reference_sha256 is not None
-        and envelope_state_reference_sha256 != state_reference_sha256
-    ):
-        raise AutoresearchValidationError(
-            "artifact state_reference_sha256 does not match dispatched state reference"
-        )
-    if envelope_state_reference_sha256 != expected_state_reference_sha256:
-        raise AutoresearchValidationError(
-            "artifact state_reference_sha256 does not match the current authoritative state"
-        )
-    artifact_raw = data["artifact"]
-
-    _validate_state(state, policy, validation_context)
-    target = _select_phase_target(state, policy)
-    if target.artifact_type is ArtifactType.SETUP:
-        return SetupContextArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.CONTEXT_PACKET:
-        return ContextPacketArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.DEBATE_RESULT:
-        return DebateResultArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.CONSENSUS_RESULT:
-        return ConsensusResultArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.IMPLEMENTATION_RESULT:
-        return ImplementationResultArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.VERIFICATION_RESULT:
-        return VerificationResultArtifact.from_dict(artifact_raw, mode=state.mode)
-    if target.artifact_type is ArtifactType.REVIEW_RESULT:
-        return ReviewResultArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.FIX_RESULT:
-        return FixResultArtifact.from_dict(artifact_raw)
-    if target.artifact_type is ArtifactType.FINAL_DECISION:
-        return FinalDecisionArtifact.from_dict(artifact_raw)
-    raise AutoresearchValidationError(
-        f"{state.phase.value} does not accept artifact files; use state mutation commands instead"
-    )
-
-
-def load_state_file(path: Path) -> AutoresearchState:
-    return AutoresearchState.from_dict(_load_state_raw(path))
-
-
-def _load_state_raw(path: Path) -> Mapping[str, object]:
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise AutoresearchValidationError(f"missing state file: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise AutoresearchValidationError(f"invalid state JSON: {path}") from exc
-    return _ensure_mapping(raw, label="autoresearch_state")
 
 
 def retry_external_verification_state_file(
@@ -3070,15 +1717,15 @@ def retry_external_verification_state_file(
 ) -> AutoresearchState:
     """Atomically authorize one bounded operator retry of the current panel failure."""
     resolved_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_path,)):
-        raw = _load_state_raw(resolved_path)
+    with _persistence_module._exclusive_state_locks((resolved_path,)):
+        raw = _persistence_module._load_state_raw(resolved_path)
         schema_version = _require_int(raw, "schema_version")
         if schema_version != AUTORESEARCH_STATE_SCHEMA_VERSION:
             raise AutoresearchValidationError(
                 "external verification retry accepts only the compatible schema-v4 state"
             )
         state = AutoresearchState.from_dict(raw)
-        _validate_state(state, policy, validation_context)
+        _transitions_module._validate_state(state, policy, validation_context)
         state = _materialize_attested_pending_retry_failure(
             state,
             policy=policy,
@@ -3096,8 +1743,8 @@ def retry_external_verification_state_file(
         )
         receipt = ExternalVerificationRetryReceipt.for_state(state, probe, operator_reason)
         retried = retry_external_verification(state, receipt)
-        _validate_state(retried, policy, validation_context)
-        _atomic_save_state_file(resolved_path, retried)
+        _transitions_module._validate_state(retried, policy, validation_context)
+        _persistence_module._atomic_save_state_file(resolved_path, retried)
         return retried
 
 
@@ -3315,7 +1962,7 @@ def _require_unchanged_platform_runtime_recovery_state(
     expected: AutoresearchState,
 ) -> None:
     """Reject an out-of-lock state-file write before v5 authorization publishes."""
-    if load_state_file(state_path) != expected:
+    if _persistence_module.load_state_file(state_path) != expected:
         raise AutoresearchValidationError(
             "platform runtime recovery state changed before publication"
         )
@@ -3370,7 +2017,7 @@ def recover_platform_runtime_state_file(
     publication_path = state_path.expanduser().resolve(strict=False)
     authoritative_path = DEFAULT_AUTORESEARCH_STATE_PATH.expanduser().resolve(strict=False)
     unit_is_active = systemd_is_active or _default_systemd_is_active
-    with _exclusive_state_locks((authoritative_path, publication_path)):
+    with _persistence_module._exclusive_state_locks((authoritative_path, publication_path)):
         try:
             authoritative_bytes = authoritative_path.read_bytes()
             publication_bytes = publication_path.read_bytes()
@@ -3383,11 +2030,11 @@ def recover_platform_runtime_state_file(
                 "platform runtime recovery output must be a byte-exact copy of the "
                 "authoritative state"
             )
-        state = load_state_file(authoritative_path)
+        state = _persistence_module.load_state_file(authoritative_path)
         historical_validation_context, current_readiness_identity = (
             _platform_runtime_recovery_identity_contexts(state, validation_context)
         )
-        _validate_state(state, policy, historical_validation_context)
+        _transitions_module._validate_state(state, policy, historical_validation_context)
         receipt = state.external_verification_retry_receipt
         implementation = state.implementation_result
         if (
@@ -3427,7 +2074,7 @@ def recover_platform_runtime_state_file(
             raise AutoresearchValidationError(
                 "platform runtime recovery v4 retry receipt identity is stale"
             )
-        state_reference_sha256 = build_authoritative_state_reference(
+        state_reference_sha256 = _transitions_module.build_authoritative_state_reference(
             state, state_path=authoritative_path
         ).sha256()
         task_label = (
@@ -3657,7 +2304,7 @@ def recover_platform_runtime_state_file(
             phase=Phase.VERIFICATION,
             pending_fix_trigger=None,
         )
-        _validate_state(recovered, policy, validation_context)
+        _transitions_module._validate_state(recovered, policy, validation_context)
         if status.systemd_unit is not None and unit_is_active(status.systemd_unit):
             raise AutoresearchValidationError(
                 "platform runtime recovery refuses an active detached systemd unit"
@@ -3756,7 +2403,7 @@ def recover_platform_runtime_state_file(
                 "platform runtime recovery cannot re-read the output state copy"
             ) from exc
         _require_unchanged_platform_runtime_recovery_state(authoritative_path, state)
-        _atomic_save_state_file(publication_path, recovered)
+        _persistence_module._atomic_save_state_file(publication_path, recovered)
         return recovered
 
 
@@ -3777,9 +2424,9 @@ def recover_interrupted_verification_state_file(
     """
     resolved_path = state_path.expanduser().resolve(strict=False)
     unit_is_active = systemd_is_active or _default_systemd_is_active
-    with _exclusive_state_locks((resolved_path,)):
-        state = load_state_file(resolved_path)
-        _validate_state(state, policy, validation_context)
+    with _persistence_module._exclusive_state_locks((resolved_path,)):
+        state = _persistence_module.load_state_file(resolved_path)
+        _transitions_module._validate_state(state, policy, validation_context)
         receipt = state.external_verification_retry_receipt
         implementation = state.implementation_result
         if (
@@ -3806,7 +2453,7 @@ def recover_interrupted_verification_state_file(
             raise AutoresearchValidationError(
                 "interrupted verification recovery retry receipt identity is stale"
             )
-        expected_state_reference = build_authoritative_state_reference(
+        expected_state_reference = _transitions_module.build_authoritative_state_reference(
             state, state_path=resolved_path
         ).sha256()
         expected_run_path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
@@ -3922,7 +2569,7 @@ def recover_interrupted_verification_state_file(
             external_verification_retry_receipt=next_receipt,
             interrupted_verification_history=(interruption,),
         )
-        _validate_state(recovered, policy, validation_context)
+        _transitions_module._validate_state(recovered, policy, validation_context)
         if unit_is_active(status.systemd_unit):
             raise AutoresearchValidationError(
                 "interrupted verification recovery refuses an active detached systemd unit"
@@ -3937,7 +2584,7 @@ def recover_interrupted_verification_state_file(
             expected=sealed_attestation,
         )
         _require_absent_interrupted_run_artifact(expected_run_path)
-        _atomic_save_state_file(resolved_path, recovered)
+        _persistence_module._atomic_save_state_file(resolved_path, recovered)
         return recovered
 
 
@@ -4125,23 +2772,8 @@ def _materialize_attested_pending_retry_failure(
         pending_fix_trigger=FixTriggerPhase.VERIFICATION,
         phase=Phase.FIX_TEST,
     )
-    _validate_state(intermediate, policy, validation_context)
+    _transitions_module._validate_state(intermediate, policy, validation_context)
     return intermediate
-
-
-def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
-    """Create a pristine v4 campaign state pinned to authoritative readiness."""
-    try:
-        identity = readiness.require_ready()
-    except ValueError as exc:
-        raise AutoresearchValidationError(str(exc)) from exc
-    return AutoresearchState(platform_readiness=identity)
-
-
-def save_state_file(path: Path, state: AutoresearchState) -> None:
-    resolved_path = path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_path,)):
-        _atomic_save_state_file(resolved_path, state)
 
 
 def advance_infrastructure_verification_failure(
@@ -4158,9 +2790,9 @@ def advance_infrastructure_verification_failure(
     _validate_sha256(state_reference_sha256, label="state_reference_sha256")
     _validate_sha256(instruction_manifest_sha256, label="instruction_manifest_sha256")
     resolved_path = state_path.expanduser().resolve(strict=False)
-    with _exclusive_state_locks((resolved_path,)):
-        state = load_state_file(resolved_path)
-        current_reference = build_authoritative_state_reference(
+    with _persistence_module._exclusive_state_locks((resolved_path,)):
+        state = _persistence_module.load_state_file(resolved_path)
+        current_reference = _transitions_module.build_authoritative_state_reference(
             state,
             state_path=resolved_path,
         ).sha256()
@@ -4168,11 +2800,13 @@ def advance_infrastructure_verification_failure(
             raise AutoresearchValidationError(
                 "infrastructure verification failure state reference is stale"
             )
-        current_instruction_manifest = expected_instruction_manifest_sha256(
-            state,
-            policy,
-            receipts,
-            state_path=resolved_path,
+        current_instruction_manifest = (
+            _manifest_runtime_module.expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=resolved_path,
+            )
         )
         if current_instruction_manifest != instruction_manifest_sha256:
             raise AutoresearchValidationError(
@@ -4190,712 +2824,12 @@ def advance_infrastructure_verification_failure(
             raise AutoresearchValidationError(
                 "infrastructure verification failure requires TEST_FAILURE status"
             )
-        advanced = advance_state(
+        advanced = _transitions_module.advance_state(
             state,
             artifact,
             policy,
             validation_context=validation_context,
             state_path=resolved_path,
         )
-        _atomic_save_state_file(resolved_path, advanced)
+        _persistence_module._atomic_save_state_file(resolved_path, advanced)
         return advanced
-
-
-def _canonical_state_paths(paths: Sequence[Path]) -> tuple[Path, ...]:
-    canonical_paths = {path.expanduser().resolve(strict=False) for path in paths}
-    lock_namespace = _prepare_lock_namespace()
-    for path in canonical_paths:
-        if path == lock_namespace or lock_namespace in path.parents:
-            raise AutoresearchValidationError(
-                f"autoresearch state path cannot be inside lock namespace: {path}"
-            )
-    return tuple(sorted(canonical_paths, key=os.fspath))
-
-
-def _prepare_lock_namespace() -> Path:
-    namespace_path = AUTORESEARCH_LOCK_NAMESPACE.expanduser().absolute()
-    try:
-        namespace_path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"unable to create autoresearch lock namespace: {namespace_path}"
-        ) from exc
-    try:
-        namespace_stat = namespace_path.lstat()
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"unable to inspect autoresearch lock namespace: {namespace_path}"
-        ) from exc
-    if not stat.S_ISDIR(namespace_stat.st_mode):
-        raise AutoresearchValidationError(
-            f"autoresearch lock namespace is not a directory: {namespace_path}"
-        )
-    if namespace_stat.st_uid != os.getuid():
-        raise AutoresearchValidationError(
-            f"autoresearch lock namespace has wrong owner: {namespace_path}"
-        )
-    if stat.S_IMODE(namespace_stat.st_mode) != 0o700:
-        raise AutoresearchValidationError(
-            f"autoresearch lock namespace permissions must be 0700: {namespace_path}"
-        )
-    return namespace_path.resolve(strict=True)
-
-
-def _state_lock_path(state_path: Path) -> Path:
-    canonical_state_path = state_path.expanduser().resolve(strict=False)
-    lock_namespace = AUTORESEARCH_LOCK_NAMESPACE.expanduser().absolute()
-    state_path_digest = hashlib.sha256(
-        "\n".join((AUTORESEARCH_STATE_LOCK_DIGEST_DOMAIN, os.fspath(canonical_state_path))).encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    return lock_namespace / f"{state_path_digest}.lock"
-
-
-def _open_state_lock_file(lock_path: Path) -> int:
-    create_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
-    try:
-        lock_fd = os.open(lock_path, create_flags, 0o600)
-    except FileExistsError:
-        try:
-            return os.open(
-                lock_path,
-                os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
-            )
-        except OSError as exc:
-            raise AutoresearchValidationError(
-                f"unable to open autoresearch state lock: {lock_path}"
-            ) from exc
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"unable to open autoresearch state lock: {lock_path}"
-        ) from exc
-    try:
-        os.fchmod(lock_fd, 0o600)
-    except OSError as exc:
-        os.close(lock_fd)
-        raise AutoresearchValidationError(
-            f"unable to secure autoresearch state lock: {lock_path}"
-        ) from exc
-    return lock_fd
-
-
-@contextmanager
-def _exclusive_state_locks(paths: Sequence[Path]) -> Iterator[None]:
-    """Lock canonical state paths once in deterministic order."""
-    with ExitStack() as stack:
-        for path in _canonical_state_paths(paths):
-            stack.enter_context(_exclusive_state_lock(path))
-        yield
-
-
-@contextmanager
-def _exclusive_state_lock(state_path: Path) -> Iterator[None]:
-    """Serialize access to one canonical state path across CLI processes."""
-    resolved_state_path = state_path.expanduser().resolve(strict=False)
-    _prepare_lock_namespace()
-    lock_path = _state_lock_path(resolved_state_path)
-    lock_fd = _open_state_lock_file(lock_path)
-    try:
-        lock_stat = os.fstat(lock_fd)
-        if not stat.S_ISREG(lock_stat.st_mode):
-            raise AutoresearchValidationError(
-                f"autoresearch state lock is not a regular file: {lock_path}"
-            )
-        if lock_stat.st_uid != os.getuid():
-            raise AutoresearchValidationError(
-                f"autoresearch state lock has wrong owner: {lock_path}"
-            )
-        if stat.S_IMODE(lock_stat.st_mode) != 0o600:
-            raise AutoresearchValidationError(
-                f"autoresearch state lock permissions must be 0600: {lock_path}"
-            )
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-    except AutoresearchValidationError:
-        os.close(lock_fd)
-        raise
-    except OSError as exc:
-        os.close(lock_fd)
-        raise AutoresearchValidationError(
-            f"unable to lock autoresearch state: {resolved_state_path}"
-        ) from exc
-    try:
-        yield
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
-
-
-def persist_derived_state(
-    source_path: Path,
-    output_path: Path,
-    source_state: AutoresearchState,
-    derived_state: AutoresearchState,
-    *,
-    policy: AutoresearchPolicy | None = None,
-    validation_context: AutoresearchValidationContext | None = None,
-) -> None:
-    """Atomically publish a derived state only while its source remains authorized.
-
-    The source path, rather than a prior derived output, is always compared while
-    both canonical paths are locked. When the paths are equal, the verified source
-    is atomically replaced. When they differ, the source is left untouched and only
-    the derived output is atomically replaced.
-    """
-    resolved_source_path = source_path.expanduser().resolve(strict=False)
-    resolved_output_path = output_path.expanduser().resolve(strict=False)
-    expected_reference = build_authoritative_state_reference(
-        source_state,
-        state_path=resolved_source_path,
-    )
-    candidate_policy = policy or load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
-    _validate_state(derived_state, candidate_policy, validation_context)
-    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
-        persisted_state = load_state_file(resolved_source_path)
-        persisted_reference = build_authoritative_state_reference(
-            persisted_state,
-            state_path=resolved_source_path,
-        )
-        if persisted_reference != expected_reference:
-            raise AutoresearchValidationError(
-                "persisted state does not match the supplied authoritative state"
-            )
-        _validate_state(derived_state, candidate_policy, validation_context)
-        _atomic_save_state_file(resolved_output_path, derived_state)
-
-
-@dataclass(frozen=True, slots=True)
-class _ArtifactAdvancePublicationGuard:
-    source_path: Path
-    artifact_path: Path
-    instruction_manifest_sha256: str
-    policy: AutoresearchPolicy
-    validation_context: AutoresearchValidationContext | None
-    state_reference_sha256: str | None
-    expected_source_reference: AuthoritativeStateReference
-    expected_candidate: AutoresearchState
-
-
-def _revalidate_artifact_advance_for_atomic_publication(
-    guard: _ArtifactAdvancePublicationGuard,
-) -> None:
-    """Re-derive every mutable input after temp-file fsync and before replace."""
-    locked_state = load_state_file(guard.source_path)
-    _require_canonical_verification_runtime_attestation(
-        locked_state,
-        validation_context=guard.validation_context,
-    )
-    locked_reference = build_authoritative_state_reference(
-        locked_state,
-        state_path=guard.source_path,
-    )
-    if locked_reference != guard.expected_source_reference:
-        raise AutoresearchValidationError(
-            "persisted state does not match the supplied authoritative state"
-        )
-    locked_artifact = load_artifact_file(
-        guard.artifact_path,
-        locked_state,
-        guard.policy,
-        instruction_manifest_sha256=guard.instruction_manifest_sha256,
-        validation_context=guard.validation_context,
-        state_reference_sha256=guard.state_reference_sha256,
-        state_path=guard.source_path,
-    )
-    if isinstance(locked_artifact, ImplementationResultArtifact | FixResultArtifact):
-        validate_artifact_workspace(locked_state, locked_artifact)
-    locked_candidate = advance_state(
-        locked_state,
-        locked_artifact,
-        guard.policy,
-        validation_context=guard.validation_context,
-        state_path=guard.source_path,
-    )
-    if locked_candidate != guard.expected_candidate:
-        raise AutoresearchValidationError("artifact changed before state publication")
-
-
-def advance_artifact_state_file(
-    *,
-    state_path: Path,
-    output_path: Path,
-    artifact_path: Path,
-    instruction_manifest_sha256: str,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None,
-    state_reference_sha256: str | None = None,
-) -> AutoresearchState:
-    """Advance a dispatched artifact twice, publishing only the locked re-derivation.
-
-    Artifact bytes and the detached runtime evidence are mutable external inputs.
-    The first derivation gives a useful fail-fast result; the second occurs while
-    the state-file publication lock is held and must produce the identical state.
-    """
-    resolved_state_path = state_path.expanduser().resolve(strict=False)
-    resolved_output_path = output_path.expanduser().resolve(strict=False)
-    resolved_artifact_path = artifact_path.expanduser().resolve(strict=False)
-    source_state = load_state_file(resolved_state_path)
-    _require_canonical_verification_runtime_attestation(
-        source_state,
-        validation_context=validation_context,
-    )
-    expected_reference = build_authoritative_state_reference(
-        source_state,
-        state_path=resolved_state_path,
-    )
-    artifact = load_artifact_file(
-        resolved_artifact_path,
-        source_state,
-        policy,
-        instruction_manifest_sha256=instruction_manifest_sha256,
-        validation_context=validation_context,
-        state_reference_sha256=state_reference_sha256,
-        state_path=resolved_state_path,
-    )
-    if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
-        validate_artifact_workspace(source_state, artifact)
-    candidate = advance_state(
-        source_state,
-        artifact,
-        policy,
-        validation_context=validation_context,
-        state_path=resolved_state_path,
-    )
-    with _exclusive_state_locks((resolved_state_path, resolved_output_path)):
-        publication_guard = _ArtifactAdvancePublicationGuard(
-            source_path=resolved_state_path,
-            artifact_path=resolved_artifact_path,
-            instruction_manifest_sha256=instruction_manifest_sha256,
-            policy=policy,
-            validation_context=validation_context,
-            state_reference_sha256=state_reference_sha256,
-            expected_source_reference=expected_reference,
-            expected_candidate=candidate,
-        )
-        _atomic_save_state_file(
-            resolved_output_path,
-            candidate,
-            publication_guard=publication_guard,
-        )
-        return candidate
-
-
-def submit_stage_artifact_file(
-    *,
-    state_path: Path,
-    artifact_path: Path,
-    inbox_path: Path = DEFAULT_AUTORESEARCH_STAGE_INBOX,
-    instruction_manifest_sha256: str,
-    policy: AutoresearchPolicy,
-    validation_context: AutoresearchValidationContext | None,
-    state_reference_sha256: str | None = None,
-) -> Path:
-    """Validate a model-produced artifact and publish only its envelope to the inbox.
-
-    This is the model-writable boundary. It never writes authoritative state; the
-    supervisor/controller later re-derives the same transition under state locks.
-    """
-    resolved_state_path = state_path.expanduser().resolve(strict=False)
-    resolved_artifact_path = artifact_path.expanduser().resolve(strict=False)
-    configured_inbox_path = inbox_path.expanduser()
-    source_state = load_state_file(resolved_state_path)
-    _require_canonical_verification_runtime_attestation(
-        source_state,
-        validation_context=validation_context,
-    )
-    expected_reference = build_authoritative_state_reference(
-        source_state,
-        state_path=resolved_state_path,
-    )
-    artifact = load_artifact_file(
-        resolved_artifact_path,
-        source_state,
-        policy,
-        instruction_manifest_sha256=instruction_manifest_sha256,
-        validation_context=validation_context,
-        state_reference_sha256=state_reference_sha256,
-        state_path=resolved_state_path,
-    )
-    if isinstance(artifact, ImplementationResultArtifact | FixResultArtifact):
-        validate_artifact_workspace(source_state, artifact)
-    advance_state(
-        source_state,
-        artifact,
-        policy,
-        validation_context=validation_context,
-        state_path=resolved_state_path,
-    )
-    envelope = resolved_artifact_path.read_bytes()
-    if len(envelope) > MAX_STAGE_SUBMISSION_BYTES:
-        raise AutoresearchValidationError(
-            "stage submission exceeds hard byte budget: "
-            f"{len(envelope)} > {MAX_STAGE_SUBMISSION_BYTES} bytes"
-        )
-    artifact_sha256 = hashlib.sha256(envelope).hexdigest()
-    filename = (
-        f"{source_state.iteration:04d}-{source_state.phase.value}-"
-        f"{expected_reference.sha256()[:16]}-{artifact_sha256[:16]}.json"
-    )
-    output_path = configured_inbox_path / filename
-    try:
-        configured_inbox_path.mkdir(mode=0o700, parents=True, exist_ok=True)
-        inbox_fd = os.open(
-            configured_inbox_path,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
-    except FileExistsError:
-        raise
-    except OSError as exc:
-        raise AutoresearchValidationError(f"failed to open stage submission inbox: {exc}") from exc
-    try:
-        _validate_stage_inbox_directory_fd(inbox_fd, label="stage submission inbox")
-        try:
-            output_fd = os.open(
-                filename,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=inbox_fd,
-            )
-        except FileExistsError:
-            try:
-                existing_fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_fd)
-            except OSError as exc:
-                raise AutoresearchValidationError(
-                    f"failed to inspect existing stage submission artifact: {exc}"
-                ) from exc
-            try:
-                existing = os.read(existing_fd, MAX_STAGE_SUBMISSION_BYTES + 1)
-            finally:
-                os.close(existing_fd)
-            if hashlib.sha256(existing).hexdigest() != artifact_sha256:
-                raise AutoresearchValidationError(
-                    "stage submission filename collision with different artifact"
-                ) from None
-        except OSError as exc:
-            raise AutoresearchValidationError(
-                f"failed to write stage submission inbox artifact: {exc}"
-            ) from exc
-        else:
-            try:
-                written = 0
-                while written < len(envelope):
-                    written += os.write(output_fd, envelope[written:])
-                os.fsync(output_fd)
-            finally:
-                os.close(output_fd)
-    finally:
-        os.close(inbox_fd)
-    return output_path
-
-
-def _validate_stage_inbox_directory_fd(fd: int, *, label: str) -> os.stat_result:
-    metadata = os.fstat(fd)
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise AutoresearchValidationError(f"{label} must be a plain directory")
-    if metadata.st_uid != os.getuid():
-        raise AutoresearchValidationError(f"{label} must be owned by the current user")
-    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise AutoresearchValidationError(f"{label} must not be group/world writable")
-    return metadata
-
-
-def _open_stage_inbox_child_directory(inbox_fd: int, name: str) -> int:
-    try:
-        os.mkdir(name, mode=0o700, dir_fd=inbox_fd)
-    except FileExistsError:
-        pass
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"cannot create stage submission {name} directory: {exc}"
-        ) from exc
-    try:
-        child_fd = os.open(
-            name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            dir_fd=inbox_fd,
-        )
-    except OSError as exc:
-        raise AutoresearchValidationError(
-            f"stage submission {name} path must be a plain directory: {exc}"
-        ) from exc
-    try:
-        _validate_stage_inbox_directory_fd(child_fd, label=f"stage submission {name} directory")
-    except Exception:
-        os.close(child_fd)
-        raise
-    return child_fd
-
-
-def _move_stage_inbox_entry_no_replace(
-    name: str,
-    *,
-    src_dir_fd: int,
-    dst_dir_fd: int,
-) -> None:
-    for attempt in range(128):
-        target = name
-        if attempt:
-            digest = hashlib.sha256(f"{name}\n{time.time_ns()}\n{attempt}".encode()).hexdigest()
-            target = f"{name}.{digest[:16]}"
-        try:
-            os.link(
-                name,
-                target,
-                src_dir_fd=src_dir_fd,
-                dst_dir_fd=dst_dir_fd,
-                follow_symlinks=False,
-            )
-        except FileExistsError:
-            continue
-        except OSError as exc:
-            raise AutoresearchValidationError(
-                f"cannot quarantine stage submission artifact: {exc}"
-            ) from exc
-        os.unlink(name, dir_fd=src_dir_fd)
-        return
-    raise AutoresearchValidationError(
-        "cannot quarantine stage submission artifact without overwrite"
-    )
-
-
-def consume_stage_submission_inbox(
-    *,
-    state_path: Path,
-    output_path: Path,
-    inbox_path: Path,
-    openclaw_config: Path = DEFAULT_OPENCLAW_CONFIG_PATH,
-    quantipy_root: Path = DEFAULT_QUANTIPY_ROOT,
-    validation_context: AutoresearchValidationContext | None,
-) -> AutoresearchState | None:
-    """Consume at most one validated stage submission from a model-writable inbox."""
-    try:
-        inbox_fd = os.open(
-            inbox_path.expanduser(),
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-        )
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise AutoresearchValidationError(f"cannot open stage submission inbox: {exc}") from exc
-    snapshot_path: Path | None = None
-    accepted_fd: int | None = None
-    rejected_fd: int | None = None
-    try:
-        _validate_stage_inbox_directory_fd(inbox_fd, label="stage submission inbox")
-        accepted_fd = _open_stage_inbox_child_directory(inbox_fd, "accepted")
-        rejected_fd = _open_stage_inbox_child_directory(inbox_fd, "rejected")
-        assert accepted_fd is not None
-        assert rejected_fd is not None
-
-        candidates: list[str] = []
-        for name in sorted(os.listdir(inbox_fd)):
-            if not name.endswith(".json"):
-                continue
-            entry = os.stat(name, dir_fd=inbox_fd, follow_symlinks=False)
-            if not stat.S_ISREG(entry.st_mode):
-                raise AutoresearchValidationError(
-                    "stage submission candidate must be a non-symlink regular file"
-                )
-            candidates.append(name)
-
-        if not candidates:
-            return None
-        policy = load_autoresearch_policy(openclaw_config)
-
-        def quarantine(name: str, destination_fd: int) -> None:
-            _move_stage_inbox_entry_no_replace(
-                name,
-                src_dir_fd=inbox_fd,
-                dst_dir_fd=destination_fd,
-            )
-
-        for artifact_name in candidates:
-            try:
-                artifact_stat = os.stat(artifact_name, dir_fd=inbox_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise AutoresearchValidationError(
-                    f"cannot inspect stage submission artifact: {exc}"
-                ) from exc
-            if not stat.S_ISREG(artifact_stat.st_mode):
-                raise AutoresearchValidationError(
-                    "stage submission artifact must be a non-symlink regular file"
-                )
-            try:
-                artifact_fd = os.open(artifact_name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=inbox_fd)
-            except OSError as exc:
-                raise AutoresearchValidationError(
-                    f"cannot open stage submission artifact: {exc}"
-                ) from exc
-            try:
-                opened_artifact = os.fstat(artifact_fd)
-                if (
-                    opened_artifact.st_dev,
-                    opened_artifact.st_ino,
-                    opened_artifact.st_size,
-                ) != (
-                    artifact_stat.st_dev,
-                    artifact_stat.st_ino,
-                    artifact_stat.st_size,
-                ):
-                    raise AutoresearchValidationError(
-                        "stage submission artifact changed during inspection"
-                    )
-                if opened_artifact.st_nlink != 1:
-                    quarantine(artifact_name, rejected_fd)
-                    continue
-                if opened_artifact.st_size > MAX_STAGE_SUBMISSION_BYTES:
-                    quarantine(artifact_name, rejected_fd)
-                    continue
-                envelope = os.read(artifact_fd, MAX_STAGE_SUBMISSION_BYTES + 1)
-                if len(envelope) != opened_artifact.st_size:
-                    raise AutoresearchValidationError(
-                        "stage submission artifact changed while reading"
-                    )
-            finally:
-                os.close(artifact_fd)
-            snapshot_path = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="wb",
-                    dir=Path(state_path).expanduser().resolve(strict=False).parent,
-                    prefix=".stage-submission.",
-                    suffix=".json",
-                    delete=False,
-                ) as snapshot:
-                    snapshot_path = Path(snapshot.name)
-                    snapshot.write(envelope)
-                    snapshot.flush()
-                    os.fsync(snapshot.fileno())
-                snapshot_path.chmod(0o600)
-                artifact_path = snapshot_path
-                state = load_state_file(state_path)
-                receipts = build_receipt_catalog(quantipy_root)
-                instruction_manifest_sha256 = expected_instruction_manifest_sha256(
-                    state,
-                    policy,
-                    receipts,
-                    state_path=state_path,
-                )
-                try:
-                    advanced = advance_artifact_state_file(
-                        state_path=state_path,
-                        output_path=output_path,
-                        artifact_path=artifact_path,
-                        instruction_manifest_sha256=instruction_manifest_sha256,
-                        policy=policy,
-                        validation_context=validation_context,
-                    )
-                except AutoresearchValidationError:
-                    quarantine(artifact_name, rejected_fd)
-                    continue
-                quarantine(artifact_name, accepted_fd)
-                return advanced
-            finally:
-                if snapshot_path is not None:
-                    with suppress(FileNotFoundError):
-                        snapshot_path.unlink()
-    finally:
-        if accepted_fd is not None:
-            os.close(accepted_fd)
-        if rejected_fd is not None:
-            os.close(rejected_fd)
-        os.close(inbox_fd)
-    return None
-
-
-def persist_next_iteration_state(
-    source_path: Path,
-    output_path: Path,
-    source_state: AutoresearchState,
-    derived_state: AutoresearchState,
-    *,
-    instruction_manifest_sha256: str,
-    policy: AutoresearchPolicy,
-    receipt_catalog_factory: Callable[[], ReceiptCatalog],
-) -> None:
-    """Publish a next-iteration state only after persisting its decision receipt."""
-    resolved_source_path = source_path.expanduser().resolve(strict=False)
-    resolved_output_path = output_path.expanduser().resolve(strict=False)
-    expected_reference = build_authoritative_state_reference(
-        source_state,
-        state_path=resolved_source_path,
-    )
-    with _exclusive_state_locks((resolved_source_path, resolved_output_path)):
-        persisted_state = load_state_file(resolved_source_path)
-        persisted_reference = build_authoritative_state_reference(
-            persisted_state,
-            state_path=resolved_source_path,
-        )
-        if persisted_reference != expected_reference:
-            raise AutoresearchValidationError(
-                "persisted state does not match the supplied authoritative state"
-            )
-        current_instruction_manifest_sha256 = expected_instruction_manifest_sha256(
-            persisted_state,
-            policy,
-            receipt_catalog_factory(),
-            state_path=resolved_source_path,
-        )
-        if current_instruction_manifest_sha256 != instruction_manifest_sha256:
-            raise AutoresearchValidationError("decision receipt instruction manifest is stale")
-        from gateway.autoresearch_decision_receipts import persist_decision_receipt
-
-        persist_decision_receipt(
-            persisted_state,
-            state_path=source_path,
-            instruction_manifest_sha256=instruction_manifest_sha256,
-        )
-        _atomic_save_state_file(resolved_output_path, derived_state)
-
-
-def _atomic_save_state_file(
-    path: Path,
-    state: AutoresearchState,
-    *,
-    publication_guard: _ArtifactAdvancePublicationGuard | None = None,
-) -> None:
-    if publication_guard is not None and state != publication_guard.expected_candidate:
-        raise AutoresearchValidationError(
-            "atomic artifact publication candidate does not match its guard"
-        )
-    serialized_state = json.dumps(state.to_dict(), indent=2, sort_keys=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary_file:
-            temporary_path = Path(temporary_file.name)
-            temporary_file.write(serialized_state)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        if publication_guard is not None:
-            _revalidate_artifact_advance_for_atomic_publication(publication_guard)
-        os.replace(temporary_path, path)
-    finally:
-        if temporary_path is not None and temporary_path.exists():
-            temporary_path.unlink()
-
-
-_configure_state_file_dependencies(
-    load_state_file=lambda path: load_state_file(path),
-    validate_state=lambda state, policy, validation_context: _validate_state(
-        state,
-        policy,
-        validation_context,
-    ),
-    validate_artifact_workspace=lambda state, artifact: validate_artifact_workspace(
-        state,
-        artifact,
-    ),
-    exclusive_state_locks=lambda paths: _exclusive_state_locks(paths),
-    atomic_save_state_file=lambda path, state: _atomic_save_state_file(path, state),
-)

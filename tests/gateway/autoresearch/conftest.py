@@ -86,10 +86,9 @@ def isolated_autoresearch_lock_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        autoresearch_runner,
+        constants,
         "AUTORESEARCH_LOCK_NAMESPACE",
         tmp_path / "autoresearch-locks",
-        raising=False,
     )
 
 
@@ -268,11 +267,6 @@ def mempalace_kg_path(tmp_path: Path) -> Path:
 def autoresearch_worktree_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     worktree_root = tmp_path / "operator-controlled" / "model-workspaces"
     monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", worktree_root)
-    monkeypatch.setattr(
-        autoresearch_runner,
-        "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
-        worktree_root,
-    )
     return worktree_root
 
 

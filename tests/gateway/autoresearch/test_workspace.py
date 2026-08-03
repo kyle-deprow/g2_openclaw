@@ -8,6 +8,7 @@ from pathlib import Path
 
 import gateway.autoresearch_runner as autoresearch_runner
 import pytest
+from gateway.autoresearch import constants
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
 )
@@ -229,7 +230,7 @@ def test_workspace_validation_rejects_missing_operator_worktree_root(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        autoresearch_runner,
+        constants,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
         tmp_path / "missing-worktree-root",
     )
@@ -411,14 +412,14 @@ def test_legacy_active_workspace_migration_clones_from_authoritative_checkout(
     new_root = tmp_path / "controller-worktrees"
     new_root.mkdir(mode=0o700)
     new_root.chmod(0o700)
-    monkeypatch.setattr(autoresearch_runner, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(constants, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
     state, commit_sha, legacy_workspace = _legacy_migration_state(
         git_worktree,
         legacy_root,
         policy,
     )
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
 
@@ -450,14 +451,14 @@ def test_legacy_workspace_migration_rejects_existing_destination_with_wrong_orig
     new_root = tmp_path / "controller-worktrees"
     new_root.mkdir(mode=0o700)
     new_root.chmod(0o700)
-    monkeypatch.setattr(autoresearch_runner, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(constants, "LEGACY_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", legacy_root)
     state, commit_sha, legacy_workspace = _legacy_migration_state(
         git_worktree,
         legacy_root,
         policy,
     )
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
+    monkeypatch.setattr(constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", new_root)
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
     destination = new_root / Path(legacy_workspace).relative_to(legacy_root)
@@ -487,7 +488,7 @@ def test_fix_workspace_validation_rejects_exact_persisted_workspace_outside_root
     replacement_root = tmp_path / "replacement-worktree-root"
     replacement_root.mkdir()
     monkeypatch.setattr(
-        autoresearch_runner,
+        constants,
         "DEFAULT_AUTORESEARCH_WORKTREE_ROOT",
         replacement_root,
     )
