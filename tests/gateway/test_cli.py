@@ -15,10 +15,75 @@ from pathlib import Path
 from typing import Protocol
 from unittest.mock import MagicMock, patch
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.fields as autoresearch_fields
+import gateway.autoresearch.persistence as autoresearch_persistence
+import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
 from dotenv import dotenv_values
 from gateway.autoresearch import constants
+from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact,
+    ContextPacketArtifact,
+    DebateResultArtifact,
+    DebateSubmission,
+    FinalDecisionArtifact,
+    FixResultArtifact,
+    ImplementationResultArtifact,
+    PriceHydrationScopePreflight,
+    SetupContextArtifact,
+    UniversePlanArtifact,
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.compute import (
+    ComputeFitArtifact,
+)
+from gateway.autoresearch.configuration import (
+    load_autoresearch_policy,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMBER_UNION_DIGEST_ALGORITHM,
+)
+from gateway.autoresearch.enums import (
+    ComputeTarget,
+    ConsensusStatus,
+    FinalDecision,
+    FinalReviewerVerdict,
+    FixTriggerPhase,
+    MetricDirection,
+    Phase,
+    ResearchMode,
+    VerificationStatus,
+)
+from gateway.autoresearch.fields import (
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
+)
+from gateway.autoresearch.manifest_runtime import (
+    QUANTIPY_RECEIPT_PATHS,
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+)
+from gateway.autoresearch.receipts import (
+    AuthoritativeSnapshotReceipt,
+    DynamicUniverseCoverageReceipt,
+    GroupedSummaryReceipt,
+    MemberUnionManifestReceipt,
+    PriceHydrationReceipt,
+    UniverseDateVerificationReceipt,
+    UniverseHistoryBatchReceipt,
+    UniverseVerificationReceipt,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import (
+    advance_state,
+)
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -30,49 +95,6 @@ from gateway.autoresearch_readiness import (
     EvidenceId,
     PlatformReadinessManifest,
     canonical_platform_capabilities,
-)
-from gateway.autoresearch_runner import (
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    MEMBER_UNION_DIGEST_ALGORITHM,
-    QUANTIPY_RECEIPT_PATHS,
-    AuthoritativeSnapshotReceipt,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    ComputeFitArtifact,
-    ComputeTarget,
-    ConsensusResultArtifact,
-    ConsensusStatus,
-    ContextPacketArtifact,
-    DebateResultArtifact,
-    DebateSubmission,
-    DynamicUniverseCoverageReceipt,
-    FinalDecision,
-    FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    FixResultArtifact,
-    FixTriggerPhase,
-    GroupedSummaryReceipt,
-    ImplementationResultArtifact,
-    MemberUnionManifestReceipt,
-    MetricDirection,
-    Phase,
-    PriceHydrationReceipt,
-    PriceHydrationScopePreflight,
-    ResearchMode,
-    SetupContextArtifact,
-    UniverseDateVerificationReceipt,
-    UniverseHistoryBatchReceipt,
-    UniversePlanArtifact,
-    UniverseVerificationReceipt,
-    VerificationResultArtifact,
-    VerificationStatus,
-    advance_state,
-    build_receipt_catalog,
-    expected_instruction_manifest_sha256,
-    load_autoresearch_policy,
-    price_hydration_coverage_digest,
-    price_hydration_request_digest,
 )
 from gateway.cli import (
     _active_target_writer_processes,
@@ -102,7 +124,7 @@ CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
 _MEMBER_UNION_PATH = Path("tests/fixtures/autoresearch-member-union.txt").resolve()
 _MEMBER_UNION_SYMBOLS = _MEMBER_UNION_PATH.read_text(encoding="utf-8").splitlines()
-_MEMBER_UNION_COUNT, _MEMBER_UNION_DIGEST = autoresearch_runner.canonical_member_union_digest(
+_MEMBER_UNION_COUNT, _MEMBER_UNION_DIGEST = autoresearch_fields.canonical_member_union_digest(
     _MEMBER_UNION_SYMBOLS
 )
 _MEMBER_UNION_SHA256 = sha256(_MEMBER_UNION_PATH.read_bytes()).hexdigest()
@@ -292,10 +314,10 @@ def _platform_coverage_receipt(
         "source_timeframe": preflight.timeframe,
         "source_market_hours": preflight.market_hours,
         "source_provider": "massive",
-        "member_union_digest": autoresearch_runner.quantipy_member_union_digest(
+        "member_union_digest": autoresearch_fields.quantipy_member_union_digest(
             _MEMBER_UNION_SYMBOLS
         )[1],
-        "requested_sessions_digest": autoresearch_runner.platform_requested_sessions_digest(
+        "requested_sessions_digest": autoresearch_fields.platform_requested_sessions_digest(
             requested_sessions
         ),
         "pit_active_roster_digest": "c" * 64,
@@ -449,7 +471,7 @@ def test_autoresearch_init_state_rejects_untrusted_control_plane_root_before_cre
     with (
         patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
         patch(
-            "gateway.autoresearch_runner.os.getuid",
+            "gateway.autoresearch.persistence.os.getuid",
             return_value=os.getuid() + 1,
         ),
     ):
@@ -577,7 +599,7 @@ def test_autoresearch_init_state_rejects_wrong_owner_quantipy_runs_root(
     with (
         patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root),
         patch(
-            "gateway.autoresearch_runner.os.getuid",
+            "gateway.autoresearch.persistence.os.getuid",
             return_value=os.getuid() + 1,
         ),
     ):
@@ -1432,10 +1454,12 @@ class TestAutoresearchCliCommands:
         if not legacy_unwrapped:
             artifact_payload = {
                 "instruction_manifest_sha256": digest,
-                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
-                    state,
-                    state_path=state_path,
-                ).sha256(),
+                "state_reference_sha256": (
+                    autoresearch_transitions.build_authoritative_state_reference(
+                        state,
+                        state_path=state_path,
+                    ).sha256()
+                ),
                 "artifact": artifact_payload,
             }
         artifact_path.write_text(json.dumps(artifact_payload), encoding="utf-8")
@@ -1538,7 +1562,7 @@ class TestAutoresearchCliCommands:
             build_receipt_catalog(quantipy_root),
             state_path=state_path,
         )
-        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
             state,
             state_path=state_path,
         ).sha256()
@@ -1592,7 +1616,7 @@ class TestAutoresearchCliCommands:
             git_worktree,
             commit_sha=git_worktree.final_commit,
         )
-        original_advance = autoresearch_runner.advance_artifact_state_file
+        original_advance = autoresearch_persistence.advance_artifact_state_file
 
         def mutate_source_then_advance(
             *,
@@ -1623,7 +1647,7 @@ class TestAutoresearchCliCommands:
             )
 
         with patch.object(
-            autoresearch_runner,
+            autoresearch_persistence,
             "advance_artifact_state_file",
             new=mutate_source_then_advance,
         ):
@@ -1691,7 +1715,7 @@ class TestAutoresearchCliCommands:
             build_receipt_catalog(quantipy_root),
             state_path=state_path,
         )
-        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
             state,
             state_path=state_path,
         ).sha256()
@@ -1852,7 +1876,7 @@ class TestAutoresearchCliCommands:
             hard_constraints=("No overnight holds",),
             data_sources=("qp.prices()",),
         )
-        state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+        state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
             state,
             state_path=state_path,
         ).sha256()
@@ -1968,16 +1992,15 @@ class TestAutoresearchCliCommands:
             raise AssertionError("autoresearch-next must not finalize memory")
 
         monkeypatch.setattr(
-            "gateway.autoresearch_runner.finalize_repeat_memory_state_file",
+            "gateway.autoresearch.memory.finalize_repeat_memory_state_file",
             forbidden_finalize,
         )
-        monkeypatch.setattr("gateway.autoresearch_runner.build_receipt_catalog", lambda _: object())
         monkeypatch.setattr(
             "gateway.autoresearch.manifest_runtime.build_receipt_catalog",
             lambda _: object(),
         )
         monkeypatch.setattr(
-            "gateway.autoresearch_runner.next_action", lambda *_, **__: FakeAction()
+            "gateway.autoresearch.engine.next_action", lambda *_, **__: FakeAction()
         )
         monkeypatch.setattr("gateway.cli._active_target_writer_processes", lambda _: ())
 
@@ -2018,33 +2041,22 @@ class TestAutoresearchCliCommands:
         quantipy_root.mkdir()
 
         with (
-            patch("gateway.autoresearch_runner.load_state_file", return_value=state),
             patch("gateway.autoresearch.persistence.load_state_file", return_value=state),
-            patch("gateway.autoresearch_runner.load_autoresearch_policy"),
             patch("gateway.autoresearch.configuration.load_autoresearch_policy"),
             patch("gateway.cli.load_platform_readiness"),
-            patch("gateway.autoresearch_runner.build_receipt_catalog"),
             patch("gateway.autoresearch.manifest_runtime.build_receipt_catalog"),
-            patch("gateway.autoresearch_runner.next_action", return_value=action),
-            patch("gateway.autoresearch_runner.AutoresearchValidationContext.from_readiness"),
-            patch(
-                "gateway.autoresearch_runner.seal_canonical_verification_dispatch_state_file",
-                return_value=state,
-            ) as seal_runtime,
+            patch("gateway.autoresearch.engine.next_action", return_value=action),
+            patch("gateway.autoresearch.state.AutoresearchValidationContext.from_readiness"),
             patch(
                 "gateway.autoresearch.attestation.seal_canonical_verification_dispatch_state_file",
                 return_value=state,
-            ) as seal_attestation,
-            patch(
-                "gateway.autoresearch_runner.require_canonical_verification_dispatch_attestation",
-                return_value=state,
-            ) as require_runtime,
+            ) as seal_runtime,
             patch(
                 "gateway.autoresearch.attestation.require_canonical_verification_dispatch_attestation",
                 return_value=state,
-            ) as require_attestation,
+            ) as require_runtime,
             patch(
-                "gateway.autoresearch_runner.provision_quantipy_experiment_runs_root"
+                "gateway.autoresearch.persistence.provision_quantipy_experiment_runs_root"
             ) as provision,
             patch("gateway.cli._git_status_short", return_value=None),
             patch("gateway.cli._active_target_writer_processes", return_value=()),
@@ -2065,9 +2077,7 @@ class TestAutoresearchCliCommands:
 
         assert result.exit_code == 0, result.output
         seal_runtime.assert_not_called()
-        seal_attestation.assert_not_called()
         require_runtime.assert_not_called()
-        require_attestation.assert_not_called()
         provision.assert_not_called()
 
     def test_autoresearch_create_command_file_reads_secure_stdin_protocol(

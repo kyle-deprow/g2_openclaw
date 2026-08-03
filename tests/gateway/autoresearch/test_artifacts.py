@@ -10,43 +10,59 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from gateway.autoresearch_platform_validation import (
-    canonical_dynamic_price_coverage_digest,
-    canonical_requested_sessions_digest,
-)
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.artifacts import (
     ARTIFACT_CONTRACTS,
-    MEMBER_UNION_DIGEST_ALGORITHM,
-    AggregateCoverageReceipt,
-    ArtifactType,
-    AuthoritativeSnapshotReceipt,
-    AutoresearchState,
-    AutoresearchValidationError,
-    ComputeFitArtifact,
-    ComputeTarget,
     ContextPacketArtifact,
-    CoverageReceipt,
-    FinalDecision,
     FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    GroupedSummaryReceipt,
     ImplementationResultArtifact,
-    InfraGateOutcome,
-    MemberUnionManifestReceipt,
     MemoryVerificationReceipt,
-    Phase,
-    PriceHydrationReceipt,
     PriceHydrationScopePreflight,
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.compute import (
+    ComputeFitArtifact,
+)
+from gateway.autoresearch.constants import (
+    MEMBER_UNION_DIGEST_ALGORITHM,
+)
+from gateway.autoresearch.enums import (
+    ArtifactType,
+    ComputeTarget,
+    FinalDecision,
+    FinalReviewerVerdict,
+    InfraGateOutcome,
+    Phase,
     ResearchMode,
+    VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.fields import (
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
+)
+from gateway.autoresearch.memory import (
+    build_final_memory_write_request,
+    verify_mempalace_final_decision,
+)
+from gateway.autoresearch.receipts import (
+    AggregateCoverageReceipt,
+    AuthoritativeSnapshotReceipt,
+    CoverageReceipt,
+    GroupedSummaryReceipt,
+    MemberUnionManifestReceipt,
+    PriceHydrationReceipt,
     UniverseDateVerificationReceipt,
     UniverseHistoryBatchReceipt,
     UniverseVerificationReceipt,
-    VerificationResultArtifact,
-    VerificationStatus,
-    build_final_memory_write_request,
-    price_hydration_coverage_digest,
-    price_hydration_request_digest,
-    verify_mempalace_final_decision,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch_platform_validation import (
+    canonical_dynamic_price_coverage_digest,
+    canonical_requested_sessions_digest,
 )
 from gateway.mempalace_finalizer import FINAL_MEMORY_SOURCE_FILE, finalization_journal_path
 

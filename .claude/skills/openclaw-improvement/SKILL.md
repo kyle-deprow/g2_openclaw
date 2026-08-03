@@ -36,6 +36,6 @@ Hard-won operational knowledge for diagnosing and fixing OpenClaw pipeline misbe
 
 - OpenClaw agent skills: `gateway/agent_config/skills/` (currently `autoresearch`, `codex-subagents`, `mempalace-readonly`, `quantipy-data-contract`, `quantipy-methodology`). Codex repo-skills: `.agents/skills/`.
 - Deploy path: `scripts/push-openclaw-config.sh` (guarded, transactional, fail-closed); also reachable via `make push-config`.
-- Supervisor/state machinery: `gateway/autoresearch_supervisor.py`, `gateway/autoresearch_runner.py`, `gateway/autoresearch_control.py`, with tests in `tests/gateway/test_autoresearch_*.py`.
+- Supervisor/state machinery: `gateway/autoresearch_supervisor.py`, the `gateway/autoresearch/` package, `gateway/autoresearch_control.py`, with tests in `tests/gateway/autoresearch/` and `tests/gateway/test_autoresearch_*.py`.
 - Memory finalizer: `gateway/mempalace_finalizer.py` (tests `tests/gateway/test_mempalace_finalizer.py`); read-only server `gateway/mempalace_readonly_server.py`.
 - Runtime verifier: `scripts/ensure-openclaw-codex-runtime.mjs` (mandatory, fail-closed) with tests in `tests/gateway/test_openclaw_codex_runtime_patch.py`.

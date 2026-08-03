@@ -13,32 +13,46 @@ from pathlib import Path
 from types import FrameType
 
 import pytest
+from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact,
+    FinalDecisionArtifact,
+    ImplementationResultArtifact,
+    MemoryVerificationReceipt,
+    PriceHydrationScopePreflight,
+)
+from gateway.autoresearch.configuration import (
+    load_autoresearch_policy,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    DEFAULT_QUANTIPY_ROOT,
+)
+from gateway.autoresearch.enums import (
+    ConsensusStatus,
+    FinalDecision,
+    FinalReviewerVerdict,
+    Phase,
+    ResearchMode,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.manifest_runtime import (
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
+)
 from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
     ReadinessIdentity,
     canonical_platform_capabilities,
-)
-from gateway.autoresearch_runner import (
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    DEFAULT_QUANTIPY_ROOT,
-    AutoresearchState,
-    AutoresearchValidationError,
-    ConsensusResultArtifact,
-    ConsensusStatus,
-    FinalDecision,
-    FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    ImplementationResultArtifact,
-    MemoryVerificationReceipt,
-    Phase,
-    PriceHydrationScopePreflight,
-    ResearchMode,
-    build_authoritative_state_reference,
-    build_receipt_catalog,
-    expected_instruction_manifest_sha256,
-    load_autoresearch_policy,
 )
 from gateway.autoresearch_runs import (
     RunFailureClassification,

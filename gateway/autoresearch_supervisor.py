@@ -24,37 +24,61 @@ from typing import Protocol
 
 from dotenv import load_dotenv
 
+from gateway.autoresearch.artifacts import (
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.attestation import (
+    require_canonical_verification_dispatch_attestation,
+    seal_canonical_verification_dispatch_state_file,
+)
+from gateway.autoresearch.configuration import (
+    load_autoresearch_policy,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_STAGE_INBOX,
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    DEFAULT_QUANTIPY_ROOT,
+)
+from gateway.autoresearch.enums import (
+    Phase,
+    ResearchMode,
+    VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.lifecycle import (
+    start_next_iteration,
+)
+from gateway.autoresearch.manifest_runtime import (
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.memory import (
+    can_write_memory,
+    finalize_repeat_memory_state_file,
+)
+from gateway.autoresearch.persistence import (
+    advance_infrastructure_verification_failure,
+    consume_stage_submission_inbox,
+    load_state_file,
+    persist_next_iteration_state,
+    provision_quantipy_experiment_runs_root,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
+)
+from gateway.autoresearch.workspace import (
+    migrate_legacy_autoresearch_workspace_state_file,
+)
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
     validate_state_readiness,
-)
-from gateway.autoresearch_runner import (
-    DEFAULT_AUTORESEARCH_STAGE_INBOX,
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    DEFAULT_QUANTIPY_ROOT,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
-    Phase,
-    ResearchMode,
-    VerificationResultArtifact,
-    VerificationStatus,
-    advance_infrastructure_verification_failure,
-    build_authoritative_state_reference,
-    build_receipt_catalog,
-    can_write_memory,
-    consume_stage_submission_inbox,
-    expected_instruction_manifest_sha256,
-    finalize_repeat_memory_state_file,
-    load_autoresearch_policy,
-    load_state_file,
-    migrate_legacy_autoresearch_workspace_state_file,
-    persist_next_iteration_state,
-    provision_quantipy_experiment_runs_root,
-    require_canonical_verification_dispatch_attestation,
-    seal_canonical_verification_dispatch_state_file,
-    start_next_iteration,
 )
 from gateway.autoresearch_runs import (
     DEFAULT_AUTORESEARCH_RUNS_ROOT,

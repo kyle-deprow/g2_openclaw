@@ -16,8 +16,81 @@ from io import BytesIO
 from pathlib import Path
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.artifacts as autoresearch_artifacts
+import gateway.autoresearch.attestation as autoresearch_attestation
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.evidence as autoresearch_evidence
+import gateway.autoresearch.fields as autoresearch_fields
 import gateway.autoresearch_runs as autoresearch_runs
+from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact,
+    ContextPacketArtifact,
+    DebateResultArtifact,
+    DebateSubmission,
+    FinalDecisionArtifact,
+    FixResultArtifact,
+    ImplementationResultArtifact,
+    PriceHydrationScopePreflight,
+    QuantipyExperimentEvidence,
+    QuantipyExperimentFailureEvidence,
+    QuantipyExperimentPanelEvidence,
+    ReviewResultArtifact,
+    SetupContextArtifact,
+    UniversePlanArtifact,
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.compute import (
+    ComputeFitArtifact,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+    MEMBER_UNION_DIGEST_ALGORITHM,
+    MEMPALACE_READONLY_SERVER_ID,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
+    ComputeTarget,
+    ConsensusStatus,
+    FinalDecision,
+    FinalReviewerVerdict,
+    FixTriggerPhase,
+    InfraGateOutcome,
+    MetricDirection,
+    ResearchMode,
+    ReviewVerdict,
+    VerificationStatus,
+)
+from gateway.autoresearch.fields import (
+    price_hydration_coverage_digest,
+    price_hydration_request_digest,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.receipts import (
+    AggregateCoverageReceipt,
+    AuthoritativeSnapshotReceipt,
+    CoverageReceipt,
+    DynamicUniverseCoverageReceipt,
+    GroupedSummaryReceipt,
+    MemberUnionManifestReceipt,
+    PriceHydrationReceipt,
+    UniverseDateVerificationReceipt,
+    UniverseHistoryBatchReceipt,
+    UniverseVerificationReceipt,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import advance_state as _runner_advance_state
+from gateway.autoresearch.transitions import (
+    validate_artifact_workspace,
+)
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -31,57 +104,6 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ResearchPanelProbeReceipt,
 )
-from gateway.autoresearch_runner import (
-    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    MEMBER_UNION_DIGEST_ALGORITHM,
-    MEMPALACE_READONLY_SERVER_ID,
-    AggregateCoverageReceipt,
-    AuthoritativeSnapshotReceipt,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    ComputeFitArtifact,
-    ComputeTarget,
-    ConsensusResultArtifact,
-    ConsensusStatus,
-    ContextPacketArtifact,
-    CoverageReceipt,
-    DebateResultArtifact,
-    DebateSubmission,
-    DynamicUniverseCoverageReceipt,
-    FinalDecision,
-    FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    FixResultArtifact,
-    FixTriggerPhase,
-    GroupedSummaryReceipt,
-    ImplementationResultArtifact,
-    InfraGateOutcome,
-    MemberUnionManifestReceipt,
-    MetricDirection,
-    PriceHydrationReceipt,
-    PriceHydrationScopePreflight,
-    QuantipyExperimentEvidence,
-    QuantipyExperimentFailureEvidence,
-    QuantipyExperimentPanelEvidence,
-    ReceiptCatalog,
-    ResearchMode,
-    ReviewResultArtifact,
-    ReviewVerdict,
-    SetupContextArtifact,
-    UniverseDateVerificationReceipt,
-    UniverseHistoryBatchReceipt,
-    UniversePlanArtifact,
-    UniverseVerificationReceipt,
-    VerificationResultArtifact,
-    VerificationStatus,
-    next_action,
-    price_hydration_coverage_digest,
-    price_hydration_request_digest,
-    validate_artifact_workspace,
-)
-from gateway.autoresearch_runner import advance_state as _runner_advance_state
 from gateway.mempalace_finalizer import (
     FINAL_MEMORY_SOURCE_FILE,
     FinalMemoryWriteRequest,
@@ -657,9 +679,9 @@ def _platform_coverage_receipt(
         "source_market_hours": preflight.market_hours,
         "source_provider": "massive",
         "member_union_digest": member_union_digest
-        or autoresearch_runner.quantipy_member_union_digest(("AMD",))[1],
+        or autoresearch_fields.quantipy_member_union_digest(("AMD",))[1],
         "requested_sessions_digest": requested_sessions_digest
-        or autoresearch_runner.platform_requested_sessions_digest((date(2021, 1, 5),)),
+        or autoresearch_fields.platform_requested_sessions_digest((date(2021, 1, 5),)),
         "pit_active_roster_digest": pit_active_roster_digest or "c" * 64,
         "source_price_coverage_response_digest": (
             source_price_coverage_response_digest
@@ -1041,7 +1063,7 @@ def _prepare_real_canonical_runtime(worktree: GitWorktree) -> str:
         capture_output=True,
         text=True,
     )
-    external_python, _, _ = autoresearch_runner._probe_quantipy_runtime_resolution(
+    external_python, _, _ = autoresearch_attestation._probe_quantipy_runtime_resolution(
         Path("/home/dev/repos/quantipy")
     )
     subprocess.run(
@@ -1410,17 +1432,17 @@ def _write_quantipy_detached_run_record(
     )
     command = (
         (
-            autoresearch_runner._build_historical_v2_quantipy_execution_contract(
+            autoresearch_evidence._build_historical_v2_quantipy_execution_contract(
                 runtime_root=runtime_root,
                 manifest_path=Path(manifest_path),
-                output_root=autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+                output_root=autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
                 run_id=run_id,
             )
             if run_id.endswith("-v2")
-            else autoresearch_runner.build_quantipy_execution_contract(
+            else autoresearch_evidence.build_quantipy_execution_contract(
                 runtime_root=runtime_root,
                 manifest_path=Path(manifest_path),
-                output_root=autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+                output_root=autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
                 run_id=run_id,
             )
         ).command
@@ -1435,7 +1457,7 @@ def _write_quantipy_detached_run_record(
             "run",
             manifest_path,
             "--output-root",
-            str(autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+            str(autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
             "--run-id",
             run_id,
         )
@@ -1567,7 +1589,7 @@ def _write_public_v5_verification_artifact(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     tmp_path: Path,
-) -> tuple[Path, autoresearch_runner.NextAction]:
+) -> tuple[Path, autoresearch_artifacts.NextAction]:
     retry = recovered.external_verification_retry_receipt
     implementation = recovered.implementation_result
     setup = recovered.setup
@@ -1582,7 +1604,7 @@ def _write_public_v5_verification_artifact(
     run = json.loads(template_path.read_text(encoding="utf-8"))
     run["run_id"] = retry.expected_run_id
     run_path = (
-        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
         / retry.expected_run_id
         / "run.json"
     )
@@ -1705,10 +1727,10 @@ def _write_public_v5_verification_artifact(
         fixture.readiness,
         state_path=fixture.copied_state_path,
     )
-    expected_command = autoresearch_runner.build_quantipy_execution_contract(
+    expected_command = autoresearch_evidence.build_quantipy_execution_contract(
         runtime_root=Path(setup.target_repo),
         manifest_path=Path(implementation.experiment_manifest_path),
-        output_root=autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        output_root=autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
         run_id=retry.expected_run_id,
     ).command
     assert " ".join(expected_command) in action.prompt_text

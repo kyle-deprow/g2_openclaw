@@ -30,7 +30,7 @@ owner-session wake.
 
 ## Deterministic State
 
-The PM obtains every next action from `gateway.autoresearch_runner` through:
+The PM obtains every next action from the `gateway.autoresearch` package through:
 
 ```bash
 cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \

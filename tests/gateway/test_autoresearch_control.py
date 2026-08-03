@@ -10,6 +10,23 @@ from pathlib import Path
 
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
+from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact,
+    FinalDecisionArtifact,
+)
+from gateway.autoresearch.enums import (
+    ConsensusStatus,
+    FinalDecision,
+    FinalReviewerVerdict,
+    Phase,
+    ResearchMode,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
+)
 from gateway.autoresearch_control import (
     DEFAULT_SUPERVISOR_SERVICE_NAME,
     AutoresearchControl,
@@ -23,17 +40,6 @@ from gateway.autoresearch_readiness import (
     EvidenceId,
     PlatformReadinessManifest,
     canonical_platform_capabilities,
-)
-from gateway.autoresearch_runner import (
-    AutoresearchState,
-    ConsensusResultArtifact,
-    ConsensusStatus,
-    FinalDecision,
-    FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    Phase,
-    ResearchMode,
-    build_authoritative_state_reference,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,

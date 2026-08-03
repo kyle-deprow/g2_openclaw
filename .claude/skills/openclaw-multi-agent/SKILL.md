@@ -32,7 +32,7 @@ Design and operate multi-agent systems: orthogonal specialists, controlled commu
 
 - **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4; `autoresearch-pm`/`consensus_arbiter`/`reviewer`=gpt-5.6-sol; `debater_data`=gpt-5.6-terra; `debater_microstructure`/`debater_skeptic`=gpt-5.5; others gpt-5.4.
 - **Session topology:** G2 traffic → `agent:main:g2`; autoresearch runs only in `agent:autoresearch-pm:autoresearch:quantipy`.
-- **Orchestration driver:** `gateway/autoresearch_supervisor.py` + `gateway/autoresearch_runner.py` (systemd user unit `quantipy-autoresearch-supervisor.service`, 60s poll, `BindsTo=openclaw-gateway.service`); control/receipts in `gateway/autoresearch_control.py`, `gateway/autoresearch_decision_receipts.py`, `gateway/autoresearch_panel_receipts.py`.
+- **Orchestration driver:** `gateway/autoresearch_supervisor.py` + the `gateway/autoresearch/` package (systemd user unit `quantipy-autoresearch-supervisor.service`, 60s poll, `BindsTo=openclaw-gateway.service`); control/receipts in `gateway/autoresearch_control.py`, `gateway/autoresearch_decision_receipts.py`, `gateway/autoresearch_panel_receipts.py`.
 - **Config changes** go through `gateway/openclaw_config/` + `bash scripts/push-openclaw-config.sh`, never `~/.openclaw/` edits.
 - **Long-task helpers:** `scripts/run-long-task.sh`, `scripts/run-long-task-worker.sh`.
 

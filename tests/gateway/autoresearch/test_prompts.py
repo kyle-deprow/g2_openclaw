@@ -5,37 +5,59 @@ import re
 from pathlib import Path
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.artifacts as autoresearch_artifacts
+import gateway.autoresearch.engine as autoresearch_engine
+import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
-from gateway.autoresearch_readiness import (
-    PlatformReadinessManifest,
+from gateway.autoresearch.artifacts import (
+    SetupContextArtifact,
 )
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.constants import (
     DEFAULT_AUTORESEARCH_STATE_PATH,
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
     INSTRUCTION_SOURCE_MANIFEST_DIGEST_DOMAIN,
     INSTRUCTION_SOURCE_MANIFEST_VERSION,
     MAX_ARTIFACT_FILE_BYTES,
-    QUANTIPY_RECEIPT_PATHS,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
     ArtifactType,
-    AutoresearchPolicy,
-    AutoresearchReceiptError,
-    AutoresearchState,
-    AutoresearchValidationError,
     FixTriggerPhase,
     Phase,
-    ReceiptCatalog,
-    SetupContextArtifact,
-    SourceReceipt,
     VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchReceiptError,
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.lifecycle import (
+    start_next_iteration,
+)
+from gateway.autoresearch.manifest import (
+    SourceReceipt,
+)
+from gateway.autoresearch.manifest_runtime import (
+    QUANTIPY_RECEIPT_PATHS,
     build_instruction_source_manifest,
     build_receipt_catalog,
     expected_instruction_manifest_sha256,
     instruction_source_manifest_sha256,
+)
+from gateway.autoresearch.persistence import (
     load_artifact_file,
-    next_action,
     persist_next_iteration_state,
-    start_next_iteration,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch_readiness import (
+    PlatformReadinessManifest,
 )
 
 from tests.gateway.autoresearch.builders import (
@@ -283,7 +305,7 @@ def test_context_prompt_requires_flat_typed_schema_and_ignores_stale_context_fil
         "mode_rationale": "string",
         "burned_theory_families": "array[string]",
     }
-    contract = autoresearch_runner.ARTIFACT_CONTRACTS[ArtifactType.CONTEXT_PACKET]
+    contract = autoresearch_artifacts.ARTIFACT_CONTRACTS[ArtifactType.CONTEXT_PACKET]
 
     assert contract["field_types"] == expected_field_types
     assert set(cast(list[str], contract["required_fields"])) == set(expected_field_types)
@@ -349,7 +371,7 @@ def test_load_artifact_file_accepts_exact_instruction_envelope(
         receipts,
         state_path=state_path,
     )
-    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+    state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
         state,
         state_path=state_path,
     ).sha256()
@@ -492,7 +514,7 @@ def test_fix_test_prompt_contains_private_workspace_and_cwd_contract(
         implementation_result=_implementation_artifact(git_worktree),
     )
 
-    prompt = autoresearch_runner._workspace_isolation_contract(state, Phase.FIX_TEST)
+    prompt = autoresearch_engine._workspace_isolation_contract(state, Phase.FIX_TEST)
 
     assert "owned non-symlink" in prompt
     assert "mode 0700" in prompt

@@ -9,23 +9,35 @@ from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.evidence as autoresearch_evidence
+import gateway.autoresearch.secure_io as autoresearch_secure_io
 import pytest
-from gateway.autoresearch_readiness import PlatformReadinessManifest
-from gateway.autoresearch_runner import (
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
-    Phase,
+from gateway.autoresearch.artifacts import (
     QuantipyExecutionNotStartedEvidence,
     QuantipyExperimentEvidence,
     QuantipyExperimentFailureEvidence,
+)
+from gateway.autoresearch.enums import (
+    Phase,
     ResearchMode,
     VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import advance_state as _runner_advance_state
+from gateway.autoresearch.transitions import (
     validate_artifact_workspace,
 )
-from gateway.autoresearch_runner import advance_state as _runner_advance_state
+from gateway.autoresearch_readiness import PlatformReadinessManifest
 
 from tests.gateway.autoresearch.builders import (
     QUANTIPY_V2_CONTRACT_FILE_SHA256,
@@ -992,7 +1004,7 @@ def test_implementation_rejects_ignored_transitive_package_source(
     ("size_bytes", "accepted"),
     (
         (70 * 1024, True),
-        (autoresearch_runner.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES + 1, False),
+        (autoresearch_constants.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES + 1, False),
     ),
 )
 def test_committed_package_source_uses_quantipy_one_mib_snapshot_limit(
@@ -1032,7 +1044,7 @@ def test_committed_package_source_uses_quantipy_one_mib_snapshot_limit(
     ("padding_bytes", "accepted"),
     (
         (70 * 1024, True),
-        (autoresearch_runner.QUANTIPY_EXPERIMENT_NOTEBOOK_MAX_BYTES, False),
+        (autoresearch_constants.QUANTIPY_EXPERIMENT_NOTEBOOK_MAX_BYTES, False),
     ),
 )
 def test_committed_notebook_uses_quantipy_eight_mib_snapshot_limit(
@@ -1490,7 +1502,7 @@ def test_quantipy_panel_receipt_rejects_legacy_v1_before_coverage_fallback() -> 
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="contract_version"):
-        autoresearch_runner._validate_panel_receipt(receipt, label="panel receipt")
+        autoresearch_evidence._validate_panel_receipt(receipt, label="panel receipt")
 
 
 def test_quantipy_compact_panel_constants_match_the_shared_gateway_contract() -> None:
@@ -1566,10 +1578,10 @@ def test_quantipy_run_receipt_at_8_mib_is_rejected(
     run["stage_receipts"][-1]["result"]["summary"] = ""
     baseline_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
     run["stage_receipts"][-1]["result"]["summary"] = "x" * (
-        autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES - len(baseline_bytes)
+        autoresearch_constants.QUANTIPY_RUN_ENVELOPE_MAX_BYTES - len(baseline_bytes)
     )
     run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
-    assert len(run_bytes) == autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES
+    assert len(run_bytes) == autoresearch_constants.QUANTIPY_RUN_ENVELOPE_MAX_BYTES
     run_path.chmod(0o600)
     run_path.write_bytes(run_bytes)
 
@@ -1608,7 +1620,7 @@ def test_quantipy_panel_receipt_member_remains_capped_at_4_mib(
     receipt_path = run_path.parent / evidence.panel.receipt_path
     receipt_path.chmod(0o600)
     oversized_receipt = receipt_path.read_bytes() + (
-        b" " * autoresearch_runner.QUANTIPY_PANEL_RECEIPT_MAX_BYTES
+        b" " * autoresearch_constants.QUANTIPY_PANEL_RECEIPT_MAX_BYTES
     )
     receipt_path.write_bytes(oversized_receipt)
     receipt_path.chmod(0o400)
@@ -1805,10 +1817,10 @@ def test_local_failure_fixture_acceptance_matches_current_quantipy_v2(
 
     local_valid = True
     try:
-        snapshot = autoresearch_runner._secure_open_snapshot(
+        snapshot = autoresearch_secure_io._secure_open_snapshot(
             fixture_path, label="cross-contract run fixture"
         )
-        autoresearch_runner._validate_quantipy_run_envelope(snapshot)
+        autoresearch_evidence._validate_quantipy_run_envelope(snapshot)
     except AutoresearchValidationError:
         local_valid = False
 
@@ -1877,11 +1889,11 @@ def test_g2_source_and_envelope_limits_match_pinned_quantipy_v2() -> None:
     )
 
     assert json.loads(result.stdout) == {
-        "run": autoresearch_runner.QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
-        "source_file": autoresearch_runner.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES,
-        "source_count": autoresearch_runner.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT,
-        "source_path": autoresearch_runner.QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH,
-        "source_total": autoresearch_runner.QUANTIPY_EXPERIMENT_SOURCE_TOTAL_MAX_BYTES,
+        "run": autoresearch_constants.QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
+        "source_file": autoresearch_constants.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_BYTES,
+        "source_count": autoresearch_constants.QUANTIPY_EXPERIMENT_SOURCE_FILE_MAX_COUNT,
+        "source_path": autoresearch_constants.QUANTIPY_EXPERIMENT_SOURCE_PATH_MAX_LENGTH,
+        "source_total": autoresearch_constants.QUANTIPY_EXPERIMENT_SOURCE_TOTAL_MAX_BYTES,
     }
 
 

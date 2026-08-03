@@ -12,35 +12,67 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import gateway.autoresearch.artifacts as autoresearch_artifacts
+import gateway.autoresearch.attestation as autoresearch_attestation
 import gateway.autoresearch.attestation as runtime_attestation
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.engine as autoresearch_engine
+import gateway.autoresearch.evidence as autoresearch_evidence
+import gateway.autoresearch.fields as autoresearch_fields
+import gateway.autoresearch.operator_recovery as autoresearch_operator_recovery
+import gateway.autoresearch.persistence as autoresearch_persistence
+import gateway.autoresearch.recovery_receipts as autoresearch_recovery_receipts
+import gateway.autoresearch.secure_io as autoresearch_secure_io
+import gateway.autoresearch.transitions as autoresearch_transitions
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
 from gateway.autoresearch import constants
+from gateway.autoresearch.artifacts import (
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_STATE_PATH,
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
+    FixTriggerPhase,
+    Phase,
+    VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.manifest_runtime import (
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.operator_recovery import (
+    retry_external_verification,
+    retry_external_verification_state_file,
+)
+from gateway.autoresearch.persistence import (
+    save_state_file,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.recovery_receipts import (
+    ExternalVerificationRetryReceipt,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import (
+    validate_state,
+)
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
     ResearchPanelProbeReceipt,
-)
-from gateway.autoresearch_runner import (
-    DEFAULT_AUTORESEARCH_STATE_PATH,
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
-    ExternalVerificationRetryReceipt,
-    FixTriggerPhase,
-    Phase,
-    ReceiptCatalog,
-    VerificationResultArtifact,
-    VerificationStatus,
-    expected_instruction_manifest_sha256,
-    next_action,
-    retry_external_verification,
-    retry_external_verification_state_file,
-    save_state_file,
-    validate_state,
 )
 from gateway.cli import app
 from typer.testing import CliRunner
@@ -68,8 +100,8 @@ def test_external_verification_retry_preserves_failure_and_reuses_implementation
 ) -> None:
     # Arrange
     state_path, probe, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
-    materialized = autoresearch_runner._materialize_attested_pending_retry_failure(
+    stale_state = autoresearch_persistence.load_state_file(state_path)
+    materialized = autoresearch_operator_recovery._materialize_attested_pending_retry_failure(
         stale_state,
         policy=policy,
         validation_context=validation_context,
@@ -159,8 +191,8 @@ def test_external_verification_retry_replaces_v2_receipt_with_deterministic_v3(
 ) -> None:
     # Arrange
     state_path, probe, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
-    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+    stale_state = autoresearch_persistence.load_state_file(state_path)
+    failed_v2_state = autoresearch_operator_recovery._materialize_attested_pending_retry_failure(
         stale_state,
         policy=policy,
         validation_context=validation_context,
@@ -178,7 +210,7 @@ def test_external_verification_retry_replaces_v2_receipt_with_deterministic_v3(
     assert v3_receipt.expected_run_id.endswith("-v3")
     assert v3_receipt.schema_version == 2
     assert v3_receipt.verification_history_sha256 == tuple(
-        autoresearch_runner._canonical_json_digest(artifact.to_dict())
+        autoresearch_fields._canonical_json_digest(artifact.to_dict())
         for artifact in failed_v2_state.verification_history
     )
     validate_state(retried, policy)
@@ -199,8 +231,8 @@ def test_v3_retry_receipt_rejects_tampered_complete_prior_history(
 ) -> None:
     # Arrange
     state_path, probe, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
-    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+    stale_state = autoresearch_persistence.load_state_file(state_path)
+    failed_v2_state = autoresearch_operator_recovery._materialize_attested_pending_retry_failure(
         stale_state,
         policy=policy,
         validation_context=validation_context,
@@ -237,8 +269,8 @@ def test_external_verification_retry_does_not_authorize_v4_from_a_sealed_generic
 ) -> None:
     # Arrange
     state_path, probe, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
-    failed_v2_state = autoresearch_runner._materialize_attested_pending_retry_failure(
+    stale_state = autoresearch_persistence.load_state_file(state_path)
+    failed_v2_state = autoresearch_operator_recovery._materialize_attested_pending_retry_failure(
         stale_state,
         policy=policy,
         validation_context=validation_context,
@@ -301,7 +333,7 @@ def test_retry_state_file_materializes_the_attested_live_v2_http_413_to_v3(
     assert retried.latest_verification.quantipy_experiment_evidence.run_id.endswith("-v2")
     assert len(retried.verification_history) == 2
     assert retried.external_verification_retry_receipt.prior_verification_sha256 == (
-        autoresearch_runner._canonical_json_digest(retried.verification_history[-1].to_dict())
+        autoresearch_fields._canonical_json_digest(retried.verification_history[-1].to_dict())
     )
     assert tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in immutable_hashes) == (
         immutable_hashes
@@ -316,7 +348,7 @@ def test_public_platform_runtime_recovery_publishes_only_a_copied_live_v4_state(
     fixture = public_platform_v4_recovery_fixture
 
     # Act
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -325,14 +357,14 @@ def test_public_platform_runtime_recovery_publishes_only_a_copied_live_v4_state(
         systemd_is_active=lambda _unit: False,
         proc_root=fixture.copied_state_path.parent / "proc",
     )
-    reattested = autoresearch_runner.require_canonical_verification_dispatch_attestation(
+    reattested = autoresearch_attestation.require_canonical_verification_dispatch_attestation(
         fixture.copied_state_path,
         policy=policy,
         validation_context=fixture.validation_context,
     )
 
     # Assert
-    assert autoresearch_runner.load_state_file(fixture.copied_state_path) == recovered
+    assert autoresearch_persistence.load_state_file(fixture.copied_state_path) == recovered
     assert reattested == recovered
     assert recovered.external_verification_retry_receipt is not None
     assert recovered.external_verification_retry_receipt.expected_run_id.endswith("-v5")
@@ -378,7 +410,7 @@ def test_public_platform_runtime_recovery_rejects_unrelated_current_readiness_id
         AutoresearchValidationError,
         match="may differ only by the current nonnull Quantipy commit",
     ):
-        autoresearch_runner.recover_platform_runtime_state_file(
+        autoresearch_operator_recovery.recover_platform_runtime_state_file(
             fixture.copied_state_path,
             probe=fixture.probe,
             operator_reason="Moved verification to the sealed canonical runtime.",
@@ -400,7 +432,7 @@ def test_public_platform_runtime_recovery_rejects_publication_races(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    state = autoresearch_runner.load_state_file(fixture.live_state_path)
+    state = autoresearch_persistence.load_state_file(fixture.live_state_path)
     retry = state.external_verification_retry_receipt
     implementation = state.implementation_result
     setup = state.setup
@@ -438,7 +470,7 @@ def test_public_platform_runtime_recovery_rejects_publication_races(
             status_path.parent.chmod(0o500)
         elif race == "run":
             run_path = (
-                autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+                autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
                 / retry.expected_run_id
                 / "run.json"
             )
@@ -451,7 +483,7 @@ def test_public_platform_runtime_recovery_rejects_publication_races(
 
     # Act / Assert
     with pytest.raises(ValueError):
-        autoresearch_runner.recover_platform_runtime_state_file(
+        autoresearch_operator_recovery.recover_platform_runtime_state_file(
             fixture.copied_state_path,
             probe=fixture.probe,
             operator_reason="Moved verification to the sealed canonical runtime.",
@@ -473,7 +505,7 @@ def test_public_autoresearch_next_rejects_post_action_dispatch_race(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -487,7 +519,7 @@ def test_public_autoresearch_next_rejects_post_action_dispatch_race(
         json.dumps(fixture.readiness.to_dict(), sort_keys=True),
         encoding="utf-8",
     )
-    original_next_action = autoresearch_runner.next_action
+    original_next_action = autoresearch_engine.next_action
 
     def mutate_after_action(
         state: AutoresearchState,
@@ -496,7 +528,7 @@ def test_public_autoresearch_next_rejects_post_action_dispatch_race(
         readiness: PlatformReadinessManifest,
         *,
         state_path: Path = DEFAULT_AUTORESEARCH_STATE_PATH,
-    ) -> autoresearch_runner.NextAction:
+    ) -> autoresearch_artifacts.NextAction:
         action = original_next_action(
             state,
             action_policy,
@@ -528,7 +560,7 @@ def test_public_autoresearch_next_rejects_post_action_dispatch_race(
 
     # Act
     with patch(
-        "gateway.autoresearch_runner.next_action",
+        "gateway.autoresearch.engine.next_action",
         new=mutate_after_action,
     ):
         result = CliRunner().invoke(
@@ -550,7 +582,7 @@ def test_public_autoresearch_next_rejects_post_action_dispatch_race(
     assert "autoresearch-next failed" in result.output
     assert fixture.live_state_path.read_bytes() == fixture.live_state_bytes
     assert (
-        autoresearch_runner.load_state_file(
+        autoresearch_persistence.load_state_file(
             fixture.copied_state_path
         ).canonical_quantipy_runtime_attestation
         == recovered.canonical_quantipy_runtime_attestation
@@ -566,7 +598,7 @@ def test_public_autoresearch_next_returns_only_the_final_guarded_state_reference
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    autoresearch_runner.recover_platform_runtime_state_file(
+    autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -598,7 +630,7 @@ def test_public_autoresearch_next_returns_only_the_final_guarded_state_reference
 
     # Assert
     assert result.exit_code == 0, result.output
-    sealed = autoresearch_runner.load_state_file(fixture.copied_state_path)
+    sealed = autoresearch_persistence.load_state_file(fixture.copied_state_path)
     action = next_action(
         sealed,
         policy,
@@ -608,7 +640,7 @@ def test_public_autoresearch_next_returns_only_the_final_guarded_state_reference
     )
     assert action.state_reference_sha256 in result.output
     assert (
-        autoresearch_runner.build_authoritative_state_reference(
+        autoresearch_transitions.build_authoritative_state_reference(
             sealed,
             state_path=fixture.copied_state_path,
         ).sha256()
@@ -629,12 +661,12 @@ def test_sealed_quantipy_panel_directory_rejects_a_foreign_owner(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="Quantipy panel directory"):
-        autoresearch_runner._require_sealed_quantipy_panel_directory(panel_directory)
+        autoresearch_secure_io._require_sealed_quantipy_panel_directory(panel_directory)
 
 
 def test_interrupted_verification_receipt_binds_the_pre_recovery_topology() -> None:
     # Arrange
-    receipt_type = autoresearch_runner.InterruptedVerificationAttemptReceipt
+    receipt_type = autoresearch_recovery_receipts.InterruptedVerificationAttemptReceipt
     prior_retry_receipt = ExternalVerificationRetryReceipt(
         expected_run_id="autoresearch-i1-aaaaaaaaaaaa-v3",
         prior_verification_sha256="3" * 64,
@@ -667,7 +699,7 @@ def test_interrupted_verification_receipt_binds_the_pre_recovery_topology() -> N
         state_sha256="e" * 64,
         state_reference_sha256="0" * 64,
         instruction_manifest_sha256="f" * 64,
-        prior_retry_receipt_sha256=autoresearch_runner._canonical_json_digest(
+        prior_retry_receipt_sha256=autoresearch_fields._canonical_json_digest(
             prior_retry_receipt.to_dict()
         ),
         prior_retry_receipt=prior_retry_receipt,
@@ -706,7 +738,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
     assert v3_receipt is not None
     implementation = v3_state.implementation_result
     assert implementation is not None
-    state_reference = autoresearch_runner.build_authoritative_state_reference(
+    state_reference = autoresearch_transitions.build_authoritative_state_reference(
         v3_state, state_path=state_path
     ).sha256()
     instruction_digest = expected_instruction_manifest_sha256(
@@ -719,7 +751,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
         f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
     )
     run_path = (
-        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
         / v3_receipt.expected_run_id
         / "run.json"
     )
@@ -737,7 +769,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
                 "run",
                 implementation.experiment_manifest_path,
                 "--output-root",
-                str(autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+                str(autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
                 "--run-id",
                 v3_receipt.expected_run_id,
             )
@@ -813,7 +845,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
     # Act / Assert
     if artifact_appears_during_inactivity_check:
         with pytest.raises(AutoresearchValidationError, match=r"run\.json to be absent"):
-            autoresearch_runner.recover_interrupted_verification_state_file(
+            autoresearch_operator_recovery.recover_interrupted_verification_state_file(
                 state_path,
                 operator_reason="Stopped the detached v3 process before it produced run.json.",
                 policy=policy,
@@ -825,7 +857,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
         assert state_path.read_bytes() == state_before_recovery
         return
 
-    recovered = autoresearch_runner.recover_interrupted_verification_state_file(
+    recovered = autoresearch_operator_recovery.recover_interrupted_verification_state_file(
         state_path,
         operator_reason="Stopped the detached v3 process before it produced run.json.",
         policy=policy,
@@ -883,7 +915,7 @@ def test_interrupted_v3_recovery_rejects_duplicate_expected_manifest_identities(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="duplicate expected detached v3"):
-        autoresearch_runner._find_exact_interrupted_detached_run(
+        autoresearch_operator_recovery._find_exact_interrupted_detached_run(
             runs_root=runs_root,
             iteration=1,
             directory_name=directory_name,
@@ -916,7 +948,7 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
     implementation = v3_state.implementation_result
     assert v3_receipt is not None
     assert implementation is not None
-    state_reference = autoresearch_runner.build_authoritative_state_reference(
+    state_reference = autoresearch_transitions.build_authoritative_state_reference(
         v3_state, state_path=state_path
     ).sha256()
     instruction_digest = expected_instruction_manifest_sha256(
@@ -929,7 +961,7 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
         f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
     )
     run_path = (
-        autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+        autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
         / v3_receipt.expected_run_id
         / "run.json"
     )
@@ -947,7 +979,7 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
                 "run",
                 implementation.experiment_manifest_path,
                 "--output-root",
-                str(autoresearch_runner.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
+                str(autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT),
                 "--run-id",
                 v3_receipt.expected_run_id,
             )
@@ -1003,7 +1035,7 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
         failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
         runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
     )
-    recovered = autoresearch_runner.recover_interrupted_verification_state_file(
+    recovered = autoresearch_operator_recovery.recover_interrupted_verification_state_file(
         state_path,
         operator_reason="Stopped the detached v3 process before it produced run.json.",
         policy=policy,
@@ -1072,7 +1104,7 @@ def test_external_verification_retry_receipt_rejects_the_removed_v6_through_v9_p
             operator_reason="Attempted removed generic retry.",
             verification_history_sha256=("1" * 64, "2" * 64, "3" * 64, "4" * 64, "5" * 64),
             interruption_history_sha256=(),
-            schema_version=autoresearch_runner.INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
+            schema_version=autoresearch_constants.INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION,
         )
 
 
@@ -1087,7 +1119,7 @@ def test_v2_retry_receipt_rejects_an_unrelated_historical_http_404(
 ) -> None:
     # Arrange
     state_path, _, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
+    stale_state = autoresearch_persistence.load_state_file(state_path)
     prior = stale_state.latest_verification
     assert prior is not None
     evidence = prior.quantipy_experiment_evidence
@@ -1120,7 +1152,7 @@ def test_v2_retry_receipt_rejects_an_unrelated_historical_http_404(
         unrelated,
         external_verification_retry_receipt=replace(
             receipt,
-            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+            prior_verification_sha256=autoresearch_fields._canonical_json_digest(
                 unrelated.verification_history[0].to_dict()
             ),
         ),
@@ -1150,7 +1182,7 @@ def test_v2_retry_receipt_rejects_a_tampered_historical_http_404_message(
 ) -> None:
     # Arrange
     state_path, _, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
+    stale_state = autoresearch_persistence.load_state_file(state_path)
     initial = stale_state.verification_history[0]
     evidence = initial.quantipy_experiment_evidence
     assert evidence is not None
@@ -1180,7 +1212,7 @@ def test_v2_retry_receipt_rejects_a_tampered_historical_http_404_message(
         verification_history=(tampered_initial,),
         external_verification_retry_receipt=replace(
             receipt,
-            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+            prior_verification_sha256=autoresearch_fields._canonical_json_digest(
                 tampered_initial.to_dict()
             ),
         ),
@@ -1204,7 +1236,7 @@ def test_v2_retry_receipt_rejects_an_appended_verification_history_entry(
 ) -> None:
     # Arrange
     state_path, _, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
+    stale_state = autoresearch_persistence.load_state_file(state_path)
     initial = stale_state.verification_history[0]
     receipt = stale_state.external_verification_retry_receipt
     assert receipt is not None
@@ -1213,7 +1245,7 @@ def test_v2_retry_receipt_rejects_an_appended_verification_history_entry(
         verification_history=(initial, initial),
         external_verification_retry_receipt=replace(
             receipt,
-            prior_verification_sha256=autoresearch_runner._canonical_json_digest(initial.to_dict()),
+            prior_verification_sha256=autoresearch_fields._canonical_json_digest(initial.to_dict()),
         ),
     )
 
@@ -1233,8 +1265,8 @@ def test_external_verification_retry_rejects_an_unrelated_legacy_http_413_query(
 ) -> None:
     # Arrange
     state_path, probe, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
-    materialized = autoresearch_runner._materialize_attested_pending_retry_failure(
+    stale_state = autoresearch_persistence.load_state_file(state_path)
+    materialized = autoresearch_operator_recovery._materialize_attested_pending_retry_failure(
         stale_state,
         policy=policy,
         validation_context=validation_context,
@@ -1290,7 +1322,7 @@ def test_external_verification_retry_receipt_rejects_an_unrelated_legacy_http_41
 ) -> None:
     # Arrange
     state_path, _, validation_context, _ = live_v2_http_413_state_file
-    stale_state = autoresearch_runner.load_state_file(state_path)
+    stale_state = autoresearch_persistence.load_state_file(state_path)
     prior = stale_state.verification_history[0]
     evidence = prior.quantipy_experiment_evidence
     assert evidence is not None
@@ -1322,7 +1354,7 @@ def test_external_verification_retry_receipt_rejects_an_unrelated_legacy_http_41
         unrelated,
         external_verification_retry_receipt=replace(
             receipt,
-            prior_verification_sha256=autoresearch_runner._canonical_json_digest(
+            prior_verification_sha256=autoresearch_fields._canonical_json_digest(
                 unrelated.verification_history[0].to_dict()
             ),
         ),
@@ -1387,7 +1419,7 @@ def test_quantipy_execution_contract_uses_canonical_runtime_and_immutable_source
     output_root = tmp_path / "runs"
 
     # Act
-    contract = autoresearch_runner.build_quantipy_execution_contract(
+    contract = autoresearch_evidence.build_quantipy_execution_contract(
         runtime_root=runtime_root,
         manifest_path=manifest_path,
         output_root=output_root,
@@ -1419,7 +1451,7 @@ def test_quantipy_execution_contract_uses_canonical_runtime_and_immutable_source
 def test_quantipy_execution_contract_allows_unsuffixed_ordinary_canonical_run(
     tmp_path: Path,
 ) -> None:
-    contract = autoresearch_runner.build_quantipy_execution_contract(
+    contract = autoresearch_evidence.build_quantipy_execution_contract(
         runtime_root=tmp_path / "quantipy-runtime",
         manifest_path=tmp_path / "worktrees" / "alpha" / "experiment-manifest.json",
         output_root=tmp_path / "runs",
@@ -1438,7 +1470,7 @@ def test_quantipy_execution_contract_rejects_arbitrary_version_suffixes(
         AutoresearchValidationError,
         match="Quantipy execution contract run_id is invalid",
     ):
-        autoresearch_runner.build_quantipy_execution_contract(
+        autoresearch_evidence.build_quantipy_execution_contract(
             runtime_root=tmp_path / "quantipy-runtime",
             manifest_path=tmp_path / "worktrees" / "alpha" / "experiment-manifest.json",
             output_root=tmp_path / "runs",
@@ -1501,7 +1533,7 @@ def test_canonical_runtime_attestation_allows_sibling_implementation_commit(
     )
 
     # Act
-    attestation = autoresearch_runner._attest_canonical_quantipy_runtime(state, implementation)
+    attestation = autoresearch_attestation._attest_canonical_quantipy_runtime(state, implementation)
 
     # Assert
     assert attestation.root == str(runtime_root)
@@ -1515,16 +1547,18 @@ def test_canonical_runtime_attestation_allows_sibling_implementation_commit(
     assert attestation.base_interpreter_mode == 0o775
     assert attestation.base_interpreter_owner_uid == os.getuid()
     assert (
-        autoresearch_runner.CanonicalQuantipyRuntimeAttestation.from_dict(attestation.to_dict())
+        autoresearch_recovery_receipts.CanonicalQuantipyRuntimeAttestation.from_dict(
+            attestation.to_dict()
+        )
         == attestation
     )
     wrong_owner = attestation.to_dict()
     wrong_owner["executable_owner_uid"] = os.getuid() + 1
     with pytest.raises(AutoresearchValidationError, match="owner UID"):
-        autoresearch_runner.CanonicalQuantipyRuntimeAttestation.from_dict(wrong_owner)
+        autoresearch_recovery_receipts.CanonicalQuantipyRuntimeAttestation.from_dict(wrong_owner)
 
     entrypoint.write_text("#!/bin/sh\necho tampered\n", encoding="utf-8")
-    reattested = autoresearch_runner._attest_canonical_quantipy_runtime(state, implementation)
+    reattested = autoresearch_attestation._attest_canonical_quantipy_runtime(state, implementation)
 
     assert reattested != attestation
 
@@ -1537,7 +1571,7 @@ def test_canonical_runtime_cli_rejects_a_world_writable_entrypoint(tmp_path: Pat
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="must not be world-writable"):
-        autoresearch_runner._secure_open_snapshot(
+        autoresearch_secure_io._secure_open_snapshot(
             entrypoint,
             label="canonical Quantipy runtime .venv quantipy entrypoint",
             allow_group_write=True,
@@ -1547,12 +1581,12 @@ def test_canonical_runtime_cli_rejects_a_world_writable_entrypoint(tmp_path: Pat
 def test_external_uv_base_attestation_accepts_installed_owner_mode_0775() -> None:
     # Arrange
     runtime_root = Path("/home/dev/repos/quantipy")
-    base_interpreter, _, version = autoresearch_runner._probe_quantipy_runtime_resolution(
+    base_interpreter, _, version = autoresearch_attestation._probe_quantipy_runtime_resolution(
         runtime_root
     )
 
     # Act
-    snapshot = autoresearch_runner._secure_open_external_uv_base_interpreter(base_interpreter)
+    snapshot = autoresearch_secure_io._secure_open_external_uv_base_interpreter(base_interpreter)
 
     # Assert
     assert snapshot.path == base_interpreter
@@ -1579,7 +1613,7 @@ def test_external_uv_base_interpreter_attestation_rejects_a_foreign_owner() -> N
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="must be owned by the autoresearch user"):
-        autoresearch_runner._secure_open_external_uv_base_interpreter(foreign_binary)
+        autoresearch_secure_io._secure_open_external_uv_base_interpreter(foreign_binary)
 
 
 def test_external_uv_base_interpreter_attestation_rejects_a_world_writable_file(
@@ -1592,7 +1626,7 @@ def test_external_uv_base_interpreter_attestation_rejects_a_world_writable_file(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="must not be world-writable"):
-        autoresearch_runner._secure_open_external_uv_base_interpreter(base_interpreter)
+        autoresearch_secure_io._secure_open_external_uv_base_interpreter(base_interpreter)
 
 
 def test_platform_runtime_recovery_state_recheck_rejects_a_write_race(tmp_path: Path) -> None:
@@ -1605,7 +1639,7 @@ def test_platform_runtime_recovery_state_recheck_rejects_a_write_race(tmp_path: 
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="state changed before publication"):
-        autoresearch_runner._require_unchanged_platform_runtime_recovery_state(
+        autoresearch_operator_recovery._require_unchanged_platform_runtime_recovery_state(
             state_path,
             expected,
         )
@@ -1625,7 +1659,7 @@ def test_canonical_verification_dispatch_requires_a_sealed_runtime_attestation(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="runtime attestation"):
-        autoresearch_runner.require_canonical_verification_dispatch_attestation(
+        autoresearch_attestation.require_canonical_verification_dispatch_attestation(
             state_path,
             policy=policy,
             validation_context=AutoresearchValidationContext.from_readiness(platform_readiness),
@@ -1647,7 +1681,7 @@ def test_verification_result_publication_rejects_an_unsealed_runtime(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="runtime attestation"):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=state_path,
             output_path=state_path,
             artifact_path=artifact_path,
@@ -1674,7 +1708,7 @@ def test_platform_v5_recovery_rejects_a_partial_expected_artifact_directory(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="artifact directory to be absent"):
-        autoresearch_runner._require_absent_platform_v5_identity(
+        autoresearch_operator_recovery._require_absent_platform_v5_identity(
             run_id=run_id,
             iteration=1,
             implementation_commit="a" * 40,
@@ -1718,7 +1752,7 @@ def test_platform_v5_recovery_rejects_alternate_detached_manifest_for_same_run(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="duplicate detached v5 identity"):
-        autoresearch_runner._require_absent_platform_v5_identity(
+        autoresearch_operator_recovery._require_absent_platform_v5_identity(
             run_id=run_id,
             iteration=1,
             implementation_commit="a" * 40,

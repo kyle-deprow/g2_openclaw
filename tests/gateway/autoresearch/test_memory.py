@@ -14,8 +14,52 @@ from datetime import (
 from hashlib import sha256
 from pathlib import Path
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.fields as autoresearch_fields
+import gateway.autoresearch.persistence as autoresearch_persistence
 import pytest
+from gateway.autoresearch.artifacts import (
+    MemoryVerificationReceipt,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
+    Phase,
+    ResearchMode,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.lifecycle import (
+    resume_suspended_iteration,
+    start_next_iteration,
+    suspend_for_infrastructure,
+)
+from gateway.autoresearch.manifest_runtime import (
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.memory import (
+    build_final_memory_write_request,
+    can_write_memory,
+    finalize_repeat_memory,
+    finalize_repeat_memory_state_file,
+    mark_memory_written,
+    standardize_mempalace_kg_object,
+    standardized_mempalace_kg_facts,
+    verify_mempalace_final_decision,
+)
+from gateway.autoresearch.persistence import (
+    persist_next_iteration_state,
+    save_state_file,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
 from gateway.autoresearch_decision_receipts import (
     decision_receipt_content,
     decision_receipt_path,
@@ -26,31 +70,6 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
     ReadinessStatus,
-)
-from gateway.autoresearch_runner import (
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
-    MemoryVerificationReceipt,
-    Phase,
-    ReceiptCatalog,
-    ResearchMode,
-    build_final_memory_write_request,
-    can_write_memory,
-    expected_instruction_manifest_sha256,
-    finalize_repeat_memory,
-    finalize_repeat_memory_state_file,
-    mark_memory_written,
-    next_action,
-    persist_next_iteration_state,
-    resume_suspended_iteration,
-    save_state_file,
-    standardize_mempalace_kg_object,
-    standardized_mempalace_kg_facts,
-    start_next_iteration,
-    suspend_for_infrastructure,
-    verify_mempalace_final_decision,
 )
 from gateway.mempalace_finalizer import (
     FINAL_MEMORY_SOURCE_FILE,
@@ -337,7 +356,7 @@ def test_finalize_repeat_memory_state_file_atomically_marks_the_current_repeat_s
     )
 
     assert finalized.memory_written is True
-    assert autoresearch_runner.load_state_file(state_path) == finalized
+    assert autoresearch_persistence.load_state_file(state_path) == finalized
 
 
 def test_persist_next_iteration_state_writes_canonical_decision_receipt(
@@ -658,7 +677,7 @@ def test_readiness_identity_without_quantipy_commit_preserves_predecessor_digest
     identity = ReadinessIdentity.from_dict(predecessor)
 
     # Act
-    digest = autoresearch_runner._canonical_json_digest(identity.to_dict())
+    digest = autoresearch_fields._canonical_json_digest(identity.to_dict())
 
     # Assert
     assert identity.to_dict() == predecessor

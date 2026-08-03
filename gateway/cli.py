@@ -573,7 +573,7 @@ def autoresearch_init_state(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Initialize a pristine schema-v4 campaign pinned to platform readiness."""
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.persistence import (
         initialize_state,
         provision_quantipy_experiment_runs_root,
         save_state_file,
@@ -746,11 +746,19 @@ def autoresearch_next(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Validate autoresearch state/config and print the deterministic next action."""
-    from gateway.autoresearch_runner import (
-        build_receipt_catalog,
+    from gateway.autoresearch.configuration import (
         load_autoresearch_policy,
-        load_state_file,
+    )
+    from gateway.autoresearch.engine import (
         next_action,
+    )
+    from gateway.autoresearch.manifest_runtime import (
+        build_receipt_catalog,
+    )
+    from gateway.autoresearch.persistence import (
+        load_state_file,
+    )
+    from gateway.autoresearch.workspace import (
         validate_target_worktree_clean,
     )
 
@@ -869,13 +877,19 @@ def autoresearch_advance(
     state_reference_sha256: str | None = _state_reference_sha256_option,
 ) -> None:
     """Advance autoresearch state with a validated artifact and persist the result."""
-    from gateway.autoresearch_runner import (
-        AutoresearchValidationContext,
-        advance_artifact_state_file,
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.manifest_runtime import (
         build_receipt_catalog,
         expected_instruction_manifest_sha256,
-        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.persistence import (
+        advance_artifact_state_file,
         load_state_file,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
     )
 
     try:
@@ -929,14 +943,22 @@ def autoresearch_submit_stage(
     state_reference_sha256: str | None = _state_reference_sha256_option,
 ) -> None:
     """Submit a validated stage artifact to the supervisor-owned inbox."""
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.constants import (
         DEFAULT_AUTORESEARCH_STAGE_INBOX,
-        AutoresearchValidationContext,
+    )
+    from gateway.autoresearch.manifest_runtime import (
         build_receipt_catalog,
         expected_instruction_manifest_sha256,
-        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.persistence import (
         load_state_file,
         submit_stage_artifact_file,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
     )
 
     try:
@@ -984,10 +1006,12 @@ def autoresearch_pin_readiness(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Initialize readiness or explicitly repin an active state to the same IDs."""
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.lifecycle import (
+        pin_platform_readiness,
+    )
+    from gateway.autoresearch.persistence import (
         load_state_file,
         persist_derived_state,
-        pin_platform_readiness,
     )
 
     try:
@@ -1047,11 +1071,17 @@ def autoresearch_resume(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Explicitly recheck readiness and resume a suspended iteration."""
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.configuration import (
         load_autoresearch_policy,
+    )
+    from gateway.autoresearch.lifecycle import (
+        resume_suspended_iteration,
+    )
+    from gateway.autoresearch.persistence import (
         load_state_file,
         persist_derived_state,
-        resume_suspended_iteration,
+    )
+    from gateway.autoresearch.transitions import (
         validate_state,
     )
 
@@ -1080,17 +1110,23 @@ def autoresearch_retry_external_verification(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Operator-only bounded retry for the current local panel HTTP 413 verification failure."""
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.manifest_runtime import (
+        build_receipt_catalog,
+    )
+    from gateway.autoresearch.operator_recovery import (
+        retry_external_verification_state_file,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
+    )
     from gateway.autoresearch_readiness import (
         EXTERNAL_VERIFICATION_RETRY_OPERATOR_ENV_VAR,
         EXTERNAL_VERIFICATION_RETRY_OPERATOR_VALUE,
         load_platform_readiness,
         probe_research_panel_for_external_verification_retry,
-    )
-    from gateway.autoresearch_runner import (
-        AutoresearchValidationContext,
-        build_receipt_catalog,
-        load_autoresearch_policy,
-        retry_external_verification_state_file,
     )
 
     try:
@@ -1134,15 +1170,23 @@ def autoresearch_recover_interrupted_verification(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Operator-only recovery for the one sealed, stopped detached v3 verification run."""
-    from gateway.autoresearch_readiness import load_platform_readiness
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.constants import (
         INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR,
         INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_VALUE,
-        AutoresearchValidationContext,
+    )
+    from gateway.autoresearch.manifest_runtime import (
         build_receipt_catalog,
-        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.operator_recovery import (
         recover_interrupted_verification_state_file,
     )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
+    )
+    from gateway.autoresearch_readiness import load_platform_readiness
 
     try:
         if os.environ.get(INTERRUPTED_VERIFICATION_RECOVERY_OPERATOR_ENV_VAR) != (
@@ -1182,16 +1226,22 @@ def autoresearch_recover_platform_runtime(
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
     """Operator-only exact recovery of the sealed v4 panel receipt failure into v5."""
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.constants import (
+        PLATFORM_RUNTIME_RECOVERY_OPERATOR_ENV_VAR,
+        PLATFORM_RUNTIME_RECOVERY_OPERATOR_VALUE,
+    )
+    from gateway.autoresearch.operator_recovery import (
+        recover_platform_runtime_state_file,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
+    )
     from gateway.autoresearch_readiness import (
         load_platform_readiness,
         probe_research_panel_for_external_verification_retry,
-    )
-    from gateway.autoresearch_runner import (
-        PLATFORM_RUNTIME_RECOVERY_OPERATOR_ENV_VAR,
-        PLATFORM_RUNTIME_RECOVERY_OPERATOR_VALUE,
-        AutoresearchValidationContext,
-        load_autoresearch_policy,
-        recover_platform_runtime_state_file,
     )
 
     try:
@@ -1230,11 +1280,17 @@ def autoresearch_suspend_infra(
     openclaw_config: Path = _openclaw_config_option,
 ) -> None:
     """Durably suspend an active alpha iteration for operator-owned infrastructure repair."""
-    from gateway.autoresearch_runner import (
+    from gateway.autoresearch.configuration import (
         load_autoresearch_policy,
+    )
+    from gateway.autoresearch.lifecycle import (
+        suspend_for_infrastructure,
+    )
+    from gateway.autoresearch.persistence import (
         load_state_file,
         persist_derived_state,
-        suspend_for_infrastructure,
+    )
+    from gateway.autoresearch.transitions import (
         validate_state,
     )
 

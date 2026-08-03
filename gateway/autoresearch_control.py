@@ -16,13 +16,17 @@ from pathlib import Path
 from typing import Protocol
 
 import gateway.autoresearch_runs as detached_runs
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
+)
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
-)
-from gateway.autoresearch_runner import (
-    AutoresearchState,
-    AutoresearchValidationError,
-    build_authoritative_state_reference,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,

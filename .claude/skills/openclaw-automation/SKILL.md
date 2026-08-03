@@ -33,7 +33,7 @@ Schedule tasks, react to lifecycle events, and integrate external systems throug
 ## This repo
 
 - **The load-bearing automation is a systemd user unit, not OpenClaw cron:** `quantipy-autoresearch-supervisor.service` (template in `gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template`), 60s poll, `BindsTo=openclaw-gateway.service`; logic in `gateway/autoresearch_supervisor.py` and `gateway/autoresearch_systemd.py`.
-- **The supervisor drives** autoresearch runs in `agent:autoresearch-pm:autoresearch:quantipy` (`gateway/autoresearch_runner.py`, `gateway/autoresearch_runs.py`) and the MemPalace finalizer (`gateway/mempalace_finalizer.py`).
+- **The supervisor drives** autoresearch runs in `agent:autoresearch-pm:autoresearch:quantipy` (the `gateway/autoresearch/` package, `gateway/autoresearch_runs.py`) and the MemPalace finalizer (`gateway/mempalace_finalizer.py`).
 - **Webhook/daemon endpoints:** OpenClaw Gateway daemon on port `18789`; the repo's G2 gateway WebSocket runs on port `8765`.
 - **Config changes** (cron jobs, webhooks, heartbeat settings) are edited in `gateway/openclaw_config/openclaw.json` and deployed with `bash scripts/push-openclaw-config.sh` — never hand-edit `~/.openclaw/`.
 - **Long-running task scripts:** `scripts/run-long-task.sh`, `scripts/run-long-task-worker.sh`.

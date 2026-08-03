@@ -15,29 +15,46 @@ from threading import (
 )
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.operator_recovery as autoresearch_operator_recovery
+import gateway.autoresearch.persistence as autoresearch_persistence
+import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
 from gateway.autoresearch import constants
 from gateway.autoresearch import manifest_runtime as manifest_runtime_module
 from gateway.autoresearch import persistence as persistence_module
 from gateway.autoresearch import transitions as transitions_module
-from gateway.autoresearch_readiness import PlatformReadinessManifest
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.artifacts import (
+    QuantipyExperimentEvidence,
+    SetupContextArtifact,
+)
+from gateway.autoresearch.constants import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
+)
+from gateway.autoresearch.enums import (
     FixTriggerPhase,
     Phase,
-    QuantipyExperimentEvidence,
-    ReceiptCatalog,
-    SetupContextArtifact,
     VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.manifest_runtime import (
     expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.persistence import (
     persist_derived_state,
     save_state_file,
 )
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch_readiness import PlatformReadinessManifest
 
 from tests.gateway.autoresearch.builders import (
     PublicPlatformRecoveryFixture,
@@ -66,7 +83,7 @@ def test_public_v5_artifact_advancement_routes_and_consumes_runtime_receipts(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -105,7 +122,7 @@ def test_public_v5_artifact_advancement_routes_and_consumes_runtime_receipts(
     )
 
     # Act
-    advanced = autoresearch_runner.advance_artifact_state_file(
+    advanced = autoresearch_persistence.advance_artifact_state_file(
         state_path=fixture.copied_state_path,
         output_path=fixture.copied_state_path,
         artifact_path=artifact_path,
@@ -121,7 +138,7 @@ def test_public_v5_artifact_advancement_routes_and_consumes_runtime_receipts(
     assert advanced.interrupted_verification_history == ()
     assert advanced.platform_runtime_recovery_receipt is None
     assert advanced.canonical_quantipy_runtime_attestation is None
-    assert autoresearch_runner.load_state_file(fixture.copied_state_path) == advanced
+    assert autoresearch_persistence.load_state_file(fixture.copied_state_path) == advanced
     assert fixture.live_state_path.read_bytes() == fixture.live_state_bytes
     assert (
         tuple((path, sha256(path.read_bytes()).hexdigest()) for path, _ in immutable_v5_hashes)
@@ -137,7 +154,7 @@ def test_public_v5_successful_bug_signal_advances_and_consumes_runtime_receipts(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -168,7 +185,7 @@ def test_public_v5_successful_bug_signal_advances_and_consumes_runtime_receipts(
     assert stat.S_IMODE(panel_directory.stat().st_mode) == 0o500
 
     # Act
-    advanced = autoresearch_runner.advance_artifact_state_file(
+    advanced = autoresearch_persistence.advance_artifact_state_file(
         state_path=fixture.copied_state_path,
         output_path=fixture.copied_state_path,
         artifact_path=artifact_path,
@@ -204,7 +221,7 @@ def test_public_v5_artifact_advancement_rejects_unsealed_panel_directory_modes(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -228,7 +245,7 @@ def test_public_v5_artifact_advancement_rejects_unsealed_panel_directory_modes(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="Quantipy panel directory"):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=fixture.copied_state_path,
             output_path=fixture.copied_state_path,
             artifact_path=artifact_path,
@@ -247,7 +264,7 @@ def test_public_v5_artifact_advancement_rejects_symlinked_panel_directory(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -275,7 +292,7 @@ def test_public_v5_artifact_advancement_rejects_symlinked_panel_directory(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="Quantipy panel"):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=fixture.copied_state_path,
             output_path=fixture.copied_state_path,
             artifact_path=artifact_path,
@@ -296,7 +313,7 @@ def test_public_v5_artifact_advancement_rejects_unsealed_panel_file_modes(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -321,7 +338,7 @@ def test_public_v5_artifact_advancement_rejects_unsealed_panel_file_modes(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError, match="mode-0400 sealed file"):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=fixture.copied_state_path,
             output_path=fixture.copied_state_path,
             artifact_path=artifact_path,
@@ -342,7 +359,7 @@ def test_public_v5_artifact_advancement_rejects_publication_races(
 ) -> None:
     # Arrange
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -389,7 +406,7 @@ def test_public_v5_artifact_advancement_rejects_publication_races(
 
     # Act / Assert
     with pytest.raises(AutoresearchValidationError):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=fixture.copied_state_path,
             output_path=fixture.copied_state_path,
             artifact_path=artifact_path,
@@ -414,7 +431,7 @@ def test_public_v5_artifact_advancement_rejects_races_at_atomic_publication(
     race: str,
 ) -> None:
     fixture = public_platform_v4_recovery_fixture
-    recovered = autoresearch_runner.recover_platform_runtime_state_file(
+    recovered = autoresearch_operator_recovery.recover_platform_runtime_state_file(
         fixture.copied_state_path,
         probe=fixture.probe,
         operator_reason="Moved verification to the sealed canonical runtime.",
@@ -442,7 +459,7 @@ def test_public_v5_artifact_advancement_rejects_races_at_atomic_publication(
         path: Path,
         state: AutoresearchState,
         *,
-        publication_guard: autoresearch_runner._ArtifactAdvancePublicationGuard | None = None,
+        publication_guard: autoresearch_persistence._ArtifactAdvancePublicationGuard | None = None,
     ) -> None:
         nonlocal mutation_applied
         assert path == output_path
@@ -489,7 +506,7 @@ def test_public_v5_artifact_advancement_rejects_races_at_atomic_publication(
     )
 
     with pytest.raises(AutoresearchValidationError):
-        autoresearch_runner.advance_artifact_state_file(
+        autoresearch_persistence.advance_artifact_state_file(
             state_path=fixture.copied_state_path,
             output_path=output_path,
             artifact_path=artifact_path,
@@ -522,7 +539,7 @@ def test_persist_derived_state_rejects_source_mutated_immediately_before_publica
         except AutoresearchValidationError as exc:
             failures.append(exc)
 
-    with autoresearch_runner._exclusive_state_lock(source_path):
+    with autoresearch_persistence._exclusive_state_lock(source_path):
         worker = Thread(target=persist)
         worker.start()
         source_path.write_text(json.dumps(changed_source_state.to_dict()), encoding="utf-8")
@@ -551,7 +568,7 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
         receipts,
         state_path=state_path,
     )
-    state_reference = autoresearch_runner.build_authoritative_state_reference(
+    state_reference = autoresearch_transitions.build_authoritative_state_reference(
         state,
         state_path=state_path,
     ).sha256()
@@ -572,7 +589,7 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
     failures: list[AutoresearchValidationError] = []
     initial_derivation_complete = Event()
     allow_lock_acquisition = Event()
-    original_advance = autoresearch_runner.advance_state
+    original_advance = autoresearch_transitions.advance_state
     calls = 0
 
     def pause_after_initial_derivation(
@@ -601,7 +618,7 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
 
     def advance() -> None:
         try:
-            autoresearch_runner.advance_artifact_state_file(
+            autoresearch_persistence.advance_artifact_state_file(
                 state_path=state_path,
                 output_path=output_path,
                 artifact_path=artifact_path,
@@ -613,7 +630,7 @@ def test_artifact_advance_reloads_the_artifact_under_the_publication_lock(
             failures.append(exc)
 
     # Act
-    with autoresearch_runner._exclusive_state_lock(state_path):
+    with autoresearch_persistence._exclusive_state_lock(state_path):
         worker = Thread(target=advance)
         worker.start()
         assert initial_derivation_complete.wait(timeout=2)
@@ -643,7 +660,7 @@ def test_stage_submission_inbox_validates_then_supervisor_advances(
         receipts,
         state_path=state_path,
     )
-    state_reference = autoresearch_runner.build_authoritative_state_reference(
+    state_reference = autoresearch_transitions.build_authoritative_state_reference(
         state,
         state_path=state_path,
     ).sha256()
@@ -658,7 +675,7 @@ def test_stage_submission_inbox_validates_then_supervisor_advances(
         encoding="utf-8",
     )
 
-    submission_path = autoresearch_runner.submit_stage_artifact_file(
+    submission_path = autoresearch_persistence.submit_stage_artifact_file(
         state_path=state_path,
         artifact_path=artifact_path,
         inbox_path=inbox_path,
@@ -670,17 +687,17 @@ def test_stage_submission_inbox_validates_then_supervisor_advances(
     assert submission_path.parent == inbox_path
     assert json.loads(state_path.read_text(encoding="utf-8")) == state.to_dict()
     monkeypatch.setattr(manifest_runtime_module, "build_receipt_catalog", lambda _: receipts)
-    advanced = autoresearch_runner.consume_stage_submission_inbox(
+    advanced = autoresearch_persistence.consume_stage_submission_inbox(
         state_path=state_path,
         output_path=state_path,
         inbox_path=inbox_path,
         openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
         validation_context=None,
     )
     assert advanced is not None
     assert advanced.setup == _setup_artifact()
-    assert autoresearch_runner.load_state_file(state_path).setup == _setup_artifact()
+    assert autoresearch_persistence.load_state_file(state_path).setup == _setup_artifact()
     assert not submission_path.exists()
     assert (inbox_path / "accepted" / submission_path.name).is_file()
 
@@ -706,12 +723,12 @@ def test_stage_submission_inbox_rejects_invalid_envelope_without_state_write(
         encoding="utf-8",
     )
 
-    advanced = autoresearch_runner.consume_stage_submission_inbox(
+    advanced = autoresearch_persistence.consume_stage_submission_inbox(
         state_path=state_path,
         output_path=state_path,
         inbox_path=inbox_path,
         openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
         validation_context=None,
     )
 
@@ -735,12 +752,12 @@ def test_stage_submission_inbox_rejects_symlinked_root_without_outside_write(
     protected.write_text("do-not-touch\n", encoding="utf-8")
 
     with pytest.raises(AutoresearchValidationError, match="cannot open stage submission inbox"):
-        autoresearch_runner.consume_stage_submission_inbox(
+        autoresearch_persistence.consume_stage_submission_inbox(
             state_path=state_path,
             output_path=state_path,
             inbox_path=inbox_path,
             openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
             validation_context=None,
         )
 
@@ -766,12 +783,12 @@ def test_stage_submission_inbox_rejects_symlinked_rejected_directory_without_ove
     protected.write_text("do-not-overwrite\n", encoding="utf-8")
 
     with pytest.raises(AutoresearchValidationError, match="rejected path must be a plain"):
-        autoresearch_runner.consume_stage_submission_inbox(
+        autoresearch_persistence.consume_stage_submission_inbox(
             state_path=state_path,
             output_path=state_path,
             inbox_path=inbox_path,
             openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
             validation_context=None,
         )
 
@@ -798,12 +815,12 @@ def test_stage_submission_inbox_rejects_symlinked_accepted_directory_without_ove
     protected.write_text("do-not-overwrite\n", encoding="utf-8")
 
     with pytest.raises(AutoresearchValidationError, match="accepted path must be a plain"):
-        autoresearch_runner.consume_stage_submission_inbox(
+        autoresearch_persistence.consume_stage_submission_inbox(
             state_path=state_path,
             output_path=state_path,
             inbox_path=inbox_path,
             openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-            quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+            quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
             validation_context=None,
         )
 
@@ -826,12 +843,12 @@ def test_stage_submission_inbox_rejects_hardlinked_submission_without_state_writ
     hardlink = inbox_path / "hardlink.json"
     os.link(source, hardlink)
 
-    advanced = autoresearch_runner.consume_stage_submission_inbox(
+    advanced = autoresearch_persistence.consume_stage_submission_inbox(
         state_path=state_path,
         output_path=state_path,
         inbox_path=inbox_path,
         openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
         validation_context=None,
     )
 
@@ -858,12 +875,12 @@ def test_stage_submission_inbox_duplicate_rejection_destination_gets_unique_name
     stale_rejected = rejected_path / "bad.json"
     stale_rejected.write_text("do-not-overwrite\n", encoding="utf-8")
 
-    advanced = autoresearch_runner.consume_stage_submission_inbox(
+    advanced = autoresearch_persistence.consume_stage_submission_inbox(
         state_path=state_path,
         output_path=state_path,
         inbox_path=inbox_path,
         openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
-        quantipy_root=autoresearch_runner.DEFAULT_QUANTIPY_ROOT,
+        quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
         validation_context=None,
     )
 
@@ -939,7 +956,7 @@ def test_canonical_state_lock_paths_are_sorted_and_deduplicated(tmp_path: Path) 
     second_path = tmp_path / "b-state.json"
     first_alias = tmp_path / "." / first_path.name
 
-    canonical_paths = autoresearch_runner._canonical_state_paths(
+    canonical_paths = autoresearch_persistence._canonical_state_paths(
         (second_path, first_alias, first_path)
     )
 
@@ -958,9 +975,9 @@ def test_state_lock_paths_hash_unique_canonical_paths_and_collapse_symlink_alias
     first_alias = tmp_path / "first-state-alias.json"
     first_alias.symlink_to(first_path)
 
-    first_lock_path = autoresearch_runner._state_lock_path(first_path)
-    second_lock_path = autoresearch_runner._state_lock_path(second_path)
-    alias_lock_path = autoresearch_runner._state_lock_path(first_alias)
+    first_lock_path = autoresearch_persistence._state_lock_path(first_path)
+    second_lock_path = autoresearch_persistence._state_lock_path(second_path)
+    alias_lock_path = autoresearch_persistence._state_lock_path(first_alias)
 
     assert first_lock_path != second_lock_path
     assert alias_lock_path == first_lock_path
@@ -977,11 +994,12 @@ def test_lock_namespace_and_path_are_process_invariant_across_temp_environments(
     script = (
         "import json\n"
         "from pathlib import Path\n"
-        "import gateway.autoresearch_runner as runner\n"
+        "import gateway.autoresearch.constants as constants\n"
+        "import gateway.autoresearch.persistence as persistence\n"
         f"state_path = Path({str(state_path)!r})\n"
         "print(json.dumps({"
-        "'namespace': str(runner.AUTORESEARCH_LOCK_NAMESPACE), "
-        "'lock_path': str(runner._state_lock_path(state_path))"
+        "'namespace': str(constants.AUTORESEARCH_LOCK_NAMESPACE), "
+        "'lock_path': str(persistence._state_lock_path(state_path))"
         "}, sort_keys=True))\n"
     )
 
@@ -1014,8 +1032,8 @@ def test_lock_namespace_and_path_are_process_invariant_across_temp_environments(
 def test_lock_namespace_and_lock_files_use_private_permissions(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
 
-    with autoresearch_runner._exclusive_state_locks((state_path,)):
-        lock_path = autoresearch_runner._state_lock_path(state_path)
+    with autoresearch_persistence._exclusive_state_locks((state_path,)):
+        lock_path = autoresearch_persistence._state_lock_path(state_path)
         namespace_path = lock_path.parent
 
         assert stat.S_IMODE(namespace_path.stat().st_mode) == 0o700
@@ -1032,7 +1050,7 @@ def test_state_output_inside_lock_namespace_fails_closed(
     source_path = tmp_path / "source.json"
     source_state = AutoresearchState(platform_readiness=platform_readiness.identity())
     source_path.write_text(json.dumps(source_state.to_dict()), encoding="utf-8")
-    namespace_path = autoresearch_runner._prepare_lock_namespace()
+    namespace_path = autoresearch_persistence._prepare_lock_namespace()
     output_parent = namespace_path
     if via_symlink:
         output_parent = tmp_path / "lock-namespace-alias"
@@ -1059,15 +1077,15 @@ def test_insecure_existing_lock_namespace_fails_closed(
 
     with (
         pytest.raises(AutoresearchValidationError, match="permissions must be 0700"),
-        autoresearch_runner._exclusive_state_locks((tmp_path / "state.json",)),
+        autoresearch_persistence._exclusive_state_locks((tmp_path / "state.json",)),
     ):
         pass
 
 
 def test_symlink_lock_file_fails_with_validation_error(tmp_path: Path) -> None:
     state_path = tmp_path / "state.json"
-    autoresearch_runner._prepare_lock_namespace()
-    lock_path = autoresearch_runner._state_lock_path(state_path)
+    autoresearch_persistence._prepare_lock_namespace()
+    lock_path = autoresearch_persistence._state_lock_path(state_path)
     symlink_target = tmp_path / "lock-target"
     symlink_target.touch(mode=0o600)
     lock_path.symlink_to(symlink_target)
@@ -1077,7 +1095,7 @@ def test_symlink_lock_file_fails_with_validation_error(tmp_path: Path) -> None:
             AutoresearchValidationError,
             match="unable to open autoresearch state lock",
         ),
-        autoresearch_runner._exclusive_state_locks((state_path,)),
+        autoresearch_persistence._exclusive_state_locks((state_path,)),
     ):
         pass
 
@@ -1209,7 +1227,7 @@ def test_save_state_file_waits_for_an_active_destination_writer(
         save_state_file(output_path, state)
         completed.set()
 
-    with autoresearch_runner._exclusive_state_locks((output_path,)):
+    with autoresearch_persistence._exclusive_state_locks((output_path,)):
         worker = Thread(target=save)
         worker.start()
 

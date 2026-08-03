@@ -6,26 +6,42 @@ from dataclasses import (
 )
 from pathlib import Path
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.workspace as autoresearch_workspace
 import pytest
 from gateway.autoresearch import constants
+from gateway.autoresearch.artifacts import (
+    FixResultArtifact,
+    ImplementationResultArtifact,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
+    FixTriggerPhase,
+    Phase,
+    VerificationStatus,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    validate_artifact_workspace,
+)
+from gateway.autoresearch.workspace import (
+    validate_target_worktree_clean,
+)
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
-)
-from gateway.autoresearch_runner import (
-    DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationError,
-    FixResultArtifact,
-    FixTriggerPhase,
-    ImplementationResultArtifact,
-    Phase,
-    ReceiptCatalog,
-    VerificationStatus,
-    next_action,
-    validate_artifact_workspace,
-    validate_target_worktree_clean,
 )
 
 from tests.gateway.autoresearch.builders import (
@@ -423,7 +439,7 @@ def test_legacy_active_workspace_migration_clones_from_authoritative_checkout(
     state_path = tmp_path / "state.json"
     state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
 
-    migrated = autoresearch_runner.migrate_legacy_autoresearch_workspace_state_file(
+    migrated = autoresearch_workspace.migrate_legacy_autoresearch_workspace_state_file(
         state_path,
         policy=policy,
         validation_context=None,
@@ -471,7 +487,7 @@ def test_legacy_workspace_migration_rejects_existing_destination_with_wrong_orig
         AutoresearchValidationError,
         match=r"remote\.origin\.url must be the authoritative local target_repo|Git ancestry check",
     ):
-        autoresearch_runner.migrate_legacy_autoresearch_workspace_state_file(
+        autoresearch_workspace.migrate_legacy_autoresearch_workspace_state_file(
             state_path,
             policy=policy,
             validation_context=None,

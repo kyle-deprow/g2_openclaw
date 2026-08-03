@@ -8,7 +8,7 @@ version: 8.1.0
 
 Autoresearch is a PM-orchestrated loop, but authoritative lifecycle mutation,
 loop state, and next-stage selection must come from the deterministic
-controller/supervisor in `gateway.autoresearch_runner` (or read-only
+controller/supervisor in the `gateway.autoresearch` package (or read-only
 `gateway-cli autoresearch-next` output), not from prompt memory. Because the PM
 workspace is outside this repo, invoke it exactly as `cd
 /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next

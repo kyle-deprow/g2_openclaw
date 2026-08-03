@@ -6,22 +6,35 @@ from copy import deepcopy
 from pathlib import Path
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.configuration as autoresearch_configuration
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.memory as autoresearch_memory
+import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
 from gateway.autoresearch import compute as compute_module
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.artifacts import (
+    VerificationResultArtifact,
+)
+from gateway.autoresearch.compute import (
+    ComputeCapabilitySnapshot,
+    ComputeFitArtifact,
+)
+from gateway.autoresearch.configuration import (
     MEMPALACE_READONLY_DISPLAY_TOOL_IDS,
+    load_autoresearch_policy,
+)
+from gateway.autoresearch.constants import (
     MEMPALACE_READONLY_SERVER_ID,
     MEMPALACE_READONLY_TOOL_NAMES,
     PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS,
+)
+from gateway.autoresearch.enums import (
+    ComputeTarget,
+    VerificationStatus,
+)
+from gateway.autoresearch.errors import (
     AutoresearchConfigError,
     AutoresearchValidationError,
-    ComputeCapabilitySnapshot,
-    ComputeFitArtifact,
-    ComputeTarget,
-    VerificationResultArtifact,
-    VerificationStatus,
-    load_autoresearch_policy,
 )
 
 from tests.gateway.autoresearch.builders import (
@@ -69,11 +82,6 @@ def test_gpu_compute_fit_fails_closed_when_dependency_is_unavailable(
         probe_errors=(),
     )
     monkeypatch.setattr(
-        autoresearch_runner,
-        "collect_compute_capability_snapshot",
-        lambda _target_repo: snapshot,
-    )
-    monkeypatch.setattr(
         compute_module,
         "collect_compute_capability_snapshot",
         lambda _target_repo: snapshot,
@@ -86,7 +94,7 @@ def test_gpu_compute_fit_fails_closed_when_dependency_is_unavailable(
     )
 
     with pytest.raises(AutoresearchValidationError, match="unavailable dependencies"):
-        autoresearch_runner._validate_compute_fit_environment(compute_fit, tmp_path)
+        autoresearch_transitions._validate_compute_fit_environment(compute_fit, tmp_path)
 
 
 def test_gpu_compute_fit_fails_closed_without_target_virtualenv(
@@ -106,11 +114,6 @@ def test_gpu_compute_fit_fails_closed_without_target_virtualenv(
         probe_errors=(),
     )
     monkeypatch.setattr(
-        autoresearch_runner,
-        "collect_compute_capability_snapshot",
-        lambda _target_repo: snapshot,
-    )
-    monkeypatch.setattr(
         compute_module,
         "collect_compute_capability_snapshot",
         lambda _target_repo: snapshot,
@@ -123,7 +126,7 @@ def test_gpu_compute_fit_fails_closed_without_target_virtualenv(
     )
 
     with pytest.raises(AutoresearchValidationError, match="virtualenv is unavailable"):
-        autoresearch_runner._validate_compute_fit_environment(compute_fit, tmp_path)
+        autoresearch_transitions._validate_compute_fit_environment(compute_fit, tmp_path)
 
 
 def test_compute_capability_snapshot_is_serializable() -> None:
@@ -265,9 +268,12 @@ def test_default_openclaw_config_projects_readonly_memory_and_main_control_only(
     mcp = cast(dict[str, object], config["mcp"])
     servers = cast(dict[str, object], mcp["servers"])
     readonly_server = cast(dict[str, object], servers[MEMPALACE_READONLY_SERVER_ID])
-    control_server = cast(dict[str, object], servers[autoresearch_runner.G2_CONTROL_SERVER_ID])
+    control_server = cast(dict[str, object], servers[autoresearch_constants.G2_CONTROL_SERVER_ID])
 
-    assert list(servers) == [MEMPALACE_READONLY_SERVER_ID, autoresearch_runner.G2_CONTROL_SERVER_ID]
+    assert list(servers) == [
+        MEMPALACE_READONLY_SERVER_ID,
+        autoresearch_constants.G2_CONTROL_SERVER_ID,
+    ]
     assert cast(dict[str, object], readonly_server["codex"])["agents"] == [
         "main",
         "autoresearch-pm",
@@ -291,7 +297,7 @@ def test_default_openclaw_config_projects_readonly_memory_and_main_control_only(
     assert control_codex["defaultToolsApprovalMode"] == "approve"
     assert cast(list[str], control_server["args"]) == [
         "-m",
-        autoresearch_runner.G2_CONTROL_MODULE,
+        autoresearch_constants.G2_CONTROL_MODULE,
     ]
 
 
@@ -305,7 +311,7 @@ def test_default_openclaw_config_has_no_model_visible_mempalace_write_tools() ->
             tools = cast(dict[str, object], agent["tools"])
             assert tools["profile"] == "minimal"
             assert cast(list[str], tools["allow"]) == list(
-                autoresearch_runner.MAIN_OPENCLAW_TOOL_ALLOW_POLICY
+                autoresearch_configuration.MAIN_OPENCLAW_TOOL_ALLOW_POLICY
             )
             denied_tools = cast(list[str], tools["deny"])
             assert "exec" in denied_tools
@@ -329,5 +335,5 @@ def test_native_codex_autoresearch_stage_agents_have_no_mcp_overrides() -> None:
 
     assert readonly_agents[:2] == ["main", "autoresearch-pm"]
     for agent_id in readonly_agents[2:]:
-        path = autoresearch_runner.G2_OPENCLAW_REPO_ROOT / ".codex" / "agents" / f"{agent_id}.toml"
+        path = autoresearch_memory.G2_OPENCLAW_REPO_ROOT / ".codex" / "agents" / f"{agent_id}.toml"
         assert "[mcp_servers" not in path.read_text(encoding="utf-8"), agent_id

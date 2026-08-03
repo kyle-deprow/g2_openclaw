@@ -9,14 +9,17 @@ from datetime import (
 from pathlib import Path
 from typing import cast
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.manifest_runtime as autoresearch_manifest_runtime
+import gateway.autoresearch.persistence as autoresearch_persistence
+import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
-from gateway.autoresearch_platform_validation import (
-    PlatformCoverageScope,
-    PlatformCoverageStatus,
+from gateway.autoresearch.artifacts import (
+    DebateResultArtifact,
+    FinalDecisionArtifact,
+    PriceHydrationScopePreflight,
+    VerificationResultArtifact,
 )
-from gateway.autoresearch_readiness import PlatformReadinessManifest
-from gateway.autoresearch_runner import (
+from gateway.autoresearch.constants import (
     MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
     MAX_ARTIFACT_FILE_BYTES,
     MAX_NEXT_ACTION_PROMPT_BYTES,
@@ -24,36 +27,59 @@ from gateway.autoresearch_runner import (
     OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,
     OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME,
     OPERATOR_INFRASTRUCTURE_SUSPENSION_RATIONALE,
+)
+from gateway.autoresearch.engine import (
+    next_action,
+)
+from gateway.autoresearch.enums import (
     ArtifactType,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    AutoresearchValidationError,
-    DebateResultArtifact,
     FinalDecision,
-    FinalDecisionArtifact,
     FinalReviewerVerdict,
     FixTriggerPhase,
     InfraGateOutcome,
-    MemberUnionManifestReceipt,
     Phase,
-    PriceHydrationScopePreflight,
-    ReceiptCatalog,
     ResearchMode,
     ReviewVerdict,
-    VerificationResultArtifact,
     VerificationStatus,
-    advance_infrastructure_verification_failure,
-    can_write_memory,
-    expected_instruction_manifest_sha256,
-    load_artifact_file,
-    next_action,
-    save_state_file,
+)
+from gateway.autoresearch.errors import (
+    AutoresearchValidationError,
+)
+from gateway.autoresearch.lifecycle import (
     start_next_iteration,
     suspend_for_infrastructure,
+)
+from gateway.autoresearch.manifest_runtime import (
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.memory import (
+    can_write_memory,
+)
+from gateway.autoresearch.persistence import (
+    advance_infrastructure_verification_failure,
+    load_artifact_file,
+    save_state_file,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.receipts import (
+    MemberUnionManifestReceipt,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import advance_state as _runner_advance_state
+from gateway.autoresearch.transitions import (
     validate_state,
 )
-from gateway.autoresearch_runner import advance_state as _runner_advance_state
+from gateway.autoresearch_platform_validation import (
+    PlatformCoverageScope,
+    PlatformCoverageStatus,
+)
+from gateway.autoresearch_readiness import PlatformReadinessManifest
 
 from tests.gateway.autoresearch.builders import (
     _MEMBER_UNION_DIGEST,
@@ -150,15 +176,17 @@ def test_infrastructure_verification_failure_advances_to_fix_test_atomically(
         terminal_status="rejected",
     )
     save_state_file(state_path, state)
-    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+    state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
         state,
         state_path=state_path,
     ).sha256()
-    instruction_manifest_sha256 = autoresearch_runner.expected_instruction_manifest_sha256(
-        state,
-        policy,
-        receipts,
-        state_path=state_path,
+    instruction_manifest_sha256 = (
+        autoresearch_manifest_runtime.expected_instruction_manifest_sha256(
+            state,
+            policy,
+            receipts,
+            state_path=state_path,
+        )
     )
     artifact = VerificationResultArtifact(
         status=VerificationStatus.TEST_FAILURE,
@@ -215,7 +243,7 @@ def test_infrastructure_verification_failure_rejects_instruction_digest_mismatch
     )
     state_path = tmp_path / "quantipy-state.json"
     save_state_file(state_path, state)
-    state_reference_sha256 = autoresearch_runner.build_authoritative_state_reference(
+    state_reference_sha256 = autoresearch_transitions.build_authoritative_state_reference(
         state,
         state_path=state_path,
     ).sha256()
@@ -310,10 +338,12 @@ def test_load_artifact_file_rejects_a_tampered_persisted_state(
         json.dumps(
             {
                 "instruction_manifest_sha256": digest,
-                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
-                    state,
-                    state_path=state_path,
-                ).sha256(),
+                "state_reference_sha256": (
+                    autoresearch_transitions.build_authoritative_state_reference(
+                        state,
+                        state_path=state_path,
+                    ).sha256()
+                ),
                 "artifact": _setup_artifact().to_dict(),
             }
         ),
@@ -352,10 +382,12 @@ def test_load_artifact_file_rejects_a_missing_persisted_state(
         json.dumps(
             {
                 "instruction_manifest_sha256": digest,
-                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
-                    state,
-                    state_path=state_path,
-                ).sha256(),
+                "state_reference_sha256": (
+                    autoresearch_transitions.build_authoritative_state_reference(
+                        state,
+                        state_path=state_path,
+                    ).sha256()
+                ),
                 "artifact": _setup_artifact().to_dict(),
             }
         ),
@@ -414,10 +446,12 @@ def test_load_artifact_file_rejects_an_envelope_bound_to_a_different_state_path(
         json.dumps(
             {
                 "instruction_manifest_sha256": digest,
-                "state_reference_sha256": autoresearch_runner.build_authoritative_state_reference(
-                    state,
-                    state_path=default_state_path,
-                ).sha256(),
+                "state_reference_sha256": (
+                    autoresearch_transitions.build_authoritative_state_reference(
+                        state,
+                        state_path=default_state_path,
+                    ).sha256()
+                ),
                 "artifact": _setup_artifact().to_dict(),
             }
         ),
@@ -459,7 +493,7 @@ def test_authoritative_state_reference_rejects_a_tampered_state_file(
     state_path.write_text(json.dumps(tampered.to_dict()), encoding="utf-8")
 
     with pytest.raises(AutoresearchValidationError, match="does not match the current state"):
-        autoresearch_runner.validate_authoritative_state_reference(
+        autoresearch_persistence.validate_authoritative_state_reference(
             action.instruction_source_manifest.state_reference
         )
 
@@ -768,7 +802,7 @@ def test_later_phase_prompt_keeps_verbose_history_in_the_verified_state_file(
     assert action.phase is Phase.DECISION_LOG
     assert len(action.prompt_text.encode("utf-8")) <= NEXT_ACTION_PROMPT_TARGET_BYTES - 1024
     assert verbose_detail not in action.prompt_text
-    validated = autoresearch_runner.validate_authoritative_state_reference(
+    validated = autoresearch_persistence.validate_authoritative_state_reference(
         action.instruction_source_manifest.state_reference
     )
 
@@ -1523,7 +1557,7 @@ def test_platform_preflight_rejects_weekend_endpoint() -> None:
     )
 
     with pytest.raises(AutoresearchValidationError, match="actual XNYS session labels"):
-        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+        autoresearch_transitions._requested_sessions_for_preflight(preflight, context)
 
 
 def test_platform_preflight_rejects_range_outside_pinned_xnys_evidence() -> None:
@@ -1546,7 +1580,7 @@ def test_platform_preflight_rejects_range_outside_pinned_xnys_evidence() -> None
     )
 
     with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
-        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+        autoresearch_transitions._requested_sessions_for_preflight(preflight, context)
 
 
 def test_platform_preflight_rejects_truncated_xnys_session_evidence() -> None:
@@ -1569,7 +1603,7 @@ def test_platform_preflight_rejects_truncated_xnys_session_evidence() -> None:
     )
 
     with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
-        autoresearch_runner._requested_sessions_for_preflight(preflight, context)
+        autoresearch_transitions._requested_sessions_for_preflight(preflight, context)
 
 
 def test_g0_remediation_rejects_stage_authored_infra_blocked(

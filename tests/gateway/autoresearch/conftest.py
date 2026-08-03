@@ -9,44 +9,67 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlencode
 
-import gateway.autoresearch_runner as autoresearch_runner
+import gateway.autoresearch.constants as autoresearch_constants
+import gateway.autoresearch.evidence as autoresearch_evidence
+import gateway.autoresearch.operator_recovery as autoresearch_operator_recovery
+import gateway.autoresearch.transitions as autoresearch_transitions
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
 from gateway.autoresearch import constants
+from gateway.autoresearch.artifacts import (
+    FinalDecisionArtifact,
+    MemoryVerificationReceipt,
+    QuantipyExperimentEvidence,
+    QuantipyExperimentFailureEvidence,
+)
+from gateway.autoresearch.configuration import (
+    load_autoresearch_policy,
+)
+from gateway.autoresearch.constants import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
+)
+from gateway.autoresearch.enums import (
+    FinalDecision,
+    FinalReviewerVerdict,
+    FixTriggerPhase,
+    InfraGateOutcome,
+    Phase,
+    ResearchMode,
+    ReviewVerdict,
+    VerificationStatus,
+)
+from gateway.autoresearch.manifest_runtime import (
+    QUANTIPY_RECEIPT_PATHS,
+    build_receipt_catalog,
+    expected_instruction_manifest_sha256,
+)
+from gateway.autoresearch.memory import (
+    mark_memory_written,
+)
+from gateway.autoresearch.operator_recovery import (
+    retry_external_verification,
+    retry_external_verification_state_file,
+)
+from gateway.autoresearch.persistence import (
+    save_state_file,
+)
+from gateway.autoresearch.policy import (
+    AutoresearchPolicy,
+    ReceiptCatalog,
+)
+from gateway.autoresearch.recovery_receipts import (
+    ExternalVerificationRetryReceipt,
+)
+from gateway.autoresearch.state import (
+    AutoresearchState,
+    AutoresearchValidationContext,
+)
+from gateway.autoresearch.transitions import advance_state as _runner_advance_state
 from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     ReadinessIdentity,
     ResearchPanelProbeReceipt,
 )
-from gateway.autoresearch_runner import (
-    DEFAULT_OPENCLAW_CONFIG_PATH,
-    QUANTIPY_RECEIPT_PATHS,
-    AutoresearchPolicy,
-    AutoresearchState,
-    AutoresearchValidationContext,
-    ExternalVerificationRetryReceipt,
-    FinalDecision,
-    FinalDecisionArtifact,
-    FinalReviewerVerdict,
-    FixTriggerPhase,
-    InfraGateOutcome,
-    MemoryVerificationReceipt,
-    Phase,
-    QuantipyExperimentEvidence,
-    QuantipyExperimentFailureEvidence,
-    ReceiptCatalog,
-    ResearchMode,
-    ReviewVerdict,
-    VerificationStatus,
-    build_receipt_catalog,
-    expected_instruction_manifest_sha256,
-    load_autoresearch_policy,
-    mark_memory_written,
-    retry_external_verification,
-    retry_external_verification_state_file,
-    save_state_file,
-)
-from gateway.autoresearch_runner import advance_state as _runner_advance_state
 
 from tests.gateway.autoresearch.builders import (
     GitWorktree,
@@ -315,7 +338,7 @@ def trusted_quantipy_runs_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     root = tmp_path / "trusted-quantipy-runs"
     root.mkdir(mode=0o700)
     monkeypatch.setattr(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", root)
-    monkeypatch.setattr(autoresearch_runner, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", root)
+    monkeypatch.setattr(autoresearch_constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", root)
     detached_root = tmp_path / "trusted-detached-runs"
     monkeypatch.setattr(
         autoresearch_runs,
@@ -464,7 +487,7 @@ def public_platform_v4_recovery_fixture(
     v3_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
         f"i{v3_state.iteration}-verification-r1-a3-{implementation.commit_sha[:12]}-v3"
     )
-    v3_command = autoresearch_runner._legacy_quantipy_bash_command(
+    v3_command = autoresearch_evidence._legacy_quantipy_bash_command(
         implementation,
         run_id=v3_receipt.expected_run_id,
     )
@@ -481,7 +504,7 @@ def public_platform_v4_recovery_fixture(
                     f"{implementation.commit_sha[:12]}-v3"
                 ),
                 "state_reference_sha256": (
-                    autoresearch_runner.build_authoritative_state_reference(
+                    autoresearch_transitions.build_authoritative_state_reference(
                         v3_state,
                         state_path=live_state_path,
                     ).sha256()
@@ -532,7 +555,7 @@ def public_platform_v4_recovery_fixture(
         failure_classification=autoresearch_runs.RunFailureClassification.OPERATOR_STOPPED,
         runs_root=autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
     )
-    v4_state = autoresearch_runner.recover_interrupted_verification_state_file(
+    v4_state = autoresearch_operator_recovery.recover_interrupted_verification_state_file(
         live_state_path,
         operator_reason="Stopped the detached v3 process before it produced run.json.",
         policy=policy,
@@ -557,7 +580,7 @@ def public_platform_v4_recovery_fixture(
     v4_run_dir = autoresearch_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT / (
         f"i{v4_state.iteration}-verification-r1-a4-{implementation.commit_sha[:12]}-v4"
     )
-    v4_command = autoresearch_runner._legacy_quantipy_bash_command(
+    v4_command = autoresearch_evidence._legacy_quantipy_bash_command(
         implementation,
         run_id=v4_receipt.expected_run_id,
     )
@@ -574,7 +597,7 @@ def public_platform_v4_recovery_fixture(
                     f"{implementation.commit_sha[:12]}-v4"
                 ),
                 "state_reference_sha256": (
-                    autoresearch_runner.build_authoritative_state_reference(
+                    autoresearch_transitions.build_authoritative_state_reference(
                         v4_state,
                         state_path=live_state_path,
                     ).sha256()
