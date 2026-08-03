@@ -6,10 +6,11 @@ import hashlib
 import os
 import re
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gateway.autoresearch import constants
 from gateway.autoresearch.constants import (
     CANONICAL_QUANTIPY_BASE_INTERPRETER_MAX_BYTES as CANONICAL_QUANTIPY_BASE_INTERPRETER_MAX_BYTES,
 )
@@ -45,6 +46,9 @@ from gateway.autoresearch.errors import (
 )
 from gateway.autoresearch.evidence import (
     _expected_local_research_panel_http_error_message as _expected_local_research_panel_http_error_message,  # noqa: E501
+)
+from gateway.autoresearch.evidence import (
+    build_quantipy_execution_contract as build_quantipy_execution_contract,
 )
 from gateway.autoresearch.fields import (
     _canonical_json_digest as _canonical_json_digest,
@@ -95,6 +99,9 @@ if TYPE_CHECKING:
     )
     from gateway.autoresearch.state import (
         AutoresearchState as AutoresearchState,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext as AutoresearchValidationContext,
     )
 
 
@@ -759,6 +766,256 @@ def _validate_external_verification_retry_eligibility(state: AutoresearchState) 
             "external verification retry requires the prior expected Quantipy run artifact"
         )
     return current_receipt.retry_attempt + 1
+
+
+def _validate_external_verification_retry_receipt(
+    state: AutoresearchState,
+    validation_context: AutoresearchValidationContext | None,
+) -> None:
+    receipt = state.external_verification_retry_receipt
+    if receipt is None:
+        if state.interrupted_verification_history:
+            raise AutoresearchValidationError(
+                "interrupted verification history requires an external verification retry receipt"
+            )
+        return
+    if state.mode is not ResearchMode.ALPHA_RESEARCH or state.implementation_result is None:
+        raise AutoresearchValidationError(
+            "external verification retry receipt requires an ALPHA_RESEARCH implementation"
+        )
+    _validate_external_verification_retry_history(state, receipt)
+    implementation = state.implementation_result
+    readiness = state.platform_readiness
+    if (
+        receipt.implementation_commit != implementation.commit_sha
+        or receipt.manifest_sha256 != implementation.experiment_manifest_sha256
+        or readiness is None
+        or receipt.readiness_manifest_id != readiness.manifest_id
+        or receipt.readiness_snapshot_id != readiness.snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "external verification retry receipt does not bind implementation/readiness identity"
+        )
+    expected = _deterministic_quantipy_run_id(
+        state.iteration,
+        implementation.commit_sha,
+        attempt=receipt.retry_attempt,
+    )
+    if receipt.expected_run_id != expected:
+        raise AutoresearchValidationError(
+            "external verification retry receipt run ID does not bind the implementation"
+        )
+    _validate_interrupted_verification_history(state, receipt)
+    _validate_platform_runtime_recovery_receipt(state, receipt, validation_context)
+
+
+def _validate_platform_runtime_recovery_receipt(
+    state: AutoresearchState,
+    receipt: ExternalVerificationRetryReceipt,
+    validation_context: AutoresearchValidationContext | None,
+) -> None:
+    from gateway.autoresearch import attestation
+
+    recovery = state.platform_runtime_recovery_receipt
+    if recovery is None:
+        if receipt.retry_attempt == 5:
+            raise AutoresearchValidationError(
+                "v5 external verification retry requires a platform runtime recovery receipt"
+            )
+        return
+    implementation = state.implementation_result
+    if implementation is None:
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt requires implementation"
+        )
+    if validation_context is None or validation_context.quantipy_commit is None:
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt requires the readiness-pinned Quantipy commit"
+        )
+    if (
+        state.phase is not Phase.VERIFICATION
+        or receipt.retry_attempt != 5
+        or receipt.schema_version != INTERRUPTED_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION
+        or len(state.interrupted_verification_history) != 1
+        or len(state.verification_history) != 3
+        or recovery.expected_run_id != receipt.expected_run_id
+        or recovery.implementation_commit != implementation.commit_sha
+        or recovery.implementation_manifest_sha256 != implementation.experiment_manifest_sha256
+        or recovery.probe != receipt.probe
+        or recovery.operator_reason != receipt.operator_reason
+    ):
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt does not bind the exact pending v5 topology"
+        )
+    history_sha256 = tuple(
+        _canonical_json_digest(artifact.to_dict()) for artifact in state.verification_history
+    )
+    interruption = state.interrupted_verification_history[0]
+    v4 = state.verification_history[-1]
+    evidence = v4.quantipy_experiment_evidence
+    failure = evidence.failure if evidence is not None else None
+    if (
+        recovery.verification_history_sha256 != history_sha256
+        or recovery.interruption_sha256 != _canonical_json_digest(interruption.to_dict())
+        or recovery.prior_retry_receipt_sha256
+        != _canonical_json_digest(interruption.prior_retry_receipt.to_dict())
+        or recovery.v4_verification_sha256 != history_sha256[-1]
+        or recovery.v4_detached_run_manifest_sha256
+        != (evidence.detached_run_manifest_sha256 if evidence is not None else "")
+        or recovery.old_worktree_runtime_commit != implementation.commit_sha
+        or v4.status is not VerificationStatus.TEST_FAILURE
+        or v4.tests_passed
+        or evidence is None
+        or evidence.success
+        or evidence.panel is not None
+        or evidence.completed_stages
+        or evidence.terminal_stage is not None
+        or evidence.terminal_status is not None
+        or failure is None
+        or failure.category != "panel"
+        or failure.message != "ExperimentPanelError: Research panel receipt is invalid."
+    ):
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt does not bind the exact v4 panel receipt failure"
+        )
+    try:
+        import gateway.autoresearch_runs as detached_runs
+
+        record = detached_runs.read_run_record(
+            run_dir=Path(evidence.detached_run_directory),
+            runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt v4 detached record is unavailable or invalid"
+        ) from exc
+    if recovery.v4_detached_run_status_sha256 != _canonical_json_digest(record.status.to_dict()):
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt v4 detached status changed"
+        )
+    if (
+        recovery.runtime.readiness_quantipy_commit != validation_context.quantipy_commit
+        or attestation._attest_canonical_quantipy_runtime(
+            state,
+            implementation,
+            readiness_quantipy_commit=validation_context.quantipy_commit,
+        )
+        != recovery.runtime
+    ):
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt canonical runtime attestation changed"
+        )
+    contract = build_quantipy_execution_contract(
+        runtime_root=Path(recovery.runtime.root),
+        manifest_path=Path(implementation.experiment_manifest_path),
+        output_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        run_id=receipt.expected_run_id,
+    )
+    command_sha256 = hashlib.sha256("\0".join(contract.command).encode("utf-8")).hexdigest()
+    if recovery.execution_command_sha256 != command_sha256:
+        raise AutoresearchValidationError(
+            "platform runtime recovery receipt does not bind the canonical v5 command"
+        )
+
+
+def _validate_interrupted_verification_history(
+    state: AutoresearchState,
+    receipt: ExternalVerificationRetryReceipt,
+) -> None:
+    """Validate the one supported, recorded gap between the v2 and v4 artifacts."""
+    interruptions = state.interrupted_verification_history
+    if not interruptions:
+        return
+    if len(interruptions) != 1 or receipt.retry_attempt < 4:
+        raise AutoresearchValidationError(
+            "interrupted verification recovery accepts exactly one recorded v3 interruption"
+        )
+    interruption = interruptions[0]
+    implementation = state.implementation_result
+    assert implementation is not None
+    expected_v3 = _deterministic_quantipy_run_id(
+        state.iteration, implementation.commit_sha, attempt=3
+    )
+    history_sha256 = tuple(
+        _canonical_json_digest(artifact.to_dict()) for artifact in state.verification_history[:2]
+    )
+    if (
+        interruption.expected_run_id != expected_v3
+        or interruption.implementation_commit != implementation.commit_sha
+        or interruption.implementation_manifest_sha256 != implementation.experiment_manifest_sha256
+        or interruption.verification_history_sha256 != history_sha256
+        or receipt.interruption_history_sha256 != (_canonical_json_digest(interruption.to_dict()),)
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt topology does not bind the preserved v1/v2 history"
+        )
+    prior_receipt = interruption.prior_retry_receipt
+    if (
+        prior_receipt.expected_run_id != expected_v3
+        or prior_receipt.prior_verification_sha256 != history_sha256[-1]
+        or prior_receipt.retry_attempt != 3
+        or prior_receipt.implementation_commit != implementation.commit_sha
+        or prior_receipt.manifest_sha256 != implementation.experiment_manifest_sha256
+        or prior_receipt.verification_history_sha256 != history_sha256
+        or prior_receipt.readiness_manifest_id != receipt.readiness_manifest_id
+        or prior_receipt.readiness_snapshot_id != receipt.readiness_snapshot_id
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt does not preserve the immutable prior retry receipt"
+        )
+    predecessor = replace(
+        state,
+        phase=Phase.VERIFICATION,
+        pending_fix_trigger=None,
+        verification_history=state.verification_history[:2],
+        external_verification_retry_receipt=prior_receipt,
+        interrupted_verification_history=(),
+        platform_runtime_recovery_receipt=None,
+        canonical_quantipy_runtime_attestation=None,
+    )
+    predecessor_sha256 = _canonical_json_digest(predecessor.to_dict())
+    readiness = predecessor.platform_readiness
+    if (
+        interruption.state_sha256 != predecessor_sha256
+        and receipt.retry_attempt == 5
+        and state.platform_runtime_recovery_receipt is not None
+        and readiness is not None
+        and readiness.quantipy_commit is not None
+    ):
+        historical_predecessor = replace(
+            predecessor,
+            platform_readiness=replace(readiness, quantipy_commit=None),
+        )
+        predecessor_sha256 = _canonical_json_digest(historical_predecessor.to_dict())
+    if (
+        interruption.prior_retry_receipt_sha256 != _canonical_json_digest(prior_receipt.to_dict())
+        or interruption.state_sha256 != predecessor_sha256
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt does not bind the pre-recovery state "
+            "and retry receipt"
+        )
+    try:
+        import gateway.autoresearch_runs as detached_runs
+
+        record = detached_runs.read_run_record(
+            run_dir=Path(interruption.detached_run_directory),
+            runs_root=detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT,
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "interrupted verification receipt detached v3 record is unavailable or invalid"
+        ) from exc
+    if (
+        record.manifest.state_reference_sha256 != interruption.state_reference_sha256
+        or record.manifest.instruction_manifest_sha256 != interruption.instruction_manifest_sha256
+        or record.status.manifest_sha256 != interruption.detached_run_manifest_sha256
+        or _canonical_json_digest(record.status.to_dict())
+        != interruption.detached_run_status_sha256
+    ):
+        raise AutoresearchValidationError(
+            "interrupted verification receipt detached v3 manifest/status digest does not match"
+        )
 
 
 @dataclass(frozen=True, slots=True)

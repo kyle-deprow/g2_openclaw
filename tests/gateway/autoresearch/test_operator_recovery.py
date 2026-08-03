@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import patch
 
+import gateway.autoresearch.attestation as runtime_attestation
 import gateway.autoresearch_runner as autoresearch_runner
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
@@ -1479,7 +1480,7 @@ def test_canonical_runtime_attestation_allows_sibling_implementation_commit(
     base_interpreter.write_bytes(b"external uv interpreter")
     base_interpreter.chmod(0o775)
     monkeypatch.setattr(
-        autoresearch_runner,
+        runtime_attestation,
         "_probe_quantipy_runtime_resolution",
         lambda _root: (base_interpreter, import_path, "3.13.0"),
     )

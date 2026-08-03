@@ -25,7 +25,7 @@ from pathlib import Path
 from types import FrameType
 from typing import BinaryIO
 
-from gateway.autoresearch_runner import Phase
+from gateway.autoresearch.enums import Phase
 
 DEFAULT_AUTORESEARCH_RUNS_ROOT = Path("/home/dev/.openclaw/autoresearch/runs")
 RUN_RECORD_SCHEMA_VERSION = 1

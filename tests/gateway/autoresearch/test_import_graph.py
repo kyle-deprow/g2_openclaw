@@ -6,14 +6,20 @@ from pathlib import Path
 
 import gateway.autoresearch
 
-
-def test_autoresearch_modules_do_not_import_runner_or_detached_runs_statically() -> None:
-    package_root = Path(next(iter(gateway.autoresearch.__path__)))
-    banned_modules = (
-        "gateway.autoresearch_runner",
+_ALLOWED_EXTERNAL_IMPORTS = frozenset(
+    {
+        "gateway.autoresearch_platform_validation",
+        "gateway.autoresearch_readiness",
+        "gateway.autoresearch_panel_receipts",
+        "gateway.mempalace_finalizer",
         "gateway.autoresearch_runs",
-    )
-    violations: list[str] = []
+    }
+)
+
+
+def test_autoresearch_modules_use_only_sanctioned_external_imports_statically() -> None:
+    package_root = Path(next(iter(gateway.autoresearch.__path__)))
+    external_imports: list[tuple[Path, int, str]] = []
     for path in sorted(package_root.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -25,12 +31,17 @@ def test_autoresearch_modules_do_not_import_runner_or_detached_runs_statically()
             else:
                 continue
             for imported_name in imported_names:
-                if any(
-                    imported_name == banned or imported_name.startswith(f"{banned}.")
-                    for banned in banned_modules
+                if imported_name.startswith("gateway.") and not (
+                    imported_name == "gateway.autoresearch"
+                    or imported_name.startswith("gateway.autoresearch.")
                 ):
-                    violations.append(f"{path}:{node.lineno}: {imported_name}")
-    assert not violations, "forbidden autoresearch package imports:\n" + "\n".join(violations)
+                    external_imports.append((path, node.lineno, imported_name))
+    violations = [
+        f"{path}:{line}: {imported_name}"
+        for path, line, imported_name in external_imports
+        if imported_name not in _ALLOWED_EXTERNAL_IMPORTS
+    ]
+    assert not violations, "unsanctioned autoresearch package imports:\n" + "\n".join(violations)
 
 
 def test_autoresearch_modules_do_not_import_runner() -> None:

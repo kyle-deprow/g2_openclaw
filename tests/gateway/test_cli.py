@@ -2050,9 +2050,17 @@ class TestAutoresearchCliCommands:
                 return_value=state,
             ) as seal_runtime,
             patch(
+                "gateway.autoresearch.attestation.seal_canonical_verification_dispatch_state_file",
+                return_value=state,
+            ) as seal_attestation,
+            patch(
                 "gateway.autoresearch_runner.require_canonical_verification_dispatch_attestation",
                 return_value=state,
             ) as require_runtime,
+            patch(
+                "gateway.autoresearch.attestation.require_canonical_verification_dispatch_attestation",
+                return_value=state,
+            ) as require_attestation,
             patch(
                 "gateway.autoresearch_runner.provision_quantipy_experiment_runs_root"
             ) as provision,
@@ -2075,7 +2083,9 @@ class TestAutoresearchCliCommands:
 
         assert result.exit_code == 0, result.output
         seal_runtime.assert_not_called()
+        seal_attestation.assert_not_called()
         require_runtime.assert_not_called()
+        require_attestation.assert_not_called()
         provision.assert_not_called()
 
     def test_autoresearch_create_command_file_reads_secure_stdin_protocol(
