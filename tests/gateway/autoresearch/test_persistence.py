@@ -44,17 +44,6 @@ from tests.gateway.autoresearch.builders import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _monolith_relative_file(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Preserve the monolith-relative repository root used by the moved subprocess probe.
-    collection_file = Path(__file__)
-    monkeypatch.setattr(
-        sys.modules[__name__],
-        "__file__",
-        str(collection_file.parents[1] / "test_autoresearch_runner.py"),
-    )
-
-
 @pytest.mark.parametrize(
     ("status", "expected_phase"),
     (
@@ -1002,7 +991,7 @@ def test_lock_namespace_and_path_are_process_invariant_across_temp_environments(
         }
         result = subprocess.run(
             [sys.executable, "-c", script],
-            cwd=Path(__file__).parents[2],
+            cwd=Path(__file__).parents[3],
             env=environment,
             check=True,
             capture_output=True,
