@@ -11,6 +11,12 @@ from gateway.autoresearch.compute import (
     ComputeFitArtifact as ComputeFitArtifact,
 )
 from gateway.autoresearch.constants import (
+    _OPERATOR_PRECONDITION_BRIEF_MARKERS as _OPERATOR_PRECONDITION_BRIEF_MARKERS,
+)
+from gateway.autoresearch.constants import (
+    _OPERATOR_PRECONDITION_MARKERS as _OPERATOR_PRECONDITION_MARKERS,
+)
+from gateway.autoresearch.constants import (
     DEFAULT_AUTORESEARCH_WORKTREE_ROOT as DEFAULT_AUTORESEARCH_WORKTREE_ROOT,
 )
 from gateway.autoresearch.constants import (
@@ -431,6 +437,16 @@ class ConsensusResultArtifact:
     implementation_brief: str | None
     dissent_summary: str
     universe_plan: UniversePlanArtifact | None = None
+    novelty_delta: str | None = None
+
+    def _is_operator_precondition(self) -> bool:
+        id_text = " ".join(
+            value.lower() for value in (self.winner_theory_id, self.winner_theory_family) if value
+        )
+        if any(marker in id_text for marker in _OPERATOR_PRECONDITION_MARKERS):
+            return True
+        brief = (self.implementation_brief or "").lower()
+        return all(marker in brief for marker in _OPERATOR_PRECONDITION_BRIEF_MARKERS)
 
     @classmethod
     def from_dict(cls, raw: object) -> ConsensusResultArtifact:
@@ -456,11 +472,13 @@ class ConsensusResultArtifact:
                 "implementation_brief",
                 "dissent_summary",
                 "universe_plan",
+                "novelty_delta",
             ),
         )
         winner_theory_id = data.get("winner_theory_id")
         winner_theory_family = data.get("winner_theory_family")
         implementation_brief = data.get("implementation_brief")
+        novelty_delta = data.get("novelty_delta")
         if "universe_plan" not in data:
             raise AutoresearchValidationError("universe_plan must be an object or null")
         universe_plan_raw = data["universe_plan"]
@@ -470,6 +488,8 @@ class ConsensusResultArtifact:
             raise AutoresearchValidationError("winner_theory_family must be a string or null")
         if implementation_brief is not None and not isinstance(implementation_brief, str):
             raise AutoresearchValidationError("implementation_brief must be a string or null")
+        if novelty_delta is not None and not isinstance(novelty_delta, str):
+            raise AutoresearchValidationError("novelty_delta must be a string or null")
         artifact = cls(
             round_number=_require_int(data, "round_number"),
             status=ConsensusStatus(_require_str(data, "status")),
@@ -494,6 +514,7 @@ class ConsensusResultArtifact:
                 if universe_plan_raw is not None
                 else None
             ),
+            novelty_delta=novelty_delta.strip() if isinstance(novelty_delta, str) else None,
         )
         artifact.validate()
         return artifact
@@ -508,6 +529,10 @@ class ConsensusResultArtifact:
                 raise AutoresearchValidationError(
                     "majority consensus requires an implementation_brief"
                 )
+            if self._is_operator_precondition() and self.novelty_delta is not None:
+                raise AutoresearchValidationError(
+                    "operator-precondition consensus must not include novelty_delta"
+                )
         else:
             if self.majority_count >= 3:
                 raise AutoresearchValidationError("NO_CONSENSUS cannot report a 3-of-5 majority")
@@ -520,6 +545,13 @@ class ConsensusResultArtifact:
                 raise AutoresearchValidationError(
                     "NO_CONSENSUS must not include winner, implementation brief, or universe plan"
                 )
+            if self.novelty_delta is not None:
+                raise AutoresearchValidationError("NO_CONSENSUS must not include novelty_delta")
+        if self.novelty_delta is not None:
+            if self.novelty_delta != self.novelty_delta.strip():
+                raise AutoresearchValidationError("novelty_delta must be trimmed")
+            if not 32 <= len(self.novelty_delta) <= 1024:
+                raise AutoresearchValidationError("novelty_delta must be 32-1024 characters")
         if self.universe_plan is not None:
             self.universe_plan.validate()
 
@@ -544,6 +576,7 @@ class ConsensusResultArtifact:
             "universe_plan": self.universe_plan.to_dict()
             if self.universe_plan is not None
             else None,
+            "novelty_delta": self.novelty_delta,
         }
 
 
@@ -988,6 +1021,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "winner_theory_id|null",
             "implementation_brief|null",
             "universe_plan|null",
+            "novelty_delta|null",
         ]
     },
     ArtifactType.IMPLEMENTATION_RESULT: {

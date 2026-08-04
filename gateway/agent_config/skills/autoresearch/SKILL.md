@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.1.0
+version: 8.2.0
 ---
 
 # Autoresearch
@@ -259,7 +259,9 @@ The context packet must select exactly one mode and give a nonempty
 The context packet also records normalized `burned_theory_families`. In alpha
 mode, a debate submission in a burned family is rejected unless it contains a
 nonempty `materially_new_evidence` explanation. Do not evade this gate by
-renaming the family.
+renaming the family. The bounded negative-results ledger is the authoritative
+registry-derived consistency input for context, debate, and consensus prompts;
+it does not replace `burned_theory_families`.
 
 ## Compute Fit and GPU Choice
 
@@ -301,6 +303,11 @@ context_curator
   -> decide/log
   -> repeat
 ```
+
+The append-only hypothesis registry records every completed decision. Consensus
+acceptance applies the novelty gate using only prior iterations; an empty
+registry therefore cannot reject an artifact. A repeated failed hypothesis
+must carry the arbiter's required novelty delta before implementation dispatch.
 
 ## Model Policy
 
@@ -553,6 +560,9 @@ packet for the debate:
 - Prior MemPalace findings: failures, keeps, feature families, model families,
   data coverage issues, and reviewer objections.
 - Prior proposals from MemPalace and canonical decision receipts.
+- The bounded negative-results ledger from the hypothesis registry, preserving
+  its newest-first order and contested-family rows as authoritative consistency
+  evidence.
 - The pinned readiness receipt, capability summary, and compact references to
   relevant universe/coverage receipts. Do not include full ticker arrays.
 - Hard constraints and supported data sources from those receipts.
@@ -585,6 +595,8 @@ Every proposal must include:
   receipts, with an untouched OOS holdout.
 - Compute fit with target, rationale, required dependencies, and benchmark plan.
 - Rejection criteria.
+- Treat every ledger row, including `contested=` rows from a prior
+  `NO_CONSENSUS`, as burned evidence when choosing and defending a theory family.
 
 For alpha mode, a burned theory family requires materially new evidence, not a
 restatement of the old hypothesis. G0 work should debate the smallest data or
@@ -626,6 +638,16 @@ majority. Required output:
   members per date, and 10,000 date-member slots; implementation performs one
   `qp.security_universe_history()` operation per batch. Consensus must
   not contain snapshot, summary, or member-union materialization digests.
+- `novelty_delta` is `null` for `NO_CONSENSUS`. For a non-operator majority,
+  set it to one trimmed 32-1024 character explanation if and only if the
+  winner's fingerprint repeats a prior `DISCARD`, `CRASH`, or `NO_CONSENSUS`
+  outcome, or its normalized family appears in a prior `NO_CONSENSUS` entry's
+  `contested_families`. The explanation must state what materially changed;
+  the runner hashes and stores it in the registry. A same-family, different
+  universe plan after `DISCARD` does not require a delta, and a delta is never
+  gratuitous when no mechanical rule requires it. A delta is required when the
+  mechanical rule matches; a delta when it does not match is rejected; and a
+  delta byte-identical to any prior delta is rejected.
 
 If there is no 3-of-5 majority, run one concise debate retry with the same
 context plus the dissent summary. If there is still no majority, emit the
@@ -1106,6 +1128,9 @@ Actions:
 - NO_CONSENSUS: set `NOT_RUN` and the explicit no-memory flag, remain
   unsuspended, then let the supervisor begin the next iteration's fresh context
   pass before PM wake.
+- Append the completed decision to the hypothesis registry, including
+  `NO_CONSENSUS` and `CRASH` outcomes and any accepted `novelty_delta` hash;
+  never edit or backfill prior entries.
 - The PM cannot choose the memory flag. It is `true` only for `ALPHA_RESEARCH`
   `KEEP`, `SIGNIFICANT KEEP`, `STRONG KEEP`, or `DISCARD` with the latest
   completed verification `PASS` and `tests_passed=true`, including reviewed

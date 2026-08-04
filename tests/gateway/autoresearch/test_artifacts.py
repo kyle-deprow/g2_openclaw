@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -12,6 +13,7 @@ from typing import cast
 import pytest
 from gateway.autoresearch.artifacts import (
     ARTIFACT_CONTRACTS,
+    ConsensusResultArtifact,
     ContextPacketArtifact,
     FinalDecisionArtifact,
     ImplementationResultArtifact,
@@ -22,6 +24,7 @@ from gateway.autoresearch.artifacts import (
 from gateway.autoresearch.compute import (
     ComputeFitArtifact,
 )
+from gateway.autoresearch.configuration import load_autoresearch_policy
 from gateway.autoresearch.constants import (
     MEMBER_UNION_DIGEST_ALGORITHM,
 )
@@ -65,6 +68,8 @@ from gateway.autoresearch_platform_validation import (
     canonical_requested_sessions_digest,
 )
 from gateway.mempalace_finalizer import FINAL_MEMORY_SOURCE_FILE, finalization_journal_path
+
+from tests.gateway.autoresearch.builders import _majority_consensus, _no_consensus
 
 
 def _coverage(*, fixed_sleeve_local_data: bool = False) -> AggregateCoverageReceipt:
@@ -504,6 +509,27 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
     assert set(implementation_fields) == set(implementation.to_dict())
     assert set(verification_fields) == set(_alpha_verification().to_dict())
     assert set(decision_fields) == set(final_decision.to_dict())
+
+    consensus = _majority_consensus(
+        round_number=1,
+        policy=load_autoresearch_policy(Path("gateway/openclaw_config/openclaw.json")),
+    )
+    consensus_fields = cast(
+        list[str], ARTIFACT_CONTRACTS[ArtifactType.CONSENSUS_RESULT]["required_fields"]
+    )
+    assert "novelty_delta|null" in consensus_fields
+    assert "novelty_delta" in consensus.to_dict()
+    assert ConsensusResultArtifact.from_dict(consensus.to_dict()) == consensus
+    with pytest.raises(AutoresearchValidationError, match="exact keys"):
+        ConsensusResultArtifact.from_dict(
+            {key: value for key, value in consensus.to_dict().items() if key != "novelty_delta"}
+        )
+
+    for delta in ("x" * 31, "x" * 1025, " " * 32):
+        with pytest.raises(AutoresearchValidationError, match="novelty_delta"):
+            replace(consensus, novelty_delta=delta).validate()
+    with pytest.raises(AutoresearchValidationError, match="NO_CONSENSUS"):
+        replace(_no_consensus(1), novelty_delta="x" * 32).validate()
 
 
 @pytest.mark.parametrize("experiment_id", ("Iteration-1", " iteration-1 "))

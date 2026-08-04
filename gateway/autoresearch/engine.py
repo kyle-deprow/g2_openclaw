@@ -63,6 +63,9 @@ from gateway.autoresearch.prompts import (
     _mode_contract as _mode_contract,
 )
 from gateway.autoresearch.prompts import (
+    _negative_results_ledger as _negative_results_ledger,
+)
+from gateway.autoresearch.prompts import (
     _operator_precondition_decision_instruction as _operator_precondition_decision_instruction,
 )
 from gateway.autoresearch.prompts import (
@@ -213,6 +216,15 @@ def _phase_instruction(
         phase,
         expected_artifact_type,
     )
+    negative_results_ledger = ""
+    if expected_artifact_type in {
+        ArtifactType.CONTEXT_PACKET,
+        ArtifactType.DEBATE_RESULT,
+        ArtifactType.CONSENSUS_RESULT,
+    }:
+        rendered_ledger = _negative_results_ledger(state)
+        if rendered_ledger:
+            negative_results_ledger = f"{rendered_ledger}\n\n"
     context_source_instruction = ""
     if expected_artifact_type is ArtifactType.CONTEXT_PACKET:
         context_source_instruction = (
@@ -234,6 +246,7 @@ def _phase_instruction(
         f"{workspace_contract}"
         f"{verification_handoff_contract}"
         f"{mempalace_fact_instruction}"
+        f"{negative_results_ledger}"
         f"{operator_precondition_instruction}"
         f"{context_source_instruction}"
         f"ARTIFACT_CONTRACT={contract}\n"

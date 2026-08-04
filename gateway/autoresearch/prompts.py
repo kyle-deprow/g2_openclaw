@@ -9,11 +9,20 @@ from typing import TYPE_CHECKING
 from gateway.autoresearch.artifacts import (
     PhaseTarget as PhaseTarget,
 )
+from gateway.autoresearch.constants import (
+    NEGATIVE_RESULTS_LEDGER_MAX_BYTES as NEGATIVE_RESULTS_LEDGER_MAX_BYTES,
+)
+from gateway.autoresearch.constants import (
+    NEGATIVE_RESULTS_LEDGER_MAX_ENTRIES as NEGATIVE_RESULTS_LEDGER_MAX_ENTRIES,
+)
 from gateway.autoresearch.enums import (
     ArtifactType as ArtifactType,
 )
 from gateway.autoresearch.enums import (
     ConsensusStatus as ConsensusStatus,
+)
+from gateway.autoresearch.enums import (
+    FinalDecision as FinalDecision,
 )
 from gateway.autoresearch.enums import (
     Phase as Phase,
@@ -23,6 +32,9 @@ from gateway.autoresearch.enums import (
 )
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
+)
+from gateway.autoresearch.governance import (
+    HypothesisRegistryEntry as HypothesisRegistryEntry,
 )
 from gateway.autoresearch.memory import (
     _is_explicit_no_memory_transition as _is_explicit_no_memory_transition,
@@ -54,6 +66,55 @@ def _json_block(payload: Mapping[str, object], *, compact: bool = False) -> str:
 
 def _render_instruction_source_manifest(manifest: InstructionSourceManifest) -> str:
     return _compact_json_block(manifest.to_dict())
+
+
+def _negative_results_ledger(state: AutoresearchState) -> str:
+    """Render bounded, model-visible negative registry evidence without I/O."""
+    negative_decisions = {
+        FinalDecision.DISCARD,
+        FinalDecision.CRASH,
+        FinalDecision.NO_CONSENSUS,
+    }
+    qualifying = [
+        entry for entry in state.hypothesis_registry if entry.decision in negative_decisions
+    ]
+    if not qualifying:
+        return ""
+
+    rows = list(reversed(qualifying[-NEGATIVE_RESULTS_LEDGER_MAX_ENTRIES:]))
+    omitted_count = len(qualifying) - len(rows)
+    rule = (
+        "rule=delta_required iff Tier 1 fingerprint equality with a prior "
+        "DISCARD/CRASH/NO_CONSENSUS entry or Tier 2 winner family in a prior "
+        "NO_CONSENSUS entry's contested_families; same family + different universe plan "
+        "after DISCARD does NOT require a delta. A delta is required when the "
+        "mechanical rule matches; a delta when it does not match is rejected; and a "
+        "delta byte-identical to any prior delta is rejected."
+    )
+
+    def row(entry: HypothesisRegistryEntry) -> str:
+        # Registry validation bounds and trims reason; replace delimiters defensively so
+        # every evidence row retains the same fixed pipe-delimited columns.
+        reason = " ".join(entry.reason.split()).replace("|", "/")
+        contested = ",".join(entry.contested_families) or "-"
+        return (
+            f"iteration={entry.iteration}|decision={entry.decision.value}|"
+            f"family={entry.family or '-'}|contested={contested}|"
+            f"fingerprint={entry.fingerprint or '-'}|reason={reason}"
+        )
+
+    while True:
+        lines = ["Negative-results ledger (newest first):", rule, *(row(entry) for entry in rows)]
+        if omitted_count:
+            lines.append(f"... {omitted_count} older negative results omitted")
+        rendered = "\n".join(lines)
+        if len(rendered.encode("utf-8")) <= NEGATIVE_RESULTS_LEDGER_MAX_BYTES:
+            return rendered
+        if not rows:
+            # The fixed header/rule/tail are below the cap for the configured limits.
+            return rendered[:NEGATIVE_RESULTS_LEDGER_MAX_BYTES]
+        rows.pop()
+        omitted_count += 1
 
 
 def _select_phase_target(

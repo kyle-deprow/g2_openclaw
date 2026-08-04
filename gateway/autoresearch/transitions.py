@@ -307,8 +307,102 @@ def _build_hypothesis_registry_entry(
         reason=(
             " ".join(decision.log_summary.split())[:HYPOTHESIS_REGISTRY_REASON_MAX_CHARS].strip()
         ),
-        novelty_delta_sha256=None,
+        novelty_delta_sha256=(
+            _sha256_text(consensus.novelty_delta)
+            if (
+                consensus is not None
+                and not _is_operator_precondition_consensus(consensus)
+                and consensus.novelty_delta is not None
+            )
+            else None
+        ),
     )
+
+
+def _validate_consensus_novelty_gate(
+    state: AutoresearchState,
+    artifact: ConsensusResultArtifact,
+) -> str | None:
+    """Reject repeated failed hypotheses unless the arbiter explains the change."""
+    if artifact.status is ConsensusStatus.NO_CONSENSUS:
+        return None
+    if _is_operator_precondition_consensus(artifact):
+        if artifact.novelty_delta is not None:
+            raise AutoresearchValidationError(
+                "operator-precondition consensus must not include novelty_delta"
+            )
+        return None
+
+    current_fingerprint = (
+        theory_family_fingerprint(artifact, state.mode)
+        if state.mode is not None and artifact.universe_plan is not None
+        else None
+    )
+    current_family = (
+        _normalise_identifier(artifact.winner_theory_family)
+        if artifact.winner_theory_family is not None
+        else None
+    )
+    prior_entries = sorted(
+        (entry for entry in state.hypothesis_registry if entry.iteration < state.iteration),
+        key=lambda entry: entry.iteration,
+        reverse=True,
+    )
+    tier_one = next(
+        (
+            entry
+            for entry in prior_entries
+            if entry.decision
+            in {FinalDecision.DISCARD, FinalDecision.CRASH, FinalDecision.NO_CONSENSUS}
+            and current_fingerprint is not None
+            and entry.fingerprint == current_fingerprint
+        ),
+        None,
+    )
+    tier_two = next(
+        (
+            entry
+            for entry in prior_entries
+            if entry.consensus_status is ConsensusStatus.NO_CONSENSUS
+            and entry.decision is FinalDecision.NO_CONSENSUS
+            and current_family is not None
+            and current_family in entry.contested_families
+        ),
+        None,
+    )
+    required_entry = tier_one or tier_two
+    if required_entry is not None and artifact.novelty_delta is None:
+        if tier_one is not None:
+            raise AutoresearchValidationError(
+                "consensus winner_theory_family "
+                f"'{current_family}' repeats iteration {tier_one.iteration} "
+                f"{tier_one.decision.value}; set novelty_delta explaining what changed"
+            )
+        assert tier_two is not None
+        raise AutoresearchValidationError(
+            "consensus winner_theory_family "
+            f"'{current_family}' repeats the iteration {tier_two.iteration} "
+            "NO_CONSENSUS deadlock; set novelty_delta explaining what changed"
+        )
+
+    if artifact.novelty_delta is not None:
+        delta_hash = _sha256_text(artifact.novelty_delta)
+        duplicate = next(
+            (entry for entry in prior_entries if entry.novelty_delta_sha256 == delta_hash),
+            None,
+        )
+        if duplicate is not None:
+            raise AutoresearchValidationError(
+                "consensus novelty_delta duplicates the "
+                f"iteration {duplicate.iteration} delta verbatim"
+            )
+        if required_entry is None:
+            raise AutoresearchValidationError(
+                "consensus novelty_delta is only valid when the theory family repeats a "
+                "prior non-KEEP outcome"
+            )
+        return delta_hash
+    return None
 
 
 def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> None:
@@ -1812,6 +1906,7 @@ def advance_state(
             raise AutoresearchValidationError(
                 "consensus round_number must match the latest debate round"
             )
+        _validate_consensus_novelty_gate(state, artifact)
         next_consensus_history = (*state.consensus_history, artifact)
         if artifact.status is ConsensusStatus.MAJORITY:
             if _is_operator_precondition_consensus(artifact):

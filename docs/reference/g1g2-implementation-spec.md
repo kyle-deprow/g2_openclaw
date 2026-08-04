@@ -121,4 +121,4 @@ New: `test_governance.py` (fingerprint determinism/normalization/None-cases, con
 
 ## Errata (post-review)
 
-Model-invisibility means template-invariance: the prompt template remains unchanged for empty-registry states, while the state, state-reference, and manifest digest lines change by design. Infrastructure-suspension entries use `consensus_status=NONE` with empty `contested_families`. Reason truncation collapses whitespace, truncates, and strips the result.
+Model-invisibility means template-invariance: the prompt template remains unchanged for empty-registry states, while the state, state-reference, and manifest digest lines change by design. Infrastructure-suspension entries use `consensus_status=NONE` with empty `contested_families`. Reason truncation collapses whitespace, truncates, and strips the result. By design, the `CONSENSUS_RESULT` contract line gains `,novelty_delta|null` (21 bytes) for empty-registry states; the gate and ledger remain fully inert.
