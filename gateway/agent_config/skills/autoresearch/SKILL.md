@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.3.0
+version: 8.4.0
 ---
 
 # Autoresearch
@@ -262,6 +262,32 @@ nonempty `materially_new_evidence` explanation. Do not evade this gate by
 renaming the family. The bounded negative-results ledger is the authoritative
 registry-derived consistency input for context, debate, and consensus prompts;
 it does not replace `burned_theory_families`.
+
+## Operator Campaign Directive (2026-08-04)
+
+The current campaign is scoped by operator direction and applies to every
+`ALPHA_RESEARCH` iteration until this section is revised:
+
+- Research **intraday scalping strategies** — short-holding-period entries and
+  exits within the trading session, evaluated with realistic costs and
+  execution assumptions per the microstructure debater's mandate.
+- The tradable universe is a **fixed set of five liquid ETFs chosen by the
+  loop**: the first context/debate round of the campaign selects the five
+  symbols, subject to Quantipy data-contract coverage verification
+  (`qp.security_universe_screen`/`qp.prices` within the frozen campaign
+  interval and the hydration budget). Record the chosen set and its rationale
+  in the consensus implementation brief; subsequent iterations reuse the same
+  five symbols and may not swap members without a `DATA_INFRA_G0` style
+  justification recorded in the decision log.
+- Across iterations, vary the **strategy family and model class** (e.g.
+  mean-reversion, momentum bursts, order-flow/volume imbalance, volatility
+  breakout; rule-based and learned models alike) rather than re-tuning one
+  idea — the novelty gate and negative-results ledger enforce this
+  mechanically.
+- All other protocol rules (data contract, budgets, decision gates, review)
+  are unchanged. If five ETFs with adequate contract coverage cannot be
+  established, report it as an operator blocker rather than substituting
+  non-ETF instruments.
 
 ## Compute Fit and GPU Choice
 

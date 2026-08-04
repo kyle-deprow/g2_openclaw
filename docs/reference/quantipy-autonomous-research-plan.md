@@ -18,6 +18,12 @@ non-KEEP outcomes or three consecutive `NO_CONSENSUS` outcomes. Only an
 operator acknowledgement through `autoresearch-acknowledge-campaign-review`
 may clear that pause; the PM does not edit the flag or touch G2.
 
+The active campaign (operator-directed, 2026-08-04) researches intraday
+scalping strategies on a fixed five-ETF universe chosen by the loop in its
+first campaign round, subject to data-contract coverage; iterations vary the
+strategy family and model class. The normative directive lives in the
+autoresearch skill's "Operator Campaign Directive" section.
+
 ## Ownership
 
 The PM orchestrates but does not edit Quantipy. Configured Codex stage agents
