@@ -245,7 +245,7 @@ DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
-    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. The supervisor owns "
     "final MemPalace persistence before waking this session; do not write "
     "MemPalace from any model turn."
@@ -254,13 +254,13 @@ FINALIZED_MEMORY_WAKE_MESSAGE = (
     "Required final MemPalace persistence was completed by the autoresearch "
     "supervisor from authoritative state. Continue Quantipy autoresearch from "
     "the authoritative state. First run exactly: cd /home/dev/repos/g2_openclaw "
-    "&& uv run gateway-cli autoresearch-next "
+    "&& uv run --no-sync gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. Do not write "
     "MemPalace from any model turn."
 )
 RECOVERY_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
-    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. Reconcile only the current "
     "iteration/phase attempt labels from the authoritative state and current task ledger. "
     "Use bounded task metadata; do not enumerate historical sessions or fetch old full "
@@ -274,7 +274,7 @@ RECOVERY_MESSAGE = (
 MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
     "Recover Quantipy autoresearch from a stale verification phase with an "
     "implementation_result but no verification_history. First run exactly: "
-    "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
+    "cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. This is artifact recovery, "
     "not research steering. Do not fabricate verification_result metrics, commands, "
     "coverage, status, or provenance from prose. Inspect the authoritative state, "

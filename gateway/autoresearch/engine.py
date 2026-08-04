@@ -317,7 +317,7 @@ def _verification_handoff_contract(
         "- Every verification attempt must terminate by writing a structured JSON "
         "verification_result artifact to an absolute path under the PM workspace, "
         "validating that same absolute path with jq/wc, and advancing it with "
-        "`cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-advance "
+        "`cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-advance "
         f"{_render_literal(str(state_path))} "
         "/home/dev/.openclaw/workspace-autoresearch-pm/<artifact.json> "
         "--instruction-manifest-sha256 <source_manifest_sha256> "

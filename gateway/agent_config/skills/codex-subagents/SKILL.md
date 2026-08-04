@@ -77,7 +77,7 @@ smoke-test or render a report only and never establish PASS.
 
 Any hydration, backtest, notebook execution, or similarly long verification
 command must create a one-time private command file with
-`uv run gateway-cli autoresearch-create-command-file --output
+`uv run --no-sync gateway-cli autoresearch-create-command-file --output
 <absolute-command-file>` and then use
 `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
 <absolute-run-dir> --manifest <absolute-manifest.json> --command-file
