@@ -32,6 +32,8 @@ from gateway.autoresearch.configuration import (
     load_autoresearch_policy,
 )
 from gateway.autoresearch.constants import (
+    CAMPAIGN_REVIEW_PENDING_MESSAGE,
+    CAMPAIGN_REVIEW_RECOVERY_COMMAND,
     DEFAULT_AUTORESEARCH_STAGE_INBOX,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_ROOT,
@@ -433,6 +435,19 @@ class AutoresearchSupervisor:
     ) -> SupervisorResult:
         try:
             state = self._load_state()
+            if state.campaign_review_required:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.campaign_review_pending",
+                    iteration=state.iteration,
+                    reason=state.campaign_review_reason,
+                    recovery_command=CAMPAIGN_REVIEW_RECOVERY_COMMAND,
+                    message=CAMPAIGN_REVIEW_PENDING_MESSAGE,
+                    consecutive_non_keep=state.campaign_counters.consecutive_non_keep,
+                    consecutive_no_consensus=state.campaign_counters.consecutive_no_consensus,
+                    iterations_since_last_keep=state.campaign_counters.iterations_since_last_keep,
+                )
+                return SupervisorResult(SupervisorOutcome.NO_ACTION, "campaign_review_pending")
             if state.suspended:
                 return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
             if self._is_terminal_state(state):

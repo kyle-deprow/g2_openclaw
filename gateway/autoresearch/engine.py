@@ -601,6 +601,8 @@ def next_action(
         transitions_module._validate_state(state, policy, validation_context)
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
+    if state.campaign_review_required:
+        raise AutoresearchValidationError(constants.CAMPAIGN_REVIEW_PENDING_MESSAGE)
     if state.suspended:
         raise AutoresearchValidationError(
             "autoresearch is suspended on an infrastructure blocker; "

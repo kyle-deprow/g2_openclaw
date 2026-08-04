@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.2.0
+version: 8.3.0
 ---
 
 # Autoresearch
@@ -308,6 +308,10 @@ The append-only hypothesis registry records every completed decision. Consensus
 acceptance applies the novelty gate using only prior iterations; an empty
 registry therefore cannot reject an artifact. A repeated failed hypothesis
 must carry the arbiter's required novelty delta before implementation dispatch.
+The controller recomputes campaign counters from that registry at each decision
+boundary. Eight consecutive non-KEEP outcomes or three consecutive
+`NO_CONSENSUS` outcomes (with infrastructure entries neutral) require a human
+campaign review before the loop can continue.
 
 ## Model Policy
 
@@ -1149,6 +1153,29 @@ Actions:
 
 ## Recovery And Status
 
+- A completed decision can set `campaign_review_required=true` in the
+  authoritative schema-v5 state. This is an orthogonal campaign pause, not an
+  infrastructure suspension and not a new phase. The deterministic supervisor
+  returns `NO_ACTION` with reason `campaign_review_pending`, emits a structured
+  warning, and sends no wake, finalization, or stage dispatch while the flag is
+  set.
+- The PM must not clear `campaign_review_required`, edit its reason, or touch G2.
+  An operator/Codex human must review the bounded status summary and acknowledge
+  it with the recovery command below; the acknowledgement is durable review
+  history and does not claim that any evidence changed:
+
+  ```bash
+  cd /home/dev/repos/g2_openclaw && uv run gateway-cli \
+    autoresearch-acknowledge-campaign-review \
+    /home/dev/.openclaw/autoresearch/quantipy-state.json \
+    --acknowledgement "<32-1024 character operator review>" \
+    --output /home/dev/.openclaw/autoresearch/quantipy-state.json
+  ```
+
+- The acknowledgement clears only the campaign-review flag and reason. It
+  zeroes the two consecutive-streak counters through the acknowledged
+  iteration while preserving `iterations_since_last_keep`; a fresh streak can
+  halt the campaign again at the configured thresholds.
 - On resume, read git status, active background tasks, canonical decision
   receipts, and MemPalace. Re-enter the first incomplete stage and inspect
   detached run directories before relaunching anything.

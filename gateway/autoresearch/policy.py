@@ -20,6 +20,21 @@ from gateway.autoresearch.transitions import (
 
 
 @dataclass(frozen=True, slots=True)
+class CampaignGovernancePolicy:
+    stall_consecutive_non_keep: int = 8
+    stall_consecutive_no_consensus: int = 3
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "stall_consecutive_non_keep",
+            "stall_consecutive_no_consensus",
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 100:
+                raise ValueError(f"{field_name} must be an integer from 1 through 100")
+
+
+@dataclass(frozen=True, slots=True)
 class AutoresearchPolicy:
     pm: StageAgentPolicy
     main_interface: StageAgentPolicy
@@ -29,6 +44,7 @@ class AutoresearchPolicy:
     implementer: StageAgentPolicy
     reviewer: StageAgentPolicy
     fixer: StageAgentPolicy
+    campaign_governance: CampaignGovernancePolicy = CampaignGovernancePolicy()
 
     @property
     def debate_agent_ids(self) -> tuple[str, ...]:

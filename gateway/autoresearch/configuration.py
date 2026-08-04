@@ -22,6 +22,12 @@ from gateway.autoresearch.fields import (
     _require_bool as _require_bool,
 )
 from gateway.autoresearch.fields import (
+    _require_exact_keys as _require_exact_keys,
+)
+from gateway.autoresearch.fields import (
+    _require_int as _require_int,
+)
+from gateway.autoresearch.fields import (
     _require_str as _require_str,
 )
 from gateway.autoresearch.fields import (
@@ -35,6 +41,9 @@ from gateway.autoresearch.memory import (
 )
 from gateway.autoresearch.policy import (
     AutoresearchPolicy as AutoresearchPolicy,
+)
+from gateway.autoresearch.policy import (
+    CampaignGovernancePolicy as CampaignGovernancePolicy,
 )
 
 
@@ -118,6 +127,41 @@ def _load_codex_agent_toml(path: Path) -> Mapping[str, object]:
     return _ensure_mapping(data, label=str(path))
 
 
+def _campaign_governance_from_defaults(
+    defaults: Mapping[str, object],
+) -> CampaignGovernancePolicy:
+    if "autoresearchCampaignGovernance" not in defaults:
+        return CampaignGovernancePolicy()
+    try:
+        raw = _ensure_mapping(
+            defaults["autoresearchCampaignGovernance"],
+            label="agents.defaults.autoresearchCampaignGovernance",
+        )
+        _require_exact_keys(
+            raw,
+            label="agents.defaults.autoresearchCampaignGovernance",
+            expected=("stallConsecutiveNonKeep", "stallConsecutiveNoConsensus"),
+        )
+        non_keep = _require_int(raw, "stallConsecutiveNonKeep")
+        no_consensus = _require_int(raw, "stallConsecutiveNoConsensus")
+    except AutoresearchValidationError as exc:
+        raise AutoresearchConfigError(str(exc)) from exc
+    if not 1 <= non_keep <= 100:
+        raise AutoresearchConfigError(
+            "agents.defaults.autoresearchCampaignGovernance.stallConsecutiveNonKeep "
+            "must be an integer from 1 through 100"
+        )
+    if not 1 <= no_consensus <= 100:
+        raise AutoresearchConfigError(
+            "agents.defaults.autoresearchCampaignGovernance.stallConsecutiveNoConsensus "
+            "must be an integer from 1 through 100"
+        )
+    return CampaignGovernancePolicy(
+        stall_consecutive_non_keep=non_keep,
+        stall_consecutive_no_consensus=no_consensus,
+    )
+
+
 def _validate_codex_native_stage_agents(policy: AutoresearchPolicy) -> None:
     for stage in (
         policy.context_curator,
@@ -180,6 +224,7 @@ def load_autoresearch_policy(
         raise AutoresearchConfigError(
             "agents.defaults.subagents.maxChildrenPerAgent must not be configured"
         )
+    campaign_governance = _campaign_governance_from_defaults(defaults)
     models = _ensure_mapping(config.get("models"), label="models")
     providers = _ensure_mapping(models.get("providers"), label="providers")
     openai_provider = _ensure_mapping(providers.get("openai"), label="providers.openai")
@@ -227,6 +272,7 @@ def load_autoresearch_policy(
         implementer=_agent_policy_from_json(agent_map, "implementer"),
         reviewer=_agent_policy_from_json(agent_map, "reviewer"),
         fixer=_agent_policy_from_json(agent_map, "fixer"),
+        campaign_governance=campaign_governance,
     )
     _validate_policy(policy, agent_map, config)
     return policy

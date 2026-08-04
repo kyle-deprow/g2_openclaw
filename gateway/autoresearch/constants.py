@@ -34,6 +34,12 @@ HYPOTHESIS_FINGERPRINT_DIGEST_DOMAIN = "g2-openclaw.autoresearch.hypothesis-fing
 HYPOTHESIS_REGISTRY_REASON_MAX_CHARS = 160
 MAX_HYPOTHESIS_REGISTRY_ENTRIES = 512
 MAX_CAMPAIGN_REVIEW_RECORDS = 32
+CAMPAIGN_REVIEW_RECOVERY_COMMAND = "autoresearch-acknowledge-campaign-review"
+CAMPAIGN_REVIEW_PENDING_MESSAGE = (
+    "campaign review is pending; run "
+    "autoresearch-acknowledge-campaign-review --acknowledgement "
+    '"<32-1024 chars>" before resuming the campaign'
+)
 NEGATIVE_RESULTS_LEDGER_MAX_ENTRIES = 12
 NEGATIVE_RESULTS_LEDGER_MAX_BYTES = 2048
 EXTERNAL_VERIFICATION_RETRY_RECEIPT_SCHEMA_VERSION = 2

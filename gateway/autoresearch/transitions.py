@@ -147,6 +147,12 @@ from gateway.autoresearch.gitops import (
     _resolve_git_commit as _resolve_git_commit,
 )
 from gateway.autoresearch.governance import (
+    CampaignCounters as CampaignCounters,
+)
+from gateway.autoresearch.governance import (
+    CampaignReviewRecord as CampaignReviewRecord,
+)
+from gateway.autoresearch.governance import (
     HypothesisRegistryEntry as HypothesisRegistryEntry,
 )
 from gateway.autoresearch.governance import (
@@ -317,6 +323,26 @@ def _build_hypothesis_registry_entry(
             else None
         ),
     )
+
+
+def _campaign_stall_reason(
+    counters: CampaignCounters,
+    policy: AutoresearchPolicy,
+) -> str | None:
+    governance = policy.campaign_governance
+    if counters.consecutive_non_keep >= governance.stall_consecutive_non_keep:
+        return (
+            "campaign stalled: "
+            f"{counters.consecutive_non_keep} consecutive non-KEEP iterations "
+            f"(threshold {governance.stall_consecutive_non_keep})"
+        )
+    if counters.consecutive_no_consensus >= governance.stall_consecutive_no_consensus:
+        return (
+            "campaign stalled: "
+            f"{counters.consecutive_no_consensus} consecutive NO_CONSENSUS iterations "
+            f"(threshold {governance.stall_consecutive_no_consensus})"
+        )
+    return None
 
 
 def _validate_consensus_novelty_gate(
@@ -2078,6 +2104,25 @@ def advance_state(
             next_registry,
             acknowledged_through_iteration=_acknowledged_through_iteration(state),
         )
+        next_review_required = state.campaign_review_required
+        next_review_reason = state.campaign_review_reason
+        next_campaign_review_history: tuple[CampaignReviewRecord, ...] = (
+            state.campaign_review_history
+        )
+        if not next_review_required:
+            next_review_reason = _campaign_stall_reason(next_counters, policy)
+            if next_review_reason is not None:
+                next_review_required = True
+                next_campaign_review_history = (
+                    *next_campaign_review_history,
+                    CampaignReviewRecord(
+                        triggered_iteration=state.iteration,
+                        reason=next_review_reason,
+                        counters=next_counters,
+                        acknowledgement=None,
+                        acknowledged_iteration=None,
+                    ),
+                )[-constants.MAX_CAMPAIGN_REVIEW_RECORDS :]
         if artifact.decision is FinalDecision.INFRA_BLOCKED:
             next_state = replace(
                 state,
@@ -2087,6 +2132,9 @@ def advance_state(
                 suspension_reason=artifact.infra_rationale,
                 hypothesis_registry=next_registry,
                 campaign_counters=next_counters,
+                campaign_review_required=next_review_required,
+                campaign_review_reason=next_review_reason,
+                campaign_review_history=next_campaign_review_history,
             )
         else:
             next_state = replace(
@@ -2095,6 +2143,9 @@ def advance_state(
                 phase=Phase.REPEAT,
                 hypothesis_registry=next_registry,
                 campaign_counters=next_counters,
+                campaign_review_required=next_review_required,
+                campaign_review_reason=next_review_reason,
+                campaign_review_history=next_campaign_review_history,
             )
         transitions_module._validate_state(next_state, policy, validation_context)
         return next_state

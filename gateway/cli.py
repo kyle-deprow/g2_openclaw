@@ -2,6 +2,8 @@
 
 Provides ``gateway-cli init-env`` to auto-generate a ``.env`` file
 by detecting system capabilities and reading OpenClaw configuration.
+Campaign stalls are resumed only through the explicit
+``autoresearch-acknowledge-campaign-review`` command.
 """
 
 from __future__ import annotations
@@ -1094,6 +1096,45 @@ def autoresearch_resume(
         persist_derived_state(state_path, output_path, state, next_state, policy=policy)
     except ValueError as exc:
         console.print(f"[red]autoresearch-resume failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]wrote autoresearch state:[/green] {output_path}")
+
+
+@app.command("autoresearch-acknowledge-campaign-review")
+def autoresearch_acknowledge_campaign_review(
+    state_path: Path = _state_path_argument,
+    acknowledgement: str = typer.Option(
+        ...,
+        "--acknowledgement",
+        help="Operator acknowledgement, stripped to 32-1024 characters.",
+    ),
+    output_path: Path = _output_path_option,
+    openclaw_config: Path = _openclaw_config_option,
+) -> None:
+    """Acknowledge a pending campaign review and persist its repeat-phase state."""
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.lifecycle import (
+        acknowledge_campaign_review,
+    )
+    from gateway.autoresearch.persistence import (
+        load_state_file,
+        persist_derived_state,
+    )
+    from gateway.autoresearch.transitions import (
+        validate_state,
+    )
+
+    try:
+        policy = load_autoresearch_policy(openclaw_config)
+        state = load_state_file(state_path)
+        validate_state(state, policy)
+        next_state = acknowledge_campaign_review(state, acknowledgement)
+        persist_derived_state(state_path, output_path, state, next_state, policy=policy)
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-acknowledge-campaign-review failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print(f"[green]wrote autoresearch state:[/green] {output_path}")

@@ -13,6 +13,11 @@ logs the outcome. The supervisor/controller owns repeat successor persistence
 and wakes the PM only after the next iteration is prepared. G2 `main` handles
 only explicit human start/status/stop requests.
 
+Campaign governance can durably pause the loop after eight consecutive
+non-KEEP outcomes or three consecutive `NO_CONSENSUS` outcomes. Only an
+operator acknowledgement through `autoresearch-acknowledge-campaign-review`
+may clear that pause; the PM does not edit the flag or touch G2.
+
 ## Ownership
 
 The PM orchestrates but does not edit Quantipy. Configured Codex stage agents

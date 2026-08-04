@@ -77,6 +77,10 @@ cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next \
 attestation/provisioning and repeat successor persistence are supervisor-owned
 during `run_once` before its corresponding wake. G2 start only enables that
 supervisor; it neither mutates authoritative state nor sends a direct PM wake.
+If the authoritative state reports a campaign stall, the supervisor remains
+paused until an operator reviews it and runs
+`autoresearch-acknowledge-campaign-review` with a 32-1024 character
+acknowledgement. The PM must not clear the pause or touch G2.
 There is no state-schema migration in the external-verification command. The
 only legacy retry-receipt bootstrap accepted by schema-v5 state is the actual
 schema-1 receipt for deterministic attempt `-v2`: it must bind exactly one

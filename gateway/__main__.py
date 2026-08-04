@@ -50,6 +50,7 @@ _cli_commands = {
     "autoresearch-pin-readiness",
     "autoresearch-build-readiness",
     "autoresearch-resume",
+    "autoresearch-acknowledge-campaign-review",
     "autoresearch-retry-external-verification",
     "autoresearch-init-state",
 }

@@ -216,6 +216,13 @@ class ControlStatus:
     owner_lifecycle_status: str | None
     supervisor_active: bool
     tasks: tuple[TaskStatus, ...]
+    suspended: bool = False
+    suspension_reason: str | None = None
+    campaign_review_required: bool = False
+    campaign_review_reason: str | None = None
+    consecutive_non_keep: int = 0
+    consecutive_no_consensus: int = 0
+    iterations_since_last_keep: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +296,13 @@ class AutoresearchControl:
             owner_lifecycle_status=lifecycle_status,
             supervisor_active=self._service_controller.is_active(),
             tasks=tasks,
+            suspended=state.suspended,
+            suspension_reason=state.suspension_reason,
+            campaign_review_required=state.campaign_review_required,
+            campaign_review_reason=state.campaign_review_reason,
+            consecutive_non_keep=state.campaign_counters.consecutive_non_keep,
+            consecutive_no_consensus=state.campaign_counters.consecutive_no_consensus,
+            iterations_since_last_keep=state.campaign_counters.iterations_since_last_keep,
         )
 
     def stop(self) -> StopResult:

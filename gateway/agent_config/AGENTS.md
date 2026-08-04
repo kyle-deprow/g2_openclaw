@@ -112,6 +112,11 @@ atomically:
 MemPalace. It is reserved only for an explicit operator-owned readiness
 suspension. The supervisor does not repeatedly wake suspended work.
 
+A completed campaign can also require operator review after a stall. The PM
+must not clear that flag or touch G2; acknowledge it only through
+`autoresearch-acknowledge-campaign-review` with a 32-1024 character operator
+acknowledgement.
+
 ### Dispatch Label Recovery
 
 OpenClaw session labels can remain occupied after a task reaches a terminal

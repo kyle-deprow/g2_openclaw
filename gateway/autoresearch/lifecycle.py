@@ -8,6 +8,9 @@ from gateway.autoresearch.artifacts import (
     FinalDecisionArtifact as FinalDecisionArtifact,
 )
 from gateway.autoresearch.constants import (
+    CAMPAIGN_REVIEW_PENDING_MESSAGE as CAMPAIGN_REVIEW_PENDING_MESSAGE,
+)
+from gateway.autoresearch.constants import (
     OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY as OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,  # noqa: E501
 )
 from gateway.autoresearch.constants import (
@@ -147,6 +150,8 @@ def start_next_iteration(
     readiness: PlatformReadinessManifest | None = None,
 ) -> AutoresearchState:
     """Begin a completed iteration's successor with a newly validated READY receipt."""
+    if state.campaign_review_required:
+        raise AutoresearchValidationError(CAMPAIGN_REVIEW_PENDING_MESSAGE)
     if state.setup is None or state.final_decision is None:
         raise AutoresearchValidationError("next iteration requires completed current iteration")
     _validate_operator_precondition_infra_blocked_suspension(state)
@@ -184,6 +189,53 @@ def start_next_iteration(
         campaign_review_required=state.campaign_review_required,
         campaign_review_reason=state.campaign_review_reason,
         campaign_review_history=state.campaign_review_history,
+    )
+
+
+def acknowledge_campaign_review(
+    state: AutoresearchState,
+    acknowledgement: str,
+) -> AutoresearchState:
+    """Record an operator acknowledgement and clear the campaign-review pause."""
+    if not state.campaign_review_required:
+        raise AutoresearchValidationError("no pending campaign review to acknowledge")
+    if state.phase is not Phase.REPEAT:
+        raise AutoresearchValidationError(
+            "campaign review acknowledgement requires the campaign to be in repeat phase"
+        )
+    if not isinstance(acknowledgement, str):
+        raise AutoresearchValidationError("campaign review acknowledgement must be a string")
+    cleaned = acknowledgement.strip()
+    if len(cleaned) < 32 or len(cleaned) > 1024:
+        raise AutoresearchValidationError(
+            "campaign review acknowledgement must be between 32 and 1024 characters"
+        )
+    if not state.campaign_review_history:
+        raise AutoresearchValidationError(
+            "campaign review is pending but its review-history record is missing"
+        )
+    trailing = state.campaign_review_history[-1]
+    if trailing.acknowledgement is not None or trailing.acknowledged_iteration is not None:
+        raise AutoresearchValidationError(
+            "campaign review is pending but its trailing review-history record is already "
+            "acknowledged"
+        )
+    acknowledged_record = replace(
+        trailing,
+        acknowledgement=cleaned,
+        acknowledged_iteration=state.iteration,
+    )
+    history = (*state.campaign_review_history[:-1], acknowledged_record)
+    counters = derive_campaign_counters(
+        state.hypothesis_registry,
+        acknowledged_through_iteration=state.iteration,
+    )
+    return replace(
+        state,
+        campaign_review_required=False,
+        campaign_review_reason=None,
+        campaign_review_history=history,
+        campaign_counters=counters,
     )
 
 
