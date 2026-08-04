@@ -788,6 +788,8 @@ const packageRoot = process.env.MOCK_CODEX_RESOLVED_PATH || "<unset>";
 const nativePackageRoot = `${packageRoot}-linux-x64/vendor/x86_64-unknown-linux-musl`;
 const npmPackageRoot =
   process.env.MOCK_CODEX_DOCTOR_NPM_PACKAGE_ROOT || `${codexHome}/npm-global/@openai/codex`;
+const updateRunningPackageRoot =
+  process.env.MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT || packageRoot;
 const checks = {
   "auth.credentials": {
     id: "auth.credentials",
@@ -875,15 +877,24 @@ const checks = {
       "update would target a different npm install",
     details: {
       "check for update on startup": "true",
-      "latest version": "0.146.0",
+      "latest version":
+        process.env.MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION || "0.146.0",
       "latest version status": "newer version is available",
       "npm package root": npmPackageRoot,
-      "running package root": packageRoot,
+      "running package root": updateRunningPackageRoot,
       "update action": "npm install -g @openai/codex",
       "version cache": [`${codexHome}/version.json`, "missing"]
     }
   }
 };
+if (process.env.MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE) {
+  const updateCheck = checks["updates.status"];
+  updateCheck["remediation"] =
+    process.env.MOCK_CODEX_DOCTOR_UPDATE_REMEDIATION || "remediation";
+  updateCheck["durationMs"] = Number(
+    process.env.MOCK_CODEX_DOCTOR_UPDATE_DURATION_MS || "4113"
+  );
+}
 if (process.env.MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE) {
   const details = checks["updates.status"].details;
   delete details["latest version"];
@@ -2854,6 +2865,57 @@ def test_push_script_allows_codex_doctor_update_probe_timeout_with_embedded_root
     assert result.returncode == 0, result.stderr
     assert "Codex doctor non-owned failures ignored" in result.stdout
     assert "updates.status" in result.stdout
+
+
+def test_push_script_allows_codex_doctor_newer_codex_update_probe_shape(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
+        Path(env["HOME"])
+        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
+        / "node_modules/@openai/codex"
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Codex doctor non-owned failures ignored" in result.stdout
+    assert "updates.status" in result.stdout
+
+
+@pytest.mark.parametrize("drift", ["summary", "latest_version", "running_root", "extra_detail"])
+def test_push_script_rejects_codex_doctor_newer_update_probe_shape_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
+        Path(env["HOME"])
+        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
+        / "node_modules/@openai/codex"
+    )
+    if drift == "summary":
+        env["MOCK_CODEX_DOCTOR_UPDATE_SUMMARY"] = "update would target another npm install"
+    elif drift == "latest_version":
+        env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION"] = "0.146"
+    elif drift == "running_root":
+        env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
+            Path(env["HOME"])
+            / "outside-openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
+            / "node_modules/@openai/codex"
+        )
+    else:
+        env["MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK"] = "updates.status"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "updates.status=fail" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
 
 
 def test_push_script_rejects_one_codex_doctor_exit_without_allowed_non_owned_checks(

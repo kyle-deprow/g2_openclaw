@@ -101,6 +101,19 @@ def validate() -> None:
             and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", value) is not None
         )
 
+    def is_strict_numeric_semver(value: object) -> bool:
+        return isinstance(value, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is not None
+
+    def is_openclaw_embedded_codex_root(value: object) -> bool:
+        if not is_abs_path(value):
+            return False
+        prefix = f"{Path.home() / '.openclaw' / 'npm'}/"
+        suffix = "/node_modules/@openclaw/codex/node_modules/@openai/codex"
+        return value.startswith(prefix) and value.endswith(suffix)
+
+    def is_string_list(value: object) -> TypeGuard[list[str]]:
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
     def is_known_curl_timeout(value: object) -> bool:
         return value == "curl: (28) Resolving timed out after 5000 milliseconds"
 
@@ -229,6 +242,32 @@ def validate() -> None:
             and details.get("update action") == "npm install -g @openai/codex"
             and details.get("version cache") == [str(codex_home / "version.json"), "missing"]
         )
+        newer_version_different_install = (
+            check.get("category") == "updates"
+            and check.get("status") == "fail"
+            and check.get("summary") == "update would target a different npm install"
+            and details_have_exact_keys(
+                details,
+                {
+                    "check for update on startup",
+                    "latest version",
+                    "latest version status",
+                    "npm package root",
+                    "running package root",
+                    "update action",
+                    "version cache",
+                },
+            )
+            and details.get("check for update on startup") == "true"
+            and is_strict_numeric_semver(details.get("latest version"))
+            and details.get("latest version status") == "newer version is available"
+            and is_abs_path(details.get("npm package root"))
+            and is_openclaw_embedded_codex_root(details.get("running package root"))
+            and details.get("update action") == "npm install -g @openai/codex"
+            and is_string_list(details.get("version cache"))
+            and isinstance(check.get("remediation"), str)
+            and type(check.get("durationMs")) is int
+        )
         probe_timeout = (
             check.get("category") == "updates"
             and check.get("status") == "fail"
@@ -260,7 +299,7 @@ def validate() -> None:
             summary="update check timed out",
             details={"running package root": str(app_server_package_root)},
         )
-        return mismatch or probe_timeout or timeout
+        return mismatch or newer_version_different_install or probe_timeout or timeout
 
     def is_expected_missing_auth_websocket_warning(check_id: str, check: dict[str, object]) -> bool:
         if check.get("id") != check_id:
