@@ -115,7 +115,13 @@ def validate() -> None:
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
     def is_known_curl_timeout(value: object) -> bool:
-        return value == "curl: (28) Resolving timed out after 5000 milliseconds"
+        # curl reports elapsed milliseconds, which varies around the 5000 ms
+        # timeout (observed: 5000 and 5001); pin the shape, not the elapsed time.
+        return (
+            isinstance(value, str)
+            and re.fullmatch(r"curl: \(28\) Resolving timed out after [0-9]+ milliseconds", value)
+            is not None
+        )
 
     def detail_string(details: dict[str, object], key: str) -> str | None:
         value = details.get(key)

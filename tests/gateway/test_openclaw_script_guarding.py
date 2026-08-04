@@ -2852,12 +2852,14 @@ def test_push_script_accepts_one_codex_doctor_exit_for_allowed_non_owned_checks(
     assert "Codex doctor non-owned failures ignored" in result.stdout
 
 
+@pytest.mark.parametrize("elapsed_ms", ("5000", "5001", "5417"))
 def test_push_script_allows_codex_doctor_update_probe_timeout_with_embedded_root_mismatch(
     tmp_path: Path,
+    elapsed_ms: str,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION_PROBE"] = (
-        "curl: (28) Resolving timed out after 5000 milliseconds"
+        f"curl: (28) Resolving timed out after {elapsed_ms} milliseconds"
     )
 
     result = _run_push_script(env)
@@ -2977,7 +2979,7 @@ def test_push_script_rejects_unexpected_codex_doctor_warning(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     "probe",
     [
-        "curl: (28) Resolving timed out after 5001 milliseconds",
+        "curl: (28) Resolving timed out after abc milliseconds",
         "curl: (28) Operation timed out after 5000 milliseconds with 0 bytes received",
         "curl: (6) Could not resolve host: api.openai.com",
     ],
