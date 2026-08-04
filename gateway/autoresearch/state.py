@@ -71,6 +71,15 @@ from gateway.autoresearch.fields import (
 from gateway.autoresearch.fields import (
     _require_str as _require_str,
 )
+from gateway.autoresearch.governance import (
+    CampaignCounters as CampaignCounters,
+)
+from gateway.autoresearch.governance import (
+    CampaignReviewRecord as CampaignReviewRecord,
+)
+from gateway.autoresearch.governance import (
+    HypothesisRegistryEntry as HypothesisRegistryEntry,
+)
 from gateway.autoresearch.recovery_receipts import (
     CanonicalQuantipyRuntimeAttestation as CanonicalQuantipyRuntimeAttestation,
 )
@@ -196,6 +205,11 @@ class AutoresearchState:
     canonical_quantipy_runtime_attestation: CanonicalQuantipyRuntimeAttestation | None = None
     suspended: bool = False
     suspension_reason: str | None = None
+    hypothesis_registry: tuple[HypothesisRegistryEntry, ...] = field(default_factory=tuple)
+    campaign_counters: CampaignCounters = field(default_factory=CampaignCounters.zero)
+    campaign_review_required: bool = False
+    campaign_review_reason: str | None = None
+    campaign_review_history: tuple[CampaignReviewRecord, ...] = field(default_factory=tuple)
 
     @property
     def latest_debate(self) -> DebateResultArtifact | None:
@@ -223,7 +237,7 @@ class AutoresearchState:
         if "schema_version" not in data:
             raise AutoresearchValidationError(
                 "autoresearch state missing schema_version is unsupported; archive it and "
-                "initialize a schema-v4 state with `gateway-cli autoresearch-init-state`; "
+                "initialize a schema-v5 state with `gateway-cli autoresearch-init-state`; "
                 f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
             )
         schema_version = _require_int(data, "schema_version")
@@ -286,6 +300,11 @@ class AutoresearchState:
             "canonical_quantipy_runtime_attestation",
             "suspended",
             "suspension_reason",
+            "hypothesis_registry",
+            "campaign_counters",
+            "campaign_review_required",
+            "campaign_review_reason",
+            "campaign_review_history",
         )
         if "interrupted_verification_history" not in data:
             expected_state_keys = tuple(
@@ -374,6 +393,21 @@ class AutoresearchState:
                 if data.get("suspension_reason") is not None
                 else None
             ),
+            hypothesis_registry=_parse_tuple(
+                "hypothesis_registry",
+                HypothesisRegistryEntry.from_dict,
+            ),
+            campaign_counters=CampaignCounters.from_dict(data["campaign_counters"]),
+            campaign_review_required=_require_bool(data, "campaign_review_required"),
+            campaign_review_reason=(
+                _require_str(data, "campaign_review_reason")
+                if data.get("campaign_review_reason") is not None
+                else None
+            ),
+            campaign_review_history=_parse_tuple(
+                "campaign_review_history",
+                CampaignReviewRecord.from_dict,
+            ),
         )
         return state
 
@@ -414,6 +448,13 @@ class AutoresearchState:
             ),
             "suspended": self.suspended,
             "suspension_reason": self.suspension_reason,
+            "hypothesis_registry": [entry.to_dict() for entry in self.hypothesis_registry],
+            "campaign_counters": self.campaign_counters.to_dict(),
+            "campaign_review_required": self.campaign_review_required,
+            "campaign_review_reason": self.campaign_review_reason,
+            "campaign_review_history": [
+                record.to_dict() for record in self.campaign_review_history
+            ],
         }
         if self.interrupted_verification_history:
             state["interrupted_verification_history"] = [

@@ -6,6 +6,7 @@ from datetime import (
     date,
     timedelta,
 )
+from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +21,7 @@ from gateway.autoresearch.artifacts import (
     VerificationResultArtifact,
 )
 from gateway.autoresearch.constants import (
+    AUTHORITATIVE_STATE_DIGEST_DOMAIN,
     MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
     MAX_ARTIFACT_FILE_BYTES,
     MAX_NEXT_ACTION_PROMPT_BYTES,
@@ -45,7 +47,12 @@ from gateway.autoresearch.enums import (
 from gateway.autoresearch.errors import (
     AutoresearchValidationError,
 )
+from gateway.autoresearch.governance import (
+    CampaignCounters,
+    CampaignReviewRecord,
+)
 from gateway.autoresearch.lifecycle import (
+    resume_suspended_iteration,
     start_next_iteration,
     suspend_for_infrastructure,
 )
@@ -1324,6 +1331,39 @@ def test_no_consensus_starts_the_next_iteration_and_dispatches_setup(
     assert action.phase is Phase.SETUP_CONTEXT
     assert action.expected_artifact_type is ArtifactType.CONTEXT_PACKET
     assert action.next_agent_ids == (policy.context_curator.agent_id,)
+
+
+def test_lifecycle_carries_all_dispatch_a_governance_fields_forward(
+    no_consensus_state: AutoresearchState,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    next_iteration = start_next_iteration(no_consensus_state, readiness=platform_readiness)
+
+    for field_name in (
+        "hypothesis_registry",
+        "campaign_counters",
+        "campaign_review_required",
+        "campaign_review_reason",
+        "campaign_review_history",
+    ):
+        assert getattr(next_iteration, field_name) == getattr(no_consensus_state, field_name)
+
+    suspended = suspend_for_infrastructure(
+        _state_to_decision(policy, platform_readiness),
+        "Operator is repairing infrastructure.",
+    )
+    changed_readiness = replace(platform_readiness, manifest_id="manifest-test-2")
+    resumed = resume_suspended_iteration(suspended, changed_readiness)
+
+    for field_name in (
+        "hypothesis_registry",
+        "campaign_counters",
+        "campaign_review_required",
+        "campaign_review_reason",
+        "campaign_review_history",
+    ):
+        assert getattr(resumed, field_name) == getattr(suspended, field_name)
 
 
 def test_no_consensus_rejects_a_memory_write_requirement(
@@ -3118,6 +3158,219 @@ def test_schema_v2_state_requires_archive_and_reinitialization(
         match=r"archive the live schema-v2 state.*before restart",
     ):
         AutoresearchState.from_dict(raw)
+
+
+def test_schema_v4_state_requires_archive_and_v5_reinitialization(
+    policy: AutoresearchPolicy,
+) -> None:
+    raw = AutoresearchState().to_dict()
+    raw["schema_version"] = 4
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"archive the live schema-v4 state.*fresh schema-v5 state.*autoresearch-init-state",
+    ):
+        AutoresearchState.from_dict(raw)
+
+
+def test_schema_v5_requires_all_dispatch_a_state_keys(
+    policy: AutoresearchPolicy,
+) -> None:
+    raw = AutoresearchState().to_dict()
+    raw.pop("hypothesis_registry")
+
+    with pytest.raises(AutoresearchValidationError, match="exact keys"):
+        AutoresearchState.from_dict(raw)
+
+
+def test_authoritative_state_digest_binds_campaign_review_history() -> None:
+    state = AutoresearchState()
+    reviewed = replace(
+        state,
+        campaign_review_history=(
+            CampaignReviewRecord(
+                triggered_iteration=1,
+                reason="operator review",
+                counters=CampaignCounters.zero(),
+                acknowledgement=None,
+                acknowledged_iteration=None,
+            ),
+        ),
+    )
+
+    empty_digest = autoresearch_transitions.build_authoritative_state_reference(state).state_sha256
+    reviewed_digest = autoresearch_transitions.build_authoritative_state_reference(
+        reviewed
+    ).state_sha256
+
+    assert empty_digest != reviewed_digest
+
+
+def test_v4_shaped_payload_hash_differs_from_the_v5_state_hash() -> None:
+    state = AutoresearchState()
+    v4_payload = state.to_dict()
+    v4_payload["schema_version"] = 4
+    for field_name in (
+        "hypothesis_registry",
+        "campaign_counters",
+        "campaign_review_required",
+        "campaign_review_reason",
+        "campaign_review_history",
+    ):
+        v4_payload.pop(field_name)
+    v4_canonical = json.dumps(v4_payload, sort_keys=True, separators=(",", ":"))
+    v4_digest = sha256(
+        "\n".join((AUTHORITATIVE_STATE_DIGEST_DOMAIN, v4_canonical)).encode("utf-8")
+    ).hexdigest()
+
+    v5_digest = autoresearch_transitions.build_authoritative_state_reference(state).state_sha256
+
+    assert v5_digest != v4_digest
+
+
+def test_g2_autoresearch_skill_receipt_hashes_actual_file_bytes(
+    receipts: ReceiptCatalog,
+) -> None:
+    receipt = receipts.receipts["g2.autoresearch_skill"]
+
+    assert receipt.sha256 == sha256(receipt.path.read_bytes()).hexdigest()
+
+
+def test_decision_log_reason_truncation_strips_boundary_whitespace(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_decision(policy)
+    decision = replace(
+        _final_decision(),
+        log_summary=("x" * 159) + " \t trailing text",
+    )
+
+    advanced = advance_state(state, decision, policy)
+    restored = AutoresearchState.from_dict(json.loads(json.dumps(advanced.to_dict())))
+
+    assert advanced.hypothesis_registry[-1].reason == "x" * 159
+    assert restored.hypothesis_registry[-1].reason == "x" * 159
+
+
+def test_infrastructure_suspension_without_consensus_records_none_shape(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    suspended = suspend_for_infrastructure(state, "Operator is repairing infrastructure.")
+    entry = suspended.hypothesis_registry[-1]
+
+    assert entry.consensus_status.value == "NONE"
+    assert entry.contested_families == ()
+    assert entry.family is None
+
+
+def _prompt_without_dispatch_digests(prompt: str) -> tuple[str, dict[str, str]]:
+    digest_values: dict[str, str] = {}
+    template_lines: list[str] = []
+    for line in prompt.splitlines():
+        if line.startswith("STATE_REF="):
+            state_reference = _round_trip_compact_json(line.removeprefix("STATE_REF="))
+            digest_values["state_sha256"] = str(state_reference["state_sha256"])
+            state_reference["state_sha256"] = "<state_sha256>"
+            template_lines.append(
+                "STATE_REF=" + json.dumps(state_reference, sort_keys=True, separators=(",", ":"))
+            )
+        elif line.startswith("INSTRUCTION_MANIFEST="):
+            manifest = _round_trip_compact_json(line.removeprefix("INSTRUCTION_MANIFEST="))
+            state_reference = cast(dict[str, object], manifest["state_reference"])
+            state_reference["state_sha256"] = "<state_sha256>"
+            template_lines.append(
+                "INSTRUCTION_MANIFEST="
+                + json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+            )
+        elif "=" in line and line.split("=", 1)[0] in {
+            "state_reference_sha256",
+            "source_manifest_sha256",
+        }:
+            key, value = line.split("=", 1)
+            digest_values[key] = value
+            template_lines.append(f"{key}=<{key}>")
+        else:
+            template_lines.append(line)
+    return "\n".join(template_lines), digest_values
+
+
+def test_empty_registry_prompt_is_template_invariant_but_digest_lines_change(
+    receipts: ReceiptCatalog,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    initial = AutoresearchState(platform_readiness=platform_readiness.identity())
+    setup_done = advance_state(initial, _setup_artifact(), policy)
+    context_done = advance_state(setup_done, _context_artifact(), policy)
+    debate_done = advance_state(context_done, _debate_result(policy, round_number=1), policy)
+    consensus_done = advance_state(
+        debate_done,
+        _majority_consensus(round_number=1, policy=policy),
+        policy,
+    )
+    implementation_done = advance_state(consensus_done, _implementation_result(), policy)
+    verification_done = advance_state(
+        implementation_done,
+        _verification_result(VerificationStatus.PASS),
+        policy,
+    )
+    review_done = advance_state(
+        verification_done,
+        _review_result(ReviewVerdict.PASS, policy),
+        policy,
+    )
+
+    for empty_registry in (
+        initial,
+        setup_done,
+        context_done,
+        debate_done,
+        consensus_done,
+        implementation_done,
+        verification_done,
+        review_done,
+    ):
+        changed_history = replace(
+            empty_registry,
+            campaign_review_history=(
+                CampaignReviewRecord(
+                    triggered_iteration=empty_registry.iteration,
+                    reason="operator review",
+                    counters=CampaignCounters.zero(),
+                    acknowledgement=None,
+                    acknowledged_iteration=None,
+                ),
+            ),
+        )
+        empty_prompt = next_action(empty_registry, policy, receipts, platform_readiness).prompt_text
+        changed_prompt = next_action(
+            changed_history, policy, receipts, platform_readiness
+        ).prompt_text
+        empty_template, empty_digests = _prompt_without_dispatch_digests(empty_prompt)
+        changed_template, changed_digests = _prompt_without_dispatch_digests(changed_prompt)
+
+        assert empty_template == changed_template
+        assert set(empty_digests) == {
+            "state_sha256",
+            "state_reference_sha256",
+            "source_manifest_sha256",
+        }
+        assert set(changed_digests) == set(empty_digests)
+        assert all(empty_digests[key] != changed_digests[key] for key in empty_digests)
+
+
+def test_populated_registry_golden_round_trip_preserves_state_and_reference_digest(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(_state_to_decision(policy), _final_decision(), policy)
+    restored = AutoresearchState.from_dict(json.loads(json.dumps(state.to_dict())))
+
+    assert restored.to_dict() == state.to_dict()
+    assert autoresearch_transitions.build_authoritative_state_reference(
+        state
+    ) == autoresearch_transitions.build_authoritative_state_reference(restored)
 
 
 def test_schema_v3_state_rejects_missing_required_fix_field(

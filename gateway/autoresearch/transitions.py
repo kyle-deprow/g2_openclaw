@@ -62,6 +62,9 @@ from gateway.autoresearch.constants import (
     HYDRATE_CAPABLE_COMMAND_RE as HYDRATE_CAPABLE_COMMAND_RE,
 )
 from gateway.autoresearch.constants import (
+    HYPOTHESIS_REGISTRY_REASON_MAX_CHARS as HYPOTHESIS_REGISTRY_REASON_MAX_CHARS,
+)
+from gateway.autoresearch.constants import (
     MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS as MAX_ALPHA_PRICE_HYDRATION_SYMBOL_SESSIONS,
 )
 from gateway.autoresearch.constants import (
@@ -142,6 +145,18 @@ from gateway.autoresearch.gitops import (
 from gateway.autoresearch.gitops import _require_workspace_under_autoresearch_worktree_root
 from gateway.autoresearch.gitops import (
     _resolve_git_commit as _resolve_git_commit,
+)
+from gateway.autoresearch.governance import (
+    HypothesisRegistryEntry as HypothesisRegistryEntry,
+)
+from gateway.autoresearch.governance import (
+    contested_families as contested_families,
+)
+from gateway.autoresearch.governance import (
+    derive_campaign_counters as derive_campaign_counters,
+)
+from gateway.autoresearch.governance import (
+    theory_family_fingerprint as theory_family_fingerprint,
 )
 from gateway.autoresearch.manifest import (
     AuthoritativeStateReference as AuthoritativeStateReference,
@@ -239,6 +254,61 @@ def _is_operator_precondition_consensus(
         return True
     brief = (consensus.implementation_brief or "").lower()
     return all(marker in brief for marker in _OPERATOR_PRECONDITION_BRIEF_MARKERS)
+
+
+def _acknowledged_through_iteration(state: AutoresearchState) -> int:
+    return max(
+        (record.acknowledged_iteration or 0 for record in state.campaign_review_history),
+        default=0,
+    )
+
+
+def _build_hypothesis_registry_entry(
+    state: AutoresearchState,
+    decision: FinalDecisionArtifact,
+) -> HypothesisRegistryEntry:
+    if state.mode is None:
+        raise AutoresearchValidationError(
+            "hypothesis registry entries require an explicit research mode"
+        )
+    consensus = state.latest_consensus
+    contested: tuple[str, ...]
+    if consensus is None:
+        consensus_status = ConsensusStatus.NONE
+        family = None
+        contested = ()
+        fingerprint = None
+    else:
+        consensus_status = consensus.status
+        family = (
+            _normalise_identifier(consensus.winner_theory_family)
+            if consensus.winner_theory_family is not None
+            else None
+        )
+        contested = (
+            contested_families(state.latest_debate)
+            if (
+                consensus_status is ConsensusStatus.NO_CONSENSUS
+                and decision.decision is FinalDecision.NO_CONSENSUS
+                and state.latest_debate is not None
+            )
+            else ()
+        )
+        fingerprint = theory_family_fingerprint(consensus, state.mode)
+    return HypothesisRegistryEntry(
+        iteration=state.iteration,
+        research_mode=state.mode,
+        consensus_status=consensus_status,
+        decision=decision.decision,
+        family=family,
+        contested_families=contested,
+        fingerprint=fingerprint,
+        metric_value=decision.recommended_metric_value,
+        reason=(
+            " ".join(decision.log_summary.split())[:HYPOTHESIS_REGISTRY_REASON_MAX_CHARS].strip()
+        ),
+        novelty_delta_sha256=None,
+    )
 
 
 def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> None:
@@ -1160,6 +1230,48 @@ def _validate_state(
         validation_context.validate_for_state(state)
     if state.iteration < 1:
         raise AutoresearchValidationError("iteration must be >= 1")
+    if len(state.hypothesis_registry) > constants.MAX_HYPOTHESIS_REGISTRY_ENTRIES:
+        raise AutoresearchValidationError(
+            "hypothesis registry exceeds the 512-entry limit; archive the campaign and "
+            "initialize a fresh state"
+        )
+    previous_registry_iteration = 0
+    for entry in state.hypothesis_registry:
+        entry.validate()
+        if entry.iteration <= previous_registry_iteration:
+            raise AutoresearchValidationError(
+                "hypothesis registry iterations must be strictly increasing"
+            )
+        if entry.iteration > state.iteration or (
+            entry.iteration == state.iteration and state.phase is not Phase.REPEAT
+        ):
+            raise AutoresearchValidationError(
+                "hypothesis registry entry iteration must be before the active iteration"
+            )
+        previous_registry_iteration = entry.iteration
+    if len(state.campaign_review_history) > constants.MAX_CAMPAIGN_REVIEW_RECORDS:
+        raise AutoresearchValidationError("campaign review history exceeds the 32-record limit")
+    for record in state.campaign_review_history:
+        record.validate()
+    state.campaign_counters.validate()
+    expected_campaign_counters = derive_campaign_counters(
+        state.hypothesis_registry,
+        acknowledged_through_iteration=_acknowledged_through_iteration(state),
+    )
+    if state.campaign_counters != expected_campaign_counters:
+        raise AutoresearchValidationError("campaign_counters do not match the hypothesis registry")
+    if state.campaign_review_required is not (state.campaign_review_reason is not None):
+        raise AutoresearchValidationError(
+            "campaign_review_reason must be non-null exactly when campaign_review_required"
+        )
+    if state.campaign_review_reason is not None and not state.campaign_review_reason.strip():
+        raise AutoresearchValidationError("campaign_review_reason must be non-empty")
+    if state.campaign_review_required and (
+        state.phase is not Phase.REPEAT or state.final_decision is None
+    ):
+        raise AutoresearchValidationError(
+            "campaign_review_required state must be in repeat phase with a final decision"
+        )
     if state.suspended:
         decision = state.final_decision
         if state.phase is not Phase.REPEAT or decision is None:
@@ -1865,6 +1977,12 @@ def advance_state(
         ):
             raise AutoresearchValidationError("final_decision requires prior artifacts")
         _validate_final_decision_artifact(artifact, state, validation_context)
+        registry_entry = _build_hypothesis_registry_entry(state, artifact)
+        next_registry = (*state.hypothesis_registry, registry_entry)
+        next_counters = derive_campaign_counters(
+            next_registry,
+            acknowledged_through_iteration=_acknowledged_through_iteration(state),
+        )
         if artifact.decision is FinalDecision.INFRA_BLOCKED:
             next_state = replace(
                 state,
@@ -1872,9 +1990,17 @@ def advance_state(
                 phase=Phase.REPEAT,
                 suspended=True,
                 suspension_reason=artifact.infra_rationale,
+                hypothesis_registry=next_registry,
+                campaign_counters=next_counters,
             )
         else:
-            next_state = replace(state, final_decision=artifact, phase=Phase.REPEAT)
+            next_state = replace(
+                state,
+                final_decision=artifact,
+                phase=Phase.REPEAT,
+                hypothesis_registry=next_registry,
+                campaign_counters=next_counters,
+            )
         transitions_module._validate_state(next_state, policy, validation_context)
         return next_state
 

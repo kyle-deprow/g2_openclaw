@@ -118,3 +118,7 @@ New: `test_governance.py` (fingerprint determinism/normalization/None-cases, con
 - **A — schema v5 + registry substrate** (model-invisible; prompt bytes proven identical to main; carry-forward test is the gate; land while the loop is stopped, fold re-init into the pending guarded deployment).
 - **B — novelty gate + ledger** (first artifact-rejecting change; inert while registry is empty; SKILL 8.2.0; two clean iterations observed before C).
 - **C — stall + campaign_review + acknowledgement** (can halt the loop; lands last; every enforcement point fails closed naming the recovery command; SKILL 8.3.0).
+
+## Errata (post-review)
+
+Model-invisibility means template-invariance: the prompt template remains unchanged for empty-registry states, while the state, state-reference, and manifest digest lines change by design. Infrastructure-suspension entries use `consensus_status=NONE` with empty `contested_families`. Reason truncation collapses whitespace, truncates, and strips the result.

@@ -31,11 +31,20 @@ from gateway.autoresearch.enums import (
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
 )
+from gateway.autoresearch.governance import (
+    derive_campaign_counters as derive_campaign_counters,
+)
 from gateway.autoresearch.memory import (
     _is_explicit_no_memory_transition as _is_explicit_no_memory_transition,
 )
 from gateway.autoresearch.state import (
     AutoresearchState as AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    _acknowledged_through_iteration as _acknowledged_through_iteration,
+)
+from gateway.autoresearch.transitions import (
+    _build_hypothesis_registry_entry as _build_hypothesis_registry_entry,
 )
 from gateway.autoresearch.transitions import (
     _canonical_iteration_experiment_id as _canonical_iteration_experiment_id,
@@ -113,6 +122,8 @@ def suspend_for_infrastructure(state: AutoresearchState, reason: str) -> Autores
         memory_write_required=False,
         infra_rationale=reason,
     )
+    registry_entry = _build_hypothesis_registry_entry(state, decision)
+    next_registry = (*state.hypothesis_registry, registry_entry)
     return replace(
         state,
         phase=Phase.REPEAT,
@@ -122,6 +133,11 @@ def suspend_for_infrastructure(state: AutoresearchState, reason: str) -> Autores
         memory_verification_receipt=None,
         suspended=True,
         suspension_reason=reason,
+        hypothesis_registry=next_registry,
+        campaign_counters=derive_campaign_counters(
+            next_registry,
+            acknowledged_through_iteration=_acknowledged_through_iteration(state),
+        ),
     )
 
 
@@ -163,6 +179,11 @@ def start_next_iteration(
         iteration=state.iteration + 1,
         setup=state.setup,
         platform_readiness=readiness_identity,
+        hypothesis_registry=state.hypothesis_registry,
+        campaign_counters=state.campaign_counters,
+        campaign_review_required=state.campaign_review_required,
+        campaign_review_reason=state.campaign_review_reason,
+        campaign_review_history=state.campaign_review_history,
     )
 
 
@@ -202,6 +223,11 @@ def resume_suspended_iteration(
         iteration=state.iteration + 1,
         setup=state.setup,
         platform_readiness=identity,
+        hypothesis_registry=state.hypothesis_registry,
+        campaign_counters=state.campaign_counters,
+        campaign_review_required=state.campaign_review_required,
+        campaign_review_reason=state.campaign_review_reason,
+        campaign_review_history=state.campaign_review_history,
     )
 
 

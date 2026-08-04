@@ -55,6 +55,7 @@ class ComputeTarget(StrEnum):
 class ConsensusStatus(StrEnum):
     MAJORITY = "MAJORITY"
     NO_CONSENSUS = "NO_CONSENSUS"
+    NONE = "NONE"
 
 
 class VerificationStatus(StrEnum):

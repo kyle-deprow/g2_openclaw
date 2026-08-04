@@ -572,7 +572,7 @@ def autoresearch_init_state(
     output_path: Path = _output_path_option,
     readiness_manifest: Path = _readiness_manifest_option,
 ) -> None:
-    """Initialize a pristine schema-v4 campaign pinned to platform readiness."""
+    """Initialize a pristine schema-v5 campaign pinned to platform readiness."""
     from gateway.autoresearch.persistence import (
         initialize_state,
         provision_quantipy_experiment_runs_root,
@@ -587,7 +587,7 @@ def autoresearch_init_state(
     except ValueError as exc:
         console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]wrote pristine autoresearch state v4:[/green] {output_path}")
+    console.print(f"[green]wrote pristine autoresearch state v5:[/green] {output_path}")
 
 
 @app.command("autoresearch-create-command-file")
