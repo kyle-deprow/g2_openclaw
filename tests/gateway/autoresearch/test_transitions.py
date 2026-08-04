@@ -3615,7 +3615,7 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     assert "Verification handoff contract" in prompt
     assert "structured JSON verification_result artifact" in prompt
     assert (
-        "uv run --no-sync gateway-cli autoresearch-advance "
+        "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance "
         f"{json.dumps(str(state_path.resolve()))} "
         "/home/dev/.openclaw/workspace-autoresearch-pm/<artifact.json> "
         "--instruction-manifest-sha256 <source_manifest_sha256> "

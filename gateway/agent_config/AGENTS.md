@@ -33,7 +33,7 @@ owner-session wake.
 The PM obtains every next action from the `gateway.autoresearch` package through:
 
 ```bash
-cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
@@ -50,7 +50,7 @@ in place.
   tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$tmp"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-init-state \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
@@ -93,14 +93,14 @@ atomically:
   resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$resumed"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-build-readiness \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-build-readiness \
     /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
     --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
     --campaign-xnys-start 2022-01-03 \
     --campaign-xnys-end 2025-12-31
-  uv run --no-sync gateway-cli autoresearch-resume "$state" \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$resumed"
   mv -- "$resumed" "$state"

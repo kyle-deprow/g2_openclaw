@@ -11,7 +11,7 @@ loop state, and next-stage selection must come from the deterministic
 controller/supervisor in the `gateway.autoresearch` package (or read-only
 `gateway-cli autoresearch-next` output), not from prompt memory. Because the PM
 workspace is outside this repo, invoke it exactly as `cd
-/home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next
+/home/dev/repos/g2_openclaw && /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next
 /home/dev/.openclaw/autoresearch/quantipy-state.json`. The PM uses that
 control-plane output to choose the next stage and verify metrics,
 and repeat until the human says `stop`.
@@ -37,7 +37,7 @@ run manifest and a one-time private command input file:
 ```bash
 cd /home/dev/repos/g2_openclaw
 command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
-uv run --no-sync gateway-cli autoresearch-create-command-file --output "$command_file"
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output "$command_file"
 # stdin protocol for the helper:
 # {"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
 /home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
@@ -102,7 +102,7 @@ restarting the supervisor:
   tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$tmp"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-init-state \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
@@ -118,7 +118,7 @@ This procedure atomically leaves schema-v5 state at the authoritative path used
 by control and the supervisor. Use that path for the first dispatch:
 
 ```bash
-cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
@@ -153,14 +153,14 @@ atomically:
   resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$resumed"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-build-readiness \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-build-readiness \
     /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
     --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
     --campaign-xnys-start 2022-01-03 \
     --campaign-xnys-end 2025-12-31
-  uv run --no-sync gateway-cli autoresearch-resume "$state" \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$resumed"
   mv -- "$resumed" "$state"
@@ -227,7 +227,7 @@ artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json
 jq -e . "$artifact" >/dev/null
 wc -c "$artifact"
 cd /home/dev/repos/g2_openclaw
-uv run --no-sync gateway-cli autoresearch-advance "$state" "$artifact" \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance "$state" "$artifact" \
   --instruction-manifest-sha256 "<source_manifest_sha256 from autoresearch-next>" \
   --state-reference-sha256 "<state_reference_sha256 from autoresearch-next>" \
   --output "$state"
@@ -1191,7 +1191,7 @@ Actions:
   history and does not claim that any evidence changed:
 
   ```bash
-  cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli \
     autoresearch-acknowledge-campaign-review \
     /home/dev/.openclaw/autoresearch/quantipy-state.json \
     --acknowledgement "<32-1024 character operator review>" \

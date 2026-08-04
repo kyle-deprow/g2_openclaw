@@ -54,7 +54,7 @@ temporary replacement before archiving the old state.
   tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$tmp"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-init-state \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-init-state \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
@@ -69,7 +69,7 @@ temporary replacement before archiving the old state.
 The control command and supervisor already use that authoritative path. Run:
 
 ```bash
-cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-next \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next \
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
@@ -90,7 +90,7 @@ human/Codex shell with the explicit capability:
 
 ```bash
 cd /home/dev/repos/g2_openclaw && G2_OPENCLAW_OPERATOR_RETRY=1 \
-  uv run --no-sync gateway-cli autoresearch-retry-external-verification \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-retry-external-verification \
   /home/dev/.openclaw/autoresearch/quantipy-state.json \
   --reason "Restarted the stale Quantipy API service and verified the panel route."
 ```
@@ -165,14 +165,14 @@ Then atomically resume the same schema-v5 state file:
   resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
   trap 'rm -f "$resumed"' EXIT
   cd /home/dev/repos/g2_openclaw
-  uv run --no-sync gateway-cli autoresearch-build-readiness \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-build-readiness \
     /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --quantipy-root /home/dev/repos/quantipy \
     --expected-quantipy-commit <full-quantipy-git-hash> \
     --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
     --campaign-xnys-start 2022-01-03 \
     --campaign-xnys-end 2025-12-31
-  uv run --no-sync gateway-cli autoresearch-resume "$state" \
+  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-resume "$state" \
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$resumed"
   mv -- "$resumed" "$state"
@@ -204,7 +204,7 @@ budget accommodates complete expanded universe receipts; the separate
 Example advance command:
 
 ```bash
-cd /home/dev/repos/g2_openclaw && uv run --no-sync gateway-cli autoresearch-advance \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance \
   /home/dev/.openclaw/autoresearch/quantipy-state.json artifact.json \
   --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
   --output /home/dev/.openclaw/autoresearch/quantipy-state.json
@@ -234,7 +234,7 @@ Invoke the launcher from this repo with:
 
 ```bash
 command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
-uv run --no-sync gateway-cli autoresearch-create-command-file --output "$command_file"
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output "$command_file"
 /home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
   --run-dir <absolute-run-dir> \
   --manifest <absolute-manifest.json> \
