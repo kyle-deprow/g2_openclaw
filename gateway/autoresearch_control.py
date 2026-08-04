@@ -28,18 +28,22 @@ from gateway.autoresearch.transitions import (
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
 )
+from gateway.autoresearch_reconciliation import (
+    TaskProvenance,
+    classify_autoresearch_task,
+    reconcile_relevant_running_tasks,
+)
+from gateway.autoresearch_rpc import (
+    OpenClawRPC,
+    TaskGateway,
+)
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_CHECKPOINT_PATH,
     DEFAULT_OWNER_SESSIONS_PATH,
     DEFAULT_STATE_PATH,
-    OpenClawRPC,
     SupervisorError,
-    TaskGateway,
-    TaskProvenance,
-    classify_autoresearch_task,
-    reconcile_relevant_running_tasks,
 )
 from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
 

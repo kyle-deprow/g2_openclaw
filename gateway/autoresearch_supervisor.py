@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import fcntl
 import hashlib
 import json
@@ -13,16 +12,14 @@ import os
 import re
 import signal
 import subprocess
-import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, field
+from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv as load_dotenv
 
 from gateway.autoresearch.artifacts import (
     VerificationResultArtifact,
@@ -75,10 +72,91 @@ from gateway.autoresearch.transitions import (
 from gateway.autoresearch.workspace import (
     migrate_legacy_autoresearch_workspace_state_file,
 )
+from gateway.autoresearch_checkpoint import (
+    MemoryWakeAcknowledgement as MemoryWakeAcknowledgement,
+)
+from gateway.autoresearch_checkpoint import (
+    RecoveryRecord as RecoveryRecord,
+)
+from gateway.autoresearch_checkpoint import (
+    SupervisorCheckpoint as SupervisorCheckpoint,
+)
+from gateway.autoresearch_checkpoint import (
+    _optional_float as _optional_float,
+)
+from gateway.autoresearch_checkpoint import (
+    _optional_int as _optional_int,
+)
+from gateway.autoresearch_checkpoint import (
+    _optional_str as _optional_str,
+)
+from gateway.autoresearch_checkpoint import (
+    reset_recovery_checkpoint_for_manual_wake as reset_recovery_checkpoint_for_manual_wake,
+)
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
     validate_state_readiness,
+)
+from gateway.autoresearch_reconciliation import (
+    CanonicalTaskStatus as CanonicalTaskStatus,
+)
+from gateway.autoresearch_reconciliation import (
+    ReconciledRunningTasks as ReconciledRunningTasks,
+)
+from gateway.autoresearch_reconciliation import (
+    TaskProvenance as TaskProvenance,
+)
+from gateway.autoresearch_reconciliation import (
+    TaskReconciliationError as TaskReconciliationError,
+)
+from gateway.autoresearch_reconciliation import (
+    _detect_recovery_error_in_object as _detect_recovery_error_in_object,
+)
+from gateway.autoresearch_reconciliation import (
+    _detect_recovery_error_in_text as _detect_recovery_error_in_text,
+)
+from gateway.autoresearch_reconciliation import (
+    _preferred_recovery_error as _preferred_recovery_error,
+)
+from gateway.autoresearch_reconciliation import (
+    _task_id_for_reconciliation as _task_id_for_reconciliation,
+)
+from gateway.autoresearch_reconciliation import (
+    _task_provenance_fingerprint as _task_provenance_fingerprint,
+)
+from gateway.autoresearch_reconciliation import (
+    classify_autoresearch_task as classify_autoresearch_task,
+)
+from gateway.autoresearch_reconciliation import (
+    reconcile_relevant_running_tasks as reconcile_relevant_running_tasks,
+)
+from gateway.autoresearch_rpc import (
+    NativeGatewayRPC as NativeGatewayRPC,
+)
+from gateway.autoresearch_rpc import (
+    OpenClawRPC as OpenClawRPC,
+)
+from gateway.autoresearch_rpc import (
+    ShutdownRequested as ShutdownRequested,
+)
+from gateway.autoresearch_rpc import (
+    TaskGateway as TaskGateway,
+)
+from gateway.autoresearch_rpc import (
+    WakeDeliveryProof as WakeDeliveryProof,
+)
+from gateway.autoresearch_rpc import (
+    _default_task_gateway as _default_task_gateway,
+)
+from gateway.autoresearch_rpc import (
+    _shutdown_not_requested as _shutdown_not_requested,
+)
+from gateway.autoresearch_rpc import (
+    _strict_json_object as _strict_json_object,
+)
+from gateway.autoresearch_rpc import (
+    make_idempotency_key as make_idempotency_key,
 )
 from gateway.autoresearch_runs import (
     DEFAULT_AUTORESEARCH_RUNS_ROOT,
@@ -90,15 +168,61 @@ from gateway.autoresearch_runs import (
     complete_run,
     read_run_record,
 )
-from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
+from gateway.autoresearch_shared import (
+    AUTORESEARCH_OWNER_AGENT_ID as AUTORESEARCH_OWNER_AGENT_ID,
+)
+from gateway.autoresearch_shared import (
+    AUTORESEARCH_OWNER_SESSION_KEY as AUTORESEARCH_OWNER_SESSION_KEY,
+)
+from gateway.autoresearch_shared import (
+    DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS as DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS,
+)
+from gateway.autoresearch_shared import (
+    DEFAULT_TASK_RPC_TIMEOUT_SECONDS as DEFAULT_TASK_RPC_TIMEOUT_SECONDS,
+)
+from gateway.autoresearch_shared import (
+    EXPECTED_STAGE_AGENT_IDS as EXPECTED_STAGE_AGENT_IDS,
+)
+from gateway.autoresearch_shared import (
+    READ_ONLY_TASK_LIST_ATTEMPTS as READ_ONLY_TASK_LIST_ATTEMPTS,
+)
+from gateway.autoresearch_shared import (
+    READ_ONLY_TASK_LIST_RETRY_SECONDS as READ_ONLY_TASK_LIST_RETRY_SECONDS,
+)
+from gateway.autoresearch_shared import (
+    RECOVERY_ERROR_PATTERNS as RECOVERY_ERROR_PATTERNS,
+)
+from gateway.autoresearch_shared import (
+    RELEVANT_AGENT_IDS as RELEVANT_AGENT_IDS,
+)
+from gateway.autoresearch_shared import (
+    REQUIRED_OPENCLAW_VERSION_TEXT as REQUIRED_OPENCLAW_VERSION_TEXT,
+)
+from gateway.autoresearch_shared import (
+    OpenClawUnavailableError as OpenClawUnavailableError,
+)
+from gateway.autoresearch_shared import (
+    RecoveryErrorPattern as RecoveryErrorPattern,
+)
+from gateway.autoresearch_shared import (
+    RecoveryStatus as RecoveryStatus,
+)
+from gateway.autoresearch_shared import (
+    ShutdownInterrupted as ShutdownInterrupted,
+)
+from gateway.autoresearch_shared import (
+    SupervisorCheckpointError as SupervisorCheckpointError,
+)
+from gateway.autoresearch_shared import (
+    SupervisorError as SupervisorError,
+)
+from gateway.openclaw_client import OpenClawClient as OpenClawClient
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_AUTORESEARCH_DIR = Path.home() / ".openclaw" / "autoresearch"
 DEFAULT_STATE_PATH = DEFAULT_AUTORESEARCH_DIR / "quantipy-state.json"
 DEFAULT_CHECKPOINT_PATH = DEFAULT_AUTORESEARCH_DIR / "owner-recovery.json"
-AUTORESEARCH_OWNER_AGENT_ID = "autoresearch-pm"
-AUTORESEARCH_OWNER_SESSION_KEY = "agent:autoresearch-pm:autoresearch:quantipy"
 DEFAULT_OWNER_SESSIONS_PATH = (
     Path.home()
     / ".openclaw"
@@ -116,12 +240,7 @@ DEFAULT_CLAIM_STALE_SECONDS = 300.0
 # finish before declaring the task stale.
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
-DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS = 0.05
-READ_ONLY_TASK_LIST_ATTEMPTS = 3
-READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
 REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
-REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
-DEFAULT_TASK_RPC_TIMEOUT_SECONDS = 30.0
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
     "cd /home/dev/repos/g2_openclaw && uv run gateway-cli autoresearch-next "
@@ -171,56 +290,9 @@ MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
     "is blocked, surface the control-plane blocker exactly and do not silently switch "
     "provider, runtime, or model."
 )
-PROVIDER_BLOCKED_ALERT_REASON = "control_plane_provider_blocked"
 MISSING_VERIFICATION_ARTIFACT_REASON = "missing_verification_artifact"
 OWNER_SESSION_STORE_UNAVAILABLE_REASON = "owner_session_store_unavailable"
 EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES = frozenset({Phase.VERIFICATION, Phase.DECISION_LOG})
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryErrorPattern:
-    pattern: str
-    alert_reason: str | None = None
-
-
-RECOVERY_ERROR_PATTERNS = (
-    RecoveryErrorPattern('no api key found for provider "openai"', PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("no api key found for provider", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("selected model is at capacity", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("model is at capacity", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("selected model is overloaded", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("authentication failed", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("auth rejected", PROVIDER_BLOCKED_ALERT_REASON),
-    RecoveryErrorPattern("cli transcript compaction failed"),
-    RecoveryErrorPattern("context overflow"),
-    RecoveryErrorPattern("prompt too long"),
-    RecoveryErrorPattern("maximum context length"),
-    RecoveryErrorPattern("maximum context size"),
-    RecoveryErrorPattern("too many tokens"),
-)
-EXPECTED_STAGE_AGENT_IDS: dict[Phase, tuple[str, ...]] = {
-    Phase.DEBATE: (
-        "debater_microstructure",
-        "debater_data",
-        "debater_skeptic",
-        "debater_theory",
-        "debater_implementation",
-    ),
-    Phase.CONSENSUS: ("consensus_arbiter",),
-    Phase.IMPLEMENTATION: ("implementer",),
-    Phase.VERIFICATION: (AUTORESEARCH_OWNER_AGENT_ID,),
-    Phase.REVIEW: ("reviewer",),
-    Phase.FIX_TEST: ("fixer",),
-    Phase.DECISION_LOG: (AUTORESEARCH_OWNER_AGENT_ID,),
-    Phase.REPEAT: (),
-}
-RELEVANT_AGENT_IDS = frozenset(
-    {
-        AUTORESEARCH_OWNER_AGENT_ID,
-        "context_curator",
-        *(agent_id for agent_ids in EXPECTED_STAGE_AGENT_IDS.values() for agent_id in agent_ids),
-    }
-)
 TARGET_WRITER_COMMAND_RE = re.compile(
     r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
@@ -228,124 +300,8 @@ TARGET_WRITER_COMMAND_RE = re.compile(
 )
 
 
-class SupervisorError(RuntimeError):
-    """Base failure for strict autoresearch supervision."""
-
-
-class SupervisorCheckpointError(SupervisorError):
-    """A checkpoint could not be trusted; autonomous writes and wakes must stop."""
-
-
-class OpenClawUnavailableError(SupervisorError):
-    """A transient OpenClaw control-plane operation exhausted bounded retries."""
-
-
 class WorkspaceEvidenceError(SupervisorError):
     """Raised when an active implementation workspace cannot be verified."""
-
-
-class ShutdownInterrupted(Exception):
-    """A command failure observed after shutdown was already requested."""
-
-
-ShutdownRequested = Callable[[], bool]
-
-
-def _shutdown_not_requested() -> bool:
-    return False
-
-
-class TaskGateway(Protocol):
-    """Synchronous boundary for native, authenticated gateway control RPCs."""
-
-    def request(
-        self,
-        method: str,
-        params: Mapping[str, object],
-        *,
-        shutdown_requested: ShutdownRequested,
-    ) -> Mapping[str, object]: ...
-
-
-@dataclass(frozen=True, slots=True)
-class NativeGatewayRPC:
-    """One-shot native WebSocket gateway RPC client; it never launches the CLI."""
-
-    host: str
-    port: int
-    token: str
-
-    def request(
-        self,
-        method: str,
-        params: Mapping[str, object],
-        *,
-        shutdown_requested: ShutdownRequested,
-    ) -> Mapping[str, object]:
-        if shutdown_requested():
-            raise ShutdownInterrupted("OpenClaw gateway RPC interrupted during shutdown")
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            raise SupervisorError("Native gateway RPC requests require a synchronous caller")
-        try:
-            return asyncio.run(self._request(method, params, shutdown_requested))
-        except OpenClawTransportError as exc:
-            detail = f"OpenClaw gateway RPC failed ({method}): {exc}"
-            if shutdown_requested():
-                raise ShutdownInterrupted(detail) from exc
-            raise OpenClawUnavailableError(detail) from exc
-        except OpenClawError as exc:
-            detail = f"OpenClaw gateway RPC failed ({method}): {exc}"
-            if shutdown_requested():
-                raise ShutdownInterrupted(detail) from exc
-            raise SupervisorError(detail) from exc
-
-    async def _request(
-        self,
-        method: str,
-        params: Mapping[str, object],
-        shutdown_requested: ShutdownRequested,
-    ) -> Mapping[str, object]:
-        client = OpenClawClient(self.host, self.port, self.token)
-        request = asyncio.create_task(
-            client.request_once(
-                method,
-                params,
-                timeout_seconds=DEFAULT_TASK_RPC_TIMEOUT_SECONDS,
-                required_server_version=REQUIRED_OPENCLAW_VERSION_TEXT,
-            )
-        )
-        while not request.done():
-            if shutdown_requested():
-                request.cancel()
-                with suppress(asyncio.CancelledError):
-                    await request
-                raise ShutdownInterrupted("OpenClaw gateway RPC interrupted during shutdown")
-            await asyncio.sleep(DEFAULT_GATEWAY_RPC_POLL_INTERVAL_SECONDS)
-        return await request
-
-
-def _default_task_gateway() -> NativeGatewayRPC:
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN")
-    if not token:
-        raise SupervisorError("OPENCLAW_GATEWAY_TOKEN is required for native task observation")
-    raw_port = os.environ.get("OPENCLAW_PORT", "18789")
-    try:
-        port = int(raw_port)
-    except ValueError as exc:
-        raise SupervisorError(
-            "OPENCLAW_PORT must be an integer for native task observation"
-        ) from exc
-    if not 1 <= port <= 65535:
-        raise SupervisorError("OPENCLAW_PORT must be between 1 and 65535")
-    host = os.environ.get("OPENCLAW_HOST", "127.0.0.1").strip()
-    if not host:
-        raise SupervisorError("OPENCLAW_HOST must be non-empty for native task observation")
-    return NativeGatewayRPC(host, port, token)
 
 
 def _require_finite_positive(value: object, *, field_name: str) -> float:
@@ -367,485 +323,11 @@ def _finite_positive_cli_float(raw: str) -> float:
     return value
 
 
-def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise SupervisorError(f"duplicate OpenClaw session key: {key}")
-        result[key] = value
-    return result
-
-
-def make_idempotency_key(*, purpose: str, material: str) -> str:
-    """Produce a stable, bounded key for one logical owner-session request."""
-    digest = hashlib.sha256(
-        f"{purpose}\n{AUTORESEARCH_OWNER_SESSION_KEY}\n{material}".encode()
-    ).hexdigest()
-    return f"autoresearch-{purpose}-{digest}"
-
-
-@dataclass(frozen=True, slots=True)
-class WakeDeliveryProof:
-    status: str
-    run_id: str | None = None
-    cached_terminal: bool = False
-
-
-class OpenClawRPC:
-    """Native authenticated gateway RPC boundary shared by owner control surfaces."""
-
-    def __init__(
-        self,
-        gateway: TaskGateway | None = None,
-    ) -> None:
-        self._gateway = gateway or _default_task_gateway()
-
-    def _request(
-        self,
-        method: str,
-        params: Mapping[str, object],
-        *,
-        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-    ) -> Mapping[str, object]:
-        return self._gateway.request(method, params, shutdown_requested=shutdown_requested)
-
-    def list_running_tasks(
-        self,
-        *,
-        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-    ) -> Mapping[str, object]:
-        """Read OpenClaw running tasks with strict bounded retry for RPC failures."""
-        last_error: OpenClawUnavailableError | None = None
-        for attempt in range(1, READ_ONLY_TASK_LIST_ATTEMPTS + 1):
-            try:
-                return self._request(
-                    "tasks.list",
-                    {"status": "running", "limit": 500},
-                    shutdown_requested=shutdown_requested,
-                )
-            except ShutdownInterrupted:
-                if last_error is not None:
-                    raise OpenClawUnavailableError(
-                        "OpenClaw running task list failed before shutdown during retry: "
-                        f"{last_error}"
-                    ) from last_error
-                raise
-            except OpenClawUnavailableError as exc:
-                if shutdown_requested():
-                    raise ShutdownInterrupted(str(exc)) from exc
-                last_error = exc
-                if attempt >= READ_ONLY_TASK_LIST_ATTEMPTS:
-                    break
-                logger.warning(
-                    "OpenClaw read-only task list failed; retrying (%s/%s): %s",
-                    attempt,
-                    READ_ONLY_TASK_LIST_ATTEMPTS,
-                    exc,
-                )
-                time.sleep(READ_ONLY_TASK_LIST_RETRY_SECONDS)
-                if shutdown_requested():
-                    raise OpenClawUnavailableError(
-                        "OpenClaw running task list failed before shutdown during retry: "
-                        f"{last_error}"
-                    ) from last_error
-        raise OpenClawUnavailableError(
-            "OpenClaw running task list failed after "
-            f"{READ_ONLY_TASK_LIST_ATTEMPTS} attempts: {last_error}"
-        ) from last_error
-
-    def wake(
-        self,
-        *,
-        message: str,
-        idempotency_key: str,
-        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-    ) -> WakeDeliveryProof:
-        params = json.dumps(
-            {
-                "message": message,
-                "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
-                "idempotencyKey": idempotency_key,
-            },
-            separators=(",", ":"),
-        )
-        payload = self._request(
-            "agent",
-            json.loads(params, object_pairs_hook=_strict_json_object),
-            shutdown_requested=shutdown_requested,
-        )
-        status = payload.get("status")
-        if not isinstance(status, str):
-            raise SupervisorError("OpenClaw wake response is missing a string status")
-        session_key = payload.get("sessionKey")
-        if status in {"accepted", "in_flight"} and session_key != AUTORESEARCH_OWNER_SESSION_KEY:
-            raise SupervisorError(
-                "OpenClaw wake response did not target the dedicated owner session"
-            )
-        if session_key is not None and session_key != AUTORESEARCH_OWNER_SESSION_KEY:
-            raise SupervisorError(
-                "OpenClaw wake response did not target the dedicated owner session"
-            )
-        run_id = payload.get("runId")
-        if not isinstance(run_id, str) or not run_id.strip():
-            raise SupervisorError("OpenClaw wake response is missing a non-empty runId")
-        if status in {"accepted", "in_flight"}:
-            return WakeDeliveryProof(status=status, run_id=run_id)
-        if (
-            set(payload) == {"runId", "status", "summary", "result"}
-            and status == "ok"
-            and payload.get("summary") == "completed"
-            and isinstance(payload.get("result"), Mapping)
-            and bool(payload["result"])
-        ):
-            return WakeDeliveryProof(
-                status=status,
-                run_id=run_id,
-                cached_terminal=True,
-            )
-        raise SupervisorError(
-            "OpenClaw wake response did not prove delivery to the dedicated owner session"
-        )
-
-    def delete_owner_session(self) -> bool:
-        params = json.dumps(
-            {
-                "key": AUTORESEARCH_OWNER_SESSION_KEY,
-                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
-                "deleteTranscript": False,
-            },
-            separators=(",", ":"),
-        )
-        payload = self._request(
-            "sessions.delete", json.loads(params, object_pairs_hook=_strict_json_object)
-        )
-        if payload.get("ok") is not True or payload.get("key") != AUTORESEARCH_OWNER_SESSION_KEY:
-            raise SupervisorError(
-                "OpenClaw owner-session deletion response is malformed or mismatched"
-            )
-        if payload.get("deleted") is True:
-            return True
-        if payload.get("deleted") is False and payload.get("absent") is True:
-            return False
-        raise SupervisorError(
-            "OpenClaw owner-session deletion response did not confirm deletion or absence"
-        )
-
-    def abort_owner_run(self, *, run_id: str) -> None:
-        params = json.dumps(
-            {
-                "key": AUTORESEARCH_OWNER_SESSION_KEY,
-                "runId": run_id,
-                "agentId": AUTORESEARCH_OWNER_AGENT_ID,
-            },
-            separators=(",", ":"),
-        )
-        payload = self._request(
-            "sessions.abort", json.loads(params, object_pairs_hook=_strict_json_object)
-        )
-        status = payload.get("status")
-        aborted_run_id = payload.get("abortedRunId")
-        if payload.get("ok") is not True or (
-            (status == "aborted" and aborted_run_id != run_id)
-            or (status == "no-active-run" and aborted_run_id is not None)
-            or status not in {"aborted", "no-active-run"}
-        ):
-            raise SupervisorError(
-                f"OpenClaw owner-run abort response is malformed or mismatched: {run_id}"
-            )
-
-    def cancel_task(self, *, task_id: str) -> None:
-        params = json.dumps(
-            {"taskId": task_id, "reason": "Quantipy autoresearch stopped by operator."},
-            separators=(",", ":"),
-        )
-        payload = self._request(
-            "tasks.cancel", json.loads(params, object_pairs_hook=_strict_json_object)
-        )
-        if payload.get("found") is not True or payload.get("cancelled") is not True:
-            raise SupervisorError(
-                f"OpenClaw task cancellation response is malformed or mismatched: {task_id}"
-            )
-        returned_task = payload.get("task")
-        if returned_task is None:
-            return
-        if not isinstance(returned_task, Mapping):
-            raise SupervisorError(
-                f"OpenClaw task cancellation response has an invalid task: {task_id}"
-            )
-        returned_task_id = returned_task.get("taskId")
-        returned_id = returned_task.get("id")
-        if returned_task_id != task_id or (
-            returned_id is not None and returned_id != returned_task_id
-        ):
-            raise SupervisorError(
-                f"OpenClaw task cancellation response is malformed or mismatched: {task_id}"
-            )
-
-    def get_task(
-        self,
-        *,
-        task_id: str,
-        shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-    ) -> Mapping[str, object]:
-        payload = self._request(
-            "tasks.get",
-            {"taskId": task_id},
-            shutdown_requested=shutdown_requested,
-        )
-        task = payload.get("task")
-        if not isinstance(task, Mapping):
-            raise SupervisorError(f"OpenClaw tasks.get response has no object task: {task_id}")
-        return task
-
-
 class SupervisorOutcome(StrEnum):
     NO_ACTION = "no_action"
     NUDGED = "nudged"
     ALERT = "alert"
     FINALIZED = "finalized"
-
-
-class RecoveryStatus(StrEnum):
-    READY = "ready"
-    IN_FLIGHT = "in_flight"
-    FAILED = "failed"
-    SUCCEEDED = "succeeded"
-    EXHAUSTED = "exhausted"
-
-
-class TaskProvenance(StrEnum):
-    """Whether a public task summary can be attributed to the PM session."""
-
-    UNRELATED = "unrelated"
-    OWNER_TURN = "owner_turn"
-    STAGE_CHILD = "stage_child"
-    CODEX_NATIVE_SUBAGENT = "codex_native_subagent"
-    AMBIGUOUS = "ambiguous"
-
-
-class CanonicalTaskStatus(StrEnum):
-    """OpenClaw 2026.7.1-2 gateway task-ledger statuses."""
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    TIMED_OUT = "timed_out"
-    CANCELLED = "cancelled"
-
-
-class TaskReconciliationError(SupervisorError):
-    """A task-list projection cannot be proven to match a canonical task record."""
-
-
-@dataclass(frozen=True, slots=True)
-class ReconciledRunningTasks:
-    """Canonical running tasks and evidence that a projected task has ended."""
-
-    running_tasks: tuple[Mapping[str, object], ...]
-    terminal_task_seen: bool
-    observed_error: RecoveryErrorPattern | None = None
-
-
-def _detect_recovery_error_in_text(text: str) -> RecoveryErrorPattern | None:
-    lowered = text.lower()
-    for pattern in RECOVERY_ERROR_PATTERNS:
-        if pattern.pattern in lowered:
-            return pattern
-    return None
-
-
-def _detect_recovery_error_in_object(value: object) -> RecoveryErrorPattern | None:
-    try:
-        rendered = json.dumps(value, sort_keys=True, default=str)
-    except TypeError:
-        rendered = str(value)
-    return _detect_recovery_error_in_text(rendered)
-
-
-def _preferred_recovery_error(
-    *candidates: RecoveryErrorPattern | None,
-) -> RecoveryErrorPattern | None:
-    preferred: RecoveryErrorPattern | None = None
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        if preferred is None or (
-            preferred.alert_reason is None and candidate.alert_reason is not None
-        ):
-            preferred = candidate
-    return preferred
-
-
-def classify_autoresearch_task(task: Mapping[str, object]) -> TaskProvenance:
-    """Classify the two exact OpenClaw 2026.7.1-2 task-list projections."""
-    # The CLI emits raw TaskRecord.requesterSessionKey. Gateway tasks.list maps
-    # that same field to TaskSummary.sessionKey. If both appear they must agree.
-    raw_requester_key = task.get("requesterSessionKey")
-    summary_session_key = task.get("sessionKey")
-    if (
-        raw_requester_key is not None
-        and summary_session_key is not None
-        and raw_requester_key != summary_session_key
-    ):
-        return TaskProvenance.AMBIGUOUS
-    requester_key = raw_requester_key if raw_requester_key is not None else summary_session_key
-    owner_key = task.get("ownerKey")
-    owns_one_key = (
-        requester_key == AUTORESEARCH_OWNER_SESSION_KEY
-        or owner_key == AUTORESEARCH_OWNER_SESSION_KEY
-    )
-    has_native_codex_marker = task.get("taskKind") is not None
-    if (
-        requester_key != AUTORESEARCH_OWNER_SESSION_KEY
-        or owner_key != AUTORESEARCH_OWNER_SESSION_KEY
-    ):
-        if has_native_codex_marker and not owns_one_key:
-            return TaskProvenance.UNRELATED
-        if owns_one_key or task.get("agentId") == AUTORESEARCH_OWNER_AGENT_ID:
-            return TaskProvenance.AMBIGUOUS
-        return TaskProvenance.UNRELATED
-
-    agent_id = task.get("agentId")
-    if not isinstance(agent_id, str) or not agent_id:
-        return TaskProvenance.AMBIGUOUS
-    runtime = task.get("runtime")
-    task_kind = task.get("taskKind")
-    run_id = task.get("runId")
-    if has_native_codex_marker:
-        if (
-            runtime == "subagent"
-            and task_kind == "codex-native"
-            and isinstance(run_id, str)
-            and run_id.startswith("codex-thread:")
-        ):
-            return TaskProvenance.CODEX_NATIVE_SUBAGENT
-        return TaskProvenance.AMBIGUOUS
-    child_session_key = task.get("childSessionKey")
-    if agent_id == AUTORESEARCH_OWNER_AGENT_ID:
-        if child_session_key is None or child_session_key == AUTORESEARCH_OWNER_SESSION_KEY:
-            return TaskProvenance.OWNER_TURN
-        return TaskProvenance.AMBIGUOUS
-
-    stage_agent_ids = RELEVANT_AGENT_IDS - {AUTORESEARCH_OWNER_AGENT_ID}
-    if agent_id not in stage_agent_ids:
-        return TaskProvenance.AMBIGUOUS
-    if not isinstance(child_session_key, str):
-        return TaskProvenance.AMBIGUOUS
-    child_parts = child_session_key.split(":", 2)
-    if (
-        len(child_parts) != 3
-        or child_parts[0] != "agent"
-        or child_parts[1] != agent_id
-        or not child_parts[2]
-    ):
-        return TaskProvenance.AMBIGUOUS
-    return TaskProvenance.STAGE_CHILD
-
-
-def _task_id_for_reconciliation(task: Mapping[str, object], *, source: str) -> str:
-    task_id = task.get("taskId")
-    if not isinstance(task_id, str) or not task_id.strip():
-        raise TaskReconciliationError(f"{source} task is missing a non-empty taskId")
-    legacy_id = task.get("id")
-    if legacy_id is not None and (
-        not isinstance(legacy_id, str) or not legacy_id.strip() or legacy_id != task_id
-    ):
-        raise TaskReconciliationError(f"{source} task id must agree with canonical taskId")
-    return task_id
-
-
-def _task_provenance_fingerprint(task: Mapping[str, object]) -> tuple[object, ...]:
-    provenance = classify_autoresearch_task(task)
-    if provenance not in {
-        TaskProvenance.OWNER_TURN,
-        TaskProvenance.STAGE_CHILD,
-        TaskProvenance.CODEX_NATIVE_SUBAGENT,
-    }:
-        raise TaskReconciliationError("canonical task has invalid autoresearch provenance")
-    requester_key = task.get("requesterSessionKey")
-    if requester_key is None:
-        requester_key = task.get("sessionKey")
-    return (
-        provenance,
-        task.get("agentId"),
-        requester_key,
-        task.get("ownerKey"),
-        task.get("childSessionKey"),
-        task.get("runtime"),
-        task.get("taskKind"),
-        task.get("runId"),
-    )
-
-
-def reconcile_relevant_running_tasks(
-    rpc: OpenClawRPC,
-    tasks: Sequence[Mapping[str, object]],
-    *,
-    shutdown_requested: ShutdownRequested = _shutdown_not_requested,
-) -> ReconciledRunningTasks:
-    """Resolve relevant task-list projections through canonical gateway task records."""
-    running_tasks: list[Mapping[str, object]] = []
-    terminal_task_seen = False
-    observed_error: RecoveryErrorPattern | None = None
-    terminal_statuses = {
-        CanonicalTaskStatus.COMPLETED,
-        CanonicalTaskStatus.FAILED,
-        CanonicalTaskStatus.TIMED_OUT,
-        CanonicalTaskStatus.CANCELLED,
-    }
-    for projected_task in tasks:
-        provenance = classify_autoresearch_task(projected_task)
-        if provenance is TaskProvenance.UNRELATED:
-            continue
-        if provenance is TaskProvenance.AMBIGUOUS:
-            raise TaskReconciliationError(
-                "task-list projection has ambiguous autoresearch provenance"
-            )
-        task_id = _task_id_for_reconciliation(projected_task, source="task-list")
-        try:
-            canonical_task = rpc.get_task(
-                task_id=task_id,
-                shutdown_requested=shutdown_requested,
-            )
-        except SupervisorError as exc:
-            raise TaskReconciliationError(
-                f"tasks.get RPC failed during reconciliation: {task_id}"
-            ) from exc
-        if _task_id_for_reconciliation(canonical_task, source="tasks.get") != task_id:
-            raise TaskReconciliationError("tasks.get taskId does not match task-list projection")
-        if _task_provenance_fingerprint(canonical_task) != _task_provenance_fingerprint(
-            projected_task
-        ):
-            raise TaskReconciliationError(
-                "tasks.get provenance does not match task-list projection"
-            )
-        status_raw = canonical_task.get("status")
-        if not isinstance(status_raw, str):
-            raise TaskReconciliationError("tasks.get response is missing a string status")
-        try:
-            status = CanonicalTaskStatus(status_raw)
-        except ValueError as exc:
-            raise TaskReconciliationError(
-                f"tasks.get response has unsupported status: {status_raw}"
-            ) from exc
-        if status is CanonicalTaskStatus.RUNNING:
-            running_tasks.append(canonical_task)
-            observed_error = _preferred_recovery_error(
-                observed_error,
-                _detect_recovery_error_in_object(canonical_task),
-            )
-        elif status in terminal_statuses:
-            terminal_task_seen = True
-            observed_error = _preferred_recovery_error(
-                observed_error,
-                _detect_recovery_error_in_object(canonical_task),
-            )
-        else:
-            raise TaskReconciliationError(
-                f"tasks.get response has non-terminal non-running status: {status.value}"
-            )
-    return ReconciledRunningTasks(tuple(running_tasks), terminal_task_seen, observed_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -910,231 +392,6 @@ class MalformedRunRecord:
     run_directory: Path
     attempt: int | None
     error: AutoresearchRunRecordError
-
-
-@dataclass(slots=True)
-class RecoveryRecord:
-    status: RecoveryStatus = RecoveryStatus.READY
-    attempt_count: int = 0
-    claim_token: str | None = None
-    claim_pid: int | None = None
-    claim_process_identity: str | None = None
-    claim_started_at: float | None = None
-    woke_at: float | None = None
-    failed_at: float | None = None
-    last_error: str | None = None
-    alerted: bool = False
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, object]) -> RecoveryRecord:
-        status_raw = raw.get("status", RecoveryStatus.READY.value)
-        if not isinstance(status_raw, str):
-            raise SupervisorError(f"invalid recovery status: {status_raw!r}")
-        try:
-            status = RecoveryStatus(status_raw)
-        except ValueError as exc:
-            raise SupervisorError(f"invalid recovery status: {status_raw!r}") from exc
-        attempt_count = raw.get("attempt_count", 0)
-        if (
-            isinstance(attempt_count, bool)
-            or not isinstance(attempt_count, int)
-            or attempt_count < 0
-        ):
-            raise SupervisorError("recovery attempt_count must be a non-negative integer")
-        return cls(
-            status=status,
-            attempt_count=attempt_count,
-            claim_token=_optional_str(raw.get("claim_token")),
-            claim_pid=_optional_int(raw.get("claim_pid")),
-            claim_process_identity=_optional_str(raw.get("claim_process_identity")),
-            claim_started_at=_optional_float(raw.get("claim_started_at")),
-            woke_at=_optional_float(raw.get("woke_at")),
-            failed_at=_optional_float(raw.get("failed_at")),
-            last_error=_optional_str(raw.get("last_error")),
-            alerted=raw.get("alerted") is True,
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return asdict(self)
-
-
-@dataclass(slots=True)
-class MemoryWakeAcknowledgement:
-    status: str
-    acknowledged_at: float
-    run_id: str | None = None
-    cached_terminal: bool = False
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, object]) -> MemoryWakeAcknowledgement:
-        status = _optional_str(raw.get("status"))
-        if status not in {"accepted", "in_flight", "ok"}:
-            raise SupervisorError(f"invalid memory wake acknowledgement status: {status!r}")
-        acknowledged_at = _optional_float(raw.get("acknowledged_at"))
-        if acknowledged_at is None or not math.isfinite(acknowledged_at) or acknowledged_at <= 0:
-            raise SupervisorError("memory wake acknowledgement requires acknowledged_at")
-        run_id = _optional_str(raw.get("run_id"))
-        cached_terminal = raw.get("cached_terminal") is True
-        if status == "ok" and not cached_terminal:
-            raise SupervisorError("cached memory wake acknowledgement must be terminal")
-        if status != "ok" and cached_terminal:
-            raise SupervisorError("non-terminal memory wake acknowledgement cannot be cached")
-        return cls(
-            status=status,
-            acknowledged_at=acknowledged_at,
-            run_id=run_id,
-            cached_terminal=cached_terminal,
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "status": self.status,
-            "acknowledged_at": self.acknowledged_at,
-            "run_id": self.run_id,
-            "cached_terminal": self.cached_terminal,
-        }
-
-
-@dataclass(slots=True)
-class SupervisorCheckpoint:
-    recovery_records: dict[str, RecoveryRecord] = field(default_factory=dict)
-    memory_wake_acknowledgements: dict[str, MemoryWakeAcknowledgement] = field(default_factory=dict)
-
-    @classmethod
-    def load(cls, path: Path) -> SupervisorCheckpoint:
-        try:
-            raw = json.loads(
-                path.read_text(encoding="utf-8"), object_pairs_hook=_strict_json_object
-            )
-        except FileNotFoundError:
-            return cls()
-        except OSError as exc:
-            raise SupervisorCheckpointError(
-                f"failed to read supervisor checkpoint {path}: {exc}"
-            ) from exc
-        except json.JSONDecodeError as exc:
-            raise SupervisorCheckpointError(f"invalid supervisor checkpoint JSON: {path}") from exc
-        if not isinstance(raw, Mapping):
-            raise SupervisorCheckpointError(f"invalid supervisor checkpoint payload: {path}")
-        records_raw = raw.get("recovery_records", {})
-        if not isinstance(records_raw, Mapping):
-            raise SupervisorCheckpointError("recovery_records must be an object")
-        records: dict[str, RecoveryRecord] = {}
-        for key, value in records_raw.items():
-            if not isinstance(key, str) or not isinstance(value, Mapping):
-                raise SupervisorCheckpointError("recovery_records entries must be keyed objects")
-            try:
-                records[key] = RecoveryRecord.from_dict(value)
-            except SupervisorError as exc:
-                raise SupervisorCheckpointError(
-                    f"invalid supervisor checkpoint recovery record: {key}"
-                ) from exc
-        acks_raw = raw.get("memory_wake_acknowledgements", {})
-        if not isinstance(acks_raw, Mapping):
-            raise SupervisorCheckpointError("memory_wake_acknowledgements must be an object")
-        acknowledgements: dict[str, MemoryWakeAcknowledgement] = {}
-        for key, value in acks_raw.items():
-            if not isinstance(key, str) or not isinstance(value, Mapping):
-                raise SupervisorCheckpointError(
-                    "memory_wake_acknowledgements entries must be keyed objects"
-                )
-            try:
-                acknowledgements[key] = MemoryWakeAcknowledgement.from_dict(value)
-            except SupervisorError as exc:
-                raise SupervisorCheckpointError(
-                    f"invalid supervisor checkpoint memory wake acknowledgement: {key}"
-                ) from exc
-        return cls(
-            recovery_records=records,
-            memory_wake_acknowledgements=acknowledgements,
-        )
-
-    def save(self, path: Path) -> None:
-        serialized = json.dumps(
-            {
-                "memory_wake_acknowledgements": {
-                    key: acknowledgement.to_dict()
-                    for key, acknowledgement in self.memory_wake_acknowledgements.items()
-                },
-                "recovery_records": {
-                    key: record.to_dict() for key, record in self.recovery_records.items()
-                },
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        temporary_path: Path | None = None
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-            temporary_path = Path(temporary_name)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(serialized)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_path, path)
-        except OSError as exc:
-            raise SupervisorError(
-                f"failed to atomically save supervisor checkpoint {path}: {exc}"
-            ) from exc
-        finally:
-            if temporary_path is not None:
-                with suppress(FileNotFoundError):
-                    temporary_path.unlink()
-
-
-def reset_recovery_checkpoint_for_manual_wake(path: Path, *, iteration: int, phase: str) -> None:
-    """Allow an explicit operator wake to retry an exhausted recovery key.
-
-    Recovery attempt limits protect the autonomous supervisor from retry loops,
-    but an operator-initiated wake is a deliberate new recovery window. Remove
-    only failed or exhausted records for the current state phase; successful
-    records remain bounded history and must not be reset implicitly.
-    """
-    checkpoint_path = path.expanduser()
-    lock_path = checkpoint_path.with_name(f"{checkpoint_path.name}.lock")
-    prefixes = (
-        f"stale_state:{iteration}:{phase}:",
-        f"missing_verification_artifact:{iteration}:{phase}:",
-    )
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                checkpoint = SupervisorCheckpoint.load(checkpoint_path)
-                removed = [
-                    key
-                    for key, record in checkpoint.recovery_records.items()
-                    if key.startswith(prefixes)
-                    and record.status in {RecoveryStatus.FAILED, RecoveryStatus.EXHAUSTED}
-                ]
-                if removed:
-                    for key in removed:
-                        del checkpoint.recovery_records[key]
-                    checkpoint.save(checkpoint_path)
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    except OSError as exc:
-        raise SupervisorError(
-            f"failed to reset supervisor checkpoint {checkpoint_path}: {exc}"
-        ) from exc
-
-
-def _optional_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    parsed = float(value)
-    return parsed if math.isfinite(parsed) else None
-
-
-def _optional_int(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _optional_str(value: object) -> str | None:
-    return value if isinstance(value, str) else None
 
 
 def memory_wake_acknowledgement_key(state: AutoresearchState) -> str:

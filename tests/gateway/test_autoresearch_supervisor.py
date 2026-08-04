@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
@@ -100,6 +101,63 @@ def test_recovery_message_uses_bounded_current_attempt_reconciliation() -> None:
         assert "do not enumerate historical sessions" in normalized
         assert "fetch old full transcripts" in normalized
         assert "exact current label" in normalized
+
+
+@pytest.mark.parametrize(
+    ("seam_module", "reexports"),
+    [
+        (
+            "gateway.autoresearch_rpc",
+            (
+                "OpenClawRPC",
+                "NativeGatewayRPC",
+                "WakeDeliveryProof",
+                "TaskGateway",
+                "make_idempotency_key",
+            ),
+        ),
+        (
+            "gateway.autoresearch_reconciliation",
+            (
+                "TaskProvenance",
+                "CanonicalTaskStatus",
+                "ReconciledRunningTasks",
+                "classify_autoresearch_task",
+                "reconcile_relevant_running_tasks",
+            ),
+        ),
+        (
+            "gateway.autoresearch_checkpoint",
+            (
+                "RecoveryRecord",
+                "MemoryWakeAcknowledgement",
+                "SupervisorCheckpoint",
+                "reset_recovery_checkpoint_for_manual_wake",
+                "_optional_float",
+            ),
+        ),
+    ],
+)
+def test_each_extracted_seam_imports_before_supervisor(
+    seam_module: str, reexports: tuple[str, ...]
+) -> None:
+    script = """
+import importlib
+import sys
+
+importlib.import_module(sys.argv[1])
+supervisor = importlib.import_module("gateway.autoresearch_supervisor")
+missing = [name for name in sys.argv[2:] if not hasattr(supervisor, name)]
+if missing:
+    raise SystemExit(f"missing supervisor re-exports: {missing}")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, seam_module, *reexports],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _operator_precondition_state_json() -> str:
