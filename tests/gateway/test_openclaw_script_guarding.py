@@ -843,11 +843,13 @@ const checks = {
     category: "websocket",
     summary: "Responses WebSocket failed; HTTPS fallback may still work",
     details: {
-      "DNS": "2 IPv4, 0 IPv6, first IPv4",
+      "DNS": process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_DNS || "2 IPv4, 0 IPv6, first IPv4",
       "auth mode": process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_AUTH_MODE || "none",
       "connect timeout": "15000 ms",
       endpoint: "wss://api.openai.com/v1/<redacted>",
-      "handshake transport error": "http 401 Unauthorized: missing bearer",
+      "handshake transport error":
+        process.env.MOCK_CODEX_DOCTOR_WEBSOCKET_HANDSHAKE_ERROR ||
+        "http 401 Unauthorized: missing bearer",
       "model provider": "openai",
       "provider name": "OpenAI",
       "proxy env vars": "none",
@@ -2974,6 +2976,51 @@ def test_push_script_rejects_unexpected_codex_doctor_warning(tmp_path: Path) -> 
     assert "unexpected fatal Codex doctor checks" in result.stderr
     assert "network.proxy=warning" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("dns_value", "handshake_error", "expect_ok"),
+    [
+        (
+            "lookup failed (failed to lookup address information: Try again)",
+            "network error: failed to lookup address information: Try again",
+            True,
+        ),
+        (
+            "2 IPv4, 0 IPv6, first IPv4",
+            "network error: failed to lookup address information: Try again",
+            True,
+        ),
+        (
+            "lookup failed (failed to lookup address information: Try again)",
+            "network error: connection reset by peer",
+            False,
+        ),
+        (
+            "lookup failed (some other resolver text)",
+            "network error: failed to lookup address information: Try again",
+            False,
+        ),
+    ],
+)
+def test_push_script_codex_doctor_websocket_transient_dns_variants(
+    tmp_path: Path,
+    dns_value: str,
+    handshake_error: str,
+    expect_ok: bool,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_WEBSOCKET_DNS"] = dns_value
+    env["MOCK_CODEX_DOCTOR_WEBSOCKET_HANDSHAKE_ERROR"] = handshake_error
+
+    result = _run_push_script(env)
+
+    if expect_ok:
+        assert result.returncode == 0, result.stderr
+        assert "network.websocket_reachability" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert "network.websocket_reachability=warning" in result.stderr
 
 
 @pytest.mark.parametrize(
