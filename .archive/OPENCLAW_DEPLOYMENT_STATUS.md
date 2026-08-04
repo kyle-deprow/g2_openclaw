@@ -90,6 +90,21 @@ When work resumes, use this order:
 
 1. Run `bash scripts/push-openclaw-config.sh` and allow it to complete; do not manually edit live OpenClaw files.
 2. Verify config validation, doctor output, state/log integrity, and authenticated endpoint behavior.
-3. Restart and enable the gateway service, then verify its health and logs.
-4. Start the autoresearch PM session through the G2 app.
-5. Verify the first complete loop end to end before widening the monitoring interval.
+3. Archive the live schema-v4 autoresearch state file and re-initialize at schema v5: stop the supervisor if active, archive `~/.openclaw/autoresearch/quantipy-state.json`, run `gateway-cli autoresearch-init-state`, then `autoresearch-pin-readiness`. (Required since the G1+G2 loop-governance work; the runner refuses v4 states by design — see `docs/reference/g1g2-implementation-spec.md` §1.10. The archived file is iteration 1 with no completed iterations, so no registry history is lost.)
+4. Restart and enable the gateway service, then verify its health and logs.
+5. Start the autoresearch PM session through the G2 app.
+6. Verify the first complete loop end to end before widening the monitoring interval. Note the loop now pauses itself at `campaign_review` after sustained non-KEEP streaks; resume via `gateway-cli autoresearch-acknowledge-campaign-review`.
+
+## Post-checkpoint code changes (2026-08-03)
+
+Since this checkpoint was written, the refactor and improvement plan
+(`docs/reference/autoresearch-refactor-plan.md`) was fully executed on
+`main`: the autoresearch runner monolith is now the `gateway/autoresearch/`
+package, the push script's logic lives in strict-typed
+`gateway/deployment/` modules (the script is orchestration and trap
+wiring only), the supervisor's rpc/reconciliation/checkpoint seams are
+extracted, and the G1+G2 loop-governance features (hypothesis registry at
+state schema v5, novelty gate, negative-results ledger, campaign stall
+detection with operator acknowledgement) are implemented per
+`docs/reference/g1g2-implementation-spec.md`. The deployment procedure
+itself is unchanged apart from step 3 above.
