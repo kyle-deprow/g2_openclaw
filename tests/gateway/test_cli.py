@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
@@ -18,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import gateway.autoresearch.fields as autoresearch_fields
 import gateway.autoresearch.persistence as autoresearch_persistence
 import gateway.autoresearch.transitions as autoresearch_transitions
+import gateway.cli as cli_module
 import pytest
 from dotenv import dotenv_values
 from gateway.autoresearch import constants
@@ -84,6 +87,14 @@ from gateway.autoresearch.state import (
 from gateway.autoresearch.transitions import (
     advance_state,
 )
+from gateway.autoresearch_checkpoint import (
+    RecoveryRecord,
+    SupervisorCheckpoint,
+)
+from gateway.autoresearch_control import (
+    ControlStatus,
+    TaskStatus,
+)
 from gateway.autoresearch_platform_validation import (
     DynamicPriceCoverageReceipt,
     PlatformCoverageScope,
@@ -96,6 +107,8 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     canonical_platform_capabilities,
 )
+from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY
+from gateway.autoresearch_systemd import SystemdUnitStateError
 from gateway.cli import (
     _active_target_writer_processes,
     _choose_whisper_model,
@@ -103,6 +116,7 @@ from gateway.cli import (
     _get_local_ip,
     _openclaw_daemon_env,
     _parse_gpu_output,
+    _PartialArchiveError,
     _read_openclaw_config,
     _render_env,
     _require_simulator_backend,
@@ -617,6 +631,687 @@ def test_autoresearch_init_state_rejects_wrong_owner_quantipy_runs_root(
     assert result.exit_code == 1
     assert "owned" in result.output
     assert "non-symlink directory" in result.output
+
+
+def _doctor_control_status(*, last_cycle_at: float | None) -> ControlStatus:
+    return ControlStatus(
+        owner_agent_id="autoresearch-pm",
+        owner_session_key=AUTORESEARCH_OWNER_SESSION_KEY,
+        phase="setup_context",
+        iteration=1,
+        owner_lifecycle_status="idle",
+        supervisor_active=True,
+        tasks=(TaskStatus("task-1", "autoresearch-pm", AUTORESEARCH_OWNER_SESSION_KEY),),
+        supervisor_last_outcome="no_action",
+        supervisor_last_detail="healthy",
+        supervisor_last_cycle_at=last_cycle_at,
+    )
+
+
+def test_autoresearch_doctor_reports_healthy_status_and_d1_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    sessions_path = tmp_path / "sessions.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    now = time.time()
+    SupervisorCheckpoint(
+        recovery_records={"recovery-key": RecoveryRecord(last_nudge_at=now)},
+        last_cycle_at=now,
+    ).save(checkpoint_path)
+    sessions_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+    status = _doctor_control_status(last_cycle_at=now)
+
+    with patch("gateway.autoresearch_control.AutoresearchControl.status", return_value=status):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "health=HEALTHY" in result.output
+    assert "owner_lifecycle=idle" in result.output
+    assert "task_count=1" in result.output
+    assert "supervisor_last_outcome=no_action" in result.output
+    assert "recovery_records=1" in result.output
+    assert "alerted_keys=none" in result.output
+
+
+def test_autoresearch_doctor_reports_degraded_checks_and_exit_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state = replace(
+        AutoresearchState(),
+        suspended=True,
+        suspension_reason="operator repair",
+        campaign_review_required=True,
+        campaign_review_reason="review me",
+    )
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(
+        recovery_records={"alerted-key": RecoveryRecord(alerted=True)},
+    ).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda unit: unit == cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE,
+    )
+    status = _doctor_control_status(last_cycle_at=0.0)
+
+    with patch("gateway.autoresearch_control.AutoresearchControl.status", return_value=status):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "INACTIVE" in result.output
+    assert "suspended=True" in result.output
+    assert "campaign_review=True" in result.output
+    assert "alerted_keys=alerted-key" in result.output
+    assert "health=DEGRADED" in result.output
+
+
+def test_autoresearch_doctor_corrupt_state_is_clear_and_nonzero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text("{not-json", encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=time.time()).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+
+    with patch(
+        "gateway.autoresearch_control.AutoresearchControl.status",
+        return_value=_doctor_control_status(last_cycle_at=time.time()),
+    ):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "ERROR:" in result.output
+    assert "invalid state JSON" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_autoresearch_doctor_marks_stale_cycle_degraded_when_services_are_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=0.0).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+
+    with patch(
+        "gateway.autoresearch_control.AutoresearchControl.status",
+        return_value=_doctor_control_status(last_cycle_at=0.0),
+    ):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "older than 10 minutes" in result.output
+
+
+def test_autoresearch_doctor_reports_systemd_probe_error_distinctly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=time.time()).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+
+    def probe(unit: str) -> bool:
+        if unit == cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE:
+            raise SystemdUnitStateError("inconclusive systemd evidence [probe]")
+        return True
+
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", probe)
+    with patch(
+        "gateway.autoresearch_control.AutoresearchControl.status",
+        return_value=_doctor_control_status(last_cycle_at=time.time()),
+    ):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "probe-error" in result.output
+    assert "[probe]" in result.output
+    assert "supervisor_active=False" not in result.output
+
+
+def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    artifacts = autoresearch_dir / "artifacts"
+    stage_inbox = autoresearch_dir / "stage-inbox"
+    checkpoint = autoresearch_dir / "owner-recovery.json"
+    state_path = autoresearch_dir / "quantipy-state.json"
+    sessions_path = tmp_path / "agent" / "sessions" / "sessions.json"
+    session_file = sessions_path.parent / "ses-owner.jsonl"
+    artifacts.mkdir(parents=True)
+    stage_inbox.mkdir(parents=True)
+    (artifacts / "old.json").write_text("{}", encoding="utf-8")
+    (stage_inbox / "submission.json").write_text("{}", encoding="utf-8")
+    SupervisorCheckpoint().save(checkpoint)
+    state_path.write_text(json.dumps({"prior_campaign": True}), encoding="utf-8")
+    sessions_path.parent.mkdir(parents=True)
+    sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "ses-owner"},
+                "other:key": {"sessionId": "ses-other"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    session_file.write_text("owner transcript\n", encoding="utf-8")
+    output = tmp_path / "pristine-v5.json"
+    runs_root = tmp_path / "runs"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", artifacts)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", stage_inbox)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    with patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", runs_root):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(output),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--fresh-campaign",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    archive_paths = sorted((autoresearch_dir / "campaign-archives").iterdir())
+    assert len(archive_paths) == 1
+    archive = archive_paths[0]
+    assert (archive / "artifacts/old.json").is_file()
+    assert (archive / "stage-inbox/submission.json").is_file()
+    assert (archive / "owner-recovery.json").is_file()
+    assert json.loads((archive / "quantipy-state.json").read_text(encoding="utf-8")) == {
+        "prior_campaign": True
+    }
+    assert (archive / "sessions/ses-owner.jsonl").is_file()
+    assert json.loads((archive / "sessions.json").read_text(encoding="utf-8")) == {
+        AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "ses-owner"}
+    }
+    assert not artifacts.exists()
+    assert not stage_inbox.exists()
+    assert not checkpoint.exists()
+    assert not state_path.exists()
+    assert not session_file.exists()
+    assert AUTORESEARCH_OWNER_SESSION_KEY not in json.loads(
+        sessions_path.read_text(encoding="utf-8")
+    )
+    assert "archived campaign residue" in result.output
+
+
+def test_autoresearch_init_state_save_failure_restores_archived_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    artifacts = autoresearch_dir / "artifacts"
+    stage_inbox = autoresearch_dir / "stage-inbox"
+    checkpoint = autoresearch_dir / "owner-recovery.json"
+    state_path = autoresearch_dir / "quantipy-state.json"
+    sessions_path = tmp_path / "sessions.json"
+    artifacts.mkdir(parents=True)
+    stage_inbox.mkdir(parents=True)
+    (artifacts / "old.json").write_text("{}", encoding="utf-8")
+    (stage_inbox / "old.json").write_text("{}", encoding="utf-8")
+    SupervisorCheckpoint().save(checkpoint)
+    state_path.write_text(json.dumps({"prior_campaign": True}), encoding="utf-8")
+    output = tmp_path / "new-state.json"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", artifacts)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", stage_inbox)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", tmp_path / "runs"),
+        patch(
+            "gateway.autoresearch.persistence.save_state_file",
+            side_effect=OSError("injected state-save failure"),
+        ),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(output),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--fresh-campaign",
+            ],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "fresh campaign state save failed" in result.output
+    assert "PARTIAL ARCHIVE" not in result.output
+    assert artifacts.is_dir()
+    assert stage_inbox.is_dir()
+    assert checkpoint.is_file()
+    assert state_path.is_file()
+    assert not list((autoresearch_dir / "campaign-archives").glob("campaign-*"))
+
+
+def test_autoresearch_init_state_preparation_failure_occurs_before_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    artifacts = autoresearch_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "old.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", artifacts)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", autoresearch_dir / "stage-inbox"
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH",
+        autoresearch_dir / "owner-recovery.json",
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", autoresearch_dir / "quantipy-state.json"
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    with patch(
+        "gateway.autoresearch.persistence.provision_quantipy_experiment_runs_root",
+        side_effect=OSError("injected preparation failure"),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--fresh-campaign",
+            ],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "injected preparation failure" in result.output
+    assert artifacts.is_dir()
+    assert not (autoresearch_dir / "campaign-archives").exists()
+
+
+def test_autoresearch_init_state_reports_partial_archive_with_stranded_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    artifacts = autoresearch_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "old.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", artifacts)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", autoresearch_dir / "stage-inbox"
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH",
+        autoresearch_dir / "owner-recovery.json",
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", autoresearch_dir / "quantipy-state.json"
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+    archive_failure = _PartialArchiveError(
+        [
+            f"{autoresearch_dir}/campaign-archives/campaign-1/artifacts -> {artifacts}",
+            f"{autoresearch_dir}/campaign-archives/campaign-1/quantipy-state.json -> "
+            f"{autoresearch_dir}/quantipy-state.json",
+        ]
+    )
+
+    with (
+        patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", tmp_path / "runs"),
+        patch(
+            "gateway.autoresearch.persistence.save_state_file",
+            side_effect=OSError("injected state-save failure"),
+        ),
+        patch.object(cli_module, "_restore_campaign_archive", side_effect=archive_failure),
+    ):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--fresh-campaign",
+            ],
+        )
+
+    assert result.exit_code == 1, result.output
+    assert "PARTIAL ARCHIVE" in result.output
+    assert "campaign-1/artifacts" in result.output
+    assert "campaign-1/quantipy-state.json" in result.output
+    assert "fresh campaign state save failed" not in result.output
+
+
+def test_autoresearch_init_state_fresh_campaign_notes_missing_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    sessions_path = tmp_path / "sessions.json"
+    output = tmp_path / "state.json"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", autoresearch_dir / "artifacts"
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", autoresearch_dir / "stage-inbox"
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", autoresearch_dir / "owner-recovery.json"
+    )
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", autoresearch_dir / "quantipy-state.json"
+    )
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    with patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", tmp_path / "runs"):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(output),
+                "--readiness-manifest",
+                str(readiness_path),
+                "--fresh-campaign",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "note: missing" in result.output
+    assert output.is_file()
+
+
+def test_autoresearch_init_state_fresh_campaign_refuses_active_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    artifacts = autoresearch_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "old.json").write_text("{}", encoding="utf-8")
+    stage_inbox = autoresearch_dir / "stage-inbox"
+    checkpoint = autoresearch_dir / "owner-recovery.json"
+    state_path = autoresearch_dir / "quantipy-state.json"
+    sessions_path = tmp_path / "agent" / "sessions" / "sessions.json"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_ARTIFACTS_PATH", artifacts)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH", stage_inbox)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+    output = tmp_path / "state.json"
+
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-init-state",
+            "--output",
+            str(output),
+            "--readiness-manifest",
+            str(readiness_path),
+            "--fresh-campaign",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "is active; stop it first" in result.output
+    assert artifacts.is_dir()
+    assert not output.exists()
+    assert not (autoresearch_dir / "campaign-archives").exists()
+
+
+def test_autoresearch_init_state_without_fresh_flag_does_not_probe_or_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readiness = _ready_manifest(tmp_path / "init-readiness")
+    readiness_path = tmp_path / "platform-readiness.json"
+    _write_readiness_manifest(readiness_path, readiness)
+    autoresearch_dir = tmp_path / "autoresearch"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_DIR", autoresearch_dir)
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda _unit: (_ for _ in ()).throw(AssertionError("plain init must not probe systemd")),
+    )
+
+    with patch.object(constants, "DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT", tmp_path / "runs"):
+        result = runner.invoke(
+            app,
+            [
+                "autoresearch-init-state",
+                "--output",
+                str(tmp_path / "state.json"),
+                "--readiness-manifest",
+                str(readiness_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "state v5" in result.output
+    assert not (autoresearch_dir / "campaign-archives").exists()
+
+
+def _write_config_health_db(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE config_health_entries (config_path TEXT NOT NULL)")
+        connection.executemany(
+            "INSERT INTO config_health_entries(config_path) VALUES (?)",
+            [
+                ("/home/dev/.openclaw/openclaw.json",),
+                ("/home/dev/.openclaw/other.json",),
+            ],
+        )
+
+
+def _write_wal_config_health_db(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA wal_autocheckpoint=1000000")
+    connection.execute("CREATE TABLE config_health_entries (config_path TEXT NOT NULL)")
+    connection.execute(
+        "INSERT INTO config_health_entries(config_path) VALUES (?)",
+        ("/home/dev/.openclaw/openclaw.json",),
+    )
+    connection.commit()
+    return connection
+
+
+def test_deployment_rebaseline_config_health_backs_up_and_deletes_exact_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "state" / "openclaw.sqlite"
+    _write_config_health_db(database_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+
+    assert result.exit_code == 0, result.output
+    backups = list(database_path.parent.glob("openclaw.sqlite.rebaseline-*.bak"))
+    assert len(backups) == 1
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT config_path FROM config_health_entries ORDER BY config_path"
+        ).fetchall()
+    assert rows == [("/home/dev/.openclaw/other.json",)]
+    with sqlite3.connect(backups[0]) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM config_health_entries").fetchone() == (2,)
+    assert "rows_deleted=1" in result.output
+    assert "openclaw config validate" in result.output
+
+
+def test_deployment_rebaseline_config_health_backup_contains_uncheckpointed_wal_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "state" / "openclaw.sqlite"
+    writer = _write_wal_config_health_db(database_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    try:
+        result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+    finally:
+        writer.close()
+
+    assert result.exit_code == 0, result.output
+    backups = list(database_path.parent.glob("openclaw.sqlite.rebaseline-*.bak"))
+    assert len(backups) == 1
+    with sqlite3.connect(backups[0]) as connection:
+        assert connection.execute("SELECT config_path FROM config_health_entries").fetchall() == [
+            ("/home/dev/.openclaw/openclaw.json",)
+        ]
+
+
+def test_deployment_rebaseline_config_health_rejects_external_schema_without_config_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "openclaw.sqlite"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE config_health_entries (path TEXT NOT NULL)")
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+
+    assert result.exit_code == 1, result.output
+    assert "expected config_path column" in result.output
+    assert "Follow-up" not in result.output
+
+
+def test_deployment_rebaseline_config_health_rejects_zero_matching_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "openclaw.sqlite"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("CREATE TABLE config_health_entries (config_path TEXT NOT NULL)")
+        connection.execute(
+            "INSERT INTO config_health_entries(config_path) VALUES (?)",
+            ("/home/dev/.openclaw/other.json",),
+        )
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+
+    assert result.exit_code == 1, result.output
+    assert "no matching config-health row for" in result.output
+    assert "nothing rebaselined" in result.output
+    assert "Follow-up" not in result.output
+    assert "rows_deleted=" not in result.output
+
+
+def test_deployment_rebaseline_config_health_refuses_active_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "openclaw.sqlite"
+    _write_config_health_db(database_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+
+    result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+
+    assert result.exit_code == 1
+    assert "is active; stop it first" in result.output
+    assert not list(tmp_path.glob("openclaw.sqlite.rebaseline-*.bak"))
+
+
+def test_deployment_rebaseline_config_health_reports_missing_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "missing.sqlite"
+    monkeypatch.setattr(cli_module, "DEFAULT_OPENCLAW_STATE_DB_PATH", database_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    result = runner.invoke(app, ["deployment-rebaseline-config-health"])
+
+    assert result.exit_code == 1
+    assert "missing database" in result.output
 
 
 def _ready_manifest(tmp_path: Path) -> PlatformReadinessManifest:

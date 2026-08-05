@@ -17,12 +17,17 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
@@ -30,9 +35,15 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
+from gateway.autoresearch import constants as autoresearch_constants
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
+)
+from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY
+from gateway.autoresearch_systemd import (
+    SystemdUnitStateError,
+    systemd_unit_is_active,
 )
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
@@ -49,6 +60,18 @@ _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
 _REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
 _REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
+DEFAULT_AUTORESEARCH_DIR = Path("/home/dev/.openclaw/autoresearch")
+DEFAULT_AUTORESEARCH_STATE_PATH = DEFAULT_AUTORESEARCH_DIR / "quantipy-state.json"
+DEFAULT_AUTORESEARCH_CHECKPOINT_PATH = DEFAULT_AUTORESEARCH_DIR / "owner-recovery.json"
+DEFAULT_AUTORESEARCH_ARTIFACTS_PATH = DEFAULT_AUTORESEARCH_DIR / "artifacts"
+DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH = DEFAULT_AUTORESEARCH_DIR / "stage-inbox"
+DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH = Path(
+    "/home/dev/.openclaw/agents/autoresearch-pm/sessions/sessions.json"
+)
+DEFAULT_OPENCLAW_GATEWAY_SERVICE = "openclaw-gateway.service"
+DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE = "quantipy-autoresearch-supervisor.service"
+DEFAULT_OPENCLAW_STATE_DB_PATH = Path("/home/dev/.openclaw/state/openclaw.sqlite")
+DEFAULT_OPENCLAW_CONFIG_PATH = Path("/home/dev/.openclaw/openclaw.json")
 _TARGET_WRITER_COMMAND_RE = re.compile(
     r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
@@ -569,10 +592,510 @@ _command_output_path_option = typer.Option(
 )
 
 
+class _OperatorCommandError(RuntimeError):
+    """Raised when an operator-only diagnostic or repair cannot be proven safe."""
+
+
+class _PartialArchiveError(_OperatorCommandError):
+    """Raised when residue restoration leaves one or more archive paths stranded."""
+
+    def __init__(self, failures: list[str]) -> None:
+        details = "\n".join(f"  stranded path: {failure}" for failure in failures)
+        super().__init__(f"PARTIAL ARCHIVE: residue restoration failed\n{details}")
+
+
+@dataclass(frozen=True, slots=True)
+class _CampaignArchive:
+    """Completed campaign archive plus the information needed to undo it."""
+
+    path: Path
+    notes: tuple[str, ...]
+    moved: tuple[tuple[Path, Path], ...]
+    owner_sessions_path: Path
+    owner_sessions_store_without_key: dict[str, object] | None
+    owner_session_entry: dict[str, object] | None
+
+
+def _run_systemd_probe(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    """Run one read-only systemd probe for the sanctioned systemd leaf."""
+    try:
+        return subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise SystemdUnitStateError(f"failed to execute systemd probe: {exc}") from exc
+
+
+def _is_systemd_unit_active(unit: str) -> bool:
+    """Return a unit's state only when the strict systemd helper proves it."""
+    return systemd_unit_is_active(unit, run_command=_run_systemd_probe)
+
+
+def _new_utc_path(parent: Path, stem: str, suffix: str = "") -> Path:
+    """Allocate a unique private path using a UTC timestamp."""
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    for attempt in range(1000):
+        numbered = "" if attempt == 0 else f"-{attempt}"
+        candidate = parent / f"{stem}-{timestamp}{numbered}{suffix}"
+        if not candidate.exists() and not candidate.is_symlink():
+            return candidate
+    raise _OperatorCommandError(f"could not allocate a unique path below {parent}")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically replace a regular file on the same filesystem."""
+    if path.is_symlink():
+        raise _OperatorCommandError(f"refusing to replace symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.chmod(0o600)
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        raise _OperatorCommandError(f"failed to atomically write {path}: {exc}") from exc
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary_path.unlink()
+
+
+def _archive_json(path: Path, payload: object) -> None:
+    """Write one archive metadata file without exposing a half-written JSON file."""
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _load_owner_session_archive_plan(
+    sessions_path: Path,
+    archive_path: Path,
+) -> tuple[list[tuple[Path, Path]], dict[str, object] | None, list[str], dict[str, object] | None]:
+    """Resolve the owner transcript from the PM sessions mapping before moving anything."""
+    notes: list[str] = []
+    if not sessions_path.exists() and not sessions_path.is_symlink():
+        notes.append(f"missing owner session mapping: {sessions_path}")
+        return [], None, notes, None
+    if sessions_path.is_symlink():
+        raise _OperatorCommandError(f"refusing symlinked owner session mapping: {sessions_path}")
+    try:
+        raw: object = json.loads(sessions_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise _OperatorCommandError(
+            f"cannot safely read owner session mapping {sessions_path}: {exc}"
+        ) from exc
+    if not isinstance(raw, Mapping) or not all(isinstance(key, str) for key in raw):
+        raise _OperatorCommandError(f"owner session mapping is not a JSON object: {sessions_path}")
+    store: dict[str, object] = dict(raw)
+    entry_raw = store.get(AUTORESEARCH_OWNER_SESSION_KEY)
+    if entry_raw is None:
+        notes.append(f"missing owner session mapping entry: {AUTORESEARCH_OWNER_SESSION_KEY}")
+        return [], None, notes, store
+    if not isinstance(entry_raw, Mapping):
+        raise _OperatorCommandError(
+            f"owner session mapping entry is malformed: {AUTORESEARCH_OWNER_SESSION_KEY}"
+        )
+    entry: dict[str, object] = dict(entry_raw)
+    session_id = entry.get("sessionId")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise _OperatorCommandError(
+            f"owner session mapping entry has no usable sessionId: {AUTORESEARCH_OWNER_SESSION_KEY}"
+        )
+
+    sessions_dir = sessions_path.parent.resolve(strict=False)
+    candidates = [sessions_dir / f"{session_id}.jsonl"]
+    session_file_raw = entry.get("sessionFile")
+    if isinstance(session_file_raw, str) and session_file_raw.strip():
+        session_file = Path(session_file_raw).expanduser()
+        if not session_file.is_absolute():
+            session_file = sessions_dir / session_file
+        candidates.append(session_file)
+    unique_candidates: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve(strict=False)
+        if resolved != sessions_dir and sessions_dir not in resolved.parents:
+            raise _OperatorCommandError(
+                f"owner session file escapes the PM sessions directory: {candidate}"
+            )
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_candidates.append(resolved)
+
+    moves: list[tuple[Path, Path]] = []
+    for candidate in unique_candidates:
+        if not candidate.exists() and not candidate.is_symlink():
+            notes.append(f"missing owner session file: {candidate}")
+            continue
+        if candidate.is_symlink() or not candidate.is_file():
+            raise _OperatorCommandError(f"owner session file is not a regular file: {candidate}")
+        moves.append((candidate, archive_path / "sessions" / candidate.name))
+
+    updated_store = dict(store)
+    del updated_store[AUTORESEARCH_OWNER_SESSION_KEY]
+    return moves, entry, notes, updated_store
+
+
+def _restore_campaign_archive(archive: _CampaignArchive) -> None:
+    """Restore every moved item and remove the archive, reporting stranded paths."""
+    failures: list[str] = []
+    for source, destination in reversed(archive.moved):
+        if not destination.exists() and not destination.is_symlink():
+            if source.exists() or source.is_symlink():
+                continue
+            failures.append(f"{source} (archive location {destination} is also missing)")
+            continue
+        try:
+            destination.rename(source)
+        except OSError as exc:
+            failures.append(f"{destination} -> {source}: {exc}")
+
+    if archive.owner_session_entry is not None:
+        if archive.owner_sessions_store_without_key is None:
+            failures.append(
+                f"{archive.path / 'sessions.json'} -> {archive.owner_sessions_path} "
+                "(original owner mapping was unavailable)"
+            )
+        else:
+            restored_store = dict(archive.owner_sessions_store_without_key)
+            restored_store[AUTORESEARCH_OWNER_SESSION_KEY] = archive.owner_session_entry
+            try:
+                _atomic_write_text(
+                    archive.owner_sessions_path,
+                    json.dumps(restored_store, indent=2, sort_keys=True) + "\n",
+                )
+            except _OperatorCommandError as exc:
+                failures.append(
+                    f"{archive.path / 'sessions.json'} -> {archive.owner_sessions_path} "
+                    f"(owner mapping restoration failed: {exc})"
+                )
+
+    mapping_archive = archive.path / "sessions.json"
+    if mapping_archive.exists() or mapping_archive.is_symlink():
+        try:
+            mapping_archive.unlink()
+        except OSError as exc:
+            failures.append(f"{mapping_archive} (archive mapping cleanup failed: {exc})")
+
+    sessions_archive = archive.path / "sessions"
+    if sessions_archive.exists() or sessions_archive.is_symlink():
+        try:
+            sessions_archive.rmdir()
+        except OSError as exc:
+            failures.append(f"{sessions_archive} (archive directory cleanup failed: {exc})")
+    if archive.path.exists() or archive.path.is_symlink():
+        try:
+            archive.path.rmdir()
+        except OSError as exc:
+            failures.append(f"{archive.path} (archive cleanup failed: {exc})")
+    if failures:
+        raise _PartialArchiveError(failures)
+
+
+def _archive_fresh_campaign() -> _CampaignArchive:
+    """Move campaign residue into a unique UTC archive, rolling back on failure."""
+    archive_parent = DEFAULT_AUTORESEARCH_DIR / "campaign-archives"
+    if archive_parent.is_symlink():
+        raise _OperatorCommandError(
+            f"refusing symlinked campaign archive directory: {archive_parent}"
+        )
+    archive_parent.mkdir(parents=True, exist_ok=True)
+    archive_path = _new_utc_path(archive_parent, "campaign")
+
+    source_specs = (
+        (DEFAULT_AUTORESEARCH_ARTIFACTS_PATH, archive_path / "artifacts", "artifacts directory"),
+        (
+            DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH,
+            archive_path / "stage-inbox",
+            "stage-inbox directory",
+        ),
+        (
+            DEFAULT_AUTORESEARCH_CHECKPOINT_PATH,
+            archive_path / "owner-recovery.json",
+            "owner-recovery checkpoint",
+        ),
+        (
+            DEFAULT_AUTORESEARCH_STATE_PATH,
+            archive_path / "quantipy-state.json",
+            "campaign state file",
+        ),
+    )
+    moves: list[tuple[Path, Path]] = []
+    notes: list[str] = []
+    for source, destination, label in source_specs:
+        if not source.exists() and not source.is_symlink():
+            notes.append(f"missing {label}: {source}")
+            continue
+        if source.is_symlink():
+            raise _OperatorCommandError(f"refusing symlinked {label}: {source}")
+        expected_directory = label.endswith("directory")
+        if source.is_dir() != expected_directory:
+            raise _OperatorCommandError(f"unexpected {label} type: {source}")
+        moves.append((source, destination))
+
+    session_moves, removed_mapping, session_notes, updated_store = _load_owner_session_archive_plan(
+        DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+        archive_path,
+    )
+    moves.extend(session_moves)
+    notes.extend(session_notes)
+    for source, destination in moves:
+        try:
+            if source.stat().st_dev != archive_parent.stat().st_dev:
+                raise _OperatorCommandError(
+                    f"archive source is on a different filesystem: {source}"
+                )
+        except OSError as exc:
+            raise _OperatorCommandError(f"cannot inspect archive source {source}: {exc}") from exc
+        if destination.exists() or destination.is_symlink():
+            raise _OperatorCommandError(f"archive destination already exists: {destination}")
+
+    mapping_archive = archive_path / "sessions.json"
+    moved: list[tuple[Path, Path]] = []
+    archive_created = False
+    try:
+        archive_path.mkdir(mode=0o700)
+        archive_created = True
+        if removed_mapping is not None:
+            _archive_json(mapping_archive, {AUTORESEARCH_OWNER_SESSION_KEY: removed_mapping})
+        for source, destination in moves:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(destination)
+            moved.append((source, destination))
+        if updated_store is not None and removed_mapping is not None:
+            _atomic_write_text(
+                DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+                json.dumps(updated_store, indent=2, sort_keys=True) + "\n",
+            )
+    except (OSError, _OperatorCommandError) as exc:
+        if archive_created:
+            archive = _CampaignArchive(
+                path=archive_path,
+                notes=tuple(notes),
+                moved=tuple(moved),
+                owner_sessions_path=DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+                owner_sessions_store_without_key=updated_store,
+                owner_session_entry=removed_mapping,
+            )
+            try:
+                _restore_campaign_archive(archive)
+            except _PartialArchiveError:
+                raise
+        if isinstance(exc, _OperatorCommandError):
+            raise
+        raise _OperatorCommandError(f"campaign residue archive failed: {exc}") from exc
+    return _CampaignArchive(
+        path=archive_path,
+        notes=tuple(notes),
+        moved=tuple(moved),
+        owner_sessions_path=DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+        owner_sessions_store_without_key=updated_store,
+        owner_session_entry=removed_mapping,
+    )
+
+
+class _DoctorSupervisorController:
+    """Inject a previously proven supervisor state into ControlStatus."""
+
+    def __init__(self, active: bool | None) -> None:
+        self._active = active
+
+    def ensure_started(self) -> None:
+        raise RuntimeError("doctor supervisor controller is read-only")
+
+    def stop(self) -> None:
+        raise RuntimeError("doctor supervisor controller is read-only")
+
+    def is_active(self) -> bool:
+        if self._active is None:
+            raise _OperatorCommandError("supervisor service probe-error")
+        return self._active
+
+
+@app.command("autoresearch-doctor")
+def autoresearch_doctor() -> None:
+    """Report autoresearch service, state, control, and recovery health."""
+    from gateway.autoresearch.persistence import load_state_file
+    from gateway.autoresearch_checkpoint import SupervisorCheckpoint
+    from gateway.autoresearch_control import AutoresearchControl, ControlConfig
+
+    service_states: dict[str, bool | None] = {}
+    service_errors: dict[str, str] = {}
+    for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
+        try:
+            service_states[unit] = _is_systemd_unit_active(unit)
+        except Exception as exc:
+            service_states[unit] = None
+            service_errors[unit] = str(exc)
+
+    state = None
+    state_error: str | None = None
+    try:
+        state = load_state_file(DEFAULT_AUTORESEARCH_STATE_PATH)
+    except Exception as exc:
+        state_error = str(exc)
+
+    checkpoint = None
+    checkpoint_error: str | None = None
+    try:
+        checkpoint = SupervisorCheckpoint.load(DEFAULT_AUTORESEARCH_CHECKPOINT_PATH)
+    except Exception as exc:
+        checkpoint_error = str(exc)
+
+    status = None
+    status_error: str | None = None
+    try:
+        supervisor_active = service_states.get(DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE)
+        control = AutoresearchControl(
+            ControlConfig(
+                state_path=DEFAULT_AUTORESEARCH_STATE_PATH,
+                owner_sessions_path=DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+                checkpoint_path=DEFAULT_AUTORESEARCH_CHECKPOINT_PATH,
+                supervisor_service_name=DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE,
+            ),
+            service_controller=_DoctorSupervisorController(supervisor_active),
+        )
+        status = control.status()
+    except Exception as exc:
+        status_error = str(exc)
+
+    now = time.time()
+    degraded: list[str] = []
+    console.print("autoresearch doctor")
+    console.print("===================")
+    console.print("systemd")
+    for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
+        activity = service_states[unit]
+        if activity is True:
+            console.print(f"  {unit:<42} ACTIVE")
+        elif activity is False:
+            console.print(f"  {unit:<42} INACTIVE")
+            degraded.append(f"{unit} inactive")
+        else:
+            console.print(
+                f"  {unit:<42} ERROR probe-error: {service_errors.get(unit, 'unknown')}",
+                markup=False,
+                soft_wrap=True,
+            )
+            degraded.append(f"{unit} probe-error")
+
+    console.print("state")
+    if state is None:
+        console.print(
+            f"  ERROR: {state_error or 'state unavailable'}",
+            markup=False,
+            soft_wrap=True,
+        )
+        degraded.append("state unavailable")
+    else:
+        counters = state.campaign_counters
+        console.print(
+            f"  schema={autoresearch_constants.AUTORESEARCH_STATE_SCHEMA_VERSION}"
+            f" phase={state.phase.value} iteration={state.iteration}"
+        )
+        console.print(f"  suspended={state.suspended} reason={state.suspension_reason or '-'}")
+        console.print(
+            "  campaign_review="
+            f"{state.campaign_review_required} reason={state.campaign_review_reason or '-'}"
+        )
+        console.print(
+            "  counters="
+            f"non_keep:{counters.consecutive_non_keep},"
+            f"no_consensus:{counters.consecutive_no_consensus},"
+            f"since_keep:{counters.iterations_since_last_keep}"
+        )
+        console.print(f"  registry_size={len(state.hypothesis_registry)}")
+        if state.suspended:
+            degraded.append("state suspended")
+        if state.campaign_review_required:
+            degraded.append("campaign review required")
+
+    console.print("control")
+    if status is None:
+        console.print(
+            f"  ERROR: {status_error or 'control status unavailable'}",
+            markup=False,
+            soft_wrap=True,
+        )
+        degraded.append("control status unavailable")
+    else:
+        console.print(f"  owner={status.owner_agent_id} session={status.owner_session_key}")
+        cycle_at = status.supervisor_last_cycle_at
+        console.print(
+            f"  phase={status.phase} iteration={status.iteration}"
+            f" owner_lifecycle={status.owner_lifecycle_status or '-'}"
+            f" task_count={len(status.tasks)}"
+        )
+        console.print(
+            "  supervisor_last_outcome="
+            f"{status.supervisor_last_outcome or '-'}"
+            f" detail={status.supervisor_last_detail or '-'}"
+            f" cycle_at={cycle_at if cycle_at is not None else '-'}"
+        )
+
+    console.print("checkpoint")
+    if checkpoint is None:
+        console.print(
+            f"  ERROR: {checkpoint_error or 'checkpoint unavailable'}",
+            markup=False,
+            soft_wrap=True,
+        )
+        degraded.append("checkpoint unavailable")
+    else:
+        alerted_keys = sorted(
+            key for key, record in checkpoint.recovery_records.items() if record.alerted
+        )
+        nudge_times = [
+            record.last_nudge_at
+            for record in checkpoint.recovery_records.values()
+            if record.last_nudge_at is not None
+        ]
+        last_nudge_at = max(nudge_times) if nudge_times else None
+        if last_nudge_at is None:
+            nudge_recency = "missing"
+        else:
+            nudge_recency = f"{max(0.0, now - last_nudge_at):.0f}s ago"
+        console.print(f"  recovery_records={len(checkpoint.recovery_records)}")
+        console.print(f"  alerted_keys={','.join(alerted_keys) if alerted_keys else 'none'}")
+        console.print(f"  last_nudge_at={nudge_recency}")
+        if alerted_keys:
+            degraded.append("alerted recovery key")
+
+    services_active = all(
+        service_states.get(unit) is True
+        for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE)
+    )
+    if services_active and status is not None:
+        if status.supervisor_last_cycle_at is None:
+            degraded.append("last supervisor cycle unavailable while services are active")
+        elif now - status.supervisor_last_cycle_at > 600:
+            degraded.append("last supervisor cycle is older than 10 minutes")
+
+    if degraded:
+        console.print("health=DEGRADED", markup=False)
+        console.print(
+            f"issues={'; '.join(dict.fromkeys(degraded))}",
+            markup=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1)
+    console.print("health=HEALTHY")
+
+
 @app.command("autoresearch-init-state")
 def autoresearch_init_state(
     output_path: Path = _output_path_option,
     readiness_manifest: Path = _readiness_manifest_option,
+    fresh_campaign: bool = typer.Option(
+        False,
+        "--fresh-campaign",
+        help="Archive campaign runtime residue before writing pristine schema-v5 state.",
+    ),
 ) -> None:
     """Initialize a pristine schema-v5 campaign pinned to platform readiness."""
     from gateway.autoresearch.persistence import (
@@ -581,15 +1104,139 @@ def autoresearch_init_state(
         save_state_file,
     )
 
+    if not fresh_campaign:
+        try:
+            readiness = load_platform_readiness(readiness_manifest)
+            provision_quantipy_experiment_runs_root()
+            state = initialize_state(readiness)
+            save_state_file(output_path, state)
+        except ValueError as exc:
+            console.print(f"autoresearch-init-state failed: {exc}", markup=False)
+            raise typer.Exit(code=1) from exc
+        console.print(f"wrote pristine autoresearch state v5: {output_path}", markup=False)
+        return
+
     try:
+        try:
+            if _is_systemd_unit_active(DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
+                raise _OperatorCommandError(
+                    "refusing fresh campaign while "
+                    f"{DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE} is active; stop it first"
+                )
+        except SystemdUnitStateError as exc:
+            raise _OperatorCommandError(f"cannot prove supervisor is inactive: {exc}") from exc
         readiness = load_platform_readiness(readiness_manifest)
-        provision_quantipy_experiment_runs_root()
         state = initialize_state(readiness)
-        save_state_file(output_path, state)
-    except ValueError as exc:
-        console.print(f"[red]autoresearch-init-state failed:[/red] {exc}")
+        provision_quantipy_experiment_runs_root()
+        archive = _archive_fresh_campaign()
+        try:
+            save_state_file(output_path, state)
+        except Exception as exc:
+            try:
+                _restore_campaign_archive(archive)
+            except _PartialArchiveError:
+                raise
+            raise _OperatorCommandError(
+                f"fresh campaign state save failed after archive: {exc}"
+            ) from exc
+    except Exception as exc:
+        console.print(f"autoresearch-init-state failed: {exc}", markup=False)
         raise typer.Exit(code=1) from exc
-    console.print(f"[green]wrote pristine autoresearch state v5:[/green] {output_path}")
+
+    console.print(f"archived campaign residue: {archive.path}", markup=False)
+    for note in archive.notes:
+        console.print(f"  note: {note}", markup=False)
+    console.print(f"wrote pristine autoresearch state v5: {output_path}", markup=False)
+
+
+def _backup_openclaw_state_db(database_path: Path) -> Path:
+    """Create a consistent WAL-aware SQLite backup and publish it atomically."""
+    backup_path = _new_utc_path(
+        database_path.parent,
+        "openclaw.sqlite.rebaseline",
+        ".bak",
+    )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{backup_path.name}.",
+        dir=database_path.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        with (
+            contextlib.closing(sqlite3.connect(database_path)) as source,
+            contextlib.closing(sqlite3.connect(temporary_path)) as backup,
+        ):
+            source.backup(backup)
+            backup.commit()
+        os.replace(temporary_path, backup_path)
+    except (OSError, sqlite3.Error) as exc:
+        raise _OperatorCommandError(f"failed to back up {database_path}: {exc}") from exc
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary_path.unlink()
+    return backup_path
+
+
+@app.command("deployment-rebaseline-config-health")
+def deployment_rebaseline_config_health() -> None:
+    """Clear one stale config-health fingerprint after a safe database backup."""
+    database_path = DEFAULT_OPENCLAW_STATE_DB_PATH
+    config_path = str(DEFAULT_OPENCLAW_CONFIG_PATH)
+    try:
+        if _is_systemd_unit_active(DEFAULT_OPENCLAW_GATEWAY_SERVICE):
+            raise _OperatorCommandError(
+                f"refusing config-health rebaseline while {DEFAULT_OPENCLAW_GATEWAY_SERVICE} "
+                "is active; stop it first"
+            )
+        if database_path.is_symlink() or not database_path.is_file():
+            raise _OperatorCommandError(f"missing database: {database_path}")
+        console.print(
+            "About to rebaseline config health: back up "
+            f"{database_path}, then delete the entry for exactly {config_path}."
+        )
+        backup_path = _backup_openclaw_state_db(database_path)
+        try:
+            with contextlib.closing(sqlite3.connect(database_path)) as connection, connection:
+                table = connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type = 'table' AND name = 'config_health_entries'"
+                ).fetchone()
+                if table is None:
+                    raise _OperatorCommandError(
+                        "config-health schema error: table config_health_entries does not exist"
+                    )
+                column_names = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(config_health_entries)")
+                }
+                if "config_path" not in column_names:
+                    raise _OperatorCommandError(
+                        "config-health schema error: table config_health_entries "
+                        "does not have the expected config_path column"
+                    )
+                cursor = connection.execute(
+                    "DELETE FROM config_health_entries WHERE config_path = ?",
+                    (config_path,),
+                )
+                deleted = cursor.rowcount
+                if deleted == 0:
+                    raise _OperatorCommandError(
+                        f"no matching config-health row for {config_path}; nothing rebaselined"
+                    )
+        except sqlite3.Error as exc:
+            raise _OperatorCommandError(f"config-health database update failed: {exc}") from exc
+    except Exception as exc:
+        console.print(
+            f"deployment-rebaseline-config-health failed: {exc}",
+            markup=False,
+            soft_wrap=True,
+        )
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"backup={backup_path}", markup=False)
+    console.print(f"rows_deleted={deleted}", markup=False)
+    console.print("Follow-up: re-run `openclaw config validate`.", markup=False)
 
 
 @app.command("autoresearch-create-command-file")
