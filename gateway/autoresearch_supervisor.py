@@ -236,6 +236,8 @@ DEFAULT_OWNER_SESSIONS_PATH = (
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
+DEFAULT_RENUDGE_IDLE_SECONDS = 600.0
+DEFAULT_RENUDGE_ALERT_LIMIT = 12
 # Implementation, verification, review, and fix stages can spend several
 # minutes running tests and backtests without producing an OpenClaw event.
 # Keep the supervisor responsive while allowing those legitimate long turns to
@@ -328,8 +330,10 @@ def _finite_positive_cli_float(raw: str) -> float:
 class SupervisorOutcome(StrEnum):
     NO_ACTION = "no_action"
     NUDGED = "nudged"
+    RENUDGED = "renudged"
     ALERT = "alert"
     FINALIZED = "finalized"
+    ERROR = "error"
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +348,8 @@ class SupervisorConfig:
     target_repo: Path = DEFAULT_QUANTIPY_ROOT
     proc_root: Path = Path("/proc")
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
+    renudge_idle_seconds: float = DEFAULT_RENUDGE_IDLE_SECONDS
+    renudge_alert_limit: int = DEFAULT_RENUDGE_ALERT_LIMIT
     expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
@@ -353,6 +359,13 @@ class SupervisorConfig:
         _require_finite_positive(self.poll_interval_seconds, field_name="poll_interval_seconds")
         _require_finite_positive(self.grace_period_seconds, field_name="grace_period_seconds")
         _require_finite_positive(self.claim_stale_seconds, field_name="claim_stale_seconds")
+        _require_finite_positive(self.renudge_idle_seconds, field_name="renudge_idle_seconds")
+        if (
+            isinstance(self.renudge_alert_limit, bool)
+            or not isinstance(self.renudge_alert_limit, int)
+            or self.renudge_alert_limit < 1
+        ):
+            raise SupervisorError("renudge_alert_limit must be a positive integer")
         _require_finite_positive(
             self.expected_stage_task_stale_seconds,
             field_name="expected_stage_task_stale_seconds",
@@ -387,6 +400,7 @@ class RecoveryPlan:
 class RecoveryClaim:
     recovery_key: str
     token: str
+    renudge_idle_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,12 +443,29 @@ class AutoresearchSupervisor:
         self._now = now
         self._sleep = sleep
         self._rpc = OpenClawRPC(task_gateway)
+        self._cycle_state: AutoresearchState | None = None
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
     ) -> SupervisorResult:
+        self._cycle_state = None
+        try:
+            result = self._run_once(shutdown_requested=shutdown_requested)
+        except BaseException as exc:
+            self._record_cycle_safely(
+                outcome=SupervisorOutcome.ERROR.value,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        self._record_cycle_safely(outcome=result.outcome.value, detail=result.reason)
+        return result
+
+    def _run_once(
+        self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
+    ) -> SupervisorResult:
         try:
             state = self._load_state()
+            self._cycle_state = state
             if state.campaign_review_required:
                 _structured_log(
                     logging.WARNING,
@@ -544,18 +575,66 @@ class AutoresearchSupervisor:
             self._fail_recovery_claim(claim, exc)
             raise
         self._complete_recovery_claim(claim)
-        _structured_log(
-            logging.WARNING,
-            "supervisor.nudged",
-            recovery_key=recovery_key,
-            reason=recovery_plan.reason,
-            detected_error=detected_error.pattern if detected_error is not None else None,
-        )
+        if claim.renudge_idle_seconds is None:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.nudged",
+                recovery_key=recovery_key,
+                reason=recovery_plan.reason,
+                detected_error=detected_error.pattern if detected_error is not None else None,
+            )
+        else:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.renudged",
+                recovery_key=recovery_key,
+                reason=recovery_plan.reason,
+                detected_error=detected_error.pattern if detected_error is not None else None,
+                idle_seconds=claim.renudge_idle_seconds,
+            )
         return SupervisorResult(
-            SupervisorOutcome.NUDGED,
+            SupervisorOutcome.RENUDGED
+            if claim.renudge_idle_seconds is not None
+            else SupervisorOutcome.NUDGED,
             recovery_plan.reason,
             recovery_key,
             sent_wake=True,
+        )
+
+    def _record_cycle_safely(self, *, outcome: str, detail: str) -> None:
+        try:
+            self._persist_cycle(self._cycle_state, outcome=outcome, detail=detail)
+        except BaseException as exc:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.cycle_persist_failed",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _persist_cycle(
+        self,
+        state: AutoresearchState | None,
+        *,
+        outcome: str,
+        detail: str,
+    ) -> None:
+        cycle_at = self._now()
+        try:
+            with self._checkpoint_lock():
+                checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+                checkpoint.last_cycle_outcome = outcome
+                checkpoint.last_cycle_detail = detail
+                checkpoint.last_cycle_at = cycle_at
+                checkpoint.save(self.config.checkpoint_path)
+        except SupervisorError as exc:
+            _structured_log(logging.ERROR, "supervisor.cycle_persist_failed", detail=str(exc))
+        _structured_log(
+            logging.INFO,
+            "supervisor.cycle",
+            outcome=outcome,
+            detail=detail,
+            phase=state.phase.value if state is not None else None,
+            iteration=state.iteration if state is not None else None,
         )
 
     def _recovery_plan(self, state: AutoresearchState) -> RecoveryPlan:
@@ -1338,18 +1417,51 @@ class AutoresearchSupervisor:
         with self._checkpoint_lock():
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
             record = checkpoint.recovery_records.setdefault(recovery_key, RecoveryRecord())
+            if record.alerted:
+                return SupervisorResult(
+                    SupervisorOutcome.NO_ACTION,
+                    "alert_already_emitted",
+                    recovery_key,
+                )
+            now = self._now()
+            renudge_idle_seconds: float | None = None
             if record.status is RecoveryStatus.SUCCEEDED and record.woke_at is not None:
-                elapsed = self._now() - record.woke_at
+                elapsed = now - record.woke_at
                 if 0 <= elapsed < self.config.grace_period_seconds:
                     return SupervisorResult(
                         SupervisorOutcome.NO_ACTION, "recovery_settling", recovery_key
                     )
+                # Explicit control-plane errors retain the bounded retry cadence;
+                # idle decay is for a clean wake whose owner turn did not advance state.
+                if detected_error is None:
+                    last_nudge_at = (
+                        record.last_nudge_at if record.last_nudge_at is not None else record.woke_at
+                    )
+                    if last_nudge_at is None:
+                        raise SupervisorError(
+                            f"successful recovery record lacks nudge timestamp: {recovery_key}"
+                        )
+                    idle_seconds = now - last_nudge_at
+                    if idle_seconds < self.config.renudge_idle_seconds:
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION,
+                            "recovery_nudge_deduped",
+                            recovery_key,
+                        )
+                    renudge_idle_seconds = idle_seconds
+                    if record.renudge_count >= self.config.renudge_alert_limit:
+                        return self._renudge_limit_alert(
+                            checkpoint,
+                            record,
+                            recovery_key,
+                            state,
+                        )
             if record.status is RecoveryStatus.IN_FLIGHT:
                 if record.claim_started_at is None or record.claim_pid is None:
                     raise SupervisorError(
                         f"in-flight recovery claim lacks owner metadata: {recovery_key}"
                     )
-                age = self._now() - record.claim_started_at
+                age = now - record.claim_started_at
                 if age < self.config.claim_stale_seconds:
                     return SupervisorResult(
                         SupervisorOutcome.NO_ACTION, "recovery_in_flight", recovery_key
@@ -1358,7 +1470,9 @@ class AutoresearchSupervisor:
                     return self._alert(
                         checkpoint, record, recovery_key, "stale_recovery_claim_owner_alive"
                     )
-            if record.attempt_count >= self.config.max_recovery_attempts:
+            if renudge_idle_seconds is None and record.attempt_count >= (
+                self.config.max_recovery_attempts
+            ):
                 record.status = RecoveryStatus.EXHAUSTED
                 return self._alert(
                     checkpoint,
@@ -1373,19 +1487,19 @@ class AutoresearchSupervisor:
                 )
             pid = os.getpid()
             identity = self._process_identity(pid)
-            token = (
-                f"{pid}:{identity or 'unknown'}:{record.attempt_count + 1}:{int(self._now() * 1e9)}"
-            )
+            attempt_number = record.attempt_count + (1 if renudge_idle_seconds is None else 0)
+            token = f"{pid}:{identity or 'unknown'}:{attempt_number}:{int(now * 1e9)}"
             record.status = RecoveryStatus.IN_FLIGHT
-            record.attempt_count += 1
+            if renudge_idle_seconds is None:
+                record.attempt_count += 1
             record.claim_token = token
             record.claim_pid = pid
             record.claim_process_identity = identity
-            record.claim_started_at = self._now()
+            record.claim_started_at = now
             record.failed_at = None
             record.last_error = None
             checkpoint.save(self.config.checkpoint_path)
-            return RecoveryClaim(recovery_key, token)
+            return RecoveryClaim(recovery_key, token, renudge_idle_seconds)
 
     def _complete_recovery_claim(self, claim: RecoveryClaim) -> None:
         with self._checkpoint_lock():
@@ -1393,6 +1507,9 @@ class AutoresearchSupervisor:
             record = self._owned_claim(checkpoint, claim)
             record.status = RecoveryStatus.SUCCEEDED
             record.woke_at = self._now()
+            record.last_nudge_at = record.woke_at
+            if claim.renudge_idle_seconds is not None:
+                record.renudge_count += 1
             record.last_error = None
             checkpoint.save(self.config.checkpoint_path)
 
@@ -1433,6 +1550,36 @@ class AutoresearchSupervisor:
         record.alerted = True
         checkpoint.save(self.config.checkpoint_path)
         return SupervisorResult(SupervisorOutcome.ALERT, reason, recovery_key)
+
+    def _renudge_limit_alert(
+        self,
+        checkpoint: SupervisorCheckpoint,
+        record: RecoveryRecord,
+        recovery_key: str,
+        state: AutoresearchState,
+    ) -> SupervisorResult:
+        record.status = RecoveryStatus.EXHAUSTED
+        result = self._alert(
+            checkpoint,
+            record,
+            recovery_key,
+            (
+                f"renudge_alert_limit_reached: iteration={state.iteration}; "
+                f"phase={state.phase.value}; recovery_key={recovery_key}; "
+                f"renudge_count={record.renudge_count}; "
+                f"renudge_alert_limit={self.config.renudge_alert_limit}"
+            ),
+        )
+        if result.outcome is SupervisorOutcome.ALERT:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.renudge_limit_reached",
+                outcome=SupervisorOutcome.ALERT.value,
+                recovery_key=recovery_key,
+                renudge_count=record.renudge_count,
+                renudge_alert_limit=self.config.renudge_alert_limit,
+            )
+        return result
 
     def _exhausted_recovery_reason(
         self, record: RecoveryRecord, detected_error: RecoveryErrorPattern | None
@@ -1651,6 +1798,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--grace", type=_finite_positive_cli_float, default=DEFAULT_GRACE_PERIOD_SECONDS
     )
     parser.add_argument(
+        "--renudge-idle",
+        type=_finite_positive_cli_float,
+        default=DEFAULT_RENUDGE_IDLE_SECONDS,
+    )
+    parser.add_argument(
+        "--renudge-alert-limit",
+        type=int,
+        default=DEFAULT_RENUDGE_ALERT_LIMIT,
+    )
+    parser.add_argument(
         "--expected-stage-task-stale",
         type=_finite_positive_cli_float,
         default=DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
@@ -1672,6 +1829,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 autoresearch_dir=args.state_path.parent,
                 poll_interval_seconds=args.interval,
                 grace_period_seconds=args.grace,
+                renudge_idle_seconds=args.renudge_idle,
+                renudge_alert_limit=args.renudge_alert_limit,
                 expected_stage_task_stale_seconds=args.expected_stage_task_stale,
             )
         )

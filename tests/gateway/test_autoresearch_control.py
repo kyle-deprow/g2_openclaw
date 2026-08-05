@@ -1222,6 +1222,62 @@ def test_status_tolerates_statusless_stale_owner_session(
     assert status.tasks == ()
 
 
+def test_status_surfaces_last_supervisor_cycle_from_checkpoint(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+    SupervisorCheckpoint(
+        last_cycle_outcome="renudged",
+        last_cycle_detail="recovery_message_sent",
+        last_cycle_at=1234.5,
+    ).save(config.checkpoint_path)
+
+    status = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([], active=False),
+    ).status()
+
+    assert status.supervisor_last_outcome == "renudged"
+    assert status.supervisor_last_detail == "recovery_message_sent"
+    assert status.supervisor_last_cycle_at == 1234.5
+
+
+def test_status_tolerates_corrupt_supervisor_checkpoint(
+    control_env: tuple[ControlConfig, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config, _ = control_env
+    config.checkpoint_path.write_text("{", encoding="utf-8")
+
+    status = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([], active=False),
+    ).status()
+
+    assert status.supervisor_last_outcome is None
+    assert status.supervisor_last_detail is None
+    assert status.supervisor_last_cycle_at is None
+    assert "checkpoint unavailable during status" in caplog.text
+
+
+def test_status_returns_none_for_missing_supervisor_checkpoint(
+    control_env: tuple[ControlConfig, Path],
+) -> None:
+    config, _ = control_env
+
+    status = AutoresearchControl(
+        config,
+        task_gateway=FakeOpenClaw(),
+        service_controller=FakeSupervisorService([], active=False),
+    ).status()
+
+    assert status.supervisor_last_outcome is None
+    assert status.supervisor_last_detail is None
+    assert status.supervisor_last_cycle_at is None
+
+
 def test_status_preserves_operator_precondition_implementation_state(
     control_env: tuple[ControlConfig, Path],
 ) -> None:

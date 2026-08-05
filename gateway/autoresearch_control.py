@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import logging
 import os
 import re
 import subprocess
@@ -24,6 +25,9 @@ from gateway.autoresearch.state import (
 )
 from gateway.autoresearch.transitions import (
     build_authoritative_state_reference,
+)
+from gateway.autoresearch_checkpoint import (
+    SupervisorCheckpoint,
 )
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
@@ -46,6 +50,8 @@ from gateway.autoresearch_supervisor import (
     SupervisorError,
 )
 from gateway.autoresearch_systemd import SystemdUnitStateError, systemd_unit_is_active
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceCommandRunner(Protocol):
@@ -223,6 +229,9 @@ class ControlStatus:
     consecutive_non_keep: int = 0
     consecutive_no_consensus: int = 0
     iterations_since_last_keep: int = 0
+    supervisor_last_outcome: str | None = None
+    supervisor_last_detail: str | None = None
+    supervisor_last_cycle_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +297,14 @@ class AutoresearchControl:
         state = self._load_state()
         tasks = tuple(self._task_status(task) for task in self._owned_running_tasks())
         lifecycle_status = self._owner_lifecycle_status()
+        try:
+            checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+        except Exception as exc:
+            logger.warning(
+                "autoresearch supervisor checkpoint unavailable during status: %s",
+                exc,
+            )
+            checkpoint = None
         return ControlStatus(
             owner_agent_id=AUTORESEARCH_OWNER_AGENT_ID,
             owner_session_key=AUTORESEARCH_OWNER_SESSION_KEY,
@@ -303,6 +320,11 @@ class AutoresearchControl:
             consecutive_non_keep=state.campaign_counters.consecutive_non_keep,
             consecutive_no_consensus=state.campaign_counters.consecutive_no_consensus,
             iterations_since_last_keep=state.campaign_counters.iterations_since_last_keep,
+            supervisor_last_outcome=(
+                checkpoint.last_cycle_outcome if checkpoint is not None else None
+            ),
+            supervisor_last_detail=checkpoint.last_cycle_detail if checkpoint is not None else None,
+            supervisor_last_cycle_at=checkpoint.last_cycle_at if checkpoint is not None else None,
         )
 
     def stop(self) -> StopResult:

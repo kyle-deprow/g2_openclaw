@@ -45,11 +45,13 @@ def _optional_str(value: object) -> str | None:
 class RecoveryRecord:
     status: RecoveryStatus = RecoveryStatus.READY
     attempt_count: int = 0
+    renudge_count: int = 0
     claim_token: str | None = None
     claim_pid: int | None = None
     claim_process_identity: str | None = None
     claim_started_at: float | None = None
     woke_at: float | None = None
+    last_nudge_at: float | None = None
     failed_at: float | None = None
     last_error: str | None = None
     alerted: bool = False
@@ -70,14 +72,23 @@ class RecoveryRecord:
             or attempt_count < 0
         ):
             raise SupervisorError("recovery attempt_count must be a non-negative integer")
+        renudge_count = raw.get("renudge_count", 0)
+        if (
+            isinstance(renudge_count, bool)
+            or not isinstance(renudge_count, int)
+            or renudge_count < 0
+        ):
+            raise SupervisorError("recovery renudge_count must be a non-negative integer")
         return cls(
             status=status,
             attempt_count=attempt_count,
+            renudge_count=renudge_count,
             claim_token=_optional_str(raw.get("claim_token")),
             claim_pid=_optional_int(raw.get("claim_pid")),
             claim_process_identity=_optional_str(raw.get("claim_process_identity")),
             claim_started_at=_optional_float(raw.get("claim_started_at")),
             woke_at=_optional_float(raw.get("woke_at")),
+            last_nudge_at=_optional_float(raw.get("last_nudge_at")),
             failed_at=_optional_float(raw.get("failed_at")),
             last_error=_optional_str(raw.get("last_error")),
             alerted=raw.get("alerted") is True,
@@ -128,6 +139,9 @@ class MemoryWakeAcknowledgement:
 class SupervisorCheckpoint:
     recovery_records: dict[str, RecoveryRecord] = field(default_factory=dict)
     memory_wake_acknowledgements: dict[str, MemoryWakeAcknowledgement] = field(default_factory=dict)
+    last_cycle_outcome: str | None = None
+    last_cycle_detail: str | None = None
+    last_cycle_at: float | None = None
 
     @classmethod
     def load(cls, path: Path) -> SupervisorCheckpoint:
@@ -176,6 +190,9 @@ class SupervisorCheckpoint:
         return cls(
             recovery_records=records,
             memory_wake_acknowledgements=acknowledgements,
+            last_cycle_outcome=_optional_str(raw.get("last_cycle_outcome")),
+            last_cycle_detail=_optional_str(raw.get("last_cycle_detail")),
+            last_cycle_at=_optional_float(raw.get("last_cycle_at")),
         )
 
     def save(self, path: Path) -> None:
@@ -188,6 +205,9 @@ class SupervisorCheckpoint:
                 "recovery_records": {
                     key: record.to_dict() for key, record in self.recovery_records.items()
                 },
+                "last_cycle_at": self.last_cycle_at,
+                "last_cycle_detail": self.last_cycle_detail,
+                "last_cycle_outcome": self.last_cycle_outcome,
             },
             indent=2,
             sort_keys=True,

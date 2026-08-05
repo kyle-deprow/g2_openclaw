@@ -67,12 +67,15 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
+    DEFAULT_RENUDGE_ALERT_LIMIT,
+    DEFAULT_RENUDGE_IDLE_SECONDS,
     MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
     RECOVERY_MESSAGE,
     AutoresearchSupervisor,
     NativeGatewayRPC,
     OpenClawRPC,
     OpenClawUnavailableError,
+    RecoveryStatus,
     ShutdownInterrupted,
     ShutdownRequested,
     SupervisorCheckpoint,
@@ -84,6 +87,7 @@ from gateway.autoresearch_supervisor import (
     main,
     make_idempotency_key,
     memory_wake_acknowledgement_key,
+    reset_recovery_checkpoint_for_manual_wake,
 )
 from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
@@ -442,6 +446,10 @@ def _supervisor(
     fake: FakeOpenClaw,
     *,
     expected_stage_task_stale_seconds: float = 300.0,
+    renudge_idle_seconds: float = DEFAULT_RENUDGE_IDLE_SECONDS,
+    renudge_alert_limit: int = DEFAULT_RENUDGE_ALERT_LIMIT,
+    grace_period_seconds: float = 120.0,
+    now: Callable[[], float] | None = None,
 ) -> AutoresearchSupervisor:
     return AutoresearchSupervisor(
         SupervisorConfig(
@@ -453,9 +461,12 @@ def _supervisor(
             target_repo=env.repo_root,
             proc_root=env.proc_root,
             runs_root=env.runs_root,
+            grace_period_seconds=grace_period_seconds,
+            renudge_idle_seconds=renudge_idle_seconds,
+            renudge_alert_limit=renudge_alert_limit,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
         ),
-        now=lambda: env.now,
+        now=(lambda: env.now) if now is None else now,
         sleep=lambda _: None,
         task_gateway=fake,
     )
@@ -463,6 +474,8 @@ def _supervisor(
 
 def test_expected_stage_task_stale_default_allows_long_stage_turns() -> None:
     assert DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS == 900.0
+    assert DEFAULT_RENUDGE_IDLE_SECONDS == 600.0
+    assert DEFAULT_RENUDGE_ALERT_LIMIT == 12
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
@@ -1215,6 +1228,305 @@ def test_supervisor_wakes_the_dedicated_owner_session_by_direct_rpc(
     assert idempotency_key.startswith("autoresearch-")
 
 
+def test_successful_recovery_renudges_after_idle_window_and_updates_timestamp(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    first = supervisor.run_once()
+    first_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    first_record = first_checkpoint.recovery_records[first.recovery_key or ""]
+    assert first_record.last_nudge_at == supervisor_env.now
+    assert first_record.attempt_count == 1
+    assert first_record.renudge_count == 0
+
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS - 1.0
+    before_idle_window = supervisor.run_once()
+    before_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    before_record = before_checkpoint.recovery_records[first.recovery_key or ""]
+
+    clock[0] += 1.0
+    after_idle_window = supervisor.run_once()
+    after_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    after_record = after_checkpoint.recovery_records[first.recovery_key or ""]
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert before_idle_window.outcome is SupervisorOutcome.NO_ACTION
+    assert after_idle_window.outcome is SupervisorOutcome.RENUDGED
+    assert before_record.last_nudge_at == supervisor_env.now
+    assert after_record.last_nudge_at == clock[0]
+    assert after_record.attempt_count == first_record.attempt_count
+    assert after_record.renudge_count == 1
+    assert after_checkpoint.last_cycle_outcome == SupervisorOutcome.RENUDGED.value
+    agent_calls = [params for method, params in fake.rpc_calls if method == "agent"]
+    assert len(agent_calls) == 2
+    cycle_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.cycle"
+    ]
+    assert len(cycle_events) == 3
+    renudge_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.renudged"
+    ]
+    assert len(renudge_events) == 1
+    assert renudge_events[0]["idle_seconds"] == DEFAULT_RENUDGE_IDLE_SECONDS
+
+
+def test_decayed_renudge_waits_for_active_tasks_and_running_owner(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+
+    first = supervisor.run_once()
+    assert first.outcome is SupervisorOutcome.NUDGED
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    active_task = {
+        "taskId": "owner-turn-active",
+        "id": "owner-turn-active",
+        "status": "running",
+        "runtime": "subagent",
+        "taskKind": "codex-native",
+        "runId": "codex-thread:owner-turn-active",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "updatedAt": int(clock[0] * 1000) - 1_000,
+    }
+    fake.tasks = [active_task]
+    blocked_by_task = supervisor.run_once()
+
+    fake.tasks = []
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "lastInteractionAt": int(clock[0] * 1000) - 1_000,
+                    "startedAt": int(clock[0] * 1000) - 2_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    blocked_by_owner = supervisor.run_once()
+
+    assert blocked_by_task.reason == "active_expected_stage_task"
+    assert blocked_by_owner.reason == "active_owner_session"
+    assert [method for method, _ in fake.rpc_calls if method == "agent"] == ["agent"]
+
+
+def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        renudge_alert_limit=2,
+        now=lambda: clock[0],
+    )
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    first = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    second = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    third = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    after_alert = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    after_alert_again = supervisor.run_once()
+
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    record = checkpoint.recovery_records[first.recovery_key or ""]
+    limit_events = [
+        json.loads(log_record.message)
+        for log_record in caplog.records
+        if json.loads(log_record.message).get("event") == "supervisor.renudge_limit_reached"
+    ]
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
+    assert third.outcome is SupervisorOutcome.RENUDGED
+    assert after_alert.outcome is SupervisorOutcome.ALERT
+    assert after_alert.reason.startswith("renudge_alert_limit_reached:")
+    assert after_alert_again.outcome is SupervisorOutcome.NO_ACTION
+    assert after_alert_again.reason == "alert_already_emitted"
+    assert record.status is RecoveryStatus.EXHAUSTED
+    assert record.alerted is True
+    assert record.attempt_count == 1
+    assert record.renudge_count == 2
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 3
+    assert len(limit_events) == 1
+    assert limit_events[0]["outcome"] == SupervisorOutcome.ALERT.value
+
+    reset_recovery_checkpoint_for_manual_wake(
+        supervisor_env.checkpoint_path,
+        iteration=4,
+        phase=Phase.VERIFICATION.value,
+    )
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    reset_result = supervisor.run_once()
+
+    assert reset_result.outcome is SupervisorOutcome.NUDGED
+    reset_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    reset_record = reset_checkpoint.recovery_records[reset_result.recovery_key or ""]
+    assert reset_record.attempt_count == 1
+    assert reset_record.renudge_count == 0
+
+
+def test_exception_cycle_is_persisted_and_logged_before_reraise(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    def fail_reconciliation(*, shutdown_requested: ShutdownRequested) -> None:
+        del shutdown_requested
+        raise SupervisorError("synthetic cycle failure")
+
+    monkeypatch.setattr(supervisor, "_reconciled_running_tasks", fail_reconciliation)
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    with pytest.raises(SupervisorError, match="synthetic cycle failure"):
+        supervisor.run_once()
+
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    cycle_events = [
+        json.loads(log_record.message)
+        for log_record in caplog.records
+        if json.loads(log_record.message).get("event") == "supervisor.cycle"
+    ]
+    assert checkpoint.last_cycle_outcome == SupervisorOutcome.ERROR.value
+    assert checkpoint.last_cycle_detail == "SupervisorError: synthetic cycle failure"
+    assert len(cycle_events) == 1
+    assert cycle_events[0]["outcome"] == SupervisorOutcome.ERROR.value
+    assert cycle_events[0]["detail"] == "SupervisorError: synthetic cycle failure"
+
+
+def test_cycle_save_oserror_after_delivered_nudge_does_not_fail_run_once(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    original_replace = os.replace
+    replace_calls = 0
+
+    def fail_cycle_replace(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+    ) -> None:
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 3:
+            raise OSError("synthetic checkpoint disk failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr("gateway.autoresearch_checkpoint.os.replace", fail_cycle_replace)
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert replace_calls == 3
+    assert any(
+        json.loads(log_record.message).get("event") == "supervisor.cycle_persist_failed"
+        for log_record in caplog.records
+    )
+    assert any(
+        json.loads(log_record.message).get("event") == "supervisor.cycle"
+        for log_record in caplog.records
+    )
+
+
+def test_supervisor_cycle_is_logged_and_persisted(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw()).run_once()
+
+    cycle_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.cycle"
+    ]
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    assert cycle_events == [
+        {
+            "detail": result.reason,
+            "event": "supervisor.cycle",
+            "iteration": 4,
+            "outcome": result.outcome.value,
+            "phase": Phase.VERIFICATION.value,
+        }
+    ]
+    assert checkpoint.last_cycle_outcome == result.outcome.value
+    assert checkpoint.last_cycle_detail == result.reason
+    assert checkpoint.last_cycle_at == supervisor_env.now
+
+
+def test_supervisor_honors_non_default_renudge_and_stage_stale_thresholds(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    clock = [supervisor_env.now]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        expected_stage_task_stale_seconds=5.0,
+        renudge_idle_seconds=30.0,
+        grace_period_seconds=1.0,
+        now=lambda: clock[0],
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 29.0
+    before_renudge = supervisor.run_once()
+    clock[0] += 1.0
+    after_renudge = supervisor.run_once()
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert before_renudge.outcome is SupervisorOutcome.NO_ACTION
+    assert after_renudge.outcome is SupervisorOutcome.RENUDGED
+
+    stale_task = {
+        "taskId": "review-stale-configured",
+        "id": "review-stale-configured",
+        "status": "running",
+        "runtime": "subagent",
+        "agentId": "reviewer",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "childSessionKey": "agent:reviewer:configured-stale",
+        "updatedAt": int(clock[0] * 1000) - 6_000,
+    }
+    fake.tasks = [stale_task]
+    stale_result = supervisor.run_once()
+    assert stale_result.reason == "stale_expected_stage_task"
+
+
 def test_supervisor_finalizes_required_memory_and_immediately_wakes_owner(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -1679,13 +1991,13 @@ def test_recovery_retries_use_distinct_idempotency_keys(
     )
 
     first = supervisor.run_once()
-    clock[0] += 121.0
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS + 1.0
     second = supervisor.run_once()
 
     agent_calls = [params for method, params in fake.rpc_calls if method == "agent"]
     idempotency_keys = [call["idempotencyKey"] for call in agent_calls]
     assert first.outcome is SupervisorOutcome.NUDGED
-    assert second.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
     assert len(idempotency_keys) == 2
     assert idempotency_keys[0] != idempotency_keys[1]
 
