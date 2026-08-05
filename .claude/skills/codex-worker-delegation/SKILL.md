@@ -41,6 +41,17 @@ Every dispatch prompt MUST contain:
 
 Right-size the task: one module, one bugfix, one focused refactor per dispatch. If the plan has 3+ independent chunks, dispatch parallel workers in separate `--cd` roots (or git worktrees) rather than one broad prompt.
 
+## Planning document (multi-step or large-context tasks)
+
+For anything spanning several files or steps where order matters, write the requirements down as a file instead of cramming them into the prompt string — luna re-reads it as needed instead of relying on everything surviving in one inline block.
+
+- **Where:** `<workdir>/.archive/PLAN-<task>.md`, inside the pinned `--cd` root so luna can read it with its own tools.
+- **Contents:** the same five prompt-contract elements above (file list, requirements, scope fence, verification command, completion sentinel), just written out per-file and in implementation order, instead of inlined.
+- **The dispatch prompt shrinks to a pointer:** "Read `<path>` in full before making any changes. Implement exactly what it specifies, in the order given. Nothing outside its file list. Run `<verify cmd>` and report the real output. Reply DONE when complete."
+- **State whether the plan file itself is in scope.** Default: read-only — tell luna explicitly not to edit or delete it, or it may "helpfully" rewrite it.
+- **This pays off most on resume rounds:** a fix-round prompt can say "Re-read PLAN-<task>.md's requirements for `foo.py` — the reviewer found: ..." instead of re-explaining the whole task, and the plan stays as a stable reference across `codex exec resume --last` calls.
+- **Skip it for single-file, single-step dispatches** — the inline prompt contract alone is enough there, and a plan file is pure overhead.
+
 ## Review protocol (mandatory)
 
 Luna output is never integrated unreviewed:
