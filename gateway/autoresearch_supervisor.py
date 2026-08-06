@@ -582,15 +582,18 @@ class AutoresearchSupervisor:
         )
         if finalization_result is not None:
             return finalization_result
-        run_record_result = self._consume_terminal_verification_run(state)
-        if run_record_result is not None:
-            return run_record_result
-        launch_result = self._consume_launch_request_inbox()
-        if launch_result is not None:
-            return launch_result
+        # Stage submissions must be consumed before terminal-run handling: a
+        # failed detached run raises a persistent alert that would otherwise
+        # starve consumption of the very submission that resolves it.
         inbox_result = self._consume_stage_submission_inbox(state)
         if inbox_result is not None:
             return inbox_result
+        launch_result = self._consume_launch_request_inbox()
+        if launch_result is not None:
+            return launch_result
+        run_record_result = self._consume_terminal_verification_run(state)
+        if run_record_result is not None:
+            return run_record_result
         if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
             lifecycle_result = self._owner_lifecycle_guard(state)
             if lifecycle_result is not None and lifecycle_result.reason == "active_owner_session":
@@ -1352,6 +1355,16 @@ class AutoresearchSupervisor:
         self,
         state: AutoresearchState,
     ) -> SupervisorResult | None:
+        try:
+            candidates = [
+                entry
+                for entry in os.listdir(self.config.stage_inbox_path)
+                if entry.endswith(".json")
+            ]
+        except OSError:
+            return None
+        if not candidates:
+            return None
         try:
             readiness = load_platform_readiness(self.config.readiness_manifest_path)
             context = AutoresearchValidationContext.from_readiness(readiness)

@@ -382,6 +382,7 @@ class SupervisorEnv:
     readiness_identity: ReadinessIdentity
     runs_root: Path
     launch_requests_path: Path
+    stage_inbox_path: Path
 
 
 @pytest.fixture()
@@ -440,6 +441,7 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         readiness_identity=readiness.identity(),
         runs_root=tmp_path / "runs",
         launch_requests_path=tmp_path / "launch-requests",
+        stage_inbox_path=tmp_path / "stage-inbox",
     )
 
 
@@ -468,6 +470,7 @@ def _supervisor(
             renudge_alert_limit=renudge_alert_limit,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
             launch_requests_path=env.launch_requests_path,
+            stage_inbox_path=env.stage_inbox_path,
         ),
         now=(lambda: env.now) if now is None else now,
         sleep=lambda _: None,
@@ -2335,6 +2338,7 @@ def test_recovery_retries_use_distinct_idempotency_keys(
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
             launch_requests_path=supervisor_env.launch_requests_path,
+            stage_inbox_path=supervisor_env.stage_inbox_path,
         ),
         now=lambda: clock[0],
         sleep=lambda _: None,
@@ -2545,6 +2549,7 @@ def test_supervisor_run_forever_stays_alive_after_closed_checkpoint_alert(
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
             launch_requests_path=supervisor_env.launch_requests_path,
+            stage_inbox_path=supervisor_env.stage_inbox_path,
             poll_interval_seconds=60,
         ),
         now=lambda: supervisor_env.now,
@@ -3167,6 +3172,7 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
             launch_requests_path=supervisor_env.launch_requests_path,
+            stage_inbox_path=supervisor_env.stage_inbox_path,
         ),
         now=lambda: clock[0],
         sleep=lambda _: None,
@@ -3438,6 +3444,7 @@ def test_run_forever_recovers_after_a_command_failure_when_shutdown_was_not_requ
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
             launch_requests_path=supervisor_env.launch_requests_path,
+            stage_inbox_path=supervisor_env.stage_inbox_path,
             poll_interval_seconds=1.0,
         ),
         now=lambda: now[0],
