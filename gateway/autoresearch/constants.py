@@ -22,7 +22,9 @@ DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT = Path(
     "/home/dev/.openclaw/autoresearch/model-workspaces"
 )
 DEFAULT_AUTORESEARCH_WORKTREE_ROOT = DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT
+DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT = DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT / "long-runs"
 DEFAULT_AUTORESEARCH_STAGE_INBOX = Path("/home/dev/.openclaw/autoresearch/stage-inbox")
+DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS = DEFAULT_AUTORESEARCH_STAGE_INBOX / "launch-requests"
 DEFAULT_AUTORESEARCH_STATE_PATH = Path("/home/dev/.openclaw/autoresearch/quantipy-state.json")
 DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT = Path(
     "/home/dev/.openclaw/autoresearch/quantipy-experiment-runs"

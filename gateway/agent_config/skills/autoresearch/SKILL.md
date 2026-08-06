@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.5.0
+version: 8.6.0
 ---
 
 # Autoresearch
@@ -42,6 +42,7 @@ command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.js
 # {"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
 /home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
   --run-dir <absolute-run-dir> \
+  --runs-root /home/dev/.openclaw/autoresearch/model-workspaces/long-runs \
   --manifest <absolute-manifest.json> \
   --command-file "$command_file"
 ```
@@ -66,11 +67,17 @@ the worker records a signal stop as terminal failure and preserves the child's
 actual exit status: an ordinary uncaught `SIGTERM` commonly yields `143`, while
 a child that handles or delays `SIGTERM` may yield its own code (for example,
 `7`).
-Direct foreground execution is invalid. If `systemd-run` or the launcher cannot
-be used, fail closed and report the infrastructure blocker without emitting a
-stage artifact. Do not reduce scope simply to avoid this requirement; launch
-the real command safely, surface concise status, and clean up stale
-processes and run directories when the stage ends.
+The launcher probes the user-systemd bus after preparation. In an OpenClaw
+sandbox where that bus is unreachable, it automatically queues the prepared
+run in the launch-request inbox and prints exactly one `LAUNCH_QUEUED: <run-dir>`
+line. `LAUNCH_QUEUED:` is success: end the turn, do not retry, and do not
+classify it as a blocker. The owner-only supervisor launches the request within
+about 60 seconds, and normal supervision wakes the session afterward.
+Direct foreground execution is invalid. If the launcher fails outside this
+queue path, fail closed and report the infrastructure blocker without emitting
+a stage artifact. Do not reduce scope simply to avoid this requirement; launch
+the real command safely, surface concise status, and clean up stale processes
+and run directories when the stage ends.
 The launcher status ledger is intentionally narrow: `status.json` emits only
 `running`, `succeeded`, or `failed`. Any blocker is a PM-owned classification
 derived from bounded polling plus logs and receipts; it is not a literal
@@ -746,12 +753,16 @@ Implementation requirements:
   stage to work around a preflight rejection.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
-  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--manifest` and
+  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--runs-root
+  /home/dev/.openclaw/autoresearch/model-workspaces/long-runs`, `--manifest` and
   `--command-file`, then bounded polling. Direct foreground execution is
   invalid. Secret-bearing command arguments are invalid; use credential files
-  or inherited auth. If the launcher cannot be used, fail closed and report the
-  infrastructure blocker without emitting a fix artifact. Record the run
-  directory in stage notes and use its status files for progress and recovery.
+  or inherited auth. In the sandbox, a `LAUNCH_QUEUED:` line is success: do not
+  retry or treat it as a blocker; the supervisor launches it within about 60
+  seconds and normal supervision wakes the session. If the launcher fails
+  outside this queue path, fail closed and report the infrastructure blocker
+  without emitting a fix artifact. Record the run directory in stage notes and
+  use its status files for progress and recovery.
   The launcher gives the detached worker a `MemoryHigh=20G` soft limit and a
   `MemoryMax=24G` hard limit; these are separate from the OpenClaw gateway's
   native-crash containment limits.

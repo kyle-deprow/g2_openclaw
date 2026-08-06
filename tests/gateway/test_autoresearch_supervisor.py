@@ -381,6 +381,7 @@ class SupervisorEnv:
     readiness_manifest_path: Path
     readiness_identity: ReadinessIdentity
     runs_root: Path
+    launch_requests_path: Path
 
 
 @pytest.fixture()
@@ -438,6 +439,7 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         readiness_manifest_path=readiness_manifest_path,
         readiness_identity=readiness.identity(),
         runs_root=tmp_path / "runs",
+        launch_requests_path=tmp_path / "launch-requests",
     )
 
 
@@ -465,6 +467,7 @@ def _supervisor(
             renudge_idle_seconds=renudge_idle_seconds,
             renudge_alert_limit=renudge_alert_limit,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
+            launch_requests_path=env.launch_requests_path,
         ),
         now=(lambda: env.now) if now is None else now,
         sleep=lambda _: None,
@@ -620,6 +623,301 @@ def _current_instruction_manifest_sha256(state: AutoresearchState, state_path: P
         build_receipt_catalog(DEFAULT_QUANTIPY_ROOT),
         state_path=state_path,
     )
+
+
+def _write_launch_request(
+    env: SupervisorEnv,
+    *,
+    name: str = "request.json",
+    run_dir: Path | None = None,
+    runs_root: Path | None = None,
+    payload: dict[str, object] | None = None,
+) -> Path:
+    request_dir = env.launch_requests_path
+    request_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    request_dir.chmod(0o700)
+    selected_runs_root = env.runs_root if runs_root is None else runs_root
+    selected_run_dir = (
+        env.runs_root / "iteration-4" / "verification" / "attempt-1" if run_dir is None else run_dir
+    )
+    if payload is None:
+        selected_run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (selected_run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        payload = {
+            "schema_version": 1,
+            "run_dir": str(selected_run_dir),
+            "runs_root": str(selected_runs_root),
+        }
+    request_path = request_dir / name
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    request_path.chmod(0o600)
+    return request_path
+
+
+def test_launch_request_inbox_accepts_one_request_and_invokes_prepared_launcher(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _write_launch_request(supervisor_env, name="attempt.json")
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[1:] == [
+        str(Path(__file__).resolve().parents[2] / "scripts" / "run-long-task.sh"),
+        "--launch-prepared",
+        "--run-dir",
+        str(supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"),
+        "--runs-root",
+        str(supervisor_env.runs_root),
+    ]
+    assert kwargs["cwd"] == Path(__file__).resolve().parents[2]
+    assert kwargs["timeout"] == 30.0
+    assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "symlink",
+        "hard_link",
+        "oversized",
+        "invalid_json",
+        "wrong_schema",
+        "relative_path",
+        "outside_run_dir",
+        "wrong_runs_root",
+        "missing_run_dir",
+        "missing_manifest",
+        "status_exists",
+    ),
+)
+def test_launch_request_inbox_rejects_invalid_requests(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    if case == "symlink":
+        target = supervisor_env.launch_requests_path / "target"
+        target.write_bytes(request_path.read_bytes())
+        target.chmod(0o600)
+        request_path.unlink()
+        request_path.symlink_to(target)
+    elif case == "hard_link":
+        target = supervisor_env.launch_requests_path / "hard-link-source"
+        os.link(request_path, target)
+    elif case == "oversized":
+        request_path.write_text("x" * 4097, encoding="utf-8")
+    elif case == "invalid_json":
+        request_path.write_text("{", encoding="utf-8")
+    elif case == "wrong_schema":
+        request_path.write_text(
+            json.dumps({"schema_version": 2, "run_dir": "", "runs_root": ""}),
+            encoding="utf-8",
+        )
+    elif case == "relative_path":
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": "relative/run",
+                    "runs_root": str(supervisor_env.runs_root),
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif case == "outside_run_dir":
+        outside = supervisor_env.state_path.parent / "outside-run"
+        outside.mkdir(mode=0o700, parents=True)
+        (outside / "manifest.json").write_text("{}", encoding="utf-8")
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": str(outside),
+                    "runs_root": str(supervisor_env.runs_root),
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif case == "wrong_runs_root":
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": str(supervisor_env.runs_root / "run"),
+                    "runs_root": str(supervisor_env.state_path.parent / "other-root"),
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif case == "missing_run_dir":
+        missing = supervisor_env.runs_root / "missing-run"
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": str(missing),
+                    "runs_root": str(supervisor_env.runs_root),
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif case == "missing_manifest":
+        run_dir = supervisor_env.runs_root / "missing-manifest"
+        run_dir.mkdir(mode=0o700, parents=True)
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": str(run_dir),
+                    "runs_root": str(supervisor_env.runs_root),
+                }
+            ),
+            encoding="utf-8",
+        )
+    elif case == "status_exists":
+        run_dir = supervisor_env.runs_root / "started-run"
+        run_dir.mkdir(mode=0o700, parents=True)
+        (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (run_dir / "status.json").write_text("{}", encoding="utf-8")
+        request_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_dir": str(run_dir),
+                    "runs_root": str(supervisor_env.runs_root),
+                }
+            ),
+            encoding="utf-8",
+        )
+    else:
+        raise AssertionError(f"unhandled launch request test case: {case}")
+    request_path.chmod(0o600)
+
+    launcher_calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal launcher_calls
+        launcher_calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is None
+    assert launcher_calls == 0
+    assert not request_path.exists()
+    assert any((supervisor_env.launch_requests_path / "rejected").iterdir())
+
+
+def test_launch_request_inbox_executes_at_most_one_request_per_cycle(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _write_launch_request(supervisor_env, name="a.json")
+    second = _write_launch_request(
+        supervisor_env,
+        name="b.json",
+        run_dir=supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-2",
+    )
+    calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert calls == 1
+    assert not first.exists()
+    assert second.exists()
+
+
+def test_launch_request_inbox_launcher_failure_alerts_and_rejects_request(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], 1, stdout="out", stderr="failed")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is not None
+    assert result.outcome is SupervisorOutcome.ALERT
+    assert result.recovery_key == f"launch-request:{request_path.name}"
+    assert "launch_request_execution_failed" in result.reason
+    assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    assert checkpoint.recovery_records[result.recovery_key].alerted is True
+
+
+def test_launch_request_inbox_rejection_failure_does_not_starve_other_entries(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor_env.launch_requests_path.mkdir(mode=0o700, parents=True)
+    (supervisor_env.launch_requests_path / "a-invalid.json").mkdir(mode=0o700)
+    (supervisor_env.launch_requests_path / "rejected").write_text("poisoned", encoding="utf-8")
+    valid_request = _write_launch_request(supervisor_env, name="b-valid.json")
+    launcher_calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal launcher_calls
+        launcher_calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert launcher_calls == 1
+    assert (supervisor_env.launch_requests_path / "a-invalid.json").is_dir()
+    assert (supervisor_env.launch_requests_path / "rejected").is_file()
+    assert not valid_request.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / valid_request.name).exists()
+    assert not supervisor_env.checkpoint_path.exists()
+
+
+def test_launch_request_inbox_missing_directory_is_a_noop(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher_calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal launcher_calls
+        launcher_calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is None
+    assert launcher_calls == 0
 
 
 def test_stale_iteration_context_residue_does_not_defer_recovery(
@@ -1984,6 +2282,7 @@ def test_recovery_retries_use_distinct_idempotency_keys(
             owner_sessions_path=supervisor_env.sessions_path,
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
+            launch_requests_path=supervisor_env.launch_requests_path,
         ),
         now=lambda: clock[0],
         sleep=lambda _: None,
@@ -2193,6 +2492,7 @@ def test_supervisor_run_forever_stays_alive_after_closed_checkpoint_alert(
             owner_sessions_path=supervisor_env.sessions_path,
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
+            launch_requests_path=supervisor_env.launch_requests_path,
             poll_interval_seconds=60,
         ),
         now=lambda: supervisor_env.now,
@@ -2786,6 +3086,7 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
             owner_sessions_path=supervisor_env.sessions_path,
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
+            launch_requests_path=supervisor_env.launch_requests_path,
         ),
         now=lambda: clock[0],
         sleep=lambda _: None,
@@ -3056,6 +3357,7 @@ def test_run_forever_recovers_after_a_command_failure_when_shutdown_was_not_requ
             owner_sessions_path=supervisor_env.sessions_path,
             target_repo=supervisor_env.repo_root,
             proc_root=supervisor_env.proc_root,
+            launch_requests_path=supervisor_env.launch_requests_path,
             poll_interval_seconds=1.0,
         ),
         now=lambda: now[0],

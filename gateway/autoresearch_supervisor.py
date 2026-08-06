@@ -11,6 +11,7 @@ import math
 import os
 import re
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -34,6 +35,7 @@ from gateway.autoresearch.configuration import (
 from gateway.autoresearch.constants import (
     CAMPAIGN_REVIEW_PENDING_MESSAGE,
     CAMPAIGN_REVIEW_RECOVERY_COMMAND,
+    DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS,
     DEFAULT_AUTORESEARCH_STAGE_INBOX,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_ROOT,
@@ -244,6 +246,9 @@ DEFAULT_RENUDGE_ALERT_LIMIT = 12
 # finish before declaring the task stale.
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
+LAUNCH_REQUEST_SCHEMA_VERSION = 1
+LAUNCH_REQUEST_MAX_BYTES = 4096
+LAUNCH_REQUEST_TIMEOUT_SECONDS = 30.0
 REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
 WAKE_MESSAGE = (
     "Continue Quantipy autoresearch from the authoritative state. First run exactly: "
@@ -354,6 +359,7 @@ class SupervisorConfig:
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
     stage_inbox_path: Path = DEFAULT_AUTORESEARCH_STAGE_INBOX
+    launch_requests_path: Path = DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS
 
     def __post_init__(self) -> None:
         _require_finite_positive(self.poll_interval_seconds, field_name="poll_interval_seconds")
@@ -426,6 +432,69 @@ def memory_wake_acknowledgement_key(state: AutoresearchState) -> str:
 
 def _structured_log(level: int, event: str, **fields: object) -> None:
     logger.log(level, json.dumps({"event": event, **fields}, sort_keys=True, default=str))
+
+
+def _validate_launch_request_directory_fd(fd: int, *, label: str) -> None:
+    metadata = os.fstat(fd)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise SupervisorError(f"{label} must be a plain directory")
+    if metadata.st_uid != os.getuid():
+        raise SupervisorError(f"{label} must be owned by the current user")
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SupervisorError(f"{label} must not be group/world writable")
+
+
+def _open_launch_request_child_directory(inbox_fd: int, name: str) -> int:
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=inbox_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise SupervisorError(f"cannot create launch request {name} directory: {exc}") from exc
+    try:
+        child_fd = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=inbox_fd,
+        )
+    except OSError as exc:
+        raise SupervisorError(
+            f"launch request {name} path must be a plain directory: {exc}"
+        ) from exc
+    try:
+        _validate_launch_request_directory_fd(child_fd, label=f"launch request {name} directory")
+    except BaseException:
+        os.close(child_fd)
+        raise
+    return child_fd
+
+
+def _move_launch_request_no_replace(
+    name: str,
+    *,
+    src_dir_fd: int,
+    dst_dir_fd: int,
+) -> None:
+    for attempt in range(128):
+        target = name
+        if attempt:
+            digest = hashlib.sha256(f"{name}\n{time.time_ns()}\n{attempt}".encode()).hexdigest()
+            target = f"{name}.{digest[:16]}"
+        try:
+            os.link(
+                name,
+                target,
+                src_dir_fd=src_dir_fd,
+                dst_dir_fd=dst_dir_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise SupervisorError(f"cannot quarantine launch request: {exc}") from exc
+        os.unlink(name, dir_fd=src_dir_fd)
+        return
+    raise SupervisorError("cannot quarantine launch request without overwrite")
 
 
 class AutoresearchSupervisor:
@@ -516,6 +585,9 @@ class AutoresearchSupervisor:
         run_record_result = self._consume_terminal_verification_run(state)
         if run_record_result is not None:
             return run_record_result
+        launch_result = self._consume_launch_request_inbox()
+        if launch_result is not None:
+            return launch_result
         inbox_result = self._consume_stage_submission_inbox(state)
         if inbox_result is not None:
             return inbox_result
@@ -1011,6 +1083,270 @@ class AutoresearchSupervisor:
             SupervisorOutcome.NUDGED,
             "detached_verification_failure_advanced",
         )
+
+    def _consume_launch_request_inbox(self) -> SupervisorResult | None:
+        try:
+            inbox_fd = os.open(
+                self.config.launch_requests_path,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.launch_request_rejected",
+                request="<inbox>",
+                reason=f"launch request inbox unavailable: {exc}",
+            )
+            return None
+
+        rejected_fd: int | None = None
+        accepted_fd: int | None = None
+
+        def log_rejection(name: str, reason: str) -> None:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.launch_request_rejected",
+                request=name,
+                reason=reason,
+            )
+
+        def reject(name: str, reason: str) -> None:
+            nonlocal rejected_fd
+            try:
+                if rejected_fd is None:
+                    rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
+                _move_launch_request_no_replace(
+                    name,
+                    src_dir_fd=inbox_fd,
+                    dst_dir_fd=rejected_fd,
+                )
+            except (OSError, SupervisorError, ValueError) as exc:
+                log_rejection(name, f"{reason}; quarantine failed: {exc}")
+                return
+            log_rejection(name, reason)
+
+        def validate_request(
+            name: str,
+        ) -> tuple[str | None, Path | None, Path | None]:
+            try:
+                metadata = os.stat(name, dir_fd=inbox_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None, None, None
+            except OSError as exc:
+                return f"cannot inspect request: {exc}", None, None
+            if not stat.S_ISREG(metadata.st_mode):
+                return "request must be a non-symlink regular file", None, None
+            if metadata.st_nlink != 1:
+                return "request must have exactly one hard link", None, None
+            if metadata.st_size > LAUNCH_REQUEST_MAX_BYTES:
+                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None
+            try:
+                request_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_NOFOLLOW,
+                    dir_fd=inbox_fd,
+                )
+            except OSError as exc:
+                return f"cannot open request: {exc}", None, None
+            try:
+                opened = os.fstat(request_fd)
+                if (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_nlink,
+                ) != (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_size,
+                    metadata.st_nlink,
+                ):
+                    return "request changed during inspection", None, None
+                raw_bytes = os.read(request_fd, LAUNCH_REQUEST_MAX_BYTES + 1)
+            except OSError as exc:
+                return f"cannot read request: {exc}", None, None
+            finally:
+                os.close(request_fd)
+            if len(raw_bytes) > LAUNCH_REQUEST_MAX_BYTES:
+                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None
+            try:
+                raw_request = json.loads(raw_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return f"request is not valid JSON: {exc}", None, None
+            if not isinstance(raw_request, dict):
+                return "request JSON must be an object", None, None
+            request: dict[str, object] = raw_request
+            schema_version = request.get("schema_version")
+            if isinstance(schema_version, bool) or schema_version != LAUNCH_REQUEST_SCHEMA_VERSION:
+                return "request has an unsupported schema_version", None, None
+            run_dir_value = request.get("run_dir")
+            runs_root_value = request.get("runs_root")
+            if not isinstance(run_dir_value, str) or not isinstance(runs_root_value, str):
+                return "request paths must be strings", None, None
+            run_dir = Path(run_dir_value)
+            runs_root = Path(runs_root_value)
+            if not run_dir.is_absolute() or not runs_root.is_absolute():
+                return "request paths must be absolute", None, None
+            if runs_root != self.config.runs_root:
+                return "request runs_root does not match the configured long-runs root", None, None
+            try:
+                configured_root = self.config.runs_root.resolve(strict=True)
+                resolved_run_dir = run_dir.resolve(strict=True)
+            except (FileNotFoundError, ValueError):
+                return "run directory is missing", None, None
+            except OSError as exc:
+                return f"cannot resolve run directory: {exc}", None, None
+            if (
+                resolved_run_dir == configured_root
+                or configured_root not in resolved_run_dir.parents
+            ):
+                return "run directory must be strictly under runs_root", None, None
+            try:
+                run_metadata = run_dir.stat()
+            except (FileNotFoundError, ValueError):
+                return "run directory is missing", None, None
+            except OSError as exc:
+                return f"cannot inspect run directory: {exc}", None, None
+            if not stat.S_ISDIR(run_metadata.st_mode):
+                return "run directory must be a directory", None, None
+            manifest_path = run_dir / "manifest.json"
+            try:
+                manifest_metadata = manifest_path.stat()
+            except (FileNotFoundError, ValueError):
+                return "run directory manifest.json is missing", None, None
+            except OSError as exc:
+                return f"cannot inspect run manifest: {exc}", None, None
+            if not stat.S_ISREG(manifest_metadata.st_mode) or manifest_path.is_symlink():
+                return "run manifest must be a non-symlink regular file", None, None
+            status_path = run_dir / "status.json"
+            try:
+                status_path.lstat()
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError) as exc:
+                return f"cannot inspect run status: {exc}", None, None
+            else:
+                return "run directory already contains status.json", None, None
+            return None, run_dir, runs_root
+
+        try:
+            _validate_launch_request_directory_fd(inbox_fd, label="launch request inbox")
+            candidates = sorted(name for name in os.listdir(inbox_fd) if name.endswith(".json"))
+            for name in candidates:
+                try:
+                    reason, run_dir, runs_root = validate_request(name)
+                except (OSError, SupervisorError, ValueError) as exc:
+                    log_rejection(name, f"request validation failed: {exc}")
+                    continue
+                if reason is not None:
+                    reject(name, reason)
+                    continue
+                if run_dir is None or runs_root is None:
+                    continue
+                repo_root = Path(__file__).resolve().parents[1]
+                try:
+                    completed = subprocess.run(
+                        [
+                            "bash",
+                            str(repo_root / "scripts" / "run-long-task.sh"),
+                            "--launch-prepared",
+                            "--run-dir",
+                            str(run_dir),
+                            "--runs-root",
+                            str(runs_root),
+                        ],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=LAUNCH_REQUEST_TIMEOUT_SECONDS,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    reject_reason = f"launch_request_execution_failed: {exc}"
+                    try:
+                        if rejected_fd is None:
+                            rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
+                        _move_launch_request_no_replace(
+                            name,
+                            src_dir_fd=inbox_fd,
+                            dst_dir_fd=rejected_fd,
+                        )
+                    except (OSError, SupervisorError, ValueError) as quarantine_exc:
+                        reject_reason = f"{reject_reason}; quarantine failed: {quarantine_exc}"
+                    _structured_log(
+                        logging.ERROR,
+                        "supervisor.launch_request_failed",
+                        request=name,
+                        detail=reject_reason,
+                    )
+                    return self._persistent_control_plane_alert(
+                        key=f"launch-request:{name}",
+                        reason=reject_reason,
+                    )
+                if completed.returncode != 0:
+                    stdout = str(completed.stdout or "")[-1000:]
+                    stderr = str(completed.stderr or "")[-1000:]
+                    reject_reason = (
+                        "launch_request_execution_failed: "
+                        f"returncode={completed.returncode}; stdout={stdout}; stderr={stderr}"
+                    )
+                    try:
+                        if rejected_fd is None:
+                            rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
+                        _move_launch_request_no_replace(
+                            name,
+                            src_dir_fd=inbox_fd,
+                            dst_dir_fd=rejected_fd,
+                        )
+                    except (OSError, SupervisorError, ValueError) as quarantine_exc:
+                        reject_reason = f"{reject_reason}; quarantine failed: {quarantine_exc}"
+                    _structured_log(
+                        logging.ERROR,
+                        "supervisor.launch_request_failed",
+                        request=name,
+                        returncode=completed.returncode,
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+                    return self._persistent_control_plane_alert(
+                        key=f"launch-request:{name}",
+                        reason=reject_reason,
+                    )
+                try:
+                    if accepted_fd is None:
+                        accepted_fd = _open_launch_request_child_directory(inbox_fd, "accepted")
+                    _move_launch_request_no_replace(
+                        name,
+                        src_dir_fd=inbox_fd,
+                        dst_dir_fd=accepted_fd,
+                    )
+                except (OSError, SupervisorError, ValueError) as exc:
+                    log_rejection(name, f"launch executed; acceptance quarantine failed: {exc}")
+                    return None
+                _structured_log(
+                    logging.INFO,
+                    "supervisor.launch_request_executed",
+                    request=name,
+                    run_dir=str(run_dir),
+                )
+                return SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+            return None
+        except (OSError, SupervisorError, ValueError) as exc:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.launch_request_rejected",
+                request="<inbox>",
+                reason=f"launch request inbox processing failed: {exc}",
+            )
+            return None
+        finally:
+            if accepted_fd is not None:
+                os.close(accepted_fd)
+            if rejected_fd is not None and rejected_fd != accepted_fd:
+                os.close(rejected_fd)
+            os.close(inbox_fd)
 
     def _consume_stage_submission_inbox(
         self,

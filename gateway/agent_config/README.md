@@ -238,6 +238,7 @@ command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.js
 /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output "$command_file"
 /home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
   --run-dir <absolute-run-dir> \
+  --runs-root /home/dev/.openclaw/autoresearch/model-workspaces/long-runs \
   --manifest <absolute-manifest.json> \
   --command-file "$command_file"
 ```
@@ -248,6 +249,12 @@ is consumed exactly once, is not passed to `systemd-run`, and cannot be supplied
 positionally. Do not pass API keys, tokens, passwords, client secrets, or
 private keys as command arguments; use credential files, environment
 references, or inherited authentication.
+
+The launcher automatically queues prepared runs when a sandbox cannot reach
+the user-systemd bus. `LAUNCH_QUEUED: <run-dir>` is successful completion:
+the PM must end the turn, must not retry, and must not report a blocker. The
+owner-only supervisor launches the request within about 60 seconds, and normal
+supervision wakes the session afterward.
 
 The detached worker uses a `MemoryHigh=20G` soft limit and a `MemoryMax=24G`
 hard limit. These limits apply only to the long-running research command and

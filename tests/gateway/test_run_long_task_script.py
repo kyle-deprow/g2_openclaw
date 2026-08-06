@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -15,17 +16,28 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from gateway.autoresearch.constants import (
+    DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS,
+    DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT,
+)
 from gateway.autoresearch_runs import (
     OUTPUT_CAPTURE_MAX_BYTES,
     AutoresearchRunRecordError,
     RunFailureClassification,
     RunState,
     command_sha256,
+    prepare_run,
     read_run_record,
+    write_command_handoff,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_LONG_TASK = REPO_ROOT / "scripts" / "run-long-task.sh"
+
+
+@pytest.fixture(autouse=True)
+def launch_request_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTORESEARCH_LAUNCH_REQUESTS_DIR", str(tmp_path / "launch-requests"))
 
 
 def _manifest(
@@ -68,6 +80,211 @@ def _wait_for_terminal_status(run_dir: Path) -> dict[str, object]:
                 return status
         time.sleep(0.05)
     raise AssertionError("timed out waiting for detached long task")
+
+
+def test_run_long_task_queues_when_systemd_user_bus_is_unreachable(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    launch_requests = tmp_path / "launch-requests"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "AUTORESEARCH_FORCE_LAUNCH_QUEUE": "1",
+            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(launch_requests),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"LAUNCH_QUEUED: {run_dir}"
+    request_paths = sorted(launch_requests.glob("*.json"))
+    assert len(request_paths) == 1
+    request_path = request_paths[0]
+    assert request_path.name.startswith("attempt-1-")
+    assert stat.S_IMODE(request_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(launch_requests.stat().st_mode) == 0o700
+    assert json.loads(request_path.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "run_dir": str(run_dir),
+        "runs_root": str(runs_root),
+    }
+    assert not list(launch_requests.glob(".*.tmp"))
+    assert not (run_dir / "status.json").exists()
+    assert (run_dir / ".command-handoff.json").exists()
+
+
+def test_run_long_task_queues_when_systemd_probe_fails(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    launch_requests = tmp_path / "launch-requests"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    (shim_dir / "systemd-run").write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    (shim_dir / "systemd-run").chmod(0o755)
+    environment = dict(os.environ)
+    environment.pop("AUTORESEARCH_FORCE_LAUNCH_QUEUE", None)
+    environment.update(
+        {
+            "PATH": f"{shim_dir}:{environment['PATH']}",
+            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(launch_requests),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_LONG_TASK),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"LAUNCH_QUEUED: {run_dir}"
+    assert len(list(launch_requests.glob("*.json"))) == 1
+    assert (run_dir / ".command-handoff.json").exists()
+
+
+def test_run_long_task_script_defaults_match_python_constants() -> None:
+    script = RUN_LONG_TASK.read_text(encoding="utf-8")
+    runs_match = re.search(
+        r'runs_root="\$\{AUTORESEARCH_RUNS_ROOT:-([^}]+)\}"',
+        script,
+    )
+    launch_requests_match = re.search(
+        r'launch_requests_dir="\$\{AUTORESEARCH_LAUNCH_REQUESTS_DIR:-([^}]+)\}"',
+        script,
+    )
+
+    assert runs_match is not None
+    assert launch_requests_match is not None
+    assert Path(runs_match.group(1)) == DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT
+    assert Path(launch_requests_match.group(1)) == DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS
+
+
+def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=command,
+    )
+    write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    (shim_dir / "systemd-run").write_text(
+        "#!/usr/bin/env bash\nexit 1\n",
+        encoding="utf-8",
+    )
+    (shim_dir / "systemd-run").chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_LONG_TASK),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{shim_dir}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode != 0
+    assert "detached systemd unit could not be enqueued" in result.stderr
+    assert (run_dir / "manifest.json").exists()
+    assert (run_dir / ".command-handoff.json").exists()
+    assert not (run_dir / "status.json").exists()
+
+
+@pytest.mark.parametrize("die_case", ("missing_manifest", "already_started"))
+def test_run_long_task_launch_prepared_rejects_unprepared_or_started_runs(
+    tmp_path: Path,
+    die_case: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    run_dir.mkdir(parents=True)
+    if die_case == "already_started":
+        (run_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        (run_dir / ".command-handoff.json").write_text("{}", encoding="utf-8")
+        (run_dir / "status.json").write_text("{}", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUN_LONG_TASK),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    if die_case == "missing_manifest":
+        assert "prepared run manifest is missing" in result.stderr
+    else:
+        assert "status.json exists" in result.stderr
 
 
 def test_run_long_task_writes_separate_private_secret_free_terminal_capture(tmp_path: Path) -> None:
@@ -615,6 +832,8 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
     (shim_dir / "systemd-run").write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
+        "if '--no-block' not in sys.argv:\n"
+        "    raise SystemExit(0)\n"
         "open(os.environ['CAPTURED_ARGV'], 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
         "raise SystemExit(1)\n",
         encoding="utf-8",
@@ -642,6 +861,7 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
             **os.environ,
             "PATH": f"{shim_dir}:{os.environ['PATH']}",
             "CAPTURED_ARGV": str(captured_argv),
+            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(tmp_path / "launch-requests"),
         },
     )
 
