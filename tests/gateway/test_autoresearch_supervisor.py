@@ -2533,6 +2533,34 @@ def test_fresh_owner_lifecycle_short_circuits_owner_stages_before_task_listing(
     assert fake.rpc_calls == []
 
 
+@pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
+def test_statusless_owner_lifecycle_record_is_not_treated_as_invalid(
+    supervisor_env: SupervisorEnv, phase: Phase
+) -> None:
+    # An aborted turn leaves the gateway session record without a top-level
+    # status key; supervision must proceed instead of alert-looping.
+    _prepare_stale_state(supervisor_env, phase=phase)
+    now = supervisor_env.now
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "sessionId": "ff133dcc-0000-0000-0000-000000000000",
+                    "updatedAt": int(now * 1000) - 1_000,
+                    "lastInteractionAt": int(now * 1000) - 1_000,
+                    "sessionStartedAt": int(now * 1000) - 2_000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    assert result.reason != "invalid_owner_session_lifecycle"
+
+
 def test_fresh_owner_lifecycle_does_not_short_circuit_setup_context(
     supervisor_env: SupervisorEnv,
 ) -> None:

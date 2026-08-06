@@ -1715,6 +1715,11 @@ class AutoresearchSupervisor:
         if not isinstance(lifecycle, Mapping):
             return SupervisorResult(SupervisorOutcome.ALERT, "invalid_owner_session_lifecycle")
         status = lifecycle.get("status")
+        if status is None:
+            # The gateway only writes a top-level status when a run ends
+            # cleanly; an aborted turn leaves the key absent, which means no
+            # run is active — not a malformed record.
+            return None
         if not isinstance(status, str):
             return SupervisorResult(SupervisorOutcome.ALERT, "invalid_owner_session_lifecycle")
         if status != "running":
