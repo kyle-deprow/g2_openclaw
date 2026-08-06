@@ -99,6 +99,13 @@ def write_runtime_config() -> None:
         'approval_policy = "never"',
         'sandbox_mode = "workspace-write"',
         "",
+        "[features]",
+        "# Pin the classic exec backend: the unified-exec/zsh-fork path failed with",
+        "# ENOENT on this host (2026-08-05) and the classic path is proven.",
+        "unified_exec = false",
+        "shell_zsh_fork = false",
+        "unified_exec_zsh_fork = false",
+        "",
         "[sandbox_workspace_write]",
         "network_access = true",
         "writable_roots = ["
@@ -149,6 +156,15 @@ def validate_mcp_wiring() -> None:
         raise SystemExit("Codex runtime config must set approval_policy=never")
     if data.get("sandbox_mode") != "workspace-write":
         raise SystemExit("Codex runtime config must set sandbox_mode=workspace-write")
+    features = data.get("features")
+    if not isinstance(features, dict) or any(
+        features.get(name) is not False
+        for name in ("unified_exec", "shell_zsh_fork", "unified_exec_zsh_fork")
+    ):
+        raise SystemExit(
+            "Codex runtime config must pin unified_exec, shell_zsh_fork, and "
+            "unified_exec_zsh_fork to false"
+        )
     workspace = data.get("sandbox_workspace_write")
     if not isinstance(workspace, dict):
         raise SystemExit("Codex runtime config missing [sandbox_workspace_write]")
