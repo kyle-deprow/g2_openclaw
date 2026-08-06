@@ -186,7 +186,7 @@ def _jq_full_assembly(
             '  "mempalace-readonly": {\n'
             '    "command": $cmd,\n'
             '    "args": [$wrapper, "--palace", $palace],\n'
-            '    "codex": {"agents": $readonly_agents},\n'
+            '    "codex": {"agents": $readonly_agents, "defaultToolsApprovalMode": "approve"},\n'
             '    "env": {\n'
             '      "FASTEMBED_CACHE_PATH": $cache,\n'
             '      "MEMPALACE_EMBEDDING_MODEL": $model,\n'

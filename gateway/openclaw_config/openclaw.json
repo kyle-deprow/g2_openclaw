@@ -367,7 +367,8 @@
             "implementer",
             "reviewer",
             "fixer"
-          ]
+          ],
+          "defaultToolsApprovalMode": "approve"
         }
       },
       "g2-control": {

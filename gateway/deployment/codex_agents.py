@@ -3,7 +3,13 @@
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TypedDict
+
+CODEX_WRITABLE_ROOTS: tuple[Path, ...] = (
+    Path("/home/dev/.openclaw/autoresearch/model-workspaces"),
+    Path("/home/dev/.openclaw/autoresearch/stage-inbox"),
+)
 
 
 class MCPServer(TypedDict, total=False):
@@ -13,6 +19,17 @@ class MCPServer(TypedDict, total=False):
     args: list[str]
     env: dict[str, str]
     default_tools_approval_mode: str
+
+
+def ensure_writable_roots(roots: Sequence[Path] | None = None) -> None:
+    """Ensure every declared Codex writable root exists with private defaults."""
+
+    if roots is None:
+        roots = CODEX_WRITABLE_ROOTS
+    for root in roots:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if root.stat().st_mode & 0o077:
+            root.chmod(0o700)
 
 
 def validate_stage_agents() -> None:
@@ -73,6 +90,7 @@ def write_runtime_config() -> None:
 
     agent_id = os.environ["CODEX_RUNTIME_AGENT_ID"]
     config_path = Path(os.environ["CODEX_RUNTIME_CONFIG_PATH"])
+    ensure_writable_roots()
     mempalace_server: MCPServer = {
         "command": os.environ["CODEX_RUNTIME_MEMPALACE_PYTHON"],
         "args": [
@@ -85,6 +103,7 @@ def write_runtime_config() -> None:
             "MEMPALACE_EMBEDDING_MODEL": os.environ["CODEX_RUNTIME_MEMPALACE_EMBEDDING_MODEL"],
             "HF_HUB_OFFLINE": os.environ["CODEX_RUNTIME_HF_HUB_OFFLINE"],
         },
+        "default_tools_approval_mode": "approve",
     }
     servers: dict[str, MCPServer] = {"mempalace-readonly": mempalace_server}
     if agent_id == "main":
@@ -101,9 +120,7 @@ def write_runtime_config() -> None:
         "",
         "[sandbox_workspace_write]",
         "network_access = true",
-        "writable_roots = ["
-        '"/home/dev/.openclaw/autoresearch/model-workspaces", '
-        '"/home/dev/.openclaw/autoresearch/stage-inbox"]',
+        "writable_roots = " + array([str(root) for root in CODEX_WRITABLE_ROOTS]),
         "exclude_tmpdir_env_var = false",
         "exclude_slash_tmp = false",
         "",
@@ -156,10 +173,7 @@ def validate_mcp_wiring() -> None:
         raise SystemExit(
             "Codex runtime config must enable network_access for localhost Quantipy HTTP"
         )
-    if workspace.get("writable_roots") != [
-        "/home/dev/.openclaw/autoresearch/model-workspaces",
-        "/home/dev/.openclaw/autoresearch/stage-inbox",
-    ]:
+    if workspace.get("writable_roots") != [str(root) for root in CODEX_WRITABLE_ROOTS]:
         raise SystemExit(
             "Codex runtime config must scope writable_roots to model workspace and stage inbox only"
         )

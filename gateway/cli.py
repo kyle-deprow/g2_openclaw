@@ -45,6 +45,12 @@ from gateway.autoresearch_systemd import (
     SystemdUnitStateError,
     systemd_unit_is_active,
 )
+from gateway.deployment.appserver_probe import (
+    APP_SERVER_RESTART_REMEDIATION,
+    AppServerProbeResult,
+    probe_appserver,
+)
+from gateway.deployment.codex_agents import CODEX_WRITABLE_ROOTS
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
 console = Console()
@@ -64,7 +70,9 @@ DEFAULT_AUTORESEARCH_DIR = Path("/home/dev/.openclaw/autoresearch")
 DEFAULT_AUTORESEARCH_STATE_PATH = DEFAULT_AUTORESEARCH_DIR / "quantipy-state.json"
 DEFAULT_AUTORESEARCH_CHECKPOINT_PATH = DEFAULT_AUTORESEARCH_DIR / "owner-recovery.json"
 DEFAULT_AUTORESEARCH_ARTIFACTS_PATH = DEFAULT_AUTORESEARCH_DIR / "artifacts"
-DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH = DEFAULT_AUTORESEARCH_DIR / "stage-inbox"
+DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH = next(
+    root for root in CODEX_WRITABLE_ROOTS if root.name == "stage-inbox"
+)
 DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH = Path(
     "/home/dev/.openclaw/agents/autoresearch-pm/sessions/sessions.json"
 )
@@ -616,6 +624,16 @@ class _CampaignArchive:
     owner_session_entry: dict[str, object] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _OwnerSessionResetResult:
+    """Outcome of an autoresearch owner-session mapping reset."""
+
+    key_present: bool
+    changed: bool
+    session_id: str | None
+    backup_path: Path | None
+
+
 def _run_systemd_probe(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     """Run one read-only systemd probe for the sanctioned systemd leaf."""
     try:
@@ -669,6 +687,85 @@ def _atomic_write_text(path: Path, content: str) -> None:
 def _archive_json(path: Path, payload: object) -> None:
     """Write one archive metadata file without exposing a half-written JSON file."""
     _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _load_owner_sessions_store(sessions_path: Path) -> dict[str, object]:
+    """Read and validate an owner-session JSON mapping before mutation."""
+    if sessions_path.is_symlink():
+        raise _OperatorCommandError(f"refusing symlinked owner sessions store: {sessions_path}")
+    try:
+        raw: object = json.loads(sessions_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise _OperatorCommandError(f"owner sessions store is missing: {sessions_path}") from exc
+    except (OSError, json.JSONDecodeError, UnicodeError) as exc:
+        raise _OperatorCommandError(
+            f"cannot safely read owner sessions store {sessions_path}: {exc}"
+        ) from exc
+    if not isinstance(raw, Mapping) or not all(isinstance(key, str) for key in raw):
+        raise _OperatorCommandError(f"owner sessions store is not a JSON object: {sessions_path}")
+    return dict(raw)
+
+
+def _reset_owner_session(
+    sessions_path: Path,
+    session_key: str,
+    *,
+    confirm: bool,
+) -> _OwnerSessionResetResult:
+    """Remove one owner-session key after explicit confirmation."""
+    store = _load_owner_sessions_store(sessions_path)
+    entry_raw = store.get(session_key)
+    if entry_raw is None:
+        return _OwnerSessionResetResult(False, False, None, None)
+    if not isinstance(entry_raw, Mapping):
+        raise _OperatorCommandError(f"owner session entry is not an object: {session_key}")
+    session_id = entry_raw.get("sessionId")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise _OperatorCommandError(f"owner session entry has no usable sessionId: {session_key}")
+    if not confirm:
+        return _OwnerSessionResetResult(True, False, session_id, None)
+
+    backup_path = _new_utc_path(sessions_path.parent, f"{sessions_path.name}.pre-reset")
+    try:
+        shutil.copy2(sessions_path, backup_path)
+    except OSError as exc:
+        raise _OperatorCommandError(
+            f"failed to back up owner sessions store {sessions_path}: {exc}"
+        ) from exc
+
+    updated_store = dict(store)
+    del updated_store[session_key]
+    try:
+        original_mode = sessions_path.stat().st_mode & 0o777
+        _atomic_write_text(
+            sessions_path,
+            json.dumps(updated_store, indent=2, sort_keys=True) + "\n",
+        )
+        if sessions_path.stat().st_mode & 0o777 != original_mode:
+            sessions_path.chmod(original_mode)
+    except OSError as exc:
+        raise _OperatorCommandError(
+            f"failed to preserve owner sessions store mode {sessions_path}: {exc}"
+        ) from exc
+    return _OwnerSessionResetResult(True, True, session_id, backup_path)
+
+
+def _ensure_owner_session_reset_quiescent() -> None:
+    """Require both autoresearch and gateway services to be provably inactive."""
+
+    try:
+        if _is_systemd_unit_active(DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
+            raise _OperatorCommandError(
+                "refusing owner-session reset while "
+                f"{DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE} is active; stop it first"
+            )
+        if _is_systemd_unit_active(DEFAULT_OPENCLAW_GATEWAY_SERVICE):
+            raise _OperatorCommandError(
+                "refusing owner-session reset while "
+                f"{DEFAULT_OPENCLAW_GATEWAY_SERVICE} is active; stop it first"
+            )
+    except SystemdUnitStateError as exc:
+        raise _OperatorCommandError(f"cannot prove services are inactive: {exc}") from exc
 
 
 def _load_owner_session_archive_plan(
@@ -947,6 +1044,13 @@ def autoresearch_doctor() -> None:
     except Exception as exc:
         checkpoint_error = str(exc)
 
+    appserver_result: AppServerProbeResult | None = None
+    appserver_error: str | None = None
+    try:
+        appserver_result = probe_appserver()
+    except Exception as exc:
+        appserver_error = str(exc)
+
     status = None
     status_error: str | None = None
     try:
@@ -1066,6 +1170,35 @@ def autoresearch_doctor() -> None:
         if alerted_keys:
             degraded.append("alerted recovery key")
 
+    console.print("app-server")
+    if appserver_result is None:
+        console.print(
+            f"  ERROR: probe-error: {appserver_error or 'unknown'}",
+            markup=False,
+            soft_wrap=True,
+        )
+        degraded.append("app-server probe-error")
+    else:
+        if appserver_result.missing_writable_roots:
+            console.print("  missing writable roots:")
+            for root in appserver_result.missing_writable_roots:
+                console.print(f"    {root}", markup=False)
+            missing_roots = ", ".join(str(root) for root in appserver_result.missing_writable_roots)
+            degraded.append(f"missing writable roots: {missing_roots}")
+        else:
+            console.print("  writable roots=present")
+        if appserver_result.stale_arg0_directories:
+            for finding in appserver_result.stale_arg0_directories:
+                console.print(
+                    f"  pid={finding.pid} stale arg0 dir={finding.path}; "
+                    f"{APP_SERVER_RESTART_REMEDIATION}",
+                    markup=False,
+                    soft_wrap=True,
+                )
+                degraded.append(f"pid {finding.pid} stale arg0 dir: {finding.path}")
+        else:
+            console.print("  arg0 directories=healthy")
+
     services_active = all(
         service_states.get(unit) is True
         for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE)
@@ -1085,6 +1218,64 @@ def autoresearch_doctor() -> None:
         )
         raise typer.Exit(code=1)
     console.print("health=HEALTHY")
+
+
+@app.command("autoresearch-reset-owner-session")
+def autoresearch_reset_owner_session(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Confirm removal of the autoresearch owner-session mapping.",
+    ),
+) -> None:
+    """Remove the autoresearch owner-session mapping so the next wake is fresh."""
+    try:
+        planned = _reset_owner_session(
+            DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+            AUTORESEARCH_OWNER_SESSION_KEY,
+            confirm=False,
+        )
+        if not planned.key_present:
+            console.print(
+                f"owner session key absent; no action: {AUTORESEARCH_OWNER_SESSION_KEY}",
+                markup=False,
+            )
+            return
+        if not confirm:
+            console.print(
+                f"owner session key present (sessionId={planned.session_id}); would back up and "
+                f"remove it from {DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH}; rerun with --confirm",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+        _ensure_owner_session_reset_quiescent()
+        result = _reset_owner_session(
+            DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH,
+            AUTORESEARCH_OWNER_SESSION_KEY,
+            confirm=True,
+        )
+    except _OperatorCommandError as exc:
+        console.print(f"autoresearch-reset-owner-session failed: {exc}", markup=False)
+        raise typer.Exit(code=1) from exc
+
+    if not result.key_present:
+        console.print(
+            f"owner session key absent; no action: {AUTORESEARCH_OWNER_SESSION_KEY}",
+            markup=False,
+        )
+        return
+    if not result.changed:
+        console.print(
+            f"owner session key present (sessionId={result.session_id}); would back up and "
+            f"remove it from {DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH}; rerun with --confirm",
+            markup=False,
+        )
+        raise typer.Exit(code=1)
+    console.print(
+        f"removed owner session key {AUTORESEARCH_OWNER_SESSION_KEY} "
+        f"(sessionId={result.session_id}); backup: {result.backup_path}",
+        markup=False,
+    )
 
 
 @app.command("autoresearch-init-state")

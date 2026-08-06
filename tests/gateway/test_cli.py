@@ -115,12 +115,14 @@ from gateway.cli import (
     _detect_gpu,
     _get_local_ip,
     _openclaw_daemon_env,
+    _OperatorCommandError,
     _parse_gpu_output,
     _PartialArchiveError,
     _read_openclaw_config,
     _render_env,
     _require_simulator_backend,
     _require_simulator_still_running,
+    _reset_owner_session,
     _ResolvedOpenClaw,
     _signal_process_group,
     _simulator_launch_command,
@@ -129,6 +131,7 @@ from gateway.cli import (
     _vite_launch_command,
     app,
 )
+from gateway.deployment.appserver_probe import AppServerProbeResult
 from typer.testing import CliRunner
 
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
@@ -178,6 +181,17 @@ def isolated_autoresearch_lock_namespace(
         constants,
         "AUTORESEARCH_LOCK_NAMESPACE",
         tmp_path / "autoresearch-locks",
+    )
+
+
+@pytest.fixture
+def isolated_appserver_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep doctor tests independent of live writable-root paths and /proc."""
+
+    monkeypatch.setattr(
+        cli_module,
+        "probe_appserver",
+        lambda: AppServerProbeResult((), ()),
     )
 
 
@@ -651,6 +665,7 @@ def _doctor_control_status(*, last_cycle_at: float | None) -> ControlStatus:
 def test_autoresearch_doctor_reports_healthy_status_and_d1_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_appserver_probe: None,
 ) -> None:
     state_path = tmp_path / "quantipy-state.json"
     checkpoint_path = tmp_path / "owner-recovery.json"
@@ -683,6 +698,7 @@ def test_autoresearch_doctor_reports_healthy_status_and_d1_fields(
 def test_autoresearch_doctor_reports_degraded_checks_and_exit_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_appserver_probe: None,
 ) -> None:
     state_path = tmp_path / "quantipy-state.json"
     checkpoint_path = tmp_path / "owner-recovery.json"
@@ -723,6 +739,7 @@ def test_autoresearch_doctor_reports_degraded_checks_and_exit_one(
 def test_autoresearch_doctor_corrupt_state_is_clear_and_nonzero(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_appserver_probe: None,
 ) -> None:
     state_path = tmp_path / "quantipy-state.json"
     checkpoint_path = tmp_path / "owner-recovery.json"
@@ -750,6 +767,7 @@ def test_autoresearch_doctor_corrupt_state_is_clear_and_nonzero(
 def test_autoresearch_doctor_marks_stale_cycle_degraded_when_services_are_active(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_appserver_probe: None,
 ) -> None:
     state_path = tmp_path / "quantipy-state.json"
     checkpoint_path = tmp_path / "owner-recovery.json"
@@ -772,6 +790,7 @@ def test_autoresearch_doctor_marks_stale_cycle_degraded_when_services_are_active
 def test_autoresearch_doctor_reports_systemd_probe_error_distinctly(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_appserver_probe: None,
 ) -> None:
     state_path = tmp_path / "quantipy-state.json"
     checkpoint_path = tmp_path / "owner-recovery.json"
@@ -796,6 +815,251 @@ def test_autoresearch_doctor_reports_systemd_probe_error_distinctly(
     assert "probe-error" in result.output
     assert "[probe]" in result.output
     assert "supervisor_active=False" not in result.output
+
+
+def test_autoresearch_doctor_reports_appserver_probe_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=time.time()).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+
+    def fail_probe() -> AppServerProbeResult:
+        raise RuntimeError("probe failed")
+
+    monkeypatch.setattr(cli_module, "probe_appserver", fail_probe)
+
+    with patch(
+        "gateway.autoresearch_control.AutoresearchControl.status",
+        return_value=_doctor_control_status(last_cycle_at=time.time()),
+    ):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "app-server probe-error" in result.output
+    assert "probe failed" in result.output
+
+
+def test_autoresearch_reset_owner_session_requires_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+
+    result = runner.invoke(app, ["autoresearch-reset-owner-session"])
+
+    assert result.exit_code == 1, result.output
+    assert "rerun with --confirm" in result.output
+    assert json.loads(sessions_path.read_text(encoding="utf-8")) == {
+        AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}
+    }
+
+
+def test_autoresearch_reset_owner_session_confirmed_reports_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    result = runner.invoke(app, ["autoresearch-reset-owner-session", "--confirm"])
+
+    assert result.exit_code == 0, result.output
+    assert "sessionId=stale-owner" in result.output
+    assert "backup:" in result.output
+    assert AUTORESEARCH_OWNER_SESSION_KEY not in json.loads(
+        sessions_path.read_text(encoding="utf-8")
+    )
+    assert len(list(tmp_path.glob("sessions.json.pre-reset-*"))) == 1
+    assert not sessions_path.with_name("sessions.json.tmp").exists()
+
+
+def _assert_autoresearch_reset_owner_session_refuses_active_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_unit: str,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda unit: unit == active_unit,
+    )
+
+    result = runner.invoke(app, ["autoresearch-reset-owner-session", "--confirm"])
+
+    assert result.exit_code == 1, result.output
+    assert "stop it first" in result.output
+    assert json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert not list(tmp_path.glob("sessions.json.pre-reset-*"))
+
+
+@pytest.mark.parametrize(
+    "active_unit",
+    [
+        cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE,
+        cli_module.DEFAULT_OPENCLAW_GATEWAY_SERVICE,
+    ],
+)
+def test_autoresearch_reset_owner_session_refuses_active_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_unit: str,
+) -> None:
+    _assert_autoresearch_reset_owner_session_refuses_active_service(
+        tmp_path,
+        monkeypatch,
+        active_unit,
+    )
+
+
+def test_autoresearch_reset_owner_session_fails_closed_on_systemd_probe_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda _unit: (_ for _ in ()).throw(SystemdUnitStateError("inconclusive")),
+    )
+
+    result = runner.invoke(app, ["autoresearch-reset-owner-session", "--confirm"])
+
+    assert result.exit_code == 1, result.output
+    assert "cannot prove services are inactive" in result.output
+    assert not list(tmp_path.glob("sessions.json.pre-reset-*"))
+
+
+def test_reset_owner_session_removes_key_and_writes_backup_atomically(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    original = {
+        AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner", "updatedAt": 1},
+        "other:key": {"sessionId": "keep-me"},
+    }
+    sessions_path.write_text(json.dumps(original), encoding="utf-8")
+    sessions_path.chmod(0o640)
+
+    result = _reset_owner_session(
+        sessions_path,
+        AUTORESEARCH_OWNER_SESSION_KEY,
+        confirm=True,
+    )
+
+    assert result.changed is True
+    assert result.session_id == "stale-owner"
+    assert result.backup_path is not None
+    assert result.backup_path.name.startswith("sessions.json.pre-reset-")
+    assert json.loads(result.backup_path.read_text(encoding="utf-8")) == original
+    assert json.loads(sessions_path.read_text(encoding="utf-8")) == {
+        "other:key": {"sessionId": "keep-me"}
+    }
+    assert sessions_path.stat().st_mode & 0o777 == 0o640
+    assert not sessions_path.with_name("sessions.json.tmp").exists()
+
+
+def test_reset_owner_session_without_key_is_successful_noop(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(json.dumps({"other:key": {"sessionId": "keep-me"}}), encoding="utf-8")
+
+    result = _reset_owner_session(
+        sessions_path,
+        AUTORESEARCH_OWNER_SESSION_KEY,
+        confirm=False,
+    )
+
+    assert result.key_present is False
+    assert result.changed is False
+    assert result.backup_path is None
+    assert not list(tmp_path.glob("sessions.json.pre-reset-*"))
+
+
+def test_reset_owner_session_without_confirmation_does_not_mutate(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    original = {AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "stale-owner"}}
+    sessions_path.write_text(json.dumps(original), encoding="utf-8")
+
+    result = _reset_owner_session(
+        sessions_path,
+        AUTORESEARCH_OWNER_SESSION_KEY,
+        confirm=False,
+    )
+
+    assert result.key_present is True
+    assert result.changed is False
+    assert json.loads(sessions_path.read_text(encoding="utf-8")) == original
+    assert not list(tmp_path.glob("sessions.json.pre-reset-*"))
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ([], "not a JSON object"),
+        ({AUTORESEARCH_OWNER_SESSION_KEY: []}, "not an object"),
+        ({AUTORESEARCH_OWNER_SESSION_KEY: {}}, "no usable sessionId"),
+    ],
+)
+def test_reset_owner_session_rejects_malformed_store_entries(
+    tmp_path: Path,
+    payload: object,
+    message: str,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    sessions_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(_OperatorCommandError, match=message):
+        _reset_owner_session(
+            sessions_path,
+            AUTORESEARCH_OWNER_SESSION_KEY,
+            confirm=True,
+        )
+
+
+def test_reset_owner_session_reports_missing_store(tmp_path: Path) -> None:
+    with pytest.raises(_OperatorCommandError, match="owner sessions store is missing"):
+        _reset_owner_session(
+            tmp_path / "sessions.json",
+            AUTORESEARCH_OWNER_SESSION_KEY,
+            confirm=True,
+        )
+
+
+def test_autoresearch_reset_owner_session_missing_store_is_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", sessions_path)
+
+    result = runner.invoke(app, ["autoresearch-reset-owner-session", "--confirm"])
+
+    assert result.exit_code == 1, result.output
+    assert "owner sessions store is missing" in result.output
 
 
 def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(

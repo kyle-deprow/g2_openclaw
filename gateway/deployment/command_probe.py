@@ -195,6 +195,10 @@ def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
     node_binary, cli = resolve_embedded_codex_binary(embedded_codex_cli)
     environment = os.environ.copy()
     environment["CODEX_HOME"] = str(codex_home)
+    # The probe must replicate the supervisor's clean service environment; a
+    # caller-injected node preload (e.g. a stale Azure shim) would fail every
+    # spawned node process inside the sandbox.
+    environment.pop("NODE_OPTIONS", None)
     failures: list[tuple[str, subprocess.CompletedProcess[str], str | None]] = []
 
     working_directory = Path.home() / _PM_WORKING_DIRECTORY

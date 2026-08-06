@@ -304,7 +304,10 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
             "mempalace-readonly": {
                 "command": inputs.mempalace_python,
                 "args": [inputs.mempalace_wrapper, "--palace", inputs.mempalace_palace],
-                "codex": {"agents": list(inputs.mempalace_readonly_agents)},
+                "codex": {
+                    "agents": list(inputs.mempalace_readonly_agents),
+                    "defaultToolsApprovalMode": "approve",
+                },
                 "env": {
                     "FASTEMBED_CACHE_PATH": inputs.fastembed_cache,
                     "MEMPALACE_EMBEDDING_MODEL": inputs.mempalace_embedding_model,
