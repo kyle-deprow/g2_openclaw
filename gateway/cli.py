@@ -525,7 +525,7 @@ _project_root_option = typer.Option(
     help="Override project root (for testing).",
 )
 _openclaw_config_option = typer.Option(
-    Path("gateway/openclaw_config/openclaw.json"),
+    autoresearch_constants.DEFAULT_OPENCLAW_CONFIG_PATH,
     "--openclaw-config",
     hidden=True,
     help="Override autoresearch config path (for testing).",

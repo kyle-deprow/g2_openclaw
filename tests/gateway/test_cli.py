@@ -2721,6 +2721,7 @@ class TestAutoresearchCliCommands:
     def test_autoresearch_next_provisions_fixed_runs_root_before_verification_dispatch(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         state = MagicMock()
         state.phase = Phase.VERIFICATION
@@ -2734,10 +2735,13 @@ class TestAutoresearchCliCommands:
         for path in (state_path, config_path, readiness_path):
             path.write_text("{}\n", encoding="utf-8")
         quantipy_root.mkdir()
+        foreign_cwd = tmp_path / "foreign-cwd"
+        foreign_cwd.mkdir()
+        monkeypatch.chdir(foreign_cwd)
 
         with (
             patch("gateway.autoresearch.persistence.load_state_file", return_value=state),
-            patch("gateway.autoresearch.configuration.load_autoresearch_policy"),
+            patch("gateway.autoresearch.configuration.load_autoresearch_policy") as load_policy,
             patch("gateway.cli.load_platform_readiness"),
             patch("gateway.autoresearch.manifest_runtime.build_receipt_catalog"),
             patch("gateway.autoresearch.engine.next_action", return_value=action),
@@ -2763,14 +2767,15 @@ class TestAutoresearchCliCommands:
                     str(state_path),
                     "--quantipy-root",
                     str(quantipy_root),
-                    "--openclaw-config",
-                    str(config_path),
                     "--readiness-manifest",
                     str(readiness_path),
                 ],
             )
 
         assert result.exit_code == 0, result.output
+        assert load_policy.call_args.args[0] == (
+            cli_module._PROJECT_ROOT / "gateway/openclaw_config/openclaw.json"
+        )
         seal_runtime.assert_not_called()
         require_runtime.assert_not_called()
         provision.assert_not_called()

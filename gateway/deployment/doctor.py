@@ -101,9 +101,6 @@ def validate() -> None:
             and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", value) is not None
         )
 
-    def is_strict_numeric_semver(value: object) -> bool:
-        return isinstance(value, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value) is not None
-
     def is_openclaw_embedded_codex_root(value: object) -> bool:
         if not is_abs_path(value):
             return False
@@ -265,7 +262,10 @@ def validate() -> None:
                 },
             )
             and details.get("check for update on startup") == "true"
-            and is_strict_numeric_semver(details.get("latest version"))
+            # The available version is an upstream diagnostic, not one of the
+            # deployment's pinned runtime versions; prerelease/build metadata
+            # may legitimately appear here.
+            and is_semver(details.get("latest version"))
             and details.get("latest version status") == "newer version is available"
             and is_abs_path(details.get("npm package root"))
             and is_openclaw_embedded_codex_root(details.get("running package root"))

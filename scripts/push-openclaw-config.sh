@@ -1761,6 +1761,20 @@ for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_HOME}"
 done
 
+run_autoresearch_pm_command_contract_probe() {
+  local codex_home="${OPENCLAW_PUSH_HOME}/agents/autoresearch-pm/agent/codex-home"
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.command_probe probe \
+    -- "${codex_home}" "${CODEX_APP_SERVER_CLI_RESOLVED}"; then
+    echo "ERROR: Autoresearch PM command-contract probe failed; rolling back managed deployment from backup ${BACKUP}." >&2
+    return 1
+  fi
+}
+
+if [[ "${PROVIDER}" == "codex" ]]; then
+  run_autoresearch_pm_command_contract_probe || run_deployment_rollback_and_exit 1
+fi
+
 # Clean stale copies from wrong bootstrap locations without touching local
 # per-workspace files such as USER.md, IDENTITY.md, or other notes.
 STALE_BOOTSTRAP_DIRS=(

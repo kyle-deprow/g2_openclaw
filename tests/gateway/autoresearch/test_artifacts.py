@@ -26,6 +26,7 @@ from gateway.autoresearch.compute import (
 )
 from gateway.autoresearch.configuration import load_autoresearch_policy
 from gateway.autoresearch.constants import (
+    DEFAULT_OPENCLAW_CONFIG_PATH,
     MEMBER_UNION_DIGEST_ALGORITHM,
 )
 from gateway.autoresearch.enums import (
@@ -512,7 +513,7 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
 
     consensus = _majority_consensus(
         round_number=1,
-        policy=load_autoresearch_policy(Path("gateway/openclaw_config/openclaw.json")),
+        policy=load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH),
     )
     consensus_fields = cast(
         list[str], ARTIFACT_CONTRACTS[ArtifactType.CONSENSUS_RESULT]["required_fields"]

@@ -15,7 +15,8 @@ from gateway.autoresearch_panel_receipts import (
 
 QUANTIPY_PANEL_RECEIPT_MAX_BYTES = PANEL_RECEIPT_MAX_BYTES
 QUANTIPY_RUN_ENVELOPE_MAX_BYTES = RUN_ENVELOPE_MAX_BYTES
-DEFAULT_OPENCLAW_CONFIG_PATH = Path("gateway/openclaw_config/openclaw.json")
+G2_OPENCLAW_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_OPENCLAW_CONFIG_PATH = G2_OPENCLAW_REPO_ROOT / "gateway/openclaw_config/openclaw.json"
 DEFAULT_QUANTIPY_ROOT = Path("/home/dev/repos/quantipy")
 DEFAULT_AUTORESEARCH_MODEL_WORKSPACE_ROOT = Path(
     "/home/dev/.openclaw/autoresearch/model-workspaces"

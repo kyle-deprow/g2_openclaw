@@ -783,6 +783,34 @@ if (process.env.CODEX_DOCTOR_LOG) {
     `${process.env.CODEX_HOME || "<unset>"} ${process.argv.slice(2).join(" ")}\\n`
   );
 }
+if (process.argv[2] === "sandbox") {
+  if (process.env.CODEX_SANDBOX_LOG) {
+    fs.appendFileSync(
+      process.env.CODEX_SANDBOX_LOG,
+      `${JSON.stringify({
+        codexHome: process.env.CODEX_HOME || "<unset>",
+        cwd: process.cwd(),
+        argv: process.argv.slice(2)
+      })}\\n`
+    );
+  }
+  const sandboxStatus = Number(process.env.MOCK_CODEX_SANDBOX_EXIT_STATUS || "0");
+  if (sandboxStatus !== 0) {
+    if (process.env.MOCK_CODEX_SANDBOX_STDERR) {
+      process.stderr.write(`${process.env.MOCK_CODEX_SANDBOX_STDERR}\\n`);
+    } else {
+      const statePath =
+        process.env.MOCK_CODEX_SANDBOX_STATE_PATH ||
+        "/home/dev/.openclaw/autoresearch/quantipy-state.json";
+      process.stderr.write(
+        "Usage: gateway-cli autoresearch-next [OPTIONS] STATE_PATH\\n" +
+        "Invalid value for 'STATE_PATH': File\\n" +
+        `'${statePath}' does not exist.\\n`
+      );
+    }
+  }
+  process.exit(sandboxStatus);
+}
 const codexHome = process.env.CODEX_HOME || "<unset>";
 const packageRoot = process.env.MOCK_CODEX_RESOLVED_PATH || "<unset>";
 const nativePackageRoot = `${packageRoot}-linux-x64/vendor/x86_64-unknown-linux-musl`;
@@ -1510,6 +1538,7 @@ def _prepare_push_script_home(
     leaked_state_dir = tmp_path / "inherited-state-dir"
     leaked_config_path = tmp_path / "inherited-config.json"
     home.mkdir()
+    (home / ".openclaw/autoresearch/model-workspaces").mkdir(parents=True)
     openclaw_home.mkdir()
     auth_db = openclaw_home / "agents/main/agent/openclaw-agent.sqlite"
     auth_db.parent.mkdir(parents=True)
@@ -1586,6 +1615,7 @@ def _prepare_push_script_home(
                 / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
             ),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
+            "CODEX_SANDBOX_LOG": str(home / "codex-sandbox.log"),
             "SQLITE_LOG": str(home / "sqlite.log"),
             "TEST_ROOT": str(tmp_path),
             "TMPDIR": str(tmp_path),
@@ -2784,6 +2814,68 @@ def test_push_script_allows_expected_non_owned_codex_doctor_failures(
     assert "OpenClaw owns OAuth in openclaw-agent.sqlite" in result.stdout
 
 
+def test_push_script_runs_all_wake_commands_in_the_managed_sandbox(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_SANDBOX_EXIT_STATUS"] = "0"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    invocations = [
+        json.loads(line)
+        for line in Path(env["CODEX_SANDBOX_LOG"]).read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(invocations) == 4
+    assert {invocation["codexHome"] for invocation in invocations} == {
+        str(Path(env["OPENCLAW_PUSH_HOME"]) / "agents/autoresearch-pm/agent/codex-home")
+    }
+    assert {invocation["cwd"] for invocation in invocations} == {
+        str(Path(env["HOME"]) / ".openclaw/autoresearch/model-workspaces")
+    }
+    assert all(
+        invocation["argv"][:3] == ["sandbox", "-c", 'sandbox_mode="workspace-write"']
+        for invocation in invocations
+    )
+    expected_command_argv = [
+        "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli",
+        "autoresearch-next",
+        "/home/dev/.openclaw/autoresearch/quantipy-state.json",
+    ]
+    assert all(invocation["argv"][3:] == expected_command_argv for invocation in invocations)
+
+
+def test_push_script_accepts_successful_gateway_cli_probe(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "command-contract probe passed" in result.stdout
+
+
+def test_push_script_rolls_back_when_the_sandbox_probe_fails(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original_config = openclaw_config.read_bytes()
+    env["MOCK_CODEX_SANDBOX_EXIT_STATUS"] = "7"
+    env["MOCK_CODEX_SANDBOX_STDERR"] = "mock sandbox failure"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "command-contract probe failed" in result.stderr
+    assert "exit code: 7" in result.stderr
+    assert "mock sandbox failure" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert openclaw_config.read_bytes() == original_config
+
+
 @pytest.mark.parametrize(
     ("env_name", "env_value", "expected_check"),
     [
@@ -2886,6 +2978,26 @@ def test_push_script_allows_codex_doctor_newer_codex_update_probe_shape(
 
     assert result.returncode == 0, result.stderr
     assert "Codex doctor non-owned failures ignored" in result.stdout
+    assert "updates.status" in result.stdout
+
+
+@pytest.mark.parametrize("latest_version", ["0.146.0-rc.1", "0.146.0+host.7"])
+def test_push_script_allows_structural_latest_codex_semver(
+    tmp_path: Path,
+    latest_version: str,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
+    env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION"] = latest_version
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
+        Path(env["HOME"])
+        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
+        / "node_modules/@openai/codex"
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
     assert "updates.status" in result.stdout
 
 

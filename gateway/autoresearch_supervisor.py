@@ -255,8 +255,8 @@ WAKE_MESSAGE = (
 FINALIZED_MEMORY_WAKE_MESSAGE = (
     "Required final MemPalace persistence was completed by the autoresearch "
     "supervisor from authoritative state. Continue Quantipy autoresearch from "
-    "the authoritative state. First run exactly: cd /home/dev/repos/g2_openclaw "
-    "&& /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next "
+    "the authoritative state. First run exactly: "
+    "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next "
     "/home/dev/.openclaw/autoresearch/quantipy-state.json. Do not write "
     "MemPalace from any model turn."
 )

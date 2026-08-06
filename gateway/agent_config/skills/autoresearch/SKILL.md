@@ -10,8 +10,8 @@ Autoresearch is a PM-orchestrated loop, but authoritative lifecycle mutation,
 loop state, and next-stage selection must come from the deterministic
 controller/supervisor in the `gateway.autoresearch` package (or read-only
 `gateway-cli autoresearch-next` output), not from prompt memory. Because the PM
-workspace is outside this repo, invoke it exactly as `cd
-/home/dev/repos/g2_openclaw && /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next
+workspace is outside this repo, invoke it exactly as
+`/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next
 /home/dev/.openclaw/autoresearch/quantipy-state.json`. The PM uses that
 control-plane output to choose the next stage and verify metrics,
 and repeat until the human says `stop`.
