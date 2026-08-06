@@ -234,7 +234,7 @@ JSON file with `O_EXCL`/`O_NOFOLLOW`:
 Invoke the launcher from this repo with:
 
 ```bash
-command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
+command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/<unique-command>.json
 /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output "$command_file"
 /home/dev/repos/g2_openclaw/scripts/run-long-task.sh \
   --run-dir <absolute-run-dir> \

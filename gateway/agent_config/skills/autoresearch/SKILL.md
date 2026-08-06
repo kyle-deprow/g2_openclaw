@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.6.0
+version: 8.6.1
 ---
 
 # Autoresearch
@@ -36,7 +36,7 @@ run manifest and a one-time private command input file:
 
 ```bash
 cd /home/dev/repos/g2_openclaw
-command_file=/home/dev/.openclaw/autoresearch/command-inputs/<unique-command>.json
+command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/<unique-command>.json
 /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output "$command_file"
 # stdin protocol for the helper:
 # {"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
