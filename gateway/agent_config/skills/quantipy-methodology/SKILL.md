@@ -41,7 +41,7 @@ Before context, debate, consensus, implementation, review, or fix work:
 If a required path is missing, report that exact path as an operator-owned
 blocker. Do not reconstruct missing methodology or capabilities from memory.
 Never emit a raw unwrapped artifact; every production file passed to
-`autoresearch-advance` uses the strict envelope and stays under the 64 KiB local
+`autoresearch-submit-stage` uses the strict envelope and stays under the 64 KiB local
 artifact-file budget. The next-action prompt remains bounded separately.
 
 ## Stage Routing

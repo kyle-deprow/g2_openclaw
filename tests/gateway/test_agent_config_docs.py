@@ -231,14 +231,18 @@ def test_runtime_docs_define_canonical_decision_receipt_authority() -> None:
     assert "memPalace".lower() in normalized
 
 
-def test_autoresearch_advance_uses_locked_atomic_in_place_state_persistence() -> None:
+def test_model_state_advances_route_through_supervisor_owned_inbox() -> None:
     text = AUTORESEARCH.read_text(encoding="utf-8")
     readme = (AGENT_CONFIG / "README.md").read_text(encoding="utf-8")
 
     assert 'next_state="$(mktemp' not in text
     assert 'mv -- "$next_state" "$state"' not in text
-    assert '--output "$state"' in text
-    assert "--output /home/dev/.openclaw/autoresearch/quantipy-state.json" in readme
+    assert '--output "$state"' not in text
+    assert "never write the authoritative state file directly" in text
+    assert "reserved for the unsandboxed supervisor and" in text
+    assert "--output /home/dev/.openclaw/autoresearch/quantipy-state.json" not in readme
+    assert "never write the authoritative state file directly" in readme
+    assert "reserved for the unsandboxed supervisor and operator" in readme
 
 
 def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspended_campaigns() -> (
@@ -423,7 +427,7 @@ def test_runtime_docs_require_absolute_artifact_handoff_paths() -> None:
     assert "artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json" in protocol
     assert 'jq -e . "$artifact"' in protocol
     assert 'wc -c "$artifact"' in protocol
-    assert 'autoresearch-advance "$state" "$artifact"' in protocol
+    assert 'autoresearch-submit-stage "$state" "$artifact"' in protocol
     assert "absolute-path handoff template" in normalized
 
 

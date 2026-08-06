@@ -209,8 +209,9 @@ must:
    `{"instruction_manifest_sha256":"<source_manifest_sha256>","state_reference_sha256":"<state_reference_sha256>","artifact":{...}}`.
    Unavailable fields are `null`, never fabricated values. Never write or pass
    a raw unwrapped `verification_result`.
-4. Persist that envelope with `gateway-cli autoresearch-advance` before any
-   prose status or handoff.
+4. Submit that envelope with `gateway-cli autoresearch-submit-stage` before
+   any prose status or handoff; the unsandboxed supervisor validates and
+   applies it from the stage inbox within one poll cycle.
 5. Route an accepted fix request only to `fixer` in that same workspace, then
    repeat structured verification and review as directed by the runner.
 

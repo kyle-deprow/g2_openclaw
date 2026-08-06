@@ -188,7 +188,7 @@ type, ordered target agent IDs, and canonical target repo root. Before writing
 a stage artifact, use the dispatch `source_manifest_sha256` and
 `state_reference_sha256` from `autoresearch-next`; read live source files when
 their current methodology rules are needed, not as a mutable freshness gate.
-Production artifact files passed to `autoresearch-advance` must use the exact
+Production artifact files passed to `autoresearch-submit-stage` must use the exact
 strict production envelope and stay at or below 64 KiB. This local artifact
 budget accommodates complete expanded universe receipts; the separate
 `autoresearch-next` prompt remains capped at 32 KiB:
@@ -201,20 +201,21 @@ budget accommodates complete expanded universe receipts; the separate
 }
 ```
 
-Example advance command:
+Example submission command:
 
 ```bash
-/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-submit-stage \
   /home/dev/.openclaw/autoresearch/quantipy-state.json artifact.json \
-  --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
-  --output /home/dev/.openclaw/autoresearch/quantipy-state.json
+  --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json
 ```
 
-The in-place output is serialized by the runner's state lock and published with
-an atomic replace. Do not move a shell-created empty temp file over the
-authoritative state after `autoresearch-advance` fails.
+Model sessions never write the authoritative state file directly; the Codex
+sandbox only permits writes to the model workspace and the stage inbox.
+`autoresearch-advance` is reserved for the unsandboxed supervisor and operator.
+The supervisor validates and applies accepted submissions from the inbox with
+the runner's locked atomic persistence within one poll cycle.
 
-`autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
+`autoresearch-submit-stage` rejects mismatched, missing, extra-key, stale-state, and
 unwrapped files before state advance. The complete envelope file must be at most
 64 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
 has a hard 32 KiB prompt budget and fails closed with an actionable error if

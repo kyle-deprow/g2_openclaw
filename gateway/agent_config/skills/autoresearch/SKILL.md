@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.4.0
+version: 8.5.0
 ---
 
 # Autoresearch
@@ -204,7 +204,7 @@ required for the stage are operator-owned blockers. OpenClaw-configured skills
 remain authoritative; target-repo methodology and agent files are read live from
 `/home/dev/repos/quantipy` using the listed canonical paths.
 
-Every production artifact file passed to `gateway-cli autoresearch-advance`
+Every production artifact file passed to `gateway-cli autoresearch-submit-stage`
 must be exactly:
 
 ```json
@@ -218,8 +218,8 @@ must be exactly:
 The `artifact` value is the phase-specific structured artifact. Do not add
 extra envelope keys, omit the digest, or pass legacy unwrapped artifacts.
 Write production artifacts to an absolute path in the PM workspace, then use
-that exact variable for validation and advancement so repository cwd changes
-cannot make `jq`, `wc`, or `autoresearch-advance` inspect different files:
+that exact variable for validation and submission so repository cwd changes
+cannot make `jq`, `wc`, or `autoresearch-submit-stage` inspect different files:
 
 ```bash
 state=/home/dev/.openclaw/autoresearch/quantipy-state.json
@@ -227,19 +227,24 @@ artifact=/home/dev/.openclaw/workspace-autoresearch-pm/<artifact-name>.json
 jq -e . "$artifact" >/dev/null
 wc -c "$artifact"
 cd /home/dev/repos/g2_openclaw
-/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance "$state" "$artifact" \
+/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-submit-stage "$state" "$artifact" \
   --instruction-manifest-sha256 "<source_manifest_sha256 from autoresearch-next>" \
-  --state-reference-sha256 "<state_reference_sha256 from autoresearch-next>" \
-  --output "$state"
+  --state-reference-sha256 "<state_reference_sha256 from autoresearch-next>"
 ```
 
-`autoresearch-advance` rejects mismatched, missing, extra-key, stale-state, and
-unwrapped files before state advance. The complete envelope file must be at most
-64 KiB; compact the artifact rather than truncating it. `autoresearch-next` also
-has a hard 32 KiB prompt budget and fails closed with an actionable error if
-accepted state artifacts would exceed it. The in-place output path uses the
-runner's locked atomic persistence; never replace authoritative state with a
-shell-created temporary file after a failed command.
+`autoresearch-submit-stage` rejects mismatched, missing, extra-key, stale-state,
+and unwrapped files before accepting the submission into the supervisor-owned
+inbox. Model sessions never write the authoritative state file directly — the
+Codex sandbox only permits writes to the model workspace and the stage inbox,
+and `autoresearch-advance` is reserved for the unsandboxed supervisor and
+operator. After a successful submission, the supervisor validates and applies it
+within one poll cycle (about 60 seconds) and wakes the session with the next
+instructions; end the turn after submitting instead of polling for the state
+change. The complete envelope file must be at most 64 KiB; compact the artifact
+rather than truncating it. `autoresearch-next` also has a hard 32 KiB prompt
+budget and fails closed with an actionable error if accepted state artifacts
+would exceed it. Never replace authoritative state with a shell-created
+temporary file after a failed command.
 
 ## Explicit Research Modes
 
