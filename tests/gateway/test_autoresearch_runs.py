@@ -183,6 +183,34 @@ def test_output_capture_keeps_streams_private_and_out_of_status_content(tmp_path
     assert b"stderr diagnostic" not in (run_dir / "status.json").read_bytes()
 
 
+def test_empty_capture_receipt_reads_as_not_yet_written(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest(run_dir)), encoding="utf-8")
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+    prepare_output_capture(run_dir=run_dir, runs_root=runs_root)
+
+    receipt_path = run_dir / ".stdout.capture.json"
+    receipt_path.touch(mode=0o600)
+
+    receipt = autoresearch_runs._read_capture_receipt(
+        run_dir, RunOutputStream.STDOUT, required=False
+    )
+    assert receipt is None
+
+    with pytest.raises(
+        autoresearch_runs.AutoresearchRunRecordError,
+        match="missing stdout capture receipt",
+    ):
+        autoresearch_runs._read_capture_receipt(run_dir, RunOutputStream.STDOUT, required=True)
+
+
 def test_output_capture_stores_a_bounded_tail_with_a_digest(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"

@@ -1423,6 +1423,12 @@ def _read_capture_receipt(
         if required:
             raise AutoresearchRunRecordError(f"missing {stream.value} capture receipt")
         return None
+    if receipt_path.stat().st_size == 0:
+        # The capture drainer creates the receipt exclusively and then renames
+        # the content in atomically; an empty file is a not-yet-written receipt.
+        if required:
+            raise AutoresearchRunRecordError(f"missing {stream.value} capture receipt")
+        return None
     raw = _read_private_json(receipt_path, label="capture receipt")
     _require_exact_keys(
         raw,

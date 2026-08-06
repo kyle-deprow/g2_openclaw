@@ -67,7 +67,10 @@ uv_bin_dir="$(dirname -- "$uv_path")"
 transient_path="${PATH}:${uv_bin_dir}"
 timeout_term_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-runtime_python=(uv run --project "$repo_root" --directory "$repo_root" python -m gateway.autoresearch_runs)
+# Direct venv argv: sandboxed stage agents cannot write the uv cache or repo
+# .venv, so `uv run` fails with EROFS inside the launch sandbox.
+runtime_python=("${repo_root}/.venv/bin/python" -m gateway.autoresearch_runs)
+[[ -x "${runtime_python[0]}" ]] || die "repo venv python is missing: ${runtime_python[0]}"
 
 if [[ -L "$run_dir" || -L "$manifest" || ( -n "$command_file" && -L "$command_file" ) ]]; then
   die "run directory, manifest, and command input must not be symlinks"

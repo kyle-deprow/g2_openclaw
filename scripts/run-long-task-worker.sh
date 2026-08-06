@@ -15,7 +15,9 @@ unit_name="$4"
 [[ "$run_dir" = /* && "$runs_root" = /* ]] || die "worker paths must be absolute"
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-runtime_python=(uv run --project "$repo_root" --directory "$repo_root" python -m gateway.autoresearch_runs)
+# Direct venv argv matches the launcher: no uv cache or repo .venv writes.
+runtime_python=("${repo_root}/.venv/bin/python" -m gateway.autoresearch_runs)
+[[ -x "${runtime_python[0]}" ]] || die "repo venv python is missing: ${runtime_python[0]}"
 supervisor_pid=""
 monitor_pid=""
 timeout_pid=""
