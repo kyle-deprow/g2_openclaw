@@ -2,6 +2,10 @@
 
 Terse recovery notes for the Codex app-server and autoresearch owner session.
 
+## Data API
+
+If prewarm reports an `httpx.ConnectError` while connecting to `127.0.0.1:8000`, restart the independent data-plane unit `quantipy-api.service` with `systemctl --user restart quantipy-api.service`.
+
 ## Unified exec: missing arg0 shim
 
 Signature:

@@ -1,0 +1,18 @@
+[Unit]
+Description=Quantipy Data API
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dev/repos/quantipy
+Environment=HOME=@HOME@
+Environment=PATH=@PATH@
+ExecStart=/home/dev/repos/quantipy/.venv/bin/python -m quantipy.api --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

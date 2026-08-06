@@ -20,6 +20,7 @@ OPENCLAW_CONFIG = REPO_ROOT / "gateway/openclaw_config/openclaw.json"
 SUPERVISOR_UNIT_TEMPLATE = (
     REPO_ROOT / "gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 )
+QUANTIPY_API_UNIT_TEMPLATE = REPO_ROOT / "gateway/openclaw_config/quantipy-api.service.template"
 GATEWAY_RUNTIME_CAPS_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 )
@@ -759,6 +760,10 @@ def _native_crash_hardening_dropin_dst(home: Path) -> Path:
 
 def _supervisor_unit_dst(home: Path) -> Path:
     return home / ".config/systemd/user/quantipy-autoresearch-supervisor.service"
+
+
+def _quantipy_api_unit_dst(home: Path) -> Path:
+    return home / ".config/systemd/user/quantipy-api.service"
 
 
 def _write_push_script_fixture_bin(
@@ -1916,12 +1921,30 @@ def _assert_missing_gateway_left_managed_destinations_untouched(
     assert not (openclaw_home / "workspace").exists()
     assert not list(openclaw_home.glob("workspace-*"))
     assert not (home / ".config/systemd/user").exists()
+    assert not _quantipy_api_unit_dst(home).exists()
     assert not (home / ".mempalace").exists()
     assert not Path(env["FASTEMBED_CACHE_PATH"]).exists()
     cp_log = _read_cp_log(env)
     assert "openclaw.json.bak" not in cp_log
     assert "mempalace-readonly-server.py" not in cp_log
     assert "/gateway/agent_config/" not in cp_log
+
+
+def test_push_script_rejects_corrupted_quantipy_api_unit_template(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    original_template = QUANTIPY_API_UNIT_TEMPLATE.read_bytes()
+    corrupted_template = original_template.replace(b"RestartSec=10", b"RestartSec=20")
+    QUANTIPY_API_UNIT_TEMPLATE.write_bytes(corrupted_template)
+    try:
+        result = _run_push_script(env)
+    finally:
+        QUANTIPY_API_UNIT_TEMPLATE.write_bytes(original_template)
+
+    assert result.returncode != 0
+    assert "Quantipy API unit must" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+    assert not _quantipy_api_unit_dst(Path(env["HOME"])).exists()
+    assert not (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json.bak").exists()
 
 
 def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
@@ -2512,12 +2535,16 @@ def test_push_script_rejects_non_exact_codex_runtime(
 def test_push_script_installs_but_does_not_start_the_supervisor_service() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
     template = SUPERVISOR_UNIT_TEMPLATE.read_text(encoding="utf-8")
+    api_template = QUANTIPY_API_UNIT_TEMPLATE.read_text(encoding="utf-8")
 
     assert "quantipy-autoresearch-supervisor.service" in script
+    assert "quantipy-api.service" in script
     assert "systemctl --user daemon-reload" in script
     assert '"${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"' in script
+    assert '"${SYSTEMD_USER_DIR}/quantipy-api.service"' in script
     assert "enable --now" not in script
     assert "start quantipy-autoresearch-supervisor.service" not in script
+    assert "start quantipy-api.service" not in script
     assert "@REPO_ROOT@" in template
     assert "@HOME@" in template
     assert "@OPENCLAW_BIN@" not in template
@@ -2529,6 +2556,21 @@ def test_push_script_installs_but_does_not_start_the_supervisor_service() -> Non
     assert "BindsTo=openclaw-gateway.service" in template
     assert "Restart=on-failure" in template
     assert "Restart=always" not in template
+    assert "Description=Quantipy Data API" in api_template
+    assert "WorkingDirectory=/home/dev/repos/quantipy" in api_template
+    assert (
+        "ExecStart=/home/dev/repos/quantipy/.venv/bin/python -m quantipy.api "
+        "--host 127.0.0.1 --port 8000"
+    ) in api_template
+    assert "Environment=HOME=@HOME@" in api_template
+    assert "Environment=PATH=@PATH@" in api_template
+    assert "Requires=openclaw-gateway.service" not in api_template
+    assert "BindsTo=openclaw-gateway.service" not in api_template
+    assert "RestartSec=10" in api_template
+    assert "TimeoutStopSec=30" in api_template
+    assert "KillMode=control-group" in api_template
+    assert "Restart=on-failure" in api_template
+    assert "Restart=always" not in api_template
 
 
 def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
@@ -2595,6 +2637,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert "validate_native_crash_hardening_dropin_file" in script
     assert "NATIVE_CRASH_HARDENING_DROPIN_DST" in script
     assert "validate_supervisor_unit_file" in script
+    assert "validate_quantipy_api_unit_file" in script
     assert "daemon-reload ||" not in script
     assert (
         'cp "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}" "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" ||'
@@ -2693,6 +2736,20 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert "BindsTo=openclaw-gateway.service" in supervisor_text
     assert "Restart=on-failure" in supervisor_text
     assert "Restart=always" not in supervisor_text
+    api_unit = _quantipy_api_unit_dst(home)
+    expected_api_text = QUANTIPY_API_UNIT_TEMPLATE.read_text(encoding="utf-8")
+    expected_api_text = expected_api_text.replace("@HOME@", str(home)).replace(
+        "@PATH@", env["PATH"]
+    )
+    assert api_unit.read_text(encoding="utf-8") == expected_api_text
+    assert "Description=Quantipy Data API" in expected_api_text
+    assert "WorkingDirectory=/home/dev/repos/quantipy" in expected_api_text
+    assert (
+        "ExecStart=/home/dev/repos/quantipy/.venv/bin/python -m quantipy.api "
+        "--host 127.0.0.1 --port 8000"
+    ) in expected_api_text
+    assert "Requires=openclaw-gateway.service" not in expected_api_text
+    assert "BindsTo=openclaw-gateway.service" not in expected_api_text
     assert _mode(dropin_dir) == 0o755
     assert _mode(dropin) == 0o644
     assert _mode(native_crash_hardening) == 0o644
@@ -4871,6 +4928,7 @@ def test_push_script_daemon_reload_runs_after_dropin_install_and_failure_aborts(
     assert "Failed to reload user systemd units after managed-file rollback" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     assert not _supervisor_unit_dst(home).exists()
+    assert not _quantipy_api_unit_dst(home).exists()
     assert not _runtime_caps_dropin_dst(home).exists()
     assert not _codex_runtime_dropin_dst(home).exists()
     assert not _native_crash_hardening_dropin_dst(home).exists()
@@ -4895,6 +4953,7 @@ def test_push_script_managed_systemd_publication_rolls_back_existing_files(
     initial_config = (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
     prior_files = {
         _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
+        _quantipy_api_unit_dst(home): "[Unit]\nDescription=prior API\n",
         _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
         _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
         _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",
@@ -5022,6 +5081,7 @@ def test_push_script_systemd_restore_failure_keeps_recovery_dir_and_rolls_back_a
     wrapper.write_text("prior wrapper\n", encoding="utf-8")
     prior_files = {
         _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
+        _quantipy_api_unit_dst(home): "[Unit]\nDescription=prior API\n",
         _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
         _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
         _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",

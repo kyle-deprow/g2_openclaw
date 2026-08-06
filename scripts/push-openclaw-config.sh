@@ -37,6 +37,8 @@ MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.p
 G2_CONTROL_MCP_MODULE="gateway.g2_control_mcp_server"
 SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
 SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
+QUANTIPY_API_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-api.service.template"
+QUANTIPY_API_SERVICE_NAME="quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 CODEX_RUNTIME_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-codex-runtime.conf"
 NATIVE_CRASH_HARDENING_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
@@ -47,6 +49,7 @@ NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"
 STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
+QUANTIPY_API_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DROPIN_NAME}"
@@ -470,6 +473,29 @@ validate_supervisor_unit_file() {
   fi
 }
 
+validate_quantipy_api_unit_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed Quantipy API unit not found at ${path}" >&2
+    return 1
+  fi
+  if ! grep -Fxq "Description=Quantipy Data API" "${path}" \
+    || ! grep -Fxq "Type=simple" "${path}" \
+    || ! grep -Fxq "WorkingDirectory=/home/dev/repos/quantipy" "${path}" \
+    || ! grep -Fxq "ExecStart=/home/dev/repos/quantipy/.venv/bin/python -m quantipy.api --host 127.0.0.1 --port 8000" "${path}" \
+    || ! grep -Fxq "Restart=on-failure" "${path}" \
+    || grep -Fxq "Restart=always" "${path}" \
+    || ! grep -Fxq "RestartSec=10" "${path}" \
+    || ! grep -Fxq "TimeoutStopSec=30" "${path}" \
+    || ! grep -Fxq "KillMode=control-group" "${path}" \
+    || ! grep -Fxq "WantedBy=default.target" "${path}" \
+    || grep -Fxq "Requires=${GATEWAY_SERVICE_NAME}" "${path}" \
+    || grep -Fxq "BindsTo=${GATEWAY_SERVICE_NAME}" "${path}"; then
+    echo "ERROR: Quantipy API unit must describe the independent data API and must not use Restart=always or bind to ${GATEWAY_SERVICE_NAME}." >&2
+    return 1
+  fi
+}
+
 require_gateway_service_loadable() {
   local service_state load_state active_state
   if ! service_state="$(systemctl --user show "${GATEWAY_SERVICE_NAME}" --property=LoadState --property=ActiveState 2>&1)"; then
@@ -664,6 +690,7 @@ MANAGED_UNIT_TRANSACTION_ARMED=0
 MANAGED_UNIT_BACKUP_DIR=""
 MANAGED_UNIT_PATHS=(
   "${SUPERVISOR_UNIT_DST}"
+  "${QUANTIPY_API_UNIT_DST}"
   "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
   "${CODEX_RUNTIME_DROPIN_DST}"
   "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
@@ -1009,6 +1036,9 @@ run_deployment_rollback_and_exit() {
   if ! cleanup_deployment_temp_file "${SUPERVISOR_UNIT_TMP:-}"; then
     rollback_step_failed=1
   fi
+  if ! cleanup_deployment_temp_file "${QUANTIPY_API_UNIT_TMP:-}"; then
+    rollback_step_failed=1
+  fi
   if ! cleanup_deployment_temp_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"; then
     rollback_step_failed=1
   fi
@@ -1121,6 +1151,13 @@ if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
   exit 1
 fi
 if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TEMPLATE}"; then
+  exit 1
+fi
+if [[ ! -f "${QUANTIPY_API_UNIT_TEMPLATE}" ]]; then
+  echo "ERROR: Repo-managed Quantipy API unit template not found at ${QUANTIPY_API_UNIT_TEMPLATE}" >&2
+  exit 1
+fi
+if ! validate_quantipy_api_unit_file "${QUANTIPY_API_UNIT_TEMPLATE}"; then
   exit 1
 fi
 
@@ -1893,6 +1930,27 @@ begin_managed_unit_transaction
 guarded_mv_replace "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}" "publishing managed supervisor unit ${SUPERVISOR_UNIT_DST}"
 SUPERVISOR_UNIT_TMP=""
 echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
+
+QUANTIPY_API_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${QUANTIPY_API_SERVICE_NAME}.XXXXXX")"
+guard_destination_path_chain "${QUANTIPY_API_UNIT_TMP}" "writing generated Quantipy API unit ${QUANTIPY_API_UNIT_TMP}"
+sed \
+  -e "s|@REPO_ROOT@|$(escape_sed_replacement "${REPO_ROOT}")|g" \
+  -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
+  -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
+  -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
+  "${QUANTIPY_API_UNIT_TEMPLATE}" > "${QUANTIPY_API_UNIT_TMP}"
+guard_destination_path_chain "${QUANTIPY_API_UNIT_TMP}" "wrote generated Quantipy API unit ${QUANTIPY_API_UNIT_TMP}"
+if grep -q '@[A-Z_][A-Z_]*@' "${QUANTIPY_API_UNIT_TMP}"; then
+  echo "ERROR: Unresolved placeholder in generated ${QUANTIPY_API_SERVICE_NAME}." >&2
+  exit 1
+fi
+if ! validate_quantipy_api_unit_file "${QUANTIPY_API_UNIT_TMP}"; then
+  exit 1
+fi
+guarded_chmod 0644 "${QUANTIPY_API_UNIT_TMP}" "chmod generated Quantipy API unit ${QUANTIPY_API_UNIT_TMP}"
+guarded_mv_replace "${QUANTIPY_API_UNIT_TMP}" "${QUANTIPY_API_UNIT_DST}" "publishing managed Quantipy API unit ${QUANTIPY_API_UNIT_DST}"
+QUANTIPY_API_UNIT_TMP=""
+echo "Installed ${QUANTIPY_API_SERVICE_NAME} (not started)."
 
 # Install persistent numerical-runtime caps on the OpenClaw Gateway service so
 # all OpenClaw-launched Quantipy child processes inherit bounded BLAS/joblib
