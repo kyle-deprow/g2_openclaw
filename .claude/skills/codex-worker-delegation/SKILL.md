@@ -29,6 +29,35 @@ codex exec --yolo \
 - Outside a git repo add `--skip-git-repo-check`. Use `--output-schema <file.json>` when you need a structured JSON artifact instead of prose. `--ephemeral` for throwaway probes.
 - Follow-up rounds: `codex exec resume --last` (or `resume <session-id>`) continues the same worker session with its context intact — use it for fix rounds instead of re-explaining.
 
+## Stall-proof long dispatches
+
+Harness-tracked background tasks can be killed environmentally mid-run
+(concurrent Claude sessions, resource pressure) — treat a kill as noise, not
+operator intent. For any worker run longer than a couple of minutes:
+
+1. **Detach via files.** Prompt in a file, launcher in a script file, then
+   `setsid nohup <launcher.sh> > <run-dir>/<run>.log 2>&1 & disown`, with
+   the launcher ending in `echo "CODEX_EXIT:$?"`. Never assemble the
+   detached command from inline nested quoting — a mis-quoted launcher
+   wedges silently and is indistinguishable from a slow worker. Empty log +
+   no `pgrep -f "codex exec"` process = wedged launcher; relaunch from
+   files.
+2. **Monitor the marker AND the process.** Poll the log for `CODEX_EXIT:`
+   and emit a distinct event if the codex process disappears without it —
+   completion-only watches are silent on crashes. A killed watcher does not
+   kill detached codex: re-arm and read the log rather than restarting a
+   live run.
+3. **Capture logs unfiltered.** No `| tail`/`| grep` between the worker and
+   its log file; filter when reading. Truncated capture windows have eaten
+   the one traceback that mattered (a single `[SQL: ...]` echo can exceed
+   40 lines).
+4. **Pre-sync toolchains from the orchestrator** (venv/node_modules) before
+   the first dispatch, and tell workers the fallback (`.venv/bin/<tool>`)
+   for read-only-cache failures so they report instead of stalling.
+5. **After a zero-output kill:** verify the worktree, relaunch fresh; after
+   partial work, `codex exec resume --last` with "re-check on-disk state
+   and finish the remaining items."
+
 ## Prompt contract (luna needs all of these)
 
 Every dispatch prompt MUST contain:
