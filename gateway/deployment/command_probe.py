@@ -197,6 +197,10 @@ def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
     environment["CODEX_HOME"] = str(codex_home)
     failures: list[tuple[str, subprocess.CompletedProcess[str], str | None]] = []
 
+    working_directory = Path.home() / _PM_WORKING_DIRECTORY
+    # The runtime treats the model-workspaces dir as create-on-demand (it is the
+    # sandbox defaultWorkspaceDir); the probe provisions it the same way.
+    working_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     for command in commands:
         completed = subprocess.run(
             [
@@ -211,7 +215,7 @@ def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
             capture_output=True,
             text=True,
             env=environment,
-            cwd=Path.home() / _PM_WORKING_DIRECTORY,
+            cwd=working_directory,
         )
         if completed.returncode == 0:
             print(f"command-contract probe passed: {command}")
