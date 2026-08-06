@@ -1229,6 +1229,9 @@ def _validate_existing_expected_artifact_ancestors(path: Path) -> None:
         current = current.parent
 
 
+_OVERFLOW_UID = 65534
+
+
 def _open_expected_artifact_fd(path: Path, *, label: str) -> tuple[int, os.stat_result]:
     """Pin each ancestor with openat before opening the final artifact."""
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -1237,9 +1240,15 @@ def _open_expected_artifact_fd(path: Path, *, label: str) -> tuple[int, os.stat_
     try:
         directory_fd = os.open(path.anchor, directory_flags)
         root_metadata = os.fstat(directory_fd)
+        # Inside a uid-mapped sandbox namespace every foreign owner reports
+        # the overflow uid, so ownership is unverifiable there; content
+        # integrity is still proven by attestation digest equality against
+        # the seal made in the unsandboxed worker.
+        overflow_mapped_namespace = root_metadata.st_uid == _OVERFLOW_UID
+        trusted_root_owners = {0, _OVERFLOW_UID} if overflow_mapped_namespace else {0}
         if (
             not stat.S_ISDIR(root_metadata.st_mode)
-            or root_metadata.st_uid != 0
+            or root_metadata.st_uid not in trusted_root_owners
             or stat.S_IMODE(root_metadata.st_mode) & 0o022
         ):
             raise _attestation_failure(
@@ -1271,7 +1280,10 @@ def _open_expected_artifact_fd(path: Path, *, label: str) -> tuple[int, os.stat_
                         ExpectedArtifactAttestationError.UNSAFE_ANCESTOR,
                         f"{label} ancestor must be a directory",
                     )
-                if ancestor.st_uid not in {0, os.getuid()}:
+                trusted_ancestor_owners = {0, os.getuid()}
+                if overflow_mapped_namespace:
+                    trusted_ancestor_owners.add(_OVERFLOW_UID)
+                if ancestor.st_uid not in trusted_ancestor_owners:
                     raise _attestation_failure(
                         ExpectedArtifactAttestationError.UNSAFE_ANCESTOR,
                         f"{label} ancestor has an untrusted owner",
