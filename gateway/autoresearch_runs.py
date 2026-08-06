@@ -1790,6 +1790,11 @@ def supervise_command(
     if grace_seconds <= 0:
         raise AutoresearchRunRecordError("command termination grace must be positive")
     canonical_run_dir, manifest, _digest = _load_manifest(run_dir, runs_root)
+    # Ancestor-trust validation must run here, in the unsandboxed detached
+    # unit: the sandboxed prepare step sees uid-mapped (nobody-owned)
+    # ancestors and would fail closed on trusted paths.
+    if manifest.expected_artifact_path is not None:
+        _validate_existing_expected_artifact_ancestors(Path(manifest.expected_artifact_path))
     command = consume_command_handoff(run_dir=run_dir, runs_root=runs_root)
     try:
         process = subprocess.Popen(
@@ -1963,8 +1968,6 @@ def prepare_run(
     _reject_symlink(working_directory, label="manifest working_directory")
     if not working_directory.is_dir():
         raise AutoresearchRunRecordError("manifest working_directory must be a directory")
-    if manifest.expected_artifact_path is not None:
-        _validate_existing_expected_artifact_ancestors(Path(manifest.expected_artifact_path))
     try:
         canonical_run_dir.mkdir(mode=0o700, parents=True, exist_ok=False)
     except FileExistsError as exc:

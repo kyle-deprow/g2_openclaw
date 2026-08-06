@@ -78,9 +78,12 @@ def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path)
     assert "--opaque-value" not in (run_dir / "manifest.json").read_text(encoding="utf-8")
 
 
-def test_prepared_run_rejects_group_writable_expected_artifact_ancestor(
+def test_prepare_accepts_untrustworthy_looking_ancestors_and_supervise_rejects_them(
     tmp_path: Path,
 ) -> None:
+    # The prepare step runs inside the stage-agent sandbox, where uid mapping
+    # makes ancestor ownership unknowable; the trust check belongs to the
+    # unsandboxed supervise step.
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
     artifact_parent = tmp_path / "artifact-parent"
@@ -93,13 +96,28 @@ def test_prepared_run_rejects_group_writable_expected_artifact_ancestor(
         encoding="utf-8",
     )
 
-    with pytest.raises(AutoresearchRunRecordError, match="group/world writable"):
-        prepare_run(
-            manifest_path=manifest_path,
-            run_dir=run_dir,
-            runs_root=runs_root,
-            command=("verify-command", "--opaque-value"),
-        )
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+
+    stdout_descriptor = os.open(os.devnull, os.O_WRONLY)
+    stderr_descriptor = os.open(os.devnull, os.O_WRONLY)
+    try:
+        with pytest.raises(AutoresearchRunRecordError, match="group/world writable"):
+            supervise_command(
+                run_dir=run_dir,
+                runs_root=runs_root,
+                systemd_unit="openclaw-long-task-test.service",
+                grace_seconds=0.1,
+                stdout_descriptor=stdout_descriptor,
+                stderr_descriptor=stderr_descriptor,
+            )
+    finally:
+        os.close(stdout_descriptor)
+        os.close(stderr_descriptor)
 
 
 def test_complete_killed_run_reports_resource_exhaustion_with_exact_evidence(
