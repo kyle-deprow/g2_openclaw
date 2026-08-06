@@ -1480,6 +1480,11 @@ class AutoresearchSupervisor:
             return MalformedRunRecord(run_dir, None, error)
         if manifest.phase is not Phase.VERIFICATION or manifest.iteration != iteration:
             return None
+        status_path = run_dir / "status.json"
+        if not status_path.is_symlink() and not status_path.exists():
+            # A valid manifest with no status file is a prepared run awaiting
+            # its queued launch, not a malformed record.
+            return None
         return MalformedRunRecord(run_dir, manifest.attempt, error)
 
     def _recover_terminal_systemd_run(self, record: RunRecord) -> RunRecord:
