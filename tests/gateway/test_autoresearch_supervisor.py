@@ -1015,6 +1015,62 @@ def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
     assert not any(method == "agent" for method, _ in fake.rpc_calls)
 
 
+def test_latched_run_record_alert_still_allows_stale_state_nudging(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    # A failed/invalid run record alerts once; on later cycles the latched
+    # alert must fall through so the PM still gets nudged to resolve it.
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake)
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "detached-manifest.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    (run_dir / "status.json").symlink_to(source_manifest)
+
+    first = supervisor.run_once()
+    second = supervisor.run_once()
+
+    assert first.outcome is SupervisorOutcome.ALERT
+    assert first.reason.startswith("invalid_detached_run_record:")
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert any(method == "agent" for method, _ in fake.rpc_calls)
+
+
 def test_prepared_run_awaiting_queued_launch_is_not_a_malformed_record(
     supervisor_env: SupervisorEnv,
 ) -> None:

@@ -593,7 +593,10 @@ class AutoresearchSupervisor:
         if launch_result is not None:
             return launch_result
         run_record_result = self._consume_terminal_verification_run(state)
-        if run_record_result is not None:
+        # A latched run-record alert must not starve the stale-state nudging
+        # below: the PM is the designated resolver of a failed run, and only
+        # a nudge summons it.
+        if run_record_result is not None and run_record_result.reason != "alert_already_emitted":
             return run_record_result
         if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
             lifecycle_result = self._owner_lifecycle_guard(state)
