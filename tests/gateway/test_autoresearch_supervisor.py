@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -481,7 +482,7 @@ def _supervisor(
 def test_expected_stage_task_stale_default_allows_long_stage_turns() -> None:
     assert DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS == 900.0
     assert DEFAULT_RENUDGE_IDLE_SECONDS == 600.0
-    assert DEFAULT_RENUDGE_ALERT_LIMIT == 12
+    assert DEFAULT_RENUDGE_ALERT_LIMIT == 6
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
@@ -1679,6 +1680,61 @@ def test_decayed_renudge_waits_for_active_tasks_and_running_owner(
     assert [method for method, _ in fake.rpc_calls if method == "agent"] == ["agent"]
 
 
+def test_owner_session_rotation_drops_only_the_owner_mapping(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "rotate-me"},
+                "agent:autoresearch-pm:main": {"sessionId": "keep-me"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    os.chmod(supervisor_env.sessions_path, 0o600)
+    supervisor._rotate_owner_session_for_wake(phase="verification")
+
+    store = json.loads(supervisor_env.sessions_path.read_text(encoding="utf-8"))
+    assert AUTORESEARCH_OWNER_SESSION_KEY not in store
+    assert store["agent:autoresearch-pm:main"] == {"sessionId": "keep-me"}
+    assert stat.S_IMODE(supervisor_env.sessions_path.stat().st_mode) == 0o600
+    assert not list(supervisor_env.sessions_path.parent.glob("*.rotate.*"))
+    # A second rotation with no mapping present is a no-op.
+    supervisor._rotate_owner_session_for_wake(phase="fix_test")
+    assert json.loads(supervisor_env.sessions_path.read_text(encoding="utf-8")) == store
+
+
+def test_owner_session_rotation_skips_a_running_turn_and_a_held_lock(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "live", "status": "running"}}),
+        encoding="utf-8",
+    )
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    supervisor._rotate_owner_session_for_wake(phase="verification")
+    store = json.loads(supervisor_env.sessions_path.read_text(encoding="utf-8"))
+    assert AUTORESEARCH_OWNER_SESSION_KEY in store
+
+    supervisor_env.sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: {"sessionId": "idle"}}),
+        encoding="utf-8",
+    )
+    lock = supervisor_env.sessions_path.with_name(supervisor_env.sessions_path.name + ".lock")
+    lock.write_text("{}", encoding="utf-8")
+    supervisor._rotate_owner_session_for_wake(phase="verification")
+    assert AUTORESEARCH_OWNER_SESSION_KEY in json.loads(
+        supervisor_env.sessions_path.read_text(encoding="utf-8")
+    )
+    lock.unlink()
+
+
 def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
     supervisor_env: SupervisorEnv,
     caplog: pytest.LogCaptureFixture,
@@ -1697,11 +1753,14 @@ def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
     first = supervisor.run_once()
     clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
     second = supervisor.run_once()
+    # Renudges back off exponentially: the second renudge requires 2x idle.
+    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    deduped_by_backoff = supervisor.run_once()
     clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
     third = supervisor.run_once()
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += 4 * DEFAULT_RENUDGE_IDLE_SECONDS
     after_alert = supervisor.run_once()
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += 8 * DEFAULT_RENUDGE_IDLE_SECONDS
     after_alert_again = supervisor.run_once()
 
     checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
@@ -1714,6 +1773,8 @@ def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
 
     assert first.outcome is SupervisorOutcome.NUDGED
     assert second.outcome is SupervisorOutcome.RENUDGED
+    assert deduped_by_backoff.outcome is SupervisorOutcome.NO_ACTION
+    assert deduped_by_backoff.reason == "recovery_nudge_deduped"
     assert third.outcome is SupervisorOutcome.RENUDGED
     assert after_alert.outcome is SupervisorOutcome.ALERT
     assert after_alert.reason.startswith("renudge_alert_limit_reached:")

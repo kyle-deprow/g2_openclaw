@@ -117,6 +117,7 @@ def write_runtime_config() -> None:
     lines = [
         'approval_policy = "never"',
         'sandbox_mode = "workspace-write"',
+        "model_auto_compact_token_limit = 100000",
         "",
         "[shell_environment_policy.set]",
         'UV_CACHE_DIR = "/tmp/uv-cache-autoresearch"',

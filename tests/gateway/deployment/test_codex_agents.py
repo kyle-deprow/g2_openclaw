@@ -68,3 +68,10 @@ def test_write_runtime_config_round_trips_through_validator(
     codex_agents.validate_mcp_wiring()
 
     assert all(root.is_dir() and root.stat().st_mode & 0o777 == 0o700 for root in roots)
+    import tomllib
+
+    rendered = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    assert rendered["model_auto_compact_token_limit"] == 100000
+    assert rendered["shell_environment_policy"]["set"]["UV_CACHE_DIR"] == (
+        "/tmp/uv-cache-autoresearch"
+    )

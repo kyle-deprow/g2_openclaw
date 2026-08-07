@@ -13,9 +13,10 @@ import re
 import signal
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -239,7 +240,7 @@ DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
 DEFAULT_RENUDGE_IDLE_SECONDS = 600.0
-DEFAULT_RENUDGE_ALERT_LIMIT = 12
+DEFAULT_RENUDGE_ALERT_LIMIT = 6
 # Implementation, verification, review, and fix stages can spend several
 # minutes running tests and backtests without producing an OpenClaw event.
 # Keep the supervisor responsive while allowing those legitimate long turns to
@@ -637,6 +638,7 @@ class AutoresearchSupervisor:
         if isinstance(claim_or_result, SupervisorResult):
             return claim_or_result
         claim = claim_or_result
+        self._rotate_owner_session_for_wake(phase=state.phase.value)
         try:
             self._rpc.wake(
                 message=recovery_plan.message,
@@ -1392,6 +1394,124 @@ class AutoresearchSupervisor:
             "stage_submission_advanced",
         )
 
+    def _rotate_owner_session_for_wake(self, *, phase: str) -> None:
+        """Drop the owner session mapping so the next wake starts fresh.
+
+        Session history is disposable by design — everything authoritative
+        lives in the state file and every wake begins with autoresearch-next
+        — so a fresh thread per wake keeps each turn near minimal context
+        instead of replaying the accumulated transcript. Called only from
+        wake paths, after the activity and lifecycle guards have proven no
+        owner turn is in flight; a lingering "running" record skips rotation
+        as a final belt-and-braces check. Store writes follow OpenClaw's
+        sessions lock protocol to avoid racing gateway persistence.
+        """
+        sessions_path = self.config.owner_sessions_path
+        if sessions_path.is_symlink():
+            _structured_log(
+                logging.WARNING,
+                "supervisor.owner_session_rotation_skipped",
+                reason="owner session store is a symlink",
+            )
+            return
+        lock_path = sessions_path.with_name(sessions_path.name + ".lock")
+        lock_fd: int | None = None
+        try:
+            lock_fd = self._acquire_session_store_lock(lock_path)
+            if lock_fd is None:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.owner_session_rotation_skipped",
+                    reason="session store lock is held",
+                )
+                return
+            try:
+                raw = json.loads(
+                    sessions_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=_strict_json_object,
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.owner_session_rotation_skipped",
+                    reason=f"cannot read owner session store: {exc}",
+                )
+                return
+            if not isinstance(raw, dict) or AUTORESEARCH_OWNER_SESSION_KEY not in raw:
+                return
+            entry = raw[AUTORESEARCH_OWNER_SESSION_KEY]
+            if isinstance(entry, Mapping) and entry.get("status") == "running":
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.owner_session_rotation_skipped",
+                    reason="owner session reports a running turn",
+                )
+                return
+            removed = raw.pop(AUTORESEARCH_OWNER_SESSION_KEY)
+            session_id = removed.get("sessionId") if isinstance(removed, Mapping) else None
+            try:
+                mode = stat.S_IMODE(sessions_path.stat().st_mode)
+                descriptor, temp_name = tempfile.mkstemp(
+                    prefix=f".{sessions_path.name}.rotate.",
+                    dir=sessions_path.parent,
+                )
+                try:
+                    os.write(descriptor, json.dumps(raw, indent=2).encode("utf-8"))
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                os.chmod(temp_name, mode)
+                os.replace(temp_name, sessions_path)
+            except OSError as exc:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.owner_session_rotation_skipped",
+                    reason=f"cannot rewrite owner session store: {exc}",
+                )
+                return
+            _structured_log(
+                logging.INFO,
+                "supervisor.owner_session_rotated",
+                phase=phase,
+                session_id=session_id,
+            )
+        finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
+                with suppress(OSError):
+                    lock_path.unlink()
+
+    def _acquire_session_store_lock(self, lock_path: Path) -> int | None:
+        """Acquire OpenClaw's exclusive session store lock, or None if held.
+
+        Mirrors the gateway's protocol: O_CREAT|O_EXCL lock file carrying
+        {pid, createdAt}, with stale takeover after 30 seconds.
+        """
+        for _attempt in range(2):
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                try:
+                    age = self._now() - lock_path.stat().st_mtime
+                except OSError:
+                    continue
+                if age > 30.0:
+                    with suppress(OSError):
+                        lock_path.unlink()
+                    continue
+                return None
+            except OSError:
+                return None
+            with suppress(OSError):
+                os.write(
+                    fd,
+                    json.dumps({"pid": os.getpid(), "createdAt": int(self._now() * 1000)}).encode(
+                        "utf-8"
+                    ),
+                )
+            return fd
+        return None
+
     def _matching_verification_runs(
         self,
         *,
@@ -1801,7 +1921,27 @@ class AutoresearchSupervisor:
                             f"successful recovery record lacks nudge timestamp: {recovery_key}"
                         )
                     idle_seconds = now - last_nudge_at
-                    if idle_seconds < self.config.renudge_idle_seconds:
+                    # The exhaustion alert must not be delayed by backoff:
+                    # once the limit is reached, alert on the base cadence.
+                    if (
+                        record.renudge_count >= self.config.renudge_alert_limit
+                        and idle_seconds < self.config.renudge_idle_seconds
+                    ):
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION,
+                            "recovery_nudge_deduped",
+                            recovery_key,
+                        )
+                    # Exponential backoff: each renudge that fails to advance
+                    # state doubles the required idle window (capped at 16x),
+                    # so a stuck phase costs a handful of premium turns per
+                    # hour instead of six.
+                    backoff_multiplier = 2 ** min(record.renudge_count, 4)
+                    required_idle_seconds = self.config.renudge_idle_seconds * backoff_multiplier
+                    if (
+                        record.renudge_count < self.config.renudge_alert_limit
+                        and idle_seconds < required_idle_seconds
+                    ):
                         return SupervisorResult(
                             SupervisorOutcome.NO_ACTION,
                             "recovery_nudge_deduped",
