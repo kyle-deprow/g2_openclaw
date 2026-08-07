@@ -408,6 +408,7 @@ async def _make_openclaw_gateway(
         openclaw_port=oc_port,
         openclaw_gateway_token="oc-token",
         agent_timeout=agent_timeout,
+        autoresearch_feed_interval=0,
     )
     gw = GatewayServer(
         config,
@@ -661,6 +662,7 @@ class TestOpenClawNotRunning:
             openclaw_port=dead_port,
             openclaw_gateway_token="oc-token",
             agent_timeout=10,
+            autoresearch_feed_interval=0,
         )
         gw = GatewayServer(config, handler=oc_handler)
         gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)

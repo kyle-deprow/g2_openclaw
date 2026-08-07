@@ -35,9 +35,6 @@ function createMockDisplay() {
     showRecording: vi.fn(),
     showTranscribing: vi.fn(),
     showConfirming: vi.fn(),
-    showDetailPage: vi.fn(),
-    showSessionMenu: vi.fn().mockResolvedValue(undefined),
-    exitMenuMode: vi.fn().mockResolvedValue(undefined),
     _streamBuffer: 'test response',
     get streamBuffer() { return this._streamBuffer; },
   };
@@ -49,9 +46,6 @@ function createMockGateway() {
     sendJson: vi.fn(),
     send: vi.fn(),
     sendForceStop: vi.fn(),
-    requestSessionList: vi.fn(),
-    switchSession: vi.fn(),
-    createNewSession: vi.fn(),
     _isConnected: true,
     get isConnected() { return this._isConnected; },
   };
@@ -321,12 +315,13 @@ describe('InputHandler', () => {
   // Double-tap (non-confirming)
   // ---------------------------------------------------------------------------
 
-  it('double tap in idle opens session menu', () => {
+  it('double tap in idle is a no-op', () => {
     sm._current = 'idle';
     handlerAny._handleEvent(DOUBLE_CLICK);
-    expect(sm.transition).toHaveBeenCalledWith('menu');
-    expect(gateway.requestSessionList).toHaveBeenCalled();
-    expect(display.showSessionMenu).toHaveBeenCalled();
+    expect(sm.transition).not.toHaveBeenCalled();
+    expect(gateway.sendJson).not.toHaveBeenCalled();
+    expect(gateway.sendForceStop).not.toHaveBeenCalled();
+    expect(display.showIdle).not.toHaveBeenCalled();
   });
 
   // ---------------------------------------------------------------------------
@@ -508,146 +503,35 @@ describe('InputHandler', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Session menu interactions
+  // Double-tap and force-stop behavior
   // ---------------------------------------------------------------------------
 
-  describe('session menu', () => {
-    it('double-tap in idle opens session menu', () => {
-      sm._current = 'idle';
-      expect(handler.openSessionMenu()).toBe(true);
-      expect(sm.transition).toHaveBeenCalledWith('menu');
-      expect(gateway.requestSessionList).toHaveBeenCalled();
-      expect(display.showSessionMenu).toHaveBeenCalled();
-    });
+  it('double-tap in error transitions to idle and repaints', () => {
+    sm._current = 'error';
+    handlerAny._handleEvent(DOUBLE_CLICK);
+    expect(sm.transition).toHaveBeenCalledWith('idle');
+    expect(display.showIdle).toHaveBeenCalled();
+  });
 
-    it('openSessionMenu returns false when not idle', () => {
-      sm._current = 'recording';
-      expect(handler.openSessionMenu()).toBe(false);
-    });
+  it('forceStop closes mic when recording', () => {
+    sm._current = 'recording';
+    handler.forceStop();
+    expect(bridge.audioControl).toHaveBeenCalledWith(false);
+    expect(gateway.sendForceStop).toHaveBeenCalled();
+  });
 
-    it('double-tap in menu closes menu', () => {
-      sm._current = 'menu';
-      handlerAny._handleEvent(DOUBLE_CLICK);
-      expect(sm.transition).toHaveBeenCalledWith('idle');
-      expect(display.exitMenuMode).toHaveBeenCalled();
-    });
+  it('forceStop returns an active response to idle', () => {
+    sm._current = 'thinking';
+    handler.forceStop();
+    expect(gateway.sendForceStop).toHaveBeenCalled();
+    expect(sm.transition).toHaveBeenCalledWith('idle');
+    expect(display.showIdle).toHaveBeenCalled();
+  });
 
-    it('closeSessionMenu returns false when not in menu', () => {
-      sm._current = 'idle';
-      expect(handler.closeSessionMenu()).toBe(false);
-    });
-
-    it('tap in menu on "New Session" (index 0) creates new session', () => {
-      sm._current = 'menu';
-      handler.setSessionList([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Test', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Test', messageCount: 0 },
-      ]);
-      handlerAny._handleEvent(CLICK, {
-        listEvent: { eventType: CLICK, currentSelectItemIndex: 0, currentSelectItemName: '✦ New Session' },
-      });
-      expect(gateway.createNewSession).toHaveBeenCalled();
-    });
-
-    it('tap in menu selects a session', () => {
-      sm._current = 'menu';
-      handler.setSessionList([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Session 1', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session 1', messageCount: 0 },
-        { sessionKey: 'k2', sessionId: 'id2', label: 'Session 2', updatedAt: '2026-03-07T09:00:00Z', isActive: false, preview: 'Session 2', messageCount: 0 },
-      ]);
-      handlerAny._handleEvent(CLICK, {
-        listEvent: { eventType: CLICK, currentSelectItemIndex: 2, currentSelectItemName: '  Session 2' },
-      });
-      expect(gateway.switchSession).toHaveBeenCalledWith('k2');
-    });
-
-    it('tap on active session closes menu instead of switching', () => {
-      sm._current = 'menu';
-      handler.setSessionList([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Active', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Active', messageCount: 0 },
-      ]);
-      handlerAny._handleEvent(CLICK, {
-        listEvent: { eventType: CLICK, currentSelectItemIndex: 1, currentSelectItemName: '● Active' },
-      });
-      expect(gateway.switchSession).not.toHaveBeenCalled();
-      expect(sm.transition).toHaveBeenCalledWith('idle');
-    });
-
-    it('menu tap with undefined index (Quirk 2) falls back to trackedMenuIndex', () => {
-      sm._current = 'menu';
-      handler.setSessionList([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Session', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session', messageCount: 0 },
-      ]);
-      // trackedMenuIndex defaults to 0, so this should trigger "New Session"
-      handlerAny._handleEvent(undefined, {
-        listEvent: { eventType: undefined },
-      });
-      expect(gateway.createNewSession).toHaveBeenCalled();
-    });
-
-    it('setSessionList stores sessions', () => {
-      const sessions = [
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Test', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Test', messageCount: 0 },
-      ];
-      handler.setSessionList(sessions);
-      // Verify by triggering a menu tap that uses the stored list
-      sm._current = 'menu';
-      handlerAny._handleEvent(CLICK, {
-        listEvent: { eventType: CLICK, currentSelectItemIndex: 1, currentSelectItemName: '  Test' },
-      });
-      expect(gateway.switchSession).toHaveBeenCalledWith('k1');
-    });
-
-    it('double-tap in confirming still rejects', () => {
-      sm._current = 'confirming';
-      handler.setPendingTranscription('text');
-      handlerAny._handleEvent(DOUBLE_CLICK);
-      expect(conversation.removeLastUser).toHaveBeenCalled();
-      expect(sm.transition).toHaveBeenCalledWith('idle');
-      expect(handler.pendingTranscription).toBeNull();
-    });
-
-    it('double-tap in streaming still cancels', () => {
-      sm._current = 'streaming';
-      handlerAny._handleEvent(DOUBLE_CLICK);
-      expect(sm.transition).toHaveBeenCalledWith('idle');
-      expect(display.showIdle).toHaveBeenCalled();
-    });
-
-    it('double-tap in error opens session menu', () => {
-      sm._current = 'error';
-      handlerAny._handleEvent(DOUBLE_CLICK);
-      expect(sm.transition).toHaveBeenCalledWith('idle');
-      expect(sm.transition).toHaveBeenCalledWith('menu');
-      expect(gateway.requestSessionList).toHaveBeenCalled();
-      expect(display.showSessionMenu).toHaveBeenCalled();
-    });
-
-    it('forceStop closes mic when recording', () => {
-      sm._current = 'recording';
-      handler.forceStop();
-      expect(bridge.audioControl).toHaveBeenCalledWith(false);
-      expect(gateway.sendForceStop).toHaveBeenCalled();
-    });
-
-    it('forceStop does not close mic when idle', () => {
-      sm._current = 'idle';
-      handler.forceStop();
-      expect(bridge.audioControl).not.toHaveBeenCalled();
-      expect(gateway.sendForceStop).toHaveBeenCalled();
-    });
-
-    it('tap in menu with no session list is graceful no-op (loading guard)', () => {
-      sm._current = 'menu';
-      // Don't set session list — _sessionList is null
-      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-      handlerAny._handleEvent(CLICK, {
-        listEvent: { eventType: CLICK, currentSelectItemIndex: 3 },
-      });
-      // Should not crash, and should not call any gateway method
-      expect(gateway.switchSession).not.toHaveBeenCalled();
-      expect(gateway.createNewSession).not.toHaveBeenCalled();
-      expect(logSpy).toHaveBeenCalledWith('[Input] Menu tap ignored — session list not yet loaded');
-      logSpy.mockRestore();
-    });
+  it('forceStop does not close mic when idle', () => {
+    sm._current = 'idle';
+    handler.forceStop();
+    expect(bridge.audioControl).not.toHaveBeenCalled();
+    expect(gateway.sendForceStop).toHaveBeenCalled();
   });
 });

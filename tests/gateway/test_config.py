@@ -245,6 +245,27 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="must be a number"):
             load_config()
 
+    def test_autoresearch_feed_interval_default(self) -> None:
+        """AUTORESEARCH_FEED_INTERVAL defaults to 5.0."""
+        cfg = load_config()
+        assert cfg.autoresearch_feed_interval == 5.0
+
+    def test_autoresearch_feed_interval_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """AUTORESEARCH_FEED_INTERVAL is parsed from env."""
+        monkeypatch.setenv("AUTORESEARCH_FEED_INTERVAL", "0")
+
+        cfg = load_config()
+        assert cfg.autoresearch_feed_interval == 0.0
+
+    def test_autoresearch_feed_interval_invalid_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-numeric AUTORESEARCH_FEED_INTERVAL raises ValueError."""
+        monkeypatch.setenv("AUTORESEARCH_FEED_INTERVAL", "nope")
+
+        with pytest.raises(ValueError, match="must be a number"):
+            load_config()
+
     def test_allowed_origins_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """ALLOWED_ORIGINS is parsed as comma-separated list."""
         monkeypatch.setenv("ALLOWED_ORIGINS", "https://example.com, https://other.com")

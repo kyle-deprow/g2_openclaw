@@ -130,3 +130,19 @@ describe('simulator automation origin gate', () => {
     expect(response.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
   });
 });
+
+describe('simulator browser command dispatch', () => {
+  it('dispatches autoresearch status and treats removed session commands as unknown', () => {
+    const plugin = apiPlugin();
+    const transform = plugin.transformIndexHtml;
+    expect(typeof transform).toBe('function');
+    const transformed = (transform as (html: string) => string)('<body></body>');
+
+    expect(transformed).toContain("case 'getAutoresearchStatus':");
+    expect(transformed).toContain('result = api.getAutoresearchStatus();');
+    expect(transformed).not.toContain("case 'getSessionList':");
+    expect(transformed).not.toContain("case 'openSessionMenu':");
+    expect(transformed).not.toContain("case 'closeSessionMenu':");
+    expect(transformed).not.toContain("case 'selectSession':");
+  });
+});

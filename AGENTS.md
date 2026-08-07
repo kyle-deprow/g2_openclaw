@@ -27,7 +27,7 @@ The current agent path is Codex based. OpenClaw agent turns use the OpenAI provi
 
 ## G2 Rules
 
-- Boot into the session menu, not idle.
+- Boot directly into the single autoresearch thread view (idle); there is no session menu or multi-thread UX.
 - Keep newest transcript messages at the top because G2 has no scroll API.
 - Use container-based G2 UI only: text, list, and image containers on the 576 x 288 canvas.
 - Use `waitForEvenAppBridge()` and import G2 SDK types from `@evenrealities/even_hub_sdk`.

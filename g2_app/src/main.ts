@@ -16,7 +16,7 @@ import { DisplayManager } from './display';
 import { Gateway } from './gateway';
 import type { GatewayEvent } from './gateway';
 import { InputHandler } from './input';
-import type { InboundFrame } from './protocol';
+import type { AutoresearchStatusFrame, FeedEntry, InboundFrame } from './protocol';
 import { StateMachine } from './state';
 import { createAppApi, SESSION_ID_KEY } from './api';
 import type { ActiveTab } from './api';
@@ -29,8 +29,31 @@ let gateway: Gateway;
 let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
+let latestArStatus: AutoresearchStatusFrame | null = null;
+let pendingFeed: FeedEntry[] | null = null;
 
 let activeTab: ActiveTab = 'openclaw';
+
+const AR_HEADER_MAX_LENGTH = 50;
+
+function formatArHeader(frame: AutoresearchStatusFrame): string {
+  if (!frame.running && frame.phase === 'not running') {
+    return 'AR not running';
+  }
+
+  const prefix = frame.running ? 'AR ' : 'AR stopped · ';
+  const outcome = frame.running && frame.supervisorOutcome
+    ? ` · ${frame.supervisorOutcome}`
+    : '';
+  const flags = `${frame.suspended ? ' ⏸' : ''}${frame.campaignReviewRequired ? ' ⚠rev' : ''}`;
+  const suffix = ` it${frame.iteration}${outcome}${flags}`;
+  const phaseLength = Math.max(0, AR_HEADER_MAX_LENGTH - prefix.length - suffix.length);
+  const phase = frame.phase.length > phaseLength
+    ? `${frame.phase.slice(0, Math.max(0, phaseLength - 1))}…`.slice(0, phaseLength)
+    : frame.phase;
+
+  return `${prefix}${phase}${suffix}`;
+}
 
 // ---------------------------------------------------------------------------
 // Frame routing
@@ -70,9 +93,8 @@ function routeFrame(frame: InboundFrame): void {
         }
       }
 
-      sm.transition('menu');
-      gateway.requestSessionList();
-      display.showSessionMenu([]).catch(err => console.error('[Main] Display error:', err));
+      sm.transition('idle');
+      display.showIdle().catch(err => console.error('[Main] Display error:', err));
       break;
     }
 
@@ -81,12 +103,6 @@ function routeFrame(frame: InboundFrame): void {
       // Guard: ignore status:idle while confirming — user must confirm/reject.
       if (frame.status === 'idle' && sm.current === 'confirming') {
         console.log('[Main] Ignoring status:idle — waiting for user confirmation');
-        return;
-      }
-
-      // Guard: ignore status:idle while in menu — user must select or dismiss.
-      if (frame.status === 'idle' && sm.current === 'menu') {
-        console.log('[Main] Ignoring status:idle — currently in menu state');
         return;
       }
 
@@ -167,7 +183,7 @@ function routeFrame(frame: InboundFrame): void {
     case 'history': {
       console.log(`[Main] History replay: ${frame.entries.length} entries`);
       conversation.replayHistory(frame.entries);
-      if (frame.entries.length > 0 && sm.current !== 'menu') {
+      if (frame.entries.length > 0) {
         display.showIdle().catch(err => console.error('[Main] Display error:', err));
       }
       break;
@@ -180,43 +196,28 @@ function routeFrame(frame: InboundFrame): void {
       conversation.clear();
       const label = reason === 'daily_reset' ? 'New day, new session' : 'Session reset';
       conversation.addSystem(label);
-      // Don't transition or show display if user is in the session menu (e.g. killed from panel)
-      if (sm.current !== 'menu') {
-        if (sm.current !== 'idle') sm.transition('idle');
-        display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
-      }
-      break;
-    }
-
-    // -- Session list response ------------------------------------------
-    case 'session_list': {
-      console.log(`[Main] Session list: ${frame.sessions.length} sessions`);
-      input.setSessionList(frame.sessions);
-      if (sm.current === 'menu') {
-        display.showSessionMenu(frame.sessions)
-          .catch(err => console.error('[Main] Display error:', err));
-      }
-      break;
-    }
-
-    // -- Session switched confirmation ----------------------------------
-    case 'session_switched': {
-      console.log(`[Main] Switched to session: ${frame.sessionKey}`);
-      conversation.clear();
-      if (frame.sessionId) {
-        try {
-          localStorage.setItem(SESSION_ID_KEY, frame.sessionId);
-        } catch { /* non-fatal */ }
-      }
-      // Transition from menu → idle
-      const wasMenu = sm.current === 'menu';
-      if (wasMenu) {
-        input.closeSessionMenu();
-      }
       if (sm.current !== 'idle') sm.transition('idle');
-      // Skip showIdle when exitMenuMode already rebuilt the transcript layout
-      if (!wasMenu) {
-        display.showIdle().catch(err => console.error('[Main] Display error:', err));
+      display.showSessionReset(label).catch(err => console.error('[Main] Display error:', err));
+      break;
+    }
+
+    // -- Autoresearch status --------------------------------------------
+    case 'autoresearch_status': {
+      latestArStatus = frame;
+      display.setAutoresearchHeader(formatArHeader(frame))
+        .catch(err => console.error('[Main] Display error:', err));
+      break;
+    }
+
+    // -- Autoresearch feed ----------------------------------------------
+    case 'autoresearch_feed': {
+      if (sm.current === 'idle' || sm.current === 'error' || sm.current === 'loading') {
+        conversation.setFeedEntries(frame.entries);
+        if (sm.current === 'idle') {
+          display.showIdle().catch(err => console.error('[Main] Display error:', err));
+        }
+      } else {
+        pendingFeed = frame.entries;
       }
       break;
     }
@@ -235,6 +236,7 @@ function routeEvent(event: GatewayEvent): void {
 
     case 'disconnected':
       console.warn('[Main] Gateway disconnected');
+      pendingFeed = null;
       sm.transition('disconnected');
       display.showDisconnected().catch(err => console.error('[Main] Display error:', err));
       break;
@@ -273,6 +275,12 @@ async function boot(): Promise<void> {
   sm = new StateMachine();
   sm.onChange((newState, oldState) => {
     console.log(`[Main] State: ${oldState} → ${newState}`);
+    if (newState === 'idle' && pendingFeed !== null) {
+      const feed = pendingFeed;
+      pendingFeed = null;
+      conversation.setFeedEntries(feed);
+      display.showIdle().catch(err => console.error('[Main] Display error:', err));
+    }
   });
 
   // 4. Create the gateway, wire callbacks, and connect
@@ -294,6 +302,7 @@ async function boot(): Promise<void> {
     input,
     conversation,
     gateway,
+    getAutoresearchStatus: () => latestArStatus,
     getActiveTab: () => activeTab,
     setActiveTab: (tab) => { activeTab = tab; },
   });

@@ -353,6 +353,9 @@ export function apiPlugin(): Plugin {
         case 'getGatewayConnected':
           result = api.getGatewayConnected();
           break;
+        case 'getAutoresearchStatus':
+          result = api.getAutoresearchStatus();
+          break;
         case 'sendText':
           result = api.sendText(args[0]);
           break;
@@ -376,18 +379,6 @@ export function apiPlugin(): Plugin {
           break;
         case 'forceStop':
           result = api.forceStop();
-          break;
-        case 'getSessionList':
-          result = api.getSessionList();
-          break;
-        case 'openSessionMenu':
-          result = api.openSessionMenu();
-          break;
-        case 'closeSessionMenu':
-          result = api.closeSessionMenu();
-          break;
-        case 'selectSession':
-          result = api.selectSession(args[0]);
           break;
         case 'tap':
           result = api.tap();

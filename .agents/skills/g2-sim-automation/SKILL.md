@@ -63,8 +63,7 @@ to a phone, G2 device, LAN host, or remote browser.
 |------------------------|-------------------|------------------------------------|
 | `sendText`             | `["message"]`     | Send text to OpenClaw (bypasses Whisper) |
 | `tap`                  | `[]`              | Simulate ring tap                  |
-| `doubleTap`            | `[]`              | Open session menu                  |
-| `selectSession`        | `[index]`         | Pick session from menu (0-based). **Index 0 = "New Session"; existing sessions start at index 1.** |
+| `doubleTap`            | `[]`              | No-op in idle; dismisses error state |
 | `getState`             | `[]`              | Returns state string               |
 | `getDisplayText`       | `[]`              | Returns glasses display text       |
 | `getConversation`      | `[]`              | Returns conversation entries       |
@@ -73,8 +72,7 @@ to a phone, G2 device, LAN host, or remote browser.
 | `stopRecording`        | `["hilText"]`     | Stop capture (optional HIL text)   |
 | `confirmTranscription` | `[]`              | Accept pending transcription       |
 | `rejectTranscription`  | `[]`              | Reject pending transcription       |
-| `openSessionMenu`      | `[]`              | Open menu from idle                |
-| `closeSessionMenu`     | `[]`              | Dismiss menu                       |
+| `getAutoresearchStatus` | `[]`             | Latest `autoresearch_status` frame (or null) |
 | `cancelResponse`       | `[]`              | Cancel in-flight response          |
 | `resetSession`         | `[]`              | Reset the current OpenClaw session |
 | `getSessionId`         | `[]`              | Get active session ID from localStorage |
@@ -91,22 +89,19 @@ curl -s --max-time 5 http://localhost:5173/_dev/health
 # → {"ok":true}
 ```
 
-### 2. Boot → select a session
+### 2. Boot straight to idle
 
-App boots into **menu** state. Index 0 is always "✦ New Session"; existing sessions start at index 1.
+The app boots directly into **idle** — the single autoresearch thread view.
+`sendText` works immediately; there is no session menu.
 
 ```bash
 curl -s --max-time 10 http://localhost:5173/_dev/state
-# → {"id":"...","result":"menu","ts":...}
+# → {"id":"...","result":"idle","ts":...}
 
-# Select first EXISTING session (index 1). Use index 0 to create a new session.
+# Check the autoresearch header data the glasses are showing
 curl -s -X POST http://localhost:5173/_dev/cmd \
   -H 'Content-Type: application/json' \
-  -d '{"cmd":"selectSession","args":[1]}'
-sleep 3
-
-curl -s --max-time 10 http://localhost:5173/_dev/state
-# → {"id":"...","result":"idle","ts":...}
+  -d '{"cmd":"getAutoresearchStatus","args":[]}'
 ```
 
 ### 3. Send a message and read the response
@@ -146,14 +141,13 @@ Prefer `/_dev/display` over screenshots — returns exact text without OCR noise
 ## State Machine
 
 ```
-LOADING → MENU → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → IDLE
+LOADING → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → IDLE
 ```
 
-- **menu**: Boot default. Must `selectSession` to reach idle.
-- **idle**: Ready. `tap` starts recording, `doubleTap` opens menu.
+- **idle**: Boot default and ready state. `tap` starts recording; `doubleTap` is a no-op.
 - **After sendText**: State cycles idle → thinking → streaming → idle automatically.
-- **After HMR/restart**: Simulator webview reloads. Wait 5 s, state returns to menu.
-- **After error/disconnected** (e.g. daemon restart): Run `make sim` to kill and restart the full stack, then re-select a session.
+- **After HMR/restart**: Simulator webview reloads. Wait 5 s, state returns to idle.
+- **After error/disconnected** (e.g. daemon restart): Run `make sim` to kill and restart the full stack; the app reconnects straight to idle.
 
 ## Troubleshooting
 

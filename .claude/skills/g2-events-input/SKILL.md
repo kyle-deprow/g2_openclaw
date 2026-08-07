@@ -28,14 +28,14 @@ Input events, event routing, audio capture, and device status for the G2 platfor
 - **Recording limits are server-side:** gateway auto-stops after 90 s (`_MAX_RECORDING_SECONDS` in `gateway/server.py`); audio buffer caps at 60 s (`AudioBuffer.MAX_DURATION_SECONDS` in `gateway/audio_buffer.py`).
 - **`onDeviceStatusChanged` NEVER fires in the simulator** — status values are hardcoded. Test battery/wearing/charging/in-case handling on real hardware only. `DeviceConnectType`: `None`/`Connecting`/`Connected`/`Disconnected`/`ConnectionFailed`.
 - **Lifecycle:** pause timers and stop the mic (`audioControl(false)`) on `FOREGROUND_EXIT_EVENT`; resume on `FOREGROUND_ENTER_EVENT`; clean up and `shutDownPageContainer(0)` on `ABNORMAL_EXIT_EVENT`. Use `shutDownPageContainer(1)` for graceful user-confirmed exit.
-- **Boot lands on the session menu** (`menu` state), not idle — the session picker is the first screen. Double-tap in `idle` opens the menu; the last item is always "+ New Session".
+- **Boot lands directly on `idle`** — the single autoresearch thread view (status header + PM feed); there is no session menu. Double-tap: no-op in `idle`, dismisses `error` back to idle, force-stops in `thinking`/`streaming`.
 - **Rejecting a transcription** (tap during `confirming`) fully removes the last user message via `splice()` (`removeLastUser()` in `conversation.ts`) — no marking or prefix — then refreshes with `formatReverse()`.
 - **Hardware limits:** the glasses have a microphone but no camera and no speaker — audio output on the glasses is impossible.
 
 ## This repo
 
 - **`g2_app/src/input.ts`** — `InputHandler`: event dispatch, `SCROLL_COOLDOWN = 300`, tap-to-toggle, `start_audio`/`stop_audio` frames to the gateway.
-- **`g2_app/src/state.ts`** — 10-state machine (LOADING → MENU → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → ...).
+- **`g2_app/src/state.ts`** — 9-state machine (LOADING → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → ...).
 - **`g2_app/src/conversation.ts`** — `removeLastUser()` and `formatReverse()`.
 - **`gateway/server.py`** (90 s recording cap) and **`gateway/audio_buffer.py`** (60 s buffer cap) — gateway owns audio buffering and STT.
 - **`docs/reference/g2-platform/evenhub_sdk.md`** — full SDK event reference.

@@ -125,8 +125,8 @@ class TestInboundOnly:
             "ping",
             "history",
             "session_reset",
-            "session_list",
-            "session_switched",
+            "autoresearch_status",
+            "autoresearch_feed",
         ],
     )
     def test_outbound_type_rejected_by_parse(self, frame_type: str) -> None:
@@ -308,38 +308,21 @@ class TestHistoryFrameWrongType:
             validate_outbound({"type": "history", "entries": "not_a_list"})
 
 
-class TestSessionListRequestFrame:
-    """session_list_request inbound frame validation."""
+class TestRemovedSessionFrames:
+    """Removed session-management frames are no longer accepted inbound."""
 
-    def test_session_list_request_round_trip(self) -> None:
-        frame: dict[str, Any] = {"type": "session_list_request"}
-        serialized = serialize(frame)
-        parsed = parse_text_frame(serialized)
-        assert parsed == frame
-
-
-class TestSessionSwitchFrame:
-    """session_switch inbound frame validation."""
-
-    def test_session_switch_round_trip(self) -> None:
-        frame: dict[str, Any] = {"type": "session_switch", "sessionKey": "agent:claw:g2:123:abc"}
-        serialized = serialize(frame)
-        parsed = parse_text_frame(serialized)
-        assert parsed == frame
-
-    def test_session_switch_missing_key_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'sessionKey'"):
-            parse_text_frame('{"type":"session_switch"}')
-
-
-class TestSessionCreateFrame:
-    """session_create inbound frame validation."""
-
-    def test_session_create_round_trip(self) -> None:
-        frame: dict[str, Any] = {"type": "session_create"}
-        serialized = serialize(frame)
-        parsed = parse_text_frame(serialized)
-        assert parsed == frame
+    @pytest.mark.parametrize(
+        "frame",
+        [
+            {"type": "session_list_request"},
+            {"type": "session_switch", "sessionKey": "agent:claw:g2"},
+            {"type": "session_create"},
+        ],
+        ids=["session_list_request", "session_switch", "session_create"],
+    )
+    def test_removed_inbound_frame_raises(self, frame: dict[str, Any]) -> None:
+        with pytest.raises(ProtocolError, match="Unknown frame type"):
+            parse_text_frame(json.dumps(frame))
 
 
 class TestForceStopFrame:
@@ -356,95 +339,91 @@ class TestForceStopFrame:
         assert parsed == frame
 
 
-class TestSessionListFrame:
-    """session_list outbound frame validation."""
+class TestAutoresearchStatusFrame:
+    """autoresearch_status outbound frame validation."""
 
-    def test_session_list_outbound_valid(self) -> None:
+    def test_minimal_status_valid(self) -> None:
         validate_outbound(
             {
-                "type": "session_list",
-                "sessions": [
-                    {
-                        "sessionKey": "agent:claw:g2",
-                        "sessionId": "ses_abc",
-                        "updatedAt": "2026-03-07T10:00:00Z",
-                        "preview": "Hello",
-                        "messageCount": 5,
-                    },
-                ],
-                "activeSessionKey": "agent:claw:g2",
+                "type": "autoresearch_status",
+                "running": True,
+                "phase": "verification",
+                "iteration": 3,
+                "suspended": False,
+                "campaignReviewRequired": False,
             }
         )
 
-    def test_session_list_empty_sessions_valid(self) -> None:
+    def test_status_with_optional_fields_valid(self) -> None:
         validate_outbound(
             {
-                "type": "session_list",
-                "sessions": [],
-                "activeSessionKey": "agent:claw:g2",
+                "type": "autoresearch_status",
+                "running": True,
+                "phase": "verification",
+                "iteration": 3,
+                "suspended": False,
+                "campaignReviewRequired": False,
+                "supervisorOutcome": "healthy",
+                "supervisorDetail": "cycle complete",
+                "lastCycleAt": 1770000000000,
+                "taskHeadline": "[RUNNING] Verify results",
             }
         )
 
-    def test_session_list_missing_sessions_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'sessions'"):
+    def test_status_missing_running_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'running'"):
             validate_outbound(
                 {
-                    "type": "session_list",
-                    "activeSessionKey": "agent:claw:g2",
+                    "type": "autoresearch_status",
+                    "phase": "verification",
+                    "iteration": 3,
+                    "suspended": False,
+                    "campaignReviewRequired": False,
                 }
             )
 
-    def test_session_list_missing_active_key_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'activeSessionKey'"):
+    def test_status_wrong_type_suspended_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="must be bool"):
             validate_outbound(
                 {
-                    "type": "session_list",
-                    "sessions": [],
+                    "type": "autoresearch_status",
+                    "running": True,
+                    "phase": "verification",
+                    "iteration": 3,
+                    "suspended": "yes",
+                    "campaignReviewRequired": False,
+                }
+            )
+
+    def test_status_wrong_type_iteration_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="must be int"):
+            validate_outbound(
+                {
+                    "type": "autoresearch_status",
+                    "running": True,
+                    "phase": "verification",
+                    "iteration": "3",
+                    "suspended": False,
+                    "campaignReviewRequired": False,
                 }
             )
 
 
-class TestSessionSwitchedFrame:
-    """session_switched outbound frame validation."""
+class TestAutoresearchFeedFrame:
+    """autoresearch_feed outbound frame validation."""
 
-    def test_session_switched_outbound_valid(self) -> None:
+    def test_feed_with_entries_valid(self) -> None:
         validate_outbound(
             {
-                "type": "session_switched",
-                "sessionKey": "agent:claw:g2:123:abc",
+                "type": "autoresearch_feed",
+                "entries": [{"role": "assistant", "text": "hello", "ts": 1770000000000}],
             }
         )
 
-    def test_session_switched_with_optional_fields(self) -> None:
-        validate_outbound(
-            {
-                "type": "session_switched",
-                "sessionKey": "agent:claw:g2:123:abc",
-                "sessionId": "ses_abc",
-                "sessionStartedAt": "2026-03-07T10:00:00Z",
-            }
-        )
+    def test_feed_missing_entries_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'entries'"):
+            validate_outbound({"type": "autoresearch_feed"})
 
-    def test_session_switched_missing_key_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'sessionKey'"):
-            validate_outbound({"type": "session_switched"})
-
-
-class TestSessionSwitchKeyValidation:
-    """session_switch sessionKey length and emptiness validation."""
-
-    def test_empty_session_key_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="sessionKey must be non-empty"):
-            parse_text_frame('{"type":"session_switch","sessionKey":""}')
-
-    def test_session_key_too_long_raises(self) -> None:
-        long_key = "x" * 201
-        raw = json.dumps({"type": "session_switch", "sessionKey": long_key})
-        with pytest.raises(ProtocolError, match="at most 200 characters"):
-            parse_text_frame(raw)
-
-    def test_session_key_at_max_length_accepted(self) -> None:
-        key = "x" * 200
-        raw = json.dumps({"type": "session_switch", "sessionKey": key})
-        result = parse_text_frame(raw)
-        assert result["sessionKey"] == key
+    def test_feed_non_list_entries_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="must be list"):
+            validate_outbound({"type": "autoresearch_feed", "entries": "not_a_list"})

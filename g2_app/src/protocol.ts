@@ -1,6 +1,6 @@
 // === Status types ===
 export type GatewayStatus = 'loading' | 'idle' | 'recording' | 'transcribing' | 'thinking' | 'streaming';
-export type AppStatus = GatewayStatus | 'error' | 'disconnected' | 'confirming' | 'menu';
+export type AppStatus = GatewayStatus | 'error' | 'disconnected' | 'confirming';
 
 export type ErrorCode =
   | 'AUTH_FAILED'
@@ -70,27 +70,28 @@ export interface SessionResetFrame {
   reason: 'user_request' | 'daily_reset' | 'force_stop';
 }
 
-export interface SessionListEntry {
-  sessionKey: string;
-  sessionId: string;
-  updatedAt: string | null;
-  preview: string;
-  messageCount: number;
-  label: string;
-  isActive: boolean;
+export interface AutoresearchStatusFrame {
+  type: 'autoresearch_status';
+  running: boolean;
+  phase: string;
+  iteration: number;
+  suspended: boolean;
+  campaignReviewRequired: boolean;
+  supervisorOutcome?: string;
+  supervisorDetail?: string;
+  lastCycleAt?: number;
+  taskHeadline?: string;
 }
 
-export interface SessionListFrame {
-  type: 'session_list';
-  sessions: SessionListEntry[];
-  activeSessionKey: string;
+export interface FeedEntry {
+  role: 'assistant';
+  text: string;
+  ts: number;
 }
 
-export interface SessionSwitchedFrame {
-  type: 'session_switched';
-  sessionKey: string;
-  sessionId?: string;
-  sessionStartedAt?: string;
+export interface AutoresearchFeedFrame {
+  type: 'autoresearch_feed';
+  entries: FeedEntry[];
 }
 
 export type InboundFrame =
@@ -103,8 +104,8 @@ export type InboundFrame =
   | PingFrame
   | HistoryFrame
   | SessionResetFrame
-  | SessionListFrame
-  | SessionSwitchedFrame;
+  | AutoresearchStatusFrame
+  | AutoresearchFeedFrame;
 
 // === Outbound frames (App → Gateway) ===
 export interface TextFrame {
@@ -136,27 +137,14 @@ export interface ResetSessionFrame {
   type: 'reset_session';
 }
 
-export interface SessionListRequestFrame {
-  type: 'session_list_request';
-}
-
-export interface SessionSwitchFrame {
-  type: 'session_switch';
-  sessionKey: string;
-}
-
-export interface SessionCreateFrame {
-  type: 'session_create';
-}
-
 export interface ForceStopFrame {
   type: 'force_stop';
 }
 
-export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | SessionListRequestFrame | SessionSwitchFrame | SessionCreateFrame | ForceStopFrame;
+export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | ForceStopFrame;
 
 // === Frame parsing ===
-const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'session_list', 'session_switched']);
+const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'autoresearch_status', 'autoresearch_feed']);
 
 /** Required fields per inbound frame type (mirrors Python gateway validation). */
 const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -169,8 +157,8 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   ping: [],
   history: ['entries'],
   session_reset: ['reason'],
-  session_list: ['sessions', 'activeSessionKey'],
-  session_switched: ['sessionKey'],
+  autoresearch_status: ['running', 'phase', 'iteration', 'suspended', 'campaignReviewRequired'],
+  autoresearch_feed: ['entries'],
 };
 
 /** Valid status values (matches GatewayStatus union). */
@@ -195,8 +183,10 @@ const FIELD_TYPES: Record<string, Record<string, string>> = {
   connected: { version: 'string', sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string', taskSummary: 'string' },
   history: { entries: 'object' },
   session_reset: { reason: 'string' },
-  session_list: { sessions: 'object', activeSessionKey: 'string' },
-  session_switched: { sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string' },
+  autoresearch_status: {
+    running: 'boolean', phase: 'string', iteration: 'number', suspended: 'boolean', campaignReviewRequired: 'boolean',
+  },
+  autoresearch_feed: { entries: 'object' },
 };
 
 export function parseFrame(data: string): InboundFrame {
@@ -253,6 +243,14 @@ export function parseFrame(data: string): InboundFrame {
     if (typeof frame.phase === 'string') clean.phase = frame.phase;
   }
 
+  // Copy optional autoresearch status fields, dropping mistyped values.
+  if (clean.type === 'autoresearch_status') {
+    if (typeof frame.supervisorOutcome === 'string') clean.supervisorOutcome = frame.supervisorOutcome;
+    if (typeof frame.supervisorDetail === 'string') clean.supervisorDetail = frame.supervisorDetail;
+    if (typeof frame.lastCycleAt === 'number') clean.lastCycleAt = frame.lastCycleAt;
+    if (typeof frame.taskHeadline === 'string') clean.taskHeadline = frame.taskHeadline;
+  }
+
   // Copy history entries array (filter out malformed entries)
   if (clean.type === 'history') {
     if (!Array.isArray(frame.entries)) {
@@ -276,54 +274,17 @@ export function parseFrame(data: string): InboundFrame {
     });
   }
 
-  // Copy session_list sessions array.
-  if (clean.type === 'session_list') {
-    if (!Array.isArray(frame.sessions)) {
-      throw new Error('session_list.sessions must be an array');
+  // Copy autoresearch feed entries, filtering out malformed or non-assistant entries.
+  if (clean.type === 'autoresearch_feed') {
+    if (!Array.isArray(frame.entries)) {
+      throw new Error('autoresearch_feed.entries must be an array');
     }
-    const activeKey = typeof clean.activeSessionKey === 'string' ? (clean.activeSessionKey as string) : '';
-    clean.sessions = (frame.sessions as unknown[]).map((entry, index) => {
-      if (typeof entry !== 'object' || entry === null) {
-        throw new Error(`session_list.sessions[${index}] must be an object`);
-      }
+    clean.entries = (frame.entries as unknown[]).flatMap((entry) => {
+      if (typeof entry !== 'object' || entry === null) return [];
       const e = entry as Record<string, unknown>;
-      if (typeof e.sessionKey !== 'string') {
-        throw new Error(`session_list.sessions[${index}].sessionKey must be string`);
-      }
-      if (typeof e.sessionId !== 'string') {
-        throw new Error(`session_list.sessions[${index}].sessionId must be string`);
-      }
-      if (e.updatedAt !== null && typeof e.updatedAt !== 'string') {
-        throw new Error(`session_list.sessions[${index}].updatedAt must be string or null`);
-      }
-      if (typeof e.preview !== 'string') {
-        throw new Error(`session_list.sessions[${index}].preview must be string`);
-      }
-      if (typeof e.messageCount !== 'number') {
-        throw new Error(`session_list.sessions[${index}].messageCount must be number`);
-      }
-      if (typeof e.label !== 'string') {
-        throw new Error(`session_list.sessions[${index}].label must be string`);
-      }
-      if (typeof e.isActive !== 'boolean') {
-        throw new Error(`session_list.sessions[${index}].isActive must be boolean`);
-      }
-      return {
-        sessionKey: e.sessionKey,
-        sessionId: e.sessionId,
-        updatedAt: e.updatedAt,
-        preview: e.preview,
-        messageCount: e.messageCount,
-        label: e.label,
-        isActive: e.sessionKey === activeKey ? e.isActive : false,
-      };
+      if (e.role !== 'assistant' || typeof e.text !== 'string' || typeof e.ts !== 'number') return [];
+      return [{ role: 'assistant', text: e.text, ts: e.ts }];
     });
-  }
-
-  // Copy optional session_switched fields
-  if (clean.type === 'session_switched') {
-    if (typeof frame.sessionId === 'string') clean.sessionId = frame.sessionId;
-    if (typeof frame.sessionStartedAt === 'string') clean.sessionStartedAt = frame.sessionStartedAt;
   }
 
   // M-5: Validate status value against known union

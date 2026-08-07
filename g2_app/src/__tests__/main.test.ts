@@ -32,6 +32,7 @@ const mockConversation = {
   startAssistantStream: vi.fn(),
   appendToLastAssistant: vi.fn(),
   replayHistory: vi.fn(),
+  setFeedEntries: vi.fn(),
   formatReverse: vi.fn().mockReturnValue('Ready.'),
   format: vi.fn().mockReturnValue('Ready.'),
   get length() { return 0; },
@@ -51,9 +52,8 @@ const mockDisplay = {
   showDisconnected: vi.fn(() => Promise.resolve()),
   showError: vi.fn(() => Promise.resolve()),
   showConfirming: vi.fn(() => Promise.resolve()),
-  showSessionMenu: vi.fn(() => Promise.resolve()),
+  setAutoresearchHeader: vi.fn(() => Promise.resolve()),
   showSessionReset: vi.fn(() => Promise.resolve()),
-  exitMenuMode: vi.fn(() => Promise.resolve()),
   appendDelta: vi.fn(() => Promise.resolve()),
   finaliseStream: vi.fn(() => Promise.resolve()),
 };
@@ -68,7 +68,6 @@ const mockGateway = {
   send: vi.fn(),
   sendJson: vi.fn(),
   requestStatus: vi.fn(),
-  requestSessionList: vi.fn(),
   isConnected: true,
 };
 vi.mock('../gateway', () => ({
@@ -77,14 +76,19 @@ vi.mock('../gateway', () => ({
 
 const mockSm = {
   _current: 'loading',
+  _callbacks: [] as Array<(newState: string, oldState: string) => void>,
   get current() {
     return this._current;
   },
   transition: vi.fn(function (this: typeof mockSm, s: string) {
+    const old = this._current;
     this._current = s;
+    for (const cb of this._callbacks) cb(s, old);
     return true;
   }),
-  onChange: vi.fn(),
+  onChange: vi.fn((cb: (newState: string, oldState: string) => void) => {
+    mockSm._callbacks.push(cb);
+  }),
   reset: vi.fn(),
 };
 vi.mock('../state', () => ({
@@ -95,11 +99,6 @@ const mockInput = {
   init: vi.fn(),
   sendTextFromInput: vi.fn(),
   _handleEvent: vi.fn(),
-  setSessionList: vi.fn(),
-  closeSessionMenu: vi.fn(function () {
-    mockSm._current = 'idle';
-    return true;
-  }),
   setPendingTranscription: vi.fn(),
   get pendingTranscription() { return null; },
 };
@@ -115,6 +114,7 @@ describe('main.ts boot()', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSm._current = 'loading';
+    mockSm._callbacks = [];
   });
 
   /**
@@ -161,6 +161,10 @@ describe('main.ts boot()', () => {
     return mockGateway.onMessage.mock.calls[0][0];
   }
 
+  function getRouteEvent(): (event: string) => void {
+    return mockGateway.onEvent.mock.calls[0][0];
+  }
+
   it('initialises InputHandler with dependencies (no audio) during boot', async () => {
     await runBoot();
 
@@ -183,8 +187,19 @@ describe('main.ts boot()', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Status and session frame routing
+  // Connection and status frame routing
   // -----------------------------------------------------------------------
+  it('connected frame transitions to idle and shows the idle display', async () => {
+    await runBoot();
+    const routeFrame = getRouteFrame();
+
+    routeFrame({ type: 'connected', version: '1.0' });
+
+    expect(mockSm.current).toBe('idle');
+    expect(mockSm.transition).toHaveBeenCalledWith('idle');
+    expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+  });
+
   describe('status frame routing', () => {
     it('recovers error to idle on an authoritative gateway idle status', async () => {
       await runBoot();
@@ -224,100 +239,111 @@ describe('main.ts boot()', () => {
       expect(mockDisplay.showIdle).not.toHaveBeenCalled();
     });
 
-    it('ignores status:idle while in menu state', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      mockSm._current = 'menu';
-
-      routeFrame({ type: 'status', status: 'idle' });
-
-      // State should remain menu — the guard prevents the transition
-      expect(mockSm.current).toBe('menu');
-      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
-    });
   });
 
-  describe('session frame routing', () => {
-    it('session_list frame in menu state calls display.showSessionMenu', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      mockSm._current = 'menu';
-
-      const sessions = [
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Chat 1', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Chat 1', messageCount: 2 },
-      ];
-
-      routeFrame({
-        type: 'session_list',
-        sessions,
-        activeSessionKey: 'k1',
-      });
-
-      expect(mockInput.setSessionList).toHaveBeenCalledWith(sessions);
-      expect(mockDisplay.showSessionMenu).toHaveBeenCalledWith(sessions);
+  describe('autoresearch frame routing', () => {
+    const statusFrame = (overrides: Record<string, unknown> = {}) => ({
+      type: 'autoresearch_status',
+      running: true,
+      phase: 'cycling',
+      iteration: 4,
+      suspended: false,
+      campaignReviewRequired: false,
+      ...overrides,
     });
 
-    it('session_list frame outside menu state stores list but does not show menu', async () => {
+    it('formats and routes running, stopped, and not-running headers', async () => {
       await runBoot();
       const routeFrame = getRouteFrame();
+
+      routeFrame(statusFrame());
+      routeFrame(statusFrame({ running: false, phase: 'paused', iteration: 7 }));
+      routeFrame(statusFrame({ running: false, phase: 'not running', iteration: 0 }));
+
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(1, 'AR cycling it4');
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(2, 'AR stopped · paused it7');
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(3, 'AR not running');
+    });
+
+    it('formats outcome, suspended, and review suffixes', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+
+      routeFrame(statusFrame({
+        supervisorOutcome: 'continue',
+        suspended: true,
+        campaignReviewRequired: true,
+      }));
+
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenCalledWith(
+        'AR cycling it4 · continue ⏸ ⚠rev',
+      );
+    });
+
+    it('truncates a long phase while preserving the autoresearch suffix', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+
+      routeFrame(statusFrame({
+        phase: '1234567890123456789012345678901234567890',
+        supervisorOutcome: 'continue',
+        suspended: true,
+        campaignReviewRequired: true,
+      }));
+
+      const header = (mockDisplay.setAutoresearchHeader.mock.calls[0] as unknown as [string])[0];
+      const phaseEnd = header.indexOf(' it4');
+      expect(header.length).toBeLessThanOrEqual(50);
+      expect(header.slice(3, phaseEnd).endsWith('…')).toBe(true);
+      expect(header.endsWith(' ⏸ ⚠rev')).toBe(true);
+    });
+
+    it('applies an autoresearch feed immediately while idle', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      const entries = [{ role: 'assistant', text: 'update', ts: 10 }];
       mockSm._current = 'idle';
 
-      routeFrame({
-        type: 'session_list',
-        sessions: [],
-        activeSessionKey: '',
-      });
+      routeFrame({ type: 'autoresearch_feed', entries });
 
-      expect(mockInput.setSessionList).toHaveBeenCalledWith([]);
-      expect(mockDisplay.showSessionMenu).not.toHaveBeenCalled();
+      expect(mockConversation.setFeedEntries).toHaveBeenCalledWith(entries);
+      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
     });
 
-    it('session_switched frame from menu clears conversation, closes menu, skips showIdle', async () => {
+    it('defers streaming feeds and applies only the latest feed on idle', async () => {
       await runBoot();
       const routeFrame = getRouteFrame();
-      mockSm._current = 'menu';
+      const first = [{ role: 'assistant', text: 'first', ts: 10 }];
+      const latest = [{ role: 'assistant', text: 'latest', ts: 20 }];
+      mockSm._current = 'streaming';
 
-      routeFrame({
-        type: 'session_switched',
-        sessionKey: 'key-new',
-        sessionId: 'sess-new',
-      });
+      routeFrame({ type: 'autoresearch_feed', entries: first });
+      routeFrame({ type: 'autoresearch_feed', entries: latest });
 
-      expect(mockConversation.clear).toHaveBeenCalled();
-      expect(mockInput.closeSessionMenu).toHaveBeenCalled();
-      // showIdle should NOT be called — exitMenuMode already rebuilt the layout
+      expect(mockConversation.setFeedEntries).not.toHaveBeenCalled();
       expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+
+      mockSm.transition('idle');
+
+      expect(mockConversation.setFeedEntries).toHaveBeenCalledOnce();
+      expect(mockConversation.setFeedEntries).toHaveBeenCalledWith(latest);
+      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+      mockSm.transition('idle');
+      expect(mockConversation.setFeedEntries).toHaveBeenCalledOnce();
     });
 
-    it('session_switched frame from non-menu calls showIdle', async () => {
+    it('drops a stashed feed when disconnected before reconnecting', async () => {
       await runBoot();
       const routeFrame = getRouteFrame();
-      mockSm._current = 'idle';
+      const routeEvent = getRouteEvent();
+      const stale = [{ role: 'assistant', text: 'stale', ts: 10 }];
+      mockSm._current = 'streaming';
 
-      routeFrame({
-        type: 'session_switched',
-        sessionKey: 'key-abc',
-      });
+      routeFrame({ type: 'autoresearch_feed', entries: stale });
+      routeEvent('disconnected');
+      routeFrame({ type: 'connected', version: '1.0' });
 
-      expect(mockConversation.clear).toHaveBeenCalled();
-      expect(mockInput.closeSessionMenu).not.toHaveBeenCalled();
-      expect(mockDisplay.showIdle).toHaveBeenCalled();
-    });
-
-    it('session_switched without sessionId does not crash localStorage', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      mockSm._current = 'idle';
-
-      // Should not throw even though sessionId is missing
-      expect(() => {
-        routeFrame({
-          type: 'session_switched',
-          sessionKey: 'key-only',
-        });
-      }).not.toThrow();
-
-      expect(mockConversation.clear).toHaveBeenCalled();
+      expect(mockConversation.setFeedEntries).not.toHaveBeenCalledWith(stale);
     });
   });
 });

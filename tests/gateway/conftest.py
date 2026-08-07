@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 import pytest_asyncio
 import websockets
+from gateway.autoresearch_feed import AutoresearchSnapshot
 from gateway.config import GatewayConfig
 from gateway.server import GatewayServer
 
@@ -54,8 +55,20 @@ def _no_real_session_resolver() -> Iterator[None]:
         patch("gateway.server.read_task_status", return_value=None),
         patch("gateway.session_history.read_history", return_value=[]),
         patch(
-            "gateway.session_history.list_session_summaries",
-            return_value=[],
+            "gateway.autoresearch_feed.read_snapshot",
+            return_value=AutoresearchSnapshot(
+                running=False,
+                header_ok=True,
+                phase="not running",
+                iteration=0,
+                suspended=False,
+                campaign_review_required=False,
+                supervisor_outcome=None,
+                supervisor_detail=None,
+                last_cycle_at_ms=None,
+                task_headline=None,
+                feed=(),
+            ),
         ),
         patch("gateway.session_resolver.list_sessions", return_value=[]),
     ):
@@ -69,6 +82,7 @@ async def auth_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
         gateway_host="127.0.0.1",
         gateway_port=0,
         gateway_token="test-token",
+        autoresearch_feed_interval=0,
     )
     gw = GatewayServer(config, handler=StaticResponseHandler())
     server = await websockets.serve(

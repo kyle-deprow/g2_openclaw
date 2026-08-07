@@ -291,31 +291,19 @@ describe('Gateway', () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Session menu methods
-  // -----------------------------------------------------------------------
-  describe('session menu methods', () => {
-    it('requestSessionList sends correct frame', () => {
+  describe('control methods', () => {
+    it('sendForceStop sends the force_stop frame', () => {
       gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
-      gateway.requestSessionList();
-      expect(MockWebSocket.last!.sent).toContain('{"type":"session_list_request"}');
+      gateway.sendForceStop();
+      expect(MockWebSocket.last!.sent).toContain('{"type":"force_stop"}');
     });
 
-    it('switchSession sends correct frame with sessionKey', () => {
+    it('requestStatus sends the status_request frame', () => {
       gateway.connect(TEST_URL);
       MockWebSocket.last!.simulateOpen();
-      gateway.switchSession('agent:claw:g2:abc123');
-      expect(MockWebSocket.last!.sent).toContain(
-        '{"type":"session_switch","sessionKey":"agent:claw:g2:abc123"}',
-      );
-    });
-
-    it('createNewSession sends correct frame', () => {
-      gateway.connect(TEST_URL);
-      MockWebSocket.last!.simulateOpen();
-      gateway.createNewSession();
-      expect(MockWebSocket.last!.sent).toContain('{"type":"session_create"}');
+      gateway.requestStatus();
+      expect(MockWebSocket.last!.sent).toContain('{"type":"status_request"}');
     });
   });
 });

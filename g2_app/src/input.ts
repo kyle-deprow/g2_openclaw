@@ -3,7 +3,6 @@ import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import type { ConversationHistory } from './conversation';
 import type { DisplayManager } from './display';
 import type { Gateway } from './gateway';
-import type { SessionListEntry } from './protocol';
 import type { StateMachine } from './state';
 
 /**
@@ -24,8 +23,6 @@ export class InputHandler {
   private _lastScrollTime = 0;
   private _initialised = false;
   private _pendingTranscription: string | null = null;
-  private _sessionList: SessionListEntry[] | null = null;
-  private _trackedMenuIndex = 0;
   private static readonly SCROLL_COOLDOWN = 300; // ms
 
   init(deps: {
@@ -185,47 +182,8 @@ export class InputHandler {
     return true;
   }
 
-  /** Get the current session list (if loaded). */
-  get sessionList(): SessionListEntry[] | null {
-    return this._sessionList;
-  }
-
-  /** Store the session list for menu interaction. */
-  setSessionList(sessions: SessionListEntry[]): void {
-    this._sessionList = sessions;
-    this._trackedMenuIndex = 0;
-  }
-
-  /** Open the session menu. */
-  openSessionMenu(): boolean {
-    if (this.sm.current !== 'idle') return false;
-    this.sm.transition('menu');
-    this.gateway.requestSessionList();
-    this.display.showSessionMenu([]).catch(err => console.error('[Input] Display error:', err));
-    return true;
-  }
-
-  /** Close the session menu and return to idle transcript view. */
-  closeSessionMenu(): boolean {
-    if (this.sm.current !== 'menu') return false;
-    this._sessionList = null;
-    this.sm.transition('idle');
-    this.display.exitMenuMode().catch(err => console.error('[Input] Display error:', err));
-    return true;
-  }
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private _handleEvent(eventType: number | undefined, event?: any): void {
-    // Menu mode: branch early
-    if (this.sm.current === 'menu') {
-      if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-        this._handleMenuTap(event);
-      } else if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-        this.closeSessionMenu();
-      }
-      // Scroll events handled natively by firmware list — no app action needed.
-      return;
-    }
     // CLICK_EVENT = 0 bug: SDK deserializes 0 as undefined
     if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
       if (eventType === undefined) {
@@ -300,9 +258,7 @@ export class InputHandler {
 
   private _handleDoubleTap(): void {
     const state = this.sm.current;
-    if (state === 'idle') {
-      this.openSessionMenu();
-    } else if (state === 'confirming') {
+    if (state === 'confirming') {
       this.rejectTranscription();
     } else if (state === 'thinking' || state === 'streaming') {
       console.log('[Input] Force stop — killing OpenClaw session');
@@ -311,38 +267,7 @@ export class InputHandler {
       this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     } else if (state === 'error') {
       this.sm.transition('idle');
-      this.openSessionMenu();
-    }
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private _handleMenuTap(event?: any): void {
-    // Ignore taps while session list is still loading
-    if (!this._sessionList) {
-      console.log('[Input] Menu tap ignored — session list not yet loaded');
-      return;
-    }
-
-    const listEvent = event?.listEvent;
-    const index = listEvent?.currentSelectItemIndex ?? this._trackedMenuIndex;
-    const name: string | undefined = listEvent?.currentSelectItemName;
-
-    if (index === 0 || (name && name.includes('New Session'))) {
-      // "New Session" item
-      this.gateway.createNewSession();
-      return;
-    }
-
-    // Session selection — map list index back to session entry
-    const sessionIndex = index - 1; // offset for "New Session" item
-    const session = this._sessionList?.[sessionIndex];
-    if (session) {
-      if (session.isActive) {
-        // Already the active session — just close the menu
-        this.closeSessionMenu();
-      } else {
-        this.gateway.switchSession(session.sessionKey);
-      }
+      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     }
   }
 
@@ -355,12 +280,6 @@ export class InputHandler {
   /** Programmatic double-tap — same as ring double-click. */
   simulateDoubleTap(): boolean {
     this._handleDoubleTap();
-    return true;
-  }
-
-  /** Programmatic session selection from menu. */
-  simulateMenuSelect(index: number): boolean {
-    this._handleMenuTap({ listEvent: { currentSelectItemIndex: index } });
     return true;
   }
 
@@ -386,9 +305,6 @@ export class InputHandler {
     this.gateway.sendForceStop();
     const current = this.sm.current;
     if (current !== 'idle' && current !== 'loading' && current !== 'disconnected') {
-      if (current === 'menu') {
-        this.display.exitMenuMode().catch(err => console.error('[Input] Display error:', err));
-      }
       this.sm.transition('idle');
       this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
     }

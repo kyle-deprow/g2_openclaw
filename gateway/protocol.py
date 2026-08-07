@@ -58,19 +58,6 @@ class ResetSessionFrame(TypedDict):
     type: Literal["reset_session"]
 
 
-class SessionListRequestFrame(TypedDict):
-    type: Literal["session_list_request"]
-
-
-class SessionSwitchFrame(TypedDict):
-    type: Literal["session_switch"]
-    sessionKey: str
-
-
-class SessionCreateFrame(TypedDict):
-    type: Literal["session_create"]
-
-
 class ForceStopFrame(TypedDict):
     type: Literal["force_stop"]
 
@@ -82,9 +69,6 @@ InboundFrame = (
     | PongFrame
     | StatusRequestFrame
     | ResetSessionFrame
-    | SessionListRequestFrame
-    | SessionSwitchFrame
-    | SessionCreateFrame
     | ForceStopFrame
 )
 
@@ -153,27 +137,22 @@ class SessionResetFrame(TypedDict):
     reason: str
 
 
-class SessionSummaryDict(TypedDict):
-    sessionKey: str
-    sessionId: str
-    updatedAt: str | None
-    preview: str
-    messageCount: int
-    label: str
-    isActive: bool
+class AutoresearchStatusFrame(TypedDict):
+    type: Literal["autoresearch_status"]
+    running: bool
+    phase: str
+    iteration: int
+    suspended: bool
+    campaignReviewRequired: bool
+    supervisorOutcome: NotRequired[str]
+    supervisorDetail: NotRequired[str]
+    lastCycleAt: NotRequired[int]
+    taskHeadline: NotRequired[str]
 
 
-class SessionListFrame(TypedDict):
-    type: Literal["session_list"]
-    sessions: list[SessionSummaryDict]
-    activeSessionKey: str
-
-
-class SessionSwitchedFrame(TypedDict):
-    type: Literal["session_switched"]
-    sessionKey: str
-    sessionId: NotRequired[str]
-    sessionStartedAt: NotRequired[str]
+class AutoresearchFeedFrame(TypedDict):
+    type: Literal["autoresearch_feed"]
+    entries: list[HistoryEntryDict]
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +166,6 @@ _INBOUND_FIELDS: dict[str, list[str]] = {
     "pong": [],
     "status_request": [],
     "reset_session": [],
-    "session_list_request": [],
-    "session_switch": ["sessionKey"],
-    "session_create": [],
     "force_stop": [],
 }
 
@@ -203,8 +179,14 @@ _OUTBOUND_FIELDS: dict[str, list[str]] = {
     "ping": [],
     "history": ["entries"],
     "session_reset": ["reason"],
-    "session_list": ["sessions", "activeSessionKey"],
-    "session_switched": ["sessionKey"],
+    "autoresearch_status": [
+        "running",
+        "phase",
+        "iteration",
+        "suspended",
+        "campaignReviewRequired",
+    ],
+    "autoresearch_feed": ["entries"],
 }
 
 _ALL_FIELDS: dict[str, list[str]] = {**_INBOUND_FIELDS, **_OUTBOUND_FIELDS}
@@ -229,10 +211,14 @@ _FIELD_TYPES: dict[str, type] = {
     "elapsedMs": int,
     "phase": str,
     "reason": str,
-    "sessions": list,
-    "activeSessionKey": str,
-    "messageCount": int,
-    "preview": str,
+    "running": bool,
+    "suspended": bool,
+    "campaignReviewRequired": bool,
+    "iteration": int,
+    "lastCycleAt": int,
+    "supervisorOutcome": str,
+    "supervisorDetail": str,
+    "taskHeadline": str,
 }
 
 
@@ -290,13 +276,6 @@ def parse_text_frame(raw: str) -> dict[str, Any]:
         if isinstance(msg, str) and len(msg) > MAX_TEXT_MESSAGE_LENGTH:
             raise ProtocolError(
                 f"Text message too long ({len(msg)} chars, max {MAX_TEXT_MESSAGE_LENGTH})"
-            )
-
-    if frame_type == "session_switch":
-        key = data.get("sessionKey", "")
-        if isinstance(key, str) and (not key or len(key) > 200):
-            raise ProtocolError(
-                f"sessionKey must be non-empty and at most 200 characters (got {len(key)})"
             )
 
     return data

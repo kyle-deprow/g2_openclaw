@@ -110,6 +110,7 @@ async def audio_gateway() -> AsyncIterator[tuple[str, GatewayServer]]:
         gateway_host="127.0.0.1",
         gateway_port=0,
         gateway_token="audio-token",
+        autoresearch_feed_interval=0,
     )
     fake_transcriber = FakeTranscriber(result=FAKE_TEXT)
     gw = GatewayServer(

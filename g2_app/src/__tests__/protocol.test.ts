@@ -215,6 +215,129 @@ describe('parseFrame', () => {
     );
   });
 
+  // --- Autoresearch status frame ---
+  it('parses autoresearch_status with minimal fields', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'autoresearch_status',
+      running: false,
+      phase: 'idle',
+      iteration: 0,
+      suspended: false,
+      campaignReviewRequired: false,
+    }));
+    expect(frame).toEqual({
+      type: 'autoresearch_status',
+      running: false,
+      phase: 'idle',
+      iteration: 0,
+      suspended: false,
+      campaignReviewRequired: false,
+    });
+  });
+
+  it('parses autoresearch_status with full fields', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'autoresearch_status',
+      running: true,
+      phase: 'experiment',
+      iteration: 7,
+      suspended: false,
+      campaignReviewRequired: true,
+      supervisorOutcome: 'continue',
+      supervisorDetail: 'Keep testing the next hypothesis',
+      lastCycleAt: 1700000000000,
+      taskHeadline: 'Improve benchmark score',
+    }));
+    expect(frame).toEqual({
+      type: 'autoresearch_status',
+      running: true,
+      phase: 'experiment',
+      iteration: 7,
+      suspended: false,
+      campaignReviewRequired: true,
+      supervisorOutcome: 'continue',
+      supervisorDetail: 'Keep testing the next hypothesis',
+      lastCycleAt: 1700000000000,
+      taskHeadline: 'Improve benchmark score',
+    });
+  });
+
+  it('rejects autoresearch_status when running is missing', () => {
+    expect(() => parseFrame(JSON.stringify({
+      type: 'autoresearch_status',
+      phase: 'idle',
+      iteration: 0,
+      suspended: false,
+      campaignReviewRequired: false,
+    }))).toThrow('Frame type "autoresearch_status" missing required field "running"');
+  });
+
+  it('rejects autoresearch_status when suspended is a string', () => {
+    expect(() => parseFrame(JSON.stringify({
+      type: 'autoresearch_status',
+      running: false,
+      phase: 'idle',
+      iteration: 0,
+      suspended: 'false',
+      campaignReviewRequired: false,
+    }))).toThrow('Field "suspended" must be boolean');
+  });
+
+  it('drops mistyped autoresearch_status optional fields', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'autoresearch_status',
+      running: true,
+      phase: 'experiment',
+      iteration: 7,
+      suspended: false,
+      campaignReviewRequired: false,
+      supervisorOutcome: 123,
+      supervisorDetail: true,
+      lastCycleAt: 'later',
+      taskHeadline: 456,
+    }));
+    expect(frame).toEqual({
+      type: 'autoresearch_status',
+      running: true,
+      phase: 'experiment',
+      iteration: 7,
+      suspended: false,
+      campaignReviewRequired: false,
+    });
+  });
+
+  // --- Autoresearch feed frame ---
+  it('parses autoresearch_feed and filters malformed or non-assistant entries', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'autoresearch_feed',
+      entries: [
+        { role: 'assistant', text: 'Keep this', ts: 1000 },
+        { role: 'user', text: 'Drop this', ts: 2000 },
+        { role: 'assistant', text: 'Missing timestamp' },
+        { role: 'assistant', ts: 4000 },
+        { role: 'assistant', text: 'Not numeric timestamp', ts: 'later' },
+        { role: 'assistant', text: 42, ts: 5000 },
+      ],
+    }));
+    expect(frame).toEqual({
+      type: 'autoresearch_feed',
+      entries: [{ role: 'assistant', text: 'Keep this', ts: 1000 }],
+    });
+  });
+
+  it('parses an empty autoresearch_feed', () => {
+    expect(parseFrame('{"type":"autoresearch_feed","entries":[]}')).toEqual({
+      type: 'autoresearch_feed',
+      entries: [],
+    });
+  });
+
+  it('rejects autoresearch_feed when entries is not an array', () => {
+    expect(() => parseFrame('{"type":"autoresearch_feed","entries":{}}')).toThrow(
+      'autoresearch_feed.entries must be an array',
+    );
+  });
+
   // --- Connected frame with optional session fields ---
   it('parses connected frame with optional sessionId/sessionKey/sessionStartedAt', () => {
     const frame = parseFrame(JSON.stringify({
@@ -301,155 +424,4 @@ describe('parseFrame', () => {
     );
   });
 
-  // --- Session list frame ---
-  it('parses a valid session_list frame', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', preview: 'First session', updatedAt: '2026-03-07T10:00:00Z', messageCount: 5, label: 'First session', isActive: true },
-        { sessionKey: 'key2', sessionId: 'id2', preview: 'Second session', updatedAt: '2026-03-07T09:00:00Z', messageCount: 3, label: 'Second session', isActive: false },
-      ],
-      activeSessionKey: 'key1',
-    }));
-    expect(frame.type).toBe('session_list');
-    const sl = frame as any;
-    expect(sl.sessions).toHaveLength(2);
-    expect(sl.sessions[0].sessionKey).toBe('key1');
-    expect(sl.sessions[0].isActive).toBe(true);
-    expect(sl.sessions[0].preview).toBe('First session');
-    expect(sl.sessions[0].messageCount).toBe(5);
-    expect(sl.sessions[0].label).toBe('First session');
-    expect(sl.sessions[1].isActive).toBe(false);
-  });
-
-  it('parses session_list with empty sessions array', () => {
-    const frame = parseFrame('{"type":"session_list","sessions":[],"activeSessionKey":""}');
-    expect(frame).toEqual({ type: 'session_list', sessions: [], activeSessionKey: '' });
-  });
-
-  it('throws when session_list is missing sessions field', () => {
-    expect(() => parseFrame('{"type":"session_list","activeSessionKey":"k"}')).toThrow(
-      'Frame type "session_list" missing required field "sessions"',
-    );
-  });
-
-  it('throws when session_list is missing activeSessionKey field', () => {
-    expect(() => parseFrame('{"type":"session_list","sessions":[]}')).toThrow(
-      'Frame type "session_list" missing required field "activeSessionKey"',
-    );
-  });
-
-  it('throws when session_list.sessions is not an array', () => {
-    expect(() => parseFrame('{"type":"session_list","sessions":"bad","activeSessionKey":""}')).toThrow(
-      'Field "sessions" must be object',
-    );
-  });
-
-  it('throws when session_list.sessions is a plain object', () => {
-    expect(() => parseFrame('{"type":"session_list","sessions":{"0":"bad"},"activeSessionKey":""}')).toThrow(
-      'session_list.sessions must be an array',
-    );
-  });
-
-  it('throws on malformed session entries', () => {
-    expect(() => parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', updatedAt: '2026-03-07T10:00:00Z', preview: 'Good', messageCount: 1, label: 'Good', isActive: false },
-        { sessionKey: 123, updatedAt: '2026-03-07T09:00:00Z', preview: 'Bad key', messageCount: 0 },
-      ],
-      activeSessionKey: '',
-    }))).toThrow('session_list.sessions[1].sessionKey must be string');
-  });
-
-  it('uses activeSessionKey to prevent stale active flags', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', preview: 'Test', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0, label: 'Test', isActive: true },
-      ],
-      activeSessionKey: 'other-key',
-    }));
-    const sl = frame as any;
-    expect(sl.sessions[0].isActive).toBe(false);
-  });
-
-  it('preserves server-provided label', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: 'My Chat', updatedAt: '2026-03-07T10:00:00Z', messageCount: 2, label: 'My Chat', isActive: false },
-      ],
-      activeSessionKey: '',
-    }));
-    const sl = frame as any;
-    expect(sl.sessions[0].label).toBe('My Chat');
-  });
-
-  it('accepts empty preview when label is provided', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'agent:claw:g2:abc', sessionId: 'id1', preview: '', updatedAt: '2026-03-07T10:00:00Z', messageCount: 0, label: 'abc', isActive: false },
-      ],
-      activeSessionKey: '',
-    }));
-    const sl = frame as any;
-    expect(sl.sessions[0].label).toBe('abc');
-  });
-
-  it('throws when messageCount is missing', () => {
-    expect(() => parseFrame(JSON.stringify({
-      type: 'session_list',
-      sessions: [
-        { sessionKey: 'key1', sessionId: 'id1', preview: 'Test', updatedAt: '2026-03-07T10:00:00Z' },
-      ],
-      activeSessionKey: '',
-    }))).toThrow('session_list.sessions[0].messageCount must be number');
-  });
-
-  // --- Session switched frame ---
-  it('parses a valid session_switched frame with sessionId', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_switched',
-      sessionId: 'sess-123',
-      sessionKey: 'key-abc',
-    }));
-    expect(frame).toEqual({ type: 'session_switched', sessionId: 'sess-123', sessionKey: 'key-abc' });
-  });
-
-  it('parses session_switched without optional sessionId', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_switched',
-      sessionKey: 'key-abc',
-    }));
-    expect(frame).toEqual({ type: 'session_switched', sessionKey: 'key-abc' });
-  });
-
-  it('parses session_switched with sessionStartedAt', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'session_switched',
-      sessionKey: 'key-abc',
-      sessionId: 'sess-999',
-      sessionStartedAt: '2026-03-07T10:00:00Z',
-    }));
-    expect(frame).toEqual({
-      type: 'session_switched',
-      sessionKey: 'key-abc',
-      sessionId: 'sess-999',
-      sessionStartedAt: '2026-03-07T10:00:00Z',
-    });
-  });
-
-  it('throws when session_switched is missing sessionKey', () => {
-    expect(() => parseFrame('{"type":"session_switched","sessionId":"id1"}')).toThrow(
-      'Frame type "session_switched" missing required field "sessionKey"',
-    );
-  });
-
-  it('throws when sessionId has wrong type on session_switched', () => {
-    expect(() => parseFrame('{"type":"session_switched","sessionKey":"k","sessionId":123}')).toThrow(
-      'Field "sessionId" must be string',
-    );
-  });
 });

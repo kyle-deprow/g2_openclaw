@@ -60,11 +60,11 @@ g2_openclaw/
 │   └── openclaw_config/   # OpenClaw daemon config (provider, model, etc.)
 ├── g2_app/                # G2 App — TypeScript thin client for iPhone / G2 glasses
 │   └── src/
-│       ├── main.ts        # Boot-to-menu, frame routing, module wiring
-│       ├── state.ts       # 10-state machine with validated transitions
-│       ├── display.ts     # Dual-mode display (transcript + session menu)
-│       ├── conversation.ts # History model, reverse chronological formatting
-│       ├── input.ts       # Tap-to-toggle, double-tap menu, scroll throttling
+│       ├── main.ts        # Boot-to-idle, frame routing, autoresearch header/feed wiring
+│       ├── state.ts       # 9-state machine with validated transitions
+│       ├── display.ts     # Single-mode display (transcript + autoresearch status header)
+│       ├── conversation.ts # History model, autoresearch feed merge, reverse formatting
+│       ├── input.ts       # Tap-to-toggle recording, force-stop gestures, scroll throttling
 │       ├── gateway.ts     # WebSocket client with auto-reconnect + jitter
 │       ├── protocol.ts    # Frame types with runtime validation
 │       └── utils.ts       # stripMarkdown() for display-safe text
@@ -95,8 +95,9 @@ Python WebSocket server that accepts G2 App connections, runs Whisper transcript
 
 | Module | Purpose |
 |--------|---------|
-| `server.py` | WebSocket server, session management, session menu handlers, frame routing |
-| `protocol.py` | Frame definitions (9 inbound, 11 outbound), session menu types, error codes |
+| `server.py` | WebSocket server, session management, autoresearch feed publisher, frame routing |
+| `protocol.py` | Frame definitions (7 inbound, 11 outbound), autoresearch frame types, error codes |
+| `autoresearch_feed.py` | Read-only autoresearch snapshot reader + change-detecting feed publisher |
 | `config.py` | Configuration via `.env` and environment variables |
 | `audio_buffer.py` | PCM validation (16-bit, 8–48kHz), 60s/5MB cap, numpy conversion |
 | `transcriber.py` | faster-whisper async wrapper with VAD (CUDA or CPU) |
@@ -128,21 +129,21 @@ TypeScript thin client running on iPhone via EvenHub. Bridges G2 glasses (BLE) t
 
 | Module | Purpose |
 |--------|---------|
-| `main.ts` | Boot-to-menu flow, frame routing, module wiring |
-| `state.ts` | 10-state machine with validated transitions and change callbacks |
-| `display.ts` | Dual-mode display manager (transcript mode + session menu mode) |
-| `conversation.ts` | History model, `formatReverse()`, `removeLastUser()` via splice |
-| `input.ts` | Tap-to-toggle recording, double-tap menu, menu tap navigation |
+| `main.ts` | Boot-to-idle flow, frame routing, autoresearch header/feed wiring |
+| `state.ts` | 9-state machine with validated transitions and change callbacks |
+| `display.ts` | Single-mode display manager with autoresearch status header |
+| `conversation.ts` | History model, autoresearch feed merge (`setFeedEntries`), `formatReverse()` |
+| `input.ts` | Tap-to-toggle recording, double-tap force-stop/dismiss gestures |
 | `gateway.ts` | WebSocket client with auto-reconnect (1s→30s backoff, ±20% jitter) |
 | `protocol.ts` | Frame types with runtime validation |
 | `utils.ts` | `stripMarkdown()` for display-safe text |
 
-**State machine (10 states):** `LOADING → MENU → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → IDLE` (+ `ERROR`, `DISCONNECTED` reachable from most states)
+**State machine (9 states):** `LOADING → IDLE → RECORDING → TRANSCRIBING → CONFIRMING → THINKING → STREAMING → IDLE` (+ `ERROR`, `DISCONNECTED` reachable from most states)
 
 **Key features:**
 
-- Boots to session menu (session picker), not idle
-- Session menu via `ListContainerProperty`: tap to select/create, double-tap to go back
+- Boots directly into the single autoresearch thread view (idle) — no session menu
+- Autoresearch status header (`AR <phase> it<n> · <outcome>`) plus the PM session's latest messages rendered as `◆` feed entries, interleaved with voice exchanges
 - Reverse chronological display — newest messages at top
 - Streaming delta display with 100ms debounced batching
 - Display layout: 576×288 canvas — status bar (y=2, 24px), content (y=34, 212px), footer (y=256, 26px)
@@ -419,7 +420,7 @@ Binary + JSON protocol between Gateway and G2 App.
 
 **Authentication:** first client frame must be `{"type":"auth","token":"..."}` when `GATEWAY_TOKEN` is configured. The G2 app may receive the token in its URL, but it strips the token before opening the WebSocket and sends this auth frame. Single connection at a time — new connections replace existing ones.
 
-### Client → Gateway (9 frame types)
+### Client → Gateway (7 frame types)
 
 | Frame | Format | Purpose |
 |-------|--------|---------|
@@ -429,9 +430,7 @@ Binary + JSON protocol between Gateway and G2 App.
 | `pong` | JSON | Respond to server ping |
 | `status_request` | JSON | Request current status |
 | `reset_session` | JSON | Reset the current session |
-| `session_list_request` | JSON | Request available sessions |
-| `session_switch` | JSON | Switch to a different session |
-| `session_create` | JSON | Create a new session |
+| `force_stop` | JSON | Abort the in-flight agent turn |
 | *(binary)* | S16LE PCM | Raw audio (16kHz, mono) |
 
 ### Gateway → Client (11 frame types)
@@ -447,8 +446,8 @@ Binary + JSON protocol between Gateway and G2 App.
 | `ping` | JSON | Keepalive |
 | `history` | JSON | Conversation history on connect |
 | `session_reset` | JSON | Session reset confirmation |
-| `session_list` | JSON | Available sessions |
-| `session_switched` | JSON | Session switch confirmation |
+| `autoresearch_status` | JSON | Autoresearch loop status header (phase, iteration, liveness) |
+| `autoresearch_feed` | JSON | Latest autoresearch PM assistant messages (replace semantics) |
 
 ### Error Codes
 

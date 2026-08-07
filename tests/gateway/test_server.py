@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import urlparse
 
 import pytest
+import pytest_asyncio
 import websockets
+from gateway.autoresearch_feed import AutoresearchSnapshot, FeedEntry
+from gateway.config import GatewayConfig
 from gateway.server import GatewayServer, SessionState, main
 from gateway.session_resolver import SessionMeta
 
+from tests.gateway.conftest import StaticResponseHandler as _StaticResponseHandler
 from tests.gateway.conftest import auth_connect as _auth_connect
 from tests.gateway.conftest import recv_json as _recv_json
 
@@ -183,8 +188,6 @@ class TestRequiredAuth:
     """GatewayServer requires explicit client auth configuration."""
 
     async def test_missing_gateway_token_rejected(self) -> None:
-        from gateway.config import GatewayConfig
-
         config = GatewayConfig(gateway_token=None)
         with pytest.raises(ValueError, match="GATEWAY_TOKEN"):
             GatewayServer(config)
@@ -475,8 +478,7 @@ class TestQuickCommand:
             # Should get an assistant frame with summary (not thinking/streaming)
             resp = await _recv_json(ws)
             assert resp["type"] == "assistant"
-            assert isinstance(resp["delta"], str)
-            assert len(resp["delta"]) > 0
+            assert resp["delta"].startswith("AR not running")
 
             # Followed by idle status
             idle = await _recv_json(ws)
@@ -498,6 +500,266 @@ class TestQuickCommand:
             # Should go through normal mock handler path → thinking
             thinking = await _recv_json(ws)
             assert thinking == {"type": "status", "status": "thinking"}
+
+
+def _autoresearch_snapshot(
+    *,
+    running: bool = False,
+    phase: str = "not running",
+    iteration: int = 0,
+    supervisor_outcome: str | None = None,
+    feed: tuple[FeedEntry, ...] = (),
+) -> AutoresearchSnapshot:
+    """Build a compact autoresearch snapshot for publisher integration tests."""
+    return AutoresearchSnapshot(
+        running=running,
+        header_ok=True,
+        phase=phase,
+        iteration=iteration,
+        suspended=False,
+        campaign_review_required=False,
+        supervisor_outcome=supervisor_outcome,
+        supervisor_detail=None,
+        last_cycle_at_ms=None,
+        task_headline=None,
+        feed=feed,
+    )
+
+
+async def _collect_autoresearch_frames(
+    ws: websockets.ClientConnection,
+    timeout: float = 1.0,
+) -> list[dict[str, object]]:
+    """Collect frames until both autoresearch startup frames have arrived."""
+    frames: list[dict[str, object]] = []
+    autoresearch_types: set[str] = set()
+    deadline = asyncio.get_running_loop().time() + timeout
+    while autoresearch_types != {"autoresearch_status", "autoresearch_feed"}:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for autoresearch frames")
+        frame = await asyncio.wait_for(_recv_json(ws), timeout=remaining)
+        frames.append(frame)
+        frame_type = frame.get("type")
+        if frame_type in {"autoresearch_status", "autoresearch_feed"}:
+            autoresearch_types.add(frame_type)
+    return frames
+
+
+async def _drain_frames(
+    ws: websockets.ClientConnection,
+    timeout: float = 0.15,
+) -> list[dict[str, object]]:
+    """Drain frames for a short interval, returning an empty list on timeout."""
+    frames: list[dict[str, object]] = []
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return frames
+        try:
+            frames.append(await asyncio.wait_for(_recv_json(ws), timeout=remaining))
+        except TimeoutError:
+            return frames
+
+
+@pytest_asyncio.fixture
+async def autoresearch_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[str, GatewayServer, dict[str, Any]]]:
+    """Start a gateway with a controllable autoresearch snapshot reader."""
+    holder: dict[str, Any] = {"snapshot": _autoresearch_snapshot(), "reads": 0}
+
+    def read_snapshot() -> AutoresearchSnapshot:
+        holder["reads"] += 1
+        snapshot: AutoresearchSnapshot = holder["snapshot"]
+        return snapshot
+
+    monkeypatch.setattr("gateway.autoresearch_feed.read_snapshot", read_snapshot)
+    config = GatewayConfig(
+        gateway_host="127.0.0.1",
+        gateway_port=0,
+        gateway_token="test-token",
+        autoresearch_feed_interval=0.05,
+    )
+    gw = GatewayServer(config, handler=_StaticResponseHandler())
+    server = await websockets.serve(
+        gw.handler,
+        config.gateway_host,
+        0,
+        process_request=gw._process_request,
+    )
+    port = server.sockets[0].getsockname()[1]
+    try:
+        yield f"ws://127.0.0.1:{port}", gw, holder
+    finally:
+        if gw._feed_publisher is not None:
+            await gw._feed_publisher.stop()
+            gw._feed_publisher = None
+        server.close()
+        await server.wait_closed()
+
+
+class TestAutoresearchPush:
+    """Autoresearch status and feed frames are pushed to the connected phone."""
+
+    async def test_initial_and_changed_snapshots_are_pushed(
+        self,
+        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, _gw, holder = autoresearch_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await _recv_json(ws)  # connected
+            await _recv_json(ws)  # history
+            await _recv_json(ws)  # status:idle
+
+            initial = await _collect_autoresearch_frames(ws)
+            initial_status = next(
+                frame for frame in initial if frame.get("type") == "autoresearch_status"
+            )
+            initial_feed = next(
+                frame for frame in initial if frame.get("type") == "autoresearch_feed"
+            )
+            assert initial_status == {
+                "type": "autoresearch_status",
+                "running": False,
+                "phase": "not running",
+                "iteration": 0,
+                "suspended": False,
+                "campaignReviewRequired": False,
+            }
+            assert initial_feed == {"type": "autoresearch_feed", "entries": []}
+
+            holder["snapshot"] = _autoresearch_snapshot(
+                running=True,
+                phase="experiment",
+                iteration=4,
+                supervisor_outcome="success",
+                feed=(FeedEntry(role="assistant", text="Cycle complete", ts=123),),
+            )
+            changed = await _collect_autoresearch_frames(ws)
+            changed_status = next(
+                frame for frame in changed if frame.get("type") == "autoresearch_status"
+            )
+            changed_feed = next(
+                frame for frame in changed if frame.get("type") == "autoresearch_feed"
+            )
+            assert changed_status["phase"] == "experiment"
+            assert changed_status["iteration"] == 4
+            assert changed_status["supervisorOutcome"] == "success"
+            assert changed_feed["entries"] == [
+                {"role": "assistant", "text": "Cycle complete", "ts": 123}
+            ]
+
+    async def test_unchanged_snapshot_is_not_repeated(
+        self,
+        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, _gw, _holder = autoresearch_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await _recv_json(ws)  # connected
+            await _recv_json(ws)  # history
+            await _recv_json(ws)  # status:idle
+            await _collect_autoresearch_frames(ws)
+
+            frames = await _drain_frames(ws)
+            assert not [
+                frame
+                for frame in frames
+                if frame.get("type") in {"autoresearch_status", "autoresearch_feed"}
+            ]
+
+    async def test_disconnect_stops_publisher(
+        self,
+        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, gw, holder = autoresearch_gateway
+        ws = await _auth_connect(url)
+        await _recv_json(ws)  # connected
+        await _recv_json(ws)  # history
+        await _recv_json(ws)  # status:idle
+        await _collect_autoresearch_frames(ws)
+
+        publisher = gw._feed_publisher
+        assert publisher is not None
+
+        await ws.close()
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while asyncio.get_running_loop().time() < deadline:
+            task = publisher._task
+            if gw._feed_publisher is None and (task is None or task.done()):
+                break
+            await asyncio.sleep(0.01)
+        assert gw._feed_publisher is None
+        task = publisher._task
+        assert task is None or task.done()
+
+        # The poll loop must actually have stopped, not just been detached.
+        reads_after_stop = holder["reads"]
+        await asyncio.sleep(0.15)  # ~3 poll intervals
+        assert holder["reads"] == reads_after_stop
+
+    async def test_connection_replacement_keeps_single_publisher(
+        self,
+        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, gw, _holder = autoresearch_gateway
+        ws_a = await _auth_connect(url)
+        await _recv_json(ws_a)  # connected
+        await _recv_json(ws_a)  # history
+        await _recv_json(ws_a)  # status:idle
+        await _collect_autoresearch_frames(ws_a)
+
+        publisher_a = gw._feed_publisher
+        assert publisher_a is not None
+
+        ws_b = await _auth_connect(url)
+        async with ws_b:
+            await _recv_json(ws_b)  # connected
+            await _recv_json(ws_b)  # history
+            await _recv_json(ws_b)  # status:idle
+            await _collect_autoresearch_frames(ws_b)
+
+            publisher_b = gw._feed_publisher
+            assert publisher_b is not None
+            assert publisher_b is not publisher_a
+
+            deadline = asyncio.get_running_loop().time() + 1.0
+            while asyncio.get_running_loop().time() < deadline:
+                task_a = publisher_a._task
+                if task_a is None or task_a.done():
+                    break
+                await asyncio.sleep(0.01)
+            task_a = publisher_a._task
+            assert task_a is None or task_a.done()
+
+            task_b = publisher_b._task
+            assert task_b is not None and not task_b.done()
+
+    async def test_removed_session_frames_are_invalid(
+        self,
+        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, _gw, _holder = autoresearch_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await _recv_json(ws)  # connected
+            await _recv_json(ws)  # history
+            await _recv_json(ws)  # status:idle
+            await _collect_autoresearch_frames(ws)
+
+            for frame_type in ("session_list_request", "session_switch", "session_create"):
+                await ws.send(json.dumps({"type": frame_type}))
+                deadline = asyncio.get_running_loop().time() + 2.0
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    assert remaining > 0, f"timed out waiting for error frame for {frame_type}"
+                    error = await asyncio.wait_for(_recv_json(ws), timeout=remaining)
+                    if error.get("type") == "error":
+                        break
+                assert error["code"] == "INVALID_FRAME"
 
 
 class TestSessionReset:
@@ -658,339 +920,6 @@ class TestResetSessionCleansUpInflight:
             assert reset_frame == {"type": "session_reset", "reason": "user_request"}
 
             assert gw._session_key.startswith("agent:main:g2:")
-
-
-class TestSessionMenu:
-    """Session menu: list, switch, create."""
-
-    async def test_session_list_request_returns_list(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Send session_list_request → receive session_list with activeSessionKey."""
-        from gateway.session_history import SessionSummary
-
-        url, gw = auth_gateway
-        summaries = [
-            SessionSummary(
-                session_key="agent:main:g2",
-                session_id="ses_1",
-                updated_at="2026-03-07T10:00:00Z",
-                preview="Hello world",
-                message_count=5,
-            ),
-        ]
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch(
-                "gateway.session_history.list_session_summaries",
-                return_value=summaries,
-            ):
-                await ws.send(json.dumps({"type": "session_list_request"}))
-                resp = await _recv_json(ws)
-
-            assert resp["type"] == "session_list"
-            assert resp["activeSessionKey"] == gw._session_key
-            assert len(resp["sessions"]) == 1
-            assert resp["sessions"][0]["sessionKey"] == "agent:main:g2"
-            assert resp["sessions"][0]["preview"] == "Hello world"
-            assert resp["sessions"][0]["messageCount"] == 5
-            assert resp["sessions"][0]["updatedAt"] == "2026-03-07T10:00:00Z"
-            assert resp["sessions"][0]["label"] == "Hello world"
-            assert resp["sessions"][0]["isActive"] is True
-
-    async def test_session_list_request_allowed_while_busy(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """session_list_request works even during streaming state (read-only)."""
-        url, gw = auth_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            # Force session into STREAMING state
-            assert gw._current_session is not None
-            gw._current_session._state = SessionState.STREAMING
-
-            with patch(
-                "gateway.session_history.list_session_summaries",
-                return_value=[],
-            ):
-                await ws.send(json.dumps({"type": "session_list_request"}))
-                resp = await _recv_json(ws)
-
-            assert resp["type"] == "session_list"
-
-    async def test_session_switch_valid_key(self, auth_gateway: tuple[str, GatewayServer]) -> None:
-        """Send session_switch → receive session_switched + history."""
-        url, gw = auth_gateway
-        meta = SessionMeta(
-            session_id="ses_target",
-            session_key="agent:claw:g2:target",
-            updated_at="2026-03-07T12:00:00Z",
-        )
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch("gateway.server.resolve_session", return_value=meta):
-                await ws.send(
-                    json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:target"})
-                )
-                switched = await _recv_json(ws)
-                history = await _recv_json(ws)
-
-            assert switched["type"] == "session_switched"
-            assert switched["sessionKey"] == "agent:claw:g2:target"
-            assert switched["sessionId"] == "ses_target"
-            assert switched["sessionStartedAt"] == "2026-03-07T12:00:00Z"
-            assert history["type"] == "history"
-            assert gw._session_key == "agent:claw:g2:target"
-
-    async def test_session_switch_unknown_key(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Send session_switch with bogus key → error frame."""
-        url, _gw = auth_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch("gateway.server.resolve_session", return_value=None):
-                await ws.send(json.dumps({"type": "session_switch", "sessionKey": "bogus:key"}))
-                error = await _recv_json(ws)
-
-            assert error["type"] == "error"
-            assert error["code"] == "INVALID_FRAME"
-            assert "bogus:key" in error["detail"]
-
-    async def test_session_switch_while_busy_rejected(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """During streaming → INVALID_STATE error."""
-        url, gw = auth_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            assert gw._current_session is not None
-            gw._current_session._state = SessionState.STREAMING
-
-            await ws.send(json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:xxx"}))
-            error = await _recv_json(ws)
-            assert error["type"] == "error"
-            assert error["code"] == "INVALID_STATE"
-
-    async def test_session_create_generates_new_key(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Send session_create → receive session_switched + empty history."""
-        url, gw = auth_gateway
-        old_key = gw._session_key
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            await ws.send(json.dumps({"type": "session_create"}))
-            switched = await _recv_json(ws)
-            history = await _recv_json(ws)
-
-            assert switched["type"] == "session_switched"
-            assert switched["sessionKey"] != old_key
-            assert switched["sessionKey"].startswith("agent:main:g2:")
-            assert history["type"] == "history"
-            assert history["entries"] == []
-            assert gw._session_key == switched["sessionKey"]
-
-    async def test_session_create_while_busy_rejected(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """During streaming → INVALID_STATE error."""
-        url, gw = auth_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            assert gw._current_session is not None
-            gw._current_session._state = SessionState.STREAMING
-
-            await ws.send(json.dumps({"type": "session_create"}))
-            error = await _recv_json(ws)
-            assert error["type"] == "error"
-            assert error["code"] == "INVALID_STATE"
-
-    async def test_session_switch_updates_session_key(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """After switch, the server's session key is updated for OpenClaw."""
-        url, gw = auth_gateway
-        meta = SessionMeta(
-            session_id="ses_new",
-            session_key="agent:claw:g2:new",
-            updated_at="2026-03-07T14:00:00Z",
-        )
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch("gateway.server.resolve_session", return_value=meta):
-                await ws.send(
-                    json.dumps({"type": "session_switch", "sessionKey": "agent:claw:g2:new"})
-                )
-                await _recv_json(ws)  # session_switched
-                await _recv_json(ws)  # history
-
-            assert gw._session_key == "agent:claw:g2:new"
-            assert gw._current_session is not None
-            assert gw._current_session._session_key == "agent:claw:g2:new"
-
-    async def test_session_create_then_message(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Create a new session, then send a text message using the new session."""
-        url, gw = auth_gateway
-        old_key = gw._session_key
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            # 1. Create a new session
-            await ws.send(json.dumps({"type": "session_create"}))
-            switched = await _recv_json(ws)
-            history = await _recv_json(ws)
-
-            assert switched["type"] == "session_switched"
-            new_key = switched["sessionKey"]
-            assert new_key != old_key
-            assert history["type"] == "history"
-            assert history["entries"] == []
-
-            # 2. Verify server and session use the new key
-            assert gw._session_key == new_key
-            assert gw._current_session is not None
-            assert gw._current_session._session_key == new_key
-
-            # 3. Send a text message on the new session
-            await ws.send(json.dumps({"type": "text", "message": "hello"}))
-            thinking = await _recv_json(ws)
-            assert thinking == {"type": "status", "status": "thinking"}
-
-            streaming = await _recv_json(ws)
-            assert streaming == {"type": "status", "status": "streaming"}
-
-            deltas: list[str] = []
-            for _ in range(3):
-                frame = await _recv_json(ws)
-                assert frame["type"] == "assistant"
-                deltas.append(frame["delta"])
-
-            end = await _recv_json(ws)
-            assert end == {"type": "end"}
-
-            idle = await _recv_json(ws)
-            assert idle == {"type": "status", "status": "idle"}
-
-            # 4. Session key should still be the new one
-            assert gw._session_key == new_key
-
-    async def test_session_list_request_error_returns_internal_error(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """list_session_summaries raising → error frame with INTERNAL_ERROR."""
-        url, _gw = auth_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch(
-                "gateway.session_history.list_session_summaries",
-                side_effect=RuntimeError("disk error"),
-            ):
-                await ws.send(json.dumps({"type": "session_list_request"}))
-                error = await _recv_json(ws)
-
-            assert error["type"] == "error"
-            assert error["code"] == "INTERNAL_ERROR"
-
-    async def test_session_switch_to_active_session_skips_reconnect(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Switching to the already-active session sends session_switched without reconnect."""
-        url, gw = auth_gateway
-        current_key = gw._session_key
-        meta = SessionMeta(
-            session_id="ses_current",
-            session_key=current_key,
-            updated_at="2026-03-07T10:00:00Z",
-        )
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch("gateway.server.resolve_session", return_value=meta):
-                await ws.send(json.dumps({"type": "session_switch", "sessionKey": current_key}))
-                switched = await _recv_json(ws)
-
-            assert switched["type"] == "session_switched"
-            assert switched["sessionKey"] == current_key
-            assert switched["sessionId"] == "ses_current"
-            # No history frame follows — reconnect was skipped
-            assert gw._session_key == current_key
-
-    async def test_session_list_null_updated_at(
-        self, auth_gateway: tuple[str, GatewayServer]
-    ) -> None:
-        """Sessions with no updatedAt send None, not empty string."""
-        from gateway.session_history import SessionSummary
-
-        url, _gw = auth_gateway
-        summaries = [
-            SessionSummary(
-                session_key="agent:claw:g2:no_ts",
-                session_id="ses_no_ts",
-                updated_at=None,
-                preview="",
-                message_count=0,
-            ),
-        ]
-        ws = await _auth_connect(url)
-        async with ws:
-            await ws.recv()  # connected
-            await ws.recv()  # history
-            await ws.recv()  # status:idle
-
-            with patch(
-                "gateway.session_history.list_session_summaries",
-                return_value=summaries,
-            ):
-                await ws.send(json.dumps({"type": "session_list_request"}))
-                resp = await _recv_json(ws)
-
-            assert resp["sessions"][0]["updatedAt"] is None
-            assert resp["sessions"][0]["label"] == "agent:claw:g2:no_ts"
 
 
 class TestForceStop:

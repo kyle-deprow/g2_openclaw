@@ -359,13 +359,21 @@ class TestAutoHandlerSelection:
 
     def test_no_token_raises(self) -> None:
         """Without openclaw_gateway_token, GatewayServer fails fast."""
-        config = GatewayConfig(gateway_token="test-token", openclaw_gateway_token=None)
+        config = GatewayConfig(
+            gateway_token="test-token",
+            openclaw_gateway_token=None,
+            autoresearch_feed_interval=0,
+        )
         with pytest.raises(ValueError, match="OPENCLAW_GATEWAY_TOKEN"):
             GatewayServer(config)
 
     def test_explicit_handler_overrides_config(self) -> None:
         """Explicitly passed handler wins regardless of token."""
-        config = GatewayConfig(gateway_token="test-token", openclaw_gateway_token="some-token")
+        config = GatewayConfig(
+            gateway_token="test-token",
+            openclaw_gateway_token="some-token",
+            autoresearch_feed_interval=0,
+        )
         mock = _StaticResponseHandler()
         server = GatewayServer(config, handler=mock)
         assert server._handler is mock
@@ -378,6 +386,7 @@ class TestAutoHandlerSelection:
             openclaw_host="10.0.0.1",
             openclaw_port=9999,
             agent_timeout=60,
+            autoresearch_feed_interval=0,
         )
         server = GatewayServer(config)
         assert isinstance(server._handler, OpenClawResponseHandler)
@@ -481,6 +490,7 @@ class TestFullWebSocketIntegration:
                 gateway_host="127.0.0.1",
                 gateway_port=0,
                 gateway_token="test-token",
+                autoresearch_feed_interval=0,
             )
             gw = GatewayServer(config, handler=oc_handler)
             gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)

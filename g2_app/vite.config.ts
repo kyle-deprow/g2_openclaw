@@ -72,7 +72,7 @@ function inputBar(): Plugin {
     var bar = document.getElementById('input-bar');
     if (bar) {
       var tab = api ? (api.getActiveTab ? api.getActiveTab() : 'openclaw') : 'openclaw';
-      var showBar = tab === 'openclaw' && state !== 'menu' && state !== 'loading' && state !== 'disconnected' && state !== 'error';
+      var showBar = tab === 'openclaw' && state !== 'loading' && state !== 'disconnected' && state !== 'error';
       bar.style.display = showBar ? 'flex' : 'none';
       var sp = document.getElementById('session-panel');
       var dt = document.getElementById('dev-telemetry');
@@ -258,7 +258,7 @@ function telemetryPanel(): Plugin {
   var stColors = {
     idle:'#3fb950', recording:'#f85149', thinking:'#d29922',
     streaming:'#58a6ff', error:'#f85149', disconnected:'#484f58',
-    menu:'#bc8cff', loading:'#484f58', confirming:'#d29922',
+    loading:'#484f58', confirming:'#d29922',
     transcribing:'#d29922'
   };
   var darkText = {thinking:1,confirming:1,transcribing:1};
@@ -382,46 +382,23 @@ function sessionPanel(): Plugin {
     border-color: #30363d #30363d transparent;
   }
 
-  /* Session list view */
-  #sp-sessions {
-    flex: 1; overflow-y: auto; padding: 12px 16px;
-  }
-  .sp-card {
-    padding: 12px 16px; margin-bottom: 8px;
-    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-    cursor: pointer; transition: background 0.15s, border-color 0.15s;
-  }
-  .sp-card:hover { background: #1c2128; border-color: #484f58; }
-  .sp-card.sp-active { border-left: 3px solid #3fb950; }
-  .sp-card-label {
-    font-size: 14px; font-weight: 600; color: #e6edf3;
-    margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .sp-card-preview {
-    font-size: 13px; color: #8b949e; margin-bottom: 6px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
-  .sp-card-meta {
-    display: flex; gap: 12px; font-size: 11px; color: #484f58;
-  }
-  .sp-card-cwd {
-    font-size: 11px; color: #484f58; margin-top: 4px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    font-family: monospace;
-  }
-  .sp-card-actions {
-    display: flex; gap: 8px; margin-top: 8px;
-  }
   .sp-kill-btn {
-    padding: 3px 10px; font-size: 11px; font-weight: 600;
+    padding: 5px 10px; font-size: 11px; font-weight: 600;
     background: #da3633; color: #fff; border: 1px solid #f85149;
-    border-radius: 4px; cursor: pointer; font-family: inherit;
+    border-radius: 6px; cursor: pointer; font-family: inherit;
     transition: background 0.15s;
   }
   .sp-kill-btn:hover { background: #f85149; }
   .sp-empty {
     text-align: center; color: #484f58; padding: 40px 20px;
     font-size: 14px;
+  }
+
+  #sp-ar-status {
+    padding: 7px 16px; min-height: 30px; box-sizing: border-box;
+    background: #161b22; border-bottom: 1px solid #30363d;
+    color: #8b949e; font-size: 12px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; flex-shrink: 0;
   }
 
   /* Conversation view */
@@ -457,84 +434,25 @@ function sessionPanel(): Plugin {
       <button class="sp-tab" id="sp-tab-telemetry">Telemetry</button>
     </div>
     <span class="sp-header-spacer"></span>
-    <h2 id="sp-title">Sessions</h2>
-    <button class="sp-btn" id="sp-back" style="display:none">&#8592; Sessions</button>
+    <h2 id="sp-title">Conversation</h2>
+    <button class="sp-kill-btn" id="sp-kill">Kill Session</button>
   </div>
-  <div id="sp-sessions"></div>
-  <div id="sp-conversation" style="display:none"></div>
+  <div id="sp-ar-status">AR not running</div>
+  <div id="sp-conversation"></div>
 </div>
 <script>
 (function() {
-  var sessionsEl = document.getElementById('sp-sessions');
   var convEl = document.getElementById('sp-conversation');
+  var arStatusEl = document.getElementById('sp-ar-status');
   var titleEl = document.getElementById('sp-title');
-  var backBtn = document.getElementById('sp-back');
+  var killBtn = document.getElementById('sp-kill');
   var tabOC = document.getElementById('sp-tab-openclaw');
   var tabTel = document.getElementById('sp-tab-telemetry');
   var telemetryEl = document.getElementById('dev-telemetry');
-  var lastState = '';
   var lastConvLen = -1;
-  // Reference equality: getSessionList() returns the same array object until
-  // the session list is replaced by a new WebSocket frame, so !== detects
-  // changes without deep comparison.
-  var lastSessionRef = null;
   var autoScroll = true;
 
   function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
-  function relTime(iso) {
-    if (!iso) return '';
-    var diff = Date.now() - new Date(iso).getTime();
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
-    if (diff < 86400000) return Math.floor(diff/3600000) + 'h ago';
-    return Math.floor(diff/86400000) + 'd ago';
-  }
-
-  function renderSessions(sessions) {
-    if (!sessions || sessions.length === 0) {
-      sessionsEl.innerHTML = '<div class="sp-empty">No sessions yet.<br>Waiting for gateway...</div>';
-      return;
-    }
-    var html = '';
-    for (var i = 0; i < sessions.length; i++) {
-      var s = sessions[i];
-      var cls = 'sp-card' + (s.isActive ? ' sp-active' : '');
-      html += '<div class="' + cls + '" data-idx="' + i + '">'
-        + '<div class="sp-card-label">' + esc(s.label || s.sessionKey) + '</div>'
-        + '<div class="sp-card-preview">' + esc(s.preview || 'No messages') + '</div>'
-        + '<div class="sp-card-meta">'
-        + '<span>' + s.messageCount + ' msgs</span>'
-        + '<span>' + relTime(s.updatedAt) + '</span>'
-        + (s.isActive ? '<span style="color:#3fb950">\\u25cf Active</span>' : '')
-        + '</div>'
-        + (s.isActive ? '<div class="sp-card-actions"><button class="sp-kill-btn" data-kill-oc="' + i + '">Kill Session</button></div>' : '')
-        + '</div>';
-    }
-    sessionsEl.innerHTML = html;
-
-    var cards = sessionsEl.querySelectorAll('.sp-card');
-    for (var j = 0; j < cards.length; j++) {
-      cards[j].addEventListener('click', function(e) {
-        if (e.target.classList.contains('sp-kill-btn')) return;
-        var idx = parseInt(this.getAttribute('data-idx'), 10);
-        if (window.__g2Api) {
-          window.__g2Api.selectSession(idx + 1);
-        }
-      });
-    }
-    var killBtns = sessionsEl.querySelectorAll('.sp-kill-btn[data-kill-oc]');
-    for (var k = 0; k < killBtns.length; k++) {
-      killBtns[k].addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (window.__g2Api) {
-          if (confirm('Kill the active OpenClaw session? This will abort any in-progress response.')) {
-            window.__g2Api.killOpenClawSession();
-          }
-        }
-      });
-    }
-  }
 
   function renderConversation(entries) {
     if (!entries || entries.length === 0) {
@@ -558,19 +476,28 @@ function sessionPanel(): Plugin {
     }
   }
 
-  function showSessionView() {
-    sessionsEl.style.display = '';
-    convEl.style.display = 'none';
-    backBtn.style.display = 'none';
-    titleEl.textContent = 'Sessions';
-  }
-
   function showConversationView() {
-    sessionsEl.style.display = 'none';
     convEl.style.display = '';
-    backBtn.style.display = '';
+    arStatusEl.style.display = '';
+    killBtn.style.display = '';
     titleEl.textContent = 'Conversation';
     autoScroll = true;
+  }
+
+  function renderAutoresearchStatus(frame) {
+    if (!frame || (!frame.running && frame.phase === 'not running')) {
+      arStatusEl.textContent = 'AR not running';
+      return;
+    }
+    var phase = frame.phase || 'unknown';
+    var parts = frame.running
+      ? ['AR ' + phase, 'it' + frame.iteration]
+      : ['AR stopped', phase, 'it' + frame.iteration];
+    if (frame.suspended) parts.push('\u23f8 suspended');
+    if (frame.campaignReviewRequired) parts.push('\u26a0 review');
+    if (frame.supervisorOutcome) parts.push(frame.supervisorOutcome);
+    if (frame.taskHeadline) parts.push(frame.taskHeadline);
+    arStatusEl.textContent = parts.join(' · ');
   }
 
   function setActiveTab(tab) {
@@ -579,28 +506,26 @@ function sessionPanel(): Plugin {
     tabTel.classList.remove('sp-tab-active');
     if (tab === 'telemetry') {
       tabTel.classList.add('sp-tab-active');
-      sessionsEl.style.display = 'none';
       convEl.style.display = 'none';
-      backBtn.style.display = 'none';
+      arStatusEl.style.display = 'none';
+      killBtn.style.display = 'none';
       titleEl.textContent = 'Telemetry';
       if (telemetryEl) telemetryEl.style.display = 'flex';
     } else if (tab === 'openclaw') {
       tabOC.classList.add('sp-tab-active');
       if (telemetryEl) telemetryEl.style.display = 'none';
-      showSessionView();
+      showConversationView();
     }
-    lastState = '';
     lastConvLen = -1;
-    lastSessionRef = null;
   }
 
   tabOC.addEventListener('click', function() { setActiveTab('openclaw'); });
   tabTel.addEventListener('click', function() { setActiveTab('telemetry'); });
 
-  backBtn.addEventListener('click', function() {
-    var api = window.__g2Api;
-    if (!api) return;
-    api.openSessionMenu();
+  killBtn.addEventListener('click', function() {
+    if (window.__g2Api && confirm('Kill the active OpenClaw session? This will abort any in-progress response.')) {
+      window.__g2Api.killOpenClawSession();
+    }
   });
 
   setInterval(function() {
@@ -612,34 +537,16 @@ function sessionPanel(): Plugin {
 
     if (tab === 'telemetry') return;
 
-    // OpenClaw tab: original behavior
-    var state = api.getState();
-
-    if (state === 'menu' || state === 'loading') {
-      if (lastState !== 'menu' && lastState !== 'loading') {
-        showSessionView();
-        lastConvLen = -1;
-      }
-      var sessions = api.getSessionList ? api.getSessionList() : null;
-      if (sessions !== lastSessionRef) {
-        lastSessionRef = sessions;
-        renderSessions(sessions);
-      }
-    } else {
-      if (lastState === 'menu' || lastState === 'loading' || lastState === '') {
-        showConversationView();
-        lastSessionRef = null;
-      }
-      var conv = api.getConversation();
-      if (conv && conv.length !== lastConvLen) {
-        lastConvLen = conv.length;
-        renderConversation(conv);
-      }
+    // OpenClaw tab: conversation and autoresearch status
+    renderAutoresearchStatus(api.getAutoresearchStatus ? api.getAutoresearchStatus() : null);
+    var conv = api.getConversation();
+    if (conv && conv.length !== lastConvLen) {
+      lastConvLen = conv.length;
+      renderConversation(conv);
     }
-    lastState = state;
   }, 500);
 
-  showSessionView();
+  showConversationView();
 })();
 <\/script>`;
       return html.replace('</body>', panelHtml + '\n</body>');

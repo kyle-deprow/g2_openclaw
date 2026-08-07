@@ -650,57 +650,18 @@ or `['list_event', {...}]`. Audio: `{ type: 'audioEvent', jsonData: { audioPcm: 
 
 ---
 
-## 13. Session Menu Interaction Pattern
+## 13. Double-Tap Semantics (No Session Menu)
 
-The G2 app supports a **session menu** for listing, switching, and creating
-OpenClaw sessions. The menu is displayed as a `ListContainerProperty` and uses
-the same event system as any list.
+The G2 app shows a single fixed thread — an autoresearch status header plus the
+autoresearch PM session's latest messages. There is no session menu and no
+multi-thread UX. On boot the app transitions straight to `idle`.
 
-### Boot-to-Menu
+Double-tap behavior by state:
 
-On boot, the app transitions directly to `menu` state (not `idle`). The session
-picker is the first screen the user sees:
-
-```typescript
-// main.ts — on connected frame
-state.transition('menu');
-gateway.requestSessionList();
-display.showSessionMenu(['Loading...']);
-```
-
-### Double-Tap to Open Menu
-
-In `idle` state, a **double-tap** opens the session menu instead of resetting
-the session:
-
-```typescript
-if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-  if (state.current === 'idle') {
-    state.transition('menu');
-    gateway.requestSessionList();
-    display.showSessionMenu(['Loading...']);
-  }
-}
-```
-
-### Menu Tap Handling
-
-When in `menu` state, single taps select a session from the list. The last
-item is always "+ New Session":
-
-```typescript
-function handleMenuTap(index: number, items: string[]): void {
-  const safeIndex = index ?? 0;  // Quirk 2: index 0 may be undefined
-  if (safeIndex === items.length - 1) {
-    gateway.createNewSession();
-  } else {
-    const sessionKey = sessionKeys[safeIndex];
-    gateway.switchSession(sessionKey);
-  }
-}
-```
-
-**Important:** Use the Quirk 2 workaround (`?? 0`) for index 0.
+- **idle** — no-op (nothing to open; the thread is always the same).
+- **error** — dismisses the error: transitions back to `idle` and repaints.
+- **thinking / streaming** — force-stop, unchanged.
+- **confirming** — reject path, unchanged.
 
 ### Rejected Transcription Removal
 
@@ -733,10 +694,9 @@ HARDWARE LIMITS:     No camera, no speaker on glasses
 EVENT VALUES:        CLICK=0  SCROLL_TOP=1  SCROLL_BOTTOM=2  DOUBLE_CLICK=3
                      FG_ENTER=4  FG_EXIT=5  ABNORMAL=6
 
-STATES:          LOADING → MENU (boot) → IDLE → RECORDING → ...
-MENU:            Double-tap in idle opens session menu
-                 Boot lands on menu (session picker)
-                 Tap in menu selects session; last item = "+ New Session"
+STATES:          LOADING → IDLE (boot) → RECORDING → ...
+DOUBLE-TAP:      idle = no-op · error = back to idle
+                 thinking/streaming = force-stop (unchanged)
 REJECT:          Tap in confirming → removeLastUser() → splice, no mark
 
 SUBSCRIBE:           const unsub = bridge.onEvenHubEvent(cb)

@@ -18,15 +18,12 @@
 import type { EvenAppBridge } from '@evenrealities/even_hub_sdk';
 import {
   CreateStartUpPageContainer,
-  ListContainerProperty,
-  ListItemContainerProperty,
   RebuildPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
 import type { ConversationHistory } from './conversation';
-import type { SessionListEntry } from './protocol';
 
 // ---------------------------------------------------------------------------
 // Container IDs (stable across all rebuilds)
@@ -34,7 +31,6 @@ import type { SessionListEntry } from './protocol';
 const ID_STATUS         = 1;
 const ID_TRANSCRIPT     = 2;
 const ID_FOOTER         = 3;
-const ID_MENU_LIST      = 4; // reuses slot 4 (menu mode replaces transcript mode)
 
 // ---------------------------------------------------------------------------
 // Character limits
@@ -79,7 +75,8 @@ function text(
 export class DisplayManager {
   private bridge: EvenAppBridge | null = null;
   private _started = false;
-  private _mode: 'transcript' | 'menu' = 'transcript';
+  private _arHeader: string | null = null;
+  private _idleStatusShown = false;
 
   /** Reference to the shared conversation model */
   private conversation: ConversationHistory | null = null;
@@ -175,7 +172,6 @@ export class DisplayManager {
   }
 
   private async _doRebuild(statusLabel: string, footerHint: string): Promise<void> {
-    this._mode = 'transcript';
     this.clearDeltaTimer();
     const b = this.requireBridge();
 
@@ -205,7 +201,6 @@ export class DisplayManager {
   // -----------------------------------------------------------------------
 
   async updateStatus(label: string): Promise<void> {
-    if (this._mode !== 'transcript') return;
     const b = this.requireBridge();
     const newText = `OpenClaw  ● ${label}`;
     await b.textContainerUpgrade(
@@ -221,7 +216,6 @@ export class DisplayManager {
   }
 
   async updateFooter(hint: string): Promise<void> {
-    if (this._mode !== 'transcript') return;
     const b = this.requireBridge();
     await b.textContainerUpgrade(
       new TextContainerUpgrade({
@@ -240,13 +234,12 @@ export class DisplayManager {
    * Falls back to a full rebuild if the text is too long.
    */
   async replaceTranscript(transcriptText: string): Promise<void> {
-    if (this._mode !== 'transcript') return;
     return this.enqueue(() => this._doReplace(transcriptText));
   }
 
   private async _doReplace(transcriptText: string): Promise<void> {
     if (transcriptText.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this._doRebuild('idle', 'Tap to interact');
+      await this._doRebuild(this._resolveIdleStatus(), 'Tap to interact');
       return;
     }
     const b = this.requireBridge();
@@ -267,7 +260,6 @@ export class DisplayManager {
    * Triggers a rebuild if the cumulative appended text is too large.
    */
   async appendToTranscript(appendText: string): Promise<void> {
-    if (this._mode !== 'transcript') return;
     return this.enqueue(() => this._doAppend(appendText));
   }
 
@@ -275,6 +267,7 @@ export class DisplayManager {
     if (!appendText) return;
 
     if (this._transcriptLen + appendText.length > UPGRADE_CHAR_LIMIT - 100) {
+      this._idleStatusShown = false;
       await this._doRebuild('Streaming', 'Streaming...');
       return;
     }
@@ -298,7 +291,6 @@ export class DisplayManager {
 
   async appendDelta(delta: string): Promise<void> {
     if (!delta) return;
-    if (this._mode !== 'transcript') return;
     this._deltaBatch.push(delta);
     if (!this._deltaTimer) {
       this._deltaTimer = setTimeout(() => {
@@ -356,6 +348,7 @@ export class DisplayManager {
 
     // Detect task status from latest system message
     const statusLabel = this._resolveIdleStatus();
+    this._idleStatusShown = true;
 
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript(statusLabel, 'Tap to interact');
@@ -368,6 +361,7 @@ export class DisplayManager {
 
   /** Check the latest system message for a [TASK:*] marker and return an appropriate status label. */
   private _resolveIdleStatus(): string {
+    if (this._arHeader !== null) return this._arHeader;
     if (!this.conversation) return 'Idle';
     const entries = this.conversation.getEntries();
     // Walk backwards to find the most recent system entry
@@ -382,14 +376,23 @@ export class DisplayManager {
     return 'Idle';
   }
 
+  async setAutoresearchHeader(header: string | null): Promise<void> {
+    this._arHeader = header;
+    if (this._idleStatusShown) {
+      await this.enqueue(() => this.updateStatus(this._resolveIdleStatus()));
+    }
+  }
+
   async showRecording(): Promise<void> {
     this.clearResetTimer();
+    this._idleStatusShown = false;
     await this.updateStatus('Recording');
     await this.updateFooter('Tap to stop');
   }
 
   async showTranscribing(): Promise<void> {
     this.clearResetTimer();
+    this._idleStatusShown = false;
     await this.updateStatus('Transcribing');
     await this.updateFooter('Processing speech...');
   }
@@ -406,6 +409,7 @@ export class DisplayManager {
 
   async showConfirming(transcriptionText: string): Promise<void> {
     this.clearResetTimer();
+    this._idleStatusShown = false;
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : transcriptionText;
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
       await this.rebuildTranscript('Confirm?', 'Tap = send · 2×tap = reject');
@@ -418,12 +422,14 @@ export class DisplayManager {
 
   async showThinking(): Promise<void> {
     this.clearResetTimer();
+    this._idleStatusShown = false;
     await this.updateStatus('Thinking');
     await this.updateFooter('Waiting for response...');
   }
 
   async showStreaming(): Promise<void> {
     this.clearResetTimer();
+    this._idleStatusShown = false;
     await this.updateStatus('Streaming');
     await this.updateFooter('Streaming...');
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
@@ -438,6 +444,7 @@ export class DisplayManager {
     await this.flushRemainingDeltas();
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     await this.replaceTranscript(transcript);
+    this._idleStatusShown = true;
     await this.updateStatus(this._resolveIdleStatus());
     await this.updateFooter('Tap to interact');
   }
@@ -445,9 +452,7 @@ export class DisplayManager {
   async showError(message: string, hint = 'Tap to continue'): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
-    if (this._mode === 'menu') {
-      await this.exitMenuMode();
-    }
+    this._idleStatusShown = false;
     await this.updateStatus('Error');
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
     const displayText = transcript || message || 'Error';
@@ -462,14 +467,13 @@ export class DisplayManager {
   async showDisconnected(): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
-    if (this._mode === 'menu') {
-      await this.exitMenuMode();
-    }
+    this._idleStatusShown = false;
     await this.updateStatus('Offline');
     await this.updateFooter('Reconnecting...');
   }
 
   async showLoading(): Promise<void> {
+    this._idleStatusShown = false;
     await this.updateStatus('Loading');
     await this.updateFooter('Initialising speech model');
   }
@@ -477,6 +481,7 @@ export class DisplayManager {
   async showSessionReset(label: string): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
+    this._idleStatusShown = false;
     await this.updateStatus('New Session');
     const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : label;
     if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
@@ -497,113 +502,6 @@ export class DisplayManager {
       clearTimeout(this._resetTimer);
       this._resetTimer = null;
     }
-  }
-
-  // -----------------------------------------------------------------------
-  // Session menu (list mode)
-  // -----------------------------------------------------------------------
-
-  /**
-   * Build the list item names for the session menu.
-   * First item is always "✦ New Session", followed by up to 19 sessions.
-   */
-  private _buildSessionListItems(sessions: SessionListEntry[]): string[] {
-    if (sessions.length === 0) {
-      return ['Loading sessions...'];
-    }
-    const items: string[] = ['✦ New Session'];
-    for (const s of sessions.slice(0, 19)) {
-      const prefix = s.isActive ? '● ' : '  ';
-      const label = s.label.slice(0, 60);
-      items.push(`${prefix}${label}`);
-    }
-    return items;
-  }
-
-  /**
-   * Rebuild the display in menu (list) mode.
-   * Replaces the transcript text container with a ListContainer.
-   */
-  async showSessionMenu(sessions: SessionListEntry[]): Promise<void> {
-    this.clearDeltaTimer();
-    this.clearResetTimer();
-    this._mode = 'menu';
-
-    const b = this.requireBridge();
-    const items = this._buildSessionListItems(sessions);
-
-    const statusText = 'OpenClaw  ● Sessions';
-    const footerText = 'Tap to select · 2×tap back';
-
-    await b.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: 3,
-        textObject: [
-          text(ID_STATUS, 'status', 8, 2, 560, 24, statusText),
-          text(ID_FOOTER, 'footer', 8, 256, 560, 26, footerText),
-        ],
-        listObject: [
-          new ListContainerProperty({
-            xPosition: 8,
-            yPosition: 34,
-            width: 560,
-            height: 212,
-            borderWidth: 0,
-            borderColor: 0,
-            borderRadius: 0,
-            paddingLength: 0,
-            containerID: ID_MENU_LIST,
-            containerName: 'menu-list',
-            isEventCapture: 1,
-            itemContainer: new ListItemContainerProperty({
-              itemCount: items.length,
-              itemWidth: 560,
-              isItemSelectBorderEn: 1,
-              itemName: items,
-            }),
-          }),
-        ],
-      }),
-    );
-
-    this._statusLen = statusText.length;
-    this._footerLen = footerText.length;
-  }
-
-  /**
-   * Return to transcript mode from menu mode.
-   * Triggers a full rebuild to swap list → text containers.
-   */
-  async exitMenuMode(): Promise<void> {
-    if (this._mode !== 'menu') return;
-    this._mode = 'transcript';
-
-    const b = this.requireBridge();
-    const statusText = 'OpenClaw  ● Idle';
-    const transcriptText = this.conversation
-      ? this.conversation.formatReverse(REBUILD_CHAR_LIMIT - 50)
-      : 'Ready.';
-    const footerText = 'Tap to interact';
-
-    await b.rebuildPageContainer(
-      new RebuildPageContainer({
-        containerTotalNum: 3,
-        textObject: [
-          text(ID_STATUS,     'status',     8,   2, 560,  24, statusText),
-          text(ID_TRANSCRIPT, 'transcript', 8,  34, 560, 212, transcriptText, 1),
-          text(ID_FOOTER,     'footer',     8, 256, 560,  26, footerText),
-        ],
-      }),
-    );
-
-    this._statusLen = statusText.length;
-    this._transcriptLen = transcriptText.length;
-    this._footerLen = footerText.length;
-  }
-
-  /** Get the current display mode. */
-  get mode(): 'transcript' | 'menu' {
-    return this._mode;
   }
 
   // -----------------------------------------------------------------------

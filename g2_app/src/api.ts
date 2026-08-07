@@ -11,7 +11,7 @@ import type { InputHandler } from './input';
 import type { StateMachine } from './state';
 import type {
   AppStatus,
-  SessionListEntry,
+  AutoresearchStatusFrame,
 } from './protocol';
 
 export interface AppApi {
@@ -19,6 +19,7 @@ export interface AppApi {
   getState(): AppStatus;
   getGatewayConnected(): boolean;
   getSessionId(): string | null;
+  getAutoresearchStatus(): AutoresearchStatusFrame | null;
 
   // Conversation
   getConversation(): Array<{ role: 'user' | 'assistant' | 'system'; text: string; timestamp: number }>;
@@ -36,11 +37,6 @@ export interface AppApi {
   killOpenClawSession(): void;
   getPendingTranscription(): string | null;
 
-  // Sessions
-  getSessionList(): SessionListEntry[] | null;
-  openSessionMenu(): boolean;
-  closeSessionMenu(): boolean;
-  selectSession(index: number): boolean;
   resetSession(): boolean;
 
   getActiveTab(): ActiveTab;
@@ -60,14 +56,24 @@ export function createAppApi(deps: {
   input: InputHandler;
   conversation: ConversationHistory;
   gateway: Gateway;
+  getAutoresearchStatus: () => AutoresearchStatusFrame | null;
   getActiveTab: () => ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
 }): AppApi {
-  const { sm, input, conversation, gateway, getActiveTab, setActiveTab: setTab } = deps;
+  const {
+    sm,
+    input,
+    conversation,
+    gateway,
+    getAutoresearchStatus,
+    getActiveTab,
+    setActiveTab: setTab,
+  } = deps;
 
   return {
     getState: () => sm.current,
     getGatewayConnected: () => gateway.isConnected,
+    getAutoresearchStatus: () => getAutoresearchStatus(),
     getSessionId: () => {
       try { return localStorage.getItem(SESSION_ID_KEY); } catch { return null; }
     },
@@ -83,13 +89,8 @@ export function createAppApi(deps: {
     forceStop: () => input.forceStop(),
     killOpenClawSession: () => {
       gateway.sendJson({ type: 'force_stop' });
-      gateway.requestSessionList();
     },
     getPendingTranscription: () => input.pendingTranscription,
-    getSessionList: () => input.sessionList,
-    openSessionMenu: () => input.openSessionMenu(),
-    closeSessionMenu: () => input.closeSessionMenu(),
-    selectSession: (index) => input.simulateMenuSelect(index),
     resetSession: () => input.resetSession(),
 
     getActiveTab: () => getActiveTab(),

@@ -614,158 +614,136 @@ describe('DisplayManager', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Session menu mode
+  // Autoresearch header
   // -----------------------------------------------------------------------
-  describe('showSessionMenu', () => {
-    it('calls rebuildPageContainer with list container', async () => {
+  describe('setAutoresearchHeader', () => {
+    it('updates the status line immediately when idle is shown', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      mock.rebuildPageContainer.mockClear();
+      await dm.showIdle();
+      mock.textContainerUpgrade.mockClear();
 
-      await dm.showSessionMenu([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Session One', updatedAt: '2026-03-07T10:00:00Z', isActive: false, preview: 'Session One', messageCount: 0 },
-        { sessionKey: 'k2', sessionId: 'id2', label: 'Session Two', updatedAt: '2026-03-07T09:00:00Z', isActive: true, preview: 'Session Two', messageCount: 3 },
-      ]);
+      await dm.setAutoresearchHeader('AR · Iteration 4');
 
-      expect(mock.rebuildPageContainer).toHaveBeenCalledOnce();
-      const arg = mock.rebuildPageContainer.mock.calls[0][0];
-      expect(arg.containerTotalNum).toBe(3);
-      expect(arg.listObject).toHaveLength(1);
-      expect(arg.listObject[0].isEventCapture).toBe(1);
-      expect(arg.listObject[0].containerName).toBe('menu-list');
-
-      // Check item names
-      const items = arg.listObject[0].itemContainer.itemName;
-      expect(items[0]).toContain('New Session');
-      expect(items[1]).toContain('Session One');
-      expect(items[2]).toContain('Session Two');
+      const statusCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(statusCall).toBeDefined();
+      expect(statusCall![0].content).toContain('AR · Iteration 4');
     });
 
-    it('respects max 20 items (19 sessions + 1 New Session)', async () => {
+    it('pipeline status overrides the header until showIdle restores it', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      const sessions = Array.from({ length: 25 }, (_, i) => ({
-        sessionKey: `k${i}`,
-        sessionId: `id${i}`,
-        label: `Session ${i}`,
-        updatedAt: '2026-03-07T10:00:00Z',
-        isActive: false,
-        preview: `Session ${i}`,
-        messageCount: 0,
-      }));
+      await dm.setAutoresearchHeader('AR · Running');
+      await dm.showIdle();
+      mock.textContainerUpgrade.mockClear();
 
-      mock.rebuildPageContainer.mockClear();
-      await dm.showSessionMenu(sessions);
+      await dm.showRecording();
+      const recordingStatus = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(recordingStatus![0].content).toContain('Recording');
 
-      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
-      expect(items).toHaveLength(20); // 1 new + 19 sessions
-      expect(items[0]).toContain('New Session');
+      mock.textContainerUpgrade.mockClear();
+      await dm.showIdle();
+      const idleStatus = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(idleStatus![0].content).toContain('AR · Running');
     });
 
-    it('marks active session with ● prefix', async () => {
+    it('does not update the status line while a pipeline status is displayed', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
-      mock.rebuildPageContainer.mockClear();
-      await dm.showSessionMenu([
-        { sessionKey: 'k1', sessionId: 'id1', label: 'Active One', updatedAt: '2026-03-07T10:00:00Z', isActive: true, preview: 'Active One', messageCount: 0 },
-        { sessionKey: 'k2', sessionId: 'id2', label: 'Other', updatedAt: '2026-03-07T09:00:00Z', isActive: false, preview: 'Other', messageCount: 0 },
-      ]);
+      await dm.showIdle();
+      await dm.showRecording();
+      mock.textContainerUpgrade.mockClear();
 
-      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
-      expect(items[1]).toMatch(/^● /);
-      expect(items[2]).toMatch(/^ {2}/);
+      await dm.setAutoresearchHeader('AR · Recording');
+
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+
+      await dm.showIdle();
+      const idleStatus = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(idleStatus![0].content).toContain('AR · Recording');
     });
 
-    it('sets mode to menu', async () => {
-      const { dm } = await initDisplay();
-      expect(dm.mode).toBe('transcript');
-      await dm.showSessionMenu([]);
-      expect(dm.mode).toBe('menu');
+    it('restores the header after error, disconnect, and session reset states', async () => {
+      const pipelineMethods = [
+        async (dm: DisplayManager) => dm.showError('failure'),
+        async (dm: DisplayManager) => dm.showDisconnected(),
+        async (dm: DisplayManager) => dm.showSessionReset('reset'),
+      ];
+
+      for (const showPipeline of pipelineMethods) {
+        const { dm, bridge } = await initDisplay();
+        const mock = asMock(bridge);
+
+        await dm.setAutoresearchHeader('AR · Persistent');
+        await dm.showIdle();
+        await showPipeline(dm);
+        mock.textContainerUpgrade.mockClear();
+
+        await dm.showIdle();
+
+        const idleStatus = mock.textContainerUpgrade.mock.calls.find(
+          (c: any[]) => c[0].containerID === 1,
+        );
+        expect(idleStatus![0].content).toContain('AR · Persistent');
+      }
     });
 
-    it('shows "Loading sessions..." when empty list', async () => {
+    it('uses the header for an overflow rebuild', async () => {
       const { dm, bridge } = await initDisplay();
       const mock = asMock(bridge);
 
+      await dm.showIdle();
+      await dm.setAutoresearchHeader('AR · Overflow');
       mock.rebuildPageContainer.mockClear();
-      await dm.showSessionMenu([]);
 
-      const items = mock.rebuildPageContainer.mock.calls[0][0].listObject[0].itemContainer.itemName;
-      expect(items).toHaveLength(1);
-      expect(items[0]).toBe('Loading sessions...');
+      await dm.replaceTranscript('x'.repeat(1901));
+
+      const rebuild = mock.rebuildPageContainer.mock.calls[0][0];
+      expect(rebuild.textObject[0].content).toContain('AR · Overflow');
     });
-  });
 
-  describe('exitMenuMode', () => {
-    it('restores transcript layout', async () => {
+    it('does not let a header update overwrite the streaming overflow label', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showIdle();
+      await dm.setAutoresearchHeader('AR · Streaming');
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.appendToTranscript('x'.repeat(1900));
+      await dm.setAutoresearchHeader('AR · Updated');
+
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+      const rebuild = mock.rebuildPageContainer.mock.calls.at(-1)![0];
+      expect(rebuild.textObject[0].content).toContain('Streaming');
+    });
+
+    it('falls back to the previous idle status behavior when cleared', async () => {
       const { dm, bridge, conversation } = await initDisplay();
       const mock = asMock(bridge);
 
-      conversation.addUser('Hello');
-      await dm.showSessionMenu([]);
-      expect(dm.mode).toBe('menu');
-
-      mock.rebuildPageContainer.mockClear();
-      await dm.exitMenuMode();
-
-      expect(dm.mode).toBe('transcript');
-      expect(mock.rebuildPageContainer).toHaveBeenCalledOnce();
-      const arg = mock.rebuildPageContainer.mock.calls[0][0];
-      expect(arg.containerTotalNum).toBe(3);
-      expect(arg.textObject).toHaveLength(3);
-      // Transcript container should be a text container with event capture
-      const transcript = arg.textObject.find((t: any) => t.containerName === 'transcript');
-      expect(transcript).toBeDefined();
-      expect(transcript.isEventCapture).toBe(1);
-    });
-
-    it('is no-op when not in menu mode', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      mock.rebuildPageContainer.mockClear();
-      await dm.exitMenuMode();
-
-      expect(mock.rebuildPageContainer).not.toHaveBeenCalled();
-      expect(dm.mode).toBe('transcript');
-    });
-  });
-
-  describe('text methods no-op in menu mode', () => {
-    it('updateStatus is no-op in menu mode', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      await dm.showSessionMenu([]);
+      conversation.addSystem('RUNNING: experiment');
+      await dm.showIdle();
+      await dm.setAutoresearchHeader('AR · Running');
       mock.textContainerUpgrade.mockClear();
 
-      await dm.updateStatus('Should not update');
-      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
-    });
+      await dm.setAutoresearchHeader(null);
 
-    it('updateFooter is no-op in menu mode', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      await dm.showSessionMenu([]);
-      mock.textContainerUpgrade.mockClear();
-
-      await dm.updateFooter('Should not update');
-      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
-    });
-
-    it('replaceTranscript is no-op in menu mode', async () => {
-      const { dm, bridge } = await initDisplay();
-      const mock = asMock(bridge);
-
-      await dm.showSessionMenu([]);
-      mock.textContainerUpgrade.mockClear();
-
-      await dm.replaceTranscript('Should not update');
-      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+      const statusCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 1,
+      );
+      expect(statusCall![0].content).toContain('● Task Running');
     });
   });
 });
