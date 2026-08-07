@@ -314,7 +314,11 @@ def seal_canonical_verification_dispatch_state_file(
             sealed,
             validation_context=validation_context,
         )
-        persistence_module._atomic_save_state_file(resolved_path, sealed)
+        if sealed != state:
+            # An unchanged attestation must not rewrite the file: the state
+            # mtime is the supervisor's staleness clock, and an every-cycle
+            # touch would suppress idle-recovery nudging indefinitely.
+            persistence_module._atomic_save_state_file(resolved_path, sealed)
         return sealed
 
 
