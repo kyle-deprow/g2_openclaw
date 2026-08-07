@@ -304,6 +304,7 @@ def test_context_prompt_requires_flat_typed_schema_and_ignores_stale_context_fil
         "research_mode": "enum[alpha_research,data_infra_g0]",
         "mode_rationale": "string",
         "burned_theory_families": "array[string]",
+        "contested_methodology_families": "array[string]",
     }
     contract = autoresearch_artifacts.ARTIFACT_CONTRACTS[ArtifactType.CONTEXT_PACKET]
 

@@ -307,11 +307,99 @@ def test_context_packet_roundtrip_requires_explicit_mode_and_rationale() -> None
         research_mode=ResearchMode.DATA_INFRA_G0,
         mode_rationale="Data provenance is not yet sufficient for alpha claims.",
         burned_theory_families=("vwap-obv",),
+        contested_methodology_families=("momentum-burst",),
     )
 
     loaded = ContextPacketArtifact.from_dict(artifact.to_dict())
 
     assert loaded == artifact
+
+
+def test_context_packet_roundtrip_accepts_legacy_payload_without_contested_families() -> None:
+    artifact = ContextPacketArtifact(
+        baseline_metric="0.18 OOS Sharpe net",
+        current_best_metric="0.22 OOS Sharpe net",
+        recent_experiment_outcomes=("T1 discard",),
+        prior_findings=("Prior coverage was incomplete",),
+        open_proposals=("Repair source provenance",),
+        hard_constraints=("2021-2026",),
+        available_data_sources=("qp.prices()",),
+        loaded_quantipy_sources=("AGENTS.md",),
+        research_mode=ResearchMode.DATA_INFRA_G0,
+        mode_rationale="Data provenance is not yet sufficient for alpha claims.",
+        burned_theory_families=("vwap-obv",),
+    )
+    legacy_payload = artifact.to_dict()
+    del legacy_payload["contested_methodology_families"]
+
+    loaded = ContextPacketArtifact.from_dict(legacy_payload)
+
+    assert loaded.contested_methodology_families == ()
+
+
+def test_context_packet_from_dict_normalizes_contested_methodology_families() -> None:
+    artifact = ContextPacketArtifact(
+        baseline_metric="0.18 OOS Sharpe net",
+        current_best_metric="0.22 OOS Sharpe net",
+        recent_experiment_outcomes=(),
+        prior_findings=(),
+        open_proposals=(),
+        hard_constraints=(),
+        available_data_sources=("qp.prices()",),
+        loaded_quantipy_sources=("AGENTS.md",),
+        research_mode=ResearchMode.ALPHA_RESEARCH,
+        mode_rationale="Coverage and provenance evidence permit an alpha experiment.",
+        burned_theory_families=(),
+    )
+    raw = artifact.to_dict()
+    raw["contested_methodology_families"] = [" Momentum / Burst "]
+
+    loaded = ContextPacketArtifact.from_dict(raw)
+
+    assert loaded.contested_methodology_families == ("momentum-burst",)
+
+
+def test_context_packet_rejects_unknown_extra_key_with_optional_field_present() -> None:
+    artifact = ContextPacketArtifact(
+        baseline_metric="0.18 OOS Sharpe net",
+        current_best_metric="0.22 OOS Sharpe net",
+        recent_experiment_outcomes=(),
+        prior_findings=(),
+        open_proposals=(),
+        hard_constraints=(),
+        available_data_sources=("qp.prices()",),
+        loaded_quantipy_sources=("AGENTS.md",),
+        research_mode=ResearchMode.ALPHA_RESEARCH,
+        mode_rationale="Coverage and provenance evidence permit an alpha experiment.",
+        burned_theory_families=(),
+        contested_methodology_families=("momentum-burst",),
+    )
+    raw = artifact.to_dict()
+    raw["unexpected"] = "reject"
+
+    with pytest.raises(AutoresearchValidationError, match="unexpected=\['unexpected'\]"):
+        ContextPacketArtifact.from_dict(raw)
+
+
+def test_context_packet_rejects_non_string_contested_methodology_family() -> None:
+    artifact = ContextPacketArtifact(
+        baseline_metric="0.18 OOS Sharpe net",
+        current_best_metric="0.22 OOS Sharpe net",
+        recent_experiment_outcomes=(),
+        prior_findings=(),
+        open_proposals=(),
+        hard_constraints=(),
+        available_data_sources=("qp.prices()",),
+        loaded_quantipy_sources=("AGENTS.md",),
+        research_mode=ResearchMode.ALPHA_RESEARCH,
+        mode_rationale="Coverage and provenance evidence permit an alpha experiment.",
+        burned_theory_families=(),
+    )
+    raw = artifact.to_dict()
+    raw["contested_methodology_families"] = ["momentum-burst", 3]
+
+    with pytest.raises(AutoresearchValidationError, match="contested_methodology_families"):
+        ContextPacketArtifact.from_dict(raw)
 
 
 def test_state_json_rejects_missing_mode_after_context_exists() -> None:

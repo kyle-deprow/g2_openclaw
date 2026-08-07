@@ -975,6 +975,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "research_mode",
             "mode_rationale",
             "burned_theory_families",
+            "contested_methodology_families",
         ],
         "field_types": {
             "baseline_metric": "string",
@@ -988,6 +989,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "research_mode": "enum[alpha_research,data_infra_g0]",
             "mode_rationale": "string",
             "burned_theory_families": "array[string]",
+            "contested_methodology_families": "array[string]",
         },
         "shape_constraints": [
             "Use exactly the listed keys and no extra keys",
@@ -1141,27 +1143,27 @@ class ContextPacketArtifact:
     research_mode: ResearchMode
     mode_rationale: str
     burned_theory_families: tuple[str, ...]
+    contested_methodology_families: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: object) -> ContextPacketArtifact:
         data = _ensure_mapping(raw, label="context_packet")
-        _require_exact_keys(
-            data,
-            label="context_packet",
-            expected=(
-                "baseline_metric",
-                "current_best_metric",
-                "recent_experiment_outcomes",
-                "prior_findings",
-                "open_proposals",
-                "hard_constraints",
-                "available_data_sources",
-                "loaded_quantipy_sources",
-                "research_mode",
-                "mode_rationale",
-                "burned_theory_families",
-            ),
+        expected_keys: tuple[str, ...] = (
+            "baseline_metric",
+            "current_best_metric",
+            "recent_experiment_outcomes",
+            "prior_findings",
+            "open_proposals",
+            "hard_constraints",
+            "available_data_sources",
+            "loaded_quantipy_sources",
+            "research_mode",
+            "mode_rationale",
+            "burned_theory_families",
         )
+        if "contested_methodology_families" in data:
+            expected_keys += ("contested_methodology_families",)
+        _require_exact_keys(data, label="context_packet", expected=expected_keys)
         return cls(
             baseline_metric=_require_str(data, "baseline_metric"),
             current_best_metric=_require_str(data, "current_best_metric"),
@@ -1176,6 +1178,10 @@ class ContextPacketArtifact:
             burned_theory_families=tuple(
                 _normalise_identifier(family)
                 for family in _require_string_list(data, "burned_theory_families")
+            ),
+            contested_methodology_families=tuple(
+                _normalise_identifier(family)
+                for family in _optional_string_list(data, "contested_methodology_families")
             ),
         )
 
@@ -1192,6 +1198,7 @@ class ContextPacketArtifact:
             "research_mode": self.research_mode.value,
             "mode_rationale": self.mode_rationale,
             "burned_theory_families": list(self.burned_theory_families),
+            "contested_methodology_families": list(self.contested_methodology_families),
         }
 
 

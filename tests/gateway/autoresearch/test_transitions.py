@@ -1417,6 +1417,49 @@ def test_alpha_debate_rejects_a_burned_theory_family_without_new_evidence(
         advance_state(state, _debate_result(policy, round_number=1), policy)
 
 
+def test_alpha_debate_rejects_a_contested_methodology_family_without_new_evidence(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    context = replace(
+        _context_artifact(),
+        contested_methodology_families=("vwap-obv",),
+    )
+    state = advance_state(state, context, policy)
+
+    with pytest.raises(AutoresearchValidationError, match="contested methodology"):
+        advance_state(state, _debate_result(policy, round_number=1), policy)
+
+
+def test_alpha_debate_accepts_a_contested_methodology_family_with_new_evidence(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    context = replace(
+        _context_artifact(),
+        contested_methodology_families=("vwap-obv",),
+    )
+    state = advance_state(state, context, policy)
+    debate = _debate_result(policy, round_number=1)
+    debate = replace(
+        debate,
+        submissions=tuple(
+            replace(
+                submission,
+                materially_new_evidence=(
+                    "Prior feature timing leaked future bars; this run adds a strict "
+                    "purge and embargo audit."
+                ),
+            )
+            for submission in debate.submissions
+        ),
+    )
+
+    next_state = advance_state(state, debate, policy)
+
+    assert next_state.latest_debate == debate
+
+
 def test_g0_final_decision_uses_infrastructure_outcome_not_sharpe(
     policy: AutoresearchPolicy,
 ) -> None:

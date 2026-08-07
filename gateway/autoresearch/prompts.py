@@ -227,7 +227,8 @@ def _mode_contract(state: AutoresearchState) -> str:
         return (
             "Mode contract:\n"
             "- The context packet must choose exactly alpha_research or data_infra_g0 and give "
-            "a nonempty rationale plus burned theory families.\n\n"
+            "a nonempty rationale plus burned theory families and contested methodology "
+            "families.\n\n"
         )
     if state.mode is ResearchMode.DATA_INFRA_G0:
         return (
@@ -237,7 +238,12 @@ def _mode_contract(state: AutoresearchState) -> str:
         )
     return (
         "mode=ALPHA_RESEARCH; strategy experiment. Burned theory families require materially "
-        "new evidence. Consensus freezes a strict universe_plan. Persist compact universe, "
+        "new evidence. Contested methodology families invite at most one hardened revisit; "
+        "that revisit requires materially_new_evidence naming the defect and correction. "
+        "Include novelty_delta only when the mechanical novelty rule requires it (fingerprint "
+        "or Tier-2 contested match); otherwise carry the suspected defect and its correction "
+        "in materially_new_evidence and the implementation brief. Consensus freezes a strict "
+        "universe_plan. Persist compact universe, "
         "hydration, and coverage identities/counts/digests only; never full membership arrays. "
         "No fixed-sleeve or per-symbol coverage alternative.\n"
     )

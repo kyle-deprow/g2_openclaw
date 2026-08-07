@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.7.0
+version: 8.8.0
 ---
 
 # Autoresearch
@@ -268,12 +268,13 @@ The context packet must select exactly one mode and give a nonempty
   `REMEDIATION_REQUIRED` is stage evidence only and maps to non-suspending
   `DISCARD`; it cannot authorize suspension.
 
-The context packet also records normalized `burned_theory_families`. In alpha
-mode, a debate submission in a burned family is rejected unless it contains a
-nonempty `materially_new_evidence` explanation. Do not evade this gate by
-renaming the family. The bounded negative-results ledger is the authoritative
-registry-derived consistency input for context, debate, and consensus prompts;
-it does not replace `burned_theory_families`.
+The context packet records normalized `burned_theory_families` and
+`contested_methodology_families`. In alpha mode, a debate submission in either
+category is rejected unless it contains a nonempty `materially_new_evidence`
+explanation. Do not evade this gate by renaming the family. The bounded
+negative-results ledger is the authoritative registry-derived consistency input
+for context, debate, and consensus prompts; it does not replace either context
+packet field.
 
 ## Operator Campaign Directive (2026-08-04)
 
@@ -296,6 +297,18 @@ The current campaign is scoped by operator direction and applies to every
   breakout; rule-based and learned models alike) rather than re-tuning one
   idea — the novelty gate and negative-results ledger enforce this
   mechanically.
+- **Methodology-failure discard rule:** BUG_SIGNAL discards are
+  contested-pending-methodology-fix cases recorded in
+  `contested_methodology_families`, not among clean negatives. That field is
+  distinct from the registry/ledger `contested_families`, which stay treated as
+  burned. Invite at most one hardened revisit, requiring
+  `materially_new_evidence` naming the suspected defect and its correction.
+  Include `novelty_delta` only when the mechanical novelty rule requires it
+  (fingerprint or Tier-2 contested match); otherwise carry the suspected defect
+  and its correction in `materially_new_evidence` and the implementation brief.
+  Once a revisit has occurred, the CURATOR must move the family to
+  `burned_theory_families` and must not re-list it in
+  `contested_methodology_families`. Clean negatives stay permanently burned.
 - **Activity floor (operator addition 2026-08-06):** scalping means trading.
   Proposals must target **at least 2 trades per day aggregated across the
   five-ETF panel** in the out-of-sample window, and a verification result
@@ -618,8 +631,10 @@ packet for the debate:
 - The pinned readiness receipt, capability summary, and compact references to
   relevant universe/coverage receipts. Do not include full ticker arrays.
 - Hard constraints and supported data sources from those receipts.
-- Selected `research_mode`, a concrete mode rationale, and burned theory
-  families from completed failures.
+- Selected `research_mode`, a concrete mode rationale, burned theory families
+  from completed failures, and `contested_methodology_families` for
+  methodology-failure cases; keep the BUG_SIGNAL-versus-clean-negative split
+  explicit.
 
 Do not skip debate because a prior proposal exists. The debate must consider
 prior proposals, current metrics, and MemPalace history before selecting the

@@ -1607,11 +1607,14 @@ def _validate_debate_result(
         )
     if mode is ResearchMode.ALPHA_RESEARCH and context is not None:
         burned = set(context.burned_theory_families)
+        contested = set(context.contested_methodology_families)
+        gated_families = burned | contested
         for submission in debate.submissions:
             family = _normalise_identifier(submission.theory_family)
-            if family in burned and not submission.materially_new_evidence:
+            if family in gated_families and not submission.materially_new_evidence:
+                category = "burned" if family in burned else "contested methodology"
                 raise AutoresearchValidationError(
-                    "alpha debate theory_family is burned and requires materially_new_evidence"
+                    f"alpha debate theory_family is {category} and requires materially_new_evidence"
                 )
     for submission in debate.submissions:
         if require_compute_fit and submission.compute_fit is None:

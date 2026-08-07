@@ -516,6 +516,14 @@ def test_runtime_docs_distinguish_process_success_from_research_validity() -> No
         )
 
 
+def test_autoresearch_directive_distinguishes_contested_methodology_discards() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split()).lower()
+
+    assert "bug_signal discards are contested-pending-methodology-fix" in skill
+    assert "one hardened revisit" in skill
+    assert "clean negatives stay permanently burned" in skill
+
+
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:
     skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
     tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())

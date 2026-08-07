@@ -221,6 +221,12 @@ unwrapped files before state advance. The complete envelope file must be at most
 has a hard 32 KiB prompt budget and fails closed with an actionable error if
 accepted state artifacts would exceed it.
 
+Context packets distinguish methodology-failure discards from clean negatives:
+BUG_SIGNAL or otherwise untrustworthy-evidence decisions go in
+`contested_methodology_families` and invite one hardened revisit with explicit
+defect/correction novelty evidence, while clean negative results remain in
+`burned_theory_families` and stay off-limits.
+
 Long verification, notebook, hydrate, and backtest commands must use
 `scripts/run-long-task.sh` with an immutable run manifest and a one-time private
 command input file. Create the command file through the repo-owned helper, which
