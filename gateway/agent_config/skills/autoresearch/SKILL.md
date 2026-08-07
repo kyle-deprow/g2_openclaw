@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.6.1
+version: 8.7.0
 ---
 
 # Autoresearch
@@ -296,6 +296,16 @@ The current campaign is scoped by operator direction and applies to every
   breakout; rule-based and learned models alike) rather than re-tuning one
   idea — the novelty gate and negative-results ledger enforce this
   mechanically.
+- **Activity floor (operator addition 2026-08-06):** scalping means trading.
+  Proposals must target **at least 2 trades per day aggregated across the
+  five-ETF panel** in the out-of-sample window, and a verification result
+  with `trades_per_day` below 1.0 misses the activity requirement regardless
+  of its Sharpe. Debaters and the arbiter must reject or refine event
+  definitions whose expected trigger frequency is materially below the
+  target (ultra-selective event quantiles such as the top 3% of events
+  require explicit justification that the implied activity still meets the
+  floor); prefer designs that trade more frequently with smaller per-trade
+  edges over rare-event designs, subject to realistic cost survival.
 - All other protocol rules (data contract, budgets, decision gates, review)
   are unchanged. If five ETFs with adequate contract coverage cannot be
   established, report it as an operator blocker rather than substituting
