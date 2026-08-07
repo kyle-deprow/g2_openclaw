@@ -123,18 +123,18 @@ QUANTIPY_V2_CONTRACT_FILE_SHA256 = {
     ),
     "src/quantipy/experiments/preflight.py": "".join(
         (
-            "ee7601b415713499",  # pragma: allowlist secret
-            "f7b0c867977cd3d4",  # pragma: allowlist secret
-            "058478ded35341d4",  # pragma: allowlist secret
-            "cc1a3894783d215a",  # pragma: allowlist secret
+            "a7e0567b090f6791",  # pragma: allowlist secret
+            "f8911ddc6651821d",  # pragma: allowlist secret
+            "a0f93dffcc7ac693",  # pragma: allowlist secret
+            "d53b274ece2bf7cd",  # pragma: allowlist secret
         )
     ),
     "src/quantipy/experiments/runtime.py": "".join(
         (
-            "7a656526d9fb2a7c",  # pragma: allowlist secret
-            "5035e093d354f77a",  # pragma: allowlist secret
-            "28aabe5a51b5424d",  # pragma: allowlist secret
-            "1f285d93f89bedbc",  # pragma: allowlist secret
+            "fe15a9350ff0c5ab",  # pragma: allowlist secret
+            "4676a2be8377a7af",  # pragma: allowlist secret
+            "8f50dfe78f655ea9",  # pragma: allowlist secret
+            "ecbad5b596fc86bf",  # pragma: allowlist secret
         )
     ),
     "src/quantipy/experiments/schemas.py": "".join(
