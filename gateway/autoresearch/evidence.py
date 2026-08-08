@@ -21,6 +21,9 @@ from gateway.autoresearch.artifacts import (
     ImplementationResultArtifact as ImplementationResultArtifact,
 )
 from gateway.autoresearch.artifacts import (
+    QuantipyExecutionInterruptedEvidence as QuantipyExecutionInterruptedEvidence,
+)
+from gateway.autoresearch.artifacts import (
     QuantipyExecutionNotStartedEvidence as QuantipyExecutionNotStartedEvidence,
 )
 from gateway.autoresearch.artifacts import (
@@ -88,6 +91,9 @@ from gateway.autoresearch.enums import (
 )
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
+)
+from gateway.autoresearch.fields import (
+    _canonical_json_digest as _canonical_json_digest,
 )
 from gateway.autoresearch.fields import (
     _ensure_mapping as _ensure_mapping,
@@ -905,6 +911,347 @@ def _reserve_quantipy_execution_not_started(
         os.close(root_fd)
 
 
+def _validate_quantipy_execution_interrupted(
+    state: AutoresearchState,
+    implementation: ImplementationResultArtifact,
+    evidence: QuantipyExecutionInterruptedEvidence,
+    *,
+    expected_run_id: str,
+    expected_run_path: Path,
+    state_path: Path | None,
+    expected_instruction_manifest_sha256: str | None = None,
+    runs_root: Path | None = None,
+) -> None:
+    """Bind interrupted verification recovery evidence to sealed detached run files."""
+    import gateway.autoresearch_runs as detached_runs
+
+    if (
+        evidence.manifest_path != implementation.experiment_manifest_path
+        or evidence.manifest_sha256 != implementation.experiment_manifest_sha256
+        or evidence.expected_run_id != expected_run_id
+        or evidence.expected_run_json_path != str(expected_run_path)
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted evidence does not bind the implementation and expected run"
+        )
+    if expected_run_path.parent.name != expected_run_id:
+        raise AutoresearchValidationError(
+            "execution-interrupted expected run path does not bind its run ID"
+        )
+    try:
+        expected_run_path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted expected run.json cannot be inspected"
+        ) from exc
+    else:
+        raise AutoresearchValidationError("execution-interrupted expected run.json must be absent")
+    configured_runs_root = (
+        detached_runs.DEFAULT_AUTORESEARCH_RUNS_ROOT if runs_root is None else runs_root
+    )
+    trusted_runs_root = _require_canonical_absolute_path(
+        configured_runs_root,
+        label="trusted detached runs root",
+    )
+    run_directory = _require_canonical_absolute_path(
+        evidence.detached_run_directory,
+        label="quantipy_execution_interrupted.detached_run_directory",
+    )
+    try:
+        run_directory.relative_to(trusted_runs_root)
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run directory escaped the trusted runs root"
+        ) from exc
+    try:
+        directory_metadata = run_directory.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run directory is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(directory_metadata.st_mode)
+        or stat.S_ISLNK(directory_metadata.st_mode)
+        or directory_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(directory_metadata.st_mode) != 0o500
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run directory must be a sealed private directory"
+        )
+    manifest_snapshot = _secure_open_snapshot(
+        run_directory / "manifest.json",
+        label="execution-interrupted detached manifest",
+        trusted_root=trusted_runs_root,
+        private=True,
+        max_bytes=QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
+    )
+    status_snapshot = _secure_open_snapshot(
+        run_directory / "status.json",
+        label="execution-interrupted detached status",
+        trusted_root=trusted_runs_root,
+        private=True,
+        max_bytes=QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
+    )
+    try:
+        detached_manifest = detached_runs.RunManifest.from_dict(
+            dict(
+                _parse_json_snapshot(
+                    manifest_snapshot,
+                    label="execution-interrupted detached manifest",
+                )
+            )
+        )
+        detached_status = detached_runs.RunStatus.from_dict(
+            dict(
+                _parse_json_snapshot(
+                    status_snapshot,
+                    label="execution-interrupted detached status",
+                )
+            )
+        )
+    except ValueError as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run manifest or status is invalid"
+        ) from exc
+    try:
+        detached_record = detached_runs.read_run_record(
+            run_dir=run_directory,
+            runs_root=Path(trusted_runs_root),
+        )
+    except (OSError, ValueError) as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run record is invalid or unavailable"
+        ) from exc
+    if detached_record.manifest != detached_manifest or detached_record.status != detached_status:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run record changed during validation"
+        )
+    if manifest_snapshot.sha256 != evidence.detached_manifest_sha256:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached manifest digest does not match evidence"
+        )
+    if detached_status.manifest_sha256 != evidence.detached_manifest_sha256:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached status manifest digest does not match evidence"
+        )
+    if _canonical_json_digest(detached_status.to_dict()) != evidence.detached_status_sha256:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached status digest does not match evidence"
+        )
+    contract = build_quantipy_execution_contract(
+        runtime_root=_target_repo_root_for_state(state),
+        manifest_path=Path(implementation.experiment_manifest_path),
+        output_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        run_id=expected_run_id,
+    )
+    if (
+        detached_manifest.iteration != state.iteration
+        or detached_manifest.phase is not Phase.VERIFICATION
+        or detached_manifest.run_directory != str(run_directory)
+        or detached_manifest.working_directory != str(contract.working_directory)
+        or detached_manifest.expected_artifact_path != str(expected_run_path)
+        or detached_manifest.command_sha256 != detached_runs.command_sha256(contract.command)
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached manifest does not bind the expected run"
+        )
+    from gateway.autoresearch.transitions import (
+        build_authoritative_state_reference,
+    )
+
+    expected_state_reference = build_authoritative_state_reference(
+        state,
+        state_path=state_path or constants.DEFAULT_AUTORESEARCH_STATE_PATH,
+    ).sha256()
+    if (
+        expected_instruction_manifest_sha256 is not None
+        and detached_manifest.instruction_manifest_sha256 != expected_instruction_manifest_sha256
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached manifest instruction digest does not match current "
+            "instructions"
+        )
+    instruction_manifest_for_matching = (
+        expected_instruction_manifest_sha256
+        if expected_instruction_manifest_sha256 is not None
+        else detached_manifest.instruction_manifest_sha256
+    )
+    if detached_manifest.state_reference_sha256 != expected_state_reference:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached manifest state reference does not match state"
+        )
+    matching_records: list[detached_runs.RunRecord] = []
+    matching_attempts: set[int] = set()
+    try:
+        trusted_root_metadata = trusted_runs_root.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "execution-interrupted trusted detached runs root is unavailable"
+        ) from exc
+    if (
+        not stat.S_ISDIR(trusted_root_metadata.st_mode)
+        or stat.S_ISLNK(trusted_root_metadata.st_mode)
+        or trusted_root_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(trusted_root_metadata.st_mode) != 0o700
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted trusted detached runs root must be a private directory"
+        )
+    for directory, child_directories, files in os.walk(trusted_runs_root, followlinks=False):
+        parent = Path(directory)
+        child_directories.sort()
+        files.sort()
+        for child_directory in child_directories:
+            if (parent / child_directory).is_symlink():
+                raise AutoresearchValidationError(
+                    "execution-interrupted trusted detached runs root contains a symlinked "
+                    "run directory"
+                )
+        if "manifest.json" not in files:
+            continue
+        try:
+            candidate = detached_runs.read_run_record(
+                run_dir=parent,
+                runs_root=trusted_runs_root,
+            )
+        except (OSError, ValueError) as exc:
+            raise AutoresearchValidationError(
+                "execution-interrupted matching detached run record is invalid"
+            ) from exc
+        candidate_manifest = candidate.manifest
+        if (
+            candidate_manifest.phase is Phase.VERIFICATION
+            and candidate_manifest.iteration == state.iteration
+            and candidate_manifest.state_reference_sha256 == expected_state_reference
+            and candidate_manifest.instruction_manifest_sha256 == instruction_manifest_for_matching
+        ):
+            if candidate_manifest.attempt in matching_attempts:
+                raise AutoresearchValidationError(
+                    "execution-interrupted matching detached runs contain duplicate attempts"
+                )
+            matching_attempts.add(candidate_manifest.attempt)
+            matching_records.append(candidate)
+    if any(record.status.state is detached_runs.RunState.RUNNING for record in matching_records):
+        raise AutoresearchValidationError(
+            "execution-interrupted evidence cannot cite a run while a newer matching run is "
+            "still running"
+        )
+    if not matching_records:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run is not a matching current verification run"
+        )
+    latest_record = max(matching_records, key=lambda record: record.manifest.attempt)
+    if latest_record.run_directory != detached_record.run_directory:
+        raise AutoresearchValidationError(
+            "execution-interrupted evidence must cite the latest matching verification attempt"
+        )
+    if (
+        detached_status.state is not detached_runs.RunState.FAILED
+        or detached_status.exit_code != evidence.exit_code
+        or detached_status.signal_number != evidence.signal_number
+        or detached_status.failure_classification is None
+        or detached_status.failure_classification.value != evidence.failure_classification
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached terminal status does not match evidence"
+        )
+    if (
+        detached_status.failure_classification
+        is detached_runs.RunFailureClassification.OPERATOR_STOPPED
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted evidence cannot accept an operator-stopped detached run"
+        )
+    if detached_status.finished_at is None:
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run lacks a terminal finish timestamp"
+        )
+    started_at = _strict_json_datetime(
+        detached_status.started_at,
+        label="execution-interrupted detached status started_at",
+        utc_only=True,
+    )
+    finished_at = _strict_json_datetime(
+        detached_status.finished_at,
+        label="execution-interrupted detached status finished_at",
+        utc_only=True,
+    )
+    observed_wall_seconds = (finished_at - started_at).total_seconds()
+    if (
+        detached_manifest.timeout_seconds != evidence.timeout_seconds
+        or observed_wall_seconds != evidence.wall_seconds_observed
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted timeout or observed wall time does not match detached run"
+        )
+    if (
+        detached_status.expected_artifact_attestation_status
+        is not detached_runs.ExpectedArtifactAttestationStatus.FAILED
+        or detached_status.expected_artifact_attestation_error
+        is not detached_runs.ExpectedArtifactAttestationError.MISSING
+        or detached_status.expected_artifact_attestation is not None
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run requires a missing artifact attestation"
+        )
+    if (
+        detached_status.systemd_unit is None
+        or constants.OPENCLAW_LONG_TASK_UNIT_RE.fullmatch(detached_status.systemd_unit) is None
+    ):
+        raise AutoresearchValidationError(
+            "execution-interrupted detached run systemd unit is invalid"
+        )
+    capture = detached_status.output_capture
+    if capture is None:
+        raise AutoresearchValidationError("execution-interrupted detached run lacks output capture")
+    streams = (
+        (
+            "stdout",
+            capture.stdout,
+            evidence.stdout_sha256,
+            evidence.stdout_bytes_observed,
+            evidence.stdout_truncated,
+        ),
+        (
+            "stderr",
+            capture.stderr,
+            evidence.stderr_sha256,
+            evidence.stderr_bytes_observed,
+            evidence.stderr_truncated,
+        ),
+    )
+    for label, stream, expected_digest, expected_bytes_observed, expected_truncated in streams:
+        if not stream.eof_observed:
+            raise AutoresearchValidationError(
+                "execution-interrupted detached run output capture is incomplete"
+            )
+        capture_snapshot = _secure_open_snapshot(
+            run_directory / stream.relative_path,
+            label=f"execution-interrupted {label} capture",
+            trusted_root=trusted_runs_root,
+            private=True,
+            max_bytes=detached_runs.OUTPUT_CAPTURE_MAX_BYTES,
+        )
+        if (
+            stream.bytes_observed != expected_bytes_observed
+            or stream.truncated is not expected_truncated
+            or not stream.eof_observed
+        ):
+            raise AutoresearchValidationError(
+                f"execution-interrupted {label} capture metadata does not match evidence"
+            )
+        if (
+            capture_snapshot.sha256 != stream.sha256
+            or capture_snapshot.sha256 != expected_digest
+            or len(capture_snapshot.content) != stream.bytes_stored
+        ):
+            raise AutoresearchValidationError(
+                f"execution-interrupted {label} capture digest does not match evidence"
+            )
+
+
 def _validate_panel_receipt(value: object, *, label: str) -> dict[str, object]:
     try:
         return validate_research_panel_receipt(value, label=label)
@@ -1449,9 +1796,13 @@ def _validate_quantipy_experiment_evidence(
     artifact: VerificationResultArtifact,
     *,
     validation_context: AutoresearchValidationContext | None = None,
+    state_path: Path | None = None,
+    expected_instruction_manifest_sha256: str | None = None,
+    runs_root: Path | None = None,
 ) -> None:
     evidence = artifact.quantipy_experiment_evidence
     not_started = artifact.quantipy_execution_not_started
+    interrupted = artifact.quantipy_execution_interrupted
     if state.implementation_result is None:
         raise AutoresearchValidationError(
             "Quantipy experiment evidence requires implementation_result"
@@ -1499,35 +1850,51 @@ def _validate_quantipy_experiment_evidence(
             raise AutoresearchValidationError(
                 "PASS verification requires Quantipy experiment evidence"
             )
-        if not_started is None:
+        if not_started is None and interrupted is None:
             raise AutoresearchValidationError(
-                "non-PASS without runtime evidence requires execution-not-started evidence"
+                "non-PASS without runtime evidence requires execution-not-started or "
+                "execution-interrupted evidence"
             )
-        if (
-            not_started.manifest_path != implementation.experiment_manifest_path
-            or not_started.manifest_sha256 != implementation.experiment_manifest_sha256
-            or not_started.expected_run_id != expected_run_id
-            or not_started.expected_run_json_path != str(expected_run_path)
-        ):
-            raise AutoresearchValidationError(
-                "execution-not-started evidence does not bind the implementation and expected run"
+        if not_started is not None:
+            if (
+                not_started.manifest_path != implementation.experiment_manifest_path
+                or not_started.manifest_sha256 != implementation.experiment_manifest_sha256
+                or not_started.expected_run_id != expected_run_id
+                or not_started.expected_run_json_path != str(expected_run_path)
+            ):
+                raise AutoresearchValidationError(
+                    "execution-not-started evidence does not bind the implementation and "
+                    "expected run"
+                )
+            if not_started.command not in artifact.commands_run:
+                raise AutoresearchValidationError(
+                    "execution-not-started command must appear exactly in commands_run"
+                )
+            if "quantipy experiment" in not_started.command:
+                raise AutoresearchValidationError(
+                    "focused_tests_failed cannot claim a Quantipy experiment command"
+                )
+            _reserve_quantipy_execution_not_started(
+                not_started,
+                runs_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
             )
-        if not_started.command not in artifact.commands_run:
-            raise AutoresearchValidationError(
-                "execution-not-started command must appear exactly in commands_run"
+        else:
+            assert interrupted is not None
+            _validate_quantipy_execution_interrupted(
+                state,
+                implementation,
+                interrupted,
+                expected_run_id=expected_run_id,
+                expected_run_path=expected_run_path,
+                state_path=state_path,
+                expected_instruction_manifest_sha256=expected_instruction_manifest_sha256,
+                runs_root=runs_root,
             )
-        if "quantipy experiment" in not_started.command:
-            raise AutoresearchValidationError(
-                "focused_tests_failed cannot claim a Quantipy experiment command"
-            )
-        _reserve_quantipy_execution_not_started(
-            not_started,
-            runs_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
-        )
         return
-    if not_started is not None:
+    if not_started is not None or interrupted is not None:
         raise AutoresearchValidationError(
-            "runtime evidence and execution-not-started evidence are mutually exclusive"
+            "runtime evidence, execution-not-started evidence, and execution-interrupted "
+            "evidence are mutually exclusive"
         )
     if (
         evidence.manifest_path != implementation.experiment_manifest_path

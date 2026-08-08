@@ -18,12 +18,14 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 from dotenv import load_dotenv as load_dotenv
 
 from gateway.autoresearch.artifacts import (
+    QuantipyExecutionInterruptedEvidence,
     VerificationResultArtifact,
 )
 from gateway.autoresearch.attestation import (
@@ -39,6 +41,7 @@ from gateway.autoresearch.constants import (
     DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS,
     DEFAULT_AUTORESEARCH_STAGE_INBOX,
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
     DEFAULT_QUANTIPY_ROOT,
 )
 from gateway.autoresearch.enums import (
@@ -166,6 +169,8 @@ from gateway.autoresearch_rpc import (
 from gateway.autoresearch_runs import (
     DEFAULT_AUTORESEARCH_RUNS_ROOT,
     AutoresearchRunRecordError,
+    ExpectedArtifactAttestationError,
+    ExpectedArtifactAttestationStatus,
     RunFailureClassification,
     RunManifest,
     RunRecord,
@@ -1061,6 +1066,19 @@ class AutoresearchSupervisor:
                 ),
                 reason="interrupted_detached_verification_requires_operator_recovery",
             )
+        if (
+            latest.status.expected_artifact_attestation_status
+            is not ExpectedArtifactAttestationStatus.FAILED
+            or latest.status.expected_artifact_attestation_error
+            is not ExpectedArtifactAttestationError.MISSING
+        ):
+            return self._persistent_control_plane_alert(
+                key=f"run-record-attestation:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
+                reason=(
+                    "detached_verification_failure_cannot_form_execution-interrupted evidence: "
+                    "expected run.json attestation is not FAILED/MISSING"
+                ),
+            )
         if state.mode is not ResearchMode.ALPHA_RESEARCH:
             return self._persistent_control_plane_alert(
                 key=f"run-record-mode:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
@@ -1069,8 +1087,8 @@ class AutoresearchSupervisor:
                     f"mode={state.mode.value if state.mode is not None else 'null'}"
                 ),
             )
-        artifact = self._verification_failure_artifact(latest)
         try:
+            artifact = self._verification_failure_artifact(latest, state)
             readiness = load_platform_readiness(self.config.readiness_manifest_path)
             context = AutoresearchValidationContext.from_readiness(readiness)
             advance_infrastructure_verification_failure(
@@ -1081,6 +1099,7 @@ class AutoresearchSupervisor:
                 policy=policy,
                 receipts=receipts,
                 validation_context=context,
+                runs_root=self.config.runs_root,
             )
         except (AutoresearchValidationError, ValueError, OSError) as exc:
             return self._persistent_control_plane_alert(
@@ -1721,7 +1740,51 @@ class AutoresearchSupervisor:
         )
         return read_run_record(run_dir=record.run_directory, runs_root=self.config.runs_root)
 
-    def _verification_failure_artifact(self, record: RunRecord) -> VerificationResultArtifact:
+    def _verification_failure_artifact(
+        self,
+        record: RunRecord,
+        state: AutoresearchState,
+    ) -> VerificationResultArtifact:
+        implementation = state.implementation_result
+        if implementation is None:
+            raise AutoresearchValidationError(
+                "execution-interrupted evidence requires implementation_result"
+            )
+        from gateway.autoresearch.recovery_receipts import (
+            _expected_quantipy_verification_run_id,
+        )
+
+        expected_run_id = _expected_quantipy_verification_run_id(
+            state,
+            implementation.commit_sha,
+        )
+        expected_run_json_path = (
+            DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
+        )
+        if record.status.finished_at is None:
+            raise AutoresearchValidationError(
+                "execution-interrupted evidence requires a terminal finish timestamp"
+            )
+        started_at = datetime.fromisoformat(record.status.started_at.replace("Z", "+00:00"))
+        finished_at = datetime.fromisoformat(record.status.finished_at.replace("Z", "+00:00"))
+        status_sha256 = hashlib.sha256(
+            json.dumps(record.status.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        capture = record.status.output_capture
+        if capture is None:
+            raise AutoresearchValidationError(
+                "execution-interrupted evidence requires sealed output capture"
+            )
+        if record.status.exit_code is None:
+            raise AutoresearchValidationError(
+                "execution-interrupted evidence requires a terminal exit code"
+            )
+        if record.status.failure_classification is None:
+            raise AutoresearchValidationError(
+                "execution-interrupted evidence requires a terminal failure classification"
+            )
         evidence = json.dumps(
             {
                 "exit_code": record.status.exit_code,
@@ -1736,6 +1799,30 @@ class AutoresearchSupervisor:
             },
             sort_keys=True,
             separators=(",", ":"),
+        )
+        interrupted = QuantipyExecutionInterruptedEvidence(
+            expected_run_id=expected_run_id,
+            expected_run_json_path=str(expected_run_json_path),
+            manifest_path=implementation.experiment_manifest_path,
+            manifest_sha256=implementation.experiment_manifest_sha256,
+            detached_run_directory=str(record.run_directory),
+            detached_manifest_sha256=record.status.manifest_sha256,
+            detached_status_sha256=status_sha256,
+            exit_code=record.status.exit_code,
+            signal_number=record.status.signal_number,
+            failure_classification=(
+                record.status.failure_classification.value
+                if record.status.failure_classification is not None
+                else ""
+            ),
+            timeout_seconds=record.manifest.timeout_seconds,
+            wall_seconds_observed=(finished_at - started_at).total_seconds(),
+            stdout_sha256=capture.stdout.sha256,
+            stdout_bytes_observed=capture.stdout.bytes_observed,
+            stdout_truncated=capture.stdout.truncated,
+            stderr_sha256=capture.stderr.sha256,
+            stderr_bytes_observed=capture.stderr.bytes_observed,
+            stderr_truncated=capture.stderr.truncated,
         )
         return VerificationResultArtifact(
             status=VerificationStatus.TEST_FAILURE,
@@ -1752,6 +1839,7 @@ class AutoresearchSupervisor:
             tests_passed=False,
             commands_run=(),
             data_coverage=None,
+            quantipy_execution_interrupted=interrupted,
         )
 
     def _persistent_control_plane_alert(self, *, key: str, reason: str) -> SupervisorResult:

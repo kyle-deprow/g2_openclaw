@@ -19,6 +19,9 @@ from gateway.autoresearch.artifacts import (
     ImplementationResultArtifact,
     MemoryVerificationReceipt,
     PriceHydrationScopePreflight,
+    QuantipyExecutionInterruptedEvidence,
+    QuantipyExecutionNotStartedEvidence,
+    QuantipyExperimentEvidence,
     VerificationResultArtifact,
 )
 from gateway.autoresearch.compute import (
@@ -127,6 +130,181 @@ def _alpha_verification() -> VerificationResultArtifact:
         commands_run=("uv run pytest",),
         data_coverage=_coverage(),
     )
+
+
+def _interrupted_quantipy_execution() -> QuantipyExecutionInterruptedEvidence:
+    return QuantipyExecutionInterruptedEvidence(
+        expected_run_id="autoresearch-i1-abc1234",
+        expected_run_json_path="/tmp/quantipy-runs/autoresearch-i1-abc1234/run.json",
+        manifest_path="/tmp/quantipy-worktree/experiment.json",
+        manifest_sha256="a" * 64,
+        detached_run_directory="/tmp/detached-runs/attempt-1",
+        detached_manifest_sha256="b" * 64,
+        detached_status_sha256="c" * 64,
+        exit_code=124,
+        signal_number=None,
+        failure_classification="timeout",
+        timeout_seconds=30.0,
+        wall_seconds_observed=30.5,
+        stdout_sha256="d" * 64,
+        stdout_bytes_observed=0,
+        stdout_truncated=False,
+        stderr_sha256="e" * 64,
+        stderr_bytes_observed=0,
+        stderr_truncated=False,
+    )
+
+
+def test_verification_result_round_trips_interrupted_quantipy_execution_only_when_present() -> None:
+    # Arrange
+    verification = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="Detached verification timed out.",
+        null_test_summary="Detached verification timed out.",
+        bug_signals=(),
+        tests_passed=False,
+        commands_run=(),
+        data_coverage=None,
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+    )
+
+    # Act
+    serialized = verification.to_dict()
+    restored = VerificationResultArtifact.from_dict(serialized)
+    legacy = replace(verification, quantipy_execution_interrupted=None)
+    legacy_restored = VerificationResultArtifact.from_dict(legacy.to_dict())
+
+    # Assert
+    assert restored == verification
+    assert "quantipy_execution_interrupted" in serialized
+    assert legacy_restored == legacy
+
+
+def test_verification_result_rejects_interrupted_quantipy_execution_with_pass_status() -> None:
+    # Arrange
+    verification = replace(
+        _alpha_verification(),
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match=r"PASS.*interrupted"):
+        verification.validate()
+
+
+def test_verification_result_rejects_interrupted_quantipy_execution_when_tests_passed() -> None:
+    # Arrange
+    verification = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="Detached verification timed out.",
+        null_test_summary="Detached verification timed out.",
+        bug_signals=(),
+        tests_passed=True,
+        commands_run=(),
+        data_coverage=None,
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="TEST_FAILURE"):
+        verification.validate()
+
+
+def test_verification_result_rejects_metrics_with_interrupted_quantipy_execution() -> None:
+    verification = VerificationResultArtifact(
+        status=VerificationStatus.TEST_FAILURE,
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=0.12,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        feature_importances_summary="Detached verification timed out.",
+        null_test_summary="Detached verification timed out.",
+        bug_signals=(),
+        tests_passed=False,
+        commands_run=(),
+        data_coverage=None,
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="all metrics"):
+        verification.validate()
+
+
+def test_interrupted_quantipy_execution_rejects_operator_stopped_failure() -> None:
+    # Arrange
+    interrupted = replace(
+        _interrupted_quantipy_execution(),
+        failure_classification="operator_stopped",
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="operator_stopped"):
+        interrupted.validate()
+
+
+def test_verification_result_rejects_interrupted_with_other_evidence() -> None:
+    # Arrange
+    verification = replace(
+        _alpha_verification(),
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+        quantipy_execution_not_started=QuantipyExecutionNotStartedEvidence(
+            manifest_path="/tmp/quantipy-worktree/experiment.json",
+            manifest_sha256="a" * 64,
+            expected_run_id="autoresearch-i1-abc1234",
+            expected_run_json_path="/tmp/quantipy-runs/autoresearch-i1-abc1234/run.json",
+            reason="focused_tests_failed",
+            command="uv run pytest tests/test_candidate.py",
+            evidence="focused test failed",
+        ),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="mutually exclusive"):
+        verification.validate()
+
+
+def test_verification_result_rejects_interrupted_and_experiment_quantipy_evidence() -> None:
+    # Arrange
+    verification = replace(
+        _alpha_verification(),
+        quantipy_experiment_evidence=QuantipyExperimentEvidence(
+            manifest_path="/tmp/quantipy-worktree/experiment.json",
+            manifest_sha256="a" * 64,
+            detached_run_directory="/tmp/detached-runs/attempt-1",
+            detached_run_manifest_sha256="b" * 64,
+            run_id="autoresearch-i1-abc1234",
+            run_json_path="/tmp/quantipy-runs/autoresearch-i1-abc1234/run.json",
+            run_json_sha256="c" * 64,
+            success=True,
+            completed_stages=("prepare", "smoke", "feasibility", "model"),
+            terminal_stage=None,
+            terminal_status=None,
+            failure=None,
+            panel=None,
+        ),
+        quantipy_execution_interrupted=_interrupted_quantipy_execution(),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="mutually exclusive"):
+        verification.validate()
 
 
 def _retention_eligible_repeat_state() -> AutoresearchState:

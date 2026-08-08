@@ -1870,6 +1870,8 @@ def advance_state(
     validation_context: AutoresearchValidationContext | None = None,
     *,
     state_path: Path | None = None,
+    expected_instruction_manifest_sha256: str | None = None,
+    runs_root: Path | None = None,
 ) -> AutoresearchState:
     if state_path is not None:
         state = transitions_module._validate_persisted_state_matches(state, state_path=state_path)
@@ -2002,6 +2004,9 @@ def advance_state(
                 state,
                 artifact,
                 validation_context=validation_context,
+                state_path=state_path,
+                expected_instruction_manifest_sha256=expected_instruction_manifest_sha256,
+                runs_root=runs_root,
             )
         next_verification_history = (*state.verification_history, artifact)
         consumed_runtime_recovery = transitions_module._clear_consumed_platform_runtime_receipts(

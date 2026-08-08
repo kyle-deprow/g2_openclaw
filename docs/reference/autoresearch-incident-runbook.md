@@ -43,6 +43,22 @@ is success. Do not retry or classify it as a blocker. The unsandboxed
 supervisor launches the prepared run on its next cycle, normally within about
 60 seconds, and ordinary supervision wakes the owner session.
 
+## Detached verification timeout or interruption
+
+If a detached ALPHA verification run started, reaches terminal `FAILED`, and
+has `failure_classification=timeout` (or another non-operator interruption),
+preserve the exact run directory, manifest, status, and complete sealed output
+capture. The verification artifact may carry `status=TEST_FAILURE` with
+`quantipy_execution_interrupted`, bound to the expected run ID/path, manifest
+digests, status digest, exit/signal/classification, timeout and wall time, and
+stdout/stderr capture digests. The supervisor can build and auto-advance this
+artifact from the terminal run record; do not hand-edit state or fabricate a
+not-started receipt.
+
+The resulting `fix_test` round must rescope the experiment specification and
+timeout. Do not relaunch the identical manifest. `OPERATOR_STOPPED` remains on
+the operator recovery path and is not valid interrupted evidence.
+
 ## Detached long-run root migration
 
 The detached-run root changed from

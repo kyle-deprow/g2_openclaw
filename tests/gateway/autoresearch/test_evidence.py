@@ -4,16 +4,19 @@ import json
 import os
 import subprocess
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from typing import cast
 
 import gateway.autoresearch.constants as autoresearch_constants
 import gateway.autoresearch.evidence as autoresearch_evidence
 import gateway.autoresearch.secure_io as autoresearch_secure_io
+import gateway.autoresearch_runs as autoresearch_runs
 import pytest
 from gateway.autoresearch.artifacts import (
+    QuantipyExecutionInterruptedEvidence,
     QuantipyExecutionNotStartedEvidence,
     QuantipyExperimentEvidence,
     QuantipyExperimentFailureEvidence,
@@ -35,6 +38,7 @@ from gateway.autoresearch.state import (
 )
 from gateway.autoresearch.transitions import advance_state as _runner_advance_state
 from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
     validate_artifact_workspace,
 )
 from gateway.autoresearch_readiness import PlatformReadinessManifest
@@ -2129,6 +2133,365 @@ def test_execution_not_started_receipt_is_rejected_when_expected_run_exists(
         _runner_advance_state(
             state,
             artifact,
+            policy,
+            validation_context=_runtime_verification_context(state),
+            state_path=state_path,
+        )
+
+
+def _timeout_interrupted_quantipy_execution(
+    state: AutoresearchState,
+    evidence: QuantipyExperimentEvidence,
+    *,
+    git_worktree: GitWorktree,
+    tmp_path: Path,
+    detached_root: Path,
+    state_path: Path,
+    truncated_capture: bool = False,
+) -> QuantipyExecutionInterruptedEvidence:
+    implementation = state.implementation_result
+    assert implementation is not None
+    run_path = Path(evidence.run_json_path)
+    run_path.unlink()
+    contract = autoresearch_evidence.build_quantipy_execution_contract(
+        runtime_root=git_worktree.target_checkout,
+        manifest_path=Path(implementation.experiment_manifest_path),
+        output_root=autoresearch_constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        run_id=evidence.run_id,
+    )
+    detached_root.mkdir(mode=0o700, exist_ok=True)
+    detached_root.chmod(0o700)
+    detached_run_directory = detached_root / "interrupted-timeout"
+    manifest_input = tmp_path / "interrupted-timeout-manifest.json"
+    manifest_input.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": state.iteration,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "quantipy-verification",
+                "state_reference_sha256": build_authoritative_state_reference(
+                    state,
+                    state_path=state_path,
+                ).sha256(),
+                "instruction_manifest_sha256": "b" * 64,
+                "run_directory": str(detached_run_directory),
+                "working_directory": str(contract.working_directory),
+                "command_sha256": autoresearch_runs.command_sha256(contract.command),
+                "expected_artifact_path": str(run_path),
+                "timeout_seconds": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    autoresearch_runs.prepare_run(
+        manifest_path=manifest_input,
+        run_dir=detached_run_directory,
+        runs_root=detached_root,
+        command=contract.command,
+    )
+    autoresearch_runs.prepare_output_capture(
+        run_dir=detached_run_directory,
+        runs_root=detached_root,
+    )
+    autoresearch_runs.start_run(
+        run_dir=detached_run_directory,
+        pid=123,
+        systemd_unit="openclaw-long-task-1-1.service",
+        runs_root=detached_root,
+    )
+    output = b"x" * (autoresearch_runs.OUTPUT_CAPTURE_MAX_BYTES + 1)
+    for stream in autoresearch_runs.RunOutputStream:
+        autoresearch_runs.capture_output_stream(
+            run_dir=detached_run_directory,
+            runs_root=detached_root,
+            stream=stream,
+            source=BytesIO(output if truncated_capture else b""),
+        )
+    autoresearch_runs.complete_run(
+        run_dir=detached_run_directory,
+        exit_code=124,
+        signal_number=None,
+        peak_rss_bytes=None,
+        timed_out=True,
+        runs_root=detached_root,
+    )
+    record = autoresearch_runs.read_run_record(
+        run_dir=detached_run_directory,
+        runs_root=detached_root,
+    )
+    capture = record.status.output_capture
+    assert capture is not None
+    assert record.status.finished_at is not None
+    assert record.status.exit_code is not None
+    assert record.status.failure_classification is not None
+    return QuantipyExecutionInterruptedEvidence(
+        expected_run_id=evidence.run_id,
+        expected_run_json_path=evidence.run_json_path,
+        manifest_path=evidence.manifest_path,
+        manifest_sha256=evidence.manifest_sha256,
+        detached_run_directory=str(record.run_directory),
+        detached_manifest_sha256=record.status.manifest_sha256,
+        detached_status_sha256=sha256(
+            json.dumps(record.status.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        exit_code=record.status.exit_code,
+        signal_number=record.status.signal_number,
+        failure_classification=record.status.failure_classification.value,
+        timeout_seconds=record.manifest.timeout_seconds,
+        wall_seconds_observed=(
+            datetime.fromisoformat(record.status.finished_at.replace("Z", "+00:00"))
+            - datetime.fromisoformat(record.status.started_at.replace("Z", "+00:00"))
+        ).total_seconds(),
+        stdout_sha256=capture.stdout.sha256,
+        stdout_bytes_observed=capture.stdout.bytes_observed,
+        stdout_truncated=capture.stdout.truncated,
+        stderr_sha256=capture.stderr.sha256,
+        stderr_bytes_observed=capture.stderr.bytes_observed,
+        stderr_truncated=capture.stderr.truncated,
+    )
+
+
+def test_execution_interrupted_receipt_accepts_sealed_timeout_run(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    detached_root = tmp_path / "interrupted-detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+    interrupted = _timeout_interrupted_quantipy_execution(
+        state,
+        evidence,
+        git_worktree=git_worktree,
+        tmp_path=tmp_path,
+        detached_root=detached_root,
+        state_path=state_path,
+    )
+    verification = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        tests_passed=False,
+        data_coverage=None,
+        quantipy_experiment_evidence=None,
+        quantipy_execution_interrupted=interrupted,
+    )
+
+    # Act
+    advanced = _runner_advance_state(
+        state,
+        verification,
+        policy,
+        validation_context=_runtime_verification_context(state),
+        state_path=state_path,
+    )
+
+    # Assert
+    assert advanced.phase is Phase.FIX_TEST
+
+
+def test_execution_interrupted_receipt_rejects_capture_digest_mismatch(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    detached_root = tmp_path / "interrupted-detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+    interrupted = _timeout_interrupted_quantipy_execution(
+        state,
+        evidence,
+        git_worktree=git_worktree,
+        tmp_path=tmp_path,
+        detached_root=detached_root,
+        state_path=state_path,
+    )
+    verification = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        tests_passed=False,
+        data_coverage=None,
+        quantipy_experiment_evidence=None,
+        quantipy_execution_interrupted=replace(interrupted, stdout_sha256="0" * 64),
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="stdout capture digest"):
+        _runner_advance_state(
+            state,
+            verification,
+            policy,
+            validation_context=_runtime_verification_context(state),
+            state_path=state_path,
+        )
+
+
+def test_execution_interrupted_receipt_accepts_truncated_capture(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    detached_root = tmp_path / "interrupted-detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+    interrupted = _timeout_interrupted_quantipy_execution(
+        state,
+        evidence,
+        git_worktree=git_worktree,
+        tmp_path=tmp_path,
+        detached_root=detached_root,
+        state_path=state_path,
+        truncated_capture=True,
+    )
+    verification = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        tests_passed=False,
+        data_coverage=None,
+        quantipy_experiment_evidence=None,
+        quantipy_execution_interrupted=interrupted,
+    )
+
+    # Act
+    advanced = _runner_advance_state(
+        state,
+        verification,
+        policy,
+        validation_context=_runtime_verification_context(state),
+        state_path=state_path,
+    )
+
+    # Assert
+    assert advanced.phase is Phase.FIX_TEST
+
+
+def test_execution_interrupted_receipt_rejects_capture_without_eof(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    detached_root = tmp_path / "interrupted-detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+    interrupted = _timeout_interrupted_quantipy_execution(
+        state,
+        evidence,
+        git_worktree=git_worktree,
+        tmp_path=tmp_path,
+        detached_root=detached_root,
+        state_path=state_path,
+    )
+    status_path = Path(interrupted.detached_run_directory) / "status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["output_capture"]["stderr"]["eof_observed"] = False
+    run_directory = status_path.parent
+    capture_receipt_path = run_directory / ".stderr.capture.json"
+    capture_receipt = json.loads(capture_receipt_path.read_text(encoding="utf-8"))
+    capture_receipt["eof_observed"] = False
+    run_directory.chmod(0o700)
+    status_path.chmod(0o600)
+    status_path.write_text(
+        json.dumps(status, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    status_path.chmod(0o400)
+    capture_receipt_path.chmod(0o600)
+    capture_receipt_path.write_text(
+        json.dumps(capture_receipt, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    capture_receipt_path.chmod(0o600)
+    run_directory.chmod(0o500)
+    record = autoresearch_runs.read_run_record(
+        run_dir=run_directory,
+        runs_root=detached_root,
+    )
+    status_digest = sha256(
+        json.dumps(record.status.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    interrupted = replace(
+        interrupted,
+        detached_status_sha256=status_digest,
+    )
+    verification = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        tests_passed=False,
+        data_coverage=None,
+        quantipy_experiment_evidence=None,
+        quantipy_execution_interrupted=interrupted,
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="output capture is incomplete"):
+        _runner_advance_state(
+            state,
+            verification,
             policy,
             validation_context=_runtime_verification_context(state),
             state_path=state_path,

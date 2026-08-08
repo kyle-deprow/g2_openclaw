@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from gateway.autoresearch.compute import (
@@ -159,6 +161,9 @@ from gateway.autoresearch_platform_validation import (
 )
 from gateway.autoresearch_platform_validation import (
     PlatformCoverageStatus as PlatformCoverageStatus,
+)
+from gateway.autoresearch_runs import (
+    RunFailureClassification as RunFailureClassification,
 )
 
 if TYPE_CHECKING:
@@ -855,6 +860,187 @@ class QuantipyExecutionNotStartedEvidence:
             "reason": self.reason,
             "command": self.command,
             "evidence": self.evidence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QuantipyExecutionInterruptedEvidence:
+    expected_run_id: str
+    expected_run_json_path: str
+    manifest_path: str
+    manifest_sha256: str
+    detached_run_directory: str
+    detached_manifest_sha256: str
+    detached_status_sha256: str
+    exit_code: int
+    signal_number: int | None
+    failure_classification: str
+    timeout_seconds: float | None
+    wall_seconds_observed: float
+    stdout_sha256: str
+    stdout_bytes_observed: int
+    stdout_truncated: bool
+    stderr_sha256: str
+    stderr_bytes_observed: int
+    stderr_truncated: bool
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExecutionInterruptedEvidence:
+        data = _ensure_mapping(raw, label="quantipy_execution_interrupted")
+        _require_exact_keys(
+            data,
+            label="quantipy_execution_interrupted",
+            expected=(
+                "expected_run_id",
+                "expected_run_json_path",
+                "manifest_path",
+                "manifest_sha256",
+                "detached_run_directory",
+                "detached_manifest_sha256",
+                "detached_status_sha256",
+                "exit_code",
+                "signal_number",
+                "failure_classification",
+                "timeout_seconds",
+                "wall_seconds_observed",
+                "stdout_sha256",
+                "stdout_bytes_observed",
+                "stdout_truncated",
+                "stderr_sha256",
+                "stderr_bytes_observed",
+                "stderr_truncated",
+            ),
+        )
+        evidence = cls(
+            expected_run_id=_require_str(data, "expected_run_id"),
+            expected_run_json_path=_require_workspace_path(data, "expected_run_json_path"),
+            manifest_path=_require_workspace_path(data, "manifest_path"),
+            manifest_sha256=_require_sha256(data, "manifest_sha256"),
+            detached_run_directory=_require_workspace_path(data, "detached_run_directory"),
+            detached_manifest_sha256=_require_sha256(data, "detached_manifest_sha256"),
+            detached_status_sha256=_require_sha256(data, "detached_status_sha256"),
+            exit_code=_require_int(data, "exit_code"),
+            signal_number=_optional_int(data, "signal_number"),
+            failure_classification=_require_str(data, "failure_classification"),
+            timeout_seconds=_optional_float(data, "timeout_seconds"),
+            wall_seconds_observed=_require_float(data, "wall_seconds_observed"),
+            stdout_sha256=_require_sha256(data, "stdout_sha256"),
+            stdout_bytes_observed=_require_int(data, "stdout_bytes_observed"),
+            stdout_truncated=_require_bool(data, "stdout_truncated"),
+            stderr_sha256=_require_sha256(data, "stderr_sha256"),
+            stderr_bytes_observed=_require_int(data, "stderr_bytes_observed"),
+            stderr_truncated=_require_bool(data, "stderr_truncated"),
+        )
+        evidence.validate()
+        return evidence
+
+    def validate(self) -> None:
+        for label, path in (
+            ("expected_run_json_path", self.expected_run_json_path),
+            ("manifest_path", self.manifest_path),
+            ("detached_run_directory", self.detached_run_directory),
+        ):
+            if not isinstance(path, str):
+                raise AutoresearchValidationError(
+                    f"quantipy_execution_interrupted.{label} must be a canonical absolute path"
+                )
+            parsed_path = Path(path)
+            if (
+                not parsed_path.is_absolute()
+                or parsed_path.as_posix() != path
+                or any(part in {"", ".", ".."} for part in parsed_path.parts[1:])
+            ):
+                raise AutoresearchValidationError(
+                    f"quantipy_execution_interrupted.{label} must be a canonical absolute path"
+                )
+        for label, digest in (
+            ("manifest_sha256", self.manifest_sha256),
+            ("detached_manifest_sha256", self.detached_manifest_sha256),
+            ("detached_status_sha256", self.detached_status_sha256),
+            ("stdout_sha256", self.stdout_sha256),
+            ("stderr_sha256", self.stderr_sha256),
+        ):
+            _validate_sha256(digest, label=f"quantipy_execution_interrupted.{label}")
+        if (
+            not isinstance(self.expected_run_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.expected_run_id) is None
+        ):
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.expected_run_id is invalid"
+            )
+        if (
+            isinstance(self.exit_code, bool)
+            or not isinstance(self.exit_code, int)
+            or not 0 <= self.exit_code <= 255
+        ):
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.exit_code must be between 0 and 255"
+            )
+        if self.signal_number is not None and (
+            isinstance(self.signal_number, bool)
+            or not isinstance(self.signal_number, int)
+            or not 1 <= self.signal_number <= 64
+        ):
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.signal_number must be between 1 and 64"
+            )
+        try:
+            failure = RunFailureClassification(self.failure_classification)
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.failure_classification is invalid"
+            ) from exc
+        if failure is RunFailureClassification.OPERATOR_STOPPED:
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted cannot record operator_stopped"
+            )
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int | float)
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.timeout_seconds must be positive or null"
+            )
+        if (
+            isinstance(self.wall_seconds_observed, bool)
+            or not isinstance(self.wall_seconds_observed, int | float)
+            or not math.isfinite(self.wall_seconds_observed)
+            or self.wall_seconds_observed < 0
+        ):
+            raise AutoresearchValidationError(
+                "quantipy_execution_interrupted.wall_seconds_observed must be non-negative"
+            )
+        for label, value in (
+            ("stdout_bytes_observed", self.stdout_bytes_observed),
+            ("stderr_bytes_observed", self.stderr_bytes_observed),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise AutoresearchValidationError(
+                    f"quantipy_execution_interrupted.{label} must be non-negative"
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "expected_run_id": self.expected_run_id,
+            "expected_run_json_path": self.expected_run_json_path,
+            "manifest_path": self.manifest_path,
+            "manifest_sha256": self.manifest_sha256,
+            "detached_run_directory": self.detached_run_directory,
+            "detached_manifest_sha256": self.detached_manifest_sha256,
+            "detached_status_sha256": self.detached_status_sha256,
+            "exit_code": self.exit_code,
+            "signal_number": self.signal_number,
+            "failure_classification": self.failure_classification,
+            "timeout_seconds": self.timeout_seconds,
+            "wall_seconds_observed": self.wall_seconds_observed,
+            "stdout_sha256": self.stdout_sha256,
+            "stdout_bytes_observed": self.stdout_bytes_observed,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_sha256": self.stderr_sha256,
+            "stderr_bytes_observed": self.stderr_bytes_observed,
+            "stderr_truncated": self.stderr_truncated,
         }
 
 
@@ -1570,6 +1756,7 @@ class VerificationResultArtifact:
     price_hydration_receipt: PriceHydrationReceipt | None = None
     quantipy_experiment_evidence: QuantipyExperimentEvidence | None = None
     quantipy_execution_not_started: QuantipyExecutionNotStartedEvidence | None = None
+    quantipy_execution_interrupted: QuantipyExecutionInterruptedEvidence | None = None
 
     @classmethod
     def from_dict(
@@ -1602,6 +1789,8 @@ class VerificationResultArtifact:
             "quantipy_experiment_evidence",
             "quantipy_execution_not_started",
         )
+        if "quantipy_execution_interrupted" in data:
+            expected_fields += ("quantipy_execution_interrupted",)
         _require_exact_keys(
             data,
             label="verification_result",
@@ -1656,6 +1845,7 @@ class VerificationResultArtifact:
         platform_coverage_raw = data.get("platform_coverage_validation")
         quantipy_evidence_raw = data.get("quantipy_experiment_evidence")
         quantipy_not_started_raw = data.get("quantipy_execution_not_started")
+        quantipy_interrupted_raw = data.get("quantipy_execution_interrupted")
         if platform_coverage_raw is not None and not isinstance(platform_coverage_raw, Mapping):
             raise AutoresearchValidationError(
                 "platform_coverage_validation must be an object or null"
@@ -1704,6 +1894,11 @@ class VerificationResultArtifact:
                 if quantipy_not_started_raw is not None
                 else None
             ),
+            quantipy_execution_interrupted=(
+                QuantipyExecutionInterruptedEvidence.from_dict(quantipy_interrupted_raw)
+                if quantipy_interrupted_raw is not None
+                else None
+            ),
         )
         artifact.validate(
             mode=mode,
@@ -1730,15 +1925,42 @@ class VerificationResultArtifact:
             )
         evidence = self.quantipy_experiment_evidence
         not_started = self.quantipy_execution_not_started
-        if evidence is not None and not_started is not None:
+        interrupted = self.quantipy_execution_interrupted
+        if sum(item is not None for item in (evidence, not_started, interrupted)) > 1:
             raise AutoresearchValidationError(
-                "verification cannot contain both Quantipy runtime and "
-                "execution-not-started evidence"
+                "Quantipy experiment, execution-not-started, and execution-interrupted "
+                "evidence are mutually exclusive"
             )
-        if self.status is VerificationStatus.PASS and not_started is not None:
+        if self.status is VerificationStatus.PASS and (
+            not_started is not None or interrupted is not None
+        ):
             raise AutoresearchValidationError(
-                "PASS verification cannot contain execution-not-started evidence"
+                "PASS verification cannot contain execution-not-started or interrupted evidence"
             )
+        if interrupted is not None:
+            interrupted.validate()
+            if self.status is not VerificationStatus.TEST_FAILURE or self.tests_passed:
+                raise AutoresearchValidationError(
+                    "interrupted Quantipy execution evidence requires TEST_FAILURE and "
+                    "tests_passed=false"
+                )
+            if any(
+                value is not None
+                for value in (
+                    self.is_walk_forward_sharpe_net,
+                    self.oos_sharpe_net,
+                    self.max_drawdown_pct,
+                    self.win_rate,
+                    self.trade_count,
+                    self.trades_per_day,
+                    self.oos_trading_days,
+                    self.data_coverage,
+                )
+            ):
+                raise AutoresearchValidationError(
+                    "interrupted Quantipy execution evidence requires all metrics and "
+                    "data_coverage to be null"
+                )
         if evidence is not None:
             evidence.validate()
         if evidence is None:
@@ -1873,7 +2095,7 @@ class VerificationResultArtifact:
             )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "status": self.status.value,
             "is_walk_forward_sharpe_net": self.is_walk_forward_sharpe_net,
             "oos_sharpe_net": self.oos_sharpe_net,
@@ -1910,3 +2132,6 @@ class VerificationResultArtifact:
             if self.quantipy_execution_not_started is not None
             else None,
         }
+        if self.quantipy_execution_interrupted is not None:
+            result["quantipy_execution_interrupted"] = self.quantipy_execution_interrupted.to_dict()
+        return result

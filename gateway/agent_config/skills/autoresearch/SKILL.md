@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.8.0
+version: 8.9.0
 ---
 
 # Autoresearch
@@ -971,6 +971,12 @@ only for a typed pre-stage preflight, panel, or filesystem failure; otherwise
 its nested receipt and bound files are mandatory. `nbconvert`, `papermill`, and Jupyter execution can
 only smoke-test or render a report; none substitutes for the v2 runtime run or
 authorizes PASS.
+
+If a detached ALPHA verification run times out or is otherwise interrupted after
+startup, submit `TEST_FAILURE` with `quantipy_execution_interrupted` bound to the
+live manifest/status and sealed stdout/stderr capture, or let the supervisor
+auto-advance it. The Fix/Test round must rescope the specification and timeout;
+the PM must not relaunch the identical manifest.
 
 Verification is the first stage that records materialization evidence. Capture
 each history batch's contract digest, the per-date snapshot and grouped-daily

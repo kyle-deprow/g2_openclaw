@@ -998,6 +998,7 @@ def advance_infrastructure_verification_failure(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     validation_context: AutoresearchValidationContext | None,
+    runs_root: Path | None = None,
 ) -> AutoresearchState:
     """Atomically advance only a manifest-bound infrastructure verification failure."""
     _validate_sha256(state_reference_sha256, label="state_reference_sha256")
@@ -1041,6 +1042,8 @@ def advance_infrastructure_verification_failure(
             policy,
             validation_context=validation_context,
             state_path=resolved_path,
+            expected_instruction_manifest_sha256=instruction_manifest_sha256,
+            runs_root=runs_root,
         )
         persistence_module._atomic_save_state_file(resolved_path, advanced)
         return advanced

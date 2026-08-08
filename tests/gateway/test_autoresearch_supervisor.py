@@ -11,9 +11,11 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from types import FrameType
 
+import gateway.autoresearch.evidence as autoresearch_evidence
 import pytest
 from gateway.autoresearch.artifacts import (
     ConsensusResultArtifact,
@@ -27,6 +29,7 @@ from gateway.autoresearch.configuration import (
 )
 from gateway.autoresearch.constants import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
+    DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
     DEFAULT_QUANTIPY_ROOT,
 )
 from gateway.autoresearch.enums import (
@@ -43,6 +46,9 @@ from gateway.autoresearch.manifest_runtime import (
     build_receipt_catalog,
     expected_instruction_manifest_sha256,
 )
+from gateway.autoresearch.recovery_receipts import (
+    _expected_quantipy_verification_run_id,
+)
 from gateway.autoresearch.state import (
     AutoresearchState,
 )
@@ -57,10 +63,14 @@ from gateway.autoresearch_readiness import (
     canonical_platform_capabilities,
 )
 from gateway.autoresearch_runs import (
+    OUTPUT_CAPTURE_MAX_BYTES,
     RunFailureClassification,
+    RunOutputStream,
     RunState,
+    capture_output_stream,
     command_sha256,
     complete_run,
+    prepare_output_capture,
     prepare_run,
     start_run,
 )
@@ -1240,6 +1250,130 @@ def test_operator_stopped_detached_verification_alerts_without_advancing_state(
     assert result.outcome is SupervisorOutcome.ALERT
     assert result.reason == "interrupted_detached_verification_requires_operator_recovery"
     assert supervisor._load_state() == state
+
+
+def test_timeout_detached_verification_auto_advances_with_interrupted_evidence(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    # Arrange
+    source_manifest = supervisor_env.state_path.parent / "timeout-manifest.json"
+    source_manifest.parent.mkdir(parents=True, exist_ok=True)
+    source_manifest.write_text("{}", encoding="utf-8")
+    implementation = replace(
+        _implementation_result(supervisor_env.repo_root),
+        experiment_manifest_path=str(source_manifest),
+        experiment_manifest_sha256=sha256(source_manifest.read_bytes()).hexdigest(),
+    )
+    state = AutoresearchState(
+        phase=Phase.VERIFICATION,
+        iteration=4,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        implementation_result=implementation,
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.parent.chmod(0o700)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+    expected_run_id = _expected_quantipy_verification_run_id(state, implementation.commit_sha)
+    expected_run_json_path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT / expected_run_id / "run.json"
+    contract = autoresearch_evidence.build_quantipy_execution_contract(
+        runtime_root=DEFAULT_QUANTIPY_ROOT,
+        manifest_path=source_manifest,
+        output_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        run_id=expected_run_id,
+    )
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification-timeout",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(contract.working_directory),
+                "command_sha256": command_sha256(contract.command),
+                "expected_artifact_path": str(expected_run_json_path),
+                "timeout_seconds": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=contract.command,
+    )
+    prepare_output_capture(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+    )
+    start_run(
+        run_dir=run_dir,
+        pid=123,
+        systemd_unit="openclaw-long-task-1-1.service",
+        runs_root=supervisor_env.runs_root,
+    )
+    for stream in RunOutputStream:
+        capture_output_stream(
+            run_dir=run_dir,
+            runs_root=supervisor_env.runs_root,
+            stream=stream,
+            source=BytesIO(
+                b"x" * (OUTPUT_CAPTURE_MAX_BYTES + 1) if stream is RunOutputStream.STDERR else b""
+            ),
+        )
+    complete_run(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        exit_code=124,
+        signal_number=None,
+        peak_rss_bytes=None,
+        timed_out=True,
+    )
+    supervisor_env.runs_root.chmod(0o700)
+    # Act
+    artifact = supervisor._verification_failure_artifact(
+        supervisor._matching_verification_runs(
+            iteration=state.iteration,
+            state_reference_sha256=state_reference_sha256,
+            instruction_manifest_sha256=instruction_manifest_sha256,
+        )[0],
+        state,
+    )
+    artifact.validate(mode=state.mode)
+    interrupted = artifact.quantipy_execution_interrupted
+    assert interrupted is not None
+    autoresearch_evidence._validate_quantipy_execution_interrupted(
+        state,
+        implementation,
+        interrupted,
+        expected_run_id=expected_run_id,
+        expected_run_path=expected_run_json_path,
+        state_path=supervisor_env.state_path,
+        expected_instruction_manifest_sha256=instruction_manifest_sha256,
+        runs_root=supervisor_env.runs_root,
+    )
+
+    # Assert
+    assert interrupted.exit_code == 124
+    assert interrupted.failure_classification == "timeout"
+    assert interrupted.timeout_seconds == 30.0
+    assert json.loads(artifact.feature_importances_summary)["exit_code"] == 124
 
 
 def test_detached_verification_instruction_digest_mismatch_is_ignored_as_stale_history(

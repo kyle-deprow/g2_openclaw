@@ -29,6 +29,9 @@ from gateway.autoresearch.enums import (
 from gateway.autoresearch.enums import (
     Phase as Phase,
 )
+from gateway.autoresearch.enums import (
+    ResearchMode as ResearchMode,
+)
 from gateway.autoresearch.errors import (
     AutoresearchValidationError as AutoresearchValidationError,
 )
@@ -336,6 +339,15 @@ def _verification_handoff_contract(
                 "preflight values, set hydrate-dependent metrics/coverage/receipts to "
                 "null, and advance the artifact.\n"
             )
+    alpha_interruption_instruction = (
+        "- For ALPHA_RESEARCH runtime timeout or interruption, submit a TEST_FAILURE "
+        "verification_result carrying quantipy_execution_interrupted evidence, or let "
+        "the supervisor auto-advance the terminal run. The resulting Fix/Test round "
+        "must rescope the experiment specification and timeout; do not relaunch the "
+        "identical manifest.\n"
+        if state.mode is ResearchMode.ALPHA_RESEARCH
+        else ""
+    )
     return (
         "Verification handoff contract:\n"
         "- Every verification attempt must terminate by writing a structured JSON "
@@ -422,6 +434,7 @@ def _verification_handoff_contract(
         "TEST_FAILURE or BUG_SIGNAL may set all three receipts to null when unavailable, "
         "but must never emit a partial receipt chain or a partial PASS.\n"
         f"{scope_gate}"
+        f"{alpha_interruption_instruction}"
         "- For DATA_INFRA_G0, include infra_gate_outcome and infra_rationale "
         "explaining why the infrastructure gate is GATE_PASSED or "
         "REMEDIATION_REQUIRED. status and tests_passed describe verifier command, "
