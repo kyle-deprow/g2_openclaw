@@ -2024,10 +2024,10 @@ class AutoresearchSupervisor:
                             recovery_key,
                         )
                     # Exponential backoff: each renudge that fails to advance
-                    # state doubles the required idle window (capped at 16x),
-                    # so a stuck phase costs a handful of premium turns per
-                    # hour instead of six.
-                    backoff_multiplier = 2 ** min(record.renudge_count, 4)
+                    # state doubles the required idle window, capped at 4x so
+                    # a stalled phase still gets re-poked within ~40 minutes.
+                    # Deeper backoff starved recovery in practice.
+                    backoff_multiplier = 2 ** min(record.renudge_count, 2)
                     required_idle_seconds = self.config.renudge_idle_seconds * backoff_multiplier
                     if (
                         record.renudge_count < self.config.renudge_alert_limit
