@@ -2307,6 +2307,63 @@ def test_execution_interrupted_receipt_accepts_sealed_timeout_run(
     assert advanced.phase is Phase.FIX_TEST
 
 
+def test_execution_interrupted_walk_skips_prepared_never_launched_runs(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A historical run directory holding only a manifest (prepared, never
+    # launched) elsewhere in the detached root must be skipped, not treated
+    # as a corrupt record.
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    detached_root = tmp_path / "interrupted-detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "DEFAULT_AUTORESEARCH_RUNS_ROOT", detached_root)
+    interrupted = _timeout_interrupted_quantipy_execution(
+        state,
+        evidence,
+        git_worktree=git_worktree,
+        tmp_path=tmp_path,
+        detached_root=detached_root,
+        state_path=state_path,
+    )
+    residue = detached_root / "historical-prepared-only"
+    residue.mkdir(mode=0o700)
+    (residue / "manifest.json").write_text("{}", encoding="utf-8")
+    verification = replace(
+        _verification_result(VerificationStatus.TEST_FAILURE),
+        is_walk_forward_sharpe_net=None,
+        oos_sharpe_net=None,
+        max_drawdown_pct=None,
+        win_rate=None,
+        trade_count=None,
+        trades_per_day=None,
+        oos_trading_days=None,
+        data_coverage=None,
+        tests_passed=False,
+        quantipy_experiment_evidence=None,
+        quantipy_execution_interrupted=interrupted,
+    )
+
+    advanced = _runner_advance_state(
+        state,
+        verification,
+        policy,
+        validation_context=_runtime_verification_context(state),
+        state_path=state_path,
+    )
+
+    assert advanced.phase is Phase.FIX_TEST
+
+
 def test_execution_interrupted_receipt_rejects_capture_digest_mismatch(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,

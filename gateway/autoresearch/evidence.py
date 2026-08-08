@@ -1111,6 +1111,11 @@ def _validate_quantipy_execution_interrupted(
                 )
         if "manifest.json" not in files:
             continue
+        status_path = parent / "status.json"
+        if not status_path.is_symlink() and not status_path.exists():
+            # A manifest with no status file is a prepared run that never
+            # launched — historical residue, not a corrupt record.
+            continue
         try:
             candidate = detached_runs.read_run_record(
                 run_dir=parent,
