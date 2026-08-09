@@ -70,6 +70,7 @@ from tests.gateway.autoresearch.builders import (
     _setup_artifact,
     _state_to_consensus,
     _state_to_decision,
+    _state_to_review,
     _verification_result,
     advance_state,
 )
@@ -578,3 +579,30 @@ def test_verification_prompt_uses_recorded_workspace(
 
     assert "implementation_result.workspace_path" in prompt
     assert "implementation_result.commit_sha" in prompt
+
+
+def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
+    policy: AutoresearchPolicy,
+) -> None:
+    implementation = autoresearch_engine._phase_instruction(
+        _state_to_consensus(policy),
+        Phase.IMPLEMENTATION,
+        ArtifactType.IMPLEMENTATION_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert "encoded_feature_columns" in implementation
+    assert "calibration_fit_seconds" in implementation
+    assert "projected_model_seconds" in implementation
+    assert "reporting-only, not an admission gate" in implementation
+
+    verification = autoresearch_engine._phase_instruction(
+        _state_to_review(policy),
+        Phase.VERIFICATION,
+        ArtifactType.VERIFICATION_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert "projected_model_seconds reported in implementation_result.summary" in verification
+    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in verification
+    assert "default 14400s" in verification

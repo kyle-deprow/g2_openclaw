@@ -85,15 +85,36 @@ EXPECTED_CODEX_RUNTIME_EXECSTARTPRE = (
 )
 EXPECTED_NATIVE_CRASH_HARDENING_LINES = [
     "[Service]",
-    "MemoryHigh=6G",
-    "MemoryMax=7G",
+    "MemoryHigh=8G",
+    "MemoryMax=10G",
     "OOMPolicy=kill",
     (
         "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV "
-        "SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
+        "SIGSYS SIGTRAP SIGXCPU SIGXFSZ"
     ),
 ]
 EXPECTED_NATIVE_CRASH_HARDENING_TEXT = "\n".join(EXPECTED_NATIVE_CRASH_HARDENING_LINES) + "\n"
+
+
+def _memory_value_to_bytes(value: str) -> int | float:
+    normalized = value.strip().lower()
+    if normalized == "infinity":
+        return float("inf")
+    for suffix, multiplier in (
+        ("kib", 1024),
+        ("mib", 1024**2),
+        ("gib", 1024**3),
+        ("tib", 1024**4),
+        ("k", 1024),
+        ("m", 1024**2),
+        ("g", 1024**3),
+        ("t", 1024**4),
+    ):
+        if normalized.endswith(suffix):
+            return int(float(normalized[: -len(suffix)]) * multiplier)
+    return int(normalized)
+
+
 CODEX_LOG_DB_SCHEMA = (
     """
 CREATE TABLE logs (
@@ -2587,10 +2608,22 @@ def test_codex_runtime_dropin_declares_prestart_verifier() -> None:
 
 
 def test_native_crash_hardening_dropin_contains_memory_and_restart_policy() -> None:
-    assert NATIVE_CRASH_HARDENING_DROPIN.read_text(encoding="utf-8").splitlines() == (
-        EXPECTED_NATIVE_CRASH_HARDENING_LINES
-    )
+    dropin_lines = NATIVE_CRASH_HARDENING_DROPIN.read_text(encoding="utf-8").splitlines()
+
+    assert dropin_lines == EXPECTED_NATIVE_CRASH_HARDENING_LINES
     assert "OOMPolicy=continue" not in NATIVE_CRASH_HARDENING_DROPIN.read_text(encoding="utf-8")
+
+    restart_status = next(
+        line for line in dropin_lines if line.startswith("RestartPreventExitStatus=")
+    )
+    assert "SIGKILL" not in restart_status
+
+    memory_limits = {
+        line.split("=", maxsplit=1)[0]: _memory_value_to_bytes(line.split("=", maxsplit=1)[1])
+        for line in dropin_lines
+        if line.startswith(("MemoryHigh=", "MemoryMax="))
+    }
+    assert memory_limits["MemoryMax"] > memory_limits["MemoryHigh"]
 
 
 def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:

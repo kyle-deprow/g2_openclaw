@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.9.0
+version: 8.10.0
 ---
 
 # Autoresearch
@@ -788,9 +788,13 @@ Implementation requirements:
   outside this queue path, fail closed and report the infrastructure blocker
   without emitting a fix artifact. Record the run directory in stage notes and
   use its status files for progress and recovery.
-  The launcher gives the detached worker a `MemoryHigh=20G` soft limit and a
-  `MemoryMax=24G` hard limit; these are separate from the OpenClaw gateway's
-  native-crash containment limits.
+  The launcher gives the detached worker a `MemoryHigh=8G` soft limit and a
+  `MemoryMax=12G` hard limit; these are separate from the OpenClaw gateway's
+  native-crash containment limits. The worst-case simultaneous ceilings are
+  10G for the gateway plus 12G for the long task, or 22G against 30.25 GiB of
+  host RAM, leaving headroom for the Quantipy API and OS; throttle onset at
+  8G + 8G = 16G remains well below host pressure. Observed peaks are 6.2G for
+  the gateway and 2.99G for long-task runs.
 
 ## 5. Verify
 
@@ -829,6 +833,25 @@ from Git blobs at the implementation commit; dirty execution followed by
 workspace restoration is rejected. The implementation worktree is immutable
 source only: it is never the runtime cwd and need not contain runtime lockfiles
 or the installed package.
+
+The accepted feasibility summary must report `encoded_feature_columns` after
+one-hot/categorical expansion alongside the declared feature count and training
+row count, and plainly identify a near-row-unique categorical when the encoded
+count approaches or exceeds the rows because it is a compute and memorization
+hazard. It must report `calibration_fit_seconds` from one fit of the largest
+(final) walk-forward fold with one candidate at real encoded dimensionality, and
+`projected_model_seconds = calibration_fit_seconds * fold_count * candidate_count`,
+identifying the `fold_count` and `candidate_count` used. These are reporting
+duties, not admission gates: `within_budget` keeps its existing data-budget
+semantics, and no stage may refuse work on the basis of projected cost. The
+feasibility stage must not reject on `encoded_feature_columns`,
+`calibration_fit_seconds`, or `projected_model_seconds`. Derive detached
+verification `timeout_seconds` from that projection with
+`timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)`; on a
+first attempt there is no projection, so record that in the artifact and use
+the default 14400 seconds, while a fix round uses prior feasibility output
+carried into the round. A timeout kill is recoverable
+execution-interrupted evidence routed to a bounded fix round.
 
 Verification order is fixed: focused tests, then launch the exact direct argv
 `env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run

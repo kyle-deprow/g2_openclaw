@@ -524,6 +524,16 @@ def test_autoresearch_directive_distinguishes_contested_methodology_discards() -
     assert "clean negatives stay permanently burned" in skill
 
 
+def test_autoresearch_docs_require_feasibility_telemetry_as_reporting_duty() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    assert "encoded_feature_columns" in skill
+    assert "calibration_fit_seconds" in skill
+    assert "projected_model_seconds" in skill
+    assert "These are reporting duties, not admission gates" in skill
+    assert "The feasibility stage must not reject on `encoded_feature_columns`," in skill
+
+
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:
     skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
     tools = " ".join((AGENT_CONFIG / "TOOLS.md").read_text(encoding="utf-8").split())

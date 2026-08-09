@@ -59,6 +59,15 @@ The resulting `fix_test` round must rescope the experiment specification and
 timeout. Do not relaunch the identical manifest. `OPERATOR_STOPPED` remains on
 the operator recovery path and is not valid interrupted evidence.
 
+## Runaway-spec signature
+
+Signature: repeated detached runs exit 143 and report
+`failure_classification: timeout`, with no `run.json`. Read
+`projected_model_seconds` against the manifest `timeout_seconds`, and compare
+`encoded_feature_columns` with the training-row count. The fix round rescopes
+the experiment; no operator action is needed beyond letting the bounded fix
+machinery run.
+
 ## Detached long-run root migration
 
 The detached-run root changed from

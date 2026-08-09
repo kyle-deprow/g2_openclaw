@@ -133,12 +133,14 @@ RUNTIME_CAP_ENV_LINES=(
   'Environment="VECLIB_MAXIMUM_THREADS=1"'
   'Environment="PYTHONFAULTHANDLER=1"'
 )
+# An OOM kill is SIGKILL; omitting it from RestartPreventExitStatus lets Restart=always recover the gateway. StartLimitBurst=5/StartLimitIntervalSec=60 still protects against restart loops.
+# MemoryHigh is a reclaim-pressure throttle and MemoryMax is the kill point. The observed peaks are 6.2G for the gateway and 2.99G for long tasks; simultaneous ceilings of 10G + 12G = 22G against 30.25 GiB RAM leave headroom for the Quantipy API and OS, while throttle onset at 8G + 8G = 16G stays well below host pressure.
 NATIVE_CRASH_HARDENING_LINES=(
   "[Service]"
-  "MemoryHigh=6G"
-  "MemoryMax=7G"
+  "MemoryHigh=8G"
+  "MemoryMax=10G"
   "OOMPolicy=kill"
-  "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ SIGKILL"
+  "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ"
 )
 quote_sqlite_literal() {
   local value="$1"

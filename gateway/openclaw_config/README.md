@@ -128,10 +128,11 @@ these settings into the local config with `jq`, preserving everything else.
   OpenClaw-launched Quantipy children inherit one-thread BLAS/joblib caps and
   `PYTHONFAULTHANDLER=1` after the gateway is externally restarted.
 - **Native-crash containment** — installs a repo-managed user-systemd drop-in
-  with `MemoryHigh=6G`, `MemoryMax=7G`, `OOMPolicy=kill`, and a no-restart
-  policy for native fatal signals and `SIGKILL`. A memory-limit OOM kills the
-  full gateway cgroup, leaves the gateway failed/stopped, and stops the bound
-  autoresearch supervisor instead of entering an automatic crash loop.
+  with `MemoryHigh=8G`, `MemoryMax=10G`, and `OOMPolicy=kill`. `SIGKILL` is
+  omitted from `RestartPreventExitStatus`, so a memory-limit OOM auto-restarts
+  the gateway within `RestartSec`; `StartLimitBurst=5` over 60 seconds still
+  bounds genuine crash loops. Native fatal signals such as `SIGSEGV` and
+  `SIGABRT` remain in `RestartPreventExitStatus` and prevent restart.
 - **Session / command settings** — DM scope, reaction scope, command modes.
 
 ### What is NOT managed here
@@ -195,9 +196,13 @@ stage roster and PM task supervision. Do not configure OpenClaw
 It also installs `30-openclaw-native-crash-hardening.conf`. The memory limits
 apply to the gateway control group, including its child processes.
 `OOMPolicy=kill` terminates the remaining processes in that cgroup after an OOM
-kill. `RestartPreventExitStatus=SIGKILL` keeps the gateway failed/stopped for
-operator investigation, and the autoresearch supervisor's `BindsTo` then stops
-it instead of polling while the gateway is down.
+kill. Because `SIGKILL` is omitted from `RestartPreventExitStatus`, a
+memory-limit OOM auto-restarts the gateway within `RestartSec`. The
+`StartLimitBurst=5`/`StartLimitIntervalSec=60` limit still bounds genuine crash
+loops. Native fatal signals such as `SIGSEGV` and `SIGABRT` remain listed in
+`RestartPreventExitStatus`, preventing restart for those failures; the
+autoresearch supervisor's `BindsTo` relationship remains active during the
+restart sequence.
 
 ### 2. Install/upgrade required MemPalace MCP
 
