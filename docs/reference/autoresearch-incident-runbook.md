@@ -6,6 +6,14 @@ Terse recovery notes for the Codex app-server and autoresearch owner session.
 
 If prewarm reports an `httpx.ConnectError` while connecting to `127.0.0.1:8000`, restart the independent data-plane unit `quantipy-api.service` with `systemctl --user restart quantipy-api.service`.
 
+## Pause/resume the autoresearch supervisor
+
+The gateway runtime-caps drop-in declares
+`Upholds=quantipy-autoresearch-supervisor.service`. While the gateway is up,
+manually stopping the supervisor will therefore be undone by systemd. To pause
+autoresearch, stop the gateway too, or mask the supervisor before stopping it;
+unmask the supervisor before resuming it.
+
 ## Unified exec: missing arg0 shim
 
 Signature:

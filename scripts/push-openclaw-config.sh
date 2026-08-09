@@ -123,6 +123,10 @@ CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS=(
   "consensus-arbiter"
 )
 RUNTIME_CAP_ENV_LINES=(
+  '[Unit]'
+  'Upholds=quantipy-autoresearch-supervisor.service'
+  ''
+  '[Service]'
   'UMask=0077'
   'Environment="LOKY_MAX_CPU_COUNT=1"'
   'Environment="OMP_NUM_THREADS=1"'
@@ -429,8 +433,8 @@ validate_runtime_caps_dropin_file() {
     echo "ERROR: Repo-managed OpenClaw gateway runtime caps drop-in not found at ${path}" >&2
     return 1
   fi
-  if ! diff -u <(printf '[Service]\n'; printf '%s\n' "${RUNTIME_CAP_ENV_LINES[@]}") "${path}" >&2; then
-    echo "ERROR: OpenClaw gateway runtime caps drop-in must match the repo-managed numerical runtime cap set exactly." >&2
+  if ! diff -u <(printf '%s\n' "${RUNTIME_CAP_ENV_LINES[@]}") "${path}" >&2; then
+    echo "ERROR: OpenClaw gateway runtime caps drop-in must match the repo-managed supervisor relationship and numerical runtime cap set exactly." >&2
     return 1
   fi
 }

@@ -126,7 +126,11 @@ these settings into the local config with `jq`, preserving everything else.
 - **Numerical runtime caps** — installs the repo-managed user-systemd drop-in
   `openclaw-gateway.service.d/10-quantipy-runtime-caps.conf` so
   OpenClaw-launched Quantipy children inherit one-thread BLAS/joblib caps and
-  `PYTHONFAULTHANDLER=1` after the gateway is externally restarted.
+  `PYTHONFAULTHANDLER=1` after the gateway is externally restarted. Its
+  `[Unit]` section also declares
+  `Upholds=quantipy-autoresearch-supervisor.service`: while the gateway is up,
+  manually stopping the supervisor will be undone by systemd. Operators must
+  stop the gateway too, or mask the supervisor first.
 - **Native-crash containment** — installs a repo-managed user-systemd drop-in
   with `MemoryHigh=8G`, `MemoryMax=10G`, and `OOMPolicy=kill`. `SIGKILL` is
   omitted from `RestartPreventExitStatus`, so a memory-limit OOM auto-restarts
@@ -288,7 +292,9 @@ drop-ins. It does not update the environment of an already running
 `openclaw-gateway.service` process. The push script intentionally keeps its
 no-restart behavior; operators must restart the gateway externally when they
 want the runtime caps, Codex runtime verifier, or native-crash hardening to
-take effect. The verifier then runs before every gateway start and rejects
+take effect. The runtime-cap drop-in's `Upholds` relationship also means that
+stopping the supervisor while the gateway remains up is undone by systemd;
+stop the gateway too, or mask the supervisor first. The verifier then runs before every gateway start and rejects
 unknown OpenClaw package versions or source layouts instead of falling back to
 an API-key compactor.
 

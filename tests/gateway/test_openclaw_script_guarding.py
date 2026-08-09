@@ -66,6 +66,9 @@ EXPECTED_MAIN_ALLOW = [
     "mempalace-readonly__mempalace_memories_filed_away",
 ]
 EXPECTED_RUNTIME_CAP_LINES = [
+    "[Unit]",
+    "Upholds=quantipy-autoresearch-supervisor.service",
+    "",
     "[Service]",
     "UMask=0077",
     'Environment="LOKY_MAX_CPU_COUNT=1"',
@@ -2638,6 +2641,7 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert 'GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"' in script
     assert 'CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"' in script
     assert 'NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"' in script
+    assert "printf '%s\\n' \"${RUNTIME_CAP_ENV_LINES[@]}\"" in script
     assert (
         'GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"'
     ) in script
@@ -2757,6 +2761,13 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert result.returncode == 0, result.stderr
     dropin = _runtime_caps_dropin_dst(home)
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
+    dropin_lines = dropin.read_text(encoding="utf-8").splitlines()
+    unit_start = dropin_lines.index("[Unit]")
+    service_start = dropin_lines.index("[Service]")
+    assert dropin_lines[unit_start + 1 : service_start] == [
+        "Upholds=quantipy-autoresearch-supervisor.service",
+        "",
+    ]
     codex_dropin = _codex_runtime_dropin_dst(home)
     assert codex_dropin.read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
     native_crash_hardening = _native_crash_hardening_dropin_dst(home)
