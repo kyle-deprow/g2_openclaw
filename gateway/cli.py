@@ -36,11 +36,16 @@ from rich.console import Console
 from rich.panel import Panel
 
 from gateway.autoresearch import constants as autoresearch_constants
+from gateway.autoresearch_checkpoint import SupervisorCheckpoint
 from gateway.autoresearch_readiness import (
     DEFAULT_PLATFORM_READINESS_PATH,
     load_platform_readiness,
 )
-from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY
+from gateway.autoresearch_shared import (
+    AUTORESEARCH_OWNER_SESSION_KEY,
+    RecoveryStatus,
+    SupervisorError,
+)
 from gateway.autoresearch_systemd import (
     SystemdUnitStateError,
     systemd_unit_is_active,
@@ -750,18 +755,18 @@ def _reset_owner_session(
     return _OwnerSessionResetResult(True, True, session_id, backup_path)
 
 
-def _ensure_owner_session_reset_quiescent() -> None:
+def _ensure_owner_session_reset_quiescent(command_name: str = "owner-session reset") -> None:
     """Require both autoresearch and gateway services to be provably inactive."""
 
     try:
         if _is_systemd_unit_active(DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
             raise _OperatorCommandError(
-                "refusing owner-session reset while "
+                f"refusing {command_name} while "
                 f"{DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE} is active; stop it first"
             )
         if _is_systemd_unit_active(DEFAULT_OPENCLAW_GATEWAY_SERVICE):
             raise _OperatorCommandError(
-                "refusing owner-session reset while "
+                f"refusing {command_name} while "
                 f"{DEFAULT_OPENCLAW_GATEWAY_SERVICE} is active; stop it first"
             )
     except SystemdUnitStateError as exc:
@@ -1274,6 +1279,71 @@ def autoresearch_reset_owner_session(
     console.print(
         f"removed owner session key {AUTORESEARCH_OWNER_SESSION_KEY} "
         f"(sessionId={result.session_id}); backup: {result.backup_path}",
+        markup=False,
+    )
+
+
+@app.command("autoresearch-clear-exhausted-recovery")
+def autoresearch_clear_exhausted_recovery(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Confirm removal of exhausted autoresearch recovery records.",
+    ),
+) -> None:
+    """Remove exhausted recovery records after an explicit operator confirmation."""
+    checkpoint_path = DEFAULT_AUTORESEARCH_CHECKPOINT_PATH
+    try:
+        if checkpoint_path.is_symlink():
+            raise _OperatorCommandError(
+                f"refusing symlinked recovery checkpoint: {checkpoint_path}"
+            )
+        checkpoint = SupervisorCheckpoint.load(checkpoint_path)
+        exhausted_keys = tuple(
+            key
+            for key, record in checkpoint.recovery_records.items()
+            if record.status is RecoveryStatus.EXHAUSTED
+        )
+        if not exhausted_keys:
+            console.print("no exhausted recovery records; no action", markup=False)
+            return
+        if not confirm:
+            console.print(
+                f"{len(exhausted_keys)} exhausted recovery record(s) present; would back up "
+                f"and remove them from {checkpoint_path}; rerun with --confirm",
+                markup=False,
+            )
+            raise typer.Exit(code=1)
+
+        _ensure_owner_session_reset_quiescent("autoresearch-clear-exhausted-recovery")
+
+        checkpoint = SupervisorCheckpoint.load(checkpoint_path)
+        exhausted_keys = tuple(
+            key
+            for key, record in checkpoint.recovery_records.items()
+            if record.status is RecoveryStatus.EXHAUSTED
+        )
+        if not exhausted_keys:
+            console.print("no exhausted recovery records; no action", markup=False)
+            return
+
+        backup_path = _new_utc_path(
+            checkpoint_path.parent,
+            f"{checkpoint_path.name}.pre-clear-exhausted",
+        )
+        shutil.copy2(checkpoint_path, backup_path)
+        for key in exhausted_keys:
+            del checkpoint.recovery_records[key]
+        checkpoint.save(checkpoint_path)
+    except (OSError, SupervisorError) as exc:
+        console.print(f"autoresearch-clear-exhausted-recovery failed: {exc}", markup=False)
+        raise typer.Exit(code=1) from exc
+    except _OperatorCommandError as exc:
+        console.print(f"autoresearch-clear-exhausted-recovery failed: {exc}", markup=False)
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"removed exhausted recovery records: {', '.join(exhausted_keys)}; backup: {backup_path}",
         markup=False,
     )
 

@@ -94,6 +94,33 @@ from gateway.autoresearch_readiness import (
 )
 
 
+def _alpha_campaign_directive(state: AutoresearchState) -> str:
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return ""
+    return (
+        "ALPHA_RESEARCH campaign directive: strategies may use any holding period from minutes "
+        "up to a full trading session. Every position must be flat by the session close; "
+        "overnight carry is forbidden. The receipt-bound panel is regular-hours 1-minute data, "
+        "so an overnight leg cannot be execution-modelled and must not be proposed. Proposals "
+        "must target at least one trade per day on average aggregated across the five-ETF panel "
+        "over the OOS window, and a verification result below 1.0 trades/day on average misses "
+        "the activity requirement regardless of Sharpe. Proposals should leave headroom above "
+        "this floor rather than targeting it exactly. The relaxation follows campaign evidence "
+        "that trading friction, not signal absence, has been the binding constraint: one iteration "
+        "found a null-beating edge consumed by costs, and another pre-screened for cost-surviving "
+        "edges at a five-minute horizon and found none. The permitted-horizon range now spans "
+        "both shorter and longer holds, each with a different edge-to-cost ratio. This is context, "
+        "not an instruction to prefer long holds: the panel chooses the horizon on its merits, and "
+        "a short-horizon proposal that clears costs remains "
+        "entirely valid. A permanently burned family may be re-proposed at a materially different "
+        "holding horizon only with materially_new_evidence naming the horizon change as the "
+        "substantive difference and explaining why the prior negative does not carry over. A "
+        "trivially rescaled rerun of a burned family is not novel; contested-family revisit rules "
+        "are unchanged. Keep the frozen five-ETF universe with no member substitution, the "
+        "receipt-bound data contract, decision gates, review, and negative-results ledger.\n"
+    )
+
+
 def _phase_instruction(
     state: AutoresearchState,
     phase: Phase,
@@ -148,7 +175,10 @@ def _phase_instruction(
             "Use the final implementation brief exactly "
             "as approved. No implementation without consensus majority. For "
             "ALPHA_RESEARCH, derive and prewarm the platform data plan before creating "
-            "or running the committed quantipy-experiment-v2 package. The implementation "
+            "or running the committed quantipy-experiment-v2 package. A succeeded prewarm "
+            "run bound to the current state reference MUST be reused. A replacement prewarm "
+            "may be launched only after stating in one line which existing receipt is unusable "
+            "and why; this is a reporting duty, not a mechanical gate. The implementation "
             "stages must not import quantipy or use network, provider, SQL, filesystem, "
             "or hydration access. "
             "worker must use only the public Quantipy client path: prewarm every frozen "
@@ -177,8 +207,8 @@ def _phase_instruction(
             "and projected_model_seconds = calibration_fit_seconds * fold_count * "
             "candidate_count, identifying fold_count and candidate_count. This cost "
             "telemetry is reporting-only, not an admission gate; preserve within_budget's "
-            "existing data-budget semantics and never refuse work on the basis of "
-            "projected cost. If "
+            "existing data-budget semantics and never refuse work on the basis of projected cost. "
+            "If "
             "within_budget is false, do not run any "
             "qp.prices(), hydrate, full backtest, or notebook command that would load "
             "the price panel; commit the scaffold, focused tests, notebook shell, and "
@@ -202,13 +232,27 @@ def _phase_instruction(
             "14400s. A timeout kill yields recoverable "
             "execution-interrupted evidence routed to a bounded fix round, so an "
             "underestimate is recoverable; deriving it makes failure fast rather than "
-            "preventing it. "
-            "Reject impossible metrics, failing tests, or incomplete required metrics."
+            "preventing it. Reject impossible metrics, failing tests, or incomplete required "
+            "metrics. A run that completes all stages and produces zero trades because a "
+            "declared, pre-registered cost or edge gate excluded every candidate is a valid "
+            "negative result, not BUG_SIGNAL. Emit status=PASS with tests_passed=true, "
+            "bug_signals=[], trade_count=0, and trades_per_day=0.0; report undefined ratio "
+            "metrics is_walk_forward_sharpe_net, oos_sharpe_net, max_drawdown_pct, and win_rate "
+            "as 0.0 with the zero denominator stated in the summary, never null. The artifact "
+            "must cite the gate's exact parameter names and values from the approved consensus "
+            "implementation_brief and the excluded_candidate_count; do not rely on a self-report "
+            "that merely says pre-registered. Make it eligible for a normal DISCARD only after "
+            "the reviewer confirms that exact pre-registration and count. "
+            "Zero trades caused by a defect such as an empty panel, broken feature build, or "
+            "exception remain BUG_SIGNAL."
         ),
         Phase.REVIEW: (
             "Run exactly one configured reviewer. "
             "The reviewer must return PASS, CONDITIONAL PASS, or FAIL "
-            "with concrete fix requests."
+            "with concrete fix requests. Before accepting a zero-trade gate-excluded result "
+            "for DISCARD, confirm that the verification artifact's exact gate parameter names "
+            "and values match the approved consensus implementation_brief and that "
+            "excluded_candidate_count is present; otherwise do not accept the DISCARD."
         ),
         Phase.FIX_TEST: (
             "Apply a narrow fix against the latest verification or review failure. "
@@ -289,6 +333,7 @@ def _phase_instruction(
         f"artifact_type={expected_artifact_type.value}\n"
         f"instruction={instructions[phase]}\n"
         f"{mode_contract}"
+        f"{_alpha_campaign_directive(state)}"
         f"{compute_fit_contract}"
         f"{workspace_contract}"
         f"{verification_handoff_contract}"

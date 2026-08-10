@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
-from types import FrameType
+from types import FrameType, SimpleNamespace
 
 import gateway.autoresearch.evidence as autoresearch_evidence
 import pytest
@@ -1079,6 +1079,156 @@ def test_latched_run_record_alert_still_allows_stale_state_nudging(
     assert first.reason.startswith("invalid_detached_run_record:")
     assert second.outcome is SupervisorOutcome.NUDGED
     assert any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_recovery_wake_includes_current_failed_detached_run_details(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    # Arrange
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake)
+    state = supervisor._load_state()
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=supervisor_env.state_path,
+    ).sha256()
+    instruction_manifest_sha256 = _current_instruction_manifest_sha256(
+        state,
+        supervisor_env.state_path,
+    )
+    run_dir = supervisor_env.runs_root / "iteration-4" / "verification" / "failed-attempt"
+    command = ("verify", "--opaque")
+    source_manifest = supervisor_env.state_path.parent / "failed-detached-manifest.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": instruction_manifest_sha256,
+                "run_directory": str(run_dir),
+                "working_directory": str(supervisor_env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=source_manifest,
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        command=command,
+    )
+    prepare_output_capture(run_dir=run_dir, runs_root=supervisor_env.runs_root)
+    start_run(run_dir=run_dir, pid=123, runs_root=supervisor_env.runs_root)
+    capture_output_stream(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        stream=RunOutputStream.STDOUT,
+        source=BytesIO(),
+    )
+    capture_output_stream(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        stream=RunOutputStream.STDERR,
+        source=BytesIO(b"x" * 500 + b'terminal "quoted" line\nnext'),
+    )
+    complete_run(
+        run_dir=run_dir,
+        runs_root=supervisor_env.runs_root,
+        exit_code=23,
+        signal_number=None,
+        peak_rss_bytes=None,
+        failure_classification=RunFailureClassification.PROCESS_ERROR,
+    )
+
+    # Act
+    first = supervisor.run_once()
+    second = supervisor.run_once()
+    wake_message = next(params["message"] for method, params in fake.rpc_calls if method == "agent")
+
+    # Assert
+    assert first.outcome is SupervisorOutcome.ALERT
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert isinstance(wake_message, str)
+    assert "failed-attempt" in wake_message
+    assert "exit_code=23" in wake_message
+    assert "failure_classification=process_error" in wake_message
+    assert "sealed_stderr_truncated=false" in wake_message
+    assert 'sealed_stderr_tail="' in wake_message
+    assert 'terminal \\"quoted\\" line\\nnext"' in wake_message
+    assert 'terminal "quoted" line\nnext' not in wake_message
+    assert "x" * 500 not in wake_message
+
+
+def test_recovery_wake_reports_missing_sealed_capture_without_raw_tail(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        supervisor,
+        "_matching_verification_runs",
+        lambda **_: (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    state=RunState.FAILED,
+                    output_capture=None,
+                    exit_code=23,
+                    failure_classification=RunFailureClassification.PROCESS_ERROR,
+                ),
+                run_directory=supervisor_env.runs_root / "missing-capture",
+            ),
+        ),
+    )
+
+    detail = supervisor._with_current_failed_detached_run_detail(
+        supervisor._load_state(),
+        "wake",
+    )
+
+    assert "sealed_stderr_truncated=null" in detail
+    assert 'sealed_stderr_tail="<sealed stderr capture unavailable>"' in detail
+
+
+def test_recovery_wake_reports_capture_io_error_and_truncation(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        supervisor,
+        "_matching_verification_runs",
+        lambda **_: (
+            SimpleNamespace(
+                status=SimpleNamespace(
+                    state=RunState.FAILED,
+                    output_capture=SimpleNamespace(
+                        stderr=SimpleNamespace(relative_path="stderr.log", truncated=True)
+                    ),
+                    exit_code=23,
+                    failure_classification=RunFailureClassification.PROCESS_ERROR,
+                ),
+                run_directory=supervisor_env.runs_root / "missing-stderr",
+            ),
+        ),
+    )
+
+    detail = supervisor._with_current_failed_detached_run_detail(
+        supervisor._load_state(),
+        "wake",
+    )
+
+    assert "sealed_stderr_truncated=true" in detail
+    assert 'sealed_stderr_tail="<sealed stderr capture unavailable>"' in detail
 
 
 def test_prepared_run_awaiting_queued_launch_is_not_a_malformed_record(

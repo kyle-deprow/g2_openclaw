@@ -252,6 +252,7 @@ DEFAULT_RENUDGE_ALERT_LIMIT = 6
 # finish before declaring the task stale.
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
+FAILED_DETACHED_RUN_STDERR_TAIL_BYTES = 400
 LAUNCH_REQUEST_SCHEMA_VERSION = 1
 LAUNCH_REQUEST_MAX_BYTES = 4096
 LAUNCH_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -647,9 +648,13 @@ class AutoresearchSupervisor:
             return claim_or_result
         claim = claim_or_result
         self._rotate_owner_session_for_wake(phase=state.phase.value)
+        wake_message = self._with_current_failed_detached_run_detail(
+            state,
+            recovery_plan.message,
+        )
         try:
             self._rpc.wake(
-                message=recovery_plan.message,
+                message=wake_message,
                 idempotency_key=make_idempotency_key(
                     purpose="recovery",
                     material=f"{recovery_key}\nclaim={claim.token}",
@@ -737,6 +742,68 @@ class AutoresearchSupervisor:
             reason="recovery_message_sent",
             message=RECOVERY_MESSAGE,
             key_prefix="stale_state",
+        )
+
+    def _with_current_failed_detached_run_detail(
+        self,
+        state: AutoresearchState,
+        message: str,
+    ) -> str:
+        """Append bounded evidence for a terminal failed current verification run."""
+        if state.phase is not Phase.VERIFICATION:
+            return message
+        state_reference_sha256 = build_authoritative_state_reference(
+            state,
+            state_path=self.config.state_path,
+        ).sha256()
+        try:
+            policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+            quantipy_root = (
+                Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
+            )
+            receipts = build_receipt_catalog(quantipy_root)
+            instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=self.config.state_path,
+            )
+            matching = self._matching_verification_runs(
+                iteration=state.iteration,
+                state_reference_sha256=state_reference_sha256,
+                instruction_manifest_sha256=instruction_manifest_sha256,
+            )
+        except (AutoresearchRunRecordError, AutoresearchValidationError, OSError, ValueError):
+            return message
+        if not matching:
+            return message
+        latest = matching[-1]
+        if latest.status.state is not RunState.FAILED:
+            return message
+        capture = latest.status.output_capture
+        stderr_truncated: bool | None
+        if capture is None:
+            stderr_tail = "<sealed stderr capture unavailable>"
+            stderr_truncated = None
+        else:
+            stderr_truncated = capture.stderr.truncated
+            try:
+                stderr_tail = (
+                    (latest.run_directory / capture.stderr.relative_path)
+                    .read_bytes()[-FAILED_DETACHED_RUN_STDERR_TAIL_BYTES:]
+                    .decode("utf-8", errors="replace")
+                )
+            except OSError:
+                stderr_tail = "<sealed stderr capture unavailable>"
+        failure_classification = latest.status.failure_classification
+        return (
+            f"{message}\n\nCurrent failed detached verification run: "
+            f"run_directory={latest.run_directory.name}; "
+            f"exit_code={latest.status.exit_code}; "
+            "failure_classification="
+            f"{failure_classification.value if failure_classification is not None else 'unknown'}; "
+            f"sealed_stderr_truncated={json.dumps(stderr_truncated)}; "
+            f"sealed_stderr_tail={json.dumps(stderr_tail)}"
         )
 
     def _prepare_controller_lifecycle(

@@ -524,6 +524,36 @@ def test_autoresearch_directive_distinguishes_contested_methodology_discards() -
     assert "clean negatives stay permanently burned" in skill
 
 
+def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> None:
+    raw_skill = AUTORESEARCH.read_text(encoding="utf-8")
+    skill = " ".join(raw_skill.split()).lower()
+    plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
+
+    assert "version: 8.11.0" in raw_skill
+    assert "any holding period from minutes up to a full trading session" in skill
+    assert "every position must be flat by the session close" in skill
+    assert "overnight carry is forbidden" in skill
+    assert "regular-hours 1-minute data" in skill
+    assert "five symbols with no member substitution" in skill
+    assert "at least one trade per day on average aggregated across the five-etf panel" in skill
+    assert "below 1.0 trades/day on average misses the activity requirement" in skill
+    assert "trading friction, not signal absence, has been the binding constraint" in skill
+    assert "context, not an instruction to prefer long holds" in skill
+    assert (
+        "proposals should leave headroom above this floor rather than targeting it exactly" in skill
+    )
+    assert "scalping" not in skill
+    assert "short-holding-period" not in skill
+    assert (
+        "`materially_new_evidence` naming the horizon change as the substantive difference" in skill
+    )
+    assert "a trivially rescaled rerun of a burned family is not novel" in skill
+    assert "at least 2 trades per day" not in skill
+    assert "scalping" not in plan
+    assert "short-holding-period" not in plan
+    assert "at least 2 trades per day" not in plan
+
+
 def test_autoresearch_docs_require_feasibility_telemetry_as_reporting_duty() -> None:
     skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
 

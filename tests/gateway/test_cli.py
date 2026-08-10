@@ -107,7 +107,7 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest,
     canonical_platform_capabilities,
 )
-from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY
+from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY, RecoveryStatus
 from gateway.autoresearch_systemd import SystemdUnitStateError
 from gateway.cli import (
     _active_target_writer_processes,
@@ -1060,6 +1060,189 @@ def test_autoresearch_reset_owner_session_missing_store_is_clear(
 
     assert result.exit_code == 1, result.output
     assert "owner sessions store is missing" in result.output
+
+
+def test_autoresearch_clear_exhausted_recovery_removes_only_exhausted_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    SupervisorCheckpoint(
+        recovery_records={
+            "exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED),
+            "failed-key": RecoveryRecord(status=RecoveryStatus.FAILED),
+            "ready-key": RecoveryRecord(status=RecoveryStatus.READY),
+        }
+    ).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    # Act
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+
+    # Assert
+    assert result.exit_code == 0, result.output
+    assert set(SupervisorCheckpoint.load(checkpoint_path).recovery_records) == {
+        "failed-key",
+        "ready-key",
+    }
+    assert "exhausted-key" in result.output
+
+
+def test_autoresearch_clear_exhausted_recovery_writes_timestamped_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    original = SupervisorCheckpoint(
+        recovery_records={"exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED)}
+    )
+    original.save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: False)
+
+    # Act
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+
+    # Assert
+    assert result.exit_code == 0, result.output
+    backup_paths = list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
+    assert len(backup_paths) == 1
+    assert SupervisorCheckpoint.load(backup_paths[0]) == original
+
+
+def test_autoresearch_clear_exhausted_recovery_without_exhausted_records_is_noop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    original = SupervisorCheckpoint(
+        recovery_records={"ready-key": RecoveryRecord(status=RecoveryStatus.READY)}
+    )
+    original.save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+
+    # Act
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+
+    # Assert
+    assert result.exit_code == 0, result.output
+    assert "no exhausted recovery records; no action" in result.output
+    assert SupervisorCheckpoint.load(checkpoint_path) == original
+    assert not list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
+
+
+def test_autoresearch_clear_exhausted_recovery_requires_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    original = SupervisorCheckpoint(
+        recovery_records={"exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED)}
+    )
+    original.save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+
+    # Act
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery"])
+
+    # Assert
+    assert result.exit_code == 1, result.output
+    assert "rerun with --confirm" in result.output
+    assert SupervisorCheckpoint.load(checkpoint_path) == original
+    assert not list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
+
+
+def _assert_clear_exhausted_recovery_refuses_active_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_unit: str,
+) -> None:
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    original = SupervisorCheckpoint(
+        recovery_records={"exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED)}
+    )
+    original.save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda unit: unit == active_unit,
+    )
+
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 1, result.output
+    assert "refusing autoresearch-clear-exhausted-recovery while" in output
+    assert "refusing owner-session reset while" not in output
+    assert SupervisorCheckpoint.load(checkpoint_path) == original
+    assert not list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
+
+
+@pytest.mark.parametrize(
+    "active_unit",
+    [
+        cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE,
+        cli_module.DEFAULT_OPENCLAW_GATEWAY_SERVICE,
+    ],
+)
+def test_autoresearch_clear_exhausted_recovery_refuses_active_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    active_unit: str,
+) -> None:
+    _assert_clear_exhausted_recovery_refuses_active_service(tmp_path, monkeypatch, active_unit)
+
+
+def test_autoresearch_clear_exhausted_recovery_fails_closed_on_systemd_probe_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    original = SupervisorCheckpoint(
+        recovery_records={"exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED)}
+    )
+    original.save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_is_systemd_unit_active",
+        lambda _unit: (_ for _ in ()).throw(SystemdUnitStateError("inconclusive")),
+    )
+
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 1, result.output
+    assert "cannot prove services are inactive" in output
+    assert SupervisorCheckpoint.load(checkpoint_path) == original
+    assert not list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
+
+
+def test_autoresearch_clear_exhausted_recovery_refuses_symlinked_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "real-owner-recovery.json"
+    SupervisorCheckpoint(
+        recovery_records={"exhausted-key": RecoveryRecord(status=RecoveryStatus.EXHAUSTED)}
+    ).save(target)
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    checkpoint_path.symlink_to(target)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+
+    result = runner.invoke(app, ["autoresearch-clear-exhausted-recovery", "--confirm"])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 1, result.output
+    assert "refusing symlinked recovery checkpoint" in output
+    assert SupervisorCheckpoint.load(target).recovery_records
+    assert not list(tmp_path.glob("owner-recovery.json.pre-clear-exhausted-*"))
 
 
 def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(

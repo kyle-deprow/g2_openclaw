@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.10.0
+version: 8.11.0
 ---
 
 # Autoresearch
@@ -276,22 +276,24 @@ negative-results ledger is the authoritative registry-derived consistency input
 for context, debate, and consensus prompts; it does not replace either context
 packet field.
 
-## Operator Campaign Directive (2026-08-04)
+## Operator Campaign Directive (2026-08-09)
 
 The current campaign is scoped by operator direction and applies to every
 `ALPHA_RESEARCH` iteration until this section is revised:
 
-- Research **intraday scalping strategies** — short-holding-period entries and
-  exits within the trading session, evaluated with realistic costs and
-  execution assumptions per the microstructure debater's mandate.
+- Holding period: strategies may use **any holding period from minutes up to a
+  full trading session**, evaluated with realistic costs and execution
+  assumptions per the microstructure debater's mandate. Every position must be
+  flat by the session close; overnight carry is forbidden. The receipt-bound
+  panel is regular-hours 1-minute data, so an overnight leg cannot be
+  execution-modelled and must not be proposed.
 - The tradable universe is a **fixed set of five liquid ETFs chosen by the
   loop**: the first context/debate round of the campaign selects the five
   symbols, subject to Quantipy data-contract coverage verification
   (`qp.security_universe_screen`/`qp.prices` within the frozen campaign
   interval and the hydration budget). Record the chosen set and its rationale
   in the consensus implementation brief; subsequent iterations reuse the same
-  five symbols and may not swap members without a `DATA_INFRA_G0` style
-  justification recorded in the decision log.
+  five symbols with no member substitution.
 - Across iterations, vary the **strategy family and model class** (e.g.
   mean-reversion, momentum bursts, order-flow/volume imbalance, volatility
   breakout; rule-based and learned models alike) rather than re-tuning one
@@ -309,16 +311,25 @@ The current campaign is scoped by operator direction and applies to every
   Once a revisit has occurred, the CURATOR must move the family to
   `burned_theory_families` and must not re-list it in
   `contested_methodology_families`. Clean negatives stay permanently burned.
-- **Activity floor (operator addition 2026-08-06):** scalping means trading.
-  Proposals must target **at least 2 trades per day aggregated across the
-  five-ETF panel** in the out-of-sample window, and a verification result
-  with `trades_per_day` below 1.0 misses the activity requirement regardless
-  of its Sharpe. Debaters and the arbiter must reject or refine event
-  definitions whose expected trigger frequency is materially below the
-  target (ultra-selective event quantiles such as the top 3% of events
-  require explicit justification that the implied activity still meets the
-  floor); prefer designs that trade more frequently with smaller per-trade
-  edges over rare-event designs, subject to realistic cost survival.
+- **Activity:** proposals must target **at least one trade per day on average
+  aggregated across the five-ETF panel** over the out-of-sample window. A
+  verification result below 1.0 trades/day on average misses the activity
+  requirement regardless of Sharpe. Proposals should leave headroom above this
+  floor rather than targeting it exactly.
+- **Rationale for the relaxation:** campaign evidence indicates that trading
+  friction, not signal absence, has been the binding constraint: one iteration
+  found a null-beating edge consumed by costs, and another pre-screened for
+  cost-surviving edges at a five-minute horizon and found none. The
+  permitted-horizon range now spans both shorter and longer holds, each with a
+  different edge-to-cost ratio. This is context, not an instruction to prefer
+  long holds: the panel chooses the horizon on its merits, and a short-horizon
+  proposal that clears costs remains entirely valid.
+- **Burned-family re-proposal under the new horizon:** a permanently burned
+  family may be re-proposed at a materially different holding horizon only
+  with `materially_new_evidence` naming the horizon change as the substantive
+  difference and explaining why the prior negative does not carry over. A
+  trivially rescaled rerun of a burned family is not novel. Contested-family
+  revisit rules are unchanged.
 - All other protocol rules (data contract, budgets, decision gates, review)
   are unchanged. If five ETFs with adequate contract coverage cannot be
   established, report it as an operator blocker rather than substituting
@@ -770,6 +781,10 @@ Implementation requirements:
   that load the price panel. Commit the scaffold, focused tests, notebook
   shell, and over-budget preflight so verification can emit the structured
   feasibility `BUG_SIGNAL` without spending the hydrate cost.
+- A succeeded prewarm run bound to the current state reference MUST be reused.
+  A replacement prewarm may be launched only after stating in one line which
+  existing receipt is unusable and why. This is a reporting duty, not a
+  mechanical gate.
 - Commit after focused tests pass; notebook rendering is optional smoke/report evidence and
   never replaces the required typed runtime verification.
 - The committed v2 package must contain exactly the client-free `prepare`, `smoke`,
@@ -1042,6 +1057,21 @@ Failure classification is mandatory:
   or `BUG_SIGNAL`, unavailable metrics or coverage must be `null`; do not use
   fabricated or zero-valued placeholders.
 
+A run that completes all stages and produces zero trades because a declared,
+pre-registered cost or edge gate excluded every candidate is a valid negative
+result, not `BUG_SIGNAL`. Emit `status=PASS` with `tests_passed=true`,
+`bug_signals=[]`, `trade_count=0`, and `trades_per_day=0.0`. Report undefined
+ratio metrics (`is_walk_forward_sharpe_net`, `oos_sharpe_net`,
+`max_drawdown_pct`, and `win_rate`) as `0.0`, state the zero denominator in the
+summary, and never use null for them. The verification artifact must cite the
+gate's exact parameter names and values as recorded in the approved consensus
+`implementation_brief`, plus `excluded_candidate_count`; the phrase
+"pre-registered" alone is not evidence. It is eligible for a normal `DISCARD`
+only after the reviewer confirms that pre-registration and count. Zero trades
+caused by a defect such as an empty panel, broken feature build, or exception
+remain `BUG_SIGNAL`. Keep this distinction explicit in the verification artifact
+and decision log.
+
 In `DATA_INFRA_G0`, `status` and `tests_passed` describe verification command,
 test, and typed Quantipy runtime execution plus experiment correctness; they do not describe
 whether the data-infrastructure gate passed. If required commands, tests, and
@@ -1154,6 +1184,10 @@ Reviewer focus:
 - Did the method avoid leakage, overfitting, overlapping-hold errors, and
   transaction-cost omissions?
 - Are null tests and OOS evaluation sufficient to trust the recommended metric?
+- Before accepting a zero-trade gate-excluded result for `DISCARD`, confirm that
+  the verification artifact's exact gate parameter names and values match the
+  approved consensus `implementation_brief` and that `excluded_candidate_count`
+  is present. Do not accept the `DISCARD` if that confirmation fails.
 
 Required output: verdict (`PASS`, `CONDITIONAL PASS`, `FAIL`), recommended
 decision metric, critical issues, noncritical issues, and exact fix requests.

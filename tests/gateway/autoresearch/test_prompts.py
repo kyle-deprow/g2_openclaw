@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -26,6 +27,7 @@ from gateway.autoresearch.enums import (
     ArtifactType,
     FixTriggerPhase,
     Phase,
+    ResearchMode,
     VerificationStatus,
 )
 from gateway.autoresearch.errors import (
@@ -508,6 +510,64 @@ def test_implementation_prompt_contains_workspace_isolation_contract(
     assert "commit_sha" in prompt
 
 
+def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
+    policy: AutoresearchPolicy,
+) -> None:
+    alpha_state = _state_to_consensus(policy)
+    alpha_prompt = autoresearch_engine._phase_instruction(
+        alpha_state,
+        Phase.CONSENSUS,
+        ArtifactType.CONSENSUS_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+    g0_prompt = autoresearch_engine._phase_instruction(
+        replace(alpha_state, mode=ResearchMode.DATA_INFRA_G0),
+        Phase.CONSENSUS,
+        ArtifactType.CONSENSUS_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+
+    for phrase in (
+        "any holding period",
+        "overnight carry is forbidden",
+        "1.0 trades/day",
+        "A permanently burned family may be re-proposed",
+    ):
+        assert phrase in alpha_prompt
+        assert phrase not in g0_prompt
+    for stale_phrase in ("scalping", "short-holding-period", "at least 2 trades per day"):
+        assert stale_phrase not in alpha_prompt
+
+
+def test_zero_trade_alpha_gate_pass_tuple_is_accepted_by_artifact_validator() -> None:
+    candidate = replace(
+        _verification_result(VerificationStatus.PASS),
+        is_walk_forward_sharpe_net=0.0,
+        oos_sharpe_net=0.0,
+        max_drawdown_pct=0.0,
+        win_rate=0.0,
+        trade_count=0,
+        trades_per_day=0.0,
+    )
+
+    parsed = autoresearch_artifacts.VerificationResultArtifact.from_dict(
+        candidate.to_dict(),
+        mode=ResearchMode.ALPHA_RESEARCH,
+    )
+
+    assert parsed.status is VerificationStatus.PASS
+    assert parsed.tests_passed is True
+    assert parsed.bug_signals == ()
+    assert parsed.trade_count == 0
+    assert parsed.trades_per_day == 0.0
+    assert parsed.is_walk_forward_sharpe_net == 0.0
+    assert parsed.oos_sharpe_net == 0.0
+    assert parsed.max_drawdown_pct == 0.0
+    assert parsed.win_rate == 0.0
+
+
 def test_fix_test_prompt_contains_private_workspace_and_cwd_contract(
     git_worktree: GitWorktree,
 ) -> None:
@@ -595,6 +655,11 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "calibration_fit_seconds" in implementation
     assert "projected_model_seconds" in implementation
     assert "reporting-only, not an admission gate" in implementation
+    assert (
+        "A succeeded prewarm run bound to the current state reference MUST be reused"
+        in implementation
+    )
+    assert "this is a reporting duty, not a mechanical gate" in implementation
 
     verification = autoresearch_engine._phase_instruction(
         _state_to_review(policy),
@@ -606,3 +671,20 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "projected_model_seconds reported in implementation_result.summary" in verification
     assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in verification
     assert "default 14400s" in verification
+    assert (
+        "zero trades because a declared, pre-registered cost or edge gate excluded every candidate"
+        in verification
+    )
+    assert "eligible for a normal DISCARD" in verification
+    assert "empty panel, broken feature build, or exception remain BUG_SIGNAL" in verification
+
+    review = autoresearch_engine._phase_instruction(
+        _state_to_review(policy),
+        Phase.REVIEW,
+        ArtifactType.REVIEW_RESULT,
+        ("reviewer",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert "exact gate parameter names and values match the approved consensus" in review
+    assert "excluded_candidate_count is present" in review
+    assert "otherwise do not accept the DISCARD" in review
