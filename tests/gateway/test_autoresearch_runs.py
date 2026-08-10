@@ -644,6 +644,30 @@ def test_supervisor_does_not_signal_reused_group_after_result_persistence_failur
         sentinel.wait(timeout=2.0)
 
 
+def test_secret_detection_allows_hyphenated_words_containing_key_prefixes() -> None:
+    # A theory family named "...risk-rotation-microstructure" contains the
+    # substring "sk-rotation-microstructure", which an unanchored OpenAI-key
+    # pattern reads as a secret and which blocked a live campaign iteration.
+    benign = (
+        "/opt/py",
+        "-m",
+        "quantipy.experiments",
+        "--experiment",
+        "i9-equity-duration-risk-rotation-microstructure",
+        "--tag",
+        "brisk-rebalance-experiment-alpha",
+    )
+    assert autoresearch_runs.command_sha256(benign)
+
+    # Built at runtime so the literals never appear in the repository.
+    openai_like = "sk-" + "a" * 20
+    github_like = "gh" + "p_" + "b" * 20
+    aws_like = "AK" + "IA" + "C" * 16
+    for secret in (openai_like, f"--key={openai_like}", github_like, aws_like):
+        with pytest.raises(AutoresearchRunRecordError, match="secret"):
+            autoresearch_runs.command_sha256(("/opt/py", secret))
+
+
 def test_secret_bearing_command_arguments_are_rejected(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"

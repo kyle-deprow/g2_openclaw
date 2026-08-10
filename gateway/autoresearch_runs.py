@@ -51,8 +51,8 @@ _SECRET_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _SECRET_VALUE_RE = re.compile(
-    r"(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|"
-    r"AKIA[0-9A-Z]{16})"
+    r"(?:\bsk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9_]{16,}|\bxox[baprs]-[A-Za-z0-9-]{16,}|"
+    r"\bAKIA[0-9A-Z]{16})"
 )
 _SECRET_REFERENCE_SUFFIXES = ("file", "path", "env", "var")
 _COMMAND_HANDOFF_NAME = ".command-handoff.json"
