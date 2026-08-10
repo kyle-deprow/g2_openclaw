@@ -2818,7 +2818,15 @@ def test_final_decision_rules_reject_incorrect_decisions(
     reviewer_verdict: FinalReviewerVerdict,
     match: str,
 ) -> None:
-    state = _state_to_decision(policy)
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=metric_value,
+            ),
+        ),
+    )
 
     with pytest.raises(AutoresearchValidationError, match=match):
         advance_state(
@@ -2827,6 +2835,230 @@ def test_final_decision_rules_reject_incorrect_decisions(
                 decision=decision,
                 metric_value=metric_value,
                 reviewer_verdict=reviewer_verdict,
+            ),
+            policy,
+        )
+
+
+def test_activity_below_floor_accepts_discard_despite_strong_oos_sharpe(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=1.2,
+                trades_per_day=0.9,
+            ),
+        ),
+    )
+
+    advanced = advance_state(
+        state,
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=1.2,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        policy,
+    )
+
+    assert advanced.final_decision is not None
+    assert advanced.final_decision.decision is FinalDecision.DISCARD
+
+
+def test_activity_below_floor_rejects_strong_keep_despite_strong_oos_sharpe(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=1.2,
+                trades_per_day=0.9,
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"average activity below 1.0 trades/day requires final_decision=DISCARD",
+    ):
+        advance_state(
+            state,
+            _final_decision_with(
+                decision=FinalDecision.STRONG_KEEP,
+                metric_value=1.2,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
+            ),
+            policy,
+        )
+
+
+def test_activity_at_floor_uses_normal_decision_ladder(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=1.2,
+                trades_per_day=1.0,
+            ),
+        ),
+    )
+
+    advanced = advance_state(
+        state,
+        _final_decision_with(
+            decision=FinalDecision.STRONG_KEEP,
+            metric_value=1.2,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        policy,
+    )
+
+    assert advanced.final_decision is not None
+    assert advanced.final_decision.decision is FinalDecision.STRONG_KEEP
+
+
+@pytest.mark.parametrize("metric_value", (-1.0, 1.0))
+def test_final_decision_rejects_in_sample_metric_name_regardless_of_value(
+    policy: AutoresearchPolicy,
+    metric_value: float,
+) -> None:
+    state = _state_to_decision(policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"is_walk_forward_sharpe_net.*out-of-sample and cost-net",
+    ):
+        advance_state(
+            state,
+            replace(
+                _final_decision_with(
+                    decision=FinalDecision.STRONG_KEEP,
+                    metric_value=metric_value,
+                    reviewer_verdict=FinalReviewerVerdict.PASS,
+                ),
+                recommended_metric_name="is_walk_forward_sharpe_net",
+            ),
+            policy,
+        )
+
+
+def test_iteration_nine_in_sample_metric_is_rejected_before_activity_discard(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=-1.1639,
+                trades_per_day=0.2222,
+            ),
+        ),
+    )
+    artifact = replace(
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=1.0842,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        recommended_metric_name="is_walk_forward_sharpe_net",
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"is_walk_forward_sharpe_net.*out-of-sample and cost-net",
+    ):
+        advance_state(state, artifact, policy)
+
+
+def test_iteration_nine_activity_evidence_accepts_discard_with_oos_metric_name(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=-1.1639,
+                trades_per_day=0.2222,
+            ),
+        ),
+    )
+    artifact = replace(
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=1.0842,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        recommended_metric_name="oos_sharpe_net",
+    )
+
+    advanced = advance_state(state, artifact, policy)
+
+    assert advanced.final_decision is not None
+    assert advanced.final_decision.decision is FinalDecision.DISCARD
+
+
+def test_iteration_nine_activity_evidence_rejects_strong_keep_with_oos_metric_name(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=-1.1639,
+                trades_per_day=0.2222,
+            ),
+        ),
+    )
+    artifact = replace(
+        _final_decision_with(
+            decision=FinalDecision.STRONG_KEEP,
+            metric_value=1.0842,
+            reviewer_verdict=FinalReviewerVerdict.PASS,
+        ),
+        recommended_metric_name="oos_sharpe_net",
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"average activity below 1.0 trades/day requires final_decision=DISCARD",
+    ):
+        advance_state(state, artifact, policy)
+
+
+def test_final_decision_ladder_uses_verification_oos_sharpe_over_artifact_value(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = replace(
+        _state_to_decision(policy),
+        verification_history=(
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                oos_sharpe_net=0.7,
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"decision Sharpe > 0.5 requires SIGNIFICANT KEEP or STRONG KEEP",
+    ):
+        advance_state(
+            state,
+            _final_decision_with(
+                decision=FinalDecision.DISCARD,
+                metric_value=-0.6,
+                reviewer_verdict=FinalReviewerVerdict.PASS,
             ),
             policy,
         )

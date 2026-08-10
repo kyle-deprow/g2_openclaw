@@ -529,7 +529,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.11.0" in raw_skill
+    assert "version: 8.12.0" in raw_skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -552,6 +552,25 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "scalping" not in plan
     assert "short-holding-period" not in plan
     assert "at least 2 trades per day" not in plan
+
+
+def test_autoresearch_decision_gate_uses_oos_metric_and_activity_floor() -> None:
+    raw_skill = AUTORESEARCH.read_text(encoding="utf-8")
+    normalized_skill = " ".join(raw_skill.split()).lower()
+    section8 = raw_skill.split("## 8. Decide And Log", 1)[1].split(
+        "After a `DATA_INFRA_G0` implementation", 1
+    )[0]
+    normalized = " ".join(section8.split()).lower()
+
+    assert "`oos_sharpe_net` is the canonical choice" in normalized
+    assert "is_walk_forward_sharpe_net" in section8
+    assert "never a valid decision metric" in normalized
+    assert (
+        "average activity below the campaign floor of 1.0 trades/day over the oos window: "
+        "discard regardless of sharpe, drawdown, or reviewer verdict" in normalized
+    )
+    assert "use the reviewer's recommended metric only for" not in normalized_skill
+    assert "use is walk-forward sharpe instead" not in normalized_skill
 
 
 def test_autoresearch_docs_require_feasibility_telemetry_as_reporting_duty() -> None:

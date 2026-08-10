@@ -450,10 +450,16 @@ The runner enforces this order for alpha work:
 
 1. Exhausted test retries: `CRASH`.
 2. Remaining critical review issue or max drawdown at least 30%: `DISCARD`.
-3. Decision Sharpe at most -0.5: `DISCARD`.
-4. Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
-5. Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.
-6. At or below 0.5, a numeric baseline is mandatory: improvement is
+3. In `ALPHA_RESEARCH`, activity below 1.0 trades/day: `DISCARD` regardless of
+   Sharpe or reviewer verdict, except zero-trade gate-excluded results require
+   the section 5 reviewer confirmation before `DISCARD`.
+4. In `ALPHA_RESEARCH`, the decision Sharpe and recommended metric must be the
+   accepted verification artifact's out-of-sample cost-net Sharpe; in-sample
+   metrics are invalid.
+5. Decision Sharpe at most -0.5: `DISCARD`.
+6. Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
+7. Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.
+8. At or below 0.5, a numeric baseline is mandatory: improvement is
    KEEP-family; no improvement is `DISCARD`. Plain `KEEP` requires that numeric
    baseline.
 

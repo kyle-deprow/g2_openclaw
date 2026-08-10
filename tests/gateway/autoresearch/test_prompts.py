@@ -688,3 +688,34 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "exact gate parameter names and values match the approved consensus" in review
     assert "excluded_candidate_count is present" in review
     assert "otherwise do not accept the DISCARD" in review
+
+
+def test_decision_and_review_instructions_require_oos_metric_and_activity_floor(
+    policy: AutoresearchPolicy,
+) -> None:
+    review = autoresearch_engine._phase_instruction(
+        _state_to_review(policy),
+        Phase.REVIEW,
+        ArtifactType.REVIEW_RESULT,
+        ("reviewer",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert "recommended_metric_name MUST name an out-of-sample, cost-net metric" in review
+    assert "An in-sample metric is not a valid recommendation." in review
+
+    decision = autoresearch_engine._phase_instruction(
+        _state_to_decision(policy),
+        Phase.DECISION_LOG,
+        ArtifactType.FINAL_DECISION,
+        ("pm",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert (
+        "if the reviewer recommended an in-sample metric, substitute the out-of-sample "
+        "net Sharpe and state the substitution in the rationale" in decision
+    )
+    assert "the decision Sharpe is the out-of-sample cost-net Sharpe" in decision
+    assert (
+        "Average activity below 1.0 trades/day over the OOS window is DISCARD regardless of Sharpe."
+        in decision
+    )

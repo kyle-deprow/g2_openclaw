@@ -143,6 +143,15 @@ def test_stall_reason_checks_non_keep_before_no_consensus(policy: AutoresearchPo
 def test_eight_discard_decisions_set_one_review_record(policy: AutoresearchPolicy) -> None:
     entries = tuple(_registry_entry(iteration, FinalDecision.DISCARD) for iteration in range(1, 8))
     state = _decision_state(policy, entries)
+    # The decision Sharpe is derived from the verification artifact, so a DISCARD
+    # fixture needs discard-worthy out-of-sample evidence to stay coherent.
+    state = replace(
+        state,
+        verification_history=(
+            *state.verification_history[:-1],
+            replace(state.verification_history[-1], oos_sharpe_net=-0.2),
+        ),
+    )
     decision = replace(
         _final_decision_with(
             decision=FinalDecision.DISCARD,

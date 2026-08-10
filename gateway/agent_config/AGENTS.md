@@ -265,6 +265,12 @@ The deterministic decision order is:
 
 - Exhausted test retries: `CRASH`.
 - Remaining critical review issue or max drawdown at least 30%: `DISCARD`.
+- In `ALPHA_RESEARCH`, activity below 1.0 trades/day: `DISCARD` regardless of
+  Sharpe or reviewer verdict, except zero-trade gate-excluded results require
+  the section 5 reviewer confirmation before `DISCARD`.
+- In `ALPHA_RESEARCH`, the decision Sharpe and recommended metric must be the
+  accepted verification artifact's out-of-sample cost-net Sharpe; in-sample
+  metrics are invalid.
 - Decision Sharpe at most -0.5: `DISCARD`.
 - Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
 - Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.

@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.11.0
+version: 8.12.0
 ---
 
 # Autoresearch
@@ -619,7 +619,7 @@ Do once before the first iteration:
 
 1. Define the mechanical goal, metric, metric direction, target repo, and
    writable scope.
-2. Establish the baseline and record iteration 0.
+2. Establish the campaign baseline as `oos_sharpe_net = 0.0` and record iteration 0.
 3. As PM, read recent git history, current in-scope files, canonical decision
    receipts, and MemPalace prior experiments with `mempalace_status`,
    `mempalace_diary_read`, `mempalace_search`, and `mempalace_kg_query`.
@@ -632,7 +632,8 @@ Do once before the first iteration:
 Call native `spawn_agent` for `context_curator` with read-only MemPalace access to produce a compact
 packet for the debate:
 
-- Current best metric, baseline, and last 10 experiment outcomes.
+- Current best metric, `baseline_metric` expressed as an out-of-sample
+  cost-net Sharpe, and last 10 experiment outcomes.
 - Prior MemPalace findings: failures, keeps, feature families, model families,
   data coverage issues, and reviewer objections.
 - Prior proposals from MemPalace and canonical decision receipts.
@@ -1165,7 +1166,8 @@ Bug signals:
 - Max drawdown = 0%.
 - Profit factor = inf.
 - Accuracy < 50% with Sharpe > 5.
-- OOS Sharpe > 2x IS Sharpe; use IS walk-forward Sharpe instead.
+- OOS Sharpe > 2x IS Sharpe (treat as an evidence defect; never resolve it by
+  switching the decision metric to the in-sample Sharpe).
 
 If a bug signal appears, send a targeted fix to `fixer`, then rerun verification.
 
@@ -1190,7 +1192,9 @@ Reviewer focus:
   is present. Do not accept the `DISCARD` if that confirmation fails.
 
 Required output: verdict (`PASS`, `CONDITIONAL PASS`, `FAIL`), recommended
-decision metric, critical issues, noncritical issues, and exact fix requests.
+decision metric (for `ALPHA_RESEARCH`, an out-of-sample cost-net metric from
+the accepted verification artifact), critical issues, noncritical issues, and
+exact fix requests.
 
 ## 7. Fix/Test
 
@@ -1230,11 +1234,22 @@ decision metric, critical issues, noncritical issues, and exact fix requests.
 
 ## 8. Decide And Log
 
-Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
+For `ALPHA_RESEARCH`, the decision Sharpe MUST be the out-of-sample, cost-net metric
+produced by the accepted verification run; `oos_sharpe_net` is the canonical
+choice. An in-sample metric (any metric whose name begins with `is_`, and
+specifically `is_walk_forward_sharpe_net`) is NEVER a valid decision metric. If
+the reviewer recommends one, substitute the out-of-sample net Sharpe and say so
+in the rationale.
 
 - Tests fail after retries: CRASH.
 - Verification BUG_SIGNAL persists after retries: DISCARD.
 - Critical review issue remains: DISCARD.
+- In `ALPHA_RESEARCH`, average activity below the campaign floor of 1.0
+  trades/day over the OOS window: DISCARD regardless of Sharpe, drawdown, or
+  reviewer verdict. This does not override the zero-trade gate-excluded
+  pre-registration confirmation required in section 5: the reviewer must
+  confirm the exact gate parameters and `excluded_candidate_count` before
+  DISCARD. Record it as a valid negative result with the measured trades/day.
 - Decision Sharpe <= -0.5: DISCARD.
 - Decision Sharpe > 1.0 and reviewer PASS: STRONG KEEP.
 - Decision Sharpe > 0.5: SIGNIFICANT KEEP or STRONG KEEP.
@@ -1242,6 +1257,10 @@ Use the reviewer's recommended metric only for `ALPHA_RESEARCH`.
   and a non-improvement is DISCARD. Plain KEEP is invalid without a numeric
   baseline.
 - Max drawdown >= 30%: DISCARD regardless of Sharpe.
+
+In-sample metrics remain reportable evidence and are useful for diagnosing
+overfit (IS strongly above OOS is the expected signature of a non-generalizing
+fit), but they never drive the decision.
 
 After a `DATA_INFRA_G0` implementation and completed verification, decide
 `INFRA_REPAIRED` only for explicit `infra_gate_outcome=GATE_PASSED` backed by

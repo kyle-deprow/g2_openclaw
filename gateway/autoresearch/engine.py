@@ -138,6 +138,8 @@ def _phase_instruction(
             "rationale in canonical receipts: families discarded due to BUG_SIGNAL or other "
             "untrustworthy-evidence decisions belong in contested_methodology_families, not "
             "burned_theory_families; families with clean negative results stay burned."
+            " Any context packet baseline_metric MUST be expressed as an "
+            "out-of-sample, cost-net Sharpe; do not use an in-sample or gross baseline."
         ),
         Phase.DEBATE: (
             "Run the fixed five-agent debate. "
@@ -252,7 +254,10 @@ def _phase_instruction(
             "with concrete fix requests. Before accepting a zero-trade gate-excluded result "
             "for DISCARD, confirm that the verification artifact's exact gate parameter names "
             "and values match the approved consensus implementation_brief and that "
-            "excluded_candidate_count is present; otherwise do not accept the DISCARD."
+            "excluded_candidate_count is present; otherwise do not accept the DISCARD. "
+            "For ALPHA_RESEARCH, the reviewer's recommended_metric_name MUST name an "
+            "out-of-sample, cost-net metric from the accepted verification artifact. "
+            "An in-sample metric is not a valid recommendation."
         ),
         Phase.FIX_TEST: (
             "Apply a narrow fix against the latest verification or review failure. "
@@ -268,6 +273,10 @@ def _phase_instruction(
         ),
         Phase.DECISION_LOG: (
             "Decide and log the completed iteration. "
+            "For ALPHA_RESEARCH, the decision Sharpe is the out-of-sample cost-net Sharpe; "
+            "if the reviewer recommended an in-sample metric, substitute the out-of-sample "
+            "net Sharpe and state the substitution in the rationale. Average activity below "
+            "1.0 trades/day over the OOS window is DISCARD regardless of Sharpe. "
             "Memory writes are forbidden before this final decision artifact exists. "
             "Set memory_write_required=true only for ALPHA_RESEARCH KEEP, SIGNIFICANT KEEP, "
             "STRONG KEEP, or DISCARD with a latest completed verification status=PASS and "

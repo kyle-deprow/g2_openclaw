@@ -235,6 +235,11 @@ KEEP_DECISIONS = frozenset(
     {FinalDecision.KEEP, FinalDecision.SIGNIFICANT_KEEP, FinalDecision.STRONG_KEEP}
 )
 
+# Mirrors the operator campaign activity floor in
+# gateway/agent_config/skills/autoresearch/SKILL.md section 8. If the operator
+# changes the floor, both must change together.
+ALPHA_MIN_TRADES_PER_DAY = 1.0
+
 
 def _canonical_iteration_experiment_id(iteration: int) -> str:
     if iteration < 1:
@@ -1186,6 +1191,16 @@ def _validate_final_decision_artifact(
             "ALPHA_RESEARCH final_decision cannot contain infra_rationale"
         )
 
+    metric_name = artifact.recommended_metric_name
+    if metric_name and (
+        metric_name.lower().startswith("is_")
+        or "in-sample" in metric_name.lower()
+        or "in_sample" in metric_name.lower()
+    ):
+        raise AutoresearchValidationError(
+            f"ALPHA_RESEARCH decision metric {metric_name!r} must be out-of-sample and cost-net"
+        )
+
     if latest_review is not None and (
         latest_review.verdict is ReviewVerdict.FAIL or latest_review.critical_issues
     ):
@@ -1206,7 +1221,25 @@ def _validate_final_decision_artifact(
             )
         return
 
-    metric_value = artifact.recommended_metric_value
+    if (
+        latest_verification is not None
+        and latest_verification.trades_per_day is not None
+        and latest_verification.trades_per_day < ALPHA_MIN_TRADES_PER_DAY
+    ):
+        if artifact.decision is not FinalDecision.DISCARD:
+            raise AutoresearchValidationError(
+                "average activity below 1.0 trades/day requires final_decision=DISCARD"
+            )
+        return
+
+    # The runner must not accept a model-supplied number as the decision Sharpe;
+    # oos_sharpe_net is guaranteed non-null for any non-G0 PASS verification by
+    # artifacts.py:1994-2010.
+    metric_value = (
+        latest_verification.oos_sharpe_net
+        if latest_verification is not None and latest_verification.oos_sharpe_net is not None
+        else artifact.recommended_metric_value
+    )
     if metric_value is None:
         raise AutoresearchValidationError(
             "final_decision requires recommended_metric_value for completed experiments"
