@@ -171,15 +171,16 @@ stop_transient_unit() {
   systemctl --user stop "$unit_name" >/dev/null 2>&1 || true
 }
 
-# Observed long-task peaks reach 2.99G. MemoryHigh=8G and MemoryMax=12G make
-# the simultaneous gateway/long-task ceilings 10G + 12G = 22G against 30.25
-# GiB RAM, leaving headroom for the Quantipy API and OS; throttle onset is
-# 8G + 8G = 16G, well below host pressure.
+# Torch/CUDA host-side allocations add pressure. MemoryHigh is a reclaim
+# throttle and MemoryMax is the kill point. Raising only the throttle to 10G
+# gives headroom without changing host-OOM arithmetic: gateway MemoryMax=10G
+# + long task 12G = 22G against 30.25 GiB of RAM. Do not raise MemoryMax; a
+# prior combined-ceiling change created a host-OOM path and was reverted.
 if ! setsid systemd-run \
   --user --no-block --collect --unit="$unit_name" --service-type=exec \
   --setenv=PATH="$transient_path" --working-directory="$working_directory" \
   --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
-  --property=MemoryHigh=8G --property=MemoryMax=12G --property=KillMode=control-group \
+  --property=MemoryHigh=10G --property=MemoryMax=12G --property=KillMode=control-group \
   -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
   </dev/null >/dev/null 2>&1; then
   die "detached systemd unit could not be enqueued: $unit_name"

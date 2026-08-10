@@ -19,9 +19,11 @@ operator acknowledgement through `autoresearch-acknowledge-campaign-review`
 may clear that pause; the PM does not edit the flag or touch G2.
 
 The active campaign (operator-directed, 2026-08-09) permits strategies using
-any holding period from minutes up to a full trading session on a fixed
-five-ETF universe chosen by the loop in its first campaign round, subject to
-data-contract coverage. Every position must be flat by the session close;
+any holding period from minutes up to a full trading session on a universe
+that each iteration pre-registers through a mechanical, data-independent
+selection rule fixed before any return or performance data is examined,
+subject to data-contract coverage. Every position must be flat by the session
+close;
 overnight carry is forbidden. Iterations vary the strategy family and model
 class. The normative directive lives in the
 autoresearch skill's "Operator Campaign Directive" section.

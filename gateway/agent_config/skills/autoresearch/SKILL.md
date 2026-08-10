@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.12.0
+version: 8.14.0
 ---
 
 # Autoresearch
@@ -287,13 +287,20 @@ The current campaign is scoped by operator direction and applies to every
   flat by the session close; overnight carry is forbidden. The receipt-bound
   panel is regular-hours 1-minute data, so an overnight leg cannot be
   execution-modelled and must not be proposed.
-- The tradable universe is a **fixed set of five liquid ETFs chosen by the
-  loop**: the first context/debate round of the campaign selects the five
-  symbols, subject to Quantipy data-contract coverage verification
-  (`qp.security_universe_screen`/`qp.prices` within the frozen campaign
-  interval and the hydration budget). Record the chosen set and its rationale
-  in the consensus implementation brief; subsequent iterations reuse the same
-  five symbols with no member substitution.
+- Each iteration's consensus MUST declare a `universe_plan` containing a
+  mechanical, data-independent selection rule: the screen criteria, ranking
+  criterion, as-of date, and resulting member count. The rule must be
+  evaluable through `qp.security_universe_screen`/`qp.prices` within the frozen
+  campaign interval and hydration budget. It must be fixed BEFORE any return,
+  label, or performance data is examined; selection may never use
+  out-of-sample returns, realized Sharpe, or any performance metric, because that is
+  instrument cherry-picking and invalidates the iteration. The selected
+  members bind to `member_union_digest` and the runner validates them against
+  the plan; post-hoc member substitution is forbidden, so the set yielded by
+  the screen is the set used. A third party must be able to re-derive the
+  universe from the recorded rule alone. A universe may legitimately be small
+  or large, and reusing a previous iteration's universe is allowed when the
+  rule is restated: the requirement is pre-registration, not novelty.
 - Across iterations, vary the **strategy family and model class** (e.g.
   mean-reversion, momentum bursts, order-flow/volume imbalance, volatility
   breakout; rule-based and learned models alike) rather than re-tuning one
@@ -312,10 +319,12 @@ The current campaign is scoped by operator direction and applies to every
   `burned_theory_families` and must not re-list it in
   `contested_methodology_families`. Clean negatives stay permanently burned.
 - **Activity:** proposals must target **at least one trade per day on average
-  aggregated across the five-ETF panel** over the out-of-sample window. A
-  verification result below 1.0 trades/day on average misses the activity
-  requirement regardless of Sharpe. Proposals should leave headroom above this
-  floor rather than targeting it exactly.
+  aggregated across the pre-registered panel** over the out-of-sample window.
+  A verification result below 1.0 trades/day on average misses the activity
+  requirement regardless of Sharpe. The verification artifact must also report
+  trades per day per instrument, so a large universe cannot satisfy the
+  aggregate floor while most instruments sit idle. Proposals should leave
+  headroom above this floor rather than targeting it exactly.
 - **Rationale for the relaxation:** campaign evidence indicates that trading
   friction, not signal absence, has been the binding constraint: one iteration
   found a null-beating edge consumed by costs, and another pre-screened for
@@ -331,9 +340,9 @@ The current campaign is scoped by operator direction and applies to every
   trivially rescaled rerun of a burned family is not novel. Contested-family
   revisit rules are unchanged.
 - All other protocol rules (data contract, budgets, decision gates, review)
-  are unchanged. If five ETFs with adequate contract coverage cannot be
-  established, report it as an operator blocker rather than substituting
-  non-ETF instruments.
+  are unchanged. If the pre-registered universe with adequate contract
+  coverage cannot be established, report it as an operator blocker rather than
+  substituting an unapproved instrument set.
 
 ## Compute Fit and GPU Choice
 
@@ -361,6 +370,27 @@ execution; CPU choices must still be reproducible in the existing environment.
 Never install dependencies, fabricate capability evidence, or switch execution
 devices. Verification compares the actual run with the declared implementation
 compute fit and reports any mismatch.
+
+The host provides one NVIDIA RTX 3080 with 10 GiB VRAM. Keep peak VRAM under
+8 GiB for every GPU experiment. Newly permitted model classes are
+gradient-boosted trees (`xgboost`, `lightgbm`) and neural sequence models
+(`torch`), alongside the existing linear/statistical options.
+
+Determinism is mandatory and is the hard constraint. Set explicit seeds for
+every GPU or mixed experiment. Torch paths must set
+`torch.use_deterministic_algorithms(True)` and the
+`CUBLAS_WORKSPACE_CONFIG=:4096:8` environment variable. Tree paths must pin a
+deterministic tree method rather than rely on defaults. If bitwise determinism
+cannot be achieved for the chosen architecture, say so explicitly in the
+stage summary and quantify measured run-to-run variation; silently
+non-reproducible results are not acceptable evidence.
+
+Choosing GPU is never required: the control plane does not prefer GPU, and a
+linear CPU model that clears costs remains entirely valid. Model class follows
+the hypothesis, not the hardware. `compute_fit.required_dependencies` must
+list the actual importable package names used. A `gpu`/`mixed` target is
+rejected by the runner unless the capability snapshot shows those packages
+installed; a mis-declared dependency fails closed.
 
 ## Loop
 
@@ -690,10 +720,44 @@ Quantipy constraints:
 - Use a simple indicator core with optional Reddit/news sentiment conditioning.
 - Hyperparameter tuning uses time-series-aware splits.
 
+### Reddit Sentiment Tables
+
+`daily_ticker_summary` is NOT truncated: it holds every ticker with at least one
+mention in COMPLETED analyzed posts for that date and subreddit, with `rank` as
+the ordinal by mention count. Its useful columns are `summary_date`, `ticker`,
+`total_mentions`, `bullish_count`, `bearish_count`, `neutral_count`,
+`avg_confidence`, `weighted_sentiment` (= (bullish - bearish) / total, in the
+range [-1, +1]), and `rank`.
+
+`TradingUniverse` IS top-N truncated, with a default of 20 per day. Absence
+from `TradingUniverse` means the ticker was not in that day's top N; absence
+from `daily_ticker_summary` means there were no mentions among analyzed posts.
+These are different facts. Absence is INFORMATIVE, not missing data: a ticker
+with no row on a date had low or no attention that day. Do not impute it, drop
+the date, or treat it as missing-at-random; encode it as an explicit
+low-attention state.
+
+Only a fraction of scraped in-window posts have been analyzed, so a raw
+mention-count feature partly measures pipeline coverage rather than market
+attention. A conditional-sentiment feature (given that mentions exist, what
+was the tone) is far less exposed to this than a mention-volume feature. Any
+experiment using attention volume must state how it handled this confound.
+
+The granularity is DAILY: one value per ticker per subreddit per date, while
+the campaign trades intraday. Sentiment therefore conditions intraday state;
+it cannot time an intraday entry by itself.
+
+**Do NOT name specific tickers as good or bad sentiment candidates.** Density
+varies by instrument and changes as the backfill progresses. The proposing
+panel must MEASURE per-instrument coverage and mention density for its own
+pre-registered universe over the campaign window, report those figures, and
+justify any instrument it leans on. Guidance must never hardcode a recommended
+ticker set.
+
 The implementation worker derives and prewarms the Quantipy data plan before the
 committed experiment runtime is invoked. Use the public client path
 (`qp.security_universe_screen()`, `qp.security_universe_history()`, and `qp.prices()`)
-to derive the fixed, sorted panel request. The Quantipy runtime remains authoritative
+to derive the pre-registered, sorted panel request. The Quantipy runtime remains authoritative
 for panel creation, hydration, receipt validation, and receipt persistence; never
 fabricate or replace its receipts. Do not import
 `quantipy`, open a network client, access a provider or database, or hydrate data from
@@ -789,7 +853,7 @@ Implementation requirements:
 - Commit after focused tests pass; notebook rendering is optional smoke/report evidence and
   never replaces the required typed runtime verification.
 - The committed v2 package must contain exactly the client-free `prepare`, `smoke`,
-  `feasibility`, and `model` stage contract. The fixed manifest panel is the handoff
+  `feasibility`, and `model` stage contract. The pre-registered manifest panel is the handoff
   from the implementation plan to the runtime; never move the prewarm calls into a
   stage to work around a preflight rejection.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
@@ -804,12 +868,12 @@ Implementation requirements:
   outside this queue path, fail closed and report the infrastructure blocker
   without emitting a fix artifact. Record the run directory in stage notes and
   use its status files for progress and recovery.
-  The launcher gives the detached worker a `MemoryHigh=8G` soft limit and a
+  The launcher gives the detached worker a `MemoryHigh=10G` soft limit and a
   `MemoryMax=12G` hard limit; these are separate from the OpenClaw gateway's
   native-crash containment limits. The worst-case simultaneous ceilings are
   10G for the gateway plus 12G for the long task, or 22G against 30.25 GiB of
   host RAM, leaving headroom for the Quantipy API and OS; throttle onset at
-  8G + 8G = 16G remains well below host pressure. Observed peaks are 6.2G for
+  8G + 10G = 18G remains well below host pressure. Observed peaks are 6.2G for
   the gateway and 2.99G for long-task runs.
 
 ## 5. Verify
@@ -863,11 +927,16 @@ semantics, and no stage may refuse work on the basis of projected cost. The
 feasibility stage must not reject on `encoded_feature_columns`,
 `calibration_fit_seconds`, or `projected_model_seconds`. Derive detached
 verification `timeout_seconds` from that projection with
-`timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)`; on a
-first attempt there is no projection, so record that in the artifact and use
-the default 14400 seconds, while a fix round uses prior feasibility output
-carried into the round. A timeout kill is recoverable
-execution-interrupted evidence routed to a bounded fix round.
+`timeout_seconds = min(max(3 * projected_model_seconds, 900), 43200)` for
+`compute_fit.target` `gpu`/`mixed`, or
+`timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)` for
+`cpu`/`none`. The 900-second floor and 3x headroom multiplier are unchanged.
+On a first attempt there is no projection, so record that in the artifact and
+use the default 28800 seconds for `gpu`/`mixed` or the default 14400 seconds
+for `cpu`/`none`; a fix round uses prior feasibility output carried into the
+round. Measured `projected_model_seconds` still drives the timeout, and the
+ceiling is only a cap, not permission to skip projection. A timeout kill is
+recoverable execution-interrupted evidence routed to a bounded fix round.
 
 Verification order is fixed: focused tests, then launch the exact direct argv
 `env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run
@@ -1276,6 +1345,9 @@ Actions:
 
 - KEEP-family: retain the accepted experiment commit, update the numeric
   baseline when the decision artifact requires it, and log the metrics.
+  Because the universe can differ between iterations, the decision log must
+  record the universe digest and member count alongside the metric, and
+  cross-iteration metric comparisons must state whether the universes matched.
 - DISCARD/CRASH: do not promote the disposable experiment commit; log why and
   move to the next proposal.
 - NO_CONSENSUS: set `NOT_RUN` and the explicit no-memory flag, remain

@@ -529,13 +529,22 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.12.0" in raw_skill
+    assert "version: 8.14.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
     assert "regular-hours 1-minute data" in skill
-    assert "five symbols with no member substitution" in skill
-    assert "at least one trade per day on average aggregated across the five-etf panel" in skill
+    assert "fixed set of five liquid etfs" not in skill
+    assert "reuse the same five symbols with no member substitution" not in skill
+    assert "each iteration's consensus must declare a `universe_plan`" in skill
+    assert "screen criteria, ranking criterion, as-of date, and resulting member count" in skill
+    assert "selection may never use out-of-sample returns" in skill
+    assert "any performance metric" in skill
+    assert (
+        "at least one trade per day on average aggregated across the pre-registered panel" in skill
+    )
+    assert "five-etf panel" not in skill
+    assert "trades per day per instrument" in skill
     assert "below 1.0 trades/day on average misses the activity requirement" in skill
     assert "trading friction, not signal absence, has been the binding constraint" in skill
     assert "context, not an instruction to prefer long holds" in skill
@@ -552,6 +561,33 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "scalping" not in plan
     assert "short-holding-period" not in plan
     assert "at least 2 trades per day" not in plan
+
+
+def test_autoresearch_docs_describe_sentiment_tables_and_forbid_ticker_picks() -> None:
+    normalized = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split()).lower()
+    sentiment = normalized.split("### reddit sentiment tables", 1)[1].split(
+        "the implementation worker derives and prewarms", 1
+    )[0]
+
+    assert "daily_ticker_summary" in sentiment
+    assert "not truncated" in sentiment
+    assert "completed analyzed posts" in sentiment
+    assert "rank" in sentiment and "ordinal by mention count" in sentiment
+    assert "tradinguniverse" in sentiment
+    assert "top-n truncated" in sentiment
+    assert "default of 20 per day" in sentiment
+    assert "absence is informative" in sentiment
+    assert "explicit low-attention state" in sentiment
+    assert "only a fraction of scraped in-window posts have been analyzed" in sentiment
+    assert "pipeline coverage rather than market attention" in sentiment
+    assert "conditional-sentiment feature" in sentiment
+    assert "mention-volume feature" in sentiment
+    assert "one value per ticker per subreddit per date" in sentiment
+    assert "cannot time an intraday entry by itself" in sentiment
+    assert "measure per-instrument coverage and mention density" in sentiment
+
+    for ticker in ("spy", "qqq", "iwm", "tlt", "tqqq"):
+        assert ticker not in sentiment
 
 
 def test_autoresearch_decision_gate_uses_oos_metric_and_activity_floor() -> None:
@@ -581,6 +617,22 @@ def test_autoresearch_docs_require_feasibility_telemetry_as_reporting_duty() -> 
     assert "projected_model_seconds" in skill
     assert "These are reporting duties, not admission gates" in skill
     assert "The feasibility stage must not reject on `encoded_feature_columns`," in skill
+
+
+def test_autoresearch_docs_describe_gpu_model_classes_and_tiered_timeouts() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    assert "one NVIDIA RTX 3080 with 10 GiB VRAM" in skill
+    assert "peak VRAM under 8 GiB" in skill
+    assert "Determinism is mandatory and is the hard constraint." in skill
+    assert "gradient-boosted trees (`xgboost`, `lightgbm`)" in skill
+    assert "neural sequence models (`torch`)" in skill
+    assert "torch.use_deterministic_algorithms(True)" in skill
+    assert "CUBLAS_WORKSPACE_CONFIG=:4096:8" in skill
+    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 43200)" in skill
+    assert "default 28800 seconds for `gpu`/`mixed`" in skill
+    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in skill
+    assert "default 14400 seconds for `cpu`/`none`" in skill
 
 
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:

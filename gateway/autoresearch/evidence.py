@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -85,6 +86,9 @@ from gateway.autoresearch.constants import (
 )
 from gateway.autoresearch.enums import (
     Phase as Phase,
+)
+from gateway.autoresearch.enums import (
+    ResearchMode as ResearchMode,
 )
 from gateway.autoresearch.enums import (
     VerificationStatus as VerificationStatus,
@@ -1314,6 +1318,8 @@ def _validate_quantipy_run_panel(value: object, *, label: str) -> dict[str, obje
 
 def _validate_quantipy_run_envelope(
     snapshot: _SecureFileSnapshot,
+    *,
+    mode: ResearchMode | None = None,
 ) -> dict[str, object]:
     run = _strict_json_keys(
         _parse_json_snapshot(snapshot, label="Quantipy run.json"),
@@ -1450,6 +1456,40 @@ def _validate_quantipy_run_envelope(
                 raise AutoresearchValidationError(
                     f"{label} completed status requires accepted result only"
                 )
+            if stage == "feasibility" and (mode is None or mode is ResearchMode.ALPHA_RESEARCH):
+                summary = cast(str, result["summary"])
+                try:
+                    parsed_summary = json.loads(
+                        summary,
+                        parse_constant=lambda value: (_ for _ in ()).throw(
+                            ValueError(f"non-finite JSON number {value}")
+                        ),
+                    )
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise AutoresearchValidationError(
+                        f"{label}.result.summary feasibility summary must be a JSON object"
+                    ) from exc
+                if not isinstance(parsed_summary, dict):
+                    raise AutoresearchValidationError(
+                        f"{label}.result.summary feasibility summary must be a JSON object"
+                    )
+                for field_name in ("calibration_fit_seconds", "projected_model_seconds"):
+                    value = parsed_summary.get(field_name)
+                    try:
+                        numeric_value = float(value) if isinstance(value, int | float) else 0.0
+                    except OverflowError:
+                        numeric_value = math.inf
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int | float)
+                        or not math.isfinite(numeric_value)
+                        or numeric_value <= 0
+                    ):
+                        raise AutoresearchValidationError(
+                            f"{label}.result.summary feasibility stage must MEASURE one real "
+                            f"fit at the true encoded width: {field_name} must be a number "
+                            "strictly greater than 0"
+                        )
         elif status_value == "rejected":
             if result is None or result["decision"] != "rejected" or failure is not None:
                 raise AutoresearchValidationError(
@@ -1928,7 +1968,7 @@ def _validate_quantipy_experiment_evidence(
         raise AutoresearchValidationError(
             "quantipy_experiment_evidence.run_json_sha256 does not match run.json"
         )
-    run = _validate_quantipy_run_envelope(run_snapshot)
+    run = _validate_quantipy_run_envelope(run_snapshot, mode=state.mode)
     if run["run_id"] != evidence.run_id or run["success"] is not evidence.success:
         raise AutoresearchValidationError("Quantipy run.json identity does not match evidence")
     if run["manifest_sha256"] != _canonical_quantipy_manifest_sha256(manifest):

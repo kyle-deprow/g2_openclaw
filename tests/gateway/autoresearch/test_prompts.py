@@ -540,6 +540,28 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
     for stale_phrase in ("scalping", "short-holding-period", "at least 2 trades per day"):
         assert stale_phrase not in alpha_prompt
 
+    # The injected directive is a second source of truth alongside SKILL.md section 8
+    # and has drifted from it before. Pin the universe rule in both directions so the
+    # prompt cannot keep asserting a frozen panel after the directive is relaxed.
+    # Mode scoping is already covered above; this block pins the rule's CONTENT.
+    # `universe_plan` also appears in the shared consensus artifact contract, so it
+    # is deliberately not asserted absent from the DATA_INFRA_G0 prompt.
+    for phrase in (
+        "pre-registered panel",
+        "universe_plan",
+        "mechanical, data-independent selection rule",
+        "may never use out-of-sample returns",
+        "post-hoc member substitution is forbidden",
+        "trades per day per instrument",
+    ):
+        assert phrase in alpha_prompt
+    for stale_universe_phrase in (
+        "five-ETF panel",
+        "frozen five-ETF universe",
+        "no member substitution, the",
+    ):
+        assert stale_universe_phrase not in alpha_prompt
+
 
 def test_zero_trade_alpha_gate_pass_tuple_is_accepted_by_artifact_validator() -> None:
     candidate = replace(
@@ -669,8 +691,12 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
         state_path=Path("/tmp/state.json"),
     )
     assert "projected_model_seconds reported in implementation_result.summary" in verification
+    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 43200)" in verification
     assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in verification
-    assert "default 14400s" in verification
+    assert "default 28800s for gpu or mixed" in verification
+    assert "the default 14400s for cpu or none" in verification
+    assert "measured projected_model_seconds still drives the timeout" in verification
+    assert "ceiling is only a cap, not permission to skip projection" in verification
     assert (
         "zero trades because a declared, pre-registered cost or edge gate excluded every candidate"
         in verification

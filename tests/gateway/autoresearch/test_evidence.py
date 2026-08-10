@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime
 from hashlib import sha256
@@ -43,6 +44,7 @@ from gateway.autoresearch.transitions import (
 )
 from gateway.autoresearch_readiness import PlatformReadinessManifest
 
+from tests.gateway.autoresearch import builders as autoresearch_builders
 from tests.gateway.autoresearch.builders import (
     QUANTIPY_V2_CONTRACT_FILE_SHA256,
     GitWorktree,
@@ -59,9 +61,59 @@ from tests.gateway.autoresearch.builders import (
     _verification_result,
     _workspace_setup,
     _write_quantipy_detached_run_record,
-    _write_quantipy_v2_run,
     advance_state,
 )
+
+_ORIGINAL_WRITE_QUANTIPY_V2_RUN: Callable[..., tuple[str, str, Path, str, str, str]] = (
+    autoresearch_builders._write_quantipy_v2_run
+)
+
+
+def _write_quantipy_v2_run(
+    *args: object,
+    **kwargs: object,
+) -> tuple[str, str, Path, str, str, str]:
+    result = _ORIGINAL_WRITE_QUANTIPY_V2_RUN(*args, **kwargs)
+    run_path = result[2]
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    stage_receipts = cast(list[dict[str, object]], payload["stage_receipts"])
+    for receipt in stage_receipts:
+        if receipt["stage"] != "feasibility" or receipt["status"] != "completed":
+            continue
+        feasibility_result = cast(dict[str, object], receipt["result"])
+        feasibility_result["summary"] = json.dumps(
+            {
+                "calibration_fit_seconds": 1.0,
+                "projected_model_seconds": 2.0,
+            },
+            separators=(",", ":"),
+        )
+    run_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    return (*result[:3], sha256(run_bytes).hexdigest(), *result[4:])
+
+
+autoresearch_builders._write_quantipy_v2_run = _write_quantipy_v2_run
+
+
+def _parse_run_with_feasibility_summary(
+    run_path: Path,
+    summary: str,
+) -> dict[str, object]:
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    stage_receipts = cast(list[dict[str, object]], payload["stage_receipts"])
+    feasibility = next(receipt for receipt in stage_receipts if receipt["stage"] == "feasibility")
+    result = cast(dict[str, object], feasibility["result"])
+    result["summary"] = summary
+    run_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+    return autoresearch_evidence._validate_quantipy_run_envelope(snapshot)
 
 
 def test_advance_state_requires_successful_quantipy_v2_run_receipt(
@@ -715,6 +767,118 @@ def test_nonpass_requires_truthful_typed_quantipy_terminal_evidence(
     assert advanced.phase is Phase.FIX_TEST
 
 
+def test_completed_feasibility_rejects_null_calibration_fit_seconds(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="feasibility stage must MEASURE one real fit at the true encoded width: "
+        "calibration_fit_seconds",
+    ):
+        _parse_run_with_feasibility_summary(
+            Path(evidence.run_json_path),
+            json.dumps(
+                {
+                    "calibration_fit_seconds": None,
+                    "projected_model_seconds": 1.0,
+                }
+            ),
+        )
+
+
+def test_completed_feasibility_rejects_zero_projected_model_seconds(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="feasibility stage must MEASURE one real fit at the true encoded width: "
+        "projected_model_seconds",
+    ):
+        _parse_run_with_feasibility_summary(
+            Path(evidence.run_json_path),
+            json.dumps(
+                {
+                    "calibration_fit_seconds": 1.0,
+                    "projected_model_seconds": 0,
+                }
+            ),
+        )
+
+
+def test_completed_feasibility_accepts_positive_fit_projection(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+
+    run = _parse_run_with_feasibility_summary(
+        Path(evidence.run_json_path),
+        json.dumps(
+            {
+                "calibration_fit_seconds": 1.0,
+                "projected_model_seconds": 2.0,
+            }
+        ),
+    )
+
+    assert run["success"] is True
+
+
+def test_completed_feasibility_rejects_non_json_summary(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="feasibility summary must be a JSON object",
+    ):
+        _parse_run_with_feasibility_summary(Path(evidence.run_json_path), "accepted")
+
+
 @pytest.mark.parametrize(
     "mutation",
     (
@@ -1183,7 +1347,19 @@ def test_quantipy_execution_source_rejects_dirty_run_after_source_restore(
         item for item in run["source"]["files"] if item["path"] == "experiment/model.py"
     )
     assert model_source["sha256"] == sha256(dirty_bytes).hexdigest()
-    run_bytes = run_path.read_bytes()
+    feasibility = next(
+        receipt for receipt in run["stage_receipts"] if receipt["stage"] == "feasibility"
+    )
+    cast(dict[str, object], feasibility["result"])["summary"] = json.dumps(
+        {
+            "calibration_fit_seconds": 1.0,
+            "projected_model_seconds": 2.0,
+        },
+        separators=(",", ":"),
+    )
+    run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
 
     with pytest.raises(
         AutoresearchValidationError,
