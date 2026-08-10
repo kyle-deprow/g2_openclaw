@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 Events and Input"
+  short_description: "Handle G2 gestures, audio, and device events"
+  default_prompt: "Use $g2-events-input to implement or verify G2 OpenClaw input and device-event handling."

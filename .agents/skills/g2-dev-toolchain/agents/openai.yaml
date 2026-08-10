@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 Development Toolchain"
+  short_description: "Build, test, package, and sideload G2 apps"
+  default_prompt: "Use $g2-dev-toolchain to configure or verify G2 OpenClaw's Even Hub development workflow."

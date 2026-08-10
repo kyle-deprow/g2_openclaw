@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 Display UI"
+  short_description: "Design valid, readable G2 container layouts"
+  default_prompt: "Use $g2-display-ui to design or verify a G2 OpenClaw glasses screen."

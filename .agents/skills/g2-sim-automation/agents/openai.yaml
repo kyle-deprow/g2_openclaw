@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 OpenClaw Simulator API"
+  short_description: "Drive OpenClaw state through its local Dev API"
+  default_prompt: "Use $g2-sim-automation to run a G2 OpenClaw product journey through the local Dev API."

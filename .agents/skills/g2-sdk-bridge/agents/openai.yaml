@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 SDK Bridge"
+  short_description: "Use the installed EvenAppBridge contract safely"
+  default_prompt: "Use $g2-sdk-bridge to verify or change G2 OpenClaw's Even Hub bridge integration."

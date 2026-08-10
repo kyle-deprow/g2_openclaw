@@ -9,6 +9,8 @@ Drive the G2 app inside the EvenHub simulator through HTTP endpoints served by t
 
 **Canonical reference:** `.agents/skills/g2-sim-automation/SKILL.md`. This file is the distilled operating summary — read the canonical file before non-trivial work in this area.
 
+Use this skill for OpenClaw product state, exact display text, gateway integration, and product journeys. Use `g2-simulator-automation` for simulator `0.8.0`'s native framebuffer/WebView screenshots, console logs, and glasses input API.
+
 ## Core rules
 
 - **Start the stack with `make sim`** (gateway on port 8765 + Vite on 127.0.0.1:5173 + simulator); stop with `make stop`. Manual alternative: run `uv run python -m gateway` in the background, `cd g2_app && npm run dev:sim`, then `evenhub-simulator --no-aid http://localhost:5173`.

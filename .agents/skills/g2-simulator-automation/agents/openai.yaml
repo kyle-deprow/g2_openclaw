@@ -1,0 +1,4 @@
+interface:
+  display_name: "G2 Simulator Automation"
+  short_description: "Drive simulator screenshots, input, and logs"
+  default_prompt: "Use $g2-simulator-automation to run a native EvenHub Simulator check for G2 OpenClaw."

@@ -16,6 +16,11 @@ served by the loopback-only Vite simulator server on **port 5173**. The API plug
 simulator's webview. This control API is for the user or local coding agents
 only. It is not a phone/G2 feature and must never be exposed to another machine.
 
+Use this skill for product state, exact rendered text, gateway integration, and
+OpenClaw journeys. Use `g2-simulator-automation` instead for simulator `0.8.0`'s
+native framebuffer/WebView screenshots, console logs, and glasses input API.
+The two layers can be used together and must remain loopback-only.
+
 ## Starting the Stack
 
 ```bash

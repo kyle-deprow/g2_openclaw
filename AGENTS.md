@@ -10,7 +10,7 @@ The current agent path is Codex based. OpenClaw agent turns use the OpenAI provi
 
 - Python 3.13+ for `gateway/`, `infra/`, and tests, managed with `uv`.
 - TypeScript and Node.js 22+ for `g2_app/`, managed with `npm`.
-- EvenHub CLI `@evenrealities/evenhub-cli` 0.1.13, SDK `@evenrealities/even_hub_sdk` 0.0.11, and simulator 0.7.3.
+- The `g2_app` lockfile resolves EvenHub CLI `@evenrealities/evenhub-cli` 0.1.13 and SDK `@evenrealities/even_hub_sdk` 0.0.11. The simulator is installed globally; inspect its version before using version-specific features. Current audited upstream versions are SDK 0.0.12 and simulator 0.8.0.
 - OpenClaw local gateway with OpenAI/Codex auth. Authenticate with `openclaw models auth login --provider openai`.
 - Azure Bicep under `infra/` for infrastructure modules.
 
@@ -29,9 +29,13 @@ The current agent path is Codex based. OpenClaw agent turns use the OpenAI provi
 
 - Boot directly into the single autoresearch thread view (idle); there is no session menu or multi-thread UX.
 - Keep newest transcript messages at the top because G2 has no scroll API.
-- Use container-based G2 UI only: text, list, and image containers on the 576 x 288 canvas.
+- Use container-based G2 UI only: text, list, and image containers on the 576 x 288 canvas. The locked SDK allows 1-12 total containers, at most 8 text/list and 4 image containers.
 - Use `waitForEvenAppBridge()` and import G2 SDK types from `@evenrealities/even_hub_sdk`.
 - Use the glasses microphone through SDK event handling; the gateway handles buffering and STT.
+- Before changing G2 behavior, read the relevant `.agents/skills/g2-*/SKILL.md`, inspect the installed SDK declarations, and treat `docs/reference/g2-platform/` as versioned secondary evidence.
+- The locked SDK 0.0.11 uses `borderRadius`, `shutDownPageContainer`, event values 0-8, and distinguishable temple/ring sources. Do not copy stale `borderRdaius`, `shutDownContaniner`, `ContainerData`, key-down/up, or `onMicData` guidance.
+- Do not use SDK 0.0.12-only `zOrderIndex` until the dependency and `min_sdk_version` are deliberately migrated.
+- Use `.agents/skills/g2-sim-automation/` for the local OpenClaw `/_dev` API and `.agents/skills/g2-simulator-automation/` for the official simulator 0.8.0 native control plane.
 
 ## OpenClaw Rules
 

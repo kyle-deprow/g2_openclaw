@@ -1,498 +1,83 @@
 ---
 name: g2-dev-toolchain
-description:
-  Even Realities G2 developer toolchain covering the EvenHub CLI, simulator, app scaffolding, packaging, and deployment workflow. Use when setting up a G2 dev environment, generating QR codes, running the simulator, structuring an EvenHub app, creating app.json manifests, or packaging .ehpk files. Triggers on tasks involving evenhub CLI, evenhub-simulator, app.json, .ehpk packaging, QR code generation, or G2 development workflow.
+description: Configure, build, test, sideload, package, and upgrade the G2 OpenClaw Even Hub app. Use for Node/Vite setup, dependency pins, app.json, permissions and network whitelists, CLI commands, QR testing, simulator setup, .ehpk packaging, or release-readiness checks.
 ---
 
-# G2 Developer Toolchain
+# G2 development toolchain
 
-Complete reference for the Even Realities G2 AR glasses developer toolchain:
-CLI utilities, simulator, app scaffolding, manifest authoring, packaging, and
-deployment. Covers every command, flag, and workflow step needed to build, test,
-and ship G2 apps.
+Use repeatable builds and validate through progressively more realistic environments.
 
-## When to Apply
+## Respect the repository baseline
 
-Reference these guidelines when:
+- Node.js: 22 or newer.
+- `g2_app/package-lock.json` currently resolves `@evenrealities/even_hub_sdk` `0.0.11` and `@evenrealities/evenhub-cli` `0.1.13`.
+- `g2_app/app.json.min_sdk_version` is `0.0.11`.
+- The simulator is installed globally by the bootstrap workflow rather than locked in `g2_app`; inspect `evenhub-simulator --version` before relying on version-specific behavior.
+- Current audited upstream versions are SDK `0.0.12`, CLI `0.1.13`, and simulator `0.8.0`.
 
-- Setting up a new G2 development environment from scratch
-- Generating QR codes to load apps on glasses via the Even App
-- Scaffolding a new EvenHub app project
-- Authoring or modifying `app.json` manifest files
-- Running the desktop simulator for previewing glasses UI
-- Packaging `.ehpk` files for distribution
-- Configuring Vite or other dev servers for G2 development
-- Troubleshooting differences between simulator and real hardware
+Do not use `latest` in committed dependencies. Before upgrading, read intervening changelogs, inspect the new `.d.ts`, update `min_sdk_version` only when justified, and rerun simulator plus real-device tests. SDK `0.0.12` adds z-order support and validation; it is not silently available to the locked `0.0.11` app.
 
----
+Use `npm` in `g2_app/` and commit `package-lock.json`. Build to `g2_app/dist/`. Keep application and SDK code browser-compatible; no Node-only modules belong in the WebView bundle.
 
-## Ecosystem Overview
+## Maintain a valid manifest
 
-| Package | Purpose | Version |
-|---|---|---|
-| `@evenrealities/even_hub_sdk` | TypeScript SDK for WebView ↔ Even App communication | 0.0.11 |
-| `@evenrealities/evenhub-cli` | CLI for dev workflow: QR codes, init, login, packaging | 0.1.13 |
-| `@evenrealities/evenhub-simulator` | Desktop simulator for previewing glasses UI | 0.7.3 |
-| `@jappyjan/even-realities-ui` | React component library for browser settings pages | community |
+- `package_id`: lowercase reverse-domain identifier; each segment starts with a letter; no hyphens.
+- `edition`: current schema value `"202601"`.
+- `name`: at most 20 characters.
+- `version`: three-part semver.
+- `min_app_version` and `min_sdk_version`: required strings.
+- `entrypoint`: must exist inside `dist/`.
+- `permissions`: objects with a non-empty `name` and `desc`.
+- `supported_languages`: values from the current supported set.
 
----
+Declare only used capabilities. Current permission names include `network`, `location`, `g2-microphone`, `phone-microphone`, `album`, and `camera`.
 
-## Installation
+For `network`, list each allowed origin in `whitelist`. The whitelist is an Even-side permission gate, not a CORS bypass; the gateway must also return valid browser CORS headers. Use HTTPS/WSS outside controlled local development and never ship credentials in URLs or the bundle.
+
+## Use repository commands
 
 ```bash
-# SDK (project dependency)
-npm install @evenrealities/even_hub_sdk
-
-# CLI (global or dev dependency)
-npm install -g @evenrealities/evenhub-cli
-# or local: npm install -D @evenrealities/evenhub-cli
-
-# Simulator (global)
-npm install -g @evenrealities/evenhub-simulator
-```
-
----
-
-## CLI Tool (`evenhub` / `eh`)
-
-Binary aliases: both `evenhub` and `eh` work. Built with Commander.js, uses inquirer for prompts.
-
-### `evenhub qr` — Generate QR Code (PRIMARY dev command)
-
-#### All Options
-
-| Flag | Alias | Type | Default | Description |
-|---|---|---|---|---|
-| `--url <url>` | `-u` | string | — | Full URL, overrides all other options |
-| `--ip <ip>` | `-i` | string | auto-detected | IP address or hostname |
-| `--port [port]` | `-p` | string | prompted | Port (empty = no port in URL) |
-| `--path <path>` | — | string | prompted | URL path |
-| `--https` | — | boolean | false | Use HTTPS scheme |
-| `--http` | — | boolean | true | Use HTTP scheme (default) |
-| `--external` | `-e` | boolean | false | Open QR in external image viewer |
-| `--scale <scale>` | `-s` | number | 4 | Scale factor for external QR image |
-| `--clear` | — | boolean | false | Clear cached settings before prompting |
-
-**IMPORTANT:** Use machine's local network IP (192.168.x.x), NOT localhost — phone must reach dev server over network.
-
-**Caching:** CLI caches scheme, IP, port, path between runs. Use `--clear` to reset.
-
-#### Examples
-
-```bash
-# Basic — interactive prompts for IP, port, path
-evenhub qr
-
-# Full URL override (skips all prompts)
-evenhub qr --url "http://192.168.1.42:5173"
-
-# Specify IP and port directly
-evenhub qr --ip 192.168.1.42 --port 5173
-
-# Short alias with explicit port
-eh qr -i 192.168.1.42 -p 5173
-
-# Open QR in external viewer (useful for large screens / screen sharing)
-evenhub qr --url "http://192.168.1.42:5173" --external --scale 8
-
-# Clear cached settings and start fresh
-evenhub qr --clear
-```
-
----
-
-### `evenhub init` — Initialize Project
-
-#### Options
-
-| Flag | Alias | Type | Default | Description |
-|---|---|---|---|---|
-| `--directory <dir>` | `-d` | string | `./` | Target directory for the generated file |
-| `--output <output>` | `-o` | string | `./app.json` | Output file path (takes precedence over `--directory`) |
-
----
-
-### `evenhub login` — Authenticate
-
-#### Options
-
-| Flag | Alias | Type | Default | Description |
-|---|---|---|---|---|
-| `--email <email>` | `-e` | string | prompted | Account email address |
-
-- Same account as Even mobile app
-- Credentials saved locally
-- Required before `evenhub pack --check`
-
----
-
-### `evenhub pack` — Package App
-
-Produces `.ehpk` file using internal WASM packer. Bundles the `app.json` metadata and the entire built project folder; format is opaque (WASM-packed, no documented internal structure).
-
-#### Arguments and Options
-
-| Argument/Flag | Type | Default | Description |
-|---|---|---|---|
-| `<json>` (positional) | string | required | Path to `app.json` manifest |
-| `<project>` (positional) | string | required | Path to built output folder (e.g. `dist`) |
-| `--output <output>` / `-o` | string | `out.ehpk` | Output `.ehpk` filename |
-| `--no-ignore` | boolean | false | Include dotfiles in the package |
-| `--check` / `-c` | boolean | false | Check package ID availability (requires login) |
-
-#### Examples
-
-```bash
-evenhub pack app.json dist                          # basic (produces out.ehpk)
-evenhub pack app.json dist -o myapp.ehpk             # custom output
-evenhub pack app.json dist -o myapp.ehpk --check     # check ID availability
-```
-
----
-
-## Simulator (`evenhub-simulator`)
-
-Native Rust binary using LVGL v9 for rendering. Thin Node.js wrapper.
-
-### CLI Options
-
-| Flag | Description |
-|---|---|
-| `[targetUrl]` | URL to load on startup (positional argument) |
-| `-c, --config <path>` | Path to config file |
-| `-g, --glow` / `--no-glow` | Enable/disable glow effect |
-| `-b, --bounce <type>` | Bounce animation: `default` or `spring` |
-| `--list-audio-input-devices` | List available audio input devices |
-| `--aid <device>` / `--no-aid` | Choose specific audio device / use default |
-| `--print-config-path` | Print the config file path |
-| `--completions <shell>` | Print shell completions (bash/elvish/fish/powershell/zsh) |
-| `-V, --version` | Print version |
-| `-h, --help` | Print help |
-
-Config file paths: Linux `~/.config`, macOS `~/Library/Application Support`, Windows `AppData/Roaming`.
-
-Platform binaries (optional deps): `@evenrealities/sim-linux-x64`, `@evenrealities/sim-win32-x64`, `@evenrealities/sim-darwin-x64`, `@evenrealities/sim-darwin-arm64`.
-
-### Screenshot Feature (v0.5.0+)
-
-The simulator can export the current glasses display as an RGBA PNG:
-
-- Click the screenshot button in the simulator window
-- File saved to the current working directory with a timestamp filename
-- Path logged to simulator stdout (warn level) and web inspector console
-- Image is **not** affected by the `--glow` flag (glow is a post-processing visual effect only)
-
-### Simulator Limitations vs Real Hardware
-
-| Feature | Simulator | Real Hardware |
-|---|---|---|
-| Font rendering | 4-bit colour rendering matches hardware greyscale depth (v0.5.2+) | Native firmware fonts |
-| List scrolling | Re-implemented in sim | Firmware native scrolling |
-| Image size limits | Not enforced | Enforced (will reject oversize) |
-| Status events | Hardcoded values, never fire | Real events from hardware |
-| Audio delivery | 100ms/event (3200 bytes) | 10ms/event (40 bytes) |
-| Event source | `sysEvent` for clicks | `textEvent`/`listEvent` |
-| `textContainerUpgrade` | Full visual redraw | Smooth in-place update |
-| User/device info | Hardcoded placeholder values | Real user and device data |
-| Error handling | Error-response handling may differ from hardware | Native error responses |
-| Image processing | Processes images faster, does not enforce size constraints | Enforced size constraints |
-| List index 0 | Missing `currentSelectItemIndex` at list index 0 | Correct index tracking |
-| `CLICK_EVENT = 0` | Deserializes as `undefined` | Correct enum value |
-| x/y position type | i32 (signed, since v0.7.3) | u32 (unsigned) |
-| Screenshot export | RGBA PNG to CWD (v0.5.0+) | N/A |
-
----
-
-## App Structure
-
-Minimal file structure:
-
-```
-my-app/
-  index.html          ← entry point loaded by glasses WebView
-  package.json         ← dependencies and scripts
-  vite.config.ts       ← dev server configuration
-  app.json             ← app metadata manifest (for packaging)
-  src/
-    main.ts            ← app bootstrap
-    styles.css         ← stylesheet
-```
-
-### `index.html`
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>My G2 App</title>
-</head>
-<body>
-  <script type="module" src="/src/main.ts"></script>
-</body>
-</html>
-```
-
-### `package.json`
-
-```json
-{
-  "name": "my-g2-app",
-  "version": "1.0.0",
-  "private": true,
-  "scripts": {
-    "dev": "vite",
-    "dev:network": "vite --host 0.0.0.0",
-    "build": "vite build",
-    "test": "vitest run",
-    "qr": "evenhub qr --http --port 5173",
-    "pack": "npm run build && evenhub pack app.json dist -o myapp.ehpk"
-  },
-  "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.11"
-  },
-  "devDependencies": {
-    "typescript": "^5.5.0",
-    "vite": "^5.4.0",
-    "vitest": "^2.0.0"
-  }
-}
-```
-
-### `vite.config.ts`
-
-```typescript
-import { defineConfig } from "vite";
-
-export default defineConfig({
-  server: {
-    host: 'localhost',    // localhost by default; use `npm run dev:network` or `--host 0.0.0.0` for phone access
-    port: 5173,
-  },
-  // G2 WebView requires a single JS bundle — no code-splitting
-  build: {
-    outDir: 'dist',
-    rollupOptions: {
-      output: {
-        inlineDynamicImports: true,    // single JS bundle for WebView
-      },
-    },
-  },
-});
-```
-
-### `src/main.ts`
-
-```typescript
-import { waitForEvenAppBridge } from '@evenrealities/even_hub_sdk';
-
-const bridge = await waitForEvenAppBridge();
-
-// Your app logic here
-console.log("G2 app started");
-```
-
-### `src/styles.css`
-
-```css
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-```
-
----
-
-## `app.json` Manifest (CRITICAL)
-
-### Full Schema
-
-```json
-{
-  "package_id": "com.example.myapp",
-  "edition": "202601",
-  "name": "My app",
-  "version": "1.0.0",
-  "min_app_version": "2.0.0",
-  "min_sdk_version": "0.0.11",
-  "entrypoint": "index.html",
-  "permissions": [
-    {
-      "name": "network",
-      "desc": "This app needs network access.",
-      "whitelist": ["https://example.com"]
-    }
-  ],
-  "supported_languages": ["en"],
-  "tagline": "Short description (optional, no longer in CLI template)",
-  "description": "Longer description (optional, no longer in CLI template)",
-  "author": "Your Name (optional, no longer in CLI template)"
-}
-```
-
-**`package_id` rules:** Reverse-domain, each segment starts with lowercase letter, only lowercase letters + numbers. No hyphens. `com.myname.myapp` = valid, `com.my-name.my-app` = invalid.
-
-**`permissions`:** Current EvenHub CLI 0.1.13 format is an empty array `[]` or
-an array of objects. Every object has `name` and `desc`; `network` may also
-include `whitelist`.
-
-### Validation Rules
-
-| Field | Rule |
-|---|---|
-| `package_id` | Regex `^[a-z][a-z0-9]*(\.[a-z][a-z0-9]*)+$` — minimum 2 segments, no hyphens |
-| `edition` | Must be exactly `"202601"` |
-| `version` | Must be semver `x.y.z` |
-| `min_app_version` | Required string — default `"2.0.0"` in CLI template |
-| `min_sdk_version` | Required string — default `"0.0.7"` in CLI template; use the installed SDK version for project manifests |
-| `supported_languages` | Required array of valid language codes: `en`, `de`, `fr`, `es`, `it`, `zh`, `ja`, `ko` |
-| `tagline` | Max 255 characters (optional, no longer in CLI template) |
-| `description` | Max 1024 characters (optional, no longer in CLI template) |
-| `author` | String (optional, no longer in CLI template) |
-| `permissions` | Required array of permission objects. Valid names: `g2-microphone`, `phone-microphone`, `album`, `location`, `network`, `camera`; `desc` is 1-300 chars |
-| Unknown fields | Rejected by the 0.1.13 Zod schema unless the CLI changes |
-
----
-
-## Development Workflow
-
-```
-1. npm install @evenrealities/even_hub_sdk
-2. Code your web app (any framework — just HTML + TS + SDK)
-3. npm run dev (Vite on port 5173, localhost only) — or npm run dev:network to bind 0.0.0.0 for phone access
-4. Terminal 2: npx evenhub qr --url "http://<local-ip>:5173"
-5. Scan QR with Even App on iPhone
-6. App loads on glasses; Vite HMR works for live changes
-7. OR: evenhub-simulator http://localhost:5173 (desktop preview)
-```
-
----
-
-## G2 OpenClaw Sim Stack
-
-The G2 OpenClaw project has a unified command to start (or restart) the full
-simulator stack: gateway → Vite dev server → simulator. This is the recommended
-way to run the project during development.
-
-### Unified Restart
-
-```bash
-# Kill any running services, then launch the full stack
+cd g2_app
+npm install
+npm test
+npm run typecheck
+npm run dev:sim
+
+# From repository root
 make sim
+make stop
 
-# Alias
-make restart
-
-# CLI equivalent
-uv run python -m gateway launch --restart
+# Phone sideloading and package
+cd g2_app
+npm run dev:network
+npx evenhub qr --url "http://<lan-ip>:5173"
+npm run pack
 ```
 
-### What `make sim` does (in order):
+Use the machine's LAN IP for QR sideloading, not `localhost` or `0.0.0.0`. Keep server exposure intentional and firewall-aware.
 
-1. **Start OTel stack** — `otel-up` Makefile dependency runs
-   `docker compose -f docker-compose.otel.yml up -d` (Grafana, Jaeger, Prometheus)
-2. **Stop** — kills any running gateway, Vite, and simulator processes
-3. **Start OpenClaw daemon** — `openclaw daemon start` (if not already running)
-4. **Start Gateway** — Python WebSocket server on port 8765
-5. **Start Vite** — G2 app dev server on port 5173
-6. **Start Simulator** — `evenhub-simulator http://localhost:5173`
+## Choose the simulator control layer
 
-Use `make sim-lite` for G2 + OpenClaw only (no OTel Docker stack).
+- Use `g2-sim-automation` for G2 OpenClaw's local `/_dev` API, exact display text, gateway state, and product journeys.
+- Use `g2-simulator-automation` with simulator `0.8.0` for native framebuffer/WebView screenshots, injected glasses input, and console logs.
+- These layers complement each other. Do not expose the app-level `/_dev` API to the LAN or replace it merely because the official simulator has a native control plane.
 
-### Individual Controls
+## Test in layers
 
-```bash
-make launch         # Start without killing first
-make stop           # Stop all services
-```
+1. Run TypeScript type-checks and unit tests.
+2. Run the current product simulator workflow for state and gateway integration.
+3. Use native simulator automation for repeatable layout and input smoke checks when simulator `0.8.0` is available.
+4. QR-sideload to physical G2 hardware for permissions, BLE behavior, fonts, audio, lifecycle, and timing.
+5. Test a private `.ehpk` build before release.
 
-### Direct Python CLI
+The simulator is not a hardware emulator. Do not accept simulator-only evidence for visual QA, image transfer, device status, background suspension, BLE timing, or production permissions.
 
-```bash
-uv run python -m gateway launch              # full stack
-uv run python -m gateway launch --restart    # stop + full stack
-uv run python -m gateway launch --no-simulator  # without simulator
-uv run python -m gateway stop                # stop all
-```
+## Package safely
 
----
+- Ensure `dist/index.html` matches `app.json.entrypoint`.
+- Exclude secrets, `.env` files, local credentials, and source maps unless intentional.
+- Keep `dist/`, `node_modules/`, screenshots, and `*.ehpk` ignored unless artifact policy says otherwise.
+- Validate that the root interaction model exposes the system exit confirmation.
+- Record tested SDK, CLI, simulator, Even App, firmware, and hardware versions for releases.
 
-## Production Packaging
-
-```bash
-npm run build
-npx evenhub pack app.json dist -o myapp.ehpk
-```
-
-Add `*.ehpk` to `.gitignore`.
-
----
-
-## Recommended npm Scripts
-
-```json
-{
-  "scripts": {
-    "dev": "vite",
-    "dev:network": "vite --host 0.0.0.0",
-    "build": "vite build",
-    "qr": "evenhub qr --http --port 5173",
-    "pack": "npm run build && evenhub pack app.json dist -o myapp.ehpk"
-  }
-}
-```
-
----
-
-## even-dev Shared Environment
-
-Repository: https://github.com/BxNxM/even-dev
-
-Handles app discovery, dep installation, Vite config, simulator launch.
-
-- `./start-even.sh` prompts for app selection
-- `APP_NAME=demo ./start-even.sh` or `APP_PATH=../my-app ./start-even.sh`
-- External apps registered in `apps.json` (git URLs auto-cloned)
-
----
-
-## Browser UI Library (`@jappyjan/even-realities-ui`)
-
-React 19 component library for settings/config WebView pages (NOT glasses display).
-
-- Components: Button, IconButton, Card, Text, Input, Textarea, Select, Checkbox, Radio, Switch, Badge, Chip, Divider
-- 90+ icons (hardware, battery, navigation, actions, features, settings)
-- Tailwind-based styling, import `@jappyjan/even-realities-ui/styles.css`
-- Design tokens as CSS custom properties (colors, typography, spacing)
-
----
-
-## Reference Apps
-
-| App | Description | Link |
-|---|---|---|
-| chess | Full app, tests, modular architecture | github.com/dmyster145/EvenChess |
-| reddit | Clean app, API proxy, packaging | github.com/fuutott/rdt-even-g2-rddit-client |
-| weather | Settings UI, plain CSS | github.com/nickustinov/weather-even-g2 |
-| tesla | Image rendering, backend integration | github.com/nickustinov/tesla-even-g2 |
-| pong | Canvas game, image container | github.com/nickustinov/pong-even-g2 |
-| snake | Canvas game, image container | github.com/nickustinov/snake-even-g2 |
-
----
-
-## Tips
-
-- Use inline styles or plain CSS — avoid Tailwind requiring build plugins
-- Keep apps standalone — should work with just `npm run dev`
-- If app needs backend, put in `server/` with own `package.json` (even-dev auto-detects)
-- Use `@jappyjan/even-realities-ui` for browser settings page consistency
-
----
-
-## Cross-References
-
-- [docs/reference/g2-platform/evenhub_cli.md](docs/reference/g2-platform/evenhub_cli.md) — Full CLI analysis
-- [docs/reference/g2-platform/evenhub_simulator.md](docs/reference/g2-platform/evenhub_simulator.md) — Full simulator analysis
-- [docs/reference/g2-platform/g2_reference_guide.md](docs/reference/g2-platform/g2_reference_guide.md) — Comprehensive G2 reference
+Official references: [quickstart](https://hub.evenrealities.com/docs/get-started/quickstart/index), [packaging](https://hub.evenrealities.com/docs/ship/packaging), [CLI](https://hub.evenrealities.com/docs/reference/cli), [networking](https://hub.evenrealities.com/docs/build/networking), and [versioning](https://hub.evenrealities.com/docs/reference/versioning).

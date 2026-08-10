@@ -1,733 +1,103 @@
 ---
 name: g2-events-input
-description:
-  Even Realities G2 input event system, event routing, interaction patterns, and audio/microphone control. Use when handling user input from the R1 ring or temple gestures, implementing event listeners, debugging event routing issues, processing audio streams, or managing device status callbacks. Triggers on tasks involving onEvenHubEvent, OsEventTypeList, event capture, audio PCM, or input handling.
+description: Implement G2 OpenClaw touch/ring input, microphone, IMU, device-status, and lifecycle handling with the installed SDK. Use for onEvenHubEvent, OsEventTypeList, event capture, audio PCM, source distinctions, app-state routing, cleanup, or background recovery.
 ---
 
-# G2 Events & Input Handling
+# G2 events and input
 
-Complete reference for input events, event routing, audio capture, and device
-status on the Even Realities G2 AR glasses platform. Covers the R1 ring,
-temple gestures, microphone PCM streaming, and lifecycle callbacks.
+Use one typed event boundary and route by payload, source, and application state.
 
-## When to Apply
+## Subscribe and clean up
 
-Reference these guidelines when:
+```ts
+import { OsEventTypeList } from '@evenrealities/even_hub_sdk'
 
-- Handling user input from the R1 ring or temple touch gestures
-- Implementing `onEvenHubEvent` listeners or processing `EvenHubEvent` payloads
-- Debugging why events are not arriving or are arriving with unexpected shapes
-- Working with microphone audio (opening, closing, processing PCM frames)
-- Managing device status callbacks (`onDeviceStatusChanged`)
-- Implementing foreground/background lifecycle handling
-- Setting `isEventCapture` on containers to control event routing
-
-## Rule Categories by Priority
-
-| Priority | Category              | Impact   | Prefix      |
-| -------- | --------------------- | -------- | ----------- |
-| 1        | Event Quirks          | CRITICAL | `quirk-`    |
-| 2        | Event Routing         | CRITICAL | `routing-`  |
-| 3        | Audio System          | HIGH     | `audio-`    |
-| 4        | Input Best Practices  | HIGH     | `input-`    |
-| 5        | Device Status         | MEDIUM   | `status-`   |
-
----
-
-## 1. Hardware Input Sources
-
-The G2 platform has two physical input devices:
-
-- **G2 Glasses** — capacitive touch strips on the temple tips. Support tap,
-  double-tap, and swipe (scroll) gestures.
-- **R1 Ring** — a separate BLE-connected ring worn on the finger. Supports tap,
-  double-tap, and scroll gestures via a small trackpad.
-
-Both devices produce the **same event types** through the SDK. Your code does
-not need to distinguish which device generated the event — the `OsEventTypeList`
-value is identical regardless of source.
-
-**Important hardware constraints:**
-
-- The G2 glasses have **no camera** and **no speaker**.
-- Audio output is not possible on the glasses themselves.
-- The glasses have a **microphone** for voice input (see Audio System below).
-
----
-
-## 2. Event Types — `OsEventTypeList` Enum
-
-Every input and system event is identified by a numeric value from the
-`OsEventTypeList` enum:
-
-| Event                    | Value | Source(s)                        | Description                                        |
-| ------------------------ | ----- | -------------------------------- | -------------------------------------------------- |
-| `CLICK_EVENT`            | 0     | Ring tap, temple tap             | Single tap / select action                         |
-| `SCROLL_TOP_EVENT`       | 1     | Scroll gesture                   | Internal scroll reached the **top** boundary       |
-| `SCROLL_BOTTOM_EVENT`    | 2     | Scroll gesture                   | Internal scroll reached the **bottom** boundary    |
-| `DOUBLE_CLICK_EVENT`     | 3     | Ring double-tap, temple double-tap | Double tap action                                |
-| `FOREGROUND_ENTER_EVENT` | 4     | System                           | App comes to foreground                            |
-| `FOREGROUND_EXIT_EVENT`  | 5     | System                           | App goes to background                             |
-| `ABNORMAL_EXIT_EVENT`    | 6     | System                           | Unexpected disconnect or crash                     |
-
-### CRITICAL: Scroll events are BOUNDARY events
-
-`SCROLL_TOP_EVENT` and `SCROLL_BOTTOM_EVENT` are **NOT** raw gesture events.
-They fire **only** when the firmware's internal scroll position reaches the top
-or bottom boundary of the scrollable content. They do **not** fire on every
-individual scroll gesture.
-
-This means:
-
-- If a list has 5 items and the user scrolls down from item 0 → 1, no
-  `SCROLL_BOTTOM_EVENT` fires.
-- When the user scrolls past the last item, `SCROLL_BOTTOM_EVENT` fires once.
-- When the user scrolls back past the first item, `SCROLL_TOP_EVENT` fires once.
-- Between boundaries, the firmware handles scroll navigation silently — your
-  app receives no scroll events.
-
-```typescript
-// You will NOT see events for every scroll step.
-// You only see boundary hits:
-//   SCROLL_TOP_EVENT    → user tried to scroll past the top
-//   SCROLL_BOTTOM_EVENT → user tried to scroll past the bottom
-```
-
----
-
-## 3. Event Delivery System
-
-### Subscribing to Events
-
-All events arrive through a single callback registered via
-`bridge.onEvenHubEvent()`. The function returns an unsubscribe handle.
-
-```typescript
-import { waitForEvenAppBridge, OsEventTypeList } from '@evenrealities/even_hub_sdk';
-
-async function setupEventListener() {
-  const bridge = await waitForEvenAppBridge();
-
-  const unsubscribe = bridge.onEvenHubEvent((event) => {
-    // event is an EvenHubEvent object
-    console.log('Received event:', JSON.stringify(event));
-
-    // Determine which sub-event is populated
-    if (event.listEvent) {
-      handleListEvent(event.listEvent);
-    } else if (event.textEvent) {
-      handleTextEvent(event.textEvent);
-    } else if (event.sysEvent) {
-      handleSysEvent(event.sysEvent);
-    } else if (event.audioEvent) {
-      handleAudioEvent(event.audioEvent);
-    }
-  });
-
-  // Later, to stop listening:
-  // unsubscribe();
-  return unsubscribe;
-}
-```
-
-### `EvenHubEvent` Shape
-
-The callback receives an `EvenHubEvent` object. Exactly **one** of the
-following fields will be populated per event:
-
-| Field          | Type                     | When populated                         |
-| -------------- | ------------------------ | -------------------------------------- |
-| `listEvent`    | `List_ItemEvent`         | Input on a list container              |
-| `textEvent`    | `Text_ItemEvent`         | Input on a text container              |
-| `sysEvent`     | `Sys_ItemEvent`          | System-level events                    |
-| `audioEvent`   | `AudioEventPayload`      | Microphone PCM data frames             |
-| `jsonData`     | `Record<string, any>`    | Raw payload (useful for debugging)     |
-
----
-
-## 4. Event Data Models
-
-### `List_ItemEvent`
-
-Sent when the user interacts with a list container that has event capture.
-
-| Field                      | Type                           | Description                          |
-| -------------------------- | ------------------------------ | ------------------------------------ |
-| `containerID`              | `number \| undefined`          | Numeric ID of the list container     |
-| `containerName`            | `string \| undefined`          | Name of the list container           |
-| `currentSelectItemName`    | `string \| undefined`          | Display text of selected item        |
-| `currentSelectItemIndex`   | `number \| undefined`          | 0-based index of selected item       |
-| `eventType`                | `OsEventTypeList \| undefined` | Which event occurred                 |
-
-```typescript
-function handleListEvent(listEvent: List_ItemEvent) {
-  const { containerID, containerName, currentSelectItemName,
-          currentSelectItemIndex, eventType } = listEvent;
-
-  console.log(`List "${containerName}" (ID: ${containerID})`);
-  console.log(`Selected: "${currentSelectItemName}" at index ${currentSelectItemIndex}`);
-  console.log(`Event type: ${eventType}`);
-}
-```
-
-### `Text_ItemEvent`
-
-Sent when the user interacts with a text container that has event capture.
-
-| Field            | Type               | Description                        |
-| ---------------- | ------------------ | ---------------------------------- |
-| `containerID`    | `number`           | Numeric ID of the text container   |
-| `containerName`  | `string`           | Name of the text container         |
-| `eventType`      | `OsEventTypeList`  | Which event occurred               |
-
-```typescript
-function handleTextEvent(textEvent: Text_ItemEvent) {
-  const { containerID, containerName, eventType } = textEvent;
-  console.log(`Text "${containerName}" (ID: ${containerID}), event: ${eventType}`);
-}
-```
-
-### `Sys_ItemEvent`
-
-System-level events that are not tied to a specific container.
-
-| Field       | Type               | Description            |
-| ----------- | ------------------ | ---------------------- |
-| `eventType` | `OsEventTypeList`  | Which event occurred   |
-
-```typescript
-function handleSysEvent(sysEvent: Sys_ItemEvent) {
-  const { eventType } = sysEvent;
-  console.log(`System event: ${eventType}`);
-}
-```
-
----
-
-## 5. Event Routing Rules (CRITICAL)
-
-Event routing is determined by which container has `isEventCapture: 1` set.
-This is the single most important configuration for input handling.
-
-### Rule: Only ONE container should have `isEventCapture: 1` at a time.
-
-### Routing by container type:
-
-**When a List container has capture (`isEventCapture: 1`):**
-
-- Scroll gestures are handled **natively by the firmware** — the visible
-  selection highlight moves up/down automatically.
-- Your app receives `listEvent` with `SCROLL_TOP_EVENT` or
-  `SCROLL_BOTTOM_EVENT` only when the user hits a boundary.
-- Click and double-click events arrive as `listEvent` with the currently
-  selected item's name and index.
-
-**When a Text container has capture (`isEventCapture: 1`):**
-
-- The firmware scrolls text content internally.
-- Boundary events arrive as `textEvent`.
-- Click and double-click events arrive as `textEvent`.
-
-**Image containers:**
-
-- Image containers do **NOT** have an `isEventCapture` property.
-- They cannot receive events directly.
-- To handle input on a screen with only images, pair images with a hidden text
-  or list container that has `isEventCapture: 1`.
-
-### Routing example:
-
-```typescript
-import {
-  waitForEvenAppBridge,
-  OsEventTypeList,
-  type EvenHubEvent,
-} from '@evenrealities/even_hub_sdk';
-
-// --- Scenario A: List container has capture ---
-// Firmware handles scroll highlighting automatically.
-// You respond to CLICK and boundary events only.
-function handleListRouting(event: EvenHubEvent) {
-  if (!event.listEvent) return;
-
-  const { eventType, currentSelectItemIndex, currentSelectItemName } = event.listEvent;
-
-  if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-    console.log(`User selected: "${currentSelectItemName}" at ${currentSelectItemIndex}`);
-    // Navigate or act on selection
-  }
-  if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    console.log('Reached bottom of list — load more or wrap around');
-  }
-  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-    console.log('Reached top of list — wrap or ignore');
-  }
-}
-
-// --- Scenario B: Text container has capture ---
-// Firmware scrolls text internally.
-// You respond to CLICK and boundary events.
-function handleTextRouting(event: EvenHubEvent) {
-  if (!event.textEvent) return;
-
-  const { eventType } = event.textEvent;
-
-  if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-    console.log('User clicked while viewing text');
-  }
-  if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    console.log('Text fully scrolled — show next page or exit');
-  }
-}
-```
-
----
-
-## 6. Event Quirks (CRITICAL)
-
-These are known SDK behaviors and bugs that **will** cause issues if not
-handled. Every G2 app must account for all five.
-
-### Quirk 1: `CLICK_EVENT = 0` becomes `undefined`
-
-The SDK's `fromJson` deserialization normalizes the numeric value `0` to
-`undefined`. Since `CLICK_EVENT` has value `0`, click events will have
-`eventType === undefined` instead of `eventType === 0`.
-
-**Always use this pattern:**
-
-```typescript
-if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-  // Handle click — this covers both real hardware and the SDK bug
-}
-```
-
-**Never** write `if (eventType === OsEventTypeList.CLICK_EVENT)` alone — it
-will miss clicks when `eventType` is `undefined`.
-
-### Quirk 2: Missing `currentSelectItemIndex` at index 0
-
-The simulator (and occasionally real hardware) omits
-`currentSelectItemIndex` when the selected item is at index 0. The field
-may be `undefined` or missing entirely.
-
-**Mitigation:** Always track the selected index in your own application state.
-Do not rely solely on `currentSelectItemIndex` from the event payload.
-
-```typescript
-let selectedIndex = 0; // Track in your own state
-
-function handleListClick(listEvent: List_ItemEvent) {
-  // Use event index if available, fall back to tracked state
-  const index = listEvent.currentSelectItemIndex ?? selectedIndex;
-  console.log(`Acting on item at index: ${index}`);
-}
-```
-
-### Quirk 3: Simulator vs Real Device event source
-
-The simulator and real hardware send events through **different** sub-event
-fields:
-
-- **Simulator:** Sends button clicks as `sysEvent`
-- **Real hardware:** Sends clicks as `listEvent` or `textEvent` depending
-  on which container has `isEventCapture: 1`
-
-**You MUST handle ALL THREE event sources** to work in both environments:
-
-```typescript
-bridge.onEvenHubEvent((event) => {
+const unsubscribe = bridge.onEvenHubEvent(event => {
   const eventType =
+    event.textEvent?.eventType ??
     event.listEvent?.eventType ??
-    event.textEvent?.eventType ??
-    event.sysEvent?.eventType;
+    event.sysEvent?.eventType
 
   if (eventType === OsEventTypeList.CLICK_EVENT || eventType === undefined) {
-    handleClick();
-  } else if (eventType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-    handleDoubleClick();
-  } else if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-    handleScrollTop();
-  } else if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    handleScrollBottom();
+    // Handle press. Protobuf zero/default values can normalize to undefined.
   }
-});
+})
 ```
 
-### Quirk 4: Swipe / Scroll throttling
+Retain every unsubscribe function. Stop audio, IMU, location updates, timers, and sockets when their owning feature is torn down.
 
-Scroll events can fire in rapid succession when the user swipes quickly.
-Without throttling, your app may process multiple page changes or list jumps
-from a single physical gesture.
+## Route the locked SDK 0.0.11 event contract
 
-**Use a 300ms cooldown:**
+SDK `0.0.11` defines:
 
-```typescript
-let lastScrollTime = 0;
+- `CLICK_EVENT = 0`
+- `SCROLL_TOP_EVENT = 1`
+- `SCROLL_BOTTOM_EVENT = 2`
+- `DOUBLE_CLICK_EVENT = 3`
+- `FOREGROUND_ENTER_EVENT = 4`
+- `FOREGROUND_EXIT_EVENT = 5`
+- `ABNORMAL_EXIT_EVENT = 6`
+- `SYSTEM_EXIT_EVENT = 7`
+- `IMU_DATA_REPORT = 8`
 
-function handleScroll(eventType: OsEventTypeList) {
-  const now = Date.now();
-  if (now - lastScrollTime < 300) return; // Discard rapid duplicates
-  lastScrollTime = now;
+Event routing depends on the active capture container:
 
-  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-    // Navigate to previous page or wrap
-  } else if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    // Navigate to next page or wrap
-  }
-}
+- With text capture, swipes arrive as `textEvent`, while single and double presses arrive as `sysEvent`.
+- With list capture, firmware handles swipe navigation internally; a single press arrives as `listEvent`, while a double press arrives as `sysEvent`.
+- Lifecycle and IMU data use `sysEvent`; microphone buffers use `audioEvent`.
+
+- Handle `CLICK_EVENT` and `undefined` together because protobuf value zero may be omitted.
+- Treat top/bottom values as firmware navigation or boundary events, not key-down/key-up events.
+- Use `sysEvent.eventSource` when behavior must distinguish right temple, left temple, and R1 ring. SDK `0.0.11` exposes all three sources.
+- Track list selection in app state and use `currentSelectItemIndex ?? 0` for the first item.
+- Do not classify an entirely empty/malformed event as a click without documented firmware evidence. The current bare-event fallback in `g2_app/src/input.ts` is a compatibility path that needs hardware evidence before reuse.
+
+## Preserve product routing and safe exit
+
+G2 OpenClaw routes a press by state: start/stop recording, confirm transcription, recover errors, or reconnect. Double press rejects confirmation, cancels an active response, or recovers an error. Preserve those state-dependent behaviors unless product requirements change.
+
+Every root interaction model must still provide a reachable system exit flow:
+
+- Request it with `await bridge.shutDownPageContainer(1)`.
+- Do not unsubscribe or stop hardware before requesting mode `1`; the user can cancel the dialog.
+- Clean up after `SYSTEM_EXIT_EVENT` or `ABNORMAL_EXIT_EVENT`.
+- Use mode `0` only after an internal confirmation.
+- Never call the nonexistent bridge method `shutDownContaniner`; the current `any`-cast occurrence in `g2_app/src/input.ts` is technical debt.
+
+## Capture audio correctly
+
+```ts
+import { AudioInputSource } from '@evenrealities/even_hub_sdk'
+
+await bridge.audioControl(true, AudioInputSource.Glasses)
+
+const unsubscribe = bridge.onEvenHubEvent(event => {
+  if (!event.audioEvent) return
+  const pcm = event.audioEvent.audioPcm // Uint8Array
+  consumePcm(pcm, event.audioEvent.source)
+})
 ```
 
-### Quirk 5: `textContainerUpgrade` visual difference
-
-Simulator causes a full redraw flash; real hardware updates smoothly. Do not optimize around the simulator flicker.
-
----
-
-## 7. Audio System
-
-### Opening and Closing the Microphone
-
-```typescript
-await bridge.audioControl(true);   // open mic — starts PCM stream
-await bridge.audioControl(false);  // close mic — stops PCM stream
-// PREREQUISITE: createStartUpPageContainer must be called first
-```
-
-### PCM Format Specification
-
-| Parameter     | Value                                     |
-| ------------- | ----------------------------------------- |
-| Sample rate   | 16,000 Hz (16 kHz)                        |
-| Frame length  | 10 ms (dtUs: 10,000 µs)                   |
-| Bytes / frame | 40 bytes                                  |
-| Encoding      | PCM S16LE (signed 16-bit little-endian)   |
-| Channels      | Mono                                      |
-
-### Simulator vs Real Hardware Frame Sizes
-
-| Environment     | Frame duration | Bytes per frame |
-| --------------- | -------------- | --------------- |
-| Real hardware   | 10 ms          | 40 bytes        |
-| Simulator       | 100 ms         | 3,200 bytes     |
-
-The simulator uses the host machine's microphone at 16 kHz, signed 16-bit LE,
-but delivers frames 10× larger (100 ms per event with 3,200 bytes) compared to
-real hardware (10 ms per event with 40 bytes). Your audio processing must handle
-**both** frame sizes.
-
-### Receiving Audio Data
-
-```typescript
-const bridge = await waitForEvenAppBridge();
-
-// Ensure startup container exists
-await bridge.createStartUpPageContainer(/* ... */);
-
-// Open microphone
-await bridge.audioControl(true);
-
-const unsubscribe = bridge.onEvenHubEvent((event) => {
-  if (event.audioEvent) {
-    const pcm: Uint8Array = event.audioEvent.audioPcm;
-    // 40 bytes per frame on real hardware, 3200 on simulator
-    processAudioFrame(pcm);
-  }
-});
-
-// Cleanup when done
-async function stopAudio() {
-  await bridge.audioControl(false);
-  unsubscribe();
-}
-```
-
-### Audio Data from Host
-
-Audio data from the host application arrives in one of these formats:
-
-- `audioPcm` as a `number[]` inside `audioEvent`
-- Base64-encoded audio inside `jsonData`
-
-The SDK normalizes both formats into a `Uint8Array` accessible via
-`event.audioEvent.audioPcm`. You do not need to decode manually.
-
-### `onMicData` Convenience Method
-
-The bridge exposes an undocumented `onMicData` method at runtime that provides
-a cleaner API for audio-only listeners. It is absent from the SDK `.d.ts` type
-definitions, so you must cast through `any`:
-
-```typescript
-// Undocumented convenience wrapper — available at runtime but absent from .d.ts
-// Provides cleaner API for audio-only listeners
-(bridge as any).onMicData((data: { audioPcm: Uint8Array }) => {
-  processFrame(data.audioPcm);
-});
-```
-
-> **Note:** In this project, audio capture is delegated to the gateway — the G2
-> app sends `start_audio` / `stop_audio` control frames over WebSocket (see
-> `g2_app/src/input.ts`). The `onMicData` method is available in the SDK for
-> apps that need direct client-side audio access.
-
----
-
-## 8. Device Status Monitoring
-
-Use `onDeviceStatusChanged` to monitor the physical state of the glasses:
-
-```typescript
-const bridge = await waitForEvenAppBridge();
-
-const unsubscribe = bridge.onDeviceStatusChanged((status) => {
-  console.log('Connection:', status.connectType); // DeviceConnectType enum
-  console.log('Battery:',    status.batteryLevel); // 0-100
-  console.log('Wearing:',    status.isWearing);    // boolean
-  console.log('Charging:',   status.isCharging);   // boolean
-  console.log('In Case:',    status.isInCase);     // boolean
-});
-
-// Later, to stop monitoring:
-// unsubscribe();
-```
-
-### Status fields
-
-| Field          | Type                 | Description                            |
-| -------------- | -------------------- | -------------------------------------- |
-| `connectType`  | `DeviceConnectType`  | Current connection state               |
-| `batteryLevel` | `number`             | Battery percentage (0–100)             |
-| `isWearing`    | `boolean`            | Whether glasses are on the user's face |
-| `isCharging`   | `boolean`            | Whether the glasses are charging       |
-| `isInCase`     | `boolean`            | Whether the glasses are in their case  |
-
-### `DeviceConnectType` Enum Values
-
-| Value               | String               | Description                    |
-| ------------------- | -------------------- | ------------------------------ |
-| `None`              | `'none'`             | No connection state            |
-| `Connecting`        | `'connecting'`       | Connection in progress         |
-| `Connected`         | `'connected'`        | Successfully connected         |
-| `Disconnected`      | `'disconnected'`     | Connection lost                |
-| `ConnectionFailed`  | `'connectionFailed'` | Connection attempt failed      |
-
-### SIMULATOR WARNING
-
-`onDeviceStatusChanged` **NEVER fires** in the simulator. Device status values
-are hardcoded and static. You must test device status handling on real hardware.
-
----
-
-## 9. Foreground / Background Lifecycle
-
-Three system events manage app lifecycle:
-
-| Event                    | Value | Meaning                                 |
-| ------------------------ | ----- | --------------------------------------- |
-| `FOREGROUND_ENTER_EVENT` | 4     | App comes to foreground (user switched to it) |
-| `FOREGROUND_EXIT_EVENT`  | 5     | App goes to background (user switched away)   |
-| `ABNORMAL_EXIT_EVENT`    | 6     | Unexpected disconnect or crash                |
-
-Use these events to pause and resume expensive operations:
-
-```typescript
-bridge.onEvenHubEvent((event) => {
-  const eventType =
-    event.sysEvent?.eventType ??
-    event.textEvent?.eventType ??
-    event.listEvent?.eventType;
-
-  switch (eventType) {
-    case OsEventTypeList.FOREGROUND_ENTER_EVENT:
-      console.log('App entered foreground');
-      resumeTimers();
-      resumeAudioIfNeeded();
-      break;
-
-    case OsEventTypeList.FOREGROUND_EXIT_EVENT:
-      console.log('App moved to background');
-      pauseTimers();
-      pauseAudio();
-      break;
-
-    case OsEventTypeList.ABNORMAL_EXIT_EVENT:
-      console.log('Abnormal exit — cleaning up');
-      emergencyCleanup();
-      bridge.shutDownPageContainer(0);  // Note: SDK class name is "ShutDownContaniner" (typo)
-      break;
-  }
-});
-```
-
-**Best practice:** Always stop the microphone (`audioControl(false)`) and clear
-intervals/timeouts on `FOREGROUND_EXIT_EVENT`. Restart them on
-`FOREGROUND_ENTER_EVENT`.
-
----
-
-## 10. Input Handling Best Practices
-
-1. **Handle bare events (no sub-object) as clicks:**
-   ```typescript
-   // Check whether any sub-event is populated
-   const hasEvent = event.textEvent || event.listEvent || event.sysEvent;
-   if (!hasEvent) {
-     console.log('[Input] Bare event (no sub-object) — treating as click');
-     handleClick(event);
-     return;
-   }
-
-   // Sub-event exists — extract eventType normally
-   const et = event.textEvent?.eventType ?? event.listEvent?.eventType ?? event.sysEvent?.eventType;
-   if (et === OsEventTypeList.CLICK_EVENT || et === undefined) { /* ... */ }
-   ```
-   On some firmware versions, taps arrive as bare events with no sub-event populated. Treating them as clicks (rather than discarding them) ensures taps are never silently dropped.
-2. **Handle clicks from ALL event sources** — never assume one channel:
-   ```typescript
-   const et = event.listEvent?.eventType ?? event.textEvent?.eventType ?? event.sysEvent?.eventType;
-   ```
-3. **Account for CLICK_EVENT = 0 → undefined:** `if (et === OsEventTypeList.CLICK_EVENT || et === undefined)`
-4. **Throttle scrolls at 300ms** to prevent duplicate actions from rapid gestures.
-5. **Track selected index yourself** — `currentSelectItemIndex` may be missing at index 0.
-6. **Test on real hardware** — simulator event sources and frame sizes differ significantly.
-7. **Use `shutDownPageContainer(1)`** for graceful exit with user confirmation.
-8. **Pair image containers with hidden text** — images lack `isEventCapture`; use a full-screen text container (`content: ' '`, `isEventCapture: 1`) behind the image.
-
----
-
-## 11. Tap-to-Toggle Pattern
-
-The G2 SDK provides **no hold/release events** — only `CLICK_EVENT` (single tap)
-and `DOUBLE_CLICK_EVENT` (double tap). This means microphone control cannot
-use a push-to-talk model. Instead, the system uses **tap-to-start / tap-to-stop**
-(walkie-talkie model):
-
-1. **First tap** → start recording (open mic, begin streaming PCM)
-2. **Second tap** → stop recording (close mic, send audio for processing)
-
-### Scroll Cooldown (300ms)
-
-Scroll events use a **300 ms** cooldown (`SCROLL_COOLDOWN` in `input.ts`) to
-prevent rapid-fire boundary events from triggering multiple page changes:
-
-```typescript
-const SCROLL_COOLDOWN = 300;
-let lastScrollTime = 0;
-
-function handleScroll(eventType: OsEventTypeList) {
-  const now = Date.now();
-  if (now - lastScrollTime < SCROLL_COOLDOWN) return; // Discard rapid duplicates
-  lastScrollTime = now;
-
-  if (eventType === OsEventTypeList.SCROLL_TOP_EVENT) {
-    // Navigate to previous page
-  } else if (eventType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    // Navigate to next page
-  }
-}
-```
-
-**Tap debounce is NOT implemented** — the firmware natively distinguishes
-between `CLICK_EVENT` (single tap) and `DOUBLE_CLICK_EVENT` (double tap),
-so application-level tap debounce is unnecessary.
-
-### Server-Side Recording Limits
-
-The gateway enforces a **90-second maximum recording duration**
-(`_MAX_RECORDING_SECONDS` in `gateway/server.py`) and the audio buffer caps at
-**60 seconds** (`AudioBuffer.MAX_DURATION_SECONDS` in `gateway/audio_buffer.py`).
-If the user starts recording but never taps again to stop, the server
-automatically closes the audio session after 90 s.
-
----
-
-## 12. Compatible Event Data Formats
-
-The SDK normalizes multiple host payload shapes into `EvenHubEvent`. For debugging:
-`{ type: 'listEvent', jsonData: {...} }`, `{ type: 'list_event', data: {...} }`,
-or `['list_event', {...}]`. Audio: `{ type: 'audioEvent', jsonData: { audioPcm: [...] } }`.
-
----
-
-## 13. Double-Tap Semantics (No Session Menu)
-
-The G2 app shows a single fixed thread — an autoresearch status header plus the
-autoresearch PM session's latest messages. There is no session menu and no
-multi-thread UX. On boot the app transitions straight to `idle`.
-
-Double-tap behavior by state:
-
-- **idle** — no-op (nothing to open; the thread is always the same).
-- **error** — dismisses the error: transitions back to `idle` and repaints.
-- **thinking / streaming** — force-stop, unchanged.
-- **confirming** — reject path, unchanged.
-
-### Rejected Transcription Removal
-
-When a user rejects a transcription (tap during `confirming` state), the last
-user message is **fully removed** from the conversation — no marking, no prefix:
-
-```typescript
-// conversation.ts
-removeLastUser(): void {
-  for (let i = this.entries.length - 1; i >= 0; i--) {
-    if (this.entries[i].role === 'user') {
-      this.entries.splice(i, 1);
-      return;
-    }
-  }
-}
-```
-
-This uses `splice()` to physically remove the entry, keeping the conversation
-clean. The display is then refreshed with `formatReverse()`.
-
----
-
-## Quick Reference Card
-
-```
-INPUT SOURCES:       G2 temple touch, R1 ring (both produce same events)
-HARDWARE LIMITS:     No camera, no speaker on glasses
-
-EVENT VALUES:        CLICK=0  SCROLL_TOP=1  SCROLL_BOTTOM=2  DOUBLE_CLICK=3
-                     FG_ENTER=4  FG_EXIT=5  ABNORMAL=6
-
-STATES:          LOADING → IDLE (boot) → RECORDING → ...
-DOUBLE-TAP:      idle = no-op · error = back to idle
-                 thinking/streaming = force-stop (unchanged)
-REJECT:          Tap in confirming → removeLastUser() → splice, no mark
-
-SUBSCRIBE:           const unsub = bridge.onEvenHubEvent(cb)
-UNSUBSCRIBE:         unsub()
-
-ROUTING:             isEventCapture: 1 → that container gets events
-                     Image containers: pair with text/list for events
-
-MUST-HANDLE QUIRKS:  eventType 0 → undefined (SDK bug)
-                     index 0 → missing currentSelectItemIndex
-                     Simulator sends sysEvent, hardware sends list/textEvent
-                     Throttle scroll at 300ms
-                     textContainerUpgrade flashes in simulator only
-
-AUDIO:               bridge.audioControl(true/false)
-                     PCM: 16kHz, S16LE, mono, 40 bytes/frame (3200 in sim)
-                     Requires createStartUpPageContainer first
-
-DEVICE STATUS:       bridge.onDeviceStatusChanged(cb)
-                     Battery, wearing, charging, inCase, connectType
-                     NEVER fires in simulator
-
-LIFECYCLE:           FG_ENTER → resume, FG_EXIT → pause, ABNORMAL → cleanup
-```
-
----
-
-## Cross-References
-
-- `g2_app/src/input.ts` — Input handler implementation
-- `g2_app/src/conversation.ts` — Conversation history and formatting
-- `g2_app/src/utils.ts` — Utility functions (stripMarkdown, etc.)
-- `g2_app/src/state.ts` — State machine
-- `docs/reference/g2-platform/evenhub_sdk.md` — Full SDK reference
+- Declare `g2-microphone` for glasses audio and create the startup page before opening it.
+- Treat audio as 16 kHz, signed 16-bit little-endian, mono.
+- Process arbitrary chunk boundaries; do not hardcode obsolete 40-byte hardware packets.
+- Copy a typed-array slice before transferring its `ArrayBuffer` when the view may not cover the whole backing buffer.
+- Apply backpressure or batching when forwarding PCM to the gateway.
+- Use `event.audioEvent.audioPcm`; do not add undocumented `onMicData` casts.
+
+## Handle device streams and backgrounding
+
+- Use `imuControl(true, ImuReportPace.*)` and accept `IMU_DATA_REPORT` through `sysEvent.imuData`; pacing values are protocol codes, not Hz.
+- Use `onDeviceStatusChanged` for battery, wearing, charging, and connection state. Current simulators do not emit these changes.
+- Use `onLaunchSource` if launch behavior differs between app and glasses menus.
+- Persist important state eagerly and assume Android may reclaim the WebView, sockets, and streams.
+- Rehydrate state and reconnect or re-arm required streams on foreground or cold launch.
+
+## Verify interactions
+
+- Unit-test state-dependent press and double-press behavior, zero-value normalization, and text/list capture paths.
+- Test source-aware behavior for temple and ring inputs when used.
+- Exercise simulator click, double-click, up, and down actions.
+- Verify permissions, arbitrary audio chunks, background recovery, and exit flow on physical G2 hardware.
+
+Official references: [device APIs](https://hub.evenrealities.com/docs/build/device-apis), [background lifecycle](https://hub.evenrealities.com/docs/build/background-lifecycle), and [page lifecycle](https://hub.evenrealities.com/docs/build/page-lifecycle).
