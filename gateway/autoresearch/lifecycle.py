@@ -8,9 +8,6 @@ from gateway.autoresearch.artifacts import (
     FinalDecisionArtifact as FinalDecisionArtifact,
 )
 from gateway.autoresearch.constants import (
-    CAMPAIGN_REVIEW_PENDING_MESSAGE as CAMPAIGN_REVIEW_PENDING_MESSAGE,
-)
-from gateway.autoresearch.constants import (
     OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY as OPERATOR_INFRASTRUCTURE_SUSPENSION_LOG_SUMMARY,  # noqa: E501
 )
 from gateway.autoresearch.constants import (
@@ -150,8 +147,6 @@ def start_next_iteration(
     readiness: PlatformReadinessManifest | None = None,
 ) -> AutoresearchState:
     """Begin a completed iteration's successor with a newly validated READY receipt."""
-    if state.campaign_review_required:
-        raise AutoresearchValidationError(CAMPAIGN_REVIEW_PENDING_MESSAGE)
     if state.setup is None or state.final_decision is None:
         raise AutoresearchValidationError("next iteration requires completed current iteration")
     _validate_operator_precondition_infra_blocked_suspension(state)

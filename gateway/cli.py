@@ -1715,7 +1715,14 @@ def autoresearch_next(
         console.print(f"[red]autoresearch-next failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
 
-    console.print_json(json.dumps(action.to_dict(), indent=2, sort_keys=True))
+    output = action.to_dict()
+    if state.campaign_review_required is True:
+        output["campaign_review"] = {
+            "required": True,
+            "reason": state.campaign_review_reason,
+            "counters": state.campaign_counters.to_dict(),
+        }
+    console.print_json(json.dumps(output, indent=2, sort_keys=True))
 
 
 def _git_status_short(repo_root: Path) -> tuple[str, ...] | None:

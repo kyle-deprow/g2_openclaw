@@ -32,6 +32,7 @@ from gateway.autoresearch_supervisor import (
     AutoresearchSupervisor,
     SupervisorConfig,
     SupervisorOutcome,
+    SupervisorResult,
 )
 from typer.testing import CliRunner
 
@@ -283,7 +284,7 @@ def test_campaign_review_acknowledgement_refusals(
         acknowledge_campaign_review(state, acknowledgement)
 
 
-def test_campaign_review_blocks_next_action_and_lifecycle(
+def test_campaign_review_is_advisory_for_next_action_and_lifecycle(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
@@ -305,19 +306,13 @@ def test_campaign_review_blocks_next_action_and_lifecycle(
         ),
     )
 
-    with pytest.raises(
-        AutoresearchValidationError,
-        match="autoresearch-acknowledge-campaign-review",
-    ):
-        next_action(pending, policy, receipts, platform_readiness)
-    with pytest.raises(
-        AutoresearchValidationError,
-        match="autoresearch-acknowledge-campaign-review",
-    ):
-        start_next_iteration(pending, readiness=platform_readiness)
+    action = next_action(pending, policy, receipts, platform_readiness)
+    assert action.phase is Phase.REPEAT
+    next_iteration = start_next_iteration(pending, readiness=platform_readiness)
+    assert next_iteration.campaign_review_required is True
 
 
-def test_supervisor_campaign_review_is_no_action_before_any_wake(
+def test_supervisor_campaign_review_is_advisory_and_warning_is_latched(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     completed_memory_written_state: AutoresearchState,
@@ -329,10 +324,14 @@ def test_supervisor_campaign_review_is_no_action_before_any_wake(
     )
     supervisor = AutoresearchSupervisor(SupervisorConfig())
     monkeypatch.setattr(supervisor, "_load_state", lambda: pending)
+    monkeypatch.setattr(supervisor, "_validate_dispatchable_state", lambda *_args: None)
+    monkeypatch.setattr(supervisor, "_active_target_repo_writer_processes", lambda *_args: ())
     monkeypatch.setattr(
         supervisor,
         "_prepare_controller_lifecycle",
-        lambda *_args, **_kwargs: pytest.fail("campaign review must short-circuit first"),
+        lambda *_args, **_kwargs: SupervisorResult(
+            SupervisorOutcome.NO_ACTION, "controller_checked"
+        ),
     )
     wake_calls: list[object] = []
     monkeypatch.setattr(supervisor._rpc, "wake", lambda *args, **kwargs: wake_calls.append(args))
@@ -341,9 +340,12 @@ def test_supervisor_campaign_review_is_no_action_before_any_wake(
         result = supervisor.run_once()
 
     assert result.outcome is SupervisorOutcome.NO_ACTION
-    assert result.reason == "campaign_review_pending"
+    assert result.reason == "controller_checked"
     assert wake_calls == []
     assert "autoresearch-acknowledge-campaign-review" in caplog.text
+
+    supervisor.run_once()
+    assert caplog.text.count('"event": "supervisor.campaign_review_advisory"') == 1
 
 
 def test_campaign_review_cli_persists_acknowledgement_and_refuses_repeat(

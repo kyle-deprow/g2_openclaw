@@ -178,7 +178,15 @@ def _phase_instruction(
             "contested_methodology_families is distinct from the registry/ledger "
             "contested_families, which stay treated as burned. Once a revisit has occurred, "
             "the CURATOR must move the family to burned_theory_families and must not re-list "
-            "it in contested_methodology_families."
+            "it in contested_methodology_families. Before testing the 3-of-5 majority in both "
+            "rounds, group closely related proposals into theory-family clusters; cluster votes "
+            "count together when proposals share the same economic mechanism. After the single "
+            "retry, if no cluster reaches three votes, MUST NOT return NO_CONSENSUS: use the "
+            "pre-registered deterministic tie-break: most votes; least-explored family by "
+            "fewest hypothesis-registry entries across its families; lexicographically smallest "
+            "normalized family name. Record tie-break application, rule inputs, and losing "
+            "clusters in dissent_summary. The brief still faces full verification and unchanged "
+            "gates; majority is integrity, tie-break is the guaranteed exit."
         ),
         Phase.IMPLEMENTATION: (
             "Implementation is allowed only after a majority consensus. "
@@ -729,8 +737,6 @@ def next_action(
         transitions_module._validate_state(state, policy, validation_context)
     except ValueError as exc:
         raise AutoresearchValidationError(str(exc)) from exc
-    if state.campaign_review_required:
-        raise AutoresearchValidationError(constants.CAMPAIGN_REVIEW_PENDING_MESSAGE)
     if state.suspended:
         raise AutoresearchValidationError(
             "autoresearch is suspended on an infrastructure blocker; "

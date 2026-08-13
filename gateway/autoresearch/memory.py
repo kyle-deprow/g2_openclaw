@@ -131,7 +131,9 @@ def _default_mempalace_kg_path() -> Path:
 def _standard_metric_object(decision: FinalDecisionArtifact) -> str:
     if decision.recommended_metric_value is None:
         return standardize_mempalace_kg_object(decision.recommended_metric_name)
-    metric = f"{decision.recommended_metric_name}_{decision.recommended_metric_value:g}"
+    value = decision.recommended_metric_value
+    sign = "negative_" if value < 0 else ""
+    metric = f"{decision.recommended_metric_name}_{sign}{abs(value):g}"
     return standardize_mempalace_kg_object(metric)
 
 

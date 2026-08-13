@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.14.0
+version: 8.15.0
 ---
 
 # Autoresearch
@@ -184,9 +184,18 @@ different validated READY receipt, persists the successor, and only then wakes
 the PM. `autoresearch-next` remains a read-only model-facing action source and
 never changes an active or suspended iteration's receipt.
 
-In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
-remains `NO_CONSENSUS`; it does not suspend, does not write MemPalace, and the
-supervisor begins the next iteration with fresh context before waking the PM.
+In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, cluster closely related proposals
+into theory-family clusters before testing the 3-of-5 majority in both rounds;
+votes count together when proposals share the same economic mechanism. After
+the single retry, if no cluster reaches three votes, the arbiter MUST NOT return
+`NO_CONSENSUS`; select among tied leading clusters by the pre-registered
+deterministic tie-break: (1) most votes; (2) the family least explored in the
+hypothesis registry, meaning fewest prior entries across its families; (3) the
+lexicographically smallest normalized family name. Record in `dissent_summary`
+that the tie-break was applied, its rule inputs, and the losing clusters. The
+selected brief still faces full verification and unchanged decision gates. The
+majority bar is an integrity parameter and is unchanged; the tie-break is a
+mechanical parameter that guarantees the loop always has a next experiment.
 `INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
 readiness suspension. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
@@ -413,7 +422,7 @@ must carry the arbiter's required novelty delta before implementation dispatch.
 The controller recomputes campaign counters from that registry at each decision
 boundary. Eight consecutive non-KEEP outcomes or three consecutive
 `NO_CONSENSUS` outcomes (with infrastructure entries neutral) require a human
-campaign review before the loop can continue.
+campaign review advisory while the loop continues.
 
 ## Model Policy
 
@@ -793,13 +802,14 @@ majority. Required output:
   delta byte-identical to any prior delta is rejected.
 
 If there is no 3-of-5 majority, run one concise debate retry with the same
-context plus the dissent summary. If there is still no majority, emit the
-structured `NO_CONSENSUS` final decision and start a fresh context pass. This
-rule is identical in `ALPHA_RESEARCH` and `DATA_INFRA_G0`; a G0 consensus
-failure must not be relabeled `INFRA_BLOCKED`. Do not implement without a
-majority. The final decision must explicitly set
-`reviewer_verdict=NOT_RUN` and `memory_write_required=false`; do not write
-MemPalace facts or fabricate a memory receipt for `NO_CONSENSUS`.
+context plus the dissent summary. A post-retry split must be resolved by the
+three-step tie-break above and recorded in `dissent_summary`; do not return
+`NO_CONSENSUS` after the retry. The selected brief still faces full verification
+and unchanged decision gates. The majority bar is an integrity parameter and is
+unchanged; the tie-break is a mechanical parameter that guarantees the loop
+always has a next experiment. This rule is identical in `ALPHA_RESEARCH` and
+`DATA_INFRA_G0`; a G0 consensus failure must not be relabeled `INFRA_BLOCKED`.
+Do not implement without a majority.
 
 An operator-precondition consensus may also terminate before implementation as
 `INFRA_BLOCKED`, with `reviewer_verdict=NOT_RUN`, a concrete `infra_rationale`,
@@ -1375,11 +1385,13 @@ Actions:
 ## Recovery And Status
 
 - A completed decision can set `campaign_review_required=true` in the
-  authoritative schema-v5 state. This is an orthogonal campaign pause, not an
-  infrastructure suspension and not a new phase. The deterministic supervisor
-  returns `NO_ACTION` with reason `campaign_review_pending`, emits a structured
-  warning, and sends no wake, finalization, or stage dispatch while the flag is
-  set.
+  authoritative schema-v5 state. The review flag is a standing advisory to the
+  operator, not an infrastructure suspension and not a new phase. The
+  supervisor surfaces the review reason and counters in doctor and wake
+  messages, emits one structured warning per review record, and continues
+  normal wakes, finalization, and stage dispatch under the current directive.
+  Only explicit operator suspension or platform-readiness failure halts the
+  loop.
 - The PM must not clear `campaign_review_required`, edit its reason, or touch G2.
   An operator/Codex human must review the bounded status summary and acknowledge
   it with the recovery command below; the acknowledgement is durable review

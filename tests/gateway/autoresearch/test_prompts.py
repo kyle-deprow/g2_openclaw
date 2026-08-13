@@ -562,6 +562,17 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
     ):
         assert stale_universe_phrase not in alpha_prompt
 
+    for phrase in (
+        "group closely related proposals into theory-family clusters",
+        "in both rounds",
+        "pre-registered deterministic tie-break",
+        "most votes",
+        "least-explored family",
+        "lexicographically smallest normalized family name",
+        "losing clusters in dissent_summary",
+    ):
+        assert phrase in alpha_prompt
+
 
 def test_zero_trade_alpha_gate_pass_tuple_is_accepted_by_artifact_validator() -> None:
     candidate = replace(

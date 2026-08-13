@@ -122,6 +122,21 @@ from tests.gateway.autoresearch.builders import (
     _verification_result,
     advance_state,
 )
+from tests.gateway.autoresearch_fixtures import (
+    xnys_calendar_payload,
+)
+
+
+def _small_xnys_calendar() -> dict[str, object]:
+    payload = xnys_calendar_payload()
+    payload["declared_range"] = {
+        "start": "2024-01-01",
+        "end": "2024-01-10",
+        "timezone": "America/New_York",
+    }
+    payload["closed_dates"] = ["2024-01-03"]
+    payload["scheduled_half_days"] = ["2024-01-04"]
+    return payload
 
 
 def test_infrastructure_verification_failure_rejects_a_stale_state_reference_before_write(
@@ -624,7 +639,6 @@ def test_prompt_hard_byte_budget_for_reachable_phase_modes(
     no_consensus_retry = advance_state(
         no_consensus_once, _debate_result(policy, round_number=2), policy
     )
-    no_consensus_decision = advance_state(no_consensus_retry, _no_consensus(round_number=2), policy)
     g0_setup = advance_state(initial, _setup_artifact(), policy)
     g0_context = advance_state(
         g0_setup,
@@ -663,7 +677,6 @@ def test_prompt_hard_byte_budget_for_reachable_phase_modes(
         review_done,
         repeat_memory,
         no_consensus_retry,
-        no_consensus_decision,
         g0_context,
         g0_consensus,
         g0_implementation,
@@ -882,7 +895,7 @@ def test_next_action_fails_closed_when_accepted_union_manifest_is_mutated_later(
         next_action(state, policy, receipts, platform_readiness)
 
 
-def test_no_majority_allows_one_retry_then_routes_to_decision(
+def test_first_round_no_consensus_allows_one_retry_and_post_retry_is_rejected(
     policy: AutoresearchPolicy,
 ) -> None:
     state = _state_to_consensus(policy)
@@ -892,8 +905,11 @@ def test_no_majority_allows_one_retry_then_routes_to_decision(
     assert state.consensus_retry_count == 1
 
     state = advance_state(state, _debate_result(policy, round_number=2), policy)
-    state = advance_state(state, _no_consensus(round_number=2), policy)
-    assert state.phase is Phase.DECISION_LOG
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"retry is exhausted.*pre-registered deterministic tie-break",
+    ):
+        advance_state(state, _no_consensus(round_number=2), policy)
 
 
 def test_data_infra_majority_without_universe_plan_fails_at_consensus(
@@ -1372,7 +1388,11 @@ def test_no_consensus_rejects_a_memory_write_requirement(
     state = _state_to_consensus(policy)
     state = advance_state(state, _no_consensus(round_number=1), policy)
     state = advance_state(state, _debate_result(policy, round_number=2), policy)
-    state = advance_state(state, _no_consensus(round_number=2), policy)
+    state = replace(
+        state,
+        consensus_history=(*state.consensus_history, _no_consensus(round_number=2)),
+        phase=Phase.DECISION_LOG,
+    )
     decision = FinalDecisionArtifact(
         experiment_id="no-consensus-1",
         decision=FinalDecision.NO_CONSENSUS,
@@ -3287,7 +3307,11 @@ def test_final_decision_no_consensus_requires_no_consensus_artifact(
     state = _state_to_consensus(policy)
     state = advance_state(state, _no_consensus(round_number=1), policy)
     state = advance_state(state, _debate_result(policy, round_number=2), policy)
-    state = advance_state(state, _no_consensus(round_number=2), policy)
+    state = replace(
+        state,
+        consensus_history=(*state.consensus_history, _no_consensus(round_number=2)),
+        phase=Phase.DECISION_LOG,
+    )
     assert state.phase is Phase.DECISION_LOG
 
     with pytest.raises(
@@ -3360,6 +3384,103 @@ def test_alpha_implementation_rejects_missing_price_scope_preflight(
             state,
             replace(_implementation_result(), price_hydration_scope_preflight=None),
             policy,
+        )
+
+
+def _alpha_implementation_state(policy: AutoresearchPolicy) -> AutoresearchState:
+    state = _state_to_consensus(policy)
+    return advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+
+def _synthetic_calendar_preflight() -> PriceHydrationScopePreflight:
+    return PriceHydrationScopePreflight(
+        member_union_count=2,
+        experiment_start="2024-01-01",
+        experiment_end="2024-01-05",
+        timeframe="1min",
+        market_hours="regular",
+        session_count=4,
+        planned_symbol_sessions=8,
+        within_budget=True,
+    )
+
+
+def test_alpha_implementation_derives_session_count_from_synthetic_calendar(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _alpha_implementation_state(policy)
+    artifact = replace(
+        _implementation_result(),
+        price_hydration_scope_preflight=_synthetic_calendar_preflight(),
+    )
+
+    advanced = _runner_advance_state(
+        state,
+        artifact,
+        policy,
+        xnys_calendar_content=_small_xnys_calendar(),
+    )
+
+    assert advanced.phase is Phase.VERIFICATION
+
+
+def test_alpha_implementation_rejects_declared_session_count_mismatch(
+    policy: AutoresearchPolicy,
+) -> None:
+    preflight = replace(
+        _synthetic_calendar_preflight(), session_count=5, planned_symbol_sessions=10
+    )
+    state = _alpha_implementation_state(policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"session_count mismatch.*2024-01-01\.\.2024-01-05.*declared=5, derived=4",
+    ):
+        _runner_advance_state(
+            state,
+            replace(_implementation_result(), price_hydration_scope_preflight=preflight),
+            policy,
+            xnys_calendar_content=_small_xnys_calendar(),
+        )
+
+
+def test_alpha_implementation_rejects_declared_planned_symbol_sessions_mismatch(
+    policy: AutoresearchPolicy,
+) -> None:
+    preflight = replace(_synthetic_calendar_preflight(), planned_symbol_sessions=7)
+    state = _alpha_implementation_state(policy)
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"planned_symbol_sessions mismatch.*2024-01-01\.\.2024-01-05.*declared=7, derived=8",
+    ):
+        _runner_advance_state(
+            state,
+            replace(_implementation_result(), price_hydration_scope_preflight=preflight),
+            policy,
+            xnys_calendar_content=_small_xnys_calendar(),
+        )
+
+
+def test_alpha_implementation_unreadable_calendar_fails_closed_with_path(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _alpha_implementation_state(policy)
+    calendar_path = tmp_path / "missing-xnys-calendar.json"
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=f"XNYS calendar evidence unreadable at {calendar_path}",
+    ):
+        _runner_advance_state(
+            state,
+            replace(
+                _implementation_result(),
+                price_hydration_scope_preflight=_synthetic_calendar_preflight(),
+            ),
+            policy,
+            xnys_calendar_path=calendar_path,
         )
 
 

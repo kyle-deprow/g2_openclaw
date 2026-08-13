@@ -36,7 +36,6 @@ from gateway.autoresearch.configuration import (
     load_autoresearch_policy,
 )
 from gateway.autoresearch.constants import (
-    CAMPAIGN_REVIEW_PENDING_MESSAGE,
     CAMPAIGN_REVIEW_RECOVERY_COMMAND,
     DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS,
     DEFAULT_AUTORESEARCH_STAGE_INBOX,
@@ -520,6 +519,7 @@ class AutoresearchSupervisor:
         self._sleep = sleep
         self._rpc = OpenClawRPC(task_gateway)
         self._cycle_state: AutoresearchState | None = None
+        self._campaign_review_warning_record: str | None = None
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -543,18 +543,7 @@ class AutoresearchSupervisor:
             state = self._load_state()
             self._cycle_state = state
             if state.campaign_review_required:
-                _structured_log(
-                    logging.WARNING,
-                    "supervisor.campaign_review_pending",
-                    iteration=state.iteration,
-                    reason=state.campaign_review_reason,
-                    recovery_command=CAMPAIGN_REVIEW_RECOVERY_COMMAND,
-                    message=CAMPAIGN_REVIEW_PENDING_MESSAGE,
-                    consecutive_non_keep=state.campaign_counters.consecutive_non_keep,
-                    consecutive_no_consensus=state.campaign_counters.consecutive_no_consensus,
-                    iterations_since_last_keep=state.campaign_counters.iterations_since_last_keep,
-                )
-                return SupervisorResult(SupervisorOutcome.NO_ACTION, "campaign_review_pending")
+                self._log_campaign_review_advisory(state)
             if state.suspended:
                 return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
             if self._is_terminal_state(state):
@@ -654,7 +643,7 @@ class AutoresearchSupervisor:
         )
         try:
             self._rpc.wake(
-                message=wake_message,
+                message=self._with_campaign_review_advisory(state, wake_message),
                 idempotency_key=make_idempotency_key(
                     purpose="recovery",
                     material=f"{recovery_key}\nclaim={claim.token}",
@@ -689,6 +678,51 @@ class AutoresearchSupervisor:
             recovery_plan.reason,
             recovery_key,
             sent_wake=True,
+        )
+
+    def _campaign_review_record_key(self, state: AutoresearchState) -> str:
+        if state.campaign_review_history:
+            record = state.campaign_review_history[-1]
+            return json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":"))
+        return json.dumps(
+            {
+                "reason": state.campaign_review_reason,
+                "counters": state.campaign_counters.to_dict(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _log_campaign_review_advisory(self, state: AutoresearchState) -> None:
+        record_key = self._campaign_review_record_key(state)
+        if record_key == self._campaign_review_warning_record:
+            return
+        self._campaign_review_warning_record = record_key
+        _structured_log(
+            logging.WARNING,
+            "supervisor.campaign_review_advisory",
+            iteration=state.iteration,
+            reason=state.campaign_review_reason,
+            recovery_command=CAMPAIGN_REVIEW_RECOVERY_COMMAND,
+            counters=state.campaign_counters.to_dict(),
+            review_record=record_key,
+        )
+
+    def _with_campaign_review_advisory(
+        self,
+        state: AutoresearchState,
+        message: str,
+    ) -> str:
+        if not state.campaign_review_required:
+            return message
+        counters = state.campaign_counters
+        return (
+            f"{message}\n\nCampaign review advisory: {state.campaign_review_reason}. "
+            "Research continues under the current directive until the operator acknowledges "
+            f"the review with {CAMPAIGN_REVIEW_RECOVERY_COMMAND}. Counters: "
+            f"consecutive_non_keep={counters.consecutive_non_keep}, "
+            f"consecutive_no_consensus={counters.consecutive_no_consensus}, "
+            f"iterations_since_last_keep={counters.iterations_since_last_keep}."
         )
 
     def _record_cycle_safely(self, *, outcome: str, detail: str) -> None:
@@ -880,7 +914,7 @@ class AutoresearchSupervisor:
                 ),
             )
             proof = self._rpc.wake(
-                message=WAKE_MESSAGE,
+                message=self._with_campaign_review_advisory(next_state, WAKE_MESSAGE),
                 idempotency_key=make_idempotency_key(
                     purpose="repeat-successor",
                     material=build_authoritative_state_reference(
@@ -934,7 +968,9 @@ class AutoresearchSupervisor:
         experiment_id = receipt.experiment_id if receipt is not None else "<missing-receipt>"
         try:
             proof = self._rpc.wake(
-                message=FINALIZED_MEMORY_WAKE_MESSAGE,
+                message=self._with_campaign_review_advisory(
+                    finalized, FINALIZED_MEMORY_WAKE_MESSAGE
+                ),
                 idempotency_key=make_idempotency_key(
                     purpose="memory-finalized",
                     material=memory_wake_acknowledgement_key(finalized),

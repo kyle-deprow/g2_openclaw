@@ -406,13 +406,22 @@ def test_runtime_docs_separate_no_consensus_from_infrastructure_blocking() -> No
 
     for path in paths:
         text = " ".join(path.read_text(encoding="utf-8").split())
-        assert "second-round `NO_CONSENSUS` remains `NO_CONSENSUS`" in text, path
         assert "`ALPHA_RESEARCH` and `DATA_INFRA_G0`" in text, path
-        assert "does not suspend" in text, path
-        assert "does not write MemPalace" in text, path
-        assert "fresh context" in text, path
-        assert "non-suspending `DISCARD`" in text, path
         assert "operator-owned readiness suspension" in text, path
+        if path is AUTORESEARCH:
+            assert "cluster closely related proposals into theory-family clusters" in text
+            assert "pre-registered deterministic tie-break" in text
+            assert "lexicographically smallest normalized family name" in text
+            assert "Record in `dissent_summary`" in text
+            assert "The review flag is a standing advisory to the operator" in text
+            assert "returns `NO_ACTION` with reason `campaign_review_pending`" not in text
+            assert "sends no wake, finalization, or stage dispatch" not in text
+        else:
+            assert "second-round `NO_CONSENSUS` remains `NO_CONSENSUS`" in text, path
+            assert "does not suspend" in text, path
+            assert "does not write MemPalace" in text, path
+            assert "fresh context" in text, path
+            assert "non-suspending `DISCARD`" in text, path
 
     combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
     assert "G0 uses only `INFRA_REPAIRED` or `INFRA_BLOCKED`" not in combined
@@ -529,7 +538,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.14.0" in skill
+    assert "version: 8.15.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill

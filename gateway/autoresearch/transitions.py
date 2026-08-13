@@ -194,6 +194,9 @@ from gateway.autoresearch_platform_validation import (
 from gateway.autoresearch_platform_validation import (
     PlatformCoverageStatus as PlatformCoverageStatus,
 )
+from gateway.autoresearch_readiness import (
+    XNYSCalendarEvidence as XNYSCalendarEvidence,
+)
 
 if TYPE_CHECKING:
     from gateway.autoresearch.artifacts import (
@@ -239,6 +242,9 @@ KEEP_DECISIONS = frozenset(
 # gateway/agent_config/skills/autoresearch/SKILL.md section 8. If the operator
 # changes the floor, both must change together.
 ALPHA_MIN_TRADES_PER_DAY = 1.0
+DEFAULT_XNYS_CALENDAR_EVIDENCE_PATH = Path(
+    "/home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json"
+)
 
 
 def _canonical_iteration_experiment_id(iteration: int) -> str:
@@ -453,6 +459,10 @@ def _validate_alpha_verification_price_preflight(state: AutoresearchState) -> No
 def _validate_alpha_implementation_price_preflight(
     state: AutoresearchState,
     artifact: ImplementationResultArtifact,
+    validation_context: AutoresearchValidationContext | None = None,
+    *,
+    calendar_path: Path | None = None,
+    calendar_content: Mapping[str, object] | None = None,
 ) -> None:
     if state.mode is not ResearchMode.ALPHA_RESEARCH:
         return
@@ -461,6 +471,31 @@ def _validate_alpha_implementation_price_preflight(
         raise AutoresearchValidationError(
             "ALPHA_RESEARCH implementation_result requires price_hydration_scope_preflight"
         )
+    if validation_context is not None or calendar_path is not None or calendar_content is not None:
+        derived_session_count = _derive_xnys_session_count(
+            preflight,
+            validation_context=validation_context,
+            calendar_path=calendar_path,
+            calendar_content=calendar_content,
+        )
+        window = f"{preflight.experiment_start}..{preflight.experiment_end}"
+        if preflight.session_count != derived_session_count:
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH price preflight session_count mismatch for window "
+                f"{window}: declared={preflight.session_count}, derived={derived_session_count}"
+            )
+        derived_planned_symbol_sessions = preflight.member_union_count * derived_session_count
+        if preflight.planned_symbol_sessions != derived_planned_symbol_sessions:
+            raise AutoresearchValidationError(
+                "ALPHA_RESEARCH price preflight planned_symbol_sessions mismatch for window "
+                f"{window}: declared={preflight.planned_symbol_sessions}, "
+                f"derived={derived_planned_symbol_sessions} "
+                f"(member_union_count={preflight.member_union_count}, "
+                f"derived_session_count={derived_session_count})"
+            )
+        preflight.validate()
+    else:
+        preflight.validate()
     if preflight.within_budget:
         return
     hydrate_commands = tuple(
@@ -471,6 +506,63 @@ def _validate_alpha_implementation_price_preflight(
             "over-budget ALPHA implementation_result must not include hydrate-capable "
             f"commands: {', '.join(hydrate_commands)}"
         )
+
+
+def _derive_xnys_session_count(
+    preflight: PriceHydrationScopePreflight,
+    *,
+    validation_context: AutoresearchValidationContext | None,
+    calendar_path: Path | None,
+    calendar_content: Mapping[str, object] | None,
+) -> int:
+    if calendar_path is not None and calendar_content is not None:
+        raise AutoresearchValidationError(
+            "XNYS calendar evidence must be supplied by path or content, not both"
+        )
+    start = date.fromisoformat(preflight.experiment_start)
+    end = date.fromisoformat(preflight.experiment_end)
+    if start > end:
+        raise AutoresearchValidationError(
+            "XNYS calendar evidence cannot derive a session count for a reversed window "
+            f"{preflight.experiment_start}..{preflight.experiment_end}"
+        )
+
+    if calendar_content is not None:
+        try:
+            evidence = XNYSCalendarEvidence.from_dict(calendar_content)
+        except (TypeError, ValueError) as exc:
+            raise AutoresearchValidationError(
+                f"XNYS calendar evidence content is unreadable: {exc}"
+            ) from exc
+        sessions = evidence.sessions
+        evidence_label = "injected XNYS calendar evidence"
+    elif calendar_path is not None:
+        try:
+            raw = json.loads(calendar_path.read_text(encoding="utf-8"))
+            evidence = XNYSCalendarEvidence.from_dict(raw)
+        except (OSError, TypeError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise AutoresearchValidationError(
+                f"XNYS calendar evidence unreadable at {calendar_path}: {exc}"
+            ) from exc
+        sessions = evidence.sessions
+        evidence_label = str(calendar_path)
+    elif validation_context is not None:
+        sessions = validation_context.xnys_sessions
+        evidence_label = "pinned validation-context XNYS calendar evidence"
+    else:
+        raise AutoresearchValidationError(
+            "XNYS calendar evidence unreadable at "
+            f"{DEFAULT_XNYS_CALENDAR_EVIDENCE_PATH}: no validation context or injected evidence"
+        )
+
+    if not sessions:
+        raise AutoresearchValidationError(f"{evidence_label} contains no sessions")
+    if start < sessions[0] or end > sessions[-1]:
+        raise AutoresearchValidationError(
+            f"{evidence_label} does not cover declaration window "
+            f"{preflight.experiment_start}..{preflight.experiment_end}"
+        )
+    return sum(start <= session <= end for session in sessions)
 
 
 def _latest_verification_is_price_scope_bug_signal(state: AutoresearchState) -> bool:
@@ -1905,6 +1997,8 @@ def advance_state(
     state_path: Path | None = None,
     expected_instruction_manifest_sha256: str | None = None,
     runs_root: Path | None = None,
+    xnys_calendar_path: Path | None = None,
+    xnys_calendar_content: Mapping[str, object] | None = None,
 ) -> AutoresearchState:
     if state_path is not None:
         state = transitions_module._validate_persisted_state_matches(state, state_path=state_path)
@@ -1970,6 +2064,11 @@ def advance_state(
             raise AutoresearchValidationError(
                 "consensus round_number must match the latest debate round"
             )
+        if artifact.status is ConsensusStatus.NO_CONSENSUS and state.consensus_retry_count >= 1:
+            raise AutoresearchValidationError(
+                "NO_CONSENSUS retry is exhausted; the arbiter must resolve the split "
+                "with the pre-registered deterministic tie-break"
+            )
         _validate_consensus_novelty_gate(state, artifact)
         next_consensus_history = (*state.consensus_history, artifact)
         if artifact.status is ConsensusStatus.MAJORITY:
@@ -2019,7 +2118,13 @@ def advance_state(
         transitions_module._validate_implementation_workspace(
             state, artifact, require_compute_fit=True
         )
-        _validate_alpha_implementation_price_preflight(state, artifact)
+        _validate_alpha_implementation_price_preflight(
+            state,
+            artifact,
+            validation_context,
+            calendar_path=xnys_calendar_path,
+            calendar_content=xnys_calendar_content,
+        )
         next_state = replace(state, implementation_result=artifact, phase=Phase.VERIFICATION)
         _validate_alpha_universe_chain(next_state)
         return next_state

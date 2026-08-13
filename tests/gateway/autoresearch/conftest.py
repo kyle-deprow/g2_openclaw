@@ -250,7 +250,11 @@ def no_consensus_state(
     state = advance_state(state, _debate_result(policy, round_number=1), policy)
     state = advance_state(state, _no_consensus(round_number=1), policy)
     state = advance_state(state, _debate_result(policy, round_number=2), policy)
-    state = advance_state(state, _no_consensus(round_number=2), policy)
+    state = replace(
+        state,
+        consensus_history=(*state.consensus_history, _no_consensus(round_number=2)),
+        phase=Phase.DECISION_LOG,
+    )
 
     return advance_state(
         state,

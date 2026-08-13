@@ -122,6 +122,36 @@ def test_standardize_mempalace_kg_object_distinguishes_long_objects_with_same_pr
     assert first != second
 
 
+def test_standardized_alpha_metric_object_preserves_negative_sign(
+    alpha_memory_state: AutoresearchState,
+) -> None:
+    decision = alpha_memory_state.final_decision
+    assert decision is not None
+    state = replace(
+        alpha_memory_state,
+        final_decision=replace(decision, recommended_metric_value=-1.16386),
+    )
+
+    facts = standardized_mempalace_kg_facts(state)
+
+    assert facts["alpha_decision_metric"] == "oos_sharpe_net_negative_1_16386"
+
+
+def test_standardized_alpha_metric_object_keeps_positive_value(
+    alpha_memory_state: AutoresearchState,
+) -> None:
+    decision = alpha_memory_state.final_decision
+    assert decision is not None
+    state = replace(
+        alpha_memory_state,
+        final_decision=replace(decision, recommended_metric_value=1.16386),
+    )
+
+    facts = standardized_mempalace_kg_facts(state)
+
+    assert facts["alpha_decision_metric"] == "oos_sharpe_net_1_16386"
+
+
 def test_verify_mempalace_final_decision_accepts_compacted_alpha_discard_rationale(
     alpha_memory_state: AutoresearchState,
     mempalace_kg_path: Path,

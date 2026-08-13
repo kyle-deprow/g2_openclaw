@@ -105,6 +105,7 @@ from gateway.autoresearch_readiness import (
     PLATFORM_READINESS_SCHEMA_VERSION,
     EvidenceId,
     PlatformReadinessManifest,
+    XNYSCalendarEvidence,
     canonical_platform_capabilities,
 )
 from gateway.autoresearch_shared import AUTORESEARCH_OWNER_SESSION_KEY, RecoveryStatus
@@ -134,7 +135,16 @@ from gateway.cli import (
 from gateway.deployment.appserver_probe import AppServerProbeResult
 from typer.testing import CliRunner
 
-from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
+from tests.gateway.autoresearch_fixtures import (
+    write_xnys_calendar_evidence,
+    xnys_calendar_payload,
+)
+
+
+def _fixture_xnys_session_count(start: date, end: date) -> int:
+    evidence = XNYSCalendarEvidence.from_dict(xnys_calendar_payload())
+    return sum(start <= session <= end for session in evidence.sessions)
+
 
 runner = CliRunner()
 CAMPAIGN_XNYS_START = "2022-01-03"
@@ -2478,6 +2488,7 @@ class TestAutoresearchCliCommands:
             Path(workspace_path) if workspace_path is not None else worktree.workspace
         )
         manifest_path = resolved_workspace / "experiment-manifest.json"
+        session_count = _fixture_xnys_session_count(date(2021, 1, 4), date(2021, 12, 31))
         return ImplementationResultArtifact(
             summary="Implemented the narrow VWAP and OBV experiment.",
             workspace_path=workspace_path
@@ -2522,8 +2533,8 @@ class TestAutoresearchCliCommands:
                 experiment_end="2021-12-31",
                 timeframe="1min",
                 market_hours="regular",
-                session_count=252,
-                planned_symbol_sessions=252,
+                session_count=session_count,
+                planned_symbol_sessions=session_count,
                 within_budget=True,
             ),
         )
@@ -2928,14 +2939,15 @@ class TestAutoresearchCliCommands:
             ),
         )
 
+        session_count = _fixture_xnys_session_count(date(2021, 1, 4), date(2021, 12, 31))
         updated_preflight = PriceHydrationScopePreflight(
             member_union_count=2,
             experiment_start="2021-01-04",
             experiment_end="2021-12-31",
             timeframe="1min",
             market_hours="regular",
-            session_count=252,
-            planned_symbol_sessions=504,
+            session_count=session_count,
+            planned_symbol_sessions=2 * session_count,
             within_budget=True,
         )
 
@@ -3091,6 +3103,102 @@ class TestAutoresearchCliCommands:
         assert result.exit_code == 1
         assert "active experiment/test writer" in result.output
         assert "processes" in result.output
+
+    def test_autoresearch_next_surfaces_pending_campaign_review(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        readiness = _ready_manifest(tmp_path / "readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = AutoresearchState(
+            campaign_review_required=True,
+            campaign_review_reason="campaign stalled: review me",
+            platform_readiness=readiness.identity(),
+        )
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+        class FakeAction:
+            source_manifest_sha256 = "0" * 64
+            state_reference_sha256 = "1" * 64
+
+            def to_dict(self) -> dict[str, object]:
+                return {"phase": "repeat", "next_agent_ids": []}
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(
+                "gateway.autoresearch.engine.next_action",
+                lambda *_, **__: FakeAction(),
+            )
+            monkeypatch.setattr(cli_module, "_git_status_short", lambda _: ())
+            monkeypatch.setattr(cli_module, "_active_target_writer_processes", lambda _: ())
+            result = runner.invoke(
+                app,
+                [
+                    "autoresearch-next",
+                    str(state_path),
+                    "--quantipy-root",
+                    str(quantipy_root),
+                    "--openclaw-config",
+                    str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                    "--readiness-manifest",
+                    str(readiness_path),
+                ],
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["campaign_review"] == {
+            "counters": {
+                "consecutive_non_keep": 0,
+                "consecutive_no_consensus": 0,
+                "iterations_since_last_keep": 0,
+            },
+            "reason": "campaign stalled: review me",
+            "required": True,
+        }
+
+    def test_autoresearch_next_still_refuses_suspended_state(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        quantipy_root = tmp_path / "quantipy"
+        self._write_quantipy_receipts(quantipy_root)
+        readiness = _ready_manifest(tmp_path / "readiness")
+        readiness_path = tmp_path / "platform-readiness.json"
+        _write_readiness_manifest(readiness_path, readiness)
+        state = AutoresearchState(suspended=True, platform_readiness=readiness.identity())
+        state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+        monkeypatch = pytest.MonkeyPatch()
+        try:
+            monkeypatch.setattr(
+                "gateway.autoresearch.engine.next_action",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    ValueError("autoresearch is suspended")
+                ),
+            )
+            monkeypatch.setattr(cli_module, "_git_status_short", lambda _: ())
+            monkeypatch.setattr(cli_module, "_active_target_writer_processes", lambda _: ())
+            result = runner.invoke(
+                app,
+                [
+                    "autoresearch-next",
+                    str(state_path),
+                    "--quantipy-root",
+                    str(quantipy_root),
+                    "--openclaw-config",
+                    str(DEFAULT_OPENCLAW_CONFIG_PATH),
+                    "--readiness-manifest",
+                    str(readiness_path),
+                ],
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert result.exit_code == 1
+        assert "autoresearch is suspended" in result.output
 
     def test_autoresearch_next_does_not_finalize_memory_from_cli(
         self,
@@ -3680,7 +3788,7 @@ class TestStop:
             if sig == 0:
                 raise ProcessLookupError
 
-        side_effect = self._pgrep_side_effect({"openclaw-agent": "1001\n1002\n"})
+        side_effect = self._pgrep_side_effect({"openclaw-agent": "1001\n4242\n"})
 
         with (
             patch("gateway.cli.subprocess.run", side_effect=side_effect),
@@ -3694,7 +3802,7 @@ class TestStop:
 
         assert result.exit_code == 0
         assert signal.SIGTERM in killed_signals.get(1001, [])
-        assert signal.SIGTERM in killed_signals.get(1002, [])
+        assert signal.SIGTERM in killed_signals.get(4242, [])
 
     def test_stop_kills_mempalace_mcp_processes(self) -> None:
         """When pgrep matches MemPalace MCP server, SIGTERM is sent to returned PIDs."""

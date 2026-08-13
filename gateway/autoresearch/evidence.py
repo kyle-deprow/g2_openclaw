@@ -1321,8 +1321,12 @@ def _validate_quantipy_run_envelope(
     *,
     mode: ResearchMode | None = None,
 ) -> dict[str, object]:
+    parsed_run = _parse_json_snapshot(snapshot, label="Quantipy run.json")
+    # Envelopes sealed before quantipy added runtime-derived provenance lack the
+    # key entirely; current envelopes always carry it (null when no panel).
+    _has_derived_provenance = isinstance(parsed_run, dict) and "derived_provenance" in parsed_run
     run = _strict_json_keys(
-        _parse_json_snapshot(snapshot, label="Quantipy run.json"),
+        parsed_run,
         label="Quantipy run.json",
         expected=(
             "run_id",
@@ -1332,6 +1336,7 @@ def _validate_quantipy_run_envelope(
             "success",
             "panel_requested",
             "panel",
+            *(("derived_provenance",) if _has_derived_provenance else ()),
             "stage_receipts",
             "telemetry",
             "failure",
@@ -1388,6 +1393,46 @@ def _validate_quantipy_run_envelope(
         if run["panel"] is not None
         else None
     )
+    derived_provenance_raw = run.get("derived_provenance") if _has_derived_provenance else None
+    if derived_provenance_raw is not None:
+        provenance = _strict_json_keys(
+            derived_provenance_raw,
+            label="Quantipy run.json derived_provenance",
+            expected=(
+                "member_union_count",
+                "member_union_digest",
+                "member_union_digest_algorithm",
+                "experiment_start",
+                "experiment_end",
+                "timeframe",
+                "market_hours",
+                "request_sha256",
+                "coverage_sha256",
+                "panel_sha256",
+                "hydrated_at",
+                "exported_at",
+            ),
+        )
+        if panel is None:
+            raise AutoresearchValidationError(
+                "Quantipy run.json derived_provenance requires bound panel evidence"
+            )
+        for digest_key in ("request_sha256", "coverage_sha256", "panel_sha256"):
+            if provenance[digest_key] != panel[digest_key]:
+                raise AutoresearchValidationError(
+                    f"Quantipy run.json derived_provenance {digest_key} "
+                    "does not match panel evidence"
+                )
+    if (
+        mode is ResearchMode.ALPHA_RESEARCH
+        and panel is not None
+        and derived_provenance_raw is None
+        and _has_derived_provenance
+    ):
+        raise AutoresearchValidationError(
+            "ALPHA_RESEARCH runs with panel evidence must carry runtime-derived "
+            "provenance; the quantipy runtime assembles it from the panel receipt"
+        )
     receipts_raw = run["stage_receipts"]
     if not isinstance(receipts_raw, list):
         raise AutoresearchValidationError("Quantipy run.json stage_receipts must be a JSON array")

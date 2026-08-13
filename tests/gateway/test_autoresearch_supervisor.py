@@ -42,6 +42,10 @@ from gateway.autoresearch.enums import (
 from gateway.autoresearch.errors import (
     AutoresearchValidationError,
 )
+from gateway.autoresearch.governance import (
+    CampaignCounters,
+    CampaignReviewRecord,
+)
 from gateway.autoresearch.manifest_runtime import (
     build_receipt_catalog,
     expected_instruction_manifest_sha256,
@@ -2505,6 +2509,17 @@ def test_supervisor_persists_repeat_successor_before_wake(
             continue_loop=True,
             memory_write_required=False,
         ),
+        campaign_review_required=True,
+        campaign_review_reason="campaign stalled: operator review required",
+        campaign_review_history=(
+            CampaignReviewRecord(
+                triggered_iteration=15,
+                reason="campaign stalled: operator review required",
+                counters=CampaignCounters(),
+                acknowledgement=None,
+                acknowledged_iteration=None,
+            ),
+        ),
         platform_readiness=supervisor_env.readiness_identity,
     )
     successor = replace(state, phase=Phase.SETUP_CONTEXT, iteration=16, final_decision=None)
@@ -2558,6 +2573,10 @@ def test_supervisor_persists_repeat_successor_before_wake(
     )
     method, payload = fake.rpc_calls[-1]
     assert method == "agent"
+    message = payload["message"]
+    assert isinstance(message, str)
+    assert "campaign stalled: operator review required" in message
+    assert "consecutive_non_keep=0" in message
     assert payload["idempotencyKey"] == make_idempotency_key(
         purpose="repeat-successor",
         material=build_authoritative_state_reference(
