@@ -538,7 +538,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.15.0" in skill
+    assert "version: 8.16.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -638,9 +638,15 @@ def test_autoresearch_docs_describe_gpu_model_classes_and_tiered_timeouts() -> N
     assert "neural sequence models (`torch`)" in skill
     assert "torch.use_deterministic_algorithms(True)" in skill
     assert "CUBLAS_WORKSPACE_CONFIG=:4096:8" in skill
-    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 43200)" in skill
+    assert (
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 43200)"
+        in skill
+    )
     assert "default 28800 seconds for `gpu`/`mixed`" in skill
-    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in skill
+    assert (
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 21600)"
+        in skill
+    )
     assert "default 14400 seconds for `cpu`/`none`" in skill
 
 

@@ -702,11 +702,17 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
         state_path=Path("/tmp/state.json"),
     )
     assert "projected_model_seconds reported in implementation_result.summary" in verification
-    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 43200)" in verification
-    assert "timeout_seconds = min(max(3 * projected_model_seconds, 900), 21600)" in verification
+    assert (
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), "
+        "43200)" in verification
+    )
+    assert (
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), "
+        "21600)" in verification
+    )
     assert "default 28800s for gpu or mixed" in verification
     assert "the default 14400s for cpu or none" in verification
-    assert "measured projected_model_seconds still drives the timeout" in verification
+    assert "Measured values still drive the timeout" in verification
     assert "ceiling is only a cap, not permission to skip projection" in verification
     assert (
         "zero trades because a declared, pre-registered cost or edge gate excluded every candidate"
