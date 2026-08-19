@@ -115,12 +115,12 @@ def test_campaign_counters_ignore_infrastructure_entries() -> None:
     assert derive_campaign_counters(entries, acknowledged_through_iteration=0) == CampaignCounters(
         consecutive_non_keep=2,
         consecutive_no_consensus=1,
-        iterations_since_last_keep=4,
+        iterations_since_last_keep=2,
     )
     assert derive_campaign_counters(entries, acknowledged_through_iteration=3) == CampaignCounters(
         consecutive_non_keep=0,
         consecutive_no_consensus=0,
-        iterations_since_last_keep=4,
+        iterations_since_last_keep=2,
     )
 
 

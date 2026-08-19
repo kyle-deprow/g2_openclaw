@@ -48,6 +48,9 @@ from gateway.autoresearch.transitions import (
 from gateway.autoresearch.transitions import (
     _is_operator_precondition_consensus as _is_operator_precondition_consensus,
 )
+from gateway.autoresearch.transitions import (
+    _requires_implementation_infra_blocked_decision,
+)
 
 if TYPE_CHECKING:
     from gateway.autoresearch.manifest import (
@@ -137,6 +140,8 @@ def _select_phase_target(
             raise AutoresearchValidationError(
                 "implementation next action requires a majority consensus"
             )
+        if _requires_implementation_infra_blocked_decision(state):
+            return PhaseTarget((policy.implementer.agent_id,), ArtifactType.FINAL_DECISION)
         return PhaseTarget((policy.implementer.agent_id,), ArtifactType.IMPLEMENTATION_RESULT)
     if state.phase is Phase.VERIFICATION:
         return PhaseTarget((policy.pm.agent_id,), ArtifactType.VERIFICATION_RESULT)
@@ -203,6 +208,22 @@ def _operator_precondition_decision_instruction(
     phase: Phase,
     expected_artifact_type: ArtifactType,
 ) -> str:
+    if (
+        phase is Phase.IMPLEMENTATION
+        and expected_artifact_type is ArtifactType.FINAL_DECISION
+        and _requires_implementation_infra_blocked_decision(state)
+    ):
+        return (
+            "Implementation infrastructure-blocker decision contract:\n"
+            "- The approved implementation brief is gated for a runtime or transport contract. "
+            "Do not implement around it or edit shared platform code.\n"
+            "- Emit final_decision=INFRA_BLOCKED, reviewer_verdict=NOT_RUN, "
+            "recommended_metric_value=null, continue_loop=true, and "
+            "memory_write_required=false.\n"
+            "- infra_rationale must be at least 64 characters, name ExperimentManifest, "
+            "ExperimentRunContext, transport, or a named Receipt contract. The next iteration "
+            "starts fresh without a suspension or resume step.\n\n"
+        )
     if (
         phase is Phase.DECISION_LOG
         and expected_artifact_type is ArtifactType.FINAL_DECISION

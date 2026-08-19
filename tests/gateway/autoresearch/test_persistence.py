@@ -25,6 +25,7 @@ from gateway.autoresearch import manifest_runtime as manifest_runtime_module
 from gateway.autoresearch import persistence as persistence_module
 from gateway.autoresearch import transitions as transitions_module
 from gateway.autoresearch.artifacts import (
+    FinalDecisionArtifact,
     QuantipyExperimentEvidence,
     SetupContextArtifact,
 )
@@ -32,6 +33,8 @@ from gateway.autoresearch.constants import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
 )
 from gateway.autoresearch.enums import (
+    FinalDecision,
+    FinalReviewerVerdict,
     FixTriggerPhase,
     Phase,
     VerificationStatus,
@@ -59,8 +62,10 @@ from gateway.autoresearch_readiness import PlatformReadinessManifest
 from tests.gateway.autoresearch.builders import (
     PublicPlatformRecoveryFixture,
     StateArtifact,
+    _majority_consensus,
     _rewrite_test_detached_status,
     _setup_artifact,
+    _state_to_consensus,
     _write_public_v5_verification_artifact,
 )
 
@@ -698,6 +703,103 @@ def test_stage_submission_inbox_validates_then_supervisor_advances(
     assert advanced is not None
     assert advanced.setup == _setup_artifact()
     assert autoresearch_persistence.load_state_file(state_path).setup == _setup_artifact()
+    assert not submission_path.exists()
+    assert (inbox_path / "accepted" / submission_path.name).is_file()
+
+
+def test_stage_submission_loads_implementation_infra_blocked_final_decision_envelope(
+    tmp_path: Path,
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = autoresearch_transitions.advance_state(
+        state,
+        _majority_consensus(round_number=1, policy=policy),
+        policy,
+    )
+    assert state.latest_consensus is not None
+    state = replace(
+        state,
+        consensus_history=(
+            replace(
+                state.latest_consensus,
+                implementation_brief=(
+                    "The approved brief requires an ExperimentManifest transport contract "
+                    "the platform does not provide."
+                ),
+            ),
+        ),
+    )
+    state_path = tmp_path / "state.json"
+    artifact_path = tmp_path / "artifact.json"
+    inbox_path = tmp_path / "stage-inbox"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    instruction_digest = expected_instruction_manifest_sha256(
+        state,
+        policy,
+        receipts,
+        state_path=state_path,
+    )
+    state_reference = autoresearch_transitions.build_authoritative_state_reference(
+        state,
+        state_path=state_path,
+    ).sha256()
+    decision = FinalDecisionArtifact(
+        experiment_id="iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="runtime contract",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="The approved brief requires a runtime contract the platform does not provide.",
+        log_summary="Blocked during implementation on a missing runtime contract.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale=(
+            "The approved brief requires an ExperimentManifest transport contract that the "
+            "platform lacks."
+        ),
+    )
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "instruction_manifest_sha256": instruction_digest,
+                "state_reference_sha256": state_reference,
+                "artifact": decision.to_dict(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    submission_path = autoresearch_persistence.submit_stage_artifact_file(
+        state_path=state_path,
+        artifact_path=artifact_path,
+        inbox_path=inbox_path,
+        instruction_manifest_sha256=instruction_digest,
+        policy=policy,
+        validation_context=None,
+    )
+    monkeypatch.setattr(manifest_runtime_module, "build_receipt_catalog", lambda _: receipts)
+    advanced = autoresearch_persistence.consume_stage_submission_inbox(
+        state_path=state_path,
+        output_path=state_path,
+        inbox_path=inbox_path,
+        openclaw_config=DEFAULT_OPENCLAW_CONFIG_PATH,
+        quantipy_root=autoresearch_constants.DEFAULT_QUANTIPY_ROOT,
+        validation_context=None,
+    )
+
+    assert advanced is not None
+    assert advanced.final_decision == decision
+    assert advanced.suspended is False
+    assert advanced.suspension_reason is None
+    assert "ExperimentManifest" in advanced.hypothesis_registry[-1].reason
+    assert advanced.campaign_counters.iterations_since_last_keep == (
+        state.campaign_counters.iterations_since_last_keep
+    )
+    assert autoresearch_persistence.load_state_file(state_path) == advanced
     assert not submission_path.exists()
     assert (inbox_path / "accepted" / submission_path.name).is_file()
 

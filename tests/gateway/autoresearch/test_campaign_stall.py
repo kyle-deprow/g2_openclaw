@@ -209,7 +209,7 @@ def test_infrastructure_entries_are_neutral_and_acknowledgement_preserves_last_k
         "Reviewed the three failed outcomes and approved a fresh hypothesis pass.",
     )
 
-    assert resumed.campaign_counters == CampaignCounters(0, 0, 5)
+    assert resumed.campaign_counters == CampaignCounters(0, 0, 3)
     assert resumed.campaign_review_required is False
     assert resumed.campaign_review_reason is None
     assert resumed.campaign_review_history[-1].acknowledged_iteration == 6

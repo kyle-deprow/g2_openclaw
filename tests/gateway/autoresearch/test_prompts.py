@@ -617,6 +617,37 @@ def test_fix_test_prompt_contains_private_workspace_and_cwd_contract(
     assert "authoritative target checkout" in prompt
 
 
+def test_implementation_missing_contract_brief_routes_to_final_decision(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    assert state.latest_consensus is not None
+    state = replace(
+        state,
+        consensus_history=(
+            replace(
+                state.latest_consensus,
+                implementation_brief=(
+                    "The approved brief requires an ExperimentManifest transport contract "
+                    "the platform does not provide."
+                ),
+            ),
+        ),
+    )
+
+    action = next_action(state, policy, receipts, platform_readiness)
+
+    assert action.expected_artifact_type is ArtifactType.FINAL_DECISION
+    assert action.next_agent_ids == (policy.implementer.agent_id,)
+    assert "continue_loop=true" in action.prompt_text
+    assert (
+        "The next iteration starts fresh without a suspension or resume step" in action.prompt_text
+    )
+
+
 def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -704,6 +735,13 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert (
         "Experiment packages are built ONLY in the persisted experiment workspace, never in the "
         "authoritative quantipy worktree" in implementation
+    )
+    assert (
+        "If implementation reveals the approved brief requires a data or runtime contract the "
+        "platform does not provide, do not work around it or edit shared platform code; submit "
+        "a FINAL_DECISION with INFRA_BLOCKED, reviewer_verdict NOT_RUN, null metric, "
+        "memory_write_required false, and an infra_rationale naming the exact missing contract."
+        in implementation
     )
 
     verification = autoresearch_engine._phase_instruction(

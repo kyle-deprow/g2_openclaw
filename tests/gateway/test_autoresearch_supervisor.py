@@ -3519,6 +3519,43 @@ def test_supervisor_does_not_wake_a_suspended_state(supervisor_env: SupervisorEn
     assert not any(method == "agent" for method, _ in fake.rpc_calls)
 
 
+def test_supervisor_rejects_persisted_infra_blocker_without_continue_loop(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    state = AutoresearchState(
+        phase=Phase.REPEAT,
+        iteration=36,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        final_decision=FinalDecisionArtifact(
+            experiment_id="iteration-36",
+            decision=FinalDecision.INFRA_BLOCKED,
+            recommended_metric_name="runtime contract",
+            recommended_metric_value=None,
+            reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+            rationale=(
+                "The approved brief requires a runtime contract the platform does not provide."
+            ),
+            log_summary="Suspended.",
+            continue_loop=False,
+            memory_write_required=False,
+            infra_rationale=(
+                "The approved brief requires an ExperimentManifest transport contract that the "
+                "platform lacks."
+            ),
+        ),
+        suspended=True,
+        suspension_reason=(
+            "The approved brief requires an ExperimentManifest transport contract that the "
+            "platform lacks."
+        ),
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+
+    with pytest.raises(SupervisorError, match="continue_loop=true"):
+        _supervisor(supervisor_env, FakeOpenClaw()).run_once()
+
+
 def test_recovery_retries_use_distinct_idempotency_keys(
     supervisor_env: SupervisorEnv,
 ) -> None:

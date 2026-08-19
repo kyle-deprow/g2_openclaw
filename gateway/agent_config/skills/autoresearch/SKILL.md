@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.17.0
+version: 8.17.2
 ---
 
 # Autoresearch
@@ -196,8 +196,12 @@ that the tie-break was applied, its rule inputs, and the losing clusters. The
 selected brief still faces full verification and unchanged decision gates. The
 majority bar is an integrity parameter and is unchanged; the tie-break is a
 mechanical parameter that guarantees the loop always has a next experiment.
-`INFRA_BLOCKED` and suspension are reserved only for explicit operator-owned
-readiness suspension. Completed
+An `ALPHA_RESEARCH` implementation blocker is a gated, no-memory
+`INFRA_BLOCKED` final decision: it requires `continue_loop=true`, records its
+named runtime or transport contract in the hypothesis registry, and proceeds
+through the normal fresh next-iteration boundary without suspension or resume
+coupling. This path leaves operator-owned readiness suspension as a separate
+control-plane action. Completed
 `DATA_INFRA_G0` `REMEDIATION_REQUIRED` proceeds to review and non-suspending
 `DISCARD`.
 
@@ -868,6 +872,14 @@ Implementation requirements:
   stage to work around a preflight rejection.
 - Experiment packages are built ONLY in the persisted experiment workspace, never in the
   authoritative quantipy worktree.
+- If implementation reveals the approved brief requires a data or runtime contract the platform
+  does not provide, do not work around it or edit shared platform code; submit a `FINAL_DECISION`
+  with `INFRA_BLOCKED`, `reviewer_verdict=NOT_RUN`, a null metric,
+  `continue_loop=true`, `memory_write_required=false`, and an `infra_rationale` naming the exact
+  missing contract, at least 64 characters, with `ExperimentManifest`, `ExperimentRunContext`,
+  `transport`, or a named receipt contract. The final decision is persisted without MemPalace,
+  its registry reason carries the named contract, and the supervisor starts a fresh next
+  iteration without suspension or resume coupling.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
   `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--runs-root
@@ -1399,8 +1411,8 @@ Actions:
   supervisor surfaces the review reason and counters in doctor and wake
   messages, emits one structured warning per review record, and continues
   normal wakes, finalization, and stage dispatch under the current directive.
-  Only explicit operator suspension or platform-readiness failure halts the
-  loop.
+  A gated mid-implementation `INFRA_BLOCKED` decision also follows the normal
+  fresh-next-iteration path.
 - The PM must not clear `campaign_review_required`, edit its reason, or touch G2.
   An operator/Codex human must review the bounded status summary and acknowledge
   it with the recovery command below; the acknowledgement is durable review

@@ -35,6 +35,7 @@ from gateway.autoresearch.engine import (
 )
 from gateway.autoresearch.enums import (
     ArtifactType,
+    ConsensusStatus,
     FinalDecision,
     FinalReviewerVerdict,
     FixTriggerPhase,
@@ -50,6 +51,8 @@ from gateway.autoresearch.errors import (
 from gateway.autoresearch.governance import (
     CampaignCounters,
     CampaignReviewRecord,
+    HypothesisRegistryEntry,
+    derive_campaign_counters,
 )
 from gateway.autoresearch.lifecycle import (
     resume_suspended_iteration,
@@ -1038,6 +1041,285 @@ def test_operator_precondition_majority_routes_to_decision_log(
     assert action.expected_artifact_type is ArtifactType.FINAL_DECISION
     assert "memory_write_required=false" in action.prompt_text
     assert "no-code operator precondition" in action.prompt_text
+
+
+def _mid_implementation_infra_blocked() -> FinalDecisionArtifact:
+    return FinalDecisionArtifact(
+        experiment_id="iteration-1",
+        decision=FinalDecision.INFRA_BLOCKED,
+        recommended_metric_name="runtime contract",
+        recommended_metric_value=None,
+        reviewer_verdict=FinalReviewerVerdict.NOT_RUN,
+        rationale="The approved brief requires a runtime contract the platform does not provide.",
+        log_summary="Blocked during implementation on a missing runtime contract.",
+        continue_loop=True,
+        memory_write_required=False,
+        infra_rationale=(
+            "The platform lacks the ExperimentManifest transport contract required by the "
+            "approved brief."
+        ),
+    )
+
+
+def _implementation_state_with_missing_contract(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> AutoresearchState:
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    assert state.latest_consensus is not None
+    return replace(
+        state,
+        consensus_history=(
+            replace(
+                state.latest_consensus,
+                implementation_brief=(
+                    "The approved brief requires an ExperimentManifest transport contract "
+                    "the platform does not provide."
+                ),
+            ),
+        ),
+    )
+
+
+def test_implementation_can_submit_infra_blocked_for_a_missing_runtime_contract(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+
+    decided = advance_state(state, _mid_implementation_infra_blocked(), policy)
+
+    assert decided.phase is Phase.REPEAT
+    assert decided.final_decision is not None
+    assert decided.final_decision.decision is FinalDecision.INFRA_BLOCKED
+    assert decided.suspended is False
+    assert decided.suspension_reason is None
+    assert decided.hypothesis_registry[-1].decision is FinalDecision.INFRA_BLOCKED
+    assert decided.hypothesis_registry[-1].reason == (
+        _mid_implementation_infra_blocked().infra_rationale
+    )
+    assert decided.campaign_counters.consecutive_non_keep == (
+        state.campaign_counters.consecutive_non_keep
+    )
+    assert decided.campaign_counters.consecutive_no_consensus == (
+        state.campaign_counters.consecutive_no_consensus
+    )
+    assert decided.campaign_counters.iterations_since_last_keep == (
+        state.campaign_counters.iterations_since_last_keep
+    )
+    assert can_write_memory(decided) is False
+
+
+def test_implementation_infra_blocked_starts_a_fresh_next_iteration(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+    decided = advance_state(state, _mid_implementation_infra_blocked(), policy)
+
+    successor = start_next_iteration(decided, readiness=platform_readiness)
+
+    assert successor.phase is Phase.SETUP_CONTEXT
+    assert successor.iteration == 2
+    assert successor.final_decision is None
+    assert successor.context_packet is None
+    assert successor.consensus_history == ()
+    assert successor.campaign_counters == decided.campaign_counters
+
+
+def test_implementation_infra_blocked_accepts_contradictory_contract_rationale(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+    artifact = replace(
+        _mid_implementation_infra_blocked(),
+        infra_rationale=(
+            "The platform provides the ExperimentManifest transport contract, so this "
+            "deliberately contradictory blocker rationale is not evidence of a missing contract."
+        ),
+    )
+
+    decided = advance_state(state, artifact, policy)
+
+    assert decided.final_decision == artifact
+
+
+def test_implementation_infra_blocked_registry_reason_retains_late_contract_name(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+    contract_name = "ExperimentManifest"
+    artifact = replace(
+        _mid_implementation_infra_blocked(),
+        infra_rationale=("x" * 170) + f" {contract_name} transport contract",
+    )
+
+    decided = advance_state(state, artifact, policy)
+
+    reason = decided.hypothesis_registry[-1].reason
+    assert contract_name in reason
+    assert len(reason) <= 160
+
+
+def test_infrastructure_entries_are_neutral_for_all_campaign_counters() -> None:
+    entries = (
+        HypothesisRegistryEntry(
+            1,
+            ResearchMode.ALPHA_RESEARCH,
+            ConsensusStatus.MAJORITY,
+            FinalDecision.KEEP,
+            "family-a",
+            (),
+            "a" * 64,
+            0.5,
+            "kept",
+            None,
+        ),
+        HypothesisRegistryEntry(
+            2,
+            ResearchMode.ALPHA_RESEARCH,
+            ConsensusStatus.NONE,
+            FinalDecision.INFRA_BLOCKED,
+            None,
+            (),
+            None,
+            None,
+            "ExperimentManifest transport contract is missing.",
+            None,
+        ),
+        HypothesisRegistryEntry(
+            3,
+            ResearchMode.ALPHA_RESEARCH,
+            ConsensusStatus.MAJORITY,
+            FinalDecision.DISCARD,
+            "family-b",
+            (),
+            "b" * 64,
+            0.0,
+            "discarded",
+            None,
+        ),
+        HypothesisRegistryEntry(
+            4,
+            ResearchMode.DATA_INFRA_G0,
+            ConsensusStatus.MAJORITY,
+            FinalDecision.INFRA_REPAIRED,
+            "family-c",
+            (),
+            "c" * 64,
+            0.0,
+            "repaired",
+            None,
+        ),
+    )
+
+    counters = derive_campaign_counters(entries, acknowledged_through_iteration=0)
+
+    assert counters.consecutive_non_keep == 1
+    assert counters.consecutive_no_consensus == 0
+    assert counters.iterations_since_last_keep == 1
+
+
+def test_implementation_infra_blocked_rejects_an_existing_implementation_result(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+    state = replace(state, implementation_result=_implementation_result())
+
+    with pytest.raises(AutoresearchValidationError, match="implementation phase final_decision"):
+        advance_state(state, _mid_implementation_infra_blocked(), policy)
+
+
+def test_persisted_implementation_infra_blocker_cannot_become_suspended(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+    decided = advance_state(state, _mid_implementation_infra_blocked(), policy)
+    assert decided.final_decision is not None
+    forged = replace(
+        decided,
+        suspended=True,
+        suspension_reason=decided.final_decision.infra_rationale,
+    )
+    persisted = AutoresearchState.from_dict(json.loads(json.dumps(forged.to_dict())))
+
+    with pytest.raises(AutoresearchValidationError, match="explicit operator-owned"):
+        validate_state(persisted, policy)
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    (
+        pytest.param(
+            replace(_mid_implementation_infra_blocked(), infra_rationale=""),
+            id="empty-rationale",
+        ),
+        pytest.param(
+            replace(_mid_implementation_infra_blocked(), recommended_metric_value=0.1),
+            id="non-null-metric",
+        ),
+        pytest.param(
+            replace(_mid_implementation_infra_blocked(), infra_rationale="   "),
+            id="whitespace-rationale",
+        ),
+        pytest.param(
+            replace(
+                _mid_implementation_infra_blocked(),
+                infra_rationale="This explanation is deliberately too short.",
+            ),
+            id="short-rationale",
+        ),
+        pytest.param(
+            replace(
+                _mid_implementation_infra_blocked(),
+                infra_rationale=(
+                    "This rationale is sufficiently long but deliberately uses none of the "
+                    "recognized implementation-blocker phrases required by the gate."
+                ),
+            ),
+            id="missing-contract-term",
+        ),
+        pytest.param(
+            replace(_mid_implementation_infra_blocked(), continue_loop=False),
+            id="continue-loop-false",
+        ),
+    ),
+)
+def test_implementation_infra_blocked_rejects_invalid_no_memory_contract(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    artifact: FinalDecisionArtifact,
+) -> None:
+    state = _implementation_state_with_missing_contract(policy, platform_readiness)
+
+    with pytest.raises(AutoresearchValidationError, match="implementation phase final_decision"):
+        advance_state(state, artifact, policy)
+
+
+def test_implementation_infra_blocked_rejects_data_infra_g0(
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_consensus(policy, platform_readiness)
+    assert state.context_packet is not None
+    state = replace(
+        state,
+        mode=ResearchMode.DATA_INFRA_G0,
+        context_packet=replace(
+            state.context_packet,
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair the missing runtime contract before alpha research.",
+        ),
+    )
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+
+    with pytest.raises(AutoresearchValidationError, match="implementation phase final_decision"):
+        advance_state(state, _mid_implementation_infra_blocked(), policy)
 
 
 def test_operator_precondition_final_decision_allows_infra_blocked_without_verification(

@@ -47,6 +47,7 @@ from gateway.autoresearch.constants import (
     DEFAULT_QUANTIPY_ROOT,
 )
 from gateway.autoresearch.enums import (
+    FinalDecision,
     Phase,
     ResearchMode,
     VerificationStatus,
@@ -713,6 +714,14 @@ class AutoresearchSupervisor:
             if state.campaign_review_required:
                 self._log_campaign_review_advisory(state)
             if state.suspended:
+                if (
+                    state.final_decision is not None
+                    and state.final_decision.decision is FinalDecision.INFRA_BLOCKED
+                    and not state.final_decision.continue_loop
+                ):
+                    raise SupervisorError(
+                        "INFRA_BLOCKED final decisions require continue_loop=true"
+                    )
                 return SupervisorResult(SupervisorOutcome.NO_ACTION, "platform_readiness_suspended")
             if self._is_terminal_state(state):
                 return SupervisorResult(SupervisorOutcome.NO_ACTION, "terminal_state")
@@ -1191,6 +1200,13 @@ class AutoresearchSupervisor:
                     )
             if state.phase is not Phase.REPEAT or state.final_decision is None:
                 return None
+            if (
+                state.final_decision.decision is FinalDecision.INFRA_BLOCKED
+                and not state.final_decision.continue_loop
+            ):
+                raise AutoresearchValidationError(
+                    "INFRA_BLOCKED final decisions require continue_loop=true"
+                )
             if not state.final_decision.continue_loop:
                 return None
             if state.final_decision.memory_write_required and not state.memory_written:
@@ -2365,6 +2381,7 @@ class AutoresearchSupervisor:
         return (
             state.phase is Phase.REPEAT
             and decision is not None
+            and decision.decision is not FinalDecision.INFRA_BLOCKED
             and not decision.continue_loop
             and (
                 not decision.memory_write_required

@@ -321,9 +321,7 @@ def _build_hypothesis_registry_entry(
         contested_families=contested,
         fingerprint=fingerprint,
         metric_value=decision.recommended_metric_value,
-        reason=(
-            " ".join(decision.log_summary.split())[:HYPOTHESIS_REGISTRY_REASON_MAX_CHARS].strip()
-        ),
+        reason=_hypothesis_registry_reason(state, decision),
         novelty_delta_sha256=(
             _sha256_text(consensus.novelty_delta)
             if (
@@ -993,6 +991,103 @@ def _is_operator_infrastructure_suspension_state(state: AutoresearchState) -> bo
     )
 
 
+_INFRA_BLOCKED_RATIONALE_MIN_CHARS = 64
+_INFRA_BLOCKED_CONTRACT_TERM_RE = re.compile(
+    r"\b(?:ExperimentManifest|ExperimentRunContext|[Rr]untime|[Tt]ransport|"
+    r"[A-Z][A-Za-z0-9_]*Receipt(?:Contract)?(?:\s+contract)?)\b"
+)
+_INFRA_BLOCKED_GENERIC_TERMS = frozenset(("runtime", "transport"))
+
+
+def _has_runtime_or_transport_contract_term(text: str | None) -> bool:
+    """Require only a bounded rationale with a runtime or transport contract term."""
+    if text is None:
+        return False
+    normalized = text.strip()
+    return (
+        len(normalized) >= _INFRA_BLOCKED_RATIONALE_MIN_CHARS
+        and _INFRA_BLOCKED_CONTRACT_TERM_RE.search(normalized) is not None
+    )
+
+
+def _hypothesis_registry_reason(
+    state: AutoresearchState,
+    decision: FinalDecisionArtifact,
+) -> str:
+    source = (
+        decision.infra_rationale
+        if _is_implementation_infra_blocked_contract(state, decision)
+        else decision.log_summary
+    )
+    if source is None:
+        raise AutoresearchValidationError(
+            "implementation INFRA_BLOCKED registry reason requires infra_rationale"
+        )
+    normalized = " ".join(source.split())
+    if len(normalized) <= HYPOTHESIS_REGISTRY_REASON_MAX_CHARS:
+        return normalized
+
+    if _is_implementation_infra_blocked_contract(state, decision):
+        named_term = next(
+            (
+                match.group(0)
+                for match in _INFRA_BLOCKED_CONTRACT_TERM_RE.finditer(source)
+                if match.group(0).casefold() not in _INFRA_BLOCKED_GENERIC_TERMS
+            ),
+            None,
+        )
+        if named_term is None:
+            named_term_match = _INFRA_BLOCKED_CONTRACT_TERM_RE.search(source)
+            named_term = named_term_match.group(0) if named_term_match is not None else None
+        if named_term is not None:
+            prefix_length = HYPOTHESIS_REGISTRY_REASON_MAX_CHARS - len(named_term) - 1
+            if prefix_length > 0:
+                return f"{normalized[:prefix_length].rstrip()} {named_term}"
+            return named_term[:HYPOTHESIS_REGISTRY_REASON_MAX_CHARS]
+
+    return normalized[:HYPOTHESIS_REGISTRY_REASON_MAX_CHARS].strip()
+
+
+def _is_implementation_infra_blocked_state(state: AutoresearchState) -> bool:
+    """Return whether the approved brief gates the blocker-only implementation dispatch."""
+    consensus = state.latest_consensus
+    return (
+        state.phase in (Phase.IMPLEMENTATION, Phase.REPEAT)
+        and state.mode is ResearchMode.ALPHA_RESEARCH
+        and state.implementation_result is None
+        and state.latest_verification is None
+        and state.latest_review is None
+        and consensus is not None
+        and consensus.status is ConsensusStatus.MAJORITY
+        and not _is_operator_precondition_consensus(consensus)
+        and _has_runtime_or_transport_contract_term(consensus.implementation_brief)
+    )
+
+
+def _requires_implementation_infra_blocked_decision(state: AutoresearchState) -> bool:
+    """Return whether IMPLEMENTATION must dispatch its infrastructure-blocker decision."""
+    return state.phase is Phase.IMPLEMENTATION and _is_implementation_infra_blocked_state(state)
+
+
+def _is_implementation_infra_blocked_contract(
+    state: AutoresearchState,
+    decision: FinalDecisionArtifact,
+) -> bool:
+    """Return true for the no-memory blocker accepted before implementation evidence."""
+    rationale = decision.infra_rationale
+    return (
+        _is_implementation_infra_blocked_state(state)
+        and decision.decision is FinalDecision.INFRA_BLOCKED
+        and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
+        and decision.recommended_metric_value is None
+        and decision.continue_loop
+        and not decision.memory_write_required
+        and not state.suspended
+        and state.suspension_reason is None
+        and _has_runtime_or_transport_contract_term(rationale)
+    )
+
+
 def _is_authorized_no_memory_final_decision(state: AutoresearchState) -> bool:
     """Return whether a non-retained final decision completed a valid terminal path."""
     decision = state.final_decision
@@ -1015,10 +1110,12 @@ def _is_authorized_no_memory_final_decision(state: AutoresearchState) -> bool:
         )
 
     if decision.decision is FinalDecision.INFRA_BLOCKED:
-        return state.suspended and (
-            _is_operator_infrastructure_suspension_state(state)
+        return (
+            _is_implementation_infra_blocked_contract(state, decision)
+            or (state.suspended and _is_operator_infrastructure_suspension_state(state))
             or (
-                _is_operator_precondition_consensus(state.latest_consensus)
+                state.suspended
+                and _is_operator_precondition_consensus(state.latest_consensus)
                 and state.implementation_result is None
                 and latest_verification is None
                 and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
@@ -1132,6 +1229,9 @@ def _validate_final_decision_artifact(
         raise AutoresearchValidationError(
             "final_decision reviewer_verdict must match latest review"
         )
+
+    if _is_implementation_infra_blocked_contract(state, artifact):
+        return
 
     if (
         latest_consensus is not None
@@ -1980,6 +2080,61 @@ def _clear_consumed_platform_runtime_receipts(state: AutoresearchState) -> Autor
     )
 
 
+def _advance_final_decision(
+    state: AutoresearchState,
+    artifact: FinalDecisionArtifact,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None,
+) -> AutoresearchState:
+    registry_entry = _build_hypothesis_registry_entry(state, artifact)
+    next_registry = (*state.hypothesis_registry, registry_entry)
+    next_counters = derive_campaign_counters(
+        next_registry,
+        acknowledged_through_iteration=_acknowledged_through_iteration(state),
+    )
+    next_review_required = state.campaign_review_required
+    next_review_reason = state.campaign_review_reason
+    next_campaign_review_history: tuple[CampaignReviewRecord, ...] = state.campaign_review_history
+    if not next_review_required:
+        next_review_reason = _campaign_stall_reason(next_counters, policy)
+        if next_review_reason is not None:
+            next_review_required = True
+            next_campaign_review_history = (
+                *next_campaign_review_history,
+                CampaignReviewRecord(
+                    triggered_iteration=state.iteration,
+                    reason=next_review_reason,
+                    counters=next_counters,
+                    acknowledgement=None,
+                    acknowledged_iteration=None,
+                ),
+            )[-constants.MAX_CAMPAIGN_REVIEW_RECORDS :]
+    next_state = replace(
+        state,
+        final_decision=artifact,
+        phase=Phase.REPEAT,
+        suspended=(
+            artifact.decision is FinalDecision.INFRA_BLOCKED
+            and not _is_implementation_infra_blocked_contract(state, artifact)
+        ),
+        suspension_reason=(
+            artifact.infra_rationale
+            if (
+                artifact.decision is FinalDecision.INFRA_BLOCKED
+                and not _is_implementation_infra_blocked_contract(state, artifact)
+            )
+            else None
+        ),
+        hypothesis_registry=next_registry,
+        campaign_counters=next_counters,
+        campaign_review_required=next_review_required,
+        campaign_review_reason=next_review_reason,
+        campaign_review_history=next_campaign_review_history,
+    )
+    transitions_module._validate_state(next_state, policy, validation_context)
+    return next_state
+
+
 def advance_state(
     state: AutoresearchState,
     artifact: SetupContextArtifact
@@ -2102,6 +2257,14 @@ def advance_state(
         )
 
     if state.phase is Phase.IMPLEMENTATION:
+        if isinstance(artifact, FinalDecisionArtifact):
+            if not _is_implementation_infra_blocked_contract(state, artifact):
+                raise AutoresearchValidationError(
+                    "implementation phase final_decision requires an ALPHA_RESEARCH "
+                    "INFRA_BLOCKED artifact with the no-memory runtime-contract fields"
+                )
+            _validate_final_decision_artifact(artifact, state, validation_context)
+            return _advance_final_decision(state, artifact, policy, validation_context)
         if not isinstance(artifact, ImplementationResultArtifact):
             raise AutoresearchValidationError(
                 "implementation phase accepts implementation_result only"
@@ -2244,57 +2407,7 @@ def advance_state(
         ):
             raise AutoresearchValidationError("final_decision requires prior artifacts")
         _validate_final_decision_artifact(artifact, state, validation_context)
-        registry_entry = _build_hypothesis_registry_entry(state, artifact)
-        next_registry = (*state.hypothesis_registry, registry_entry)
-        next_counters = derive_campaign_counters(
-            next_registry,
-            acknowledged_through_iteration=_acknowledged_through_iteration(state),
-        )
-        next_review_required = state.campaign_review_required
-        next_review_reason = state.campaign_review_reason
-        next_campaign_review_history: tuple[CampaignReviewRecord, ...] = (
-            state.campaign_review_history
-        )
-        if not next_review_required:
-            next_review_reason = _campaign_stall_reason(next_counters, policy)
-            if next_review_reason is not None:
-                next_review_required = True
-                next_campaign_review_history = (
-                    *next_campaign_review_history,
-                    CampaignReviewRecord(
-                        triggered_iteration=state.iteration,
-                        reason=next_review_reason,
-                        counters=next_counters,
-                        acknowledgement=None,
-                        acknowledged_iteration=None,
-                    ),
-                )[-constants.MAX_CAMPAIGN_REVIEW_RECORDS :]
-        if artifact.decision is FinalDecision.INFRA_BLOCKED:
-            next_state = replace(
-                state,
-                final_decision=artifact,
-                phase=Phase.REPEAT,
-                suspended=True,
-                suspension_reason=artifact.infra_rationale,
-                hypothesis_registry=next_registry,
-                campaign_counters=next_counters,
-                campaign_review_required=next_review_required,
-                campaign_review_reason=next_review_reason,
-                campaign_review_history=next_campaign_review_history,
-            )
-        else:
-            next_state = replace(
-                state,
-                final_decision=artifact,
-                phase=Phase.REPEAT,
-                hypothesis_registry=next_registry,
-                campaign_counters=next_counters,
-                campaign_review_required=next_review_required,
-                campaign_review_reason=next_review_reason,
-                campaign_review_history=next_campaign_review_history,
-            )
-        transitions_module._validate_state(next_state, policy, validation_context)
-        return next_state
+        return _advance_final_decision(state, artifact, policy, validation_context)
 
     raise AutoresearchValidationError(
         "repeat phase does not accept artifacts; mark memory or start next iteration"

@@ -194,7 +194,23 @@ def load_artifact_file(
     if target.artifact_type is ArtifactType.FIX_RESULT:
         return FixResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.FINAL_DECISION:
-        return FinalDecisionArtifact.from_dict(artifact_raw)
+        if (
+            state.phase is Phase.IMPLEMENTATION
+            and not transitions_module._requires_implementation_infra_blocked_decision(state)
+        ):
+            raise AutoresearchValidationError(
+                "implementation artifact envelope does not satisfy the infrastructure-blocker gate"
+            )
+        artifact = FinalDecisionArtifact.from_dict(artifact_raw)
+        if (
+            state.phase is Phase.IMPLEMENTATION
+            and not transitions_module._is_implementation_infra_blocked_contract(state, artifact)
+        ):
+            raise AutoresearchValidationError(
+                "implementation final_decision envelope requires the INFRA_BLOCKED "
+                "runtime-contract no-memory fields"
+            )
+        return artifact
     raise AutoresearchValidationError(
         f"{state.phase.value} does not accept artifact files; use state mutation commands instead"
     )

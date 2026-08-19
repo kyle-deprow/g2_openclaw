@@ -42,10 +42,10 @@ Frozen slots dataclass: `iteration`, `research_mode`, `consensus_status`, `decis
 For NO_CONSENSUS: normalized `vote_family` values from the final debate round receiving ≥2 of 5 votes (first mechanical use of `DebateSubmission.vote_family`). At most 2 members by construction.
 
 ### 1.5 `reason`
-`" ".join(final_decision.log_summary.split())[:160]` — runner-owned, deterministic, no model writes.
+`" ".join(final_decision.log_summary.split())[:160]` — runner-owned, deterministic, no model writes. Exception: a mid-implementation `INFRA_BLOCKED` entry derives its reason from `infra_rationale`, carrying the named missing runtime contract verbatim (truncated to the same 160-character bound).
 
 ### 1.6 `CampaignCounters`
-`consecutive_non_keep`, `consecutive_no_consensus`, `iterations_since_last_keep`. Derived by `derive_campaign_counters(registry, *, acknowledged_through_iteration)`: consecutive counters consider entries after the acknowledgement baseline; `INFRA_BLOCKED`/`INFRA_REPAIRED` are **counter-neutral** (neither increment nor reset); `iterations_since_last_keep` counts all entries and ignores the baseline. `_validate_state` recomputes and compares (`"campaign_counters do not match the hypothesis registry"`).
+`consecutive_non_keep`, `consecutive_no_consensus`, `iterations_since_last_keep`. Derived by `derive_campaign_counters(registry, *, acknowledged_through_iteration)`: consecutive counters consider entries after the acknowledgement baseline; `INFRA_BLOCKED`/`INFRA_REPAIRED` are **counter-neutral** (neither increment nor reset); `iterations_since_last_keep` counts non-infrastructure entries after the last keep and ignores the baseline. `_validate_state` recomputes and compares (`"campaign_counters do not match the hypothesis registry"`).
 
 ### 1.7 State fields
 Appended to `AutoresearchState`: `hypothesis_registry`, `campaign_counters`, `campaign_review_required: bool`, `campaign_review_reason: str | None`, `campaign_review_history: tuple[CampaignReviewRecord,...]` (cap 32). `CampaignReviewRecord`: `triggered_iteration`, `reason`, `counters`, `acknowledgement | None`, `acknowledged_iteration | None`.
@@ -58,6 +58,9 @@ All five keys required in `from_dict`/`to_dict` — the v4 conditional-key-remov
 ### 1.9 Write points
 - `advance_state` DECISION_LOG branch: build entry (consensus + debate + decision), append, recompute counters, evaluate stall (phase C), single `replace(...)` validated by the existing `_validate_state` call.
 - `lifecycle.suspend_for_infrastructure`: appends a counter-neutral INFRA_BLOCKED entry.
+- `advance_state` IMPLEMENTATION branch (operator-precondition path): a gated
+  `FINAL_DECISION` with `INFRA_BLOCKED` discovered mid-implementation appends a
+  counter-neutral entry and proceeds to the next iteration without suspension.
 - **Critical:** `lifecycle.start_next_iteration` and `resume_suspended_iteration` construct fresh `AutoresearchState(...)` — they must explicitly carry all five fields or the registry silently resets every iteration. Dedicated carry-forward test required.
 
 ### 1.10 Schema version — decision
@@ -93,7 +96,7 @@ Zero existing fixtures change (all consensus artifacts in tests are dataclass-co
 ## 4. Campaign counters + stall
 
 ### 4.1-4.3
-Counters recomputed at exactly one place (DECISION_LOG transition; mirror in suspend_for_infrastructure). Thresholds as `CampaignGovernancePolicy` (`stall_consecutive_non_keep=8`, `stall_consecutive_no_consensus=3`) on `AutoresearchPolicy`; optional strictly-validated `agents.defaults.autoresearchCampaignGovernance` config block (absent → defaults; no deployment coupling). Stall predicate at DECISION_LOG; on trip: set flag, deterministic reason string, append `CampaignReviewRecord`.
+Counters recomputed where registry entries are written (DECISION_LOG transition, suspend_for_infrastructure, and the mid-implementation INFRA_BLOCKED path). Thresholds as `CampaignGovernancePolicy` (`stall_consecutive_non_keep=8`, `stall_consecutive_no_consensus=3`) on `AutoresearchPolicy`; optional strictly-validated `agents.defaults.autoresearchCampaignGovernance` config block (absent → defaults; no deployment coupling). Stall predicate at DECISION_LOG; on trip: set flag, deterministic reason string, append `CampaignReviewRecord`.
 ```
 campaign stalled: <n> consecutive non-KEEP iterations (threshold <N>)
 campaign stalled: <n> consecutive NO_CONSENSUS iterations (threshold <M>)

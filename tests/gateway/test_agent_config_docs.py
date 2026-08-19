@@ -538,7 +538,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.17.0" in skill
+    assert "version: 8.17.2" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -556,6 +556,18 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "trades per day per instrument" in skill
     assert "below 1.0 trades/day on average misses the activity requirement" in skill
     assert "trading friction, not signal absence, has been the binding constraint" in skill
+    assert (
+        "implementation reveals the approved brief requires a data or runtime contract the "
+        "platform does not provide" in skill
+    )
+    assert "submit a `final_decision` with `infra_blocked`" in skill
+    assert "`reviewer_verdict=not_run`" in skill
+    assert "`memory_write_required=false`" in skill
+    assert "`infra_rationale` naming the exact missing contract" in skill
+    for bootstrap_name in ("AGENTS.md", "SOUL.md", "README.md"):
+        bootstrap = " ".join((AGENT_CONFIG / bootstrap_name).read_text(encoding="utf-8").split())
+        assert "gated `ALPHA_RESEARCH` implementation" in bootstrap
+        assert "fresh next iteration" in bootstrap
     assert "context, not an instruction to prefer long holds" in skill
     assert (
         "proposals should leave headroom above this floor rather than targeting it exactly" in skill

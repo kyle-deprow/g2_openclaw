@@ -191,7 +191,12 @@ def _phase_instruction(
         Phase.IMPLEMENTATION: (
             "Implementation is allowed only after a majority consensus. "
             "Use the final implementation brief exactly "
-            "as approved. No implementation without consensus majority. For "
+            "as approved. If implementation reveals the approved brief requires a data or "
+            "runtime contract the platform does not provide, do not work around it or edit "
+            "shared platform code; submit a FINAL_DECISION with INFRA_BLOCKED, "
+            "reviewer_verdict NOT_RUN, null metric, memory_write_required false, and an "
+            "infra_rationale naming the exact missing contract. No implementation without "
+            "consensus majority. For "
             "ALPHA_RESEARCH, derive and prewarm the platform data plan before creating "
             "or running the committed quantipy-experiment-v2 package. A succeeded prewarm "
             "run bound to the current state reference MUST be reused. A replacement prewarm "
@@ -751,7 +756,8 @@ def next_action(
     if state.suspended:
         raise AutoresearchValidationError(
             "autoresearch is suspended on an infrastructure blocker; "
-            "run autoresearch-resume after platform readiness changes"
+            "address the named missing contract and run autoresearch-resume; only an operator "
+            "readiness suspension requires a changed platform manifest"
         )
     if state.phase is not Phase.REVIEW:
         transitions_module._revalidate_accepted_member_union_manifests(state)

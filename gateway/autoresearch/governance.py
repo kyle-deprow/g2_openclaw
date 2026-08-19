@@ -384,8 +384,13 @@ def derive_campaign_counters(
     consecutive_non_keep = 0
     consecutive_no_consensus = 0
     last_keep_index = -1
-    for index, entry in enumerate(registry):
+    eligible_entries: list[HypothesisRegistryEntry] = []
+    for entry in registry:
         entry.validate()
+        if entry.decision in (FinalDecision.INFRA_BLOCKED, FinalDecision.INFRA_REPAIRED):
+            continue
+        eligible_entries.append(entry)
+        index = len(eligible_entries) - 1
         if entry.iteration <= acknowledged_through_iteration:
             if entry.decision in {
                 FinalDecision.KEEP,
@@ -393,8 +398,6 @@ def derive_campaign_counters(
                 FinalDecision.STRONG_KEEP,
             }:
                 last_keep_index = index
-            continue
-        if entry.decision in (FinalDecision.INFRA_BLOCKED, FinalDecision.INFRA_REPAIRED):
             continue
         if entry.decision in {
             FinalDecision.KEEP,
@@ -410,7 +413,7 @@ def derive_campaign_counters(
             consecutive_no_consensus += 1
         else:
             consecutive_no_consensus = 0
-    iterations_since_last_keep = len(registry) - last_keep_index - 1
+    iterations_since_last_keep = len(eligible_entries) - last_keep_index - 1
     return CampaignCounters(
         consecutive_non_keep=consecutive_non_keep,
         consecutive_no_consensus=consecutive_no_consensus,
