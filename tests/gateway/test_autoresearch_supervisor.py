@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -82,8 +83,8 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
-    DEFAULT_RENUDGE_ALERT_LIMIT,
-    DEFAULT_RENUDGE_IDLE_SECONDS,
+    DEFAULT_MAX_ESCALATING_RENUDGES,
+    DEFAULT_RENUDGE_ESCALATION_MINUTES,
     MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
     RECOVERY_MESSAGE,
     AutoresearchSupervisor,
@@ -99,10 +100,10 @@ from gateway.autoresearch_supervisor import (
     SupervisorOutcome,
     SupervisorResult,
     WakeDeliveryProof,
+    _move_launch_request_no_replace,
     main,
     make_idempotency_key,
     memory_wake_acknowledgement_key,
-    reset_recovery_checkpoint_for_manual_wake,
 )
 from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
@@ -380,6 +381,7 @@ class FailingWakeOpenClaw(FakeOpenClaw):
         shutdown_requested: ShutdownRequested,
     ) -> Mapping[str, object]:
         if method == "agent":
+            self.rpc_calls.append((method, params))
             raise SupervisorError(self._stderr)
         return super().request(method, params, shutdown_requested=shutdown_requested)
 
@@ -465,10 +467,13 @@ def _supervisor(
     fake: FakeOpenClaw,
     *,
     expected_stage_task_stale_seconds: float = 300.0,
-    renudge_idle_seconds: float = DEFAULT_RENUDGE_IDLE_SECONDS,
-    renudge_alert_limit: int = DEFAULT_RENUDGE_ALERT_LIMIT,
+    renudge_escalation_minutes: float = DEFAULT_RENUDGE_ESCALATION_MINUTES,
+    max_escalating_renudges: int = DEFAULT_MAX_ESCALATING_RENUDGES,
+    staleness_force_wake_minutes: float = 45.0,
     grace_period_seconds: float = 120.0,
     now: Callable[[], float] | None = None,
+    monotonic: Callable[[], float] | None = None,
+    mtime: Callable[[Path], float] | None = None,
 ) -> AutoresearchSupervisor:
     return AutoresearchSupervisor(
         SupervisorConfig(
@@ -481,13 +486,16 @@ def _supervisor(
             proc_root=env.proc_root,
             runs_root=env.runs_root,
             grace_period_seconds=grace_period_seconds,
-            renudge_idle_seconds=renudge_idle_seconds,
-            renudge_alert_limit=renudge_alert_limit,
+            renudge_escalation_minutes=renudge_escalation_minutes,
+            max_escalating_renudges=max_escalating_renudges,
+            staleness_force_wake_minutes=staleness_force_wake_minutes,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
             launch_requests_path=env.launch_requests_path,
             stage_inbox_path=env.stage_inbox_path,
         ),
         now=(lambda: env.now) if now is None else now,
+        monotonic=monotonic,
+        mtime=mtime,
         sleep=lambda _: None,
         task_gateway=fake,
     )
@@ -495,8 +503,8 @@ def _supervisor(
 
 def test_expected_stage_task_stale_default_allows_long_stage_turns() -> None:
     assert DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS == 900.0
-    assert DEFAULT_RENUDGE_IDLE_SECONDS == 600.0
-    assert DEFAULT_RENUDGE_ALERT_LIMIT == 6
+    assert DEFAULT_RENUDGE_ESCALATION_MINUTES == 20.0
+    assert DEFAULT_MAX_ESCALATING_RENUDGES == 5
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
@@ -641,6 +649,60 @@ def _current_instruction_manifest_sha256(state: AutoresearchState, state_path: P
         build_receipt_catalog(DEFAULT_QUANTIPY_ROOT),
         state_path=state_path,
     )
+
+
+def _write_matching_run(
+    env: SupervisorEnv,
+    state: AutoresearchState,
+    *,
+    task_label: str,
+    run_name: str,
+    running: bool = False,
+) -> Path:
+    run_dir = env.runs_root / f"iteration-{state.iteration}" / state.phase.value / run_name
+    command = (task_label, "--opaque")
+    manifest_path = env.state_path.parent / f"{run_name}-manifest.json"
+    state_reference_sha256 = build_authoritative_state_reference(
+        state,
+        state_path=env.state_path,
+    ).sha256()
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": state.iteration,
+                "phase": state.phase.value,
+                "attempt": 1,
+                "task_label": task_label,
+                "state_reference_sha256": state_reference_sha256,
+                "instruction_manifest_sha256": _current_instruction_manifest_sha256(
+                    state, env.state_path
+                ),
+                "run_directory": str(run_dir),
+                "working_directory": str(env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=env.runs_root,
+        command=command,
+    )
+    start_run(run_dir=run_dir, pid=123, runs_root=env.runs_root)
+    if not running:
+        complete_run(
+            run_dir=run_dir,
+            runs_root=env.runs_root,
+            exit_code=0,
+            signal_number=None,
+            peak_rss_bytes=None,
+        )
+    return run_dir
 
 
 def _write_launch_request(
@@ -868,6 +930,238 @@ def test_launch_request_inbox_executes_at_most_one_request_per_cycle(
     assert second.exists()
 
 
+def test_launch_request_ttl_archives_old_request_and_executes_fresh_request(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    old = _write_launch_request(supervisor_env, name="old.json")
+    fresh = _write_launch_request(
+        supervisor_env,
+        name="fresh.json",
+        run_dir=supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-2",
+    )
+    old_mtime = supervisor_env.now - 31.0 * 60.0
+    os.utime(old, (old_mtime, old_mtime))
+    calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert calls == 1
+    assert not old.exists()
+    assert (supervisor_env.launch_requests_path / "rejected" / ".stale-old.json").exists()
+    assert not fresh.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / fresh.name).exists()
+    stale_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_stale"
+    ]
+    assert stale_events[0]["request"] == "old.json"
+    assert stale_events[0]["age_seconds"] > 30.0 * 60.0
+
+
+def test_stale_launch_archive_rejects_replaced_inode(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "launch-requests"
+    destination_dir = tmp_path / "rejected"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    request = source_dir / "request.json"
+    request.write_text("old", encoding="utf-8")
+    expected_stat = request.stat()
+    request.unlink()
+    request.write_text("new", encoding="utf-8")
+    source_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination_dir, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(SupervisorError, match="changed during stale archival"):
+            _move_launch_request_no_replace(
+                request.name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+                destination_name=".stale-request.json",
+                expected_stat=expected_stat,
+            )
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+    assert request.exists()
+    assert not (destination_dir / ".stale-request.json").exists()
+
+
+def test_stale_launch_archive_rejects_inode_swap_at_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "launch-requests"
+    destination_dir = tmp_path / "rejected"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    request = source_dir / "request.json"
+    request.write_text("old", encoding="utf-8")
+    expected_stat = request.stat()
+    source_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination_dir, os.O_RDONLY | os.O_DIRECTORY)
+    request_fd = os.open(request, os.O_RDONLY | os.O_NOFOLLOW)
+    real_renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    real_renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    real_renameat2.restype = ctypes.c_int
+    swapped = False
+
+    class RenameAt2Proxy:
+        argtypes: list[object] | None = None
+        restype: object | None = None
+
+        def __call__(
+            self,
+            source_directory_fd: int,
+            source_name: bytes,
+            target_directory_fd: int,
+            target_name: bytes,
+            flags: int,
+        ) -> int:
+            nonlocal swapped
+            if not swapped:
+                swapped = True
+                request.unlink()
+                request.write_text("fresh", encoding="utf-8")
+            return int(
+                real_renameat2(
+                    source_directory_fd,
+                    source_name,
+                    target_directory_fd,
+                    target_name,
+                    flags,
+                )
+            )
+
+    class LibraryProxy:
+        def __init__(self) -> None:
+            self.renameat2 = RenameAt2Proxy()
+
+    try:
+        monkeypatch.setattr(
+            "gateway.autoresearch_supervisor.ctypes.CDLL",
+            lambda *args, **kwargs: LibraryProxy(),
+        )
+        with pytest.raises(SupervisorError, match="changed during stale archival"):
+            _move_launch_request_no_replace(
+                request.name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+                destination_name=".stale-request.json",
+                expected_stat=expected_stat,
+                source_fd=request_fd,
+            )
+    finally:
+        os.close(request_fd)
+        os.close(source_fd)
+        os.close(destination_fd)
+    assert request.read_text(encoding="utf-8") == "fresh"
+    assert not (destination_dir / ".stale-request.json").exists()
+
+
+def test_stale_launch_archive_cleans_archive_when_publisher_wins_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "launch-requests"
+    destination_dir = tmp_path / "rejected"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    request = source_dir / "request.json"
+    request.write_text("old", encoding="utf-8")
+    expected_stat = request.stat()
+    source_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination_dir, os.O_RDONLY | os.O_DIRECTORY)
+    request_fd = os.open(request, os.O_RDONLY | os.O_NOFOLLOW)
+    real_renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    real_renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    real_renameat2.restype = ctypes.c_int
+    calls = 0
+
+    class RenameAt2Proxy:
+        argtypes: list[object] | None = None
+        restype: object | None = None
+
+        def __call__(
+            self,
+            source_directory_fd: int,
+            source_name: bytes,
+            target_directory_fd: int,
+            target_name: bytes,
+            flags: int,
+        ) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                request.unlink()
+                request.write_text("replacement-before-rename", encoding="utf-8")
+            elif calls == 2:
+                request.write_text("replacement-during-rollback", encoding="utf-8")
+            return int(
+                real_renameat2(
+                    source_directory_fd,
+                    source_name,
+                    target_directory_fd,
+                    target_name,
+                    flags,
+                )
+            )
+
+    class LibraryProxy:
+        def __init__(self) -> None:
+            self.renameat2 = RenameAt2Proxy()
+
+    try:
+        monkeypatch.setattr(
+            "gateway.autoresearch_supervisor.ctypes.CDLL",
+            lambda *args, **kwargs: LibraryProxy(),
+        )
+        with pytest.raises(SupervisorError, match="moved entry restored"):
+            _move_launch_request_no_replace(
+                request.name,
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+                destination_name=".stale-request.json",
+                expected_stat=expected_stat,
+                source_fd=request_fd,
+            )
+    finally:
+        os.close(request_fd)
+        os.close(source_fd)
+        os.close(destination_fd)
+
+    assert request.read_text(encoding="utf-8") == "replacement-during-rollback"
+    assert not (destination_dir / ".stale-request.json").exists()
+    recovered = tuple(source_dir.glob(".raced-request.json-*"))
+    assert len(recovered) == 1
+    assert recovered[0].read_text(encoding="utf-8") == "replacement-before-rename"
+
+
 def test_launch_request_inbox_launcher_failure_alerts_and_rejects_request(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -881,14 +1175,11 @@ def test_launch_request_inbox_launcher_failure_alerts_and_rejects_request(
 
     result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
 
-    assert result is not None
-    assert result.outcome is SupervisorOutcome.ALERT
-    assert result.recovery_key == f"launch-request:{request_path.name}"
-    assert "launch_request_execution_failed" in result.reason
+    assert result is None
     assert not request_path.exists()
     assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
     checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
-    assert checkpoint.recovery_records[result.recovery_key].alerted is True
+    assert checkpoint.recovery_records[f"launch-request:{request_path.name}"].alerted is True
 
 
 def test_launch_request_inbox_rejection_failure_does_not_starve_other_entries(
@@ -977,6 +1268,282 @@ def test_current_git_marker_mtime_does_not_suppress_stale_recovery(
     assert result.outcome is SupervisorOutcome.NUDGED
 
 
+def test_staleness_watchdog_forces_wake_when_no_owner_or_detached_run(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    os.utime(
+        supervisor_env.state_path,
+        (supervisor_env.now - 3600.0, supervisor_env.now - 3600.0),
+    )
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(supervisor_env, fake, grace_period_seconds=3600.0)
+
+    result = supervisor.run_once()
+
+    wake_message = next(params["message"] for method, params in fake.rpc_calls if method == "agent")
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert isinstance(wake_message, str)
+    assert "staleness watchdog" in wake_message.lower()
+
+
+def test_staleness_watchdog_does_not_wake_for_running_detached_run(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    state = _supervisor(supervisor_env, FakeOpenClaw())._load_state()
+    _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="verification",
+        run_name="running-verification",
+        running=True,
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(
+        supervisor_env,
+        fake,
+        grace_period_seconds=3600.0,
+        mtime=lambda _path: supervisor_env.now - 3_601.0,
+    ).run_once()
+
+    assert result.reason == "active_matching_detached_run"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_staleness_watchdog_due_guard_rejects_running_detached_run(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        mtime=lambda _path: supervisor_env.now - 3_601.0,
+    )
+    state = supervisor._load_state()
+    _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="verification",
+        run_name="running-verification-watchdog-guard",
+        running=True,
+    )
+    probe = supervisor._build_state_probe(state)
+
+    assert (
+        supervisor._staleness_watchdog_due(
+            state,
+            probe,
+            owner_task_active=False,
+        )
+        is False
+    )
+
+
+def test_watchdog_cold_start_starts_the_ordinary_ladder_and_cap(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    wall_clock = [supervisor_env.now]
+    monotonic_clock = [0.0]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: wall_clock[0],
+        monotonic=lambda: monotonic_clock[0],
+        mtime=lambda _path: supervisor_env.now - 3_601.0,
+        grace_period_seconds=3_600.0,
+        max_escalating_renudges=1,
+    )
+
+    first = supervisor.run_once()
+    first_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    ordinary_record = first_checkpoint.recovery_records[first.recovery_key or ""]
+    ordinary_clock = first_checkpoint.recovery_records[f"supervisor-clock:{first.recovery_key}"]
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert ordinary_record.status is RecoveryStatus.SUCCEEDED
+    assert ordinary_record.woke_at == supervisor_env.now
+    assert ordinary_clock.woke_at == 0.0
+
+    wall_clock[0] += 45.0 * 60.0
+    monotonic_clock[0] += 45.0 * 60.0
+    watchdog = supervisor.run_once()
+    wall_clock[0] += 15.0 * 60.0
+    monotonic_clock[0] += 15.0 * 60.0
+    ordinary = supervisor.run_once()
+    wall_clock[0] += 3_600.0
+    monotonic_clock[0] += 3_600.0
+    watchdog_again = supervisor.run_once()
+    wall_clock[0] += 1.0
+    monotonic_clock[0] += 1.0
+    capped = supervisor.run_once()
+
+    messages = [params["message"] for method, params in fake.rpc_calls if method == "agent"]
+    assert watchdog.outcome is SupervisorOutcome.NUDGED
+    assert ordinary.outcome is SupervisorOutcome.RENUDGED
+    assert watchdog_again.outcome is SupervisorOutcome.NUDGED
+    assert capped.reason == "recovery_escalation_capped"
+    assert len(messages) == 4
+    assert isinstance(messages[0], str) and "staleness watchdog" in messages[0].lower()
+    assert isinstance(messages[1], str) and "staleness watchdog" in messages[1].lower()
+    assert isinstance(messages[2], str) and "staleness watchdog" not in messages[2].lower()
+    assert "Recovery escalation 1/1" in str(messages[2])
+
+
+def test_staleness_watchdog_ignores_recent_ordinary_wake_clock(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    wall_clock = [supervisor_env.now]
+    monotonic_clock = [0.0]
+    state_mtime = [supervisor_env.now - 900.0]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: wall_clock[0],
+        monotonic=lambda: monotonic_clock[0],
+        mtime=lambda _path: state_mtime[0],
+        staleness_force_wake_minutes=45.0,
+    )
+
+    first = supervisor.run_once()
+    wall_clock[0] += 1_200.0
+    monotonic_clock[0] += 1_200.0
+    second = supervisor.run_once()
+    wall_clock[0] += 601.0
+    monotonic_clock[0] += 601.0
+    watchdog = supervisor.run_once()
+
+    messages = [params["message"] for method, params in fake.rpc_calls if method == "agent"]
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
+    assert watchdog.outcome is SupervisorOutcome.NUDGED
+    assert isinstance(messages[-1], str)
+    assert "staleness watchdog" in messages[-1].lower()
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    assert any(key.startswith("staleness-watchdog:") for key in checkpoint.recovery_records)
+
+
+def test_staleness_watchdog_settling_does_not_suppress_ordinary_ladder(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    wall_clock = [supervisor_env.now]
+    monotonic_clock = [0.0]
+    state_mtime = [supervisor_env.now - 120.0]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: wall_clock[0],
+        monotonic=lambda: monotonic_clock[0],
+        mtime=lambda _path: state_mtime[0],
+        staleness_force_wake_minutes=45.0,
+    )
+
+    for advance in (0.0, 1_200.0, 1_200.0, 400.0, 800.0):
+        wall_clock[0] += advance
+        monotonic_clock[0] += advance
+        result = supervisor.run_once()
+
+    messages = [params["message"] for method, params in fake.rpc_calls if method == "agent"]
+    assert result.outcome is SupervisorOutcome.RENUDGED
+    assert len(messages) == 5
+    assert all(isinstance(message, str) for message in messages)
+    assert "staleness watchdog" in str(messages[3]).lower()
+    assert "staleness watchdog" not in str(messages[4]).lower()
+    assert "Recovery escalation 3/5" in str(messages[4])
+
+
+def test_due_watchdog_breaks_through_capped_ordinary_ladder(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    wall_clock = [supervisor_env.now]
+    monotonic_clock = [0.0]
+    state_mtime = [supervisor_env.now - 120.0]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: wall_clock[0],
+        monotonic=lambda: monotonic_clock[0],
+        mtime=lambda _path: state_mtime[0],
+        max_escalating_renudges=1,
+        staleness_force_wake_minutes=45.0,
+    )
+
+    first = supervisor.run_once()
+    wall_clock[0] += 1_200.0
+    monotonic_clock[0] += 1_200.0
+    second = supervisor.run_once()
+    wall_clock[0] += 1_200.0
+    monotonic_clock[0] += 1_200.0
+    capped = supervisor.run_once()
+    wall_clock[0] += 301.0
+    monotonic_clock[0] += 301.0
+    watchdog = supervisor.run_once()
+
+    messages = [params["message"] for method, params in fake.rpc_calls if method == "agent"]
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
+    assert capped.reason == "recovery_escalation_capped"
+    assert watchdog.outcome is SupervisorOutcome.NUDGED
+    assert len(messages) == 3
+    assert isinstance(messages[-1], str)
+    assert "staleness watchdog" in messages[-1].lower()
+
+
+def test_failed_staleness_watchdog_wake_retries_on_the_next_poll(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    wall_clock = [supervisor_env.now]
+    monotonic_clock = [0.0]
+    state_mtime = [supervisor_env.now - 3_600.0]
+    fake = FailingWakeOpenClaw(stderr="temporary provider capacity")
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: wall_clock[0],
+        monotonic=lambda: monotonic_clock[0],
+        mtime=lambda _path: state_mtime[0],
+    )
+
+    with pytest.raises(SupervisorError):
+        supervisor.run_once()
+    # A failed watchdog wake settles on the watchdog cadence: the immediately
+    # following poll must NOT retry the failing wake.
+    settled = supervisor.run_once()
+    assert settled.outcome is SupervisorOutcome.NO_ACTION
+    assert settled.reason == "staleness_watchdog_settling"
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    watchdog_records = [
+        record
+        for key, record in checkpoint.recovery_records.items()
+        if key.startswith("staleness-watchdog:")
+    ]
+    assert len(watchdog_records) == 1
+    assert watchdog_records[0].status is RecoveryStatus.FAILED
+    assert watchdog_records[0].woke_at is None
+    watchdog_key = next(
+        key for key in checkpoint.recovery_records if key.startswith("staleness-watchdog:")
+    )
+    watchdog_clock = checkpoint.recovery_records.get(f"supervisor-clock:{watchdog_key}")
+    assert watchdog_clock is None or watchdog_clock.failed_at is None
+
+    wall_clock[0] += 45.0 * 60.0
+    monotonic_clock[0] += 45.0 * 60.0
+    with pytest.raises(SupervisorError):
+        supervisor.run_once()
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 2
+
+
 def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
     supervisor_env: SupervisorEnv,
 ) -> None:
@@ -1024,9 +1591,8 @@ def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
 
     result = supervisor.run_once()
 
-    assert result.outcome is SupervisorOutcome.ALERT
-    assert result.reason.startswith("invalid_detached_run_record:")
-    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert any(method == "agent" for method, _ in fake.rpc_calls)
 
 
 def test_latched_run_record_alert_still_allows_stale_state_nudging(
@@ -1079,19 +1645,38 @@ def test_latched_run_record_alert_still_allows_stale_state_nudging(
     first = supervisor.run_once()
     second = supervisor.run_once()
 
-    assert first.outcome is SupervisorOutcome.ALERT
-    assert first.reason.startswith("invalid_detached_run_record:")
-    assert second.outcome is SupervisorOutcome.NUDGED
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.reason != "alert_already_emitted"
     assert any(method == "agent" for method, _ in fake.rpc_calls)
 
 
 def test_recovery_wake_includes_current_failed_detached_run_details(
     supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Arrange
-    _prepare_stale_state(supervisor_env)
+    workspace = supervisor_env.repo_root.parent / "experiment-workspace"
+    workspace.mkdir()
+    state = replace(
+        AutoresearchState.from_dict(json.loads(_operator_precondition_state_json())),
+        phase=Phase.VERIFICATION,
+        iteration=4,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
     fake = FakeOpenClaw()
-    supervisor = _supervisor(supervisor_env, fake)
+    clock = [supervisor_env.now]
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+    monkeypatch.setattr(supervisor, "_consume_terminal_verification_run", lambda _state: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_prepare_controller_lifecycle",
+        lambda _state, *, shutdown_requested: None,
+    )
     state = supervisor._load_state()
     state_reference_sha256 = build_authoritative_state_reference(
         state,
@@ -1154,21 +1739,126 @@ def test_recovery_wake_includes_current_failed_detached_run_details(
 
     # Act
     first = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
     second = supervisor.run_once()
-    wake_message = next(params["message"] for method, params in fake.rpc_calls if method == "agent")
+    wake_messages = [params["message"] for method, params in fake.rpc_calls if method == "agent"]
+    wake_message = wake_messages[-1]
 
     # Assert
-    assert first.outcome is SupervisorOutcome.ALERT
-    assert second.outcome is SupervisorOutcome.NUDGED
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
     assert isinstance(wake_message, str)
     assert "failed-attempt" in wake_message
+    assert "run_directory=failed-attempt" in wake_message
+    assert "outcome=failed" in wake_message
     assert "exit_code=23" in wake_message
     assert "failure_classification=process_error" in wake_message
     assert "sealed_stderr_truncated=false" in wake_message
-    assert 'sealed_stderr_tail="' in wake_message
-    assert 'terminal \\"quoted\\" line\\nnext"' in wake_message
+    assert "Otherwise rerun the verification stage from the authoritative state." in wake_message
     assert 'terminal "quoted" line\nnext' not in wake_message
     assert "x" * 500 not in wake_message
+    assert len(wake_message.encode("utf-8")) <= 1500
+
+
+def test_escalated_missing_verification_wake_preserves_success_run_action(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = supervisor_env.repo_root.parent / "experiment-workspace"
+    workspace.mkdir()
+    state = replace(
+        AutoresearchState.from_dict(json.loads(_operator_precondition_state_json())),
+        phase=Phase.VERIFICATION,
+        iteration=4,
+        mode=ResearchMode.ALPHA_RESEARCH,
+        implementation_result=_implementation_result(workspace),
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    fake = FakeOpenClaw()
+    clock = [supervisor_env.now]
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+    monkeypatch.setattr(supervisor, "_consume_terminal_verification_run", lambda _state: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_prepare_controller_lifecycle",
+        lambda _state, *, shutdown_requested: None,
+    )
+    loaded_state = supervisor._load_state()
+    run_dir = _write_matching_run(
+        supervisor_env,
+        loaded_state,
+        task_label="verification",
+        run_name="sealed-success-escalated",
+    )
+
+    first = supervisor.run_once()
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
+    second = supervisor.run_once()
+    wake_message = [params["message"] for method, params in fake.rpc_calls if method == "agent"][-1]
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.RENUDGED
+    assert isinstance(wake_message, str)
+    assert "Recovery escalation 1/5" in wake_message
+    assert f"run_directory={run_dir.name}" in wake_message
+    assert "outcome=succeeded" in wake_message
+    assert "the run sealed; submit the verification artifact referencing it" in wake_message
+    assert len(wake_message.encode("utf-8")) <= 1500
+
+
+def test_recovery_wake_names_sealed_successful_verification_run(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    state = _supervisor(supervisor_env, FakeOpenClaw())._load_state()
+    run_dir = _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="verification",
+        run_name="sealed-success",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    wake_message = next(params["message"] for method, params in fake.rpc_calls if method == "agent")
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert isinstance(wake_message, str)
+    assert run_dir.name in wake_message
+    assert "the run sealed; submit the verification artifact referencing it" in wake_message
+    assert len(wake_message.encode("utf-8")) <= 1500
+
+
+def test_recovery_wake_names_succeeded_prewarm_without_implementation(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    state = replace(
+        AutoresearchState.from_dict(json.loads(_operator_precondition_state_json())),
+        iteration=4,
+        platform_readiness=supervisor_env.readiness_identity,
+    )
+    supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    _make_stale([supervisor_env.state_path, *supervisor_env.marker_paths], now=supervisor_env.now)
+    run_dir = _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="implementation-prewarm",
+        run_name="prewarm-success",
+    )
+    fake = FakeOpenClaw()
+
+    result = _supervisor(supervisor_env, fake).run_once()
+
+    wake_message = next(params["message"] for method, params in fake.rpc_calls if method == "agent")
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert isinstance(wake_message, str)
+    assert run_dir.name in wake_message
+    assert "reuse its receipts; build and submit the implementation" in wake_message
+    assert len(wake_message.encode("utf-8")) <= 1500
 
 
 def test_recovery_wake_reports_missing_sealed_capture_without_raw_tail(
@@ -1400,9 +2090,14 @@ def test_operator_stopped_detached_verification_alerts_without_advancing_state(
     result = supervisor._consume_terminal_verification_run(state)
 
     # Assert
-    assert result is not None
-    assert result.outcome is SupervisorOutcome.ALERT
-    assert result.reason == "interrupted_detached_verification_requires_operator_recovery"
+    assert result is None
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    assert (
+        checkpoint.recovery_records[
+            "interrupted-detached-verification:4:verification:" + state_reference_sha256
+        ].alerted
+        is True
+    )
     assert supervisor._load_state() == state
 
 
@@ -1933,7 +2628,12 @@ def test_successful_recovery_renudges_after_idle_window_and_updates_timestamp(
     _prepare_stale_state(supervisor_env)
     clock = [supervisor_env.now]
     fake = FakeOpenClaw()
-    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1000.0,
+    )
     caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
 
     first = supervisor.run_once()
@@ -1943,7 +2643,7 @@ def test_successful_recovery_renudges_after_idle_window_and_updates_timestamp(
     assert first_record.attempt_count == 1
     assert first_record.renudge_count == 0
 
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS - 1.0
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0 - 1.0
     before_idle_window = supervisor.run_once()
     before_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
     before_record = before_checkpoint.recovery_records[first.recovery_key or ""]
@@ -1963,6 +2663,8 @@ def test_successful_recovery_renudges_after_idle_window_and_updates_timestamp(
     assert after_checkpoint.last_cycle_outcome == SupervisorOutcome.RENUDGED.value
     agent_calls = [params for method, params in fake.rpc_calls if method == "agent"]
     assert len(agent_calls) == 2
+    assert isinstance(agent_calls[1]["message"], str)
+    assert "Recovery escalation 1/5" in agent_calls[1]["message"]
     cycle_events = [
         json.loads(record.message)
         for record in caplog.records
@@ -1975,7 +2677,7 @@ def test_successful_recovery_renudges_after_idle_window_and_updates_timestamp(
         if json.loads(record.message).get("event") == "supervisor.renudged"
     ]
     assert len(renudge_events) == 1
-    assert renudge_events[0]["idle_seconds"] == DEFAULT_RENUDGE_IDLE_SECONDS
+    assert renudge_events[0]["idle_seconds"] == DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
 
 
 def test_decayed_renudge_waits_for_active_tasks_and_running_owner(
@@ -1984,11 +2686,16 @@ def test_decayed_renudge_waits_for_active_tasks_and_running_owner(
     _prepare_stale_state(supervisor_env)
     clock = [supervisor_env.now]
     fake = FakeOpenClaw()
-    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1000.0,
+    )
 
     first = supervisor.run_once()
     assert first.outcome is SupervisorOutcome.NUDGED
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
     active_task = {
         "taskId": "owner-turn-active",
         "id": "owner-turn-active",
@@ -2022,6 +2729,85 @@ def test_decayed_renudge_waits_for_active_tasks_and_running_owner(
     assert blocked_by_task.reason == "active_expected_stage_task"
     assert blocked_by_owner.reason == "active_owner_session"
     assert [method for method, _ in fake.rpc_calls if method == "agent"] == ["agent"]
+
+
+def test_state_mtime_change_starts_a_new_recovery_condition(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    state_mtime = [supervisor_env.now - 600.0]
+    fake = FakeOpenClaw()
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        mtime=lambda _path: state_mtime[0],
+        staleness_force_wake_minutes=1000.0,
+    )
+
+    first = supervisor.run_once()
+    state_mtime[0] = clock[0] - 599.0
+    second = supervisor.run_once()
+
+    assert first.outcome is SupervisorOutcome.NUDGED
+    assert second.outcome is SupervisorOutcome.NUDGED
+    assert second.recovery_key != first.recovery_key
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 2
+
+
+def test_unchanged_state_fingerprint_survives_wall_clock_step(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    first_wall_clock = [supervisor_env.now]
+    first_monotonic_clock = [1_000.0]
+    first_supervisor = _supervisor(
+        supervisor_env,
+        FakeOpenClaw(),
+        now=lambda: first_wall_clock[0],
+        monotonic=lambda: first_monotonic_clock[0],
+        staleness_force_wake_minutes=1000.0,
+    )
+    state = first_supervisor._load_state()
+    probe = first_supervisor._build_state_probe(state)
+    plan = first_supervisor._recovery_plan(state)
+    recovery_key = f"{plan.key_prefix}:{state.iteration}:{state.phase.value}:{probe.fingerprint}"
+
+    first = first_supervisor._claim_recovery(
+        state,
+        recovery_key,
+        detected_error=None,
+        state_fingerprint=probe.fingerprint,
+        state_mtime=probe.latest_update_ts,
+        owner_task_active=False,
+    )
+    assert first is not None and not isinstance(first, SupervisorResult)
+    first_supervisor._complete_recovery_claim(first)
+
+    # The process restarts with a backward wall clock, while the monotonic
+    # source continues advancing. The persisted fingerprint and monotonic
+    # anchor still make the unchanged condition eligible.
+    second_supervisor = _supervisor(
+        supervisor_env,
+        FakeOpenClaw(),
+        now=lambda: supervisor_env.now - 500.0,
+        monotonic=lambda: 1_000.0 + DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0,
+        staleness_force_wake_minutes=1000.0,
+    )
+    second = second_supervisor._claim_recovery(
+        state,
+        recovery_key,
+        detected_error=None,
+        state_fingerprint=probe.fingerprint,
+        # This is deliberately newer than the persisted wake wall time. The
+        # unchanged fingerprint, not a wall-clock comparison, is authoritative.
+        state_mtime=probe.latest_update_ts + 1_000.0,
+        owner_task_active=False,
+    )
+
+    assert second is not None and not isinstance(second, SupervisorResult)
+    assert second.renudge_idle_seconds == DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
 
 
 def test_owner_session_rotation_drops_only_the_owner_mapping(
@@ -2079,9 +2865,10 @@ def test_owner_session_rotation_skips_a_running_turn_and_a_held_lock(
     lock.unlink()
 
 
-def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
+def test_renudge_cap_emits_one_advisory_and_stops_ladder_wakes(
     supervisor_env: SupervisorEnv,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _prepare_stale_state(supervisor_env)
     clock = [supervisor_env.now]
@@ -2089,22 +2876,25 @@ def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
     supervisor = _supervisor(
         supervisor_env,
         fake,
-        renudge_alert_limit=2,
+        max_escalating_renudges=2,
+        staleness_force_wake_minutes=1000.0,
         now=lambda: clock[0],
     )
     caplog.set_level(logging.INFO, logger="gateway.autoresearch_supervisor")
 
     first = supervisor.run_once()
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
     second = supervisor.run_once()
-    # Renudges back off exponentially: the second renudge requires 2x idle.
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
-    deduped_by_backoff = supervisor.run_once()
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
     third = supervisor.run_once()
-    clock[0] += 4 * DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
+    _write_launch_request(supervisor_env, name="post-cap.json")
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
     after_alert = supervisor.run_once()
-    clock[0] += 8 * DEFAULT_RENUDGE_IDLE_SECONDS
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0
     after_alert_again = supervisor.run_once()
 
     checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
@@ -2117,34 +2907,20 @@ def test_renudge_alert_limit_stops_decay_and_manual_reset_reenables_it(
 
     assert first.outcome is SupervisorOutcome.NUDGED
     assert second.outcome is SupervisorOutcome.RENUDGED
-    assert deduped_by_backoff.outcome is SupervisorOutcome.NO_ACTION
-    assert deduped_by_backoff.reason == "recovery_nudge_deduped"
     assert third.outcome is SupervisorOutcome.RENUDGED
-    assert after_alert.outcome is SupervisorOutcome.ALERT
-    assert after_alert.reason.startswith("renudge_alert_limit_reached:")
+    assert after_alert == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
     assert after_alert_again.outcome is SupervisorOutcome.NO_ACTION
-    assert after_alert_again.reason == "alert_already_emitted"
-    assert record.status is RecoveryStatus.EXHAUSTED
+    assert after_alert_again.reason == "recovery_escalation_capped"
+    assert record.status is RecoveryStatus.SUCCEEDED
     assert record.alerted is True
     assert record.attempt_count == 1
     assert record.renudge_count == 2
     assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 3
     assert len(limit_events) == 1
-    assert limit_events[0]["outcome"] == SupervisorOutcome.ALERT.value
+    assert limit_events[0]["max_escalating_renudges"] == 2
 
-    reset_recovery_checkpoint_for_manual_wake(
-        supervisor_env.checkpoint_path,
-        iteration=4,
-        phase=Phase.VERIFICATION.value,
-    )
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS
-    reset_result = supervisor.run_once()
-
-    assert reset_result.outcome is SupervisorOutcome.NUDGED
-    reset_checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
-    reset_record = reset_checkpoint.recovery_records[reset_result.recovery_key or ""]
-    assert reset_record.attempt_count == 1
-    assert reset_record.renudge_count == 0
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 3
+    assert record.renudge_count == 2
 
 
 def test_exception_cycle_is_persisted_and_logged_before_reraise(
@@ -2254,7 +3030,8 @@ def test_supervisor_honors_non_default_renudge_and_stage_stale_thresholds(
         supervisor_env,
         fake,
         expected_stage_task_stale_seconds=5.0,
-        renudge_idle_seconds=30.0,
+        renudge_escalation_minutes=0.5,
+        staleness_force_wake_minutes=1000.0,
         grace_period_seconds=1.0,
         now=lambda: clock[0],
     )
@@ -2766,7 +3543,7 @@ def test_recovery_retries_use_distinct_idempotency_keys(
     )
 
     first = supervisor.run_once()
-    clock[0] += DEFAULT_RENUDGE_IDLE_SECONDS + 1.0
+    clock[0] += DEFAULT_RENUDGE_ESCALATION_MINUTES * 60.0 + 1.0
     second = supervisor.run_once()
 
     agent_calls = [params for method, params in fake.rpc_calls if method == "agent"]
@@ -3278,9 +4055,7 @@ def test_missing_verification_reason_is_not_masked_by_owner_session_error(
 
     result = _supervisor(supervisor_env, fake).run_once()
 
-    assert result.reason == (
-        "controller_lifecycle_failed: implementation_result requires a majority consensus"
-    )
+    assert result.reason == "missing_verification_artifact"
 
 
 def test_stage_task_uses_the_public_task_summary_requester_and_owner_mapping(
@@ -3517,45 +4292,81 @@ def test_recovery_attempts_remain_bounded_after_repeated_wake_failures(
     supervisor_env: SupervisorEnv,
 ) -> None:
     _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
     fake = FakeOpenClaw()
     fake.agent_payload = {
         "status": "rejected",
         "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
         "runId": "run",
     }
-    supervisor = _supervisor(supervisor_env, fake)
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
 
     with pytest.raises(SupervisorError):
         supervisor.run_once()
+    settling = supervisor.run_once()
+    assert settling.reason == "recovery_failed_settling"
+    clock[0] += 121.0
     with pytest.raises(SupervisorError):
         supervisor.run_once()
 
+    clock[0] += 121.0
     result = supervisor.run_once()
 
-    assert result.reason.startswith("recovery_attempts_exhausted:")
+    assert result.reason == "recovery_escalation_capped"
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    record = checkpoint.recovery_records[result.recovery_key or ""]
+    assert record.status is RecoveryStatus.FAILED
+    assert record.alerted is True
+
+    clock[0] += 121.0
+    fake.agent_payload = {
+        "status": "accepted",
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "runId": "recovered",
+    }
+    recovered = supervisor.run_once()
+    assert recovered.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 3
 
 
 def test_provider_auth_wake_failures_alert_as_control_plane_blockers(
     supervisor_env: SupervisorEnv,
 ) -> None:
     _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
     fake = FailingWakeOpenClaw(
         stderr=(
             "CLI transcript compaction failed for openai/gpt-5.6-sol: "
             'No API key found for provider "openai"'
         )
     )
-    supervisor = _supervisor(supervisor_env, fake)
+    supervisor = _supervisor(supervisor_env, fake, now=lambda: clock[0])
 
     with pytest.raises(SupervisorError, match="No API key found"):
         supervisor.run_once()
+    # A failed wake gets its own settling cadence; the next poll must not
+    # spin another provider call immediately.
+    settling = supervisor.run_once()
+    assert settling.reason == "recovery_error_settling"
+    clock[0] += 121.0
     with pytest.raises(SupervisorError, match="No API key found"):
         supervisor.run_once()
 
+    clock[0] += 121.0
     result = supervisor.run_once()
 
-    assert result.outcome is SupervisorOutcome.ALERT
-    assert result.reason.startswith("control_plane_provider_blocked:")
+    assert result.outcome is SupervisorOutcome.NO_ACTION
+    assert result.reason == "recovery_escalation_capped"
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    record = checkpoint.recovery_records[result.recovery_key or ""]
+    assert record.status is RecoveryStatus.FAILED
+    assert record.alerted is True
+
+    # The advisory does not latch the condition: after its cadence, recovery
+    # is attempted again if the provider is still unavailable.
+    clock[0] += 121.0
+    with pytest.raises(SupervisorError, match="No API key found"):
+        supervisor.run_once()
 
 
 def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
@@ -3604,11 +4415,14 @@ def test_repeated_stage_capacity_failures_alert_as_control_plane_blockers(
     second = supervisor.run_once()
     clock[0] += 121.0
     third = supervisor.run_once()
+    clock[0] += 121.0
+    fourth = supervisor.run_once()
 
     assert first.outcome is SupervisorOutcome.NUDGED
     assert second.outcome is SupervisorOutcome.NUDGED
-    assert third.outcome is SupervisorOutcome.ALERT
-    assert third.reason.startswith("control_plane_provider_blocked:")
+    assert third.outcome is SupervisorOutcome.NUDGED
+    assert fourth.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 4
 
 
 def test_active_target_writer_process_suppresses_owner_wake(
@@ -3624,6 +4438,115 @@ def test_active_target_writer_process_suppresses_owner_wake(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "target_repo_writer_active"
+
+
+def test_stale_target_writer_is_ignored_with_warning_but_young_writer_blocks(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    process_dir = supervisor_env.proc_root / "1234"
+    process_dir.mkdir()
+    (process_dir / "cmdline").write_bytes(b"uv\x00run\x00pytest\x00")
+    (process_dir / "cwd").symlink_to(supervisor_env.repo_root, target_is_directory=True)
+    stale_mtime = supervisor_env.now - 61.0 * 60.0
+    os.utime(process_dir, (stale_mtime, stale_mtime))
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    ignored = supervisor._active_target_repo_writer_processes(supervisor._load_state())
+
+    assert ignored == ()
+    supervisor._active_target_repo_writer_processes(supervisor._load_state())
+    stale_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.stale_writer_ignored"
+    ]
+    assert len(stale_events) == 1
+    assert stale_events[0]["pid"] == 1234
+    assert "pytest" in stale_events[0]["command"]
+
+    young_mtime = supervisor_env.now - 10.0
+    os.utime(process_dir, (young_mtime, young_mtime))
+    assert supervisor._active_target_repo_writer_processes(supervisor._load_state()) == (
+        "1234:uv run pytest ",
+    )
+    reused_pid_mtime = supervisor_env.now - 62.0 * 60.0
+    os.utime(process_dir, (reused_pid_mtime, reused_pid_mtime))
+    assert supervisor._active_target_repo_writer_processes(supervisor._load_state()) == ()
+    stale_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.stale_writer_ignored"
+    ]
+    assert len(stale_events) == 2
+
+
+def test_writer_start_time_uses_proc_stat_field_22_and_boot_time(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    process_dir = supervisor_env.proc_root / "1234"
+    process_dir.mkdir()
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    boot_time = supervisor_env.now - 600.0
+    (supervisor_env.proc_root / "stat").write_text(
+        f"btime {int(boot_time)}\n",
+        encoding="utf-8",
+    )
+    start_ticks = 123 * ticks_per_second
+    stat_fields = ["0"] * 18 + [str(start_ticks)]
+    (process_dir / "stat").write_text(
+        "1234 (pytest worker) S " + " ".join(stat_fields) + "\n",
+        encoding="utf-8",
+    )
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    started_at = supervisor._process_started_at(process_dir)
+
+    assert started_at == int(boot_time) + 123.0
+
+
+def test_stale_writer_warning_identity_uses_proc_start_time_for_pid_reuse(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    process_dir = supervisor_env.proc_root / "1234"
+    process_dir.mkdir()
+    (process_dir / "cmdline").write_bytes(b"uv\x00run\x00pytest\x00")
+    (process_dir / "cwd").symlink_to(supervisor_env.repo_root, target_is_directory=True)
+    ticks_per_second = os.sysconf("SC_CLK_TCK")
+    boot_time = int(supervisor_env.now - 10_000.0)
+    (supervisor_env.proc_root / "stat").write_text(
+        f"btime {boot_time}\n",
+        encoding="utf-8",
+    )
+
+    def write_process_start_ticks(start_seconds: float) -> None:
+        start_ticks = int((start_seconds - boot_time) * ticks_per_second)
+        stat_fields = ["0"] * 18 + [str(start_ticks)]
+        (process_dir / "stat").write_text(
+            "1234 (pytest worker) S " + " ".join(stat_fields) + "\n",
+            encoding="utf-8",
+        )
+
+    write_process_start_ticks(supervisor_env.now - 61.0 * 60.0)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    assert supervisor._active_target_repo_writer_processes(supervisor._load_state()) == ()
+    assert supervisor._active_target_repo_writer_processes(supervisor._load_state()) == ()
+    write_process_start_ticks(supervisor_env.now - 62.0 * 60.0)
+    assert supervisor._active_target_repo_writer_processes(supervisor._load_state()) == ()
+
+    stale_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.stale_writer_ignored"
+    ]
+    assert len(stale_events) == 2
 
 
 def test_active_writer_in_the_verified_implementation_workspace_suppresses_owner_wake(
@@ -4036,3 +4959,47 @@ def test_run_forever_does_not_poll_again_after_shutdown_during_sleep(
 
     assert exit_code == 0
     assert poll_count == 1
+
+
+def test_stale_launch_archive_rejects_pathname_swap_before_rename(
+    tmp_path: Path,
+) -> None:
+    """A publisher replacing the entry after our open must abort BEFORE rename.
+
+    The post-rename rollback only runs if the process survives; validating the
+    inode currently bound to the pathname first closes the crash window in
+    which a fresh request could be stranded in the archive.
+    """
+    source_dir = tmp_path / "launch-requests"
+    destination_dir = tmp_path / "rejected"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    request = source_dir / "request.json"
+    request.write_text("old", encoding="utf-8")
+    expected_stat = request.stat()
+    source_fd = os.open(source_dir, os.O_RDONLY | os.O_DIRECTORY)
+    destination_fd = os.open(destination_dir, os.O_RDONLY | os.O_DIRECTORY)
+    request_fd = os.open(request, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        # Swap the pathname binding after the descriptor was opened.
+        replacement = source_dir / ".swap.tmp"
+        replacement.write_text("fresh", encoding="utf-8")
+        os.replace(replacement, request)
+
+        with pytest.raises(SupervisorError, match="changed during stale archival"):
+            _move_launch_request_no_replace(
+                "request.json",
+                src_dir_fd=source_fd,
+                dst_dir_fd=destination_fd,
+                destination_name=".stale-request.json",
+                expected_stat=expected_stat,
+                source_fd=request_fd,
+            )
+        # The fresh replacement must still be live in the request directory
+        # and nothing may have landed in the archive.
+        assert (source_dir / "request.json").read_text(encoding="utf-8") == "fresh"
+        assert list(destination_dir.iterdir()) == []
+    finally:
+        os.close(source_fd)
+        os.close(destination_fd)
+        os.close(request_fd)

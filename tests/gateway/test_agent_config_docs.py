@@ -538,7 +538,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.16.0" in skill
+    assert "version: 8.17.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -626,6 +626,23 @@ def test_autoresearch_docs_require_feasibility_telemetry_as_reporting_duty() -> 
     assert "projected_model_seconds" in skill
     assert "These are reporting duties, not admission gates" in skill
     assert "The feasibility stage must not reject on `encoded_feature_columns`," in skill
+
+
+def test_autoresearch_docs_pin_stage_summary_budget_and_compaction_contract() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    assert "stage summaries are limited to 4096 characters" in skill
+    assert "serialized summary length <= 3800 locally" in skill
+    assert "top-K by |magnitude|" in skill
+    assert "name K" in skill
+    assert "~6 significant figures" in skill
+    assert "stripped prefixes" in skill
+    assert "scalar comparators" in skill
+    assert "bulk detail in the run artifact" in skill
+    assert (
+        "Experiment packages are built ONLY in the persisted experiment workspace, never in the "
+        "authoritative quantipy worktree." in skill
+    )
 
 
 def test_autoresearch_docs_describe_gpu_model_classes_and_tiered_timeouts() -> None:

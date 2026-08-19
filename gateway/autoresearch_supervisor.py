@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import fcntl
 import hashlib
 import json
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import cast
 
 from dotenv import load_dotenv as load_dotenv
 
@@ -243,8 +246,11 @@ DEFAULT_OWNER_SESSIONS_PATH = (
 DEFAULT_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_GRACE_PERIOD_SECONDS = 120.0
 DEFAULT_CLAIM_STALE_SECONDS = 300.0
-DEFAULT_RENUDGE_IDLE_SECONDS = 600.0
-DEFAULT_RENUDGE_ALERT_LIMIT = 6
+DEFAULT_RENUDGE_ESCALATION_MINUTES = 20.0
+DEFAULT_MAX_ESCALATING_RENUDGES = 5
+DEFAULT_STALENESS_FORCE_WAKE_MINUTES = 45.0
+DEFAULT_WRITER_STALE_MINUTES = 60.0
+DEFAULT_LAUNCH_REQUEST_TTL_MINUTES = 30.0
 # Implementation, verification, review, and fix stages can spend several
 # minutes running tests and backtests without producing an OpenClaw event.
 # Keep the supervisor responsive while allowing those legitimate long turns to
@@ -252,6 +258,9 @@ DEFAULT_RENUDGE_ALERT_LIMIT = 6
 DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 FAILED_DETACHED_RUN_STDERR_TAIL_BYTES = 400
+MAX_WAKE_MESSAGE_BYTES = 1500
+WATCHDOG_RECOVERY_KEY_PREFIX = "staleness-watchdog:"
+MONOTONIC_RECOVERY_KEY_PREFIX = "supervisor-clock:"
 LAUNCH_REQUEST_SCHEMA_VERSION = 1
 LAUNCH_REQUEST_MAX_BYTES = 4096
 LAUNCH_REQUEST_TIMEOUT_SECONDS = 30.0
@@ -359,8 +368,11 @@ class SupervisorConfig:
     target_repo: Path = DEFAULT_QUANTIPY_ROOT
     proc_root: Path = Path("/proc")
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
-    renudge_idle_seconds: float = DEFAULT_RENUDGE_IDLE_SECONDS
-    renudge_alert_limit: int = DEFAULT_RENUDGE_ALERT_LIMIT
+    renudge_escalation_minutes: float = DEFAULT_RENUDGE_ESCALATION_MINUTES
+    max_escalating_renudges: int = DEFAULT_MAX_ESCALATING_RENUDGES
+    staleness_force_wake_minutes: float = DEFAULT_STALENESS_FORCE_WAKE_MINUTES
+    writer_stale_minutes: float = DEFAULT_WRITER_STALE_MINUTES
+    launch_request_ttl_minutes: float = DEFAULT_LAUNCH_REQUEST_TTL_MINUTES
     expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
@@ -371,13 +383,25 @@ class SupervisorConfig:
         _require_finite_positive(self.poll_interval_seconds, field_name="poll_interval_seconds")
         _require_finite_positive(self.grace_period_seconds, field_name="grace_period_seconds")
         _require_finite_positive(self.claim_stale_seconds, field_name="claim_stale_seconds")
-        _require_finite_positive(self.renudge_idle_seconds, field_name="renudge_idle_seconds")
+        _require_finite_positive(
+            self.renudge_escalation_minutes,
+            field_name="renudge_escalation_minutes",
+        )
         if (
-            isinstance(self.renudge_alert_limit, bool)
-            or not isinstance(self.renudge_alert_limit, int)
-            or self.renudge_alert_limit < 1
+            isinstance(self.max_escalating_renudges, bool)
+            or not isinstance(self.max_escalating_renudges, int)
+            or self.max_escalating_renudges < 1
         ):
-            raise SupervisorError("renudge_alert_limit must be a positive integer")
+            raise SupervisorError("max_escalating_renudges must be a positive integer")
+        _require_finite_positive(
+            self.staleness_force_wake_minutes,
+            field_name="staleness_force_wake_minutes",
+        )
+        _require_finite_positive(self.writer_stale_minutes, field_name="writer_stale_minutes")
+        _require_finite_positive(
+            self.launch_request_ttl_minutes,
+            field_name="launch_request_ttl_minutes",
+        )
         _require_finite_positive(
             self.expected_stage_task_stale_seconds,
             field_name="expected_stage_task_stale_seconds",
@@ -413,6 +437,11 @@ class RecoveryClaim:
     recovery_key: str
     token: str
     renudge_idle_seconds: float | None = None
+    escalation_count: int = 0
+    forced_by_staleness_watchdog: bool = False
+    state_fingerprint: str = ""
+    record_key: str | None = None
+    ordinary_recovery_cold_start: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,27 +509,161 @@ def _move_launch_request_no_replace(
     *,
     src_dir_fd: int,
     dst_dir_fd: int,
+    destination_name: str | None = None,
+    expected_stat: os.stat_result | None = None,
+    source_fd: int | None = None,
 ) -> None:
-    for attempt in range(128):
-        target = name
-        if attempt:
-            digest = hashlib.sha256(f"{name}\n{time.time_ns()}\n{attempt}".encode()).hexdigest()
-            target = f"{name}.{digest[:16]}"
+    """Atomically move a request without replacing a destination.
+
+    ``os.rename`` is atomic but replaces an existing destination on POSIX.
+    Launch requests need the stronger no-replace operation because a stale
+    request can race a publisher using the same filename.  Linux exposes the
+    required operation as ``renameat2(RENAME_NOREPLACE)``; fail closed when it
+    is unavailable rather than falling back to link/unlink or an overwrite.
+    """
+
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise SupervisorError("atomic no-replace rename is unavailable") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+
+    owned_source_fd = source_fd
+    close_source_fd = False
+    if expected_stat is not None and owned_source_fd is None:
         try:
-            os.link(
+            owned_source_fd = os.open(
                 name,
-                target,
-                src_dir_fd=src_dir_fd,
-                dst_dir_fd=dst_dir_fd,
-                follow_symlinks=False,
+                os.O_RDONLY | os.O_NOFOLLOW,
+                dir_fd=src_dir_fd,
             )
-        except FileExistsError:
-            continue
         except OSError as exc:
-            raise SupervisorError(f"cannot quarantine launch request: {exc}") from exc
-        os.unlink(name, dir_fd=src_dir_fd)
-        return
-    raise SupervisorError("cannot quarantine launch request without overwrite")
+            raise SupervisorError("launch request changed during stale archival") from exc
+        close_source_fd = True
+
+    def same_inode(metadata: os.stat_result) -> bool:
+        assert expected_stat is not None
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_nlink,
+        ) == (
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+            expected_stat.st_mode,
+            expected_stat.st_size,
+            expected_stat.st_mtime_ns,
+            expected_stat.st_nlink,
+        )
+
+    def rollback_mismatched_entry(target: str) -> str | None:
+        restore_result = renameat2(
+            dst_dir_fd,
+            os.fsencode(target),
+            src_dir_fd,
+            os.fsencode(name),
+            1,
+        )
+        if restore_result == 0:
+            return None
+        restore_errno = ctypes.get_errno()
+        # A publisher can recreate the request name between the archival
+        # rename and this rollback. Keep that replacement at the request name,
+        # but move the entry we moved out of the archive name to a unique
+        # non-request name. This preserves no-replace semantics and never
+        # leaves the replacement under the stale archive name.
+        for rollback_attempt in range(128):
+            rollback_name = (
+                f".raced-{name}-"
+                f"{hashlib.sha256(f'{name}\\n{time.time_ns()}\\n{rollback_attempt}'.encode()).hexdigest()[:16]}"
+            )
+            rollback_result = renameat2(
+                dst_dir_fd,
+                os.fsencode(target),
+                src_dir_fd,
+                os.fsencode(rollback_name),
+                1,
+            )
+            if rollback_result == 0:
+                return rollback_name
+            if ctypes.get_errno() != errno.EEXIST:
+                break
+        raise SupervisorError(
+            "launch request changed during stale archival and could not be restored"
+        ) from OSError(restore_errno, os.strerror(restore_errno))
+
+    try:
+        if expected_stat is not None:
+            assert owned_source_fd is not None
+            if not same_inode(os.fstat(owned_source_fd)):
+                raise SupervisorError("launch request changed during stale archival")
+            # Also validate the inode CURRENTLY bound to the pathname, not only
+            # the descriptor we hold: a publisher can replace the entry after
+            # our open, and the rename below moves whatever the name binds NOW.
+            # The post-rename check only rolls back if this process survives to
+            # run it, so a crash in that window would strand a live request in
+            # the archive. Checking the binding first closes the crash window.
+            try:
+                bound_stat = os.stat(name, dir_fd=src_dir_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise SupervisorError("launch request changed during stale archival") from exc
+            if not same_inode(bound_stat):
+                raise SupervisorError("launch request changed during stale archival")
+
+        for attempt in range(128):
+            target = destination_name or name
+            if attempt:
+                digest = hashlib.sha256(
+                    f"{target}\n{time.time_ns()}\n{attempt}".encode()
+                ).hexdigest()
+                target = f"{target}.{digest[:16]}"
+            result = renameat2(
+                src_dir_fd,
+                os.fsencode(name),
+                dst_dir_fd,
+                os.fsencode(target),
+                1,  # RENAME_NOREPLACE
+            )
+            if result != 0:
+                error_number = ctypes.get_errno()
+                if error_number == errno.EEXIST:
+                    continue
+                raise SupervisorError(
+                    f"cannot quarantine launch request: {os.strerror(error_number)}"
+                )
+
+            if expected_stat is not None:
+                try:
+                    archived = os.stat(target, dir_fd=dst_dir_fd, follow_symlinks=False)
+                except OSError as exc:
+                    try:
+                        rollback_mismatched_entry(target)
+                    except SupervisorError as rollback_exc:
+                        raise rollback_exc from exc
+                    raise SupervisorError("launch request changed during stale archival") from exc
+                if not same_inode(archived):
+                    rollback_name = rollback_mismatched_entry(target)
+                    if rollback_name is not None:
+                        raise SupervisorError(
+                            "launch request changed during stale archival; "
+                            f"moved entry restored as {rollback_name}"
+                        )
+                    raise SupervisorError("launch request changed during stale archival")
+            return
+        raise SupervisorError("cannot quarantine launch request without overwrite")
+    finally:
+        if close_source_fd and owned_source_fd is not None:
+            os.close(owned_source_fd)
 
 
 class AutoresearchSupervisor:
@@ -511,15 +674,20 @@ class AutoresearchSupervisor:
         config: SupervisorConfig | None = None,
         *,
         now: Callable[[], float] = time.time,
+        monotonic: Callable[[], float] | None = None,
+        mtime: Callable[[Path], float] | None = None,
         sleep: Callable[[float], None] = time.sleep,
         task_gateway: TaskGateway | None = None,
     ) -> None:
         self.config = config or SupervisorConfig()
         self._now = now
+        self._monotonic = monotonic or (time.monotonic if now is time.time else now)
+        self._mtime = mtime or (lambda path: path.stat().st_mtime)
         self._sleep = sleep
         self._rpc = OpenClawRPC(task_gateway)
         self._cycle_state: AutoresearchState | None = None
         self._campaign_review_warning_record: str | None = None
+        self._stale_writer_warning_identities: set[tuple[int, float]] = set()
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -588,10 +756,7 @@ class AutoresearchSupervisor:
         if launch_result is not None:
             return launch_result
         run_record_result = self._consume_terminal_verification_run(state)
-        # A latched run-record alert must not starve the stale-state nudging
-        # below: the PM is the designated resolver of a failed run, and only
-        # a nudge summons it.
-        if run_record_result is not None and run_record_result.reason != "alert_already_emitted":
+        if run_record_result is not None:
             return run_record_result
         if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
             lifecycle_result = self._owner_lifecycle_guard(state)
@@ -608,8 +773,6 @@ class AutoresearchSupervisor:
             probe = self._build_state_probe(state)
         except SupervisorError as exc:
             return SupervisorResult(SupervisorOutcome.ALERT, f"invalid_progress_evidence: {exc}")
-        if self._now() - probe.latest_update_ts < self.config.grace_period_seconds:
-            return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
         try:
             reconciled_tasks = self._reconciled_running_tasks(shutdown_requested=shutdown_requested)
         except TaskReconciliationError:
@@ -620,6 +783,16 @@ class AutoresearchSupervisor:
         writers = self._active_target_repo_writer_processes(state)
         if writers:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "target_repo_writer_active")
+        owner_task_active = self._active_owner_task(reconciled_tasks)
+        force_staleness_wake = self._staleness_watchdog_due(
+            state,
+            probe,
+            owner_task_active=owner_task_active,
+        )
+        if not force_staleness_wake and self._now() - probe.latest_update_ts < (
+            self.config.grace_period_seconds
+        ):
+            return SupervisorResult(SupervisorOutcome.NO_ACTION, "state_not_stale")
         recovery_plan = self._recovery_plan(state)
         recovery_key = (
             f"{recovery_plan.key_prefix}:{state.iteration}:{state.phase.value}:{probe.fingerprint}"
@@ -632,18 +805,43 @@ class AutoresearchSupervisor:
             state,
             recovery_key,
             detected_error=detected_error,
+            state_fingerprint=probe.fingerprint,
+            state_mtime=probe.latest_update_ts,
+            owner_task_active=owner_task_active,
+            force=force_staleness_wake,
         )
         if isinstance(claim_or_result, SupervisorResult):
             return claim_or_result
+        if claim_or_result is None:
+            return SupervisorResult(
+                SupervisorOutcome.NO_ACTION,
+                "recovery_escalation_capped",
+                recovery_key,
+            )
         claim = claim_or_result
         self._rotate_owner_session_for_wake(phase=state.phase.value)
         wake_message = self._with_current_failed_detached_run_detail(
             state,
             recovery_plan.message,
         )
+        if claim.forced_by_staleness_watchdog:
+            wake_message = (
+                "Staleness watchdog: the authoritative state is stale with no active owner "
+                "task or current detached run.\n\n"
+                f"{wake_message}"
+            )
+        if claim.escalation_count:
+            wake_message = (
+                f"Recovery escalation {claim.escalation_count}/"
+                f"{self.config.max_escalating_renudges}: fresh wake after unchanged state.\n\n"
+                f"{wake_message}"
+            )
+        wake_message = self._bounded_wake_message(
+            self._with_campaign_review_advisory(state, wake_message)
+        )
         try:
             self._rpc.wake(
-                message=self._with_campaign_review_advisory(state, wake_message),
+                message=wake_message,
                 idempotency_key=make_idempotency_key(
                     purpose="recovery",
                     material=f"{recovery_key}\nclaim={claim.token}",
@@ -654,7 +852,14 @@ class AutoresearchSupervisor:
             self._fail_recovery_claim(claim, exc)
             raise
         self._complete_recovery_claim(claim)
-        if claim.renudge_idle_seconds is None:
+        if claim.forced_by_staleness_watchdog:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.staleness_watchdog_wake",
+                recovery_key=recovery_key,
+                reason=recovery_plan.reason,
+            )
+        elif claim.renudge_idle_seconds is None:
             _structured_log(
                 logging.WARNING,
                 "supervisor.nudged",
@@ -670,10 +875,11 @@ class AutoresearchSupervisor:
                 reason=recovery_plan.reason,
                 detected_error=detected_error.pattern if detected_error is not None else None,
                 idle_seconds=claim.renudge_idle_seconds,
+                escalation_count=claim.escalation_count,
             )
         return SupervisorResult(
             SupervisorOutcome.RENUDGED
-            if claim.renudge_idle_seconds is not None
+            if claim.renudge_idle_seconds is not None and not claim.forced_by_staleness_watchdog
             else SupervisorOutcome.NUDGED,
             recovery_plan.reason,
             recovery_key,
@@ -783,8 +989,8 @@ class AutoresearchSupervisor:
         state: AutoresearchState,
         message: str,
     ) -> str:
-        """Append bounded evidence for a terminal failed current verification run."""
-        if state.phase is not Phase.VERIFICATION:
+        """Append bounded current-run evidence needed by the owner on recovery."""
+        if state.phase not in {Phase.IMPLEMENTATION, Phase.VERIFICATION}:
             return message
         state_reference_sha256 = build_authoritative_state_reference(
             state,
@@ -802,16 +1008,47 @@ class AutoresearchSupervisor:
                 receipts,
                 state_path=self.config.state_path,
             )
-            matching = self._matching_verification_runs(
-                iteration=state.iteration,
-                state_reference_sha256=state_reference_sha256,
-                instruction_manifest_sha256=instruction_manifest_sha256,
-            )
+            if state.phase is Phase.VERIFICATION:
+                matching = self._matching_verification_runs(
+                    iteration=state.iteration,
+                    state_reference_sha256=state_reference_sha256,
+                    instruction_manifest_sha256=instruction_manifest_sha256,
+                )
+            else:
+                matching = self._matching_current_phase_runs(
+                    state,
+                    state_reference_sha256=state_reference_sha256,
+                    instruction_manifest_sha256=instruction_manifest_sha256,
+                )
         except (AutoresearchRunRecordError, AutoresearchValidationError, OSError, ValueError):
             return message
         if not matching:
             return message
         latest = matching[-1]
+        if state.phase is Phase.IMPLEMENTATION and state.implementation_result is None:
+            succeeded_prewarms = [
+                record
+                for record in matching
+                if record.status.state is RunState.SUCCEEDED
+                and "prewarm" in record.manifest.task_label.lower()
+            ]
+            if succeeded_prewarms:
+                latest = succeeded_prewarms[-1]
+                return (
+                    f"{message}\n\nCurrent succeeded prewarm: "
+                    f"outcome=succeeded; run_directory={latest.run_directory.name}; "
+                    "reuse its receipts; build "
+                    "and submit the implementation"
+                )
+        if latest.status.state is RunState.SUCCEEDED:
+            if state.phase is Phase.VERIFICATION:
+                return (
+                    f"{message}\n\nCurrent succeeded detached verification run: "
+                    f"outcome=succeeded; run_directory={latest.run_directory.name}; "
+                    "the run sealed; submit the "
+                    "verification artifact referencing it"
+                )
+            return message
         if latest.status.state is not RunState.FAILED:
             return message
         capture = latest.status.output_capture
@@ -831,14 +1068,88 @@ class AutoresearchSupervisor:
                 stderr_tail = "<sealed stderr capture unavailable>"
         failure_classification = latest.status.failure_classification
         return (
-            f"{message}\n\nCurrent failed detached verification run: "
-            f"run_directory={latest.run_directory.name}; "
+            f"{message}\n\nCurrent failed detached run: "
+            f"outcome=failed; run_directory={latest.run_directory.name}; "
             f"exit_code={latest.status.exit_code}; "
             "failure_classification="
             f"{failure_classification.value if failure_classification is not None else 'unknown'}; "
             f"sealed_stderr_truncated={json.dumps(stderr_truncated)}; "
             f"sealed_stderr_tail={json.dumps(stderr_tail)}"
         )
+
+    def _bounded_wake_message(self, message: str) -> str:
+        encoded = message.encode("utf-8")
+        if len(encoded) <= MAX_WAKE_MESSAGE_BYTES:
+            return message
+
+        # The long recovery instructions are useful context, but the run
+        # identity and imperative at the end are the information the owner
+        # cannot reconstruct safely after a truncation.  Keep those fields as
+        # required fragments and spend the remaining budget on prose.
+        required: list[str] = []
+        for pattern in (
+            r"run_directory=[^;\n]+",
+            r"outcome=(?:succeeded|failed)",
+            r"exit_code=[^;\n]+",
+            r"failure_classification=[^;\n]+",
+            r"sealed_stderr_truncated=[^;\n]+",
+        ):
+            required.extend(match.group(0) for match in re.finditer(pattern, message))
+        for phrase in (
+            "the run sealed; submit the verification artifact referencing it",
+            "reuse its receipts; build and submit the implementation",
+            "If provider/model/auth/capacity is blocked, surface the control-plane blocker exactly",
+            "Otherwise rerun the verification stage from the authoritative state.",
+        ):
+            if phrase in message:
+                required.append(phrase)
+        unique_required = tuple(dict.fromkeys(required))
+        required_message = "\n".join(unique_required)
+        required_bytes = required_message.encode("utf-8")
+        if len(required_bytes) >= MAX_WAKE_MESSAGE_BYTES:
+            return required_bytes[:MAX_WAKE_MESSAGE_BYTES].decode("utf-8", errors="ignore")
+        remaining = MAX_WAKE_MESSAGE_BYTES - len(required_bytes) - 8
+        optional_prefix = encoded[: max(0, remaining)].decode("utf-8", errors="ignore")
+        if optional_prefix:
+            return f"{optional_prefix}\n...\n{required_message}"
+        return required_message
+
+    def _matching_current_phase_runs(
+        self,
+        state: AutoresearchState,
+        *,
+        state_reference_sha256: str,
+        instruction_manifest_sha256: str,
+    ) -> tuple[RunRecord, ...]:
+        root = self.config.runs_root
+        try:
+            metadata = root.lstat()
+        except FileNotFoundError:
+            return ()
+        except OSError as exc:
+            raise AutoresearchRunRecordError(f"cannot inspect runs root: {exc}") from exc
+        if not metadata or root.is_symlink() or not root.is_dir():
+            raise AutoresearchRunRecordError("runs root must be a non-symlink directory")
+        records: list[RunRecord] = []
+        for directory, child_directories, files in os.walk(root, followlinks=False):
+            child_directories.sort()
+            files.sort()
+            parent = Path(directory)
+            if "manifest.json" not in files:
+                continue
+            try:
+                record = read_run_record(run_dir=parent, runs_root=root)
+            except AutoresearchRunRecordError:
+                continue
+            manifest = record.manifest
+            if (
+                manifest.phase is state.phase
+                and manifest.iteration == state.iteration
+                and manifest.state_reference_sha256 == state_reference_sha256
+                and manifest.instruction_manifest_sha256 == instruction_manifest_sha256
+            ):
+                records.append(record)
+        return tuple(sorted(records, key=lambda record: record.manifest.attempt))
 
     def _prepare_controller_lifecycle(
         self,
@@ -931,10 +1242,11 @@ class AutoresearchSupervisor:
                 sent_wake=True,
             )
         except (AutoresearchValidationError, ValueError, OSError, SupervisorError) as exc:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"controller-lifecycle:{state.iteration}:{state.phase.value}",
                 reason=f"controller_lifecycle_failed: {exc}",
             )
+            return None
 
     def _finalize_required_memory(
         self,
@@ -1139,10 +1451,11 @@ class AutoresearchSupervisor:
                 state_path=self.config.state_path,
             )
         except (AutoresearchValidationError, ValueError, OSError) as exc:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"run-record-current-instruction:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
                 reason=f"cannot_compute_current_instruction_manifest: {exc}",
             )
+            return None
         try:
             matching = self._matching_verification_runs(
                 iteration=state.iteration,
@@ -1150,10 +1463,11 @@ class AutoresearchSupervisor:
                 instruction_manifest_sha256=instruction_manifest_sha256,
             )
         except AutoresearchRunRecordError as exc:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"run-record:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
                 reason=f"invalid_detached_run_record: {exc}",
             )
+            return None
         if not matching:
             return None
         latest = matching[-1]
@@ -1162,34 +1476,37 @@ class AutoresearchSupervisor:
         if latest.status.state is RunState.SUCCEEDED:
             return None
         if latest.status.failure_classification is RunFailureClassification.OPERATOR_STOPPED:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=(
                     "interrupted-detached-verification:"
                     f"{state.iteration}:{state.phase.value}:{state_reference_sha256}"
                 ),
                 reason="interrupted_detached_verification_requires_operator_recovery",
             )
+            return None
         if (
             latest.status.expected_artifact_attestation_status
             is not ExpectedArtifactAttestationStatus.FAILED
             or latest.status.expected_artifact_attestation_error
             is not ExpectedArtifactAttestationError.MISSING
         ):
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"run-record-attestation:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
                 reason=(
                     "detached_verification_failure_cannot_form_execution-interrupted evidence: "
                     "expected run.json attestation is not FAILED/MISSING"
                 ),
             )
+            return None
         if state.mode is not ResearchMode.ALPHA_RESEARCH:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"run-record-mode:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
                 reason=(
                     "detached_verification_failure_cannot_form_strict_artifact: "
                     f"mode={state.mode.value if state.mode is not None else 'null'}"
                 ),
             )
+            return None
         try:
             artifact = self._verification_failure_artifact(latest, state)
             readiness = load_platform_readiness(self.config.readiness_manifest_path)
@@ -1205,10 +1522,11 @@ class AutoresearchSupervisor:
                 runs_root=self.config.runs_root,
             )
         except (AutoresearchValidationError, ValueError, OSError) as exc:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"run-record-advance:{state.iteration}:{state.phase.value}:{state_reference_sha256}",
                 reason=f"detached_verification_failure_not_advanced: {exc}",
             )
+            return None
         return SupervisorResult(
             SupervisorOutcome.NUDGED,
             "detached_verification_failure_advanced",
@@ -1242,7 +1560,14 @@ class AutoresearchSupervisor:
                 reason=reason,
             )
 
-        def reject(name: str, reason: str) -> None:
+        def reject(
+            name: str,
+            reason: str,
+            *,
+            destination_name: str | None = None,
+            expected_stat: os.stat_result | None = None,
+            source_fd: int | None = None,
+        ) -> bool:
             nonlocal rejected_fd
             try:
                 if rejected_fd is None:
@@ -1251,11 +1576,15 @@ class AutoresearchSupervisor:
                     name,
                     src_dir_fd=inbox_fd,
                     dst_dir_fd=rejected_fd,
+                    destination_name=destination_name,
+                    expected_stat=expected_stat,
+                    source_fd=source_fd,
                 )
             except (OSError, SupervisorError, ValueError) as exc:
                 log_rejection(name, f"{reason}; quarantine failed: {exc}")
-                return
+                return False
             log_rejection(name, reason)
+            return True
 
         def validate_request(
             name: str,
@@ -1363,8 +1692,74 @@ class AutoresearchSupervisor:
 
         try:
             _validate_launch_request_directory_fd(inbox_fd, label="launch request inbox")
-            candidates = sorted(name for name in os.listdir(inbox_fd) if name.endswith(".json"))
+
+            def candidate_mtime(name: str) -> float:
+                try:
+                    return self._mtime(self.config.launch_requests_path / name)
+                except (FileNotFoundError, OSError, ValueError):
+                    return float("inf")
+
+            candidates = sorted(
+                (name for name in os.listdir(inbox_fd) if name.endswith(".json")),
+                key=lambda name: (candidate_mtime(name), name),
+            )
             for name in candidates:
+                request_metadata: os.stat_result | None = None
+                request_fd: int | None = None
+                try:
+                    request_fd = os.open(
+                        name,
+                        os.O_RDONLY | os.O_NOFOLLOW,
+                        dir_fd=inbox_fd,
+                    )
+                    request_metadata = os.fstat(request_fd)
+                    request_age = (
+                        self._now() - request_metadata.st_mtime
+                        if stat.S_ISREG(request_metadata.st_mode)
+                        else None
+                    )
+                except (FileNotFoundError, OSError, ValueError):
+                    request_age = None
+                    if request_fd is not None:
+                        os.close(request_fd)
+                        request_fd = None
+                if request_age is not None and request_age > (
+                    self.config.launch_request_ttl_minutes * 60.0
+                ):
+                    stale_reason = (
+                        f"stale launch request age_seconds={request_age:.3f}; "
+                        f"ttl_minutes={self.config.launch_request_ttl_minutes}"
+                    )
+                    archived = reject(
+                        name,
+                        stale_reason,
+                        destination_name=f".stale-{name}",
+                        expected_stat=request_metadata,
+                        source_fd=request_fd,
+                    )
+                    if request_fd is not None:
+                        os.close(request_fd)
+                        request_fd = None
+                    if not archived:
+                        _structured_log(
+                            logging.WARNING,
+                            "supervisor.launch_request_stale",
+                            request=name,
+                            age_seconds=request_age,
+                            reason=f"{stale_reason}; archive failed",
+                        )
+                    else:
+                        _structured_log(
+                            logging.WARNING,
+                            "supervisor.launch_request_stale",
+                            request=name,
+                            age_seconds=request_age,
+                            ttl_minutes=self.config.launch_request_ttl_minutes,
+                            archived_as=f".stale-{name}",
+                        )
+                    continue
+                if request_fd is not None:
+                    os.close(request_fd)
                 try:
                     reason, run_dir, runs_root = validate_request(name)
                 except (OSError, SupervisorError, ValueError) as exc:
@@ -1411,10 +1806,11 @@ class AutoresearchSupervisor:
                         request=name,
                         detail=reject_reason,
                     )
-                    return self._persistent_control_plane_alert(
+                    self._persistent_control_plane_alert(
                         key=f"launch-request:{name}",
                         reason=reject_reason,
                     )
+                    continue
                 if completed.returncode != 0:
                     stdout = str(completed.stdout or "")[-1000:]
                     stderr = str(completed.stderr or "")[-1000:]
@@ -1440,10 +1836,11 @@ class AutoresearchSupervisor:
                         stdout=stdout,
                         stderr=stderr,
                     )
-                    return self._persistent_control_plane_alert(
+                    self._persistent_control_plane_alert(
                         key=f"launch-request:{name}",
                         reason=reject_reason,
                     )
+                    continue
                 try:
                     if accepted_fd is None:
                         accepted_fd = _open_launch_request_child_directory(inbox_fd, "accepted")
@@ -1508,10 +1905,11 @@ class AutoresearchSupervisor:
                 validation_context=context,
             )
         except (AutoresearchValidationError, ValueError, OSError) as exc:
-            return self._persistent_control_plane_alert(
+            self._persistent_control_plane_alert(
                 key=f"stage-inbox:{state.iteration}:{state.phase.value}",
                 reason=f"stage_submission_inbox_invalid: {exc}",
             )
+            return None
         if advanced is None:
             return None
         return SupervisorResult(
@@ -1945,17 +2343,22 @@ class AutoresearchSupervisor:
             quantipy_execution_interrupted=interrupted,
         )
 
-    def _persistent_control_plane_alert(self, *, key: str, reason: str) -> SupervisorResult:
+    def _persistent_control_plane_alert(self, *, key: str, reason: str) -> None:
         with self._checkpoint_lock():
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
             record = checkpoint.recovery_records.setdefault(key, RecoveryRecord())
             if record.alerted:
-                return SupervisorResult(SupervisorOutcome.NO_ACTION, "alert_already_emitted", key)
+                return
             record.status = RecoveryStatus.EXHAUSTED
             record.last_error = reason[:1000]
             record.alerted = True
             checkpoint.save(self.config.checkpoint_path)
-        return SupervisorResult(SupervisorOutcome.ALERT, reason, key)
+        _structured_log(
+            logging.ERROR,
+            "supervisor.control_plane_advisory",
+            recovery_key=key,
+            reason=reason,
+        )
 
     def _is_terminal_state(self, state: AutoresearchState) -> bool:
         decision = state.final_decision
@@ -1988,6 +2391,51 @@ class AutoresearchSupervisor:
             self._running_tasks(shutdown_requested=shutdown_requested),
             shutdown_requested=shutdown_requested,
         )
+
+    def _active_owner_task(self, tasks: ReconciledRunningTasks) -> bool:
+        return any(
+            classify_autoresearch_task(task) is TaskProvenance.OWNER_TURN
+            for task in tasks.running_tasks
+        )
+
+    def _staleness_watchdog_due(
+        self,
+        state: AutoresearchState,
+        probe: StateProbe,
+        *,
+        owner_task_active: bool,
+    ) -> bool:
+        if self._is_terminal_state(state) or owner_task_active:
+            return False
+        if self._now() - probe.latest_update_ts <= (
+            self.config.staleness_force_wake_minutes * 60.0
+        ):
+            return False
+        return not self._has_running_detached_run(state.iteration)
+
+    def _has_running_detached_run(self, iteration: int) -> bool:
+        root = self.config.runs_root
+        try:
+            metadata = root.lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        if not metadata or root.is_symlink() or not root.is_dir():
+            return True
+        for directory, child_directories, files in os.walk(root, followlinks=False):
+            child_directories.sort()
+            files.sort()
+            parent = Path(directory)
+            if "manifest.json" not in files:
+                continue
+            try:
+                record = read_run_record(run_dir=parent, runs_root=root)
+            except AutoresearchRunRecordError:
+                continue
+            if record.manifest.iteration == iteration and record.status.state is RunState.RUNNING:
+                return True
+        return False
 
     def _expected_stage_agent_ids(self, state: AutoresearchState) -> tuple[str, ...]:
         if state.phase is Phase.SETUP_CONTEXT:
@@ -2086,88 +2534,251 @@ class AutoresearchSupervisor:
         recovery_key: str,
         *,
         detected_error: RecoveryErrorPattern | None,
-    ) -> RecoveryClaim | SupervisorResult:
+        state_fingerprint: str | None = None,
+        state_mtime: float,
+        owner_task_active: bool,
+        force: bool = False,
+    ) -> RecoveryClaim | SupervisorResult | None:
+        del state_mtime  # State change is compared by fingerprint, not wall-clock time.
+        observed_fingerprint = state_fingerprint or recovery_key
         with self._checkpoint_lock():
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
-            record = checkpoint.recovery_records.setdefault(recovery_key, RecoveryRecord())
-            if record.alerted:
-                return SupervisorResult(
-                    SupervisorOutcome.NO_ACTION,
-                    "alert_already_emitted",
-                    recovery_key,
-                )
+            condition_record = checkpoint.recovery_records.setdefault(
+                recovery_key, RecoveryRecord()
+            )
             now = self._now()
+            monotonic_now = self._monotonic()
+
+            def elapsed_since(
+                record: RecoveryRecord,
+                *,
+                record_key: str,
+                field: str,
+            ) -> float:
+                anchor = cast(float | None, getattr(record, field))
+                if anchor is None:
+                    return 0.0
+                clock_record = checkpoint.recovery_records.get(
+                    f"{MONOTONIC_RECOVERY_KEY_PREFIX}{record_key}"
+                )
+                monotonic_anchor = (
+                    clock_record.woke_at
+                    if field == "woke_at" and clock_record is not None
+                    else clock_record.failed_at
+                    if field == "failed_at" and clock_record is not None
+                    else None
+                )
+                if monotonic_anchor is not None and monotonic_now >= monotonic_anchor:
+                    return monotonic_now - monotonic_anchor
+                return max(0.0, now - anchor)
+
+            recovered_error = _preferred_recovery_error(
+                detected_error,
+                _detect_recovery_error_in_text(condition_record.last_error)
+                if condition_record.last_error is not None
+                else None,
+            )
             renudge_idle_seconds: float | None = None
-            if record.status is RecoveryStatus.SUCCEEDED and record.woke_at is not None:
-                elapsed = now - record.woke_at
-                if 0 <= elapsed < self.config.grace_period_seconds:
-                    return SupervisorResult(
-                        SupervisorOutcome.NO_ACTION, "recovery_settling", recovery_key
+            escalation_count = 0
+            ordinary_recovery_cold_start = force and condition_record.woke_at is None
+
+            # A watchdog uses a separate record.  It is intentionally not the
+            # ordinary wake record: ordinary 20-minute escalation and watchdog
+            # settling are independent clocks.
+            watchdog_key = f"{WATCHDOG_RECOVERY_KEY_PREFIX}{recovery_key}"
+            ordinary_renudge_due = False
+            if condition_record.status is RecoveryStatus.SUCCEEDED:
+                last_wake_elapsed = elapsed_since(
+                    condition_record,
+                    record_key=recovery_key,
+                    field="woke_at",
+                )
+                if last_wake_elapsed >= self.config.grace_period_seconds:
+                    last_nudge_elapsed = elapsed_since(
+                        condition_record,
+                        record_key=recovery_key,
+                        field="woke_at",
                     )
-                # Explicit control-plane errors retain the bounded retry cadence;
-                # idle decay is for a clean wake whose owner turn did not advance state.
-                if detected_error is None:
-                    last_nudge_at = (
-                        record.last_nudge_at if record.last_nudge_at is not None else record.woke_at
+                    key_fingerprint = recovery_key.rsplit(":", 1)[-1]
+                    unchanged = key_fingerprint == observed_fingerprint
+                    ordinary_renudge_due = (
+                        not recovered_error
+                        and not owner_task_active
+                        and unchanged
+                        and last_nudge_elapsed >= self.config.renudge_escalation_minutes * 60.0
                     )
-                    if last_nudge_at is None:
-                        raise SupervisorError(
-                            f"successful recovery record lacks nudge timestamp: {recovery_key}"
-                        )
-                    idle_seconds = now - last_nudge_at
-                    # The exhaustion alert must not be delayed by backoff:
-                    # once the limit is reached, alert on the base cadence.
-                    if (
-                        record.renudge_count >= self.config.renudge_alert_limit
-                        and idle_seconds < self.config.renudge_idle_seconds
-                    ):
+
+            record_key = watchdog_key if force else recovery_key
+            record = (
+                checkpoint.recovery_records.setdefault(record_key, RecoveryRecord())
+                if force
+                else condition_record
+            )
+            watchdog_claim = force
+            watchdog_settling_reason: str | None = None
+            if force:
+                if record.status is RecoveryStatus.SUCCEEDED and record.woke_at is not None:
+                    watchdog_elapsed = elapsed_since(
+                        record,
+                        record_key=record_key,
+                        field="woke_at",
+                    )
+                    if watchdog_elapsed < self.config.staleness_force_wake_minutes * 60.0:
+                        watchdog_settling_reason = "staleness_watchdog_settling"
+                elif record.status is RecoveryStatus.FAILED and record.failed_at is not None:
+                    # A failed watchdog wake settles on the same cadence as a
+                    # successful one; without this throttle the watchdog would
+                    # retry a failing wake on every poll, and at the cap it
+                    # would alert, reset, and retry in the same poll.
+                    watchdog_elapsed = elapsed_since(
+                        record,
+                        record_key=record_key,
+                        field="failed_at",
+                    )
+                    if watchdog_elapsed < self.config.staleness_force_wake_minutes * 60.0:
+                        watchdog_settling_reason = "staleness_watchdog_settling"
+                if watchdog_settling_reason is not None:
+                    watchdog_claim = False
+                    if not ordinary_renudge_due:
                         return SupervisorResult(
                             SupervisorOutcome.NO_ACTION,
-                            "recovery_nudge_deduped",
+                            watchdog_settling_reason,
                             recovery_key,
                         )
-                    # Exponential backoff: each renudge that fails to advance
-                    # state doubles the required idle window, capped at 4x so
-                    # a stalled phase still gets re-poked within ~40 minutes.
-                    # Deeper backoff starved recovery in practice.
-                    backoff_multiplier = 2 ** min(record.renudge_count, 2)
-                    required_idle_seconds = self.config.renudge_idle_seconds * backoff_multiplier
-                    if (
-                        record.renudge_count < self.config.renudge_alert_limit
-                        and idle_seconds < required_idle_seconds
-                    ):
-                        return SupervisorResult(
-                            SupervisorOutcome.NO_ACTION,
-                            "recovery_nudge_deduped",
-                            recovery_key,
-                        )
-                    renudge_idle_seconds = idle_seconds
-                    if record.renudge_count >= self.config.renudge_alert_limit:
-                        return self._renudge_limit_alert(
+                elif record.status is RecoveryStatus.FAILED:
+                    if record.attempt_count >= self.config.max_recovery_attempts:
+                        self._alert(
                             checkpoint,
                             record,
-                            recovery_key,
-                            state,
+                            record_key,
+                            "staleness_watchdog_recovery_capped",
                         )
+                        # This advisory is logging-only. Reset the bounded
+                        # attempt counter so a persistent outage can be
+                        # retried on the next watchdog cadence.
+                        record.attempt_count = 0
+                        checkpoint.save(self.config.checkpoint_path)
+            if not watchdog_claim:
+                record_key = recovery_key
+                record = condition_record
+                if condition_record.status is RecoveryStatus.SUCCEEDED and condition_record.woke_at:
+                    elapsed = elapsed_since(
+                        condition_record,
+                        record_key=recovery_key,
+                        field="woke_at",
+                    )
+                    if elapsed < self.config.grace_period_seconds:
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION, "recovery_settling", recovery_key
+                        )
+                    key_fingerprint = recovery_key.rsplit(":", 1)[-1]
+                    unchanged = key_fingerprint == observed_fingerprint
+                    idle_seconds = elapsed_since(
+                        condition_record,
+                        record_key=recovery_key,
+                        field="woke_at",
+                    )
+                    if owner_task_active or not unchanged:
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION,
+                            "recovery_nudge_deduped",
+                            recovery_key,
+                        )
+                    if recovered_error is None and idle_seconds < (
+                        self.config.renudge_escalation_minutes * 60.0
+                    ):
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION,
+                            "recovery_nudge_deduped",
+                            recovery_key,
+                        )
+                    if recovered_error is None:
+                        if condition_record.renudge_count >= self.config.max_escalating_renudges:
+                            self._renudge_limit_alert(
+                                checkpoint,
+                                condition_record,
+                                recovery_key,
+                                state,
+                            )
+                            return SupervisorResult(
+                                SupervisorOutcome.NO_ACTION,
+                                "recovery_escalation_capped",
+                                recovery_key,
+                            )
+                        renudge_idle_seconds = idle_seconds
+                        escalation_count = condition_record.renudge_count + 1
+                    else:
+                        # A retained auth/capacity signature gets a retry
+                        # cadence, not a permanent exhausted state.
+                        if idle_seconds < self.config.grace_period_seconds:
+                            return SupervisorResult(
+                                SupervisorOutcome.NO_ACTION,
+                                "recovery_error_settling",
+                                recovery_key,
+                            )
+                        renudge_idle_seconds = None
+                        escalation_count = 0
+                else:
+                    renudge_idle_seconds = None
+                    escalation_count = 0
+
+            if record.status is RecoveryStatus.EXHAUSTED and not watchdog_claim:
+                # Older checkpoints used EXHAUSTED for mechanical wake
+                # failures. Advisories are not a recovery latch.
+                record.status = RecoveryStatus.FAILED
+                record.attempt_count = 0
+                if record.failed_at is None:
+                    record.failed_at = now
+                checkpoint.save(self.config.checkpoint_path)
+
             if record.status is RecoveryStatus.IN_FLIGHT:
                 if record.claim_started_at is None or record.claim_pid is None:
                     raise SupervisorError(
                         f"in-flight recovery claim lacks owner metadata: {recovery_key}"
                     )
-                age = now - record.claim_started_at
+                age = max(0.0, now - record.claim_started_at)
                 if age < self.config.claim_stale_seconds:
                     return SupervisorResult(
-                        SupervisorOutcome.NO_ACTION, "recovery_in_flight", recovery_key
+                        SupervisorOutcome.NO_ACTION,
+                        "recovery_in_flight",
+                        recovery_key,
                     )
                 if self._claim_owner_alive(record):
-                    return self._alert(
-                        checkpoint, record, recovery_key, "stale_recovery_claim_owner_alive"
+                    self._alert(
+                        checkpoint,
+                        record,
+                        record_key,
+                        "stale_recovery_claim_owner_alive",
                     )
-            if renudge_idle_seconds is None and record.attempt_count >= (
-                self.config.max_recovery_attempts
+                    return SupervisorResult(
+                        SupervisorOutcome.NO_ACTION,
+                        "recovery_in_flight",
+                        recovery_key,
+                    )
+
+            if (
+                record.status is RecoveryStatus.FAILED
+                and record.failed_at is not None
+                and not watchdog_claim
+                and elapsed_since(record, record_key=record_key, field="failed_at")
+                < self.config.grace_period_seconds
             ):
-                record.status = RecoveryStatus.EXHAUSTED
-                return self._alert(
+                return SupervisorResult(
+                    SupervisorOutcome.NO_ACTION,
+                    (
+                        "recovery_error_settling"
+                        if recovered_error is not None
+                        else "recovery_failed_settling"
+                    ),
+                    recovery_key,
+                )
+
+            if (
+                record.status is RecoveryStatus.FAILED
+                and record.attempt_count >= self.config.max_recovery_attempts
+                and not watchdog_claim
+            ):
+                self._alert(
                     checkpoint,
                     record,
                     recovery_key,
@@ -2178,6 +2789,21 @@ class AutoresearchSupervisor:
                         f"last_failure_reason={record.last_error or 'none'}"
                     ),
                 )
+                record.attempt_count = 0
+                record.status = RecoveryStatus.FAILED
+                record.failed_at = now
+                clock_record = checkpoint.recovery_records.setdefault(
+                    f"{MONOTONIC_RECOVERY_KEY_PREFIX}{record_key}",
+                    RecoveryRecord(),
+                )
+                clock_record.failed_at = self._monotonic()
+                checkpoint.save(self.config.checkpoint_path)
+                return SupervisorResult(
+                    SupervisorOutcome.NO_ACTION,
+                    "recovery_escalation_capped",
+                    recovery_key,
+                )
+
             pid = os.getpid()
             identity = self._process_identity(pid)
             attempt_number = record.attempt_count + (1 if renudge_idle_seconds is None else 0)
@@ -2192,18 +2818,56 @@ class AutoresearchSupervisor:
             record.failed_at = None
             record.last_error = None
             checkpoint.save(self.config.checkpoint_path)
-            return RecoveryClaim(recovery_key, token, renudge_idle_seconds)
+            return RecoveryClaim(
+                recovery_key,
+                token,
+                renudge_idle_seconds,
+                escalation_count,
+                watchdog_claim,
+                observed_fingerprint,
+                record_key,
+                ordinary_recovery_cold_start,
+            )
 
     def _complete_recovery_claim(self, claim: RecoveryClaim) -> None:
         with self._checkpoint_lock():
             checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
             record = self._owned_claim(checkpoint, claim)
+            woke_at = self._now()
+            monotonic_woke_at = self._monotonic()
             record.status = RecoveryStatus.SUCCEEDED
-            record.woke_at = self._now()
+            record.woke_at = woke_at
             record.last_nudge_at = record.woke_at
-            if claim.renudge_idle_seconds is not None:
-                record.renudge_count += 1
+            if claim.renudge_idle_seconds is not None and not claim.forced_by_staleness_watchdog:
+                record.renudge_count = min(
+                    record.renudge_count + 1,
+                    self.config.max_escalating_renudges,
+                )
             record.last_error = None
+            clock_record = checkpoint.recovery_records.setdefault(
+                f"{MONOTONIC_RECOVERY_KEY_PREFIX}{claim.record_key or claim.recovery_key}",
+                RecoveryRecord(),
+            )
+            clock_record.status = RecoveryStatus.READY
+            clock_record.woke_at = monotonic_woke_at
+            clock_record.failed_at = None
+            if claim.forced_by_staleness_watchdog and claim.ordinary_recovery_cold_start:
+                ordinary_record = checkpoint.recovery_records.setdefault(
+                    claim.recovery_key,
+                    RecoveryRecord(),
+                )
+                ordinary_record.status = RecoveryStatus.SUCCEEDED
+                ordinary_record.woke_at = woke_at
+                ordinary_record.last_nudge_at = woke_at
+                ordinary_record.failed_at = None
+                ordinary_record.last_error = None
+                ordinary_clock_record = checkpoint.recovery_records.setdefault(
+                    f"{MONOTONIC_RECOVERY_KEY_PREFIX}{claim.recovery_key}",
+                    RecoveryRecord(),
+                )
+                ordinary_clock_record.status = RecoveryStatus.READY
+                ordinary_clock_record.woke_at = monotonic_woke_at
+                ordinary_clock_record.failed_at = None
             checkpoint.save(self.config.checkpoint_path)
 
     def _fail_recovery_claim(self, claim: RecoveryClaim, error: BaseException) -> None:
@@ -2213,12 +2877,18 @@ class AutoresearchSupervisor:
             record.status = RecoveryStatus.FAILED
             record.failed_at = self._now()
             record.last_error = f"{type(error).__name__}: {error}"[:1000]
+            if not claim.forced_by_staleness_watchdog:
+                clock_record = checkpoint.recovery_records.setdefault(
+                    f"{MONOTONIC_RECOVERY_KEY_PREFIX}{claim.record_key or claim.recovery_key}",
+                    RecoveryRecord(),
+                )
+                clock_record.failed_at = self._monotonic()
             checkpoint.save(self.config.checkpoint_path)
 
     def _owned_claim(
         self, checkpoint: SupervisorCheckpoint, claim: RecoveryClaim
     ) -> RecoveryRecord:
-        record = checkpoint.recovery_records.get(claim.recovery_key)
+        record = checkpoint.recovery_records.get(claim.record_key or claim.recovery_key)
         if (
             record is None
             or record.status is not RecoveryStatus.IN_FLIGHT
@@ -2235,14 +2905,18 @@ class AutoresearchSupervisor:
         record: RecoveryRecord,
         recovery_key: str,
         reason: str,
-    ) -> SupervisorResult:
+    ) -> bool:
         if record.alerted:
-            return SupervisorResult(
-                SupervisorOutcome.NO_ACTION, "alert_already_emitted", recovery_key
-            )
+            return False
         record.alerted = True
         checkpoint.save(self.config.checkpoint_path)
-        return SupervisorResult(SupervisorOutcome.ALERT, reason, recovery_key)
+        _structured_log(
+            logging.ERROR,
+            "supervisor.recovery_advisory",
+            recovery_key=recovery_key,
+            reason=reason,
+        )
+        return True
 
     def _renudge_limit_alert(
         self,
@@ -2250,29 +2924,26 @@ class AutoresearchSupervisor:
         record: RecoveryRecord,
         recovery_key: str,
         state: AutoresearchState,
-    ) -> SupervisorResult:
-        record.status = RecoveryStatus.EXHAUSTED
-        result = self._alert(
+    ) -> None:
+        emitted = self._alert(
             checkpoint,
             record,
             recovery_key,
             (
-                f"renudge_alert_limit_reached: iteration={state.iteration}; "
+                f"renudge_escalation_limit_reached: iteration={state.iteration}; "
                 f"phase={state.phase.value}; recovery_key={recovery_key}; "
                 f"renudge_count={record.renudge_count}; "
-                f"renudge_alert_limit={self.config.renudge_alert_limit}"
+                f"max_escalating_renudges={self.config.max_escalating_renudges}"
             ),
         )
-        if result.outcome is SupervisorOutcome.ALERT:
+        if emitted:
             _structured_log(
                 logging.ERROR,
                 "supervisor.renudge_limit_reached",
-                outcome=SupervisorOutcome.ALERT.value,
                 recovery_key=recovery_key,
                 renudge_count=record.renudge_count,
-                renudge_alert_limit=self.config.renudge_alert_limit,
+                max_escalating_renudges=self.config.max_escalating_renudges,
             )
-        return result
 
     def _exhausted_recovery_reason(
         self, record: RecoveryRecord, detected_error: RecoveryErrorPattern | None
@@ -2374,6 +3045,26 @@ class AutoresearchSupervisor:
         except OSError as exc:
             raise SupervisorError(f"failed to read owner transcript tail {path}: {exc}") from exc
 
+    def _process_started_at(self, process_dir: Path) -> float | None:
+        try:
+            raw = (process_dir / "stat").read_text(encoding="utf-8")
+            closing = raw.rfind(")")
+            fields = raw[closing + 1 :].split() if closing >= 0 else []
+            start_ticks = int(fields[19]) if len(fields) > 19 else None
+            boot_time = None
+            for line in (self.config.proc_root / "stat").read_text(encoding="utf-8").splitlines():
+                if line.startswith("btime "):
+                    boot_time = float(line.split()[1])
+                    break
+            if start_ticks is not None and boot_time is not None:
+                return boot_time + start_ticks / float(os.sysconf("SC_CLK_TCK"))
+        except (FileNotFoundError, OSError, ValueError, IndexError, TypeError):
+            pass
+        try:
+            return self._mtime(process_dir)
+        except (FileNotFoundError, OSError, ValueError):
+            return None
+
     def _active_target_repo_writer_processes(self, state: AutoresearchState) -> tuple[str, ...]:
         roots = self._target_writer_roots(state)
         if not self.config.proc_root.is_dir():
@@ -2394,6 +3085,22 @@ class AutoresearchSupervisor:
             if pid in {os.getpid(), os.getppid()} or not TARGET_WRITER_COMMAND_RE.search(command):
                 continue
             if any(cwd == root or root in cwd.parents for root in roots):
+                started_at = self._process_started_at(process_dir)
+                age_seconds = self._now() - started_at if started_at is not None else 0.0
+                if age_seconds > self.config.writer_stale_minutes * 60.0:
+                    if started_at is not None:
+                        warning_identity = (pid, started_at)
+                        if warning_identity not in self._stale_writer_warning_identities:
+                            self._stale_writer_warning_identities.add(warning_identity)
+                            _structured_log(
+                                logging.WARNING,
+                                "supervisor.stale_writer_ignored",
+                                pid=pid,
+                                command=command[:200],
+                                age_minutes=age_seconds / 60.0,
+                                writer_stale_minutes=self.config.writer_stale_minutes,
+                            )
+                    continue
                 writers.append(f"{pid}:{command[:200]}")
         return tuple(writers)
 
@@ -2437,17 +3144,18 @@ class AutoresearchSupervisor:
         for path in paths:
             try:
                 metadata = path.stat()
+                mtime = self._mtime(path)
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 raise SupervisorError(f"failed to stat supervision path {path}: {exc}") from exc
-            if metadata.st_mtime > now:
+            if mtime > now:
                 if path == self.config.state_path:
                     raise SupervisorError("state progress evidence is future-dated")
                 continue
-            parts.append(f"{path}:{metadata.st_mtime_ns}:{metadata.st_size}")
-            if metadata.st_mtime > latest:
-                latest, latest_path = metadata.st_mtime, path
+            parts.append(f"{path}:{mtime:.9f}:{metadata.st_size}")
+            if mtime > latest:
+                latest, latest_path = mtime, path
         if latest == 0.0:
             raise SupervisorError("could not determine any autoresearch progress timestamps")
         return StateProbe(
@@ -2491,14 +3199,29 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--grace", type=_finite_positive_cli_float, default=DEFAULT_GRACE_PERIOD_SECONDS
     )
     parser.add_argument(
-        "--renudge-idle",
+        "--renudge-escalation-minutes",
         type=_finite_positive_cli_float,
-        default=DEFAULT_RENUDGE_IDLE_SECONDS,
+        default=DEFAULT_RENUDGE_ESCALATION_MINUTES,
     )
     parser.add_argument(
-        "--renudge-alert-limit",
+        "--max-escalating-renudges",
         type=int,
-        default=DEFAULT_RENUDGE_ALERT_LIMIT,
+        default=DEFAULT_MAX_ESCALATING_RENUDGES,
+    )
+    parser.add_argument(
+        "--staleness-force-wake-minutes",
+        type=_finite_positive_cli_float,
+        default=DEFAULT_STALENESS_FORCE_WAKE_MINUTES,
+    )
+    parser.add_argument(
+        "--writer-stale-minutes",
+        type=_finite_positive_cli_float,
+        default=DEFAULT_WRITER_STALE_MINUTES,
+    )
+    parser.add_argument(
+        "--launch-request-ttl-minutes",
+        type=_finite_positive_cli_float,
+        default=DEFAULT_LAUNCH_REQUEST_TTL_MINUTES,
     )
     parser.add_argument(
         "--expected-stage-task-stale",
@@ -2522,8 +3245,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 autoresearch_dir=args.state_path.parent,
                 poll_interval_seconds=args.interval,
                 grace_period_seconds=args.grace,
-                renudge_idle_seconds=args.renudge_idle,
-                renudge_alert_limit=args.renudge_alert_limit,
+                renudge_escalation_minutes=args.renudge_escalation_minutes,
+                max_escalating_renudges=args.max_escalating_renudges,
+                staleness_force_wake_minutes=args.staleness_force_wake_minutes,
+                writer_stale_minutes=args.writer_stale_minutes,
+                launch_request_ttl_minutes=args.launch_request_ttl_minutes,
                 expected_stage_task_stale_seconds=args.expected_stage_task_stale,
             )
         )

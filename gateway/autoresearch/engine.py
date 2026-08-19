@@ -234,7 +234,13 @@ def _phase_instruction(
             "BUG_SIGNAL without spending the hydrate cost. Commit one canonical "
             "quantipy-experiment-v2 manifest under the workspace with exactly prepare, smoke, "
             "feasibility, and model stage_files; record its canonical absolute path and "
-            "SHA-256 in implementation_result. A notebook alone is not implementation evidence."
+            "SHA-256 in implementation_result. A notebook alone is not implementation evidence. "
+            "Stage summaries have a 4096-character cap; assert serialized length <= 3800 locally "
+            "before accepting, compacting with top-K by |magnitude| with K named, ~6 significant "
+            "figures, prefixes stripped, comparators as scalars, and bulk detail in the run "
+            "artifact. Experiment packages are built ONLY in the persisted experiment workspace, "
+            "never in the "
+            "authoritative quantipy worktree."
         ),
         Phase.VERIFICATION: (
             "Verify the produced experiment deterministically. "
@@ -270,7 +276,10 @@ def _phase_instruction(
             "that merely says pre-registered. Make it eligible for a normal DISCARD only after "
             "the reviewer confirms that exact pre-registration and count. "
             "Zero trades caused by a defect such as an empty panel, broken feature build, or "
-            "exception remain BUG_SIGNAL."
+            "exception remain BUG_SIGNAL. Stage summaries have a 4096-character cap; assert "
+            "serialized length <= 3800 locally before accepting, compacting with top-K by "
+            "|magnitude| with K named, ~6 significant figures, prefixes stripped, comparators "
+            "as scalars, and bulk detail in the run artifact."
         ),
         Phase.REVIEW: (
             "Run exactly one configured reviewer. "

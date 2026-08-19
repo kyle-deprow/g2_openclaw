@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.16.0
+version: 8.17.0
 ---
 
 # Autoresearch
@@ -866,6 +866,8 @@ Implementation requirements:
   `feasibility`, and `model` stage contract. The pre-registered manifest panel is the handoff
   from the implementation plan to the runtime; never move the prewarm calls into a
   stage to work around a preflight rejection.
+- Experiment packages are built ONLY in the persisted experiment workspace, never in the
+  authoritative quantipy worktree.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
   the watchdog must be launched detached through
   `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--runs-root
@@ -988,7 +990,10 @@ source file, and a committed notebook snapshot permits 8 MiB. Within the run
 envelope, source evidence is limited to 256 ordered Python files, 1 MiB per
 file and 8 MiB total; stage summaries are
 limited to 4096 characters, failure messages to 2048, identity paths to 4096,
-and the nested or standalone panel receipt to 4 MiB.
+and the nested or standalone panel receipt to 4 MiB. Before accepting a stage,
+assert serialized summary length <= 3800 locally. Compact summaries with top-K
+by |magnitude| and name K, ~6 significant figures, stripped prefixes, scalar
+comparators, and bulk detail in the run artifact.
 
 Research-panel receipts use `research-price-panel-receipt-v2`; the request remains
 `research-price-panel-v1`. Its `coverage` is only the seven-key compact

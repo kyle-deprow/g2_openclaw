@@ -693,6 +693,18 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
         in implementation
     )
     assert "this is a reporting duty, not a mechanical gate" in implementation
+    for instruction in (implementation,):
+        assert "4096-character cap" in instruction
+        assert "serialized length <= 3800 locally" in instruction
+        assert "top-K by |magnitude| with K named" in instruction
+        assert "~6 significant figures" in instruction
+        assert "prefixes stripped" in instruction
+        assert "comparators as scalars" in instruction
+        assert "bulk detail in the run artifact" in instruction
+    assert (
+        "Experiment packages are built ONLY in the persisted experiment workspace, never in the "
+        "authoritative quantipy worktree" in implementation
+    )
 
     verification = autoresearch_engine._phase_instruction(
         _state_to_review(policy),
@@ -720,6 +732,13 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     )
     assert "eligible for a normal DISCARD" in verification
     assert "empty panel, broken feature build, or exception remain BUG_SIGNAL" in verification
+    assert "4096-character cap" in verification
+    assert "serialized length <= 3800 locally" in verification
+    assert "top-K by |magnitude| with K named" in verification
+    assert "~6 significant figures" in verification
+    assert "prefixes stripped" in verification
+    assert "comparators as scalars" in verification
+    assert "bulk detail in the run artifact" in verification
 
     review = autoresearch_engine._phase_instruction(
         _state_to_review(policy),
