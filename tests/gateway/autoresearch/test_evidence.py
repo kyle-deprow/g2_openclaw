@@ -2868,3 +2868,47 @@ def test_implementation_parses_complete_quantipy_v2_manifest_schema(
             AutoresearchState(setup=_workspace_setup(git_worktree.target_checkout)),
             artifact,
         )
+
+
+def test_failed_run_feasibility_guard_does_not_block_failure_evidence(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    """A failed run's receipts are failure evidence and must stay submittable.
+
+    The measured-projection guard exists to keep timeout derivations honest on
+    successful runs; binding it on failed runs blocks reporting the very
+    defect, which is the anti-pattern this validator family eliminates.
+    """
+    _, _, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    run_path = Path(evidence.run_json_path)
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["success"] = False
+    stage_receipts = cast(list[dict[str, object]], payload["stage_receipts"])
+    feasibility = next(receipt for receipt in stage_receipts if receipt["stage"] == "feasibility")
+    result = cast(dict[str, object], feasibility["result"])
+    result["summary"] = json.dumps({"projected_model_seconds": 1.0})
+    model = next(receipt for receipt in stage_receipts if receipt["stage"] == "model")
+    model["status"] = "failed"
+    model["result"] = None
+    model["failure"] = {"category": "stage", "message": "ValueError: no qualifying candidate"}
+    run_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    run = autoresearch_evidence._validate_quantipy_run_envelope(snapshot)
+
+    assert run["success"] is False

@@ -1501,7 +1501,16 @@ def _validate_quantipy_run_envelope(
                 raise AutoresearchValidationError(
                     f"{label} completed status requires accepted result only"
                 )
-            if stage == "feasibility" and (mode is None or mode is ResearchMode.ALPHA_RESEARCH):
+            # The measured-projection guard binds only on SUCCESSFUL runs: it
+            # exists to keep timeout derivations honest, and a failed run's
+            # receipts are failure evidence that must remain submittable. A
+            # guard that blocks reporting a defect is the anti-pattern this
+            # validator family is meant to eliminate.
+            if (
+                stage == "feasibility"
+                and success
+                and (mode is None or mode is ResearchMode.ALPHA_RESEARCH)
+            ):
                 summary = cast(str, result["summary"])
                 try:
                     parsed_summary = json.loads(
