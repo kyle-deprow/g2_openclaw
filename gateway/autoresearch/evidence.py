@@ -1320,6 +1320,7 @@ def _validate_quantipy_run_envelope(
     snapshot: _SecureFileSnapshot,
     *,
     mode: ResearchMode | None = None,
+    declared_bug_signals: tuple[str, ...] = (),
 ) -> dict[str, object]:
     parsed_run = _parse_json_snapshot(snapshot, label="Quantipy run.json")
     # Envelopes sealed before quantipy added runtime-derived provenance lack the
@@ -1506,9 +1507,19 @@ def _validate_quantipy_run_envelope(
             # receipts are failure evidence that must remain submittable. A
             # guard that blocks reporting a defect is the anti-pattern this
             # validator family is meant to eliminate.
+            # A submission that DECLARES the telemetry defect as its own bug
+            # signal stays submittable: self-indicting evidence cannot be
+            # silently ignored, and without this escape a successful run with
+            # unmeasured telemetry and an exhausted fix budget has no truthful
+            # exit path in the artifact contract.
+            _telemetry_defect_declared = any(
+                "calibration_fit_seconds" in signal or "feasibility_telemetry" in signal
+                for signal in declared_bug_signals
+            )
             if (
                 stage == "feasibility"
                 and success
+                and not _telemetry_defect_declared
                 and (mode is None or mode is ResearchMode.ALPHA_RESEARCH)
             ):
                 summary = cast(str, result["summary"])
@@ -2022,7 +2033,11 @@ def _validate_quantipy_experiment_evidence(
         raise AutoresearchValidationError(
             "quantipy_experiment_evidence.run_json_sha256 does not match run.json"
         )
-    run = _validate_quantipy_run_envelope(run_snapshot, mode=state.mode)
+    run = _validate_quantipy_run_envelope(
+        run_snapshot,
+        mode=state.mode,
+        declared_bug_signals=tuple(artifact.bug_signals),
+    )
     if run["run_id"] != evidence.run_id or run["success"] is not evidence.success:
         raise AutoresearchValidationError("Quantipy run.json identity does not match evidence")
     if run["manifest_sha256"] != _canonical_quantipy_manifest_sha256(manifest):
