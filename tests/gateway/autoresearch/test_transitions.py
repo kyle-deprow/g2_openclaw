@@ -1151,6 +1151,7 @@ def _mid_implementation_infra_blocked() -> FinalDecisionArtifact:
         continue_loop=True,
         memory_write_required=False,
         infra_rationale=(
+            "OPERATOR-AUTHORIZED-INFRA-BLOCK: "
             "The platform lacks the ExperimentManifest transport contract required by the "
             "approved brief."
         ),
@@ -1232,6 +1233,7 @@ def test_implementation_infra_blocked_accepts_contradictory_contract_rationale(
     artifact = replace(
         _mid_implementation_infra_blocked(),
         infra_rationale=(
+            "OPERATOR-AUTHORIZED-INFRA-BLOCK: "
             "The platform provides the ExperimentManifest transport contract, so this "
             "deliberately contradictory blocker rationale is not evidence of a missing contract."
         ),
@@ -1250,7 +1252,11 @@ def test_implementation_infra_blocked_registry_reason_retains_late_contract_name
     contract_name = "ExperimentManifest"
     artifact = replace(
         _mid_implementation_infra_blocked(),
-        infra_rationale=("x" * 170) + f" {contract_name} transport contract",
+        infra_rationale=(
+            "OPERATOR-AUTHORIZED-INFRA-BLOCK: "
+            + ("x" * 170)
+            + f" {contract_name} transport contract"
+        ),
     )
 
     decided = advance_state(state, artifact, policy)
@@ -1374,6 +1380,7 @@ def test_persisted_implementation_infra_blocker_cannot_become_suspended(
             replace(
                 _mid_implementation_infra_blocked(),
                 infra_rationale=(
+                    "OPERATOR-AUTHORIZED-INFRA-BLOCK: "
                     "This rationale is sufficiently long but deliberately uses none of the "
                     "recognized implementation-blocker phrases required by the gate."
                 ),

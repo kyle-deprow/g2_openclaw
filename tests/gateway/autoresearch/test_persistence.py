@@ -758,6 +758,7 @@ def test_stage_submission_loads_implementation_infra_blocked_final_decision_enve
         continue_loop=True,
         memory_write_required=False,
         infra_rationale=(
+            "OPERATOR-AUTHORIZED-INFRA-BLOCK: "
             "The approved brief requires an ExperimentManifest transport contract that the "
             "platform lacks."
         ),

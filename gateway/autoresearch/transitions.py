@@ -1126,8 +1126,17 @@ def _is_implementation_infra_blocked_contract(
 ) -> bool:
     """Return true for the no-memory blocker accepted before implementation evidence."""
     rationale = decision.infra_rationale
+    # OPERATOR-AUTHORIZED ONLY. The consensus data-requirements gate guarantees
+    # every new MAJORITY brief is implementable with supported transports, so a
+    # stage-authored mid-implementation INFRA_BLOCKED is no longer a legitimate
+    # discovery: three of this route's first four uses were adaptively-worded
+    # false positives abandoning implementable briefs. The operator authorizes
+    # a genuine case by placing the exact token below in the wake directive,
+    # which the PM must quote verbatim in infra_rationale.
+    operator_authorized = rationale is not None and ("OPERATOR-AUTHORIZED-INFRA-BLOCK" in rationale)
     return (
-        _is_implementation_infra_blocked_state(state)
+        operator_authorized
+        and _is_implementation_infra_blocked_state(state)
         and decision.decision is FinalDecision.INFRA_BLOCKED
         and decision.reviewer_verdict is FinalReviewerVerdict.NOT_RUN
         and decision.recommended_metric_value is None
