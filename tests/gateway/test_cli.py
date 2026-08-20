@@ -2469,6 +2469,7 @@ class TestAutoresearchCliCommands:
                 data_adequacy_score=0.9,
                 overfit_risk_score=0.2,
                 expected_net_sharpe=0.5,
+                data_requirements=("price_panel",),
                 rejection_reasons=(),
                 implementation_brief="Implement the narrow VWAP and OBV experiment.",
                 dissent_summary="The panel reached consensus.",

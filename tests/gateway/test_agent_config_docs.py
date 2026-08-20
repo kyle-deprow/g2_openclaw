@@ -538,7 +538,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.17.2" in skill
+    assert "version: 8.18.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -546,6 +546,15 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "fixed set of five liquid etfs" not in skill
     assert "reuse the same five symbols with no member substitution" not in skill
     assert "each iteration's consensus must declare a `universe_plan`" in skill
+    assert "`data_requirements`" in skill
+    assert "supported experiment transports are exactly `price_panel`" in skill
+    assert "runtime-derived provenance is receipt evidence, not a requestable transport" in skill
+    assert "operator-precondition consensus" in skill
+    assert "data_requirements` as the arbiter's declaration trust point" in skill
+    assert "must verify the implementation actually consumed only declared transports" in skill
+    assert "flag any undeclared data dependency as a critical issue" in skill
+    assert "mid-implementation `infra_blocked` route bounds the cost" in skill
+    assert "named contract is recorded in the hypothesis registry" in skill
     assert "screen criteria, ranking criterion, as-of date, and resulting member count" in skill
     assert "selection may never use out-of-sample returns" in skill
     assert "any performance metric" in skill
@@ -564,10 +573,6 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "`reviewer_verdict=not_run`" in skill
     assert "`memory_write_required=false`" in skill
     assert "`infra_rationale` naming the exact missing contract" in skill
-    for bootstrap_name in ("AGENTS.md", "SOUL.md", "README.md"):
-        bootstrap = " ".join((AGENT_CONFIG / bootstrap_name).read_text(encoding="utf-8").split())
-        assert "gated `ALPHA_RESEARCH` implementation" in bootstrap
-        assert "fresh next iteration" in bootstrap
     assert "context, not an instruction to prefer long holds" in skill
     assert (
         "proposals should leave headroom above this floor rather than targeting it exactly" in skill

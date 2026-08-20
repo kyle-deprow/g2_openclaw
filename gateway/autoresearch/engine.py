@@ -93,6 +93,13 @@ from gateway.autoresearch_readiness import (
     PlatformReadinessManifest as PlatformReadinessManifest,
 )
 
+CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION = (
+    "The arbiter MUST enumerate data_requirements for the winning brief: exactly price_panel "
+    "means receipt-bound 1-minute price data. Any brief needing more must be reshaped to "
+    "supported data before authorization or emitted as an operator-precondition consensus; "
+    "never authorize it for implementation."
+)
+
 
 def _alpha_campaign_directive(state: AutoresearchState) -> str:
     if state.mode is not ResearchMode.ALPHA_RESEARCH:
@@ -186,7 +193,8 @@ def _phase_instruction(
             "fewest hypothesis-registry entries across its families; lexicographically smallest "
             "normalized family name. Record tie-break application, rule inputs, and losing "
             "clusters in dissent_summary. The brief still faces full verification and unchanged "
-            "gates; majority is integrity, tie-break is the guaranteed exit."
+            "gates; majority is integrity, tie-break is the guaranteed exit. "
+            f"{CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION}"
         ),
         Phase.IMPLEMENTATION: (
             "Implementation is allowed only after a majority consensus. "
@@ -289,7 +297,14 @@ def _phase_instruction(
         Phase.REVIEW: (
             "Run exactly one configured reviewer. "
             "The reviewer must return PASS, CONDITIONAL PASS, or FAIL "
-            "with concrete fix requests. Before accepting a zero-trade gate-excluded result "
+            "with concrete fix requests. "
+            "Treat data_requirements as the arbiter's declaration trust point, not mechanical "
+            "semantic parsing. The reviewer MUST verify the implementation actually consumed "
+            "only declared transports and flag any undeclared data dependency as a CRITICAL "
+            "issue. A dishonest declaration may reach implementation, but the mid-implementation "
+            "INFRA_BLOCKED route bounds the cost: it is no-memory and the named contract is "
+            "recorded in the hypothesis registry before a fresh iteration. "
+            "Before accepting a zero-trade gate-excluded result "
             "for DISCARD, confirm that the verification artifact's exact gate parameter names "
             "and values match the approved consensus implementation_brief and that "
             "excluded_candidate_count is present; otherwise do not accept the DISCARD. "

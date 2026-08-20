@@ -111,6 +111,7 @@ def _operator_precondition_state_json() -> str:
                     data_adequacy_score=1.0,
                     overfit_risk_score=1.0,
                     expected_net_sharpe=0.0,
+                    data_requirements=("price_panel",),
                     rejection_reasons=("missing operator evidence",),
                     implementation_brief=(
                         "Do not enter ENGINEER and do not modify Quantipy. "

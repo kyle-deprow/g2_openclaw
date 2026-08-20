@@ -438,6 +438,7 @@ class ConsensusResultArtifact:
     data_adequacy_score: float
     overfit_risk_score: float
     expected_net_sharpe: float
+    data_requirements: tuple[str, ...] | None
     rejection_reasons: tuple[str, ...]
     implementation_brief: str | None
     dissent_summary: str
@@ -456,30 +457,31 @@ class ConsensusResultArtifact:
     @classmethod
     def from_dict(cls, raw: object) -> ConsensusResultArtifact:
         data = _ensure_mapping(raw, label="consensus_result")
-        _require_exact_keys(
-            data,
-            label="consensus_result",
-            expected=(
-                "round_number",
-                "status",
-                "winner_theory_id",
-                "winner_theory_family",
-                "majority_count",
-                "majority_agent_ids",
-                "dissenting_positions",
-                "novelty_score",
-                "theory_score",
-                "implementation_risk_score",
-                "data_adequacy_score",
-                "overfit_risk_score",
-                "expected_net_sharpe",
-                "rejection_reasons",
-                "implementation_brief",
-                "dissent_summary",
-                "universe_plan",
-                "novelty_delta",
-            ),
+        expected_keys: tuple[str, ...] = (
+            "round_number",
+            "status",
+            "winner_theory_id",
+            "winner_theory_family",
+            "majority_count",
+            "majority_agent_ids",
+            "dissenting_positions",
+            "novelty_score",
+            "theory_score",
+            "implementation_risk_score",
+            "data_adequacy_score",
+            "overfit_risk_score",
+            "expected_net_sharpe",
+            "data_requirements",
+            "rejection_reasons",
+            "implementation_brief",
+            "dissent_summary",
+            "universe_plan",
+            "novelty_delta",
         )
+        if "data_requirements" not in data:
+            # Historical consensus_history entries predate this additive field.
+            expected_keys = tuple(key for key in expected_keys if key != "data_requirements")
+        _require_exact_keys(data, label="consensus_result", expected=expected_keys)
         winner_theory_id = data.get("winner_theory_id")
         winner_theory_family = data.get("winner_theory_family")
         implementation_brief = data.get("implementation_brief")
@@ -509,6 +511,11 @@ class ConsensusResultArtifact:
             data_adequacy_score=_require_float(data, "data_adequacy_score"),
             overfit_risk_score=_require_float(data, "overfit_risk_score"),
             expected_net_sharpe=_require_float(data, "expected_net_sharpe"),
+            data_requirements=(
+                _require_string_list(data, "data_requirements")
+                if "data_requirements" in data
+                else None
+            ),
             rejection_reasons=_require_string_list(data, "rejection_reasons"),
             implementation_brief=implementation_brief.strip()
             if isinstance(implementation_brief, str)
@@ -525,6 +532,17 @@ class ConsensusResultArtifact:
         return artifact
 
     def validate(self) -> None:
+        if self.data_requirements is not None and (
+            not isinstance(self.data_requirements, tuple)
+            or not self.data_requirements
+            or any(
+                not isinstance(requirement, str) or not requirement.strip()
+                for requirement in self.data_requirements
+            )
+        ):
+            raise AutoresearchValidationError(
+                "data_requirements must be a non-empty tuple of non-empty strings"
+            )
         if self.status is ConsensusStatus.MAJORITY:
             if self.majority_count < 3:
                 raise AutoresearchValidationError("majority consensus requires majority_count >= 3")
@@ -561,7 +579,7 @@ class ConsensusResultArtifact:
             self.universe_plan.validate()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        data: dict[str, object] = {
             "round_number": self.round_number,
             "status": self.status.value,
             "winner_theory_id": self.winner_theory_id,
@@ -583,6 +601,16 @@ class ConsensusResultArtifact:
             else None,
             "novelty_delta": self.novelty_delta,
         }
+        if self.data_requirements is not None:
+            data["data_requirements"] = list(self.data_requirements)
+        return data
+
+    def require_submitted_data_requirements(self) -> None:
+        """Require the additive field at the new-artifact submission boundary."""
+        if self.data_requirements is None:
+            raise AutoresearchValidationError(
+                "new consensus_result submissions must include data_requirements"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1204,6 +1232,7 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
             "data_adequacy_score",
             "overfit_risk_score",
             "expected_net_sharpe",
+            "data_requirements",
             "rejection_reasons",
             "dissent_summary",
             "winner_theory_id|null",

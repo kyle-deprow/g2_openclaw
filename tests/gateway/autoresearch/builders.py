@@ -562,6 +562,7 @@ def _majority_consensus(
         data_adequacy_score=0.9,
         overfit_risk_score=0.27,
         expected_net_sharpe=0.54,
+        data_requirements=("price_panel",),
         rejection_reasons=("Losers lacked coverage plan",),
         implementation_brief="Implement VWAP + OBV with walk-forward tuning.",
         dissent_summary="Two dissenters preferred a simpler regime filter.",
@@ -587,6 +588,7 @@ def _operator_precondition_consensus(
         data_adequacy_score=1.0,
         overfit_risk_score=1.0,
         expected_net_sharpe=0.0,
+        data_requirements=("price_panel",),
         rejection_reasons=("Missing immutable operator evidence bundle.",),
         implementation_brief=(
             "Do not enter ENGINEER and do not modify Quantipy. The operator "
@@ -611,6 +613,7 @@ def _no_consensus(round_number: int) -> ConsensusResultArtifact:
         data_adequacy_score=0.83,
         overfit_risk_score=0.44,
         expected_net_sharpe=0.21,
+        data_requirements=("price_panel",),
         rejection_reasons=("No 3-of-5 majority",),
         implementation_brief=None,
         dissent_summary="Panel split between VWAP, Bollinger, and sentiment families.",

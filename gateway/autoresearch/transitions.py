@@ -246,6 +246,10 @@ DEFAULT_XNYS_CALENDAR_EVIDENCE_PATH = Path(
     "/home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json"
 )
 
+# Extending this set requires the runtime transport to actually ship, with the
+# consensus data contract re-pinned in the same change.
+SUPPORTED_EXPERIMENT_TRANSPORTS = ("price_panel",)
+
 
 def _canonical_iteration_experiment_id(iteration: int) -> str:
     if iteration < 1:
@@ -271,6 +275,35 @@ def _is_operator_precondition_consensus(
         return True
     brief = (consensus.implementation_brief or "").lower()
     return all(marker in brief for marker in _OPERATOR_PRECONDITION_BRIEF_MARKERS)
+
+
+def _validate_consensus_data_requirements(
+    artifact: ConsensusResultArtifact,
+    *,
+    require_submission_field: bool,
+) -> None:
+    # Trust boundary: the arbiter's data_requirements declaration is the trust
+    # point; this validator cannot mechanically infer semantic data dependencies.
+    artifact.validate()
+    if require_submission_field:
+        artifact.require_submitted_data_requirements()
+    if artifact.data_requirements is None:
+        return
+    if artifact.status is not ConsensusStatus.MAJORITY:
+        return
+    if _is_operator_precondition_consensus(artifact):
+        return
+    unsupported = tuple(
+        requirement
+        for requirement in artifact.data_requirements
+        if requirement not in SUPPORTED_EXPERIMENT_TRANSPORTS
+    )
+    if unsupported:
+        raise AutoresearchValidationError(
+            "unsupported consensus data requirement "
+            f"'{unsupported[0]}'; resubmit as an operator-precondition consensus "
+            "(the existing no-code path) or reshape to supported data"
+        )
 
 
 def _acknowledged_through_iteration(state: AutoresearchState) -> int:
@@ -1654,6 +1687,8 @@ def _validate_state(
         raise AutoresearchValidationError("debate history requires a context_packet")
     if state.consensus_history and state.latest_debate is None:
         raise AutoresearchValidationError("consensus history requires a debate_result")
+    for consensus in state.consensus_history:
+        _validate_consensus_data_requirements(consensus, require_submission_field=False)
     _validate_consensus_history_universe_plans(state)
     if (
         state.suspended
@@ -2224,6 +2259,7 @@ def advance_state(
                 "NO_CONSENSUS retry is exhausted; the arbiter must resolve the split "
                 "with the pre-registered deterministic tie-break"
             )
+        _validate_consensus_data_requirements(artifact, require_submission_field=True)
         _validate_consensus_novelty_gate(state, artifact)
         next_consensus_history = (*state.consensus_history, artifact)
         if artifact.status is ConsensusStatus.MAJORITY:

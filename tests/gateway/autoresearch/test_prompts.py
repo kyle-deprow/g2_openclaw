@@ -570,8 +570,14 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
         "least-explored family",
         "lexicographically smallest normalized family name",
         "losing clusters in dissent_summary",
+        "enumerate data_requirements",
+        "exactly price_panel",
+        "receipt-bound 1-minute price data",
+        "operator-precondition consensus",
+        "never authorize it for implementation",
     ):
         assert phrase in alpha_prompt
+    assert len(autoresearch_engine.CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION.encode()) <= 500
 
 
 def test_zero_trade_alpha_gate_pass_tuple_is_accepted_by_artifact_validator() -> None:
@@ -788,6 +794,13 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "exact gate parameter names and values match the approved consensus" in review
     assert "excluded_candidate_count is present" in review
     assert "otherwise do not accept the DISCARD" in review
+    assert "data_requirements as the arbiter's declaration trust point" in review
+    assert "not mechanical semantic parsing" in review
+    assert "MUST verify the implementation actually consumed only declared transports" in review
+    assert "flag any undeclared data dependency as a CRITICAL issue" in review
+    assert "dishonest declaration" in review
+    assert "mid-implementation INFRA_BLOCKED route bounds the cost" in review
+    assert "named contract is recorded in the hypothesis registry" in review
 
 
 def test_decision_and_review_instructions_require_oos_metric_and_activity_floor(

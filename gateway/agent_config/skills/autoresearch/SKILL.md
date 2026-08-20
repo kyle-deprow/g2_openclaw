@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.17.2
+version: 8.18.0
 ---
 
 # Autoresearch
@@ -787,6 +787,12 @@ majority. Required output:
   and expected net Sharpe.
 - Explicit reasons losers were rejected.
 - Final implementation brief.
+- `data_requirements`, enumerating every transport the winning brief needs. The
+  supported experiment transports are exactly `price_panel`, meaning
+  receipt-bound regular-hours 1-minute price data. Runtime-derived provenance
+  is receipt evidence, not a requestable transport. A brief needing anything
+  else must be reshaped to supported data before authorization or emitted as an
+  operator-precondition consensus; never authorize it for implementation.
 - Frozen canonical universe plan inputs: profile identity and digest, sorted
   full-range selection schedule, maximum members per date, and execution
   policy. Consensus stores no redundant batch boundaries. The runner derives
@@ -1290,6 +1296,13 @@ Reviewer focus:
   the verification artifact's exact gate parameter names and values match the
   approved consensus `implementation_brief` and that `excluded_candidate_count`
   is present. Do not accept the `DISCARD` if that confirmation fails.
+- Treat `data_requirements` as the arbiter's declaration trust point, not
+  mechanical semantic parsing. The reviewer MUST verify the implementation
+  actually consumed only declared transports and flag any undeclared data
+  dependency as a critical issue. A dishonest declaration may reach
+  implementation, but the mid-implementation `INFRA_BLOCKED` route bounds the
+  cost: it is a no-memory decision, and the named contract is recorded in the
+  hypothesis registry before a fresh iteration.
 
 Required output: verdict (`PASS`, `CONDITIONAL PASS`, `FAIL`), recommended
 decision metric (for `ALPHA_RESEARCH`, an out-of-sample cost-net metric from

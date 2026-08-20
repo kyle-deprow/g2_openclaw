@@ -15,6 +15,7 @@ import gateway.autoresearch.persistence as autoresearch_persistence
 import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
 from gateway.autoresearch.artifacts import (
+    ConsensusResultArtifact,
     DebateResultArtifact,
     FinalDecisionArtifact,
     PriceHydrationScopePreflight,
@@ -913,6 +914,101 @@ def test_first_round_no_consensus_allows_one_retry_and_post_retry_is_rejected(
         match=r"retry is exhausted.*pre-registered deterministic tie-break",
     ):
         advance_state(state, _no_consensus(round_number=2), policy)
+
+
+def test_majority_consensus_rejects_unsupported_data_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    consensus = replace(
+        _majority_consensus(round_number=1, policy=policy),
+        data_requirements=("dividend_action",),
+    )
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=r"dividend_action.*operator-precondition consensus.*reshape to supported data",
+    ):
+        advance_state(state, consensus, policy)
+
+
+def test_majority_consensus_accepts_price_panel_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+
+    advanced = advance_state(
+        state,
+        replace(
+            _majority_consensus(round_number=1, policy=policy),
+            data_requirements=("price_panel",),
+        ),
+        policy,
+    )
+
+    assert advanced.phase is Phase.IMPLEMENTATION
+
+
+def test_dishonest_transport_declaration_is_left_to_the_reviewer_check(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    dishonest = replace(
+        _majority_consensus(round_number=1, policy=policy),
+        data_requirements=("price_panel",),
+        implementation_brief=(
+            "Use dividend timestamps and payout amounts even though only price_panel is declared."
+        ),
+    )
+
+    # The transition enforces the arbiter declaration, while the REVIEWER
+    # instruction pins the semantic implementation-consumption check.
+    advanced = advance_state(state, dishonest, policy)
+
+    assert advanced.phase is Phase.IMPLEMENTATION
+
+
+def test_operator_precondition_consensus_accepts_unsupported_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+
+    advanced = advance_state(
+        state,
+        replace(
+            _operator_precondition_consensus(1, policy),
+            data_requirements=("dividend_action",),
+        ),
+        policy,
+    )
+
+    assert advanced.phase is Phase.DECISION_LOG
+
+
+def test_no_consensus_data_requirements_content_is_unconstrained(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+
+    advanced = advance_state(
+        state,
+        replace(_no_consensus(round_number=1), data_requirements=("anything",)),
+        policy,
+    )
+
+    assert advanced.phase is Phase.DEBATE
+
+
+def test_historical_consensus_without_data_requirements_is_not_a_new_submission(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+    raw = _majority_consensus(round_number=1, policy=policy).to_dict()
+    raw.pop("data_requirements")
+    historical = ConsensusResultArtifact.from_dict(raw)
+
+    with pytest.raises(AutoresearchValidationError, match="must include data_requirements"):
+        advance_state(state, historical, policy)
 
 
 def test_data_infra_majority_without_universe_plan_fails_at_consensus(

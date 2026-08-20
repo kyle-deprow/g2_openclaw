@@ -29,6 +29,7 @@ from gateway.autoresearch.compute import (
 )
 from gateway.autoresearch.configuration import load_autoresearch_policy
 from gateway.autoresearch.constants import (
+    AUTHORITATIVE_STATE_DIGEST_DOMAIN,
     DEFAULT_OPENCLAW_CONFIG_PATH,
     MEMBER_UNION_DIGEST_ALGORITHM,
 )
@@ -66,6 +67,9 @@ from gateway.autoresearch.receipts import (
 )
 from gateway.autoresearch.state import (
     AutoresearchState,
+)
+from gateway.autoresearch.transitions import (
+    build_authoritative_state_reference,
 )
 from gateway.autoresearch_platform_validation import (
     canonical_dynamic_price_coverage_digest,
@@ -785,6 +789,8 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
         list[str], ARTIFACT_CONTRACTS[ArtifactType.CONSENSUS_RESULT]["required_fields"]
     )
     assert "novelty_delta|null" in consensus_fields
+    assert "data_requirements" in consensus_fields
+    assert consensus.data_requirements == ("price_panel",)
     assert "novelty_delta" in consensus.to_dict()
     assert ConsensusResultArtifact.from_dict(consensus.to_dict()) == consensus
     with pytest.raises(AutoresearchValidationError, match="exact keys"):
@@ -797,6 +803,47 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
             replace(consensus, novelty_delta=delta).validate()
     with pytest.raises(AutoresearchValidationError, match="NO_CONSENSUS"):
         replace(_no_consensus(1), novelty_delta="x" * 32).validate()
+
+
+def test_legacy_consensus_payload_preserves_serialized_bytes_and_state_digest() -> None:
+    policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+    legacy_consensus_payload = _majority_consensus(round_number=1, policy=policy).to_dict()
+    del legacy_consensus_payload["data_requirements"]
+    legacy_state_payload = AutoresearchState(
+        consensus_history=(ConsensusResultArtifact.from_dict(legacy_consensus_payload),)
+    ).to_dict()
+    legacy_state_payload["consensus_history"] = [legacy_consensus_payload]
+    stored_state_bytes = json.dumps(
+        legacy_state_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    expected_state_digest = hashlib.sha256(
+        b"\n".join((AUTHORITATIVE_STATE_DIGEST_DOMAIN.encode("utf-8"), stored_state_bytes))
+    ).hexdigest()
+
+    restored_state = AutoresearchState.from_dict(json.loads(stored_state_bytes))
+
+    assert restored_state.consensus_history[0].data_requirements is None
+    assert (
+        json.dumps(
+            restored_state.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        == stored_state_bytes
+    )
+    assert build_authoritative_state_reference(restored_state).state_sha256 == expected_state_digest
+
+
+def test_consensus_submission_requires_data_requirements() -> None:
+    policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+    legacy_consensus_payload = _majority_consensus(round_number=1, policy=policy).to_dict()
+    del legacy_consensus_payload["data_requirements"]
+    legacy_consensus = ConsensusResultArtifact.from_dict(legacy_consensus_payload)
+
+    with pytest.raises(AutoresearchValidationError, match="must include data_requirements"):
+        legacy_consensus.require_submitted_data_requirements()
 
 
 @pytest.mark.parametrize("experiment_id", ("Iteration-1", " iteration-1 "))
