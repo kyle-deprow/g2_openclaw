@@ -4745,3 +4745,55 @@ def test_infra_blocked_rationale_accepts_a_genuinely_missing_contract() -> None:
         "contract from ExperimentManifest through the runtime, which does not exist."
     )
     assert _has_runtime_or_transport_contract_term(rationale) is True
+
+
+def test_review_fix_rounds_cap_routes_to_decision_log(
+    policy: AutoresearchPolicy,
+) -> None:
+    """Unfixable evidence-findings must terminate: on the review cap the
+    iteration proceeds to decision_log, where critical-remains -> DISCARD
+    applies, instead of looping fix rounds forever (iteration 24 livelock)."""
+    from gateway.autoresearch.transitions import MAX_REVIEW_FIX_ROUNDS
+
+    state = advance_state(AutoresearchState(), _setup_artifact(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _context_artifact(),
+            research_mode=ResearchMode.DATA_INFRA_G0,
+            mode_rationale="Repair cap and source provenance before an alpha rerun.",
+        ),
+        policy,
+    )
+    state = advance_state(state, _debate_result(policy, round_number=1), policy)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = advance_state(state, _implementation_result(), policy)
+    state = advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.PASS),
+            infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+            infra_rationale="The initial coverage proof passed before review found defects.",
+        ),
+        policy,
+    )
+    failing = _review_result(ReviewVerdict.FAIL, policy)
+    for round_index in range(MAX_REVIEW_FIX_ROUNDS - 1):
+        state = advance_state(state, failing, policy)
+        assert state.phase is Phase.FIX_TEST, round_index
+        state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+        state = advance_state(
+            state,
+            replace(
+                _verification_result(VerificationStatus.PASS),
+                infra_gate_outcome=InfraGateOutcome.GATE_PASSED,
+                infra_rationale="Coverage proof re-passed; review defects persist.",
+            ),
+            policy,
+        )
+
+    capped = advance_state(state, failing, policy)
+
+    assert len(capped.review_history) == MAX_REVIEW_FIX_ROUNDS
+    assert capped.phase is Phase.DECISION_LOG
+    assert capped.pending_fix_trigger is None

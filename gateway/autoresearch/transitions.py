@@ -242,6 +242,10 @@ KEEP_DECISIONS = frozenset(
 # gateway/agent_config/skills/autoresearch/SKILL.md section 8. If the operator
 # changes the floor, both must change together.
 ALPHA_MIN_TRADES_PER_DAY = 1.0
+
+# Bounded review-driven fix rounds per iteration; on the cap the iteration
+# routes to decision_log where critical-remains -> DISCARD applies.
+MAX_REVIEW_FIX_ROUNDS = 3
 DEFAULT_XNYS_CALENDAR_EVIDENCE_PATH = Path(
     "/home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json"
 )
@@ -2409,6 +2413,21 @@ def advance_state(
         transitions_module._validate_review_result(artifact, policy)
         next_review_history = (*state.review_history, artifact)
         if artifact.verdict is ReviewVerdict.FAIL or artifact.critical_issues:
+            # Review-fix rounds are BOUNDED. Findings that are properties of
+            # the evidence (a bootstrap interval, fold concentration) cannot
+            # be changed by any code fix; unbounded routing produced a
+            # five-lap livelock in iteration 24 with no exit, because
+            # fix_test only accepts fix results and the DISCARD ladder is
+            # unreachable outside decision_log. After the cap, the iteration
+            # proceeds to decision_log where the deterministic rule
+            # "critical review issue remains: DISCARD" applies.
+            if len(next_review_history) >= MAX_REVIEW_FIX_ROUNDS:
+                return replace(
+                    state,
+                    review_history=next_review_history,
+                    pending_fix_trigger=None,
+                    phase=Phase.DECISION_LOG,
+                )
             return replace(
                 state,
                 review_history=next_review_history,
