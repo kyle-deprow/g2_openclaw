@@ -1032,11 +1032,29 @@ _INFRA_BLOCKED_CONTRACT_TERM_RE = re.compile(
 _INFRA_BLOCKED_GENERIC_TERMS = frozenset(("runtime", "transport"))
 
 
+# Contracts that EXIST cannot be claimed missing. Two of the first three uses
+# of the mid-implementation route were false positives: one keyword-matched a
+# prohibition clause, one claimed the panel execution path itself was absent.
+# A brief whose consensus declared only supported transports is implementable
+# by construction; genuine breakage of a supported transport is a verification
+# BUG_SIGNAL, never INFRA_BLOCKED.
+_EXISTING_CONTRACT_CLAIMS_RE = re.compile(
+    r"(?:ExperimentRunContext[^.]{0,60}?(?:panel|load_frame|price)"
+    r"|(?:panel|load_frame|price_panel)[^.]{0,60}?ExperimentRunContext"
+    r"|price_panel[^.]{0,60}?(?:missing|absent|lack(?:s|ed|ing)?|does not exist)"
+    r"|(?:missing|absent|lack(?:s|ed|ing)?)[^.]{0,60}?price_panel)",
+    re.IGNORECASE,
+)
+
+
 def _has_runtime_or_transport_contract_term(text: str | None) -> bool:
-    """Require only a bounded rationale with a runtime or transport contract term."""
+    """Require a bounded rationale naming a runtime/transport contract that
+    is not one of the contracts the platform already provides."""
     if text is None:
         return False
     normalized = text.strip()
+    if _EXISTING_CONTRACT_CLAIMS_RE.search(normalized) is not None:
+        return False
     return (
         len(normalized) >= _INFRA_BLOCKED_RATIONALE_MIN_CHARS
         and _INFRA_BLOCKED_CONTRACT_TERM_RE.search(normalized) is not None

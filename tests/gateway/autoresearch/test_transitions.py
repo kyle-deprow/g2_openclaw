@@ -4711,3 +4711,30 @@ def test_g0_complete_receipt_with_preflight_identity_mismatch_fails_closed(
 
     with pytest.raises(AutoresearchValidationError, match="outside pinned XNYS evidence"):
         advance_state(mismatched, artifact, policy)
+
+
+@pytest.mark.parametrize(
+    "rationale",
+    [
+        "The approved brief requires an ExperimentRunContext runtime contract for the "
+        "receipt-bound panel execution path, but the authoritative contract is absent.",
+        "The platform lacks price_panel transport required by the brief and no "
+        "runtime contract exposes it through the manifest.",
+    ],
+)
+def test_infra_blocked_rationale_rejects_claims_that_existing_contracts_are_missing(
+    rationale: str,
+) -> None:
+    from gateway.autoresearch.transitions import _has_runtime_or_transport_contract_term
+
+    assert _has_runtime_or_transport_contract_term(rationale) is False
+
+
+def test_infra_blocked_rationale_accepts_a_genuinely_missing_contract() -> None:
+    from gateway.autoresearch.transitions import _has_runtime_or_transport_contract_term
+
+    rationale = (
+        "The approved brief requires a receipt-bound dividend-action transport "
+        "contract from ExperimentManifest through the runtime, which does not exist."
+    )
+    assert _has_runtime_or_transport_contract_term(rationale) is True
