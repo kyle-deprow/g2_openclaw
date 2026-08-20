@@ -116,6 +116,171 @@ def _parse_run_with_feasibility_summary(
     return autoresearch_evidence._validate_quantipy_run_envelope(snapshot)
 
 
+def _rewrite_quantipy_run_payload(run_path: Path, payload: dict[str, object]) -> None:
+    run_path.chmod(0o600)
+    run_path.write_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _valid_derived_provenance(panel: dict[str, object]) -> dict[str, object]:
+    receipt = cast(dict[str, object], panel["receipt"])
+    request = cast(dict[str, object], receipt["request"])
+    return {
+        "member_union_count": 1,
+        "member_union_digest": "a" * 64,
+        "member_union_digest_algorithm": autoresearch_constants.MEMBER_UNION_DIGEST_ALGORITHM,
+        "experiment_start": request["start"],
+        "experiment_end": request["end"],
+        "timeframe": "1min",
+        "market_hours": "all",
+        "request_sha256": panel["request_sha256"],
+        "coverage_sha256": panel["coverage_sha256"],
+        "panel_sha256": panel["panel_sha256"],
+        "hydrated_at": receipt["hydrated_at"],
+        "exported_at": receipt["exported_at"],
+    }
+
+
+def test_quantipy_run_envelope_preserves_validated_derived_provenance(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    panel = cast(dict[str, object], payload["panel"])
+    expected_provenance = _valid_derived_provenance(panel)
+    payload["derived_provenance"] = expected_provenance
+    _rewrite_quantipy_run_payload(run_path, payload)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    # Act
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        snapshot,
+        mode=ResearchMode.ALPHA_RESEARCH,
+    )
+
+    # Assert
+    assert normalized["derived_provenance"] == expected_provenance
+
+
+def test_quantipy_run_envelope_rejects_mismatched_derived_provenance_digest(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    panel = cast(dict[str, object], payload["panel"])
+    provenance = _valid_derived_provenance(panel)
+    provenance["request_sha256"] = "0" * 64
+    payload["derived_provenance"] = provenance
+    _rewrite_quantipy_run_payload(run_path, payload)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="derived_provenance request_sha256 does not match panel evidence",
+    ):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            snapshot,
+            mode=ResearchMode.ALPHA_RESEARCH,
+        )
+
+
+def test_quantipy_run_envelope_preserves_current_null_derived_provenance(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload["derived_provenance"] = None
+    _rewrite_quantipy_run_payload(run_path, payload)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    # Act
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(snapshot)
+
+    # Assert
+    assert "derived_provenance" in normalized
+    assert normalized["derived_provenance"] is None
+
+
+def test_quantipy_run_envelope_rejects_null_derived_provenance_for_alpha_panel(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload["derived_provenance"] = None
+    _rewrite_quantipy_run_payload(run_path, payload)
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="ALPHA_RESEARCH runs with panel evidence must carry runtime-derived provenance",
+    ):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            snapshot,
+            mode=ResearchMode.ALPHA_RESEARCH,
+        )
+
+
+def test_legacy_quantipy_run_envelope_omits_derived_provenance(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    # Arrange
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+        panel_requested=True,
+    )
+    snapshot = autoresearch_secure_io._secure_open_snapshot(
+        run_path,
+        label="test Quantipy run.json",
+    )
+
+    # Act
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        snapshot,
+        mode=ResearchMode.ALPHA_RESEARCH,
+    )
+
+    # Assert
+    assert "derived_provenance" not in normalized
+
+
 def test_advance_state_requires_successful_quantipy_v2_run_receipt(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,

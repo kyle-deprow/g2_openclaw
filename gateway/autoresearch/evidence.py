@@ -1395,6 +1395,7 @@ def _validate_quantipy_run_envelope(
         else None
     )
     derived_provenance_raw = run.get("derived_provenance") if _has_derived_provenance else None
+    normalized_derived_provenance: dict[str, object] | None = None
     if derived_provenance_raw is not None:
         provenance = _strict_json_keys(
             derived_provenance_raw,
@@ -1424,6 +1425,7 @@ def _validate_quantipy_run_envelope(
                     f"Quantipy run.json derived_provenance {digest_key} "
                     "does not match panel evidence"
                 )
+        normalized_derived_provenance = dict(provenance)
     if (
         mode is ResearchMode.ALPHA_RESEARCH
         and panel is not None
@@ -1717,6 +1719,9 @@ def _validate_quantipy_run_envelope(
         "success": success,
         "panel_requested": panel_requested,
         "panel": panel,
+        **(
+            {"derived_provenance": normalized_derived_provenance} if _has_derived_provenance else {}
+        ),
         "stage_receipts": normalized_receipts,
         "telemetry": {
             "scope": "process_wide",
