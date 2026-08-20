@@ -17,6 +17,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -252,6 +253,7 @@ DEFAULT_MAX_ESCALATING_RENUDGES = 5
 DEFAULT_STALENESS_FORCE_WAKE_MINUTES = 45.0
 DEFAULT_WRITER_STALE_MINUTES = 60.0
 DEFAULT_LAUNCH_REQUEST_TTL_MINUTES = 30.0
+DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES = 30.0
 # Implementation, verification, review, and fix stages can spend several
 # minutes running tests and backtests without producing an OpenClaw event.
 # Keep the supervisor responsive while allowing those legitimate long turns to
@@ -317,7 +319,9 @@ MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE = (
 )
 MISSING_VERIFICATION_ARTIFACT_REASON = "missing_verification_artifact"
 OWNER_SESSION_STORE_UNAVAILABLE_REASON = "owner_session_store_unavailable"
-EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES = frozenset({Phase.VERIFICATION, Phase.DECISION_LOG})
+OWNER_EVIDENCE_TRANSCRIPT = "transcript"
+OWNER_EVIDENCE_SESSIONS_STORE = "sessions_store"
+OWNER_EVIDENCE_MISSING = "missing"
 TARGET_WRITER_COMMAND_RE = re.compile(
     r"(\bpytest\b|\bpy\.test\b|\bjupyter\b|\bpapermill\b|\bipython\b|"
     r"\bnbconvert\b|\bgenerate_[\w.-]*|notebooks/experiments|"
@@ -348,6 +352,13 @@ def _finite_positive_cli_float(raw: str) -> float:
     return value
 
 
+def _finite_positive_owner_warn_cli_float(raw: str) -> float:
+    value = _finite_positive_cli_float(raw)
+    if not math.isfinite(value * 120.0):
+        raise argparse.ArgumentTypeError("twice the threshold in seconds must be finite")
+    return value
+
+
 class SupervisorOutcome(StrEnum):
     NO_ACTION = "no_action"
     NUDGED = "nudged"
@@ -374,6 +385,7 @@ class SupervisorConfig:
     staleness_force_wake_minutes: float = DEFAULT_STALENESS_FORCE_WAKE_MINUTES
     writer_stale_minutes: float = DEFAULT_WRITER_STALE_MINUTES
     launch_request_ttl_minutes: float = DEFAULT_LAUNCH_REQUEST_TTL_MINUTES
+    owner_task_no_write_warn_minutes: float = DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES
     expected_stage_task_stale_seconds: float = DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS
     max_recovery_attempts: int = DEFAULT_MAX_RECOVERY_ATTEMPTS
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
@@ -404,6 +416,14 @@ class SupervisorConfig:
             field_name="launch_request_ttl_minutes",
         )
         _require_finite_positive(
+            self.owner_task_no_write_warn_minutes,
+            field_name="owner_task_no_write_warn_minutes",
+        )
+        _require_finite_positive(
+            self.owner_task_no_write_warn_minutes * 120.0,
+            field_name="owner_task_no_write_stall_seconds",
+        )
+        _require_finite_positive(
             self.expected_stage_task_stale_seconds,
             field_name="expected_stage_task_stale_seconds",
         )
@@ -416,6 +436,35 @@ class StateProbe:
     fingerprint: str
     latest_update_ts: float
     latest_update_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerWriteEvidence:
+    path: Path | None
+    timestamp: float | None
+    identity: str
+    session_id: str | None
+    source_kind: str
+    transcript_write_timestamp: float | None
+    transcript_write_epoch: int | None
+
+
+@dataclass(slots=True)
+class OwnerTaskWriteObservation:
+    baseline_timestamp: float
+    evidence_identity: str
+    session_id: str | None
+    source_kind: str
+    last_trusted_transcript_write_timestamp: float | None
+    last_trusted_transcript_write_epoch: int | None
+    warning_epoch: str
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerTaskWriteAssessment:
+    task_id: str
+    stalled: bool
+    session_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,6 +738,8 @@ class AutoresearchSupervisor:
         self._cycle_state: AutoresearchState | None = None
         self._campaign_review_warning_record: str | None = None
         self._stale_writer_warning_identities: set[tuple[int, float]] = set()
+        self._owner_task_observations: dict[str, OwnerTaskWriteObservation] = {}
+        self._owner_task_warning_identities: set[tuple[str, str, str]] = set()
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -767,10 +818,6 @@ class AutoresearchSupervisor:
         run_record_result = self._consume_terminal_verification_run(state)
         if run_record_result is not None:
             return run_record_result
-        if state.phase in EARLY_OWNER_LIFECYCLE_SHORT_CIRCUIT_PHASES:
-            lifecycle_result = self._owner_lifecycle_guard(state)
-            if lifecycle_result is not None and lifecycle_result.reason == "active_owner_session":
-                return lifecycle_result
         try:
             reconciled_tasks = self._reconciled_running_tasks(shutdown_requested=shutdown_requested)
         except TaskReconciliationError:
@@ -792,7 +839,15 @@ class AutoresearchSupervisor:
         writers = self._active_target_repo_writer_processes(state)
         if writers:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "target_repo_writer_active")
-        owner_task_active = self._active_owner_task(reconciled_tasks)
+        try:
+            owner_task_active = self._active_owner_task(reconciled_tasks)
+        except SupervisorError as exc:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.owner_write_evidence_invalid",
+                detail=str(exc),
+            )
+            return SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
         force_staleness_wake = self._staleness_watchdog_due(
             state,
             probe,
@@ -2409,11 +2464,150 @@ class AutoresearchSupervisor:
             shutdown_requested=shutdown_requested,
         )
 
-    def _active_owner_task(self, tasks: ReconciledRunningTasks) -> bool:
-        return any(
-            classify_autoresearch_task(task) is TaskProvenance.OWNER_TURN
-            for task in tasks.running_tasks
+    def _owner_task_assessments(
+        self, tasks: Sequence[Mapping[str, object]]
+    ) -> tuple[OwnerTaskWriteAssessment, ...]:
+        owner_tasks = tuple(
+            task for task in tasks if classify_autoresearch_task(task) is TaskProvenance.OWNER_TURN
         )
+        current_task_ids = {
+            _task_id_for_reconciliation(task, source="owner") for task in owner_tasks
+        }
+        self._owner_task_observations = {
+            task_id: observation
+            for task_id, observation in self._owner_task_observations.items()
+            if task_id in current_task_ids
+        }
+        self._owner_task_warning_identities = {
+            identity
+            for identity in self._owner_task_warning_identities
+            if identity[0] in current_task_ids
+        }
+        if not owner_tasks:
+            return ()
+
+        now = self._now()
+        assessments: list[OwnerTaskWriteAssessment] = []
+        for task in owner_tasks:
+            task_id = _task_id_for_reconciliation(task, source="owner")
+            task_session_raw = task.get("sessionId")
+            if task_session_raw is not None and (
+                not isinstance(task_session_raw, str) or not task_session_raw.strip()
+            ):
+                raise SupervisorError(f"owner task {task_id} has an invalid sessionId")
+            task_session_id = task_session_raw
+            started_at = _task_start_timestamp_seconds(task, now=now)
+            evidence = self._owner_write_evidence(task_session_id=task_session_id)
+
+            observation = self._owner_task_observations.get(task_id)
+            evidence_timestamp = evidence.timestamp
+            if observation is None:
+                baseline_timestamp = max(
+                    now,
+                    evidence_timestamp if evidence_timestamp is not None else now,
+                    started_at if started_at is not None else now,
+                )
+                warning_epoch = (
+                    f"transcript-mtime:{evidence.transcript_write_epoch}"
+                    if evidence.transcript_write_epoch is not None
+                    else f"observation:{task_id}"
+                )
+                last_transcript_timestamp = evidence.transcript_write_timestamp
+                last_transcript_epoch = evidence.transcript_write_epoch
+            else:
+                baseline_timestamp = observation.baseline_timestamp
+                last_transcript_timestamp = observation.last_trusted_transcript_write_timestamp
+                last_transcript_epoch = observation.last_trusted_transcript_write_epoch
+                transcript_write_observed = (
+                    evidence.source_kind == OWNER_EVIDENCE_TRANSCRIPT
+                    and evidence.transcript_write_timestamp is not None
+                    and evidence.transcript_write_epoch is not None
+                    and evidence.transcript_write_timestamp > baseline_timestamp
+                    and (
+                        last_transcript_epoch is None
+                        or evidence.transcript_write_epoch > last_transcript_epoch
+                    )
+                )
+                if transcript_write_observed:
+                    assert evidence.transcript_write_timestamp is not None
+                    baseline_timestamp = min(now, evidence.transcript_write_timestamp)
+                    last_transcript_timestamp = evidence.transcript_write_timestamp
+                    last_transcript_epoch = evidence.transcript_write_epoch
+                    warning_epoch = (
+                        f"transcript-mtime:{evidence.transcript_write_epoch}"
+                        if evidence.transcript_write_epoch is not None
+                        else f"observation:{task_id}"
+                    )
+                else:
+                    warning_epoch = observation.warning_epoch
+            self._owner_task_observations[task_id] = OwnerTaskWriteObservation(
+                baseline_timestamp=baseline_timestamp,
+                evidence_identity=evidence.identity,
+                session_id=evidence.session_id,
+                source_kind=evidence.source_kind,
+                last_trusted_transcript_write_timestamp=last_transcript_timestamp,
+                last_trusted_transcript_write_epoch=last_transcript_epoch,
+                warning_epoch=warning_epoch,
+            )
+            silence_seconds = max(0.0, now - baseline_timestamp)
+            warn_seconds = self.config.owner_task_no_write_warn_minutes * 60.0
+            stalled_seconds = warn_seconds * 2.0
+            if silence_seconds >= warn_seconds:
+                self._log_owner_task_write_warning(
+                    event="supervisor.owner_task_write_suspect",
+                    task_id=task_id,
+                    evidence=evidence,
+                    warning_epoch=warning_epoch,
+                    silence_seconds=silence_seconds,
+                    threshold_seconds=warn_seconds,
+                )
+            stalled = silence_seconds >= stalled_seconds
+            if stalled:
+                self._log_owner_task_write_warning(
+                    event="supervisor.owner_task_write_stalled",
+                    task_id=task_id,
+                    evidence=evidence,
+                    warning_epoch=warning_epoch,
+                    silence_seconds=silence_seconds,
+                    threshold_seconds=stalled_seconds,
+                )
+            assessments.append(
+                OwnerTaskWriteAssessment(
+                    task_id=task_id,
+                    stalled=stalled,
+                    session_id=evidence.session_id,
+                )
+            )
+        return tuple(assessments)
+
+    def _log_owner_task_write_warning(
+        self,
+        *,
+        event: str,
+        task_id: str,
+        evidence: OwnerWriteEvidence,
+        warning_epoch: str,
+        silence_seconds: float,
+        threshold_seconds: float,
+    ) -> None:
+        identity = (task_id, warning_epoch, event)
+        if identity in self._owner_task_warning_identities:
+            return
+        self._owner_task_warning_identities.add(identity)
+        _structured_log(
+            logging.WARNING,
+            event,
+            task_id=task_id,
+            session_id=evidence.session_id,
+            evidence_path=str(evidence.path) if evidence.path is not None else None,
+            evidence_identity=evidence.identity,
+            silence_minutes=silence_seconds / 60.0,
+            threshold_minutes=threshold_seconds / 60.0,
+        )
+
+    def _active_owner_task(self, tasks: ReconciledRunningTasks) -> bool:
+        assessments = self._owner_task_assessments(tasks.running_tasks)
+        return any(not assessment.stalled for assessment in assessments)
 
     def _staleness_watchdog_due(
         self,
@@ -2462,7 +2656,31 @@ class AutoresearchSupervisor:
     def _activity_guard(
         self, state: AutoresearchState, reconciled_tasks: ReconciledRunningTasks
     ) -> SupervisorResult | None:
-        running_tasks = reconciled_tasks.running_tasks
+        try:
+            owner_assessments = self._owner_task_assessments(reconciled_tasks.running_tasks)
+        except SupervisorError as exc:
+            _structured_log(
+                logging.ERROR,
+                "supervisor.owner_write_evidence_invalid",
+                detail=str(exc),
+            )
+            return SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+        stalled_owner_task_ids = frozenset(
+            assessment.task_id for assessment in owner_assessments if assessment.stalled
+        )
+        stalled_owner_session_ids = frozenset(
+            assessment.session_id
+            for assessment in owner_assessments
+            if assessment.stalled and assessment.session_id is not None
+        )
+        running_tasks = tuple(
+            task
+            for task in reconciled_tasks.running_tasks
+            if not (
+                classify_autoresearch_task(task) is TaskProvenance.OWNER_TURN
+                and _task_id_for_reconciliation(task, source="owner") in stalled_owner_task_ids
+            )
+        )
         expected = [
             task
             for task in running_tasks
@@ -2481,7 +2699,11 @@ class AutoresearchSupervisor:
             ):
                 return SupervisorResult(SupervisorOutcome.ALERT, "stale_expected_stage_task")
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_expected_stage_task")
-        lifecycle_result = self._owner_lifecycle_guard(state)
+        lifecycle_result = self._owner_lifecycle_guard(
+            state,
+            stalled_owner_task_ids=stalled_owner_task_ids,
+            stalled_owner_session_ids=stalled_owner_session_ids,
+        )
         if lifecycle_result is not None:
             if lifecycle_result.reason == OWNER_SESSION_STORE_UNAVAILABLE_REASON:
                 return lifecycle_result
@@ -2501,7 +2723,13 @@ class AutoresearchSupervisor:
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "fresh_relevant_task")
         return None
 
-    def _owner_lifecycle_guard(self, state: AutoresearchState) -> SupervisorResult | None:
+    def _owner_lifecycle_guard(
+        self,
+        state: AutoresearchState,
+        *,
+        stalled_owner_task_ids: frozenset[str] = frozenset(),
+        stalled_owner_session_ids: frozenset[str] = frozenset(),
+    ) -> SupervisorResult | None:
         try:
             store = self._load_owner_session_store()
         except SupervisorError:
@@ -2530,11 +2758,20 @@ class AutoresearchSupervisor:
         now_ms = int(self._now() * 1000)
         if timestamp > now_ms:
             return SupervisorResult(SupervisorOutcome.ALERT, "contradictory_running_owner_session")
+        lifecycle_session_id = lifecycle.get("sessionId")
+        stalled_owner_matches_lifecycle = (
+            isinstance(lifecycle_session_id, str)
+            and lifecycle_session_id in stalled_owner_session_ids
+        ) or (lifecycle_session_id is None and bool(stalled_owner_task_ids))
         if now_ms - timestamp <= int(self.config.expected_stage_task_stale_seconds * 1000):
+            if stalled_owner_matches_lifecycle:
+                return None
             return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_owner_session")
         if AUTORESEARCH_OWNER_AGENT_ID in self._expected_stage_agent_ids(state):
             if self._active_target_repo_writer_processes(state):
                 return SupervisorResult(SupervisorOutcome.NO_ACTION, "active_owner_process")
+            if stalled_owner_matches_lifecycle:
+                return None
             return SupervisorResult(SupervisorOutcome.ALERT, "stale_running_owner_session")
         return None
 
@@ -3034,6 +3271,314 @@ class AutoresearchSupervisor:
             raise SupervisorError("invalid owner session store payload")
         return raw
 
+    def _owner_write_evidence(self, *, task_session_id: str | None) -> OwnerWriteEvidence:
+        """Return trusted write evidence for one dedicated owner task/session."""
+        sessions_dir = self.config.owner_sessions_path.parent
+        sessions_name = self._owner_direct_child_name(
+            self.config.owner_sessions_path.name,
+            sessions_dir=sessions_dir,
+            label="owner sessions store",
+        )
+        directory_fd = self._open_owner_sessions_directory(sessions_dir)
+        try:
+            store, store_metadata = self._read_owner_session_store_fd(directory_fd, sessions_name)
+            lifecycle_raw = store.get(AUTORESEARCH_OWNER_SESSION_KEY)
+            lifecycle: Mapping[str, object] | None
+            if AUTORESEARCH_OWNER_SESSION_KEY not in store:
+                lifecycle = None
+            elif isinstance(lifecycle_raw, Mapping):
+                lifecycle = lifecycle_raw
+            else:
+                raise SupervisorError("invalid owner session lifecycle mapping")
+
+            lifecycle_session_id: str | None = None
+            declared_name: str | None = None
+            if lifecycle is not None:
+                lifecycle_session_raw = lifecycle.get("sessionId")
+                if lifecycle_session_raw is not None:
+                    if (
+                        not isinstance(lifecycle_session_raw, str)
+                        or not lifecycle_session_raw.strip()
+                    ):
+                        raise SupervisorError("invalid owner sessionId evidence")
+                    lifecycle_session_id = lifecycle_session_raw
+                if (
+                    task_session_id is not None
+                    and lifecycle_session_id is not None
+                    and task_session_id != lifecycle_session_id
+                ):
+                    raise SupervisorError(
+                        "owner task sessionId conflicts with dedicated lifecycle sessionId"
+                    )
+                if "sessionFile" in lifecycle:
+                    session_file_raw = lifecycle.get("sessionFile")
+                    if not isinstance(session_file_raw, str) or not session_file_raw.strip():
+                        raise SupervisorError("invalid owner sessionFile evidence")
+                    declared_name = self._owner_direct_child_name(
+                        session_file_raw,
+                        sessions_dir=sessions_dir,
+                        label="owner sessionFile",
+                    )
+
+            effective_session_id = task_session_id or lifecycle_session_id
+            canonical_name = (
+                self._owner_canonical_child_name(effective_session_id)
+                if effective_session_id is not None
+                else None
+            )
+            candidate_names: list[str] = []
+            names_to_validate: list[str] = []
+            if declared_name is not None:
+                names_to_validate.append(declared_name)
+            if declared_name is not None and (
+                task_session_id is None
+                or lifecycle_session_id is not None
+                or canonical_name == declared_name
+            ):
+                candidate_names.append(declared_name)
+            if canonical_name is not None:
+                names_to_validate.append(canonical_name)
+                candidate_names.append(canonical_name)
+
+            transcript_evidence: list[OwnerWriteEvidence] = []
+            seen_names: set[str] = set()
+            selected_names = set(candidate_names)
+            for candidate_name in names_to_validate:
+                if candidate_name in seen_names:
+                    continue
+                seen_names.add(candidate_name)
+                evidence = self._open_owner_transcript_evidence(
+                    directory_fd,
+                    sessions_dir=sessions_dir,
+                    name=candidate_name,
+                    session_id=effective_session_id,
+                )
+                if evidence is not None and candidate_name in selected_names:
+                    transcript_evidence.append(evidence)
+            if transcript_evidence:
+                return max(
+                    transcript_evidence,
+                    key=lambda evidence: evidence.timestamp or float("-inf"),
+                )
+            if store_metadata is not None:
+                return self._owner_evidence_from_metadata(
+                    self.config.owner_sessions_path,
+                    store_metadata,
+                    session_id=effective_session_id,
+                    identity_prefix="sessions-store",
+                )
+            return OwnerWriteEvidence(
+                path=None,
+                timestamp=None,
+                identity=(
+                    f"missing-owner-write-evidence:session={effective_session_id or '<unknown>'}"
+                ),
+                session_id=effective_session_id,
+                source_kind=OWNER_EVIDENCE_MISSING,
+                transcript_write_timestamp=None,
+                transcript_write_epoch=None,
+            )
+        finally:
+            os.close(directory_fd)
+
+    def _open_owner_sessions_directory(self, path: Path) -> int:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            directory_fd = os.open(path, flags)
+        except OSError as exc:
+            raise SupervisorError(f"cannot securely open owner sessions directory: {exc}") from exc
+        try:
+            metadata = os.fstat(directory_fd)
+            self._validate_owner_evidence_metadata(
+                metadata,
+                label="owner sessions directory",
+                require_directory=True,
+            )
+        except BaseException:
+            os.close(directory_fd)
+            raise
+        return directory_fd
+
+    def _owner_direct_child_name(self, raw: str, *, sessions_dir: Path, label: str) -> str:
+        if any(unicodedata.category(character) == "Cc" for character in raw):
+            raise SupervisorError(f"{label} path contains control characters")
+        try:
+            candidate = Path(raw).expanduser()
+        except (RuntimeError, ValueError) as exc:
+            raise SupervisorError(f"{label} path is malformed") from exc
+        sessions_dir_absolute = Path(os.path.abspath(sessions_dir))
+        if candidate.is_absolute():
+            if ".." in candidate.parts:
+                raise SupervisorError(f"{label} path is nested or escaping")
+            normalized = Path(os.path.abspath(candidate))
+            if normalized.parent != sessions_dir_absolute:
+                raise SupervisorError(f"{label} path is nested or escaping")
+            name = normalized.name
+        else:
+            if len(candidate.parts) != 1 or candidate.parts[0] in {".", ".."}:
+                raise SupervisorError(f"{label} path is nested or escaping")
+            name = candidate.name
+        if not name or name in {".", ".."} or "/" in name or "\\" in name:
+            raise SupervisorError(f"{label} path is not a direct child")
+        return name
+
+    def _owner_canonical_child_name(self, session_id: str | None) -> str | None:
+        if session_id is None:
+            return None
+        if any(unicodedata.category(character) == "Cc" for character in session_id):
+            raise SupervisorError("owner sessionId contains control characters")
+        if not session_id or session_id in {".", ".."} or "/" in session_id or "\\" in session_id:
+            raise SupervisorError("owner sessionId is not a direct-child identifier")
+        return f"{session_id}.jsonl"
+
+    def _read_owner_session_store_fd(
+        self, directory_fd: int, name: str
+    ) -> tuple[Mapping[str, object], os.stat_result | None]:
+        child_fd = self._open_owner_child(directory_fd, name, label="owner sessions store")
+        if child_fd is None:
+            return {}, None
+        try:
+            metadata = os.fstat(child_fd)
+            self._validate_owner_evidence_metadata(
+                metadata,
+                label="owner sessions store",
+                require_directory=False,
+            )
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(child_fd, 65_536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            try:
+                raw: object = json.loads(
+                    b"".join(chunks).decode("utf-8"),
+                    object_pairs_hook=_strict_json_object,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SupervisorError("invalid owner session store JSON") from exc
+            if not isinstance(raw, Mapping):
+                raise SupervisorError("invalid owner session store payload")
+            final_metadata = os.fstat(child_fd)
+            self._validate_owner_evidence_metadata(
+                final_metadata,
+                label="owner sessions store",
+                require_directory=False,
+            )
+            before_identity = (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_ctime_ns,
+                metadata.st_mtime_ns,
+                metadata.st_size,
+            )
+            after_identity = (
+                final_metadata.st_dev,
+                final_metadata.st_ino,
+                final_metadata.st_ctime_ns,
+                final_metadata.st_mtime_ns,
+                final_metadata.st_size,
+            )
+            if before_identity != after_identity:
+                raise SupervisorError("owner session store changed during read")
+            return raw, final_metadata
+        except OSError as exc:
+            raise SupervisorError(f"cannot read owner sessions store: {exc}") from exc
+        finally:
+            os.close(child_fd)
+
+    def _open_owner_child(self, directory_fd: int, name: str, *, label: str) -> int | None:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        try:
+            return os.open(name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise SupervisorError(f"cannot securely open {label}: {exc}") from exc
+        except OSError as exc:
+            raise SupervisorError(f"cannot securely open {label}: {exc}") from exc
+
+    def _open_owner_transcript_evidence(
+        self,
+        directory_fd: int,
+        *,
+        sessions_dir: Path,
+        name: str,
+        session_id: str | None,
+    ) -> OwnerWriteEvidence | None:
+        child_fd = self._open_owner_child(directory_fd, name, label="owner transcript")
+        if child_fd is None:
+            return None
+        try:
+            metadata = os.fstat(child_fd)
+            self._validate_owner_evidence_metadata(
+                metadata,
+                label="owner transcript",
+                require_directory=False,
+            )
+            return self._owner_evidence_from_metadata(
+                sessions_dir / name,
+                metadata,
+                session_id=session_id,
+                identity_prefix="transcript",
+            )
+        finally:
+            os.close(child_fd)
+
+    def _validate_owner_evidence_metadata(
+        self,
+        metadata: os.stat_result,
+        *,
+        label: str,
+        require_directory: bool,
+    ) -> None:
+        if require_directory:
+            valid_type = stat.S_ISDIR(metadata.st_mode)
+        else:
+            valid_type = stat.S_ISREG(metadata.st_mode)
+        if not valid_type:
+            raise SupervisorError(f"{label} is not the required file type")
+        if metadata.st_uid != os.getuid():
+            raise SupervisorError(f"{label} has a foreign owner")
+        if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise SupervisorError(f"{label} is group/world writable")
+
+    def _owner_evidence_from_metadata(
+        self,
+        path: Path,
+        metadata: os.stat_result,
+        *,
+        session_id: str | None,
+        identity_prefix: str,
+    ) -> OwnerWriteEvidence:
+        timestamp = metadata.st_mtime
+        if not math.isfinite(timestamp):
+            raise SupervisorError(f"{identity_prefix} mtime is not finite")
+        if timestamp > self._now():
+            raise SupervisorError(f"{identity_prefix} evidence is future-dated")
+        identity = (
+            f"{identity_prefix};session={session_id or '<unknown>'};path={path};"
+            f"dev={metadata.st_dev};ino={metadata.st_ino};"
+            f"mtime_ns={metadata.st_mtime_ns};size={metadata.st_size}"
+        )
+        return OwnerWriteEvidence(
+            path=path,
+            timestamp=timestamp,
+            identity=identity,
+            session_id=session_id,
+            source_kind=(
+                OWNER_EVIDENCE_TRANSCRIPT
+                if identity_prefix == OWNER_EVIDENCE_TRANSCRIPT
+                else OWNER_EVIDENCE_SESSIONS_STORE
+            ),
+            transcript_write_timestamp=(
+                timestamp if identity_prefix == OWNER_EVIDENCE_TRANSCRIPT else None
+            ),
+            transcript_write_epoch=(
+                metadata.st_mtime_ns if identity_prefix == OWNER_EVIDENCE_TRANSCRIPT else None
+            ),
+        )
+
     def _detect_owner_error(self) -> RecoveryErrorPattern | None:
         lifecycle = self._load_owner_session_store().get(AUTORESEARCH_OWNER_SESSION_KEY)
         if not isinstance(lifecycle, Mapping):
@@ -3197,6 +3742,24 @@ def _task_last_event_ms(task: Mapping[str, object]) -> int | None:
     return None
 
 
+def _task_start_timestamp_seconds(task: Mapping[str, object], *, now: float) -> float | None:
+    timestamps: list[float] = []
+    for field_name in ("startedAt", "createdAt"):
+        value = task.get(field_name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise SupervisorError(f"owner task {field_name} must be a finite millisecond timestamp")
+        milliseconds = float(value)
+        if not math.isfinite(milliseconds):
+            raise SupervisorError(f"owner task {field_name} must be a finite millisecond timestamp")
+        timestamp = milliseconds / 1000.0
+        if timestamp > now:
+            raise SupervisorError(f"owner task {field_name} is future-dated")
+        timestamps.append(timestamp)
+    return max(timestamps) if timestamps else None
+
+
 def _running_lifecycle_last_event_ms(lifecycle: Mapping[str, object]) -> int:
     # OpenClaw's sessions.json uses updatedAt for record writes; lastInteractionAt
     # is the only lifecycle field that evidences activity for a running session.
@@ -3241,6 +3804,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_LAUNCH_REQUEST_TTL_MINUTES,
     )
     parser.add_argument(
+        "--owner-task-no-write-warn-minutes",
+        type=_finite_positive_owner_warn_cli_float,
+        default=DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES,
+    )
+    parser.add_argument(
         "--expected-stage-task-stale",
         type=_finite_positive_cli_float,
         default=DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
@@ -3267,6 +3835,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 staleness_force_wake_minutes=args.staleness_force_wake_minutes,
                 writer_stale_minutes=args.writer_stale_minutes,
                 launch_request_ttl_minutes=args.launch_request_ttl_minutes,
+                owner_task_no_write_warn_minutes=args.owner_task_no_write_warn_minutes,
                 expected_stage_task_stale_seconds=args.expected_stage_task_stale,
             )
         )

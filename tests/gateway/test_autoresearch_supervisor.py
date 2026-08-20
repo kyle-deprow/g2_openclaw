@@ -84,6 +84,7 @@ from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_SESSION_KEY,
     DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS,
     DEFAULT_MAX_ESCALATING_RENUDGES,
+    DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES,
     DEFAULT_RENUDGE_ESCALATION_MINUTES,
     MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
     RECOVERY_MESSAGE,
@@ -100,6 +101,7 @@ from gateway.autoresearch_supervisor import (
     SupervisorOutcome,
     SupervisorResult,
     WakeDeliveryProof,
+    _build_arg_parser,
     _move_launch_request_no_replace,
     main,
     make_idempotency_key,
@@ -470,6 +472,7 @@ def _supervisor(
     expected_stage_task_stale_seconds: float = 300.0,
     renudge_escalation_minutes: float = DEFAULT_RENUDGE_ESCALATION_MINUTES,
     max_escalating_renudges: int = DEFAULT_MAX_ESCALATING_RENUDGES,
+    owner_task_no_write_warn_minutes: float = DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES,
     staleness_force_wake_minutes: float = 45.0,
     grace_period_seconds: float = 120.0,
     now: Callable[[], float] | None = None,
@@ -489,6 +492,7 @@ def _supervisor(
             grace_period_seconds=grace_period_seconds,
             renudge_escalation_minutes=renudge_escalation_minutes,
             max_escalating_renudges=max_escalating_renudges,
+            owner_task_no_write_warn_minutes=owner_task_no_write_warn_minutes,
             staleness_force_wake_minutes=staleness_force_wake_minutes,
             expected_stage_task_stale_seconds=expected_stage_task_stale_seconds,
             launch_requests_path=env.launch_requests_path,
@@ -506,6 +510,31 @@ def test_expected_stage_task_stale_default_allows_long_stage_turns() -> None:
     assert DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS == 900.0
     assert DEFAULT_RENUDGE_ESCALATION_MINUTES == 20.0
     assert DEFAULT_MAX_ESCALATING_RENUDGES == 5
+
+
+def test_owner_task_no_write_threshold_has_a_finite_positive_cli_config() -> None:
+    assert DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES == 30.0
+    assert SupervisorConfig().owner_task_no_write_warn_minutes == 30.0
+    assert (
+        _build_arg_parser().parse_args([]).owner_task_no_write_warn_minutes
+        == DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES
+    )
+    assert (
+        _build_arg_parser()
+        .parse_args(["--owner-task-no-write-warn-minutes", "12.5"])
+        .owner_task_no_write_warn_minutes
+        == 12.5
+    )
+    with pytest.raises(SupervisorError, match="owner_task_no_write_warn_minutes"):
+        SupervisorConfig(owner_task_no_write_warn_minutes=0.0)
+    with pytest.raises(SupervisorError, match="owner_task_no_write_warn_minutes"):
+        SupervisorConfig(owner_task_no_write_warn_minutes=float("nan"))
+    with pytest.raises(SupervisorError, match="owner_task_no_write_stall_seconds"):
+        SupervisorConfig(owner_task_no_write_warn_minutes=1e307)
+    with pytest.raises(SystemExit):
+        _build_arg_parser().parse_args(["--owner-task-no-write-warn-minutes", "inf"])
+    with pytest.raises(SystemExit):
+        _build_arg_parser().parse_args(["--owner-task-no-write-warn-minutes", "1e307"])
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
@@ -3797,7 +3826,7 @@ def test_supervisor_run_forever_stays_alive_after_closed_checkpoint_alert(
 
 
 @pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
-def test_fresh_owner_lifecycle_short_circuits_owner_stages_before_task_listing(
+def test_fresh_owner_lifecycle_reconciles_owner_stages_before_returning_active(
     supervisor_env: SupervisorEnv, phase: Phase
 ) -> None:
     _prepare_stale_state(supervisor_env, phase=phase)
@@ -3821,8 +3850,8 @@ def test_fresh_owner_lifecycle_short_circuits_owner_stages_before_task_listing(
     result = _supervisor(supervisor_env, fake).run_once()
 
     assert result.reason == "active_owner_session"
-    assert fake.task_list_calls == 0
-    assert fake.rpc_calls == []
+    assert fake.task_list_calls == 1
+    assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
 
 
 @pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
@@ -3904,6 +3933,1070 @@ def test_fresh_updated_at_does_not_hide_stale_owner_interaction(
 
     assert result == SupervisorResult(SupervisorOutcome.ALERT, "stale_running_owner_session")
     assert [method for method, _ in fake.rpc_calls] == ["tasks.list"]
+
+
+def _owner_turn_task(
+    *,
+    task_id: str,
+    now: float,
+    started_at: float,
+    session_id: str | None = "owner-session-1",
+) -> dict[str, object]:
+    task: dict[str, object] = {
+        "taskId": task_id,
+        "status": "running",
+        "runtime": "subagent",
+        "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+        "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+        "startedAt": int(started_at * 1000),
+        "updatedAt": int(now * 1000),
+    }
+    if session_id is not None:
+        task["sessionId"] = session_id
+    return task
+
+
+def _write_owner_lifecycle(
+    env: SupervisorEnv,
+    *,
+    transcript: Path | None,
+    timestamp: float,
+    status: str = "running",
+    session_id: str | None = "owner-session-1",
+) -> None:
+    entry: dict[str, object] = {
+        "status": status,
+        "lastInteractionAt": int(timestamp * 1000),
+        "startedAt": int(timestamp * 1000),
+    }
+    if session_id is not None:
+        entry["sessionId"] = session_id
+    if transcript is not None:
+        entry["sessionFile"] = str(transcript)
+        transcript.write_text("old owner transcript\n", encoding="utf-8")
+        transcript.chmod(0o600)
+        os.utime(transcript, (timestamp, timestamp))
+    env.sessions_path.write_text(
+        json.dumps({AUTORESEARCH_OWNER_SESSION_KEY: entry}),
+        encoding="utf-8",
+    )
+    env.sessions_path.chmod(0o600)
+    os.utime(env.sessions_path, (timestamp, timestamp))
+
+
+def test_new_owner_task_observation_does_not_inherit_old_transcript_silence(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    old = supervisor_env.now - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(task_id="owner-new-task", now=supervisor_env.now, started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = supervisor.run_once()
+
+    assert result.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert not any(
+        json.loads(record.message).get("event") == "supervisor.owner_task_write_suspect"
+        for record in caplog.records
+    )
+
+
+def test_owner_task_updated_at_does_not_mask_write_silence_and_warnings_are_deduplicated(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(
+        task_id="owner-silent-task",
+        now=clock[0],
+        started_at=old,
+        session_id=None,
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    first = supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    suspect = supervisor.run_once()
+    duplicate = supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    stalled = supervisor.run_once()
+
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event")
+        in {
+            "supervisor.owner_task_write_suspect",
+            "supervisor.owner_task_write_stalled",
+        }
+    ]
+    assert first.reason == "active_expected_stage_task"
+    assert suspect.reason == "active_expected_stage_task"
+    assert duplicate.reason == "active_expected_stage_task"
+    assert stalled.outcome is SupervisorOutcome.NUDGED
+    assert sum(event["event"] == "supervisor.owner_task_write_suspect" for event in events) == 1
+    assert sum(event["event"] == "supervisor.owner_task_write_stalled" for event in events) == 1
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_safe_owner_transcript_write_resets_silence_clock(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(task_id="owner-reset-task", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    supervisor.run_once()
+    transcript.write_text("fresh owner transcript\n", encoding="utf-8")
+    os.utime(transcript, (clock[0], clock[0]))
+    clock[0] += (DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0) - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    stalled_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.owner_task_write_stalled"
+    ]
+    assert stalled_events == []
+
+
+@pytest.mark.parametrize("unsafe_kind", ["outside", "symlink", "future"])
+def test_unsafe_owner_transcript_evidence_fails_closed(
+    supervisor_env: SupervisorEnv,
+    unsafe_kind: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="gateway.autoresearch_supervisor")
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    sessions_dir = supervisor_env.sessions_path.parent
+    transcript = sessions_dir / "owner-session-1.jsonl"
+    declared_path = transcript
+    if unsafe_kind == "outside":
+        declared_path = sessions_dir.parent / "outside-owner.jsonl"
+        declared_path.write_text("outside\n", encoding="utf-8")
+        declared_path.chmod(0o600)
+    else:
+        transcript.write_text("owner\n", encoding="utf-8")
+        transcript.chmod(0o600)
+        os.utime(transcript, (clock[0] + 1.0 if unsafe_kind == "future" else old,) * 2)
+        if unsafe_kind == "symlink":
+            link = sessions_dir / "owner-session-link.jsonl"
+            link.symlink_to(transcript)
+            declared_path = link
+    env_entry = {
+        AUTORESEARCH_OWNER_SESSION_KEY: {
+            "status": "running",
+            "sessionId": "owner-session-1",
+            "sessionFile": str(declared_path),
+            "lastInteractionAt": int(old * 1000),
+            "startedAt": int(old * 1000),
+        }
+    }
+    supervisor_env.sessions_path.write_text(json.dumps(env_entry), encoding="utf-8")
+    supervisor_env.sessions_path.chmod(0o600)
+    os.utime(supervisor_env.sessions_path, (old, old))
+    task = _owner_turn_task(task_id=f"owner-unsafe-{unsafe_kind}", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    result = supervisor.run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert any(
+        json.loads(record.message).get("event") == "supervisor.owner_write_evidence_invalid"
+        for record in caplog.records
+    )
+
+
+def test_conflicting_owner_task_session_id_fails_closed(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="gateway.autoresearch_supervisor")
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(
+        task_id="owner-conflicting-session",
+        now=clock[0],
+        started_at=old,
+        session_id="different-session",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += 2.0 * DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    result = supervisor.run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert any(
+        json.loads(record.message).get("event") == "supervisor.owner_write_evidence_invalid"
+        for record in caplog.records
+    )
+
+
+def test_task_session_id_selects_canonical_transcript_when_lifecycle_omits_session_id(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    _write_owner_lifecycle(
+        supervisor_env,
+        transcript=None,
+        timestamp=old,
+        session_id=None,
+    )
+    transcript = supervisor_env.sessions_path.parent / "session-b.jsonl"
+    transcript.write_text("old session-b\n", encoding="utf-8")
+    transcript.chmod(0o600)
+    os.utime(transcript, (old, old))
+    task = _owner_turn_task(
+        task_id="owner-session-b",
+        now=clock[0],
+        started_at=old,
+        session_id="session-b",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    transcript.write_text("fresh session-b\n", encoding="utf-8")
+    os.utime(transcript, (clock[0], clock[0]))
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0 - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert not any(
+        json.loads(record.message).get("event") == "supervisor.owner_task_write_stalled"
+        for record in caplog.records
+    )
+
+
+def test_owner_tasks_have_independent_transcript_write_clocks(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    _write_owner_lifecycle(
+        supervisor_env,
+        transcript=None,
+        timestamp=old,
+        session_id=None,
+    )
+    for session_id in ("session-a", "session-b"):
+        transcript = supervisor_env.sessions_path.parent / f"{session_id}.jsonl"
+        transcript.write_text(f"old {session_id}\n", encoding="utf-8")
+        transcript.chmod(0o600)
+        os.utime(transcript, (old, old))
+    tasks = [
+        _owner_turn_task(
+            task_id=f"owner-{session_id}",
+            now=clock[0],
+            started_at=old,
+            session_id=session_id,
+        )
+        for session_id in ("session-a", "session-b")
+    ]
+    fake = FakeOpenClaw(tasks=tasks)
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    tasks[0]["updatedAt"] = int(clock[0] * 1000)
+    tasks[1]["updatedAt"] = int(clock[0] * 1000)
+    session_a = supervisor_env.sessions_path.parent / "session-a.jsonl"
+    session_a.write_text("fresh session-a\n", encoding="utf-8")
+    os.utime(session_a, (clock[0], clock[0]))
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    for task in tasks:
+        task["updatedAt"] = int(clock[0] * 1000)
+
+    assessments = supervisor._owner_task_assessments(tuple(tasks))
+    result = supervisor.run_once()
+    by_task = {assessment.task_id: assessment for assessment in assessments}
+
+    assert by_task["owner-session-a"].stalled is False
+    assert by_task["owner-session-b"].stalled is True
+    assert result.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_owner_transcript_open_race_to_symlink_fails_closed(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "race-session.jsonl"
+    _write_owner_lifecycle(
+        supervisor_env,
+        transcript=transcript,
+        timestamp=old,
+        session_id="race-session",
+    )
+    outside = supervisor_env.sessions_path.parent.parent / "outside-race.jsonl"
+    outside.write_text("outside\n", encoding="utf-8")
+    outside.chmod(0o600)
+    original_open = os.open
+    replaced = False
+
+    def race_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal replaced
+        if path == transcript.name and dir_fd is not None and not replaced:
+            transcript.unlink()
+            transcript.symlink_to(outside)
+            replaced = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", race_open)
+    task = _owner_turn_task(
+        task_id="owner-race",
+        now=clock[0],
+        started_at=old,
+        session_id="race-session",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    result = supervisor.run_once()
+
+    assert replaced is True
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_sessions_store_write_does_not_reset_existing_transcript_silence(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(task_id="owner-transcript-primary", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    supervisor_env.sessions_path.write_text(
+        supervisor_env.sessions_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    os.utime(supervisor_env.sessions_path, (clock[0], clock[0]))
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_store_only_first_observation_ignores_older_first_transcript(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    _write_owner_lifecycle(
+        supervisor_env,
+        transcript=None,
+        timestamp=clock[0],
+    )
+    task_id = "owner-store-only-first-observation"
+    task = _owner_turn_task(
+        task_id=task_id,
+        now=clock[0],
+        started_at=clock[0],
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        owner_task_no_write_warn_minutes=1.0,
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    first = supervisor.run_once()
+    initial_baseline = supervisor._owner_task_observations[task_id].baseline_timestamp
+    assert initial_baseline == clock[0]
+
+    clock[0] += 1.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    transcript.write_text("old first transcript\n", encoding="utf-8")
+    transcript.chmod(0o600)
+    os.utime(transcript, (old, old))
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    after_transcript = supervisor.run_once()
+    early_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event")
+        in {
+            "supervisor.owner_task_write_suspect",
+            "supervisor.owner_task_write_stalled",
+        }
+    ]
+
+    assert first.reason == "active_expected_stage_task"
+    assert after_transcript.reason == "active_expected_stage_task"
+    assert supervisor._owner_task_observations[task_id].baseline_timestamp == initial_baseline
+    assert early_events == []
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+    clock[0] = initial_baseline + 60.0 - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    before_warning = supervisor.run_once()
+    assert before_warning.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+    clock[0] = initial_baseline + 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    warning = supervisor.run_once()
+    assert warning.reason == "active_expected_stage_task"
+    assert (
+        len(
+            [
+                record
+                for record in caplog.records
+                if json.loads(record.message).get("event") == "supervisor.owner_task_write_suspect"
+            ]
+        )
+        == 1
+    )
+
+    clock[0] = initial_baseline + 120.0 - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    before_recovery = supervisor.run_once()
+    assert before_recovery.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_missing_owner_write_store_and_transcript_evidence_ages(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    supervisor_env.sessions_path.unlink(missing_ok=True)
+    task = _owner_turn_task(
+        task_id="owner-missing-evidence",
+        now=clock[0],
+        started_at=old,
+        session_id="missing-session",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_transcript_deletion_does_not_reset_silence_clock(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(task_id="owner-deleted-transcript", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    transcript.unlink()
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+@pytest.mark.parametrize("reappearance", ["same", "older"])
+def test_transcript_reappearance_without_newer_mtime_preserves_silence_clock(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+    reappearance: str,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task_id = f"owner-reappear-{reappearance}"
+    task = _owner_turn_task(
+        task_id=task_id,
+        now=clock[0],
+        started_at=old,
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+    initial_baseline = supervisor._owner_task_observations[task_id].baseline_timestamp
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    transcript.unlink()
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    transcript.write_text("reappeared transcript\n", encoding="utf-8")
+    transcript.chmod(0o600)
+    reappeared_mtime = old if reappearance == "same" else old - 1.0
+    os.utime(transcript, (reappeared_mtime, reappeared_mtime))
+    task["updatedAt"] = int(clock[0] * 1000)
+    reappeared = supervisor.run_once()
+    suspect_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.owner_task_write_suspect"
+    ]
+
+    assert reappeared.reason == "active_expected_stage_task"
+    assert supervisor._owner_task_observations[task_id].baseline_timestamp == initial_baseline
+    assert len(suspect_events) == 1
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0 - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    clock[0] += 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_transcript_reappearance_with_newer_mtime_resets_silence_clock(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task_id = "owner-reappear-newer"
+    task = _owner_turn_task(task_id=task_id, now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    transcript.unlink()
+    task["updatedAt"] = int(clock[0] * 1000)
+    supervisor.run_once()
+    transcript.write_text("newer reappeared transcript\n", encoding="utf-8")
+    transcript.chmod(0o600)
+    os.utime(transcript, (clock[0], clock[0]))
+    task["updatedAt"] = int(clock[0] * 1000)
+    supervisor.run_once()
+    reset_baseline = supervisor._owner_task_observations[task_id].baseline_timestamp
+
+    assert reset_baseline == clock[0]
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0 - 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += 1.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_task_session_id_presence_enrichment_does_not_reset_transcript_silence(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(
+        supervisor_env,
+        transcript=transcript,
+        timestamp=old,
+        session_id=None,
+    )
+    task = _owner_turn_task(
+        task_id="owner-session-enrichment",
+        now=clock[0],
+        started_at=old,
+        session_id=None,
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    supervisor.run_once()
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    task["sessionId"] = "owner-session-1"
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+
+    result = supervisor.run_once()
+
+    assert result.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+@pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
+def test_fresh_stalled_owner_bypasses_fresh_lifecycle_in_every_owner_phase(
+    supervisor_env: SupervisorEnv,
+    phase: Phase,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=phase)
+    clock = [supervisor_env.now]
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=clock[0])
+    task = _owner_turn_task(
+        task_id=f"owner-{phase.value}-fresh-lifecycle",
+        now=clock[0],
+        started_at=clock[0],
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        owner_task_no_write_warn_minutes=1.0,
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    warning = supervisor.run_once()
+    clock[0] += 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    stalled = supervisor.run_once()
+
+    assert first.reason == "active_expected_stage_task"
+    assert warning.reason == "active_expected_stage_task"
+    assert stalled.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+def test_declared_symlink_is_validated_even_when_task_session_selects_canonical_file(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="gateway.autoresearch_supervisor")
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    sessions_dir = supervisor_env.sessions_path.parent
+    canonical = sessions_dir / "session-b.jsonl"
+    canonical.write_text("safe canonical\n", encoding="utf-8")
+    canonical.chmod(0o600)
+    os.utime(canonical, (old, old))
+    outside = sessions_dir.parent / "outside-declared.jsonl"
+    outside.write_text("outside\n", encoding="utf-8")
+    outside.chmod(0o600)
+    declared = sessions_dir / "declared-other.jsonl"
+    declared.symlink_to(outside)
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "sessionFile": str(declared),
+                    "lastInteractionAt": int(old * 1000),
+                    "startedAt": int(old * 1000),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor_env.sessions_path.chmod(0o600)
+    os.utime(supervisor_env.sessions_path, (old, old))
+    task = _owner_turn_task(
+        task_id="owner-declared-symlink",
+        now=clock[0],
+        started_at=old,
+        session_id="session-b",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    result = supervisor.run_once()
+
+    assert result == SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert any(
+        json.loads(record.message).get("event") == "supervisor.owner_write_evidence_invalid"
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x7f", "\x80"])
+def test_control_owner_task_session_id_is_closed_in_run_once_and_run_forever(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    control: str,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    old = supervisor_env.now - 10.0
+    supervisor_env.sessions_path.write_text(
+        json.dumps(
+            {
+                AUTORESEARCH_OWNER_SESSION_KEY: {
+                    "status": "running",
+                    "lastInteractionAt": int(old * 1000),
+                    "startedAt": int(old * 1000),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    supervisor_env.sessions_path.chmod(0o600)
+    os.utime(supervisor_env.sessions_path, (old, old))
+    task = _owner_turn_task(
+        task_id="owner-nul-session",
+        now=supervisor_env.now,
+        started_at=supervisor_env.now,
+        session_id=f"session-{control}-invalid",
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(supervisor_env, fake, staleness_force_wake_minutes=1_000.0)
+    caplog.set_level(logging.ERROR, logger="gateway.autoresearch_supervisor")
+    first = supervisor.run_once()
+
+    harness = SignalHarness()
+    monkeypatch.setattr(signal, "signal", harness.install)
+
+    def stop_after_first_sleep(_seconds: float) -> None:
+        harness.trigger(signal.SIGTERM)
+
+    supervisor._sleep = stop_after_first_sleep
+    code = supervisor.run_forever()
+
+    assert first == SupervisorResult(SupervisorOutcome.ALERT, "owner_write_evidence_invalid")
+    assert code == 0
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+    assert any(
+        (payload := json.loads(record.message)).get("event")
+        == "supervisor.owner_write_evidence_invalid"
+        and "control characters" in str(payload.get("detail"))
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("phase", [Phase.VERIFICATION, Phase.DECISION_LOG])
+def test_owner_write_escalation_reconciles_fresh_task_heartbeats_at_one_minute(
+    supervisor_env: SupervisorEnv,
+    phase: Phase,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=phase)
+    clock = [supervisor_env.now]
+    old = clock[0]
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    task = _owner_turn_task(
+        task_id=f"owner-{phase.value}-one-minute",
+        now=clock[0],
+        started_at=old,
+    )
+    fake = FakeOpenClaw(tasks=[task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        owner_task_no_write_warn_minutes=1.0,
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    warning = supervisor.run_once()
+    clock[0] += 60.0
+    task["updatedAt"] = int(clock[0] * 1000)
+    stalled = supervisor.run_once()
+
+    assert first.reason == "active_expected_stage_task"
+    assert warning.reason == "active_expected_stage_task"
+    assert warning.outcome is SupervisorOutcome.NO_ACTION
+    assert stalled.outcome is SupervisorOutcome.NUDGED
+    assert len([method for method, _ in fake.rpc_calls if method == "agent"]) == 1
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_stalled_owner_does_not_suppress_active_child_or_native_task(
+    supervisor_env: SupervisorEnv,
+    native: bool,
+) -> None:
+    _prepare_stale_state(supervisor_env, phase=Phase.REVIEW)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    owner_task = _owner_turn_task(task_id="owner-with-child", now=clock[0], started_at=old)
+    if native:
+        active_task = {
+            "taskId": "native-review-active",
+            "status": "running",
+            "runtime": "subagent",
+            "taskKind": "codex-native",
+            "runId": "codex-thread:review-active",
+            "agentId": AUTORESEARCH_OWNER_AGENT_ID,
+            "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            "updatedAt": int(clock[0] * 1000),
+        }
+    else:
+        active_task = {
+            "taskId": "review-child-active",
+            "status": "running",
+            "runtime": "subagent",
+            "agentId": "reviewer",
+            "sessionKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            "ownerKey": AUTORESEARCH_OWNER_SESSION_KEY,
+            "childSessionKey": "agent:reviewer:active",
+            "updatedAt": int(clock[0] * 1000),
+        }
+    fake = FakeOpenClaw(tasks=[owner_task, active_task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    first = supervisor.run_once()
+    clock[0] += 2.0 * DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    owner_task["updatedAt"] = int(clock[0] * 1000)
+    active_task["updatedAt"] = int(clock[0] * 1000)
+    result = supervisor.run_once()
+
+    assert first.reason == "active_expected_stage_task"
+    assert result.reason == "active_expected_stage_task"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_stalled_owner_does_not_bypass_active_target_repo_writer(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    owner_task = _owner_turn_task(task_id="owner-with-writer", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[owner_task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=1_000.0,
+    )
+
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += 2.0 * DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    owner_task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor._owner_task_assessments((owner_task,))[0].stalled is True
+    process_dir = supervisor_env.proc_root / "1234"
+    process_dir.mkdir()
+    (process_dir / "cmdline").write_bytes(b"uv\x00run\x00pytest\x00")
+    (process_dir / "cwd").symlink_to(supervisor_env.repo_root, target_is_directory=True)
+
+    result = supervisor.run_once()
+
+    assert result.reason == "target_repo_writer_active"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
+
+
+def test_stalled_owner_does_not_bypass_running_detached_run(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    clock = [supervisor_env.now]
+    old = clock[0] - 3_600.0
+    transcript = supervisor_env.sessions_path.parent / "owner-session-1.jsonl"
+    _write_owner_lifecycle(supervisor_env, transcript=transcript, timestamp=old)
+    owner_task = _owner_turn_task(task_id="owner-with-detached-run", now=clock[0], started_at=old)
+    fake = FakeOpenClaw(tasks=[owner_task])
+    supervisor = _supervisor(
+        supervisor_env,
+        fake,
+        now=lambda: clock[0],
+        staleness_force_wake_minutes=45.0,
+    )
+
+    assert supervisor.run_once().reason == "active_expected_stage_task"
+    clock[0] += 2.0 * DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES * 60.0
+    owner_task["updatedAt"] = int(clock[0] * 1000)
+    assert supervisor._owner_task_assessments((owner_task,))[0].stalled is True
+    state = supervisor._load_state()
+    _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="verification",
+        run_name="running-owner-guard",
+        running=True,
+    )
+
+    result = supervisor.run_once()
+
+    assert result.reason == "active_matching_detached_run"
+    assert not any(method == "agent" for method, _ in fake.rpc_calls)
 
 
 @pytest.mark.parametrize("contents", ["{", '{"owner":'])
