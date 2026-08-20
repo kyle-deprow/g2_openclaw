@@ -186,6 +186,18 @@ def load_artifact_file(
     if target.artifact_type is ArtifactType.CONSENSUS_RESULT:
         return ConsensusResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.IMPLEMENTATION_RESULT:
+        if isinstance(artifact_raw, dict) and "decision" in artifact_raw:
+            # Operator-authorized mid-implementation blocker: detected by
+            # payload shape, never forced by expectation. The token gate in
+            # _is_implementation_infra_blocked_contract rejects anything a
+            # stage authored on its own.
+            artifact = FinalDecisionArtifact.from_dict(artifact_raw)
+            if not transitions_module._is_implementation_infra_blocked_contract(state, artifact):
+                raise AutoresearchValidationError(
+                    "implementation final_decision envelope requires the operator-authorized "
+                    "INFRA_BLOCKED runtime-contract no-memory fields"
+                )
+            return artifact
         return ImplementationResultArtifact.from_dict(artifact_raw)
     if target.artifact_type is ArtifactType.VERIFICATION_RESULT:
         return VerificationResultArtifact.from_dict(artifact_raw, mode=state.mode)

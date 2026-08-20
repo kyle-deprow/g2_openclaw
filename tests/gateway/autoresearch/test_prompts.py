@@ -8,6 +8,7 @@ from typing import cast
 
 import gateway.autoresearch.artifacts as autoresearch_artifacts
 import gateway.autoresearch.engine as autoresearch_engine
+import gateway.autoresearch.prompts as autoresearch_prompts
 import gateway.autoresearch.transitions as autoresearch_transitions
 import pytest
 from gateway.autoresearch.artifacts import (
@@ -623,11 +624,17 @@ def test_fix_test_prompt_contains_private_workspace_and_cwd_contract(
     assert "authoritative target checkout" in prompt
 
 
-def test_implementation_missing_contract_brief_routes_to_final_decision(
+def test_implementation_target_is_always_implementation_result(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
     platform_readiness: PlatformReadinessManifest,
 ) -> None:
+    """Brief wording must never force the blocker decision as the target.
+
+    Keying the expectation on transport terms in the brief text made the
+    controller reject valid implementation_result submissions for three
+    consecutive iterations once briefs began declaring price_panel.
+    """
     state = _state_to_consensus(policy, platform_readiness)
     state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
     assert state.latest_consensus is not None
@@ -644,14 +651,9 @@ def test_implementation_missing_contract_brief_routes_to_final_decision(
         ),
     )
 
-    action = next_action(state, policy, receipts, platform_readiness)
+    target = autoresearch_prompts._select_phase_target(state, policy)
 
-    assert action.expected_artifact_type is ArtifactType.FINAL_DECISION
-    assert action.next_agent_ids == (policy.implementer.agent_id,)
-    assert "continue_loop=true" in action.prompt_text
-    assert (
-        "The next iteration starts fresh without a suspension or resume step" in action.prompt_text
-    )
+    assert target.artifact_type is ArtifactType.IMPLEMENTATION_RESULT
 
 
 def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(

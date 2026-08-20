@@ -140,8 +140,12 @@ def _select_phase_target(
             raise AutoresearchValidationError(
                 "implementation next action requires a majority consensus"
             )
-        if _requires_implementation_infra_blocked_decision(state):
-            return PhaseTarget((policy.implementer.agent_id,), ArtifactType.FINAL_DECISION)
+        # Implementation ALWAYS targets normal work. The brief's wording must
+        # never force the blocker decision: keying this on transport terms in
+        # the brief text made the controller reject valid implementation_result
+        # submissions for three consecutive iterations once briefs began
+        # declaring price_panel. The operator-token-gated INFRA_BLOCKED
+        # alternative is payload-detected at the parse boundary instead.
         return PhaseTarget((policy.implementer.agent_id,), ArtifactType.IMPLEMENTATION_RESULT)
     if state.phase is Phase.VERIFICATION:
         return PhaseTarget((policy.pm.agent_id,), ArtifactType.VERIFICATION_RESULT)
