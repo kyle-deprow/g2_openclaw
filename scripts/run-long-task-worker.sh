@@ -189,6 +189,18 @@ mapfile -t supervised_result < <(
 [[ ${#supervised_result[@]} -eq 2 ]] || die "supervised command result is incomplete"
 child_exit_code="${supervised_result[0]}"
 signal_number="${supervised_result[1]}"
+archival_failed=0
+archival_diagnostic=""
+if [[ -f "$timeout_marker_file" ]]; then
+  set +e
+  archival_diagnostic="$("${runtime_python[@]}" archive-timeout-partial-run \
+    --run-dir "$run_dir" --runs-root "$runs_root" 2>&1 >/dev/null)"
+  archival_exit_code=$?
+  set -e
+  if (( archival_exit_code != 0 )); then
+    archival_failed=1
+  fi
+fi
 complete_args=(complete --run-dir "$run_dir" --runs-root "$runs_root" --exit-code "$child_exit_code")
 peak="$(peak_rss_bytes)"
 if [[ -n "$peak" ]]; then
@@ -210,5 +222,22 @@ rm -f -- "$timeout_marker_file"
 rm -f -- "$operator_stop_marker_file"
 cleanup_capture_fifos
 trap - EXIT
+set +e
 "${runtime_python[@]}" "${complete_args[@]}" >/dev/null
+complete_exit_code=$?
+set -e
+if (( archival_failed )); then
+  if [[ -n "$archival_diagnostic" ]]; then
+    printf 'ERROR: timed-out partial-run archival failed: %s\n' "$archival_diagnostic" >&2
+  else
+    printf 'ERROR: timed-out partial-run archival failed with exit code %s\n' \
+      "$archival_exit_code" >&2
+  fi
+fi
+if (( complete_exit_code != 0 )); then
+  exit "$complete_exit_code"
+fi
+if (( archival_failed )); then
+  exit 1
+fi
 exit 0

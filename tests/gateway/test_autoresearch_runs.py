@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
 import stat
 import subprocess
+import sys
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
+from gateway.autoresearch.constants import DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
 from gateway.autoresearch_runs import (
     EXPECTED_ARTIFACT_MAX_BYTES,
     OUTPUT_CAPTURE_MAX_BYTES,
@@ -22,6 +25,7 @@ from gateway.autoresearch_runs import (
     RunOutputStream,
     RunState,
     RunStatus,
+    archive_timed_out_partial_run,
     capture_output_stream,
     complete_run,
     consume_command_handoff,
@@ -76,6 +80,854 @@ def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path)
     persisted = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert prepared.manifest == RunManifest.from_dict(persisted)
     assert "--opaque-value" not in (run_dir / "manifest.json").read_text(encoding="utf-8")
+
+
+def _prepare_running_run_with_expected_artifact(
+    tmp_path: Path,
+    *,
+    expected_artifact_path: Path | None,
+    run_id: str = "autoresearch-i7-abcdef1-v5",
+) -> tuple[Path, Path, Path]:
+    artifact_root = tmp_path / "quantipy-runs"
+    runs_root = tmp_path / "detached-runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(_manifest(run_dir, expected_artifact_path=expected_artifact_path)),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+    start_run(run_dir=run_dir, pid=os.getpid(), runs_root=runs_root)
+    return runs_root, run_dir, artifact_root / run_id
+
+
+def test_timeout_archival_moves_exact_partial_run_into_private_sibling_archive(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    artifact_path = source / "run.json"
+    source.mkdir(mode=0o700)
+    artifact_path.write_text('{"partial":true}\n', encoding="utf-8")
+    artifact_path.chmod(0o600)
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=artifact_path,
+        run_id=run_id,
+    )
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is not None
+    assert not source.exists()
+    assert archived.parent == artifact_root.parent / ".archive-partial-runs"
+    assert archived.name.startswith(f"{run_id}.timeout.")
+    assert (archived / "run.json").read_text(encoding="utf-8") == '{"partial":true}\n'
+    assert stat.S_IMODE(archived.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(archived.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize(
+    ("expected_artifact", "create_source"),
+    (
+        (None, False),
+        ("outside", True),
+        ("missing", False),
+    ),
+)
+def test_timeout_archival_ignores_ineligible_or_missing_artifacts(
+    tmp_path: Path,
+    expected_artifact: str | None,
+    create_source: bool,
+) -> None:
+    run_id = "autoresearch-i7-abcdef1-v5"
+    if expected_artifact is None:
+        test_root = tmp_path / "no-artifact"
+        test_root.mkdir()
+        artifact_root = test_root / "quantipy-runs"
+        artifact_root.mkdir(mode=0o700)
+        artifact_path = None
+    else:
+        artifact_root = tmp_path / "quantipy-runs"
+        artifact_root.mkdir(mode=0o700)
+        if expected_artifact == "outside":
+            artifact_path = tmp_path / "outside" / run_id / "run.json"
+        else:
+            artifact_path = artifact_root / run_id / "run.json"
+    runs_root, run_dir, source = _prepare_running_run_with_expected_artifact(
+        test_root if expected_artifact is None else tmp_path,
+        expected_artifact_path=artifact_path,
+        run_id=run_id,
+    )
+    if create_source:
+        source.mkdir(mode=0o700, parents=True)
+        (source / "run.json").write_text("outside", encoding="utf-8")
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is None
+    assert not (artifact_root.parent / ".archive-partial-runs").exists()
+    if expected_artifact == "outside":
+        assert source.exists()
+
+
+def test_timeout_archival_rejects_a_malformed_path_inside_the_artifact_root(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    source = artifact_root / "autoresearch-i7-abcdef1-v5"
+    source.mkdir(mode=0o700)
+    malformed_path = source / "result.json"
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=malformed_path,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="expected artifact path"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+
+def test_timeout_archival_rejects_a_symlink_source_without_moving_its_target(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    target = tmp_path / "target-run"
+    target.mkdir(mode=0o700)
+    source = artifact_root / run_id
+    source.symlink_to(target, target_is_directory=True)
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="non-symlink directory"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.is_symlink()
+    assert target.exists()
+    assert not (artifact_root.parent / ".archive-partial-runs").exists()
+
+
+def test_timeout_archival_rejects_a_group_or_world_writable_source(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o720)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="group/world writable"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+
+
+def test_timeout_archival_rejects_a_foreign_source_owner_without_chown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    real_fstat = os.fstat
+
+    def foreign_source_owner(fd: int) -> os.stat_result:
+        metadata = real_fstat(fd)
+        try:
+            descriptor_target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return metadata
+        if descriptor_target != str(source):
+            return metadata
+        fields = list(metadata)
+        fields[4] = os.getuid() + 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", foreign_source_owner)
+
+    with pytest.raises(AutoresearchRunRecordError, match="owned by the current user"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+
+
+def test_timeout_archival_rejects_an_unsafe_artifact_root(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o770)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="artifact root"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+
+
+def test_timeout_archival_rejects_an_archive_root_symlink_without_moving_source(
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    archive_target = tmp_path / "archive-target"
+    archive_target.mkdir(mode=0o700)
+    (artifact_root.parent / ".archive-partial-runs").symlink_to(
+        archive_target,
+        target_is_directory=True,
+    )
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="non-symlink directory"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+    assert list(archive_target.iterdir()) == []
+
+
+def test_timeout_archival_rejects_injected_rename_failure_with_source_retained(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+
+    def fail_rename(*args: object, **kwargs: object) -> None:
+        raise OSError(errno.EIO, "injected rename failure")
+
+    monkeypatch.setattr(autoresearch_runs, "_rename_directory_no_replace", fail_rename)
+
+    with pytest.raises(AutoresearchRunRecordError, match="injected rename failure"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+
+
+def test_timeout_archival_rejects_a_source_swap_at_rename_and_restores_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("original", encoding="utf-8")
+    original = artifact_root / f"{run_id}.original"
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    real_rename = autoresearch_runs._rename_directory_no_replace
+    swapped = False
+
+    def swap_before_rename(
+        source_name: str,
+        *,
+        source_directory: int,
+        destination_name: str,
+        destination_directory: int,
+    ) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            source.rename(original)
+            source.mkdir(mode=0o700)
+            (source / "run.json").write_text("replacement", encoding="utf-8")
+        real_rename(
+            source_name,
+            source_directory=source_directory,
+            destination_name=destination_name,
+            destination_directory=destination_directory,
+        )
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_rename_directory_no_replace",
+        swap_before_rename,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="identity mismatch"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.joinpath("run.json").read_text(encoding="utf-8") == "replacement"
+    assert original.joinpath("run.json").read_text(encoding="utf-8") == "original"
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    assert not [path for path in archive_root.iterdir() if path.name != ".keep"]
+
+
+def test_timeout_archival_keeps_pending_quarantine_when_rollback_source_is_reoccupied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("original", encoding="utf-8")
+    original = artifact_root / f"{run_id}.original"
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    real_rename = autoresearch_runs._rename_directory_no_replace
+    stage_swapped = False
+    rollback_blocked = False
+
+    def swap_and_reoccupy_source(
+        source_name: str,
+        *,
+        source_directory: int,
+        destination_name: str,
+        destination_directory: int,
+    ) -> None:
+        nonlocal rollback_blocked, stage_swapped
+        if source_name == run_id and not stage_swapped:
+            stage_swapped = True
+            source.rename(original)
+            source.mkdir(mode=0o700)
+            (source / "run.json").write_text("replacement", encoding="utf-8")
+        elif source_name.startswith(".pending.") and not rollback_blocked:
+            rollback_blocked = True
+            source.mkdir(mode=0o700)
+            (source / "run.json").write_text("blocker", encoding="utf-8")
+        real_rename(
+            source_name,
+            source_directory=source_directory,
+            destination_name=destination_name,
+            destination_directory=destination_directory,
+        )
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_rename_directory_no_replace",
+        swap_and_reoccupy_source,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="pending quarantine retained"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    pending_entries = [path for path in archive_root.iterdir() if path.name.startswith(".pending.")]
+    assert stage_swapped
+    assert rollback_blocked
+    assert source.joinpath("run.json").read_text(encoding="utf-8") == "blocker"
+    assert original.joinpath("run.json").read_text(encoding="utf-8") == "original"
+    assert len(pending_entries) == 1
+    assert pending_entries[0].joinpath("run.json").read_text(encoding="utf-8") == "replacement"
+    assert not [
+        path for path in archive_root.iterdir() if path.name.startswith(f"{run_id}.timeout.")
+    ]
+
+
+def test_timeout_archival_quarantines_a_replacement_after_final_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("original", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    fixed_timestamp = "2026-08-20T12:34:56.123456Z"
+    monkeypatch.setattr(autoresearch_runs, "_utc_now", lambda: fixed_timestamp)
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    real_rename = autoresearch_runs._rename_directory_no_replace
+    promotion_swapped = False
+    original_archived = archive_root / f"{run_id}.timeout.{fixed_timestamp}.original"
+    old_quarantine_base = f".pending.{run_id}.timeout.{fixed_timestamp}.promotion-mismatch"
+    old_quarantine_names = {
+        old_quarantine_base if attempt == 0 else f"{old_quarantine_base}.{attempt}"
+        for attempt in range(128)
+    }
+    preferred_pending_name = ""
+    fsynced_paths: list[str] = []
+    real_fsync = os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        fsynced_paths.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+
+    def swap_after_promotion(
+        source_name: str,
+        *,
+        source_directory: int,
+        destination_name: str,
+        destination_directory: int,
+    ) -> None:
+        nonlocal preferred_pending_name, promotion_swapped
+        real_rename(
+            source_name,
+            source_directory=source_directory,
+            destination_name=destination_name,
+            destination_directory=destination_directory,
+        )
+        if source_name.startswith(".pending.") and not promotion_swapped:
+            promotion_swapped = True
+            preferred_pending_name = source_name
+            (archive_root / preferred_pending_name).mkdir(mode=0o700)
+            for quarantine_name in old_quarantine_names:
+                (archive_root / quarantine_name).mkdir(mode=0o700)
+            final_path = archive_root / destination_name
+            final_path.rename(original_archived)
+            final_path.mkdir(mode=0o700)
+            (final_path / "run.json").write_text("replacement", encoding="utf-8")
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_rename_directory_no_replace",
+        swap_after_promotion,
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="unvalidated entry quarantined"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    final_path = archive_root / f"{run_id}.timeout.{fixed_timestamp}"
+    pending_entries = [path for path in archive_root.iterdir() if path.name.startswith(".pending.")]
+    randomized_entries = [
+        path
+        for path in pending_entries
+        if path.name not in old_quarantine_names | {preferred_pending_name}
+    ]
+    assert promotion_swapped
+    assert preferred_pending_name
+    assert not final_path.exists()
+    assert original_archived.joinpath("run.json").read_text(encoding="utf-8") == "original"
+    assert len(randomized_entries) == 1
+    assert randomized_entries[0].joinpath("run.json").read_text(encoding="utf-8") == "replacement"
+    assert old_quarantine_names <= {path.name for path in pending_entries}
+    assert str(artifact_root) in fsynced_paths
+    assert str(archive_root) in fsynced_paths
+    assert str(artifact_root.parent) in fsynced_paths
+
+
+def test_timeout_archival_returns_descriptor_path_after_post_identity_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("original", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    real_descriptor_path = autoresearch_runs._directory_path_from_descriptor
+    swapped = False
+    original_path: Path | None = None
+    replacement_path: Path | None = None
+
+    def replace_after_final_identity(
+        descriptor: int,
+        *,
+        expected_metadata: os.stat_result,
+        label: str,
+    ) -> Path:
+        nonlocal original_path, replacement_path, swapped
+        if not swapped:
+            swapped = True
+            final_path = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+            original_path = final_path.with_name(f"{final_path.name}.original")
+            replacement_path = final_path
+            final_path.rename(original_path)
+            final_path.mkdir(mode=0o700)
+            (final_path / "run.json").write_text("replacement", encoding="utf-8")
+        return real_descriptor_path(
+            descriptor,
+            expected_metadata=expected_metadata,
+            label=label,
+        )
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_directory_path_from_descriptor",
+        replace_after_final_identity,
+    )
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert swapped
+    assert archived == original_path
+    assert archived is not None
+    assert archived.exists()
+    assert (archived / "run.json").read_text(encoding="utf-8") == "original"
+    assert replacement_path is not None
+    assert (replacement_path / "run.json").read_text(encoding="utf-8") == "replacement"
+
+
+def test_timeout_archival_fsyncs_all_successful_move_descriptors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    fsynced_paths: list[str] = []
+    real_fsync = os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        fsynced_paths.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is not None
+    assert str(artifact_root.parent) in fsynced_paths
+    assert str(artifact_root) in fsynced_paths
+    assert str(archive_root) in fsynced_paths
+
+
+def test_timeout_archival_pins_parent_before_root_name_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "artifact-parent"
+    parent.mkdir(mode=0o700)
+    artifact_root = parent / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("original", encoding="utf-8")
+    attacker_parent = tmp_path / "attacker-parent"
+    attacker_parent.mkdir(mode=0o700)
+    (attacker_parent / "quantipy-runs").mkdir(mode=0o700)
+    original_parent = tmp_path / "artifact-parent-original"
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    real_open = autoresearch_runs._open_absolute_directory_no_follow
+    swapped = False
+
+    def swap_after_parent_open(path: Path, *, label: str, missing_ok: bool = False) -> int | None:
+        nonlocal swapped
+        descriptor = real_open(path, label=label, missing_ok=missing_ok)
+        if label in {"artifact root", "artifact root parent"} and not swapped:
+            swapped = True
+            parent.rename(original_parent)
+            attacker_parent.rename(parent)
+        return descriptor
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_open_absolute_directory_no_follow",
+        swap_after_parent_open,
+    )
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is not None
+    pinned_archive_root = original_parent / ".archive-partial-runs"
+    assert swapped
+    assert archived.exists()
+    assert archived.parent == pinned_archive_root
+    assert (archived / "run.json").read_text(encoding="utf-8") == "original"
+    assert len(list(pinned_archive_root.iterdir())) == 1
+    assert not (parent / ".archive-partial-runs").exists()
+
+
+def test_timeout_archival_rejects_a_cross_device_archive_simulation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    source.mkdir(mode=0o700)
+    (source / "run.json").write_text("partial", encoding="utf-8")
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=source / "run.json",
+        run_id=run_id,
+    )
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    real_fstat = os.fstat
+
+    def foreign_device_for_archive(fd: int) -> os.stat_result:
+        metadata = real_fstat(fd)
+        try:
+            descriptor_target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            return metadata
+        if descriptor_target != str(archive_root):
+            return metadata
+        fields = list(metadata)
+        fields[2] += 1
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", foreign_device_for_archive)
+
+    with pytest.raises(AutoresearchRunRecordError, match="different filesystems"):
+        archive_timed_out_partial_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            artifact_root=artifact_root,
+        )
+
+    assert source.exists()
+
+
+def test_archive_timeout_cli_dispatches_the_fixed_artifact_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, Path, Path]] = []
+
+    def record_dispatch(*, run_dir: Path, runs_root: Path, artifact_root: Path) -> Path | None:
+        calls.append((run_dir, runs_root, artifact_root))
+        return None
+
+    run_dir = tmp_path / "detached-run"
+    runs_root = tmp_path / "detached-runs"
+    monkeypatch.setattr(autoresearch_runs, "archive_timed_out_partial_run", record_dispatch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "archive-timeout-partial-run",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
+
+    assert autoresearch_runs._main() == 0
+    assert calls == [
+        (
+            run_dir,
+            runs_root,
+            DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        )
+    ]
+
+
+def test_archive_timeout_cli_rejects_an_artifact_root_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "archive-timeout-partial-run",
+            "--run-dir",
+            str(tmp_path / "detached-run"),
+            "--artifact-root",
+            str(tmp_path / "artifact-root"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as raised:
+        autoresearch_runs._main()
+
+    assert raised.value.code == 2
+
+
+def test_timeout_archival_does_not_touch_a_terminal_detached_record(tmp_path: Path) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    artifact_path = source / "run.json"
+    source.mkdir(mode=0o700)
+    artifact_path.write_text("terminal", encoding="utf-8")
+    artifact_path.chmod(0o600)
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=artifact_path,
+        run_id=run_id,
+    )
+    complete_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        exit_code=0,
+        signal_number=None,
+        peak_rss_bytes=None,
+    )
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is None
+    assert source.exists()
+
+
+def test_timeout_archival_chooses_a_new_name_without_overwriting_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact_root = tmp_path / "quantipy-runs"
+    artifact_root.mkdir(mode=0o700)
+    run_id = "autoresearch-i7-abcdef1-v5"
+    source = artifact_root / run_id
+    artifact_path = source / "run.json"
+    source.mkdir(mode=0o700)
+    artifact_path.write_text("source", encoding="utf-8")
+    artifact_path.chmod(0o600)
+    runs_root, run_dir, _ = _prepare_running_run_with_expected_artifact(
+        tmp_path,
+        expected_artifact_path=artifact_path,
+        run_id=run_id,
+    )
+    fixed_timestamp = "2026-08-20T12:34:56.123456Z"
+    monkeypatch.setattr(autoresearch_runs, "_utc_now", lambda: fixed_timestamp)
+    archive_root = artifact_root.parent / ".archive-partial-runs"
+    archive_root.mkdir(mode=0o700)
+    collision = archive_root / f"{run_id}.timeout.{fixed_timestamp}"
+    collision.mkdir(mode=0o700)
+    (collision / "run.json").write_text("existing", encoding="utf-8")
+
+    archived = archive_timed_out_partial_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        artifact_root=artifact_root,
+    )
+
+    assert archived is not None
+    assert archived != collision
+    assert (collision / "run.json").read_text(encoding="utf-8") == "existing"
+    assert (archived / "run.json").read_text(encoding="utf-8") == "source"
 
 
 def test_prepare_accepts_untrustworthy_looking_ancestors_and_supervise_rejects_them(

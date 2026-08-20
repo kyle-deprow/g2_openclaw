@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import select
 import signal
 import stat
@@ -23,10 +25,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType
-from typing import BinaryIO
+from typing import BinaryIO, NoReturn
 
 from gateway.autoresearch.constants import (
     DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT,
+    DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
 )
 from gateway.autoresearch.enums import Phase
 
@@ -68,6 +71,10 @@ _SUPERVISED_COMMAND_RESULT_NAME = ".command-result.json"
 _STARTUP_MARKER_NAME = ".startup-published.json"
 _TIMEOUT_MARKER_NAME = ".timeout-fired"
 _OPERATOR_STOP_MARKER_NAME = ".operator-stop-fired"
+_PARTIAL_ARCHIVE_DIRECTORY_NAME = ".archive-partial-runs"
+_PARTIAL_ARCHIVE_RENAME_NOREPLACE = 1
+_PARTIAL_ARCHIVE_PENDING_PREFIX = ".pending."
+_SAFE_QUANTIPY_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _SUPERVISOR_POLL_SECONDS = 0.05
 _SUPERVISED_COMMAND_RESULT_SCHEMA_VERSION = 1
 
@@ -2139,6 +2146,510 @@ def _current_status(run_dir: Path, runs_root: Path) -> tuple[Path, RunManifest, 
     return canonical_run_dir, manifest, digest, status
 
 
+def _open_absolute_directory_no_follow(
+    path: Path, *, label: str, missing_ok: bool = False
+) -> int | None:
+    canonical_path = Path(_require_canonical_absolute_path(str(path), label=label))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    descriptor = -1
+    try:
+        descriptor = os.open(canonical_path.anchor, flags)
+        for component in canonical_path.parts[1:]:
+            try:
+                next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if missing_ok:
+                    os.close(descriptor)
+                    descriptor = -1
+                    return None
+                raise
+            os.close(descriptor)
+            descriptor = next_descriptor
+        result = descriptor
+        descriptor = -1
+        return result
+    except FileNotFoundError as exc:
+        if missing_ok:
+            if descriptor != -1:
+                os.close(descriptor)
+                descriptor = -1
+            return None
+        raise AutoresearchRunRecordError(f"missing {label}: {canonical_path}") from exc
+    except OSError as exc:
+        raise AutoresearchRunRecordError(
+            f"{label} must be an existing canonical non-symlink directory: {exc}"
+        ) from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+
+
+def _validate_partial_archive_directory(
+    descriptor: int, *, label: str, exact_mode: bool
+) -> os.stat_result:
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise AutoresearchRunRecordError(f"cannot inspect {label}: {exc}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise AutoresearchRunRecordError(f"{label} must be a directory")
+    if metadata.st_uid != os.getuid():
+        raise AutoresearchRunRecordError(f"{label} must be owned by the current user")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if exact_mode and mode != 0o700:
+        raise AutoresearchRunRecordError(f"{label} must have mode 0700")
+    if not exact_mode and mode & 0o022:
+        raise AutoresearchRunRecordError(f"{label} must not be group/world writable")
+    return metadata
+
+
+def _open_partial_archive_directory(parent_descriptor: int) -> int:
+    try:
+        os.mkdir(
+            _PARTIAL_ARCHIVE_DIRECTORY_NAME,
+            mode=0o700,
+            dir_fd=parent_descriptor,
+        )
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchRunRecordError(
+            f"cannot create partial-run archive directory: {exc}"
+        ) from exc
+    try:
+        archive_descriptor = os.open(
+            _PARTIAL_ARCHIVE_DIRECTORY_NAME,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_descriptor,
+        )
+    except OSError as exc:
+        raise AutoresearchRunRecordError(
+            "partial-run archive directory must be a non-symlink directory"
+        ) from exc
+    try:
+        metadata = _validate_partial_archive_directory(
+            archive_descriptor,
+            label="partial-run archive directory",
+            exact_mode=False,
+        )
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            os.fchmod(archive_descriptor, 0o700)
+            _validate_partial_archive_directory(
+                archive_descriptor,
+                label="partial-run archive directory",
+                exact_mode=True,
+            )
+        os.fsync(archive_descriptor)
+        os.fsync(parent_descriptor)
+    except BaseException:
+        os.close(archive_descriptor)
+        raise
+    return archive_descriptor
+
+
+def _rename_directory_no_replace(
+    source_name: str,
+    *,
+    source_directory: int,
+    destination_name: str,
+    destination_directory: int,
+) -> None:
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as exc:
+        raise AutoresearchRunRecordError(
+            "atomic no-replace directory rename is unavailable"
+        ) from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        source_directory,
+        os.fsencode(source_name),
+        destination_directory,
+        os.fsencode(destination_name),
+        _PARTIAL_ARCHIVE_RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, os.strerror(error_number), destination_name)
+    raise OSError(error_number, os.strerror(error_number), source_name)
+
+
+def _same_directory_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev,
+        first.st_ino,
+        first.st_mode,
+        first.st_uid,
+        first.st_nlink,
+    ) == (
+        second.st_dev,
+        second.st_ino,
+        second.st_mode,
+        second.st_uid,
+        second.st_nlink,
+    )
+
+
+def _directory_path_from_descriptor(
+    descriptor: int,
+    *,
+    expected_metadata: os.stat_result,
+    label: str,
+) -> Path:
+    try:
+        descriptor_path = os.readlink(f"/proc/self/fd/{descriptor}")
+    except OSError as exc:
+        raise AutoresearchRunRecordError(f"cannot resolve {label} descriptor path") from exc
+    if not descriptor_path.startswith("/") or descriptor_path.endswith(" (deleted)"):
+        raise AutoresearchRunRecordError(f"{label} descriptor path is not a live absolute path")
+    try:
+        path = Path(_require_canonical_absolute_path(descriptor_path, label=f"{label} path"))
+        mapped_metadata = os.stat(path, follow_symlinks=False)
+    except (AutoresearchRunRecordError, OSError) as exc:
+        raise AutoresearchRunRecordError(f"{label} descriptor path cannot be validated") from exc
+    if not _same_directory_identity(expected_metadata, mapped_metadata):
+        raise AutoresearchRunRecordError(f"{label} descriptor path identity changed")
+    return path
+
+
+def _rollback_pending_partial_archive(
+    *,
+    run_id: str,
+    pending_name: str,
+    artifact_root_descriptor: int,
+    archive_descriptor: int,
+    parent_descriptor: int,
+) -> NoReturn:
+    try:
+        _rename_directory_no_replace(
+            pending_name,
+            source_directory=archive_descriptor,
+            destination_name=run_id,
+            destination_directory=artifact_root_descriptor,
+        )
+        os.fsync(archive_descriptor)
+        os.fsync(artifact_root_descriptor)
+        os.fsync(parent_descriptor)
+    except (AutoresearchRunRecordError, OSError) as exc:
+        raise AutoresearchRunRecordError(
+            "partial artifact identity mismatch; rollback failed; pending quarantine "
+            f"retained: {exc}"
+        ) from exc
+    raise AutoresearchRunRecordError("partial artifact identity mismatch; source name was restored")
+
+
+def _quarantine_mismatched_final(
+    *,
+    final_name: str,
+    pending_name: str,
+    artifact_root_descriptor: int,
+    archive_descriptor: int,
+    parent_descriptor: int,
+) -> NoReturn:
+    base_name = f"{_PARTIAL_ARCHIVE_PENDING_PREFIX}{final_name}.promotion-mismatch"
+    for attempt in range(129):
+        quarantine_name = pending_name if attempt == 0 else f"{base_name}.{secrets.token_hex(24)}"
+        try:
+            _rename_directory_no_replace(
+                final_name,
+                source_directory=archive_descriptor,
+                destination_name=quarantine_name,
+                destination_directory=archive_descriptor,
+            )
+        except FileExistsError:
+            continue
+        except (AutoresearchRunRecordError, OSError) as exc:
+            raise AutoresearchRunRecordError(
+                f"final partial artifact identity mismatch; quarantine failed: {exc}"
+            ) from exc
+        try:
+            os.fsync(archive_descriptor)
+            os.fsync(artifact_root_descriptor)
+            os.fsync(parent_descriptor)
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                "final partial artifact identity mismatch; quarantined entry could not "
+                f"be persisted: {exc}"
+            ) from exc
+        raise AutoresearchRunRecordError(
+            "final partial artifact identity mismatch; unvalidated entry quarantined as "
+            f"{quarantine_name}"
+        )
+    raise AutoresearchRunRecordError(
+        "final partial artifact identity mismatch; randomized quarantine name exhaustion "
+        "left the final name unresolved"
+    )
+
+
+def archive_timed_out_partial_run(
+    *,
+    run_dir: Path,
+    runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    artifact_root: Path = DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+) -> Path | None:
+    """Move one eligible timed-out Quantipy run into the private sibling archive."""
+    canonical_run_dir = _validate_run_directory(run_dir, runs_root)
+    with _status_lock(canonical_run_dir):
+        _canonical_run_dir, manifest, _digest, status = _current_status(run_dir, runs_root)
+        if status.state is not RunState.RUNNING:
+            return None
+        expected_artifact_path = manifest.expected_artifact_path
+        if expected_artifact_path is None:
+            return None
+
+        canonical_artifact_root = Path(
+            _require_canonical_absolute_path(str(artifact_root), label="artifact root")
+        )
+        expected_path = Path(expected_artifact_path)
+        try:
+            relative_expected_path = expected_path.relative_to(canonical_artifact_root)
+        except ValueError:
+            return None
+        if (
+            len(relative_expected_path.parts) != 2
+            or relative_expected_path.parts[1] != "run.json"
+            or _SAFE_QUANTIPY_RUN_ID_RE.fullmatch(relative_expected_path.parts[0]) is None
+        ):
+            raise AutoresearchRunRecordError(
+                "expected artifact path must be exactly <artifact_root>/<safe-run-id>/run.json"
+            )
+        run_id = relative_expected_path.parts[0]
+
+        parent_descriptor = _open_absolute_directory_no_follow(
+            canonical_artifact_root.parent,
+            label="artifact root parent",
+            missing_ok=True,
+        )
+        if parent_descriptor is None:
+            return None
+        artifact_root_descriptor = -1
+        source_descriptor = -1
+        archive_descriptor = -1
+        destination_descriptor = -1
+        final_descriptor = -1
+        try:
+            parent_metadata = _validate_partial_archive_directory(
+                parent_descriptor,
+                label="artifact root parent",
+                exact_mode=False,
+            )
+            try:
+                artifact_root_descriptor = os.open(
+                    canonical_artifact_root.name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise AutoresearchRunRecordError(
+                    "artifact root must be a non-symlink directory"
+                ) from exc
+            artifact_root_metadata = _validate_partial_archive_directory(
+                artifact_root_descriptor,
+                label="artifact root",
+                exact_mode=True,
+            )
+            try:
+                source_descriptor = os.open(
+                    run_id,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=artifact_root_descriptor,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise AutoresearchRunRecordError(
+                    "partial artifact run directory must be a non-symlink directory"
+                ) from exc
+            source_metadata = _validate_partial_archive_directory(
+                source_descriptor,
+                label="partial artifact run directory",
+                exact_mode=False,
+            )
+            if source_metadata.st_dev != artifact_root_metadata.st_dev:
+                raise AutoresearchRunRecordError(
+                    "partial artifact run directory is on a different filesystem"
+                )
+            try:
+                current_source = os.stat(
+                    run_id,
+                    dir_fd=artifact_root_descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise AutoresearchRunRecordError(
+                    "partial artifact run directory changed before archival"
+                ) from exc
+            if not _same_directory_identity(source_metadata, current_source):
+                raise AutoresearchRunRecordError(
+                    "partial artifact run directory changed before archival"
+                )
+
+            archive_descriptor = _open_partial_archive_directory(parent_descriptor)
+            archive_metadata = os.fstat(archive_descriptor)
+            if source_metadata.st_dev != archive_metadata.st_dev:
+                raise AutoresearchRunRecordError(
+                    "partial artifact run directory and archive are on different filesystems"
+                )
+            if parent_metadata.st_dev != archive_metadata.st_dev:
+                raise AutoresearchRunRecordError(
+                    "artifact root parent and archive are on different filesystems"
+                )
+
+            timestamp = _utc_now()
+            base_name = f"{run_id}.timeout.{timestamp}"
+            pending_name = ""
+            for attempt in range(128):
+                candidate_pending_name = (
+                    f"{_PARTIAL_ARCHIVE_PENDING_PREFIX}{base_name}"
+                    if attempt == 0
+                    else f"{_PARTIAL_ARCHIVE_PENDING_PREFIX}{base_name}.{attempt}"
+                )
+                try:
+                    _rename_directory_no_replace(
+                        run_id,
+                        source_directory=artifact_root_descriptor,
+                        destination_name=candidate_pending_name,
+                        destination_directory=archive_descriptor,
+                    )
+                except FileExistsError:
+                    continue
+                except OSError as exc:
+                    raise AutoresearchRunRecordError(
+                        f"failed to archive timed-out partial run: {exc}"
+                    ) from exc
+                pending_name = candidate_pending_name
+                break
+            if not pending_name:
+                raise AutoresearchRunRecordError(
+                    "failed to stage timed-out partial run without overwriting a quarantine"
+                )
+            os.fsync(artifact_root_descriptor)
+            os.fsync(archive_descriptor)
+            os.fsync(parent_descriptor)
+            try:
+                destination_descriptor = os.open(
+                    pending_name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=archive_descriptor,
+                )
+                destination_metadata = _validate_partial_archive_directory(
+                    destination_descriptor,
+                    label="pending archived partial run",
+                    exact_mode=False,
+                )
+            except (AutoresearchRunRecordError, OSError) as exc:
+                _rollback_pending_partial_archive(
+                    run_id=run_id,
+                    pending_name=pending_name,
+                    artifact_root_descriptor=artifact_root_descriptor,
+                    archive_descriptor=archive_descriptor,
+                    parent_descriptor=parent_descriptor,
+                )
+                raise AssertionError("unreachable") from exc
+            if not _same_directory_identity(source_metadata, destination_metadata):
+                _rollback_pending_partial_archive(
+                    run_id=run_id,
+                    pending_name=pending_name,
+                    artifact_root_descriptor=artifact_root_descriptor,
+                    archive_descriptor=archive_descriptor,
+                    parent_descriptor=parent_descriptor,
+                )
+
+            for attempt in range(128):
+                final_name = base_name if attempt == 0 else f"{base_name}.{attempt}"
+                try:
+                    _rename_directory_no_replace(
+                        pending_name,
+                        source_directory=archive_descriptor,
+                        destination_name=final_name,
+                        destination_directory=archive_descriptor,
+                    )
+                except FileExistsError:
+                    continue
+                except OSError as exc:
+                    raise AutoresearchRunRecordError(
+                        f"failed to promote timed-out partial run: {exc}"
+                    ) from exc
+                try:
+                    final_descriptor = os.open(
+                        final_name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        dir_fd=archive_descriptor,
+                    )
+                    final_metadata = _validate_partial_archive_directory(
+                        final_descriptor,
+                        label="archived partial run",
+                        exact_mode=False,
+                    )
+                except (AutoresearchRunRecordError, OSError) as exc:
+                    _quarantine_mismatched_final(
+                        final_name=final_name,
+                        pending_name=pending_name,
+                        artifact_root_descriptor=artifact_root_descriptor,
+                        archive_descriptor=archive_descriptor,
+                        parent_descriptor=parent_descriptor,
+                    )
+                    raise AssertionError("unreachable") from exc
+                if not _same_directory_identity(destination_metadata, final_metadata):
+                    _quarantine_mismatched_final(
+                        final_name=final_name,
+                        pending_name=pending_name,
+                        artifact_root_descriptor=artifact_root_descriptor,
+                        archive_descriptor=archive_descriptor,
+                        parent_descriptor=parent_descriptor,
+                    )
+                os.fsync(artifact_root_descriptor)
+                os.fsync(archive_descriptor)
+                os.fsync(parent_descriptor)
+                try:
+                    return _directory_path_from_descriptor(
+                        destination_descriptor,
+                        expected_metadata=destination_metadata,
+                        label="archived partial run",
+                    )
+                except AutoresearchRunRecordError as exc:
+                    _quarantine_mismatched_final(
+                        final_name=final_name,
+                        pending_name=pending_name,
+                        artifact_root_descriptor=artifact_root_descriptor,
+                        archive_descriptor=archive_descriptor,
+                        parent_descriptor=parent_descriptor,
+                    )
+                    raise AssertionError("unreachable") from exc
+            raise AutoresearchRunRecordError(
+                "failed to promote timed-out partial run without overwriting an archive"
+            )
+        except AutoresearchRunRecordError:
+            raise
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                f"failed to archive timed-out partial run: {exc}"
+            ) from exc
+        finally:
+            for descriptor in (
+                final_descriptor,
+                destination_descriptor,
+                source_descriptor,
+                archive_descriptor,
+                parent_descriptor,
+            ):
+                if descriptor != -1:
+                    os.close(descriptor)
+            if artifact_root_descriptor != -1:
+                os.close(artifact_root_descriptor)
+
+
 def heartbeat_run(
     *, run_dir: Path, peak_rss_bytes: int | None, runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
 ) -> RunStatus:
@@ -2383,6 +2894,9 @@ def _main() -> int:
         type=Path,
         default=DEFAULT_AUTORESEARCH_RUNS_ROOT,
     )
+    archive_timeout = subparsers.add_parser("archive-timeout-partial-run")
+    archive_timeout.add_argument("--run-dir", type=Path, required=True)
+    archive_timeout.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
     startup = subparsers.add_parser("validate-startup")
     startup.add_argument("--run-dir", type=Path, required=True)
     startup.add_argument("--marker", type=Path, required=True)
@@ -2456,6 +2970,12 @@ def _main() -> int:
         )
         sys.stdout.write(f"{result.exit_code}\n")
         sys.stdout.write(f"{result.signal_number if result.signal_number is not None else ''}\n")
+    elif args.operation == "archive-timeout-partial-run":
+        archive_timed_out_partial_run(
+            run_dir=args.run_dir,
+            runs_root=args.runs_root,
+            artifact_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+        )
     elif args.operation == "validate-startup":
         validate_startup_marker(
             run_dir=args.run_dir, marker_path=args.marker, runs_root=args.runs_root
