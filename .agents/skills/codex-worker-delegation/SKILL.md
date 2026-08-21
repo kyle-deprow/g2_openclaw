@@ -5,11 +5,9 @@ description: Delegate bounded coding, review, and verification work to native Co
 
 # Native Codex Worker Delegation
 
-The main Codex session is the orchestrator. Use the native `spawn_agent` tool
-to hand off bounded implementation work to a Codex subagent. This Claude skill
-is a mirror of that repository workflow; it does not imply that Claude
-subagents can spawn workers themselves. Do not dispatch workers through shell
-launchers, CLI commands, or OpenClaw session spawning.
+The main Codex session is the orchestrator. Use the native `spawn_agent` tool to
+hand off bounded implementation work to a Codex subagent. Do not invoke
+`codex exec`, `codex resume`, or any other Codex CLI worker from the shell.
 
 ## Coding worker
 
@@ -29,6 +27,9 @@ The model and reasoning override are intentional for this delegation path.
 For a repo-configured specialist such as `backend-python`, `g2-development`,
 or `azure-bicep`, use its configured `agent_type` instead and preserve the
 model and reasoning declared in `.codex/agents/<agent>.toml`.
+
+Do not use the OpenClaw `sessions_spawn` tool for this workflow. That creates an
+OpenClaw session, not a native Codex subagent handoff.
 
 ## Handoff prompt contract
 
@@ -74,18 +75,19 @@ an owned file. Split parallel work into disjoint write sets.
 ## Orchestration cycle
 
 1. Inspect enough of the repository to define a bounded task and decide what
-   the parent will do locally while the worker runs.
-2. Spawn one worker per disjoint implementation slice. Do not duplicate its
+   the main session will do locally while the worker runs.
+2. Spawn one worker per disjoint implementation slice. Do not duplicate their
    work in the parent session.
-3. Continue non-overlapping local work while workers run; wait only when the
-   returned result is needed for the critical path.
-4. Inspect each worker's changed files and diff when it returns. Do not trust a
-   claimed verification result without running the relevant checks yourself.
-5. For meaningful changes, spawn a separate Luna worker for an independent,
-   read-only review with the exact diff or commit under review.
+3. Continue non-overlapping local work while workers run. Use `wait_agent`
+   only when the returned result is needed for the next critical-path step.
+4. Inspect the worker's changed files and diff when it returns. Do not trust a
+   claimed test result without running the relevant verification yourself.
+5. For meaningful changes, spawn a separate Luna worker for an independent
+   review, with read-only scope and the exact diff or commit under review.
 6. If review finds defects, send concrete file-and-line findings to the owning
    worker with `send_input` so it can fix them in context. Re-review the result.
-7. The parent orchestrator owns final integration, verification, and commits.
+7. The parent orchestrator owns final integration, verification, and commits
+   unless the user explicitly delegates those actions.
 
 ## Review prompt minimum
 
@@ -102,8 +104,8 @@ findings ordered as `Must-Fix`, `Should-Fix`, and `Nits`, followed by one of:
 - Do not dispatch parallel workers with overlapping write sets.
 - Do not ask a worker to modify `/home/dev/repos/quantipy` outside the defined
   autoresearch workflow.
-- If a worker stops after planning, send `send_input` with: `Skip
-  exploration. Execute the approved implementation plan now.`
+- If a worker stops after planning, send a follow-up through `send_input`:
+  `Skip exploration. Execute the approved implementation plan now.`
 - If a worker fails, inspect its returned status and worktree before retrying;
   do not silently switch runtimes or models.
 
