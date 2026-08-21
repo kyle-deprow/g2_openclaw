@@ -5,7 +5,7 @@ import json
 import sqlite3
 import subprocess
 import zlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import (
     dataclass,
     replace,
@@ -21,6 +21,7 @@ import gateway.autoresearch.attestation as autoresearch_attestation
 import gateway.autoresearch.constants as autoresearch_constants
 import gateway.autoresearch.evidence as autoresearch_evidence
 import gateway.autoresearch.fields as autoresearch_fields
+import gateway.autoresearch.secure_io as autoresearch_secure_io
 import gateway.autoresearch_runs as autoresearch_runs
 from gateway.autoresearch.artifacts import (
     ConsensusResultArtifact,
@@ -34,6 +35,7 @@ from gateway.autoresearch.artifacts import (
     QuantipyExperimentEvidence,
     QuantipyExperimentFailureEvidence,
     QuantipyExperimentPanelEvidence,
+    QuantipyExperimentSentimentEvidence,
     ReviewResultArtifact,
     SetupContextArtifact,
     UniversePlanArtifact,
@@ -349,7 +351,11 @@ def _setup_artifact() -> SetupContextArtifact:
         writable_scope="src/quantipy/alpha, notebooks/experiments, tests",
         baseline_summary="Baseline OOS Sharpe net is 0.18.",
         hard_constraints=("No overnight holds", "Use real OHLCV only"),
-        data_sources=("qp.prices()", "PostgreSQL OHLCV", "news sentiment"),
+        data_sources=(
+            "qp.prices()",
+            "PostgreSQL OHLCV",
+            "governed Reddit sentiment (sentiment_panels)",
+        ),
     )
 
 
@@ -361,7 +367,11 @@ def _context_artifact() -> ContextPacketArtifact:
         prior_findings=("VWAP works better with volume filters",),
         open_proposals=("Test OBV + VWAP interaction",),
         hard_constraints=("2021-2026 coverage", "95% trading days minimum"),
-        available_data_sources=("qp.prices()", "Reddit sentiment", "news sentiment"),
+        available_data_sources=(
+            "qp.prices()",
+            "Reddit sentiment",
+            "governed Reddit sentiment (sentiment_panels)",
+        ),
         loaded_quantipy_sources=("AGENTS.md", "experiment-data", "data-querying"),
         research_mode=ResearchMode.ALPHA_RESEARCH,
         mode_rationale="Coverage and provenance evidence permit an alpha experiment.",
@@ -1029,6 +1039,218 @@ class GitWorktree:
     final_commit: str
 
 
+def sentiment_receipt_payload(
+    *,
+    bundle_sha256: str = "a" * 64,
+    extra_subreddits: list[str] | None = None,
+) -> tuple[dict[str, object], str]:
+    subreddits = ["stocks", "wallstreetbets"]
+    if extra_subreddits is not None:
+        subreddits.extend(extra_subreddits)
+        subreddits.sort()
+    attention = {
+        "schema_version": "reddit-attention-panel-v1",
+        "pyarrow_version": "20.0.0",
+        "pandas_version": "2.3.0",
+        "extractor_version": "attention-v1",
+        "generated_at": "2026-07-28T13:00:00Z",
+        "date_start": "2026-07-28",
+        "date_end": "2026-07-28",
+        "subreddits": subreddits,
+        "universe_size": 10,
+        "universe_sha256": "1" * 64,
+        "blocklist_sha256": "2" * 64,
+        "universe_market": "US",
+        "universe_locale": "en-US",
+        "source_post_count": 100,
+        "source_max_post_id": 123,
+        "hourly_row_count": 20,
+        "daily_row_count": 10,
+        "hourly_parquet_sha256": "3" * 64,
+        "daily_parquet_sha256": "4" * 64,
+    }
+    tone = {
+        "schema_version": "reddit-tone-panel-v1",
+        "pyarrow_version": "20.0.0",
+        "pandas_version": "2.3.0",
+        "generated_at": "2026-07-28T13:30:00Z",
+        "date_start": "2026-07-28",
+        "date_end": "2026-07-28",
+        "subreddits": subreddits,
+        "judge_selectors": ["codex/gpt-5.6-luna/xhigh", "legacy/gpt-4.1/default"],
+        "subreddit_row_count": 20,
+        "fused_row_count": 10,
+        "subreddit_parquet_sha256": "5" * 64,
+        "fused_parquet_sha256": "6" * 64,
+    }
+    receipt: dict[str, object] = {
+        "contract_version": "research-sentiment-panels-v1",
+        "panels_sha256": bundle_sha256,
+        "attention": attention,
+        "tone": tone,
+        "packaged_at": "2026-07-28T14:00:00Z",
+    }
+    receipt_sha256 = sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return receipt, receipt_sha256
+
+
+def sentiment_run_payload(
+    run_path: Path,
+    *,
+    requested: bool = True,
+    sentiment: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload["sentiment_requested"] = requested
+    payload["sentiment"] = sentiment
+    return payload
+
+
+def valid_sentiment_run_evidence() -> tuple[dict[str, object], bytes, str]:
+    bundle_bytes = b"sentiment-panels-bundle"
+    receipt, receipt_sha256 = sentiment_receipt_payload(
+        bundle_sha256=sha256(bundle_bytes).hexdigest()
+    )
+    sentiment: dict[str, object] = {
+        "bundle_path": "sentiment/panels.zip",
+        "bundle_sha256": sha256(bundle_bytes).hexdigest(),
+        "receipt_path": "sentiment/receipt.json",
+        "receipt_sha256": receipt_sha256,
+        "receipt": receipt,
+    }
+    return sentiment, bundle_bytes, json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+
+
+def build_full_sentiment_case(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+    *,
+    api_url: str = "https://sentiment.example.test/api",
+    write_run: Callable[..., tuple[str, str, Path, str, str, str]] | None = None,
+) -> tuple[
+    AutoresearchState,
+    VerificationResultArtifact,
+    QuantipyExperimentEvidence,
+    Path,
+    Path,
+    Path,
+    Path,
+]:
+    # Resolve the run writer explicitly so this helper's behavior never
+    # depends on module-attribute rebinding performed by importing tests.
+    run_writer = cast(
+        "Callable[..., tuple[str, str, Path, str, str, str]]",
+        write_run if write_run is not None else _write_quantipy_v2_run,
+    )
+    manifest_path, _, run_path, _, _, _ = run_writer(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, bundle_bytes, receipt_json = valid_sentiment_run_evidence()
+    receipt_sha256 = cast(str, sentiment["receipt_sha256"])
+    manifest_file = Path(manifest_path)
+    manifest = cast(dict[str, object], json.loads(manifest_file.read_text(encoding="utf-8")))
+    manifest["sentiment"] = {
+        "api_url": api_url,
+        "receipt_sha256": receipt_sha256,
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_file.write_bytes(manifest_bytes)
+    _git(git_worktree.workspace, "add", "experiment-manifest.json")
+    _git(git_worktree.workspace, "commit", "-m", "add sentiment manifest request")
+    commit_sha = _git(git_worktree.workspace, "rev-parse", "HEAD")
+    run_id = "autoresearch-i1-" + commit_sha[:12]
+    new_run_directory = trusted_quantipy_runs_root / run_id
+    run_path.parent.rename(new_run_directory)
+    run_path = new_run_directory / "run.json"
+    sentiment_directory = new_run_directory / "sentiment"
+    sentiment_directory.mkdir(mode=0o700)
+    bundle_path = sentiment_directory / "panels.zip"
+    bundle_path.write_bytes(bundle_bytes)
+    bundle_path.chmod(0o400)
+    receipt_path = sentiment_directory / "receipt.json"
+    receipt_path.write_text(receipt_json, encoding="utf-8")
+    receipt_path.chmod(0o400)
+    sentiment_directory.chmod(0o500)
+
+    manifest_snapshot = autoresearch_secure_io._secure_open_snapshot(
+        manifest_file, label="test sentiment manifest"
+    )
+    normalized_manifest = autoresearch_evidence._validate_quantipy_v2_manifest(
+        manifest_snapshot,
+        workspace=git_worktree.workspace,
+        commit_sha=commit_sha,
+        expected_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload.update(
+        run_id=run_id,
+        manifest_sha256=autoresearch_evidence._canonical_quantipy_manifest_sha256(
+            normalized_manifest
+        ),
+        sentiment_requested=True,
+        sentiment=sentiment,
+    )
+    run_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    detached_directory, detached_manifest_sha256 = _write_quantipy_detached_run_record(
+        workspace=git_worktree.workspace,
+        runtime_root=git_worktree.target_checkout,
+        manifest_path=manifest_path,
+        run_id=run_id,
+        run_path=run_path,
+    )
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(state, setup=_workspace_setup(git_worktree.target_checkout))
+    implementation = replace(
+        _implementation_result(),
+        workspace_path=str(git_worktree.workspace),
+        commit_sha=commit_sha,
+        experiment_manifest_path=manifest_path,
+        experiment_manifest_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+    validate_artifact_workspace(state, implementation)
+    state = advance_state(state, implementation, policy)
+    evidence = QuantipyExperimentEvidence(
+        manifest_path=manifest_path,
+        manifest_sha256=sha256(manifest_bytes).hexdigest(),
+        detached_run_directory=detached_directory,
+        detached_run_manifest_sha256=detached_manifest_sha256,
+        run_id=run_id,
+        run_json_path=str(run_path),
+        run_json_sha256=sha256(run_bytes).hexdigest(),
+        success=True,
+        completed_stages=("prepare", "smoke", "feasibility", "model"),
+        terminal_stage=None,
+        terminal_status=None,
+        failure=None,
+        panel=None,
+        sentiment=QuantipyExperimentSentimentEvidence(
+            bundle_path="sentiment/panels.zip",
+            bundle_sha256=cast(str, sentiment["bundle_sha256"]),
+            receipt_path="sentiment/receipt.json",
+            receipt_sha256=receipt_sha256,
+        ),
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS), quantipy_experiment_evidence=evidence
+    )
+    return (
+        state,
+        artifact,
+        evidence,
+        run_path,
+        sentiment_directory,
+        bundle_path,
+        receipt_path,
+    )
+
+
 def _workspace_setup(target_checkout: Path) -> SetupContextArtifact:
     return replace(_setup_artifact(), target_repo=str(target_checkout))
 
@@ -1126,6 +1348,7 @@ def _write_quantipy_v2_run(
     terminal_status: str = "completed",
     run_root: Path | None = None,
     panel_requested: bool = False,
+    sentiment_requested: bool = False,
     manifest_parent: Path = Path(),
     notebook_requested: bool = False,
     extra_source_file_count: int = 0,
@@ -1204,6 +1427,18 @@ def _write_quantipy_v2_run(
         }
         panel_request = {"api_url": "http://127.0.0.1:8000", "request": request}
         manifest["panel"] = panel_request
+    sentiment_evidence: dict[str, object] | None = None
+    sentiment_bundle_bytes: bytes | None = None
+    sentiment_receipt_bytes: bytes | None = None
+    if sentiment_requested:
+        sentiment_evidence, sentiment_bundle_bytes, sentiment_receipt_json = (
+            valid_sentiment_run_evidence()
+        )
+        manifest["sentiment"] = {
+            "api_url": "https://sentiment.example.test/api",
+            "receipt_sha256": sentiment_evidence["receipt_sha256"],
+        }
+        sentiment_receipt_bytes = sentiment_receipt_json.encode("utf-8")
     manifest_path = source_root / "experiment-manifest.json"
     manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     manifest_path.write_bytes(manifest_bytes)
@@ -1370,8 +1605,8 @@ def _write_quantipy_v2_run(
         "success": success,
         "panel_requested": panel_requested,
         "panel": run_panel,
-        "sentiment_requested": False,
-        "sentiment": None,
+        "sentiment_requested": sentiment_requested,
+        "sentiment": sentiment_evidence,
         "stage_receipts": stage_receipts,
         "telemetry": {
             "scope": "process_wide",
@@ -1398,6 +1633,18 @@ def _write_quantipy_v2_run(
         receipt_path.write_bytes(receipt_bytes)
         receipt_path.chmod(0o400)
         panel_directory.chmod(0o500)
+    if sentiment_requested:
+        assert sentiment_bundle_bytes is not None
+        assert sentiment_receipt_bytes is not None
+        sentiment_directory = run_path.parent / "sentiment"
+        sentiment_directory.mkdir(mode=0o700)
+        bundle_path = sentiment_directory / "panels.zip"
+        bundle_path.write_bytes(sentiment_bundle_bytes)
+        bundle_path.chmod(0o400)
+        receipt_path = sentiment_directory / "receipt.json"
+        receipt_path.write_bytes(sentiment_receipt_bytes)
+        receipt_path.chmod(0o400)
+        sentiment_directory.chmod(0o500)
     run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
     run_path.write_bytes(run_bytes)
     run_path.chmod(0o600)
