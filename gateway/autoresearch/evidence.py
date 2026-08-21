@@ -11,10 +11,10 @@ import stat
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import gateway.autoresearch.evidence as evidence_module
 from gateway.autoresearch import constants
@@ -83,6 +83,12 @@ from gateway.autoresearch.constants import (
 )
 from gateway.autoresearch.constants import (
     QUANTIPY_RUN_ENVELOPE_MAX_BYTES as QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
+)
+from gateway.autoresearch.constants import (
+    QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES as QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES,
+)
+from gateway.autoresearch.constants import (
+    QUANTIPY_SENTIMENT_RECEIPT_MAX_BYTES as QUANTIPY_SENTIMENT_RECEIPT_MAX_BYTES,
 )
 from gateway.autoresearch.enums import (
     Phase as Phase,
@@ -158,9 +164,6 @@ from gateway.autoresearch.secure_io import (
 )
 from gateway.autoresearch.secure_io import (
     _require_private_directory as _require_private_directory,
-)
-from gateway.autoresearch.secure_io import (
-    _require_sealed_quantipy_panel_directory as _require_sealed_quantipy_panel_directory,
 )
 from gateway.autoresearch.secure_io import (
     _require_sealed_quantipy_panel_file as _require_sealed_quantipy_panel_file,
@@ -339,6 +342,276 @@ def _verified_panel_request_for_state(state: AutoresearchState) -> Mapping[str, 
     return _validate_panel_request(request, label="experiment manifest panel request")
 
 
+def _validate_http_base_url(value: object, *, label: str) -> str:
+    url = _strict_json_string(value, label=label, minimum=1, maximum=2048)
+    if any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127 for character in url
+    ):
+        raise AutoresearchValidationError(f"{label} must be an HTTP(S) base URL")
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        _ = parsed.port
+    except ValueError as exc:
+        raise AutoresearchValidationError(f"{label} must be an HTTP(S) base URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or "?" in url
+        or "#" in url
+    ):
+        raise AutoresearchValidationError(
+            f"{label} must be an HTTP(S) base URL without credentials, query, or fragment"
+        )
+    return url.rstrip("/")
+
+
+def _canonical_sentiment_datetime(value: object, *, label: str) -> tuple[str, datetime]:
+    raw = _strict_json_string(value, label=label, minimum=1)
+    parsed = _strict_json_datetime(raw, label=label, utc_only=True)
+    canonical = parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if raw != canonical:
+        raise AutoresearchValidationError(f"{label} must use canonical UTC timestamp spelling")
+    return canonical, parsed.astimezone(UTC)
+
+
+def _validate_sentiment_string_list(
+    value: object,
+    *,
+    label: str,
+    lowercase: bool = False,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise AutoresearchValidationError(f"{label} must be a JSON array of strings")
+    items: list[str] = []
+    for item in value:
+        text = _strict_json_string(item, label=label)
+        if lowercase and text != text.lower():
+            raise AutoresearchValidationError(f"{label} must contain lower-case strings")
+        items.append(text)
+    if items != sorted(items) or len(items) != len(set(items)):
+        raise AutoresearchValidationError(f"{label} must be sorted and unique")
+    return items
+
+
+_SENTIMENT_ATTENTION_KEYS = (
+    "schema_version",
+    "pyarrow_version",
+    "pandas_version",
+    "extractor_version",
+    "generated_at",
+    "date_start",
+    "date_end",
+    "subreddits",
+    "universe_size",
+    "universe_sha256",
+    "blocklist_sha256",
+    "universe_market",
+    "universe_locale",
+    "source_post_count",
+    "source_max_post_id",
+    "hourly_row_count",
+    "daily_row_count",
+    "hourly_parquet_sha256",
+    "daily_parquet_sha256",
+)
+_SENTIMENT_TONE_KEYS = (
+    "schema_version",
+    "pyarrow_version",
+    "pandas_version",
+    "generated_at",
+    "date_start",
+    "date_end",
+    "subreddits",
+    "judge_selectors",
+    "subreddit_row_count",
+    "fused_row_count",
+    "subreddit_parquet_sha256",
+    "fused_parquet_sha256",
+)
+
+
+def _validate_sentiment_attention(
+    value: object,
+    *,
+    label: str,
+) -> tuple[dict[str, object], datetime, date, date]:
+    data = _strict_json_keys(value, label=label, expected=_SENTIMENT_ATTENTION_KEYS)
+    if data["schema_version"] != "reddit-attention-panel-v1":
+        raise AutoresearchValidationError(f"{label}.schema_version is invalid")
+    generated_at, generated_at_dt = _canonical_sentiment_datetime(
+        data["generated_at"], label=f"{label}.generated_at"
+    )
+    date_start = _strict_json_date(data["date_start"], label=f"{label}.date_start")
+    date_end = _strict_json_date(data["date_end"], label=f"{label}.date_end")
+    if date_start > date_end:
+        raise AutoresearchValidationError(f"{label} date span is not ordered")
+    normalized: dict[str, object] = {
+        "schema_version": "reddit-attention-panel-v1",
+        "pyarrow_version": _strict_json_string(
+            data["pyarrow_version"], label=f"{label}.pyarrow_version"
+        ),
+        "pandas_version": _strict_json_string(
+            data["pandas_version"], label=f"{label}.pandas_version"
+        ),
+        "extractor_version": _strict_json_string(
+            data["extractor_version"], label=f"{label}.extractor_version"
+        ),
+        "generated_at": generated_at,
+        "date_start": date_start.isoformat(),
+        "date_end": date_end.isoformat(),
+        "subreddits": _validate_sentiment_string_list(
+            data["subreddits"], label=f"{label}.subreddits", lowercase=True
+        ),
+        "universe_size": _strict_json_int(data["universe_size"], label=f"{label}.universe_size"),
+        "universe_sha256": _strict_json_sha256(
+            data["universe_sha256"], label=f"{label}.universe_sha256"
+        ),
+        "blocklist_sha256": _strict_json_sha256(
+            data["blocklist_sha256"], label=f"{label}.blocklist_sha256"
+        ),
+        "universe_market": _strict_json_string(
+            data["universe_market"], label=f"{label}.universe_market"
+        ),
+        "universe_locale": _strict_json_string(
+            data["universe_locale"], label=f"{label}.universe_locale"
+        ),
+        "source_post_count": _strict_json_int(
+            data["source_post_count"], label=f"{label}.source_post_count"
+        ),
+        "source_max_post_id": _strict_json_int(
+            data["source_max_post_id"], label=f"{label}.source_max_post_id"
+        ),
+        "hourly_row_count": _strict_json_int(
+            data["hourly_row_count"], label=f"{label}.hourly_row_count"
+        ),
+        "daily_row_count": _strict_json_int(
+            data["daily_row_count"], label=f"{label}.daily_row_count"
+        ),
+        "hourly_parquet_sha256": _strict_json_sha256(
+            data["hourly_parquet_sha256"], label=f"{label}.hourly_parquet_sha256"
+        ),
+        "daily_parquet_sha256": _strict_json_sha256(
+            data["daily_parquet_sha256"], label=f"{label}.daily_parquet_sha256"
+        ),
+    }
+    return normalized, generated_at_dt, date_start, date_end
+
+
+def _validate_sentiment_tone(
+    value: object,
+    *,
+    label: str,
+) -> tuple[dict[str, object], datetime, date, date]:
+    data = _strict_json_keys(value, label=label, expected=_SENTIMENT_TONE_KEYS)
+    if data["schema_version"] != "reddit-tone-panel-v1":
+        raise AutoresearchValidationError(f"{label}.schema_version is invalid")
+    generated_at, generated_at_dt = _canonical_sentiment_datetime(
+        data["generated_at"], label=f"{label}.generated_at"
+    )
+    date_start = _strict_json_date(data["date_start"], label=f"{label}.date_start")
+    date_end = _strict_json_date(data["date_end"], label=f"{label}.date_end")
+    if date_start > date_end:
+        raise AutoresearchValidationError(f"{label} date span is not ordered")
+    normalized = {
+        "schema_version": "reddit-tone-panel-v1",
+        "pyarrow_version": _strict_json_string(
+            data["pyarrow_version"], label=f"{label}.pyarrow_version"
+        ),
+        "pandas_version": _strict_json_string(
+            data["pandas_version"], label=f"{label}.pandas_version"
+        ),
+        "generated_at": generated_at,
+        "date_start": date_start.isoformat(),
+        "date_end": date_end.isoformat(),
+        "subreddits": _validate_sentiment_string_list(
+            data["subreddits"], label=f"{label}.subreddits", lowercase=True
+        ),
+        "judge_selectors": _validate_sentiment_string_list(
+            data["judge_selectors"], label=f"{label}.judge_selectors"
+        ),
+        "subreddit_row_count": _strict_json_int(
+            data["subreddit_row_count"], label=f"{label}.subreddit_row_count"
+        ),
+        "fused_row_count": _strict_json_int(
+            data["fused_row_count"], label=f"{label}.fused_row_count"
+        ),
+        "subreddit_parquet_sha256": _strict_json_sha256(
+            data["subreddit_parquet_sha256"], label=f"{label}.subreddit_parquet_sha256"
+        ),
+        "fused_parquet_sha256": _strict_json_sha256(
+            data["fused_parquet_sha256"], label=f"{label}.fused_parquet_sha256"
+        ),
+    }
+    return normalized, generated_at_dt, date_start, date_end
+
+
+def _validate_sentiment_receipt(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=("contract_version", "panels_sha256", "attention", "tone", "packaged_at"),
+    )
+    if data["contract_version"] != "research-sentiment-panels-v1":
+        raise AutoresearchValidationError(f"{label}.contract_version is invalid")
+    attention, attention_generated_at, attention_start, attention_end = (
+        _validate_sentiment_attention(data["attention"], label=f"{label}.attention")
+    )
+    tone, tone_generated_at, tone_start, tone_end = _validate_sentiment_tone(
+        data["tone"], label=f"{label}.tone"
+    )
+    if (attention_start, attention_end) != (tone_start, tone_end):
+        raise AutoresearchValidationError(f"{label} attention and tone date spans differ")
+    packaged_at, packaged_at_dt = _canonical_sentiment_datetime(
+        data["packaged_at"], label=f"{label}.packaged_at"
+    )
+    if packaged_at_dt < attention_generated_at or packaged_at_dt < tone_generated_at:
+        raise AutoresearchValidationError(f"{label}.packaged_at precedes panel generation")
+    normalized: dict[str, object] = {
+        "contract_version": "research-sentiment-panels-v1",
+        "panels_sha256": _strict_json_sha256(data["panels_sha256"], label=f"{label}.panels_sha256"),
+        "attention": attention,
+        "tone": tone,
+        "packaged_at": packaged_at,
+    }
+    canonical_size = len(
+        json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    if canonical_size > QUANTIPY_SENTIMENT_RECEIPT_MAX_BYTES:
+        raise AutoresearchValidationError(f"{label} exceeds its size limit")
+    return normalized
+
+
+def _validate_quantipy_manifest_sentiment(value: object, *, label: str) -> dict[str, str]:
+    data = _strict_json_keys(value, label=label, expected=("api_url", "receipt_sha256"))
+    return {
+        "api_url": _validate_http_base_url(data["api_url"], label=f"{label}.api_url"),
+        "receipt_sha256": _strict_json_sha256(
+            data["receipt_sha256"], label=f"{label}.receipt_sha256"
+        ),
+    }
+
+
+def _validate_quantipy_sentiment_manifest_binding(
+    value: object,
+    receipt: Mapping[str, object],
+    *,
+    label: str,
+) -> None:
+    data = _ensure_mapping(value, label=label)
+    expected_receipt_sha256 = _strict_json_sha256(
+        data["receipt_sha256"], label=f"{label}.receipt_sha256"
+    )
+    if _canonical_json_digest(receipt) != expected_receipt_sha256:
+        raise AutoresearchValidationError(
+            f"{label}.receipt_sha256 does not match the persisted sentiment receipt"
+        )
+
+
 def _validate_quantipy_v2_manifest(
     manifest_snapshot: _SecureFileSnapshot,
     *,
@@ -368,7 +641,15 @@ def _validate_quantipy_v2_manifest(
         )
     raw_manifest = _parse_json_snapshot(manifest_snapshot, label="Quantipy experiment manifest")
     allowed = frozenset(
-        ("schema_version", "experiment_id", "package_path", "notebook_path", "stage_files", "panel")
+        (
+            "schema_version",
+            "experiment_id",
+            "package_path",
+            "notebook_path",
+            "stage_files",
+            "panel",
+            "sentiment",
+        )
     )
     required = frozenset(("schema_version", "experiment_id", "package_path", "stage_files"))
     if set(raw_manifest) - allowed or not required <= set(raw_manifest):
@@ -447,6 +728,10 @@ def _validate_quantipy_v2_manifest(
                 panel_data["request"], label="manifest panel request"
             ),
         }
+    if "sentiment" in manifest and manifest["sentiment"] is not None:
+        manifest["sentiment"] = _validate_quantipy_manifest_sentiment(
+            manifest["sentiment"], label="manifest sentiment"
+        )
     _validate_quantipy_committed_sources(
         manifest,
         manifest_path=manifest_path,
@@ -1316,6 +1601,71 @@ def _validate_quantipy_run_panel(value: object, *, label: str) -> dict[str, obje
     }
 
 
+def _validate_quantipy_run_sentiment(value: object, *, label: str) -> dict[str, object]:
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=("bundle_path", "bundle_sha256", "receipt_path", "receipt_sha256", "receipt"),
+    )
+    if data["bundle_path"] != "sentiment/panels.zip":
+        raise AutoresearchValidationError(f"{label}.bundle_path is invalid")
+    if data["receipt_path"] != "sentiment/receipt.json":
+        raise AutoresearchValidationError(f"{label}.receipt_path is invalid")
+    receipt = _validate_sentiment_receipt(data["receipt"], label=f"{label}.receipt")
+    bundle_sha = _strict_json_sha256(data["bundle_sha256"], label=f"{label}.bundle_sha256")
+    receipt_sha = _strict_json_sha256(data["receipt_sha256"], label=f"{label}.receipt_sha256")
+    if bundle_sha != receipt["panels_sha256"]:
+        raise AutoresearchValidationError(
+            f"{label}.bundle_sha256 does not match receipt.panels_sha256"
+        )
+    if receipt_sha != _canonical_json_digest(receipt):
+        raise AutoresearchValidationError(
+            f"{label}.receipt_sha256 does not match the canonical nested receipt digest"
+        )
+    return {
+        "bundle_path": "sentiment/panels.zip",
+        "bundle_sha256": bundle_sha,
+        "receipt_path": "sentiment/receipt.json",
+        "receipt_sha256": receipt_sha,
+        "receipt": receipt,
+    }
+
+
+def _reject_unbound_quantipy_sentiment(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            "unbound Quantipy sentiment artifact cannot be inspected"
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode):
+        raise AutoresearchValidationError(
+            "unbound Quantipy sentiment artifact must not be a symlink"
+        )
+    raise AutoresearchValidationError(
+        "Quantipy sentiment artifact is present without bound run evidence"
+    )
+
+
+def _require_sealed_quantipy_directory(path: Path, *, label: str) -> None:
+    """Require an owned mode-0500 directory for a sealed Quantipy artifact set."""
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise AutoresearchValidationError(f"{label} does not exist") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o500
+    ):
+        raise AutoresearchValidationError(
+            f"{label} must be an owned mode-0500 non-symlink directory"
+        )
+
+
 def _validate_quantipy_run_envelope(
     snapshot: _SecureFileSnapshot,
     *,
@@ -1326,6 +1676,12 @@ def _validate_quantipy_run_envelope(
     # Envelopes sealed before quantipy added runtime-derived provenance lack the
     # key entirely; current envelopes always carry it (null when no panel).
     _has_derived_provenance = isinstance(parsed_run, dict) and "derived_provenance" in parsed_run
+    _has_sentiment_requested = isinstance(parsed_run, dict) and "sentiment_requested" in parsed_run
+    _has_sentiment = isinstance(parsed_run, dict) and "sentiment" in parsed_run
+    if _has_sentiment_requested is not _has_sentiment:
+        raise AutoresearchValidationError(
+            "Quantipy run.json sentiment_requested and sentiment must be present together"
+        )
     run = _strict_json_keys(
         parsed_run,
         label="Quantipy run.json",
@@ -1337,6 +1693,7 @@ def _validate_quantipy_run_envelope(
             "success",
             "panel_requested",
             "panel",
+            *(("sentiment_requested", "sentiment") if _has_sentiment_requested else ()),
             *(("derived_provenance",) if _has_derived_provenance else ()),
             "stage_receipts",
             "telemetry",
@@ -1392,6 +1749,16 @@ def _validate_quantipy_run_envelope(
     panel = (
         _validate_quantipy_run_panel(run["panel"], label="Quantipy run.json panel")
         if run["panel"] is not None
+        else None
+    )
+    sentiment_requested = (
+        _strict_json_bool(run["sentiment_requested"], label="Quantipy run.json sentiment_requested")
+        if _has_sentiment_requested
+        else False
+    )
+    sentiment = (
+        _validate_quantipy_run_sentiment(run["sentiment"], label="Quantipy run.json sentiment")
+        if _has_sentiment and run["sentiment"] is not None
         else None
     )
     derived_provenance_raw = run.get("derived_provenance") if _has_derived_provenance else None
@@ -1634,8 +2001,15 @@ def _validate_quantipy_run_envelope(
     )
     if not panel_requested and panel is not None:
         raise AutoresearchValidationError("unrequested Quantipy runs cannot bind panel evidence")
-    if not panel_requested and failure is not None and failure["category"] == "panel":
-        raise AutoresearchValidationError("unrequested Quantipy runs cannot fail panel preparation")
+    if not sentiment_requested and sentiment is not None:
+        raise AutoresearchValidationError(
+            "unrequested Quantipy runs cannot bind sentiment evidence"
+        )
+    requested_artifact_missing = (panel_requested and panel is None) or (
+        sentiment_requested and sentiment is None
+    )
+    if failure is not None and failure["category"] == "panel" and not requested_artifact_missing:
+        raise AutoresearchValidationError("panel failures require a missing requested artifact")
     if (
         panel_requested
         and panel is None
@@ -1644,10 +2018,18 @@ def _validate_quantipy_run_envelope(
         raise AutoresearchValidationError(
             "requested Quantipy panels require evidence or a valid pre-stage failure"
         )
-    if panel is not None and failure is not None and failure["category"] == "panel":
-        raise AutoresearchValidationError("panel failures cannot also bind panel evidence")
+    if (
+        sentiment_requested
+        and sentiment is None
+        and (failure is None or failure["category"] not in {"panel", "preflight", "filesystem"})
+    ):
+        raise AutoresearchValidationError(
+            "requested Quantipy sentiment requires evidence or a valid pre-stage failure"
+        )
     if panel is not None and failure is not None and failure["category"] == "preflight":
         raise AutoresearchValidationError("preflight failures cannot bind panel evidence")
+    if sentiment is not None and failure is not None and failure["category"] == "preflight":
+        raise AutoresearchValidationError("preflight failures cannot bind sentiment evidence")
     if failure is not None and success:
         raise AutoresearchValidationError("failed Quantipy runs cannot be successful")
     if (
@@ -1657,6 +2039,15 @@ def _validate_quantipy_run_envelope(
     ):
         raise AutoresearchValidationError(
             "preflight and panel failures require zero stage receipts"
+        )
+    if (
+        failure is not None
+        and failure["category"] == "filesystem"
+        and requested_artifact_missing
+        and normalized_receipts
+    ):
+        raise AutoresearchValidationError(
+            "filesystem failures with missing requested artifacts require zero stage receipts"
         )
     if failure is not None and failure["category"] in {"manifest", "preflight"}:
         if source is not None:
@@ -1719,6 +2110,14 @@ def _validate_quantipy_run_envelope(
         "success": success,
         "panel_requested": panel_requested,
         "panel": panel,
+        **(
+            {
+                "sentiment_requested": sentiment_requested,
+                "sentiment": sentiment,
+            }
+            if _has_sentiment_requested
+            else {}
+        ),
         **(
             {"derived_provenance": normalized_derived_provenance} if _has_derived_provenance else {}
         ),
@@ -2138,6 +2537,12 @@ def _validate_quantipy_experiment_evidence(
         raise AutoresearchValidationError(
             "Quantipy run.json panel_requested does not match manifest"
         )
+    sentiment_requested = bool(run.get("sentiment_requested", False))
+    manifest_sentiment_requested = manifest.get("sentiment") is not None
+    if sentiment_requested is not manifest_sentiment_requested:
+        raise AutoresearchValidationError(
+            "Quantipy run.json sentiment_requested does not match manifest"
+        )
     run_panel = run["panel"]
     if run_panel is None:
         if evidence.panel is not None:
@@ -2158,7 +2563,7 @@ def _validate_quantipy_experiment_evidence(
                 "Quantipy experiment panel evidence does not match run.json"
             )
         panel_directory = run_snapshot.path.parent / "panel"
-        _require_sealed_quantipy_panel_directory(panel_directory)
+        _require_sealed_quantipy_directory(panel_directory, label="Quantipy panel directory")
         panel_snapshot = _secure_open_snapshot(
             run_snapshot.path.parent / evidence.panel.panel_path,
             label="Quantipy panel file",
@@ -2193,3 +2598,60 @@ def _validate_quantipy_experiment_evidence(
             raise AutoresearchValidationError(
                 "Quantipy panel receipt request does not match manifest request"
             )
+    run_sentiment = run.get("sentiment")
+    if run_sentiment is None:
+        if evidence.sentiment is not None:
+            raise AutoresearchValidationError(
+                "Quantipy experiment sentiment evidence is not present in run.json"
+            )
+        _reject_unbound_quantipy_sentiment(run_snapshot.path.parent / "sentiment")
+    else:
+        run_sentiment_data = _ensure_mapping(run_sentiment, label="Quantipy run.json sentiment")
+        if evidence.sentiment is None or evidence.sentiment.to_dict() != {
+            "bundle_path": run_sentiment_data["bundle_path"],
+            "bundle_sha256": run_sentiment_data["bundle_sha256"],
+            "receipt_path": run_sentiment_data["receipt_path"],
+            "receipt_sha256": run_sentiment_data["receipt_sha256"],
+        }:
+            raise AutoresearchValidationError(
+                "Quantipy experiment sentiment evidence does not match run.json"
+            )
+        sentiment_directory = run_snapshot.path.parent / "sentiment"
+        _require_sealed_quantipy_directory(
+            sentiment_directory, label="Quantipy sentiment directory"
+        )
+        bundle_snapshot = _secure_open_snapshot(
+            run_snapshot.path.parent / evidence.sentiment.bundle_path,
+            label="Quantipy sentiment bundle",
+            trusted_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+            private=True,
+            max_bytes=QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES,
+        )
+        receipt_snapshot = _secure_open_snapshot(
+            run_snapshot.path.parent / evidence.sentiment.receipt_path,
+            label="Quantipy sentiment receipt",
+            trusted_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+            private=True,
+            max_bytes=QUANTIPY_SENTIMENT_RECEIPT_MAX_BYTES,
+        )
+        _require_sealed_quantipy_panel_file(bundle_snapshot, label="Quantipy sentiment bundle")
+        _require_sealed_quantipy_panel_file(receipt_snapshot, label="Quantipy sentiment receipt")
+        if bundle_snapshot.sha256 != evidence.sentiment.bundle_sha256:
+            raise AutoresearchValidationError(
+                "Quantipy sentiment bundle digest does not match evidence"
+            )
+        if receipt_snapshot.sha256 != evidence.sentiment.receipt_sha256:
+            raise AutoresearchValidationError(
+                "Quantipy sentiment receipt digest does not match evidence"
+            )
+        persisted_receipt = _validate_sentiment_receipt(
+            _parse_json_snapshot(receipt_snapshot, label="Quantipy sentiment receipt"),
+            label="Quantipy sentiment receipt",
+        )
+        if persisted_receipt != run_sentiment_data["receipt"]:
+            raise AutoresearchValidationError(
+                "Quantipy sentiment receipt does not match nested run evidence"
+            )
+        _validate_quantipy_sentiment_manifest_binding(
+            manifest["sentiment"], persisted_receipt, label="manifest sentiment"
+        )

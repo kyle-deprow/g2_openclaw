@@ -21,6 +21,8 @@ from gateway.autoresearch.artifacts import (
     QuantipyExecutionNotStartedEvidence,
     QuantipyExperimentEvidence,
     QuantipyExperimentFailureEvidence,
+    QuantipyExperimentSentimentEvidence,
+    VerificationResultArtifact,
 )
 from gateway.autoresearch.enums import (
     Phase,
@@ -138,6 +140,806 @@ def _valid_derived_provenance(panel: dict[str, object]) -> dict[str, object]:
         "hydrated_at": receipt["hydrated_at"],
         "exported_at": receipt["exported_at"],
     }
+
+
+def _sentiment_receipt_payload(
+    *,
+    bundle_sha256: str = "a" * 64,
+    extra_subreddits: list[str] | None = None,
+) -> tuple[dict[str, object], str]:
+    subreddits = ["stocks", "wallstreetbets"]
+    if extra_subreddits is not None:
+        subreddits.extend(extra_subreddits)
+        subreddits.sort()
+    attention = {
+        "schema_version": "reddit-attention-panel-v1",
+        "pyarrow_version": "20.0.0",
+        "pandas_version": "2.3.0",
+        "extractor_version": "attention-v1",
+        "generated_at": "2026-07-28T13:00:00Z",
+        "date_start": "2026-07-28",
+        "date_end": "2026-07-28",
+        "subreddits": subreddits,
+        "universe_size": 10,
+        "universe_sha256": "1" * 64,
+        "blocklist_sha256": "2" * 64,
+        "universe_market": "US",
+        "universe_locale": "en-US",
+        "source_post_count": 100,
+        "source_max_post_id": 123,
+        "hourly_row_count": 20,
+        "daily_row_count": 10,
+        "hourly_parquet_sha256": "3" * 64,
+        "daily_parquet_sha256": "4" * 64,
+    }
+    tone = {
+        "schema_version": "reddit-tone-panel-v1",
+        "pyarrow_version": "20.0.0",
+        "pandas_version": "2.3.0",
+        "generated_at": "2026-07-28T13:30:00Z",
+        "date_start": "2026-07-28",
+        "date_end": "2026-07-28",
+        "subreddits": subreddits,
+        "judge_selectors": ["codex/gpt-5.6-luna/xhigh", "legacy/gpt-4.1/default"],
+        "subreddit_row_count": 20,
+        "fused_row_count": 10,
+        "subreddit_parquet_sha256": "5" * 64,
+        "fused_parquet_sha256": "6" * 64,
+    }
+    receipt: dict[str, object] = {
+        "contract_version": "research-sentiment-panels-v1",
+        "panels_sha256": bundle_sha256,
+        "attention": attention,
+        "tone": tone,
+        "packaged_at": "2026-07-28T14:00:00Z",
+    }
+    receipt_sha256 = sha256(
+        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return receipt, receipt_sha256
+
+
+def _sentiment_run_payload(
+    run_path: Path,
+    *,
+    requested: bool = True,
+    sentiment: dict[str, object] | None = None,
+) -> dict[str, object]:
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload["sentiment_requested"] = requested
+    payload["sentiment"] = sentiment
+    return payload
+
+
+def _valid_sentiment_run_evidence() -> tuple[dict[str, object], bytes, str]:
+    bundle_bytes = b"sentiment-panels-bundle"
+    receipt, receipt_sha256 = _sentiment_receipt_payload(
+        bundle_sha256=sha256(bundle_bytes).hexdigest()
+    )
+    sentiment: dict[str, object] = {
+        "bundle_path": "sentiment/panels.zip",
+        "bundle_sha256": sha256(bundle_bytes).hexdigest(),
+        "receipt_path": "sentiment/receipt.json",
+        "receipt_sha256": receipt_sha256,
+        "receipt": receipt,
+    }
+    return sentiment, bundle_bytes, json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+
+
+def _build_full_sentiment_case(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+    *,
+    api_url: str = "https://sentiment.example.test/api",
+) -> tuple[
+    AutoresearchState,
+    VerificationResultArtifact,
+    QuantipyExperimentEvidence,
+    Path,
+    Path,
+    Path,
+    Path,
+]:
+    manifest_path, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, bundle_bytes, receipt_json = _valid_sentiment_run_evidence()
+    receipt_sha256 = cast(str, sentiment["receipt_sha256"])
+    manifest_file = Path(manifest_path)
+    manifest = cast(dict[str, object], json.loads(manifest_file.read_text(encoding="utf-8")))
+    manifest["sentiment"] = {
+        "api_url": api_url,
+        "receipt_sha256": receipt_sha256,
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_file.write_bytes(manifest_bytes)
+    _git(git_worktree.workspace, "add", "experiment-manifest.json")
+    _git(git_worktree.workspace, "commit", "-m", "add sentiment manifest request")
+    commit_sha = _git(git_worktree.workspace, "rev-parse", "HEAD")
+    run_id = "autoresearch-i1-" + commit_sha[:12]
+    new_run_directory = trusted_quantipy_runs_root / run_id
+    run_path.parent.rename(new_run_directory)
+    run_path = new_run_directory / "run.json"
+    sentiment_directory = new_run_directory / "sentiment"
+    sentiment_directory.mkdir(mode=0o700)
+    bundle_path = sentiment_directory / "panels.zip"
+    bundle_path.write_bytes(bundle_bytes)
+    bundle_path.chmod(0o400)
+    receipt_path = sentiment_directory / "receipt.json"
+    receipt_path.write_text(receipt_json, encoding="utf-8")
+    receipt_path.chmod(0o400)
+    sentiment_directory.chmod(0o500)
+
+    manifest_snapshot = autoresearch_secure_io._secure_open_snapshot(
+        manifest_file, label="test sentiment manifest"
+    )
+    normalized_manifest = autoresearch_evidence._validate_quantipy_v2_manifest(
+        manifest_snapshot,
+        workspace=git_worktree.workspace,
+        commit_sha=commit_sha,
+        expected_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload.update(
+        run_id=run_id,
+        manifest_sha256=autoresearch_evidence._canonical_quantipy_manifest_sha256(
+            normalized_manifest
+        ),
+        sentiment_requested=True,
+        sentiment=sentiment,
+    )
+    run_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    detached_directory, detached_manifest_sha256 = _write_quantipy_detached_run_record(
+        workspace=git_worktree.workspace,
+        runtime_root=git_worktree.target_checkout,
+        manifest_path=manifest_path,
+        run_id=run_id,
+        run_path=run_path,
+    )
+    state = _state_to_consensus(policy, platform_readiness)
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    state = replace(state, setup=_workspace_setup(git_worktree.target_checkout))
+    implementation = replace(
+        _implementation_result(),
+        workspace_path=str(git_worktree.workspace),
+        commit_sha=commit_sha,
+        experiment_manifest_path=manifest_path,
+        experiment_manifest_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+    validate_artifact_workspace(state, implementation)
+    state = advance_state(state, implementation, policy)
+    evidence = QuantipyExperimentEvidence(
+        manifest_path=manifest_path,
+        manifest_sha256=sha256(manifest_bytes).hexdigest(),
+        detached_run_directory=detached_directory,
+        detached_run_manifest_sha256=detached_manifest_sha256,
+        run_id=run_id,
+        run_json_path=str(run_path),
+        run_json_sha256=sha256(run_bytes).hexdigest(),
+        success=True,
+        completed_stages=("prepare", "smoke", "feasibility", "model"),
+        terminal_stage=None,
+        terminal_status=None,
+        failure=None,
+        panel=None,
+        sentiment=QuantipyExperimentSentimentEvidence(
+            bundle_path="sentiment/panels.zip",
+            bundle_sha256=cast(str, sentiment["bundle_sha256"]),
+            receipt_path="sentiment/receipt.json",
+            receipt_sha256=receipt_sha256,
+        ),
+    )
+    artifact = replace(
+        _verification_result(VerificationStatus.PASS), quantipy_experiment_evidence=evidence
+    )
+    return (
+        state,
+        artifact,
+        evidence,
+        run_path,
+        sentiment_directory,
+        bundle_path,
+        receipt_path,
+    )
+
+
+def test_quantipy_sentiment_run_normalizes_current_fields_and_omits_legacy_fields(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, _, _ = _valid_sentiment_run_evidence()
+    payload = _sentiment_run_payload(run_path, sentiment=sentiment)
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+    )
+
+    assert normalized["sentiment_requested"] is True
+    assert normalized["sentiment"] == sentiment
+
+    _, _, legacy_run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root / "legacy"
+    )
+    legacy = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(
+            legacy_run_path, label="legacy test Quantipy run.json"
+        )
+    )
+    assert "sentiment_requested" not in legacy
+    assert "sentiment" not in legacy
+
+
+@pytest.mark.parametrize("field_name", ("bundle_sha256", "receipt_sha256"))
+def test_quantipy_sentiment_run_rejects_nested_digest_substitution(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+    field_name: str,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, _, _ = _valid_sentiment_run_evidence()
+    sentiment[field_name] = "f" * 64
+    _rewrite_quantipy_run_payload(run_path, _sentiment_run_payload(run_path, sentiment=sentiment))
+
+    with pytest.raises(AutoresearchValidationError, match=r"sentiment.*(digest|sha256)"):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+        )
+
+
+def test_quantipy_sentiment_run_rejects_path_substitution(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, _, _ = _valid_sentiment_run_evidence()
+    sentiment["bundle_path"] = "sentiment/other.zip"
+    _rewrite_quantipy_run_payload(run_path, _sentiment_run_payload(run_path, sentiment=sentiment))
+
+    with pytest.raises(AutoresearchValidationError, match="bundle_path"):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+        )
+
+
+def test_full_quantipy_sentiment_evidence_binds_manifest_receipt_digest(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    state, artifact, _, _, sentiment_directory, _, _ = _build_full_sentiment_case(
+        git_worktree, policy, platform_readiness, trusted_quantipy_runs_root
+    )
+
+    try:
+        autoresearch_evidence._validate_quantipy_experiment_evidence(state, artifact)
+    finally:
+        sentiment_directory.chmod(0o700)
+
+
+@pytest.mark.parametrize("member_name", ("panels.zip", "receipt.json"))
+def test_full_quantipy_sentiment_evidence_rejects_symlinked_members(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+    tmp_path: Path,
+    member_name: str,
+) -> None:
+    state, artifact, _, _, sentiment_directory, bundle_path, receipt_path = (
+        _build_full_sentiment_case(
+            git_worktree, policy, platform_readiness, trusted_quantipy_runs_root
+        )
+    )
+    member_path = bundle_path if member_name == "panels.zip" else receipt_path
+    target = tmp_path / f"{member_name}.target"
+    target.write_bytes(b"untrusted substitution")
+    sentiment_directory.chmod(0o700)
+    member_path.unlink()
+    member_path.symlink_to(target)
+    sentiment_directory.chmod(0o500)
+
+    try:
+        with pytest.raises(AutoresearchValidationError, match=r"sentiment.*non-symlink"):
+            autoresearch_evidence._validate_quantipy_experiment_evidence(state, artifact)
+    finally:
+        sentiment_directory.chmod(0o700)
+        member_path.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+
+
+@pytest.mark.parametrize("mutation", ("wrong_mode", "hard_link"))
+def test_full_quantipy_sentiment_evidence_rejects_unsealed_members(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+    mutation: str,
+) -> None:
+    state, artifact, _, _, sentiment_directory, bundle_path, _ = _build_full_sentiment_case(
+        git_worktree, policy, platform_readiness, trusted_quantipy_runs_root
+    )
+    hard_link_path = sentiment_directory / "panels-copy.zip"
+    if mutation == "wrong_mode":
+        bundle_path.chmod(0o600)
+    else:
+        sentiment_directory.chmod(0o700)
+        os.link(bundle_path, hard_link_path)
+        sentiment_directory.chmod(0o500)
+
+    try:
+        expected = "0400 sealed file" if mutation == "wrong_mode" else "hard-linked"
+        with pytest.raises(AutoresearchValidationError, match=expected):
+            autoresearch_evidence._validate_quantipy_experiment_evidence(state, artifact)
+    finally:
+        sentiment_directory.chmod(0o700)
+        hard_link_path.unlink(missing_ok=True)
+
+
+def test_full_quantipy_sentiment_evidence_rejects_persisted_digest_substitution(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    state, artifact, _, _, sentiment_directory, bundle_path, _ = _build_full_sentiment_case(
+        git_worktree, policy, platform_readiness, trusted_quantipy_runs_root
+    )
+    sentiment_directory.chmod(0o700)
+    bundle_path.chmod(0o600)
+    bundle_path.write_bytes(b"persisted digest substitution")
+    bundle_path.chmod(0o400)
+    sentiment_directory.chmod(0o500)
+
+    try:
+        with pytest.raises(AutoresearchValidationError, match="sentiment bundle digest"):
+            autoresearch_evidence._validate_quantipy_experiment_evidence(state, artifact)
+    finally:
+        sentiment_directory.chmod(0o700)
+
+
+@pytest.mark.parametrize(
+    ("bound_name", "expected_message"),
+    (
+        ("QUANTIPY_SENTIMENT_RECEIPT_MAX_BYTES", "sentiment.receipt exceeds its size limit"),
+        ("QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES", "sentiment bundle.*byte limit"),
+    ),
+)
+def test_full_quantipy_sentiment_evidence_enforces_member_size_limits(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bound_name: str,
+    expected_message: str,
+) -> None:
+    state, artifact, _, _, sentiment_directory, _, _ = _build_full_sentiment_case(
+        git_worktree, policy, platform_readiness, trusted_quantipy_runs_root
+    )
+    monkeypatch.setattr(autoresearch_evidence, bound_name, 1)
+
+    try:
+        with pytest.raises(AutoresearchValidationError, match=expected_message):
+            autoresearch_evidence._validate_quantipy_experiment_evidence(state, artifact)
+    finally:
+        sentiment_directory.chmod(0o700)
+
+
+def test_sentiment_manifest_trailing_slashes_normalize_before_canonical_hash(
+    git_worktree: GitWorktree,
+) -> None:
+    manifest_path, _, _, _, _, _ = _write_quantipy_v2_run(git_worktree)
+    manifest_file = Path(manifest_path)
+    manifest = cast(dict[str, object], json.loads(manifest_file.read_text(encoding="utf-8")))
+    manifest["sentiment"] = {
+        "api_url": "https://sentiment.example.test/api///",
+        "receipt_sha256": "a" * 64,
+    }
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_file.write_bytes(manifest_bytes)
+    _git(git_worktree.workspace, "add", "experiment-manifest.json")
+    _git(git_worktree.workspace, "commit", "-m", "add trailing slash sentiment URL")
+    commit_sha = _git(git_worktree.workspace, "rev-parse", "HEAD")
+
+    normalized = autoresearch_evidence._validate_quantipy_v2_manifest(
+        autoresearch_secure_io._secure_open_snapshot(
+            manifest_file, label="test sentiment manifest"
+        ),
+        workspace=git_worktree.workspace,
+        commit_sha=commit_sha,
+        expected_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+
+    assert cast(dict[str, object], normalized["sentiment"])["api_url"] == (
+        "https://sentiment.example.test/api"
+    )
+    assert (
+        autoresearch_evidence._canonical_quantipy_manifest_sha256(normalized)
+        == sha256(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def test_current_manifest_null_sentiment_preserves_key_and_canonical_hash(
+    git_worktree: GitWorktree,
+) -> None:
+    manifest_path, _, _, _, _, _ = _write_quantipy_v2_run(git_worktree)
+    manifest_file = Path(manifest_path)
+    manifest = cast(dict[str, object], json.loads(manifest_file.read_text(encoding="utf-8")))
+    manifest["sentiment"] = None
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_file.write_bytes(manifest_bytes)
+    _git(git_worktree.workspace, "add", "experiment-manifest.json")
+    _git(git_worktree.workspace, "commit", "-m", "add null sentiment manifest field")
+    commit_sha = _git(git_worktree.workspace, "rev-parse", "HEAD")
+
+    normalized = autoresearch_evidence._validate_quantipy_v2_manifest(
+        autoresearch_secure_io._secure_open_snapshot(
+            manifest_file, label="test sentiment manifest"
+        ),
+        workspace=git_worktree.workspace,
+        commit_sha=commit_sha,
+        expected_sha256=sha256(manifest_bytes).hexdigest(),
+    )
+
+    assert "sentiment" in normalized
+    assert normalized["sentiment"] is None
+    assert (
+        autoresearch_evidence._canonical_quantipy_manifest_sha256(normalized)
+        == sha256(
+            json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
+
+
+def test_quantipy_sentiment_manifest_receipt_digest_substitution_is_rejected() -> None:
+    receipt, receipt_sha256 = _sentiment_receipt_payload()
+    manifest_sentiment = {
+        "api_url": "https://sentiment.example.test/api",
+        "receipt_sha256": receipt_sha256,
+    }
+    autoresearch_evidence._validate_quantipy_sentiment_manifest_binding(
+        manifest_sentiment, receipt, label="manifest sentiment"
+    )
+    manifest_sentiment["receipt_sha256"] = "f" * 64
+
+    with pytest.raises(AutoresearchValidationError, match="persisted sentiment receipt"):
+        autoresearch_evidence._validate_quantipy_sentiment_manifest_binding(
+            manifest_sentiment, receipt, label="manifest sentiment"
+        )
+
+
+def test_quantipy_sentiment_run_rejects_partial_current_shape(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    payload["sentiment_requested"] = True
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    with pytest.raises(AutoresearchValidationError, match="present together"):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+        )
+
+
+@pytest.mark.parametrize("category", ("panel", "preflight", "filesystem"))
+def test_requested_sentiment_accepts_valid_pre_stage_failure(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+    category: str,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    payload = _sentiment_run_payload(run_path, sentiment=None)
+    payload.update(
+        success=False,
+        stage_receipts=[],
+        source=None if category == "preflight" else payload["source"],
+        failure={"category": category, "message": "sentiment preparation failed"},
+    )
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+    )
+
+    assert normalized["sentiment_requested"] is True
+    assert normalized["sentiment"] is None
+
+
+def test_sentiment_request_invariants_reject_missing_unrequested_and_invalid_panel_failure(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    sentiment, _, _ = _valid_sentiment_run_evidence()
+    cases = (
+        (
+            _sentiment_run_payload(run_path, sentiment=None),
+            "requested Quantipy sentiment requires evidence",
+        ),
+        (
+            _sentiment_run_payload(run_path, requested=False, sentiment=sentiment),
+            "unrequested Quantipy runs cannot bind sentiment",
+        ),
+        (
+            {
+                **_sentiment_run_payload(run_path, requested=False, sentiment=None),
+                "success": False,
+                "stage_receipts": [],
+                "failure": {"category": "panel", "message": "nothing requested"},
+            },
+            "missing requested artifact",
+        ),
+    )
+    for payload, message in cases:
+        if payload["sentiment_requested"] is True and payload["sentiment"] is None:
+            payload["failure"] = None
+        _rewrite_quantipy_run_payload(run_path, payload)
+        with pytest.raises(AutoresearchValidationError, match=message):
+            autoresearch_evidence._validate_quantipy_run_envelope(
+                autoresearch_secure_io._secure_open_snapshot(
+                    run_path, label="test Quantipy run.json"
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "panel_present_sentiment_missing",
+        "panel_missing_sentiment_present",
+        "both_missing",
+    ),
+)
+def test_panel_failure_accepts_any_missing_requested_artifact(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+    case: str,
+) -> None:
+    panel_present = case == "panel_present_sentiment_missing"
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        run_root=trusted_quantipy_runs_root,
+        panel_requested=panel_present,
+    )
+    sentiment = (
+        _valid_sentiment_run_evidence()[0] if case == "panel_missing_sentiment_present" else None
+    )
+    payload = _sentiment_run_payload(run_path, sentiment=sentiment)
+    payload.update(
+        success=False,
+        panel_requested=True,
+        panel=payload["panel"] if panel_present else None,
+        stage_receipts=[],
+        failure={"category": "panel", "message": "one requested artifact failed"},
+    )
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+    )
+
+    if panel_present:
+        assert normalized["panel"] is not None
+    else:
+        assert normalized["panel"] is None
+    if sentiment is not None:
+        assert normalized["sentiment"] is not None
+    else:
+        assert normalized["sentiment"] is None
+
+
+def test_panel_failure_requires_zero_stage_receipts_for_both_requested_artifacts(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    payload = _sentiment_run_payload(run_path, sentiment=None)
+    payload.update(
+        success=False,
+        panel_requested=True,
+        panel=None,
+        failure={"category": "panel", "message": "panel preparation failed"},
+    )
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    with pytest.raises(AutoresearchValidationError, match="zero stage receipts"):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+        )
+
+
+def test_filesystem_failure_with_missing_requested_artifact_must_be_pre_stage(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    payload = _sentiment_run_payload(run_path, sentiment=None)
+    payload.update(
+        success=False,
+        panel_requested=True,
+        panel=None,
+        failure={"category": "filesystem", "message": "artifact disappeared"},
+    )
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    with pytest.raises(AutoresearchValidationError, match="missing requested artifacts"):
+        autoresearch_evidence._validate_quantipy_run_envelope(
+            autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+        )
+
+
+def test_entered_filesystem_failure_is_valid_when_requested_artifacts_are_present(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root, panel_requested=True
+    )
+    sentiment = _valid_sentiment_run_evidence()[0]
+    payload = _sentiment_run_payload(run_path, sentiment=sentiment)
+    stage_receipts = cast(list[dict[str, object]], payload["stage_receipts"])
+    terminal = stage_receipts[-1]
+    terminal.update(
+        status="failed",
+        result=None,
+        failure={"category": "filesystem", "message": "model output unavailable"},
+    )
+    payload.update(
+        success=False,
+        sentiment_requested=True,
+        failure={"category": "filesystem", "message": "model output unavailable"},
+    )
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+    )
+
+    assert normalized["failure"] == payload["failure"]
+
+
+def test_current_sentiment_envelope_false_null_fields_preserve_both_keys(
+    git_worktree: GitWorktree,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree, run_root=trusted_quantipy_runs_root
+    )
+    payload = _sentiment_run_payload(run_path, requested=False, sentiment=None)
+    _rewrite_quantipy_run_payload(run_path, payload)
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(run_path, label="test Quantipy run.json")
+    )
+
+    assert normalized["sentiment_requested"] is False
+    assert "sentiment" in normalized
+    assert normalized["sentiment"] is None
+
+
+def test_sentiment_receipt_accepts_producer_plain_empty_strings() -> None:
+    receipt, _ = _sentiment_receipt_payload()
+    attention = cast(dict[str, object], receipt["attention"])
+    tone = cast(dict[str, object], receipt["tone"])
+    attention.update(
+        pyarrow_version="",
+        pandas_version="",
+        extractor_version="",
+        subreddits=[""],
+        universe_market="",
+        universe_locale="",
+    )
+    tone.update(
+        pyarrow_version="",
+        pandas_version="",
+        subreddits=[""],
+        judge_selectors=[""],
+    )
+
+    normalized = autoresearch_evidence._validate_sentiment_receipt(
+        receipt, label="producer parity sentiment receipt"
+    )
+
+    assert normalized["attention"] == attention
+    assert normalized["tone"] == tone
+
+
+def test_sentiment_receipt_and_bundle_limits_reject_oversize_inputs(tmp_path: Path) -> None:
+    huge_receipt, _ = _sentiment_receipt_payload(
+        extra_subreddits=[f"subreddit-{index:06d}" for index in range(100_000)]
+    )
+    with pytest.raises(AutoresearchValidationError, match="exceeds its size limit"):
+        autoresearch_evidence._validate_sentiment_receipt(
+            huge_receipt, label="oversized sentiment receipt"
+        )
+
+    root = tmp_path / "runs"
+    run_directory = root / "run-id"
+    sentiment_directory = run_directory / "sentiment"
+    sentiment_directory.mkdir(parents=True)
+    root.chmod(0o700)
+    run_directory.chmod(0o700)
+    bundle_path = sentiment_directory / "panels.zip"
+    bundle_path.write_bytes(b"x" * (autoresearch_constants.QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES + 1))
+    bundle_path.chmod(0o400)
+    sentiment_directory.chmod(0o500)
+
+    try:
+        with pytest.raises(AutoresearchValidationError, match="byte limit"):
+            autoresearch_secure_io._secure_open_snapshot(
+                bundle_path,
+                label="oversized sentiment bundle",
+                trusted_root=root,
+                private=True,
+                max_bytes=autoresearch_constants.QUANTIPY_SENTIMENT_BUNDLE_MAX_BYTES,
+            )
+    finally:
+        sentiment_directory.chmod(0o700)
+        bundle_path.unlink(missing_ok=True)
+        run_directory.chmod(0o700)
+        root.chmod(0o700)
+        sentiment_directory.rmdir()
+        run_directory.rmdir()
+        root.rmdir()
+
+
+@pytest.mark.parametrize("member_name", ("panels.zip", "receipt.json"))
+def test_sentiment_files_reject_symlinks(tmp_path: Path, member_name: str) -> None:
+    root = tmp_path / "runs"
+    run_directory = root / "run-id"
+    sentiment_directory = run_directory / "sentiment"
+    sentiment_directory.mkdir(parents=True)
+    root.chmod(0o700)
+    run_directory.chmod(0o700)
+    target = tmp_path / "target"
+    target.write_bytes(b"not trusted")
+    os.symlink(target, sentiment_directory / member_name)
+    sentiment_directory.chmod(0o500)
+
+    try:
+        with pytest.raises(AutoresearchValidationError, match="non-symlink"):
+            autoresearch_secure_io._secure_open_snapshot(
+                sentiment_directory / member_name,
+                label="symlinked sentiment file",
+                trusted_root=root,
+                private=True,
+            )
+    finally:
+        sentiment_directory.chmod(0o700)
+        (sentiment_directory / member_name).unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        run_directory.chmod(0o700)
+        root.chmod(0o700)
+        sentiment_directory.rmdir()
+        run_directory.rmdir()
+        root.rmdir()
 
 
 def test_quantipy_run_envelope_preserves_validated_derived_provenance(

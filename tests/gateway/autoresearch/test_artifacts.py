@@ -22,6 +22,7 @@ from gateway.autoresearch.artifacts import (
     QuantipyExecutionInterruptedEvidence,
     QuantipyExecutionNotStartedEvidence,
     QuantipyExperimentEvidence,
+    QuantipyExperimentSentimentEvidence,
     ReviewResultArtifact,
     VerificationResultArtifact,
 )
@@ -81,6 +82,46 @@ from gateway.autoresearch_platform_validation import (
 from gateway.mempalace_finalizer import FINAL_MEMORY_SOURCE_FILE, finalization_journal_path
 
 from tests.gateway.autoresearch.builders import _majority_consensus, _no_consensus
+
+
+def test_quantipy_sentiment_evidence_round_trips_with_exact_transport_fields(
+    successful_quantipy_evidence: QuantipyExperimentEvidence,
+) -> None:
+    sentiment = QuantipyExperimentSentimentEvidence(
+        bundle_path="sentiment/panels.zip",
+        bundle_sha256="a" * 64,
+        receipt_path="sentiment/receipt.json",
+        receipt_sha256="b" * 64,
+    )
+    evidence = replace(successful_quantipy_evidence, sentiment=sentiment)
+
+    restored = QuantipyExperimentEvidence.from_dict(evidence.to_dict())
+
+    assert restored == evidence
+    assert restored.to_dict()["sentiment"] == sentiment.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("bundle_path", "sentiment/other.zip"),
+        ("receipt_path", "sentiment/other.json"),
+    ),
+)
+def test_quantipy_sentiment_evidence_rejects_path_substitution(
+    field_name: str,
+    value: str,
+) -> None:
+    payload = {
+        "bundle_path": "sentiment/panels.zip",
+        "bundle_sha256": "a" * 64,
+        "receipt_path": "sentiment/receipt.json",
+        "receipt_sha256": "b" * 64,
+    }
+    payload[field_name] = value
+
+    with pytest.raises(AutoresearchValidationError, match=r"sentiment.*path"):
+        QuantipyExperimentSentimentEvidence.from_dict(payload)
 
 
 def _coverage(*, fixed_sleeve_local_data: bool = False) -> AggregateCoverageReceipt:

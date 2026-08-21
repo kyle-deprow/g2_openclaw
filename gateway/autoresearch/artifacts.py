@@ -703,6 +703,49 @@ class QuantipyExperimentPanelEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class QuantipyExperimentSentimentEvidence:
+    bundle_path: str
+    bundle_sha256: str
+    receipt_path: str
+    receipt_sha256: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> QuantipyExperimentSentimentEvidence:
+        data = _ensure_mapping(raw, label="quantipy_experiment_evidence.sentiment")
+        _require_exact_keys(
+            data,
+            label="quantipy_experiment_evidence.sentiment",
+            expected=("bundle_path", "bundle_sha256", "receipt_path", "receipt_sha256"),
+        )
+        evidence = cls(
+            bundle_path=_require_str(data, "bundle_path"),
+            bundle_sha256=_require_sha256(data, "bundle_sha256"),
+            receipt_path=_require_str(data, "receipt_path"),
+            receipt_sha256=_require_sha256(data, "receipt_sha256"),
+        )
+        evidence.validate()
+        return evidence
+
+    def validate(self) -> None:
+        if self.bundle_path != "sentiment/panels.zip":
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.sentiment.bundle_path must be sentiment/panels.zip"
+            )
+        if self.receipt_path != "sentiment/receipt.json":
+            raise AutoresearchValidationError(
+                "quantipy_experiment_evidence.sentiment.receipt_path must be sentiment/receipt.json"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "bundle_path": self.bundle_path,
+            "bundle_sha256": self.bundle_sha256,
+            "receipt_path": self.receipt_path,
+            "receipt_sha256": self.receipt_sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class QuantipyExperimentEvidence:
     manifest_path: str
     manifest_sha256: str
@@ -717,31 +760,32 @@ class QuantipyExperimentEvidence:
     terminal_status: str | None
     failure: QuantipyExperimentFailureEvidence | None
     panel: QuantipyExperimentPanelEvidence | None
+    sentiment: QuantipyExperimentSentimentEvidence | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> QuantipyExperimentEvidence:
         data = _ensure_mapping(raw, label="quantipy_experiment_evidence")
-        _require_exact_keys(
-            data,
-            label="quantipy_experiment_evidence",
-            expected=(
-                "manifest_path",
-                "manifest_sha256",
-                "detached_run_directory",
-                "detached_run_manifest_sha256",
-                "run_id",
-                "run_json_path",
-                "run_json_sha256",
-                "success",
-                "completed_stages",
-                "terminal_stage",
-                "terminal_status",
-                "failure",
-                "panel",
-            ),
+        expected_keys: tuple[str, ...] = (
+            "manifest_path",
+            "manifest_sha256",
+            "detached_run_directory",
+            "detached_run_manifest_sha256",
+            "run_id",
+            "run_json_path",
+            "run_json_sha256",
+            "success",
+            "completed_stages",
+            "terminal_stage",
+            "terminal_status",
+            "failure",
+            "panel",
         )
+        if set(data) == set(expected_keys) | {"sentiment"}:
+            expected_keys = (*expected_keys, "sentiment")
+        _require_exact_keys(data, label="quantipy_experiment_evidence", expected=expected_keys)
         failure_raw = data.get("failure")
         panel_raw = data.get("panel")
+        sentiment_raw = data.get("sentiment")
         evidence = cls(
             manifest_path=_require_workspace_path(data, "manifest_path"),
             manifest_sha256=_require_sha256(data, "manifest_sha256"),
@@ -773,6 +817,11 @@ class QuantipyExperimentEvidence:
             panel=(
                 QuantipyExperimentPanelEvidence.from_dict(panel_raw)
                 if panel_raw is not None
+                else None
+            ),
+            sentiment=(
+                QuantipyExperimentSentimentEvidence.from_dict(sentiment_raw)
+                if sentiment_raw is not None
                 else None
             ),
         )
@@ -811,9 +860,11 @@ class QuantipyExperimentEvidence:
             raise AutoresearchValidationError("Quantipy experiment terminal stage is invalid")
         if self.terminal_status is not None and self.terminal_status not in {"rejected", "failed"}:
             raise AutoresearchValidationError("Quantipy experiment terminal status is invalid")
+        if self.sentiment is not None:
+            self.sentiment.validate()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result = {
             "manifest_path": self.manifest_path,
             "manifest_sha256": self.manifest_sha256,
             "detached_run_directory": self.detached_run_directory,
@@ -828,6 +879,9 @@ class QuantipyExperimentEvidence:
             "failure": self.failure.to_dict() if self.failure is not None else None,
             "panel": self.panel.to_dict() if self.panel is not None else None,
         }
+        if self.sentiment is not None:
+            result["sentiment"] = self.sentiment.to_dict()
+        return result
 
 
 @dataclass(frozen=True, slots=True)
