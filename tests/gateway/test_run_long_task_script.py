@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
+import shlex
 import signal
 import stat
 import subprocess
@@ -35,12 +37,164 @@ from gateway.autoresearch_runs import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUN_LONG_TASK = REPO_ROOT / "scripts" / "run-long-task.sh"
+PRODUCTION_RUN_LONG_TASK = REPO_ROOT / "scripts" / "run-long-task.sh"
+RUN_LONG_TASK = PRODUCTION_RUN_LONG_TASK
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _worker_environment(tmp_path: Path) -> dict[str, str]:
+    systemctl_root = tmp_path / "worker-control-bin"
+    systemctl_root.mkdir()
+    _write_executable(
+        systemctl_root / "systemctl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *--property=MemoryPeak*--value*) printf '0\n' ;;
+  *--property=Result*--value*) printf 'success\n' ;;
+  *) exit 1 ;;
+esac
+""",
+    )
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join((str(systemctl_root), environment.get("PATH", "")))
+    environment["AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS"] = "0.2"
+    return environment
+
+
+def _install_control_shims(
+    root: Path,
+    *,
+    systemd_run_contents: str | None = None,
+) -> None:
+    root.mkdir(parents=True)
+    _write_executable(
+        root / "setsid",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FIXED_CONTROL_LOG:-}" ]]; then printf 'setsid\n' >>"$FIXED_CONTROL_LOG"; fi
+exec "$@"
+""",
+    )
+    _write_executable(
+        root / "timeout",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FIXED_CONTROL_LOG:-}" ]]; then printf 'timeout\n' >>"$FIXED_CONTROL_LOG"; fi
+[[ $# -ge 2 ]] || exit 125
+shift
+exec "$@"
+""",
+    )
+    _write_executable(
+        root / "systemctl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FIXED_CONTROL_LOG:-}" ]]; then printf 'systemctl\n' >>"$FIXED_CONTROL_LOG"; fi
+if [[ "$*" == *"property=Result"* && "$*" == *"--value"* ]]; then
+  printf 'success\n'
+elif [[ "$*" == *"property=MemoryPeak"* && "$*" == *"--value"* ]]; then
+  printf '0\n'
+elif [[ "$*" == *" show "* || "$*" == show* ]]; then
+  printf 'LoadState=loaded\nActiveState=active\nResult=success\n'
+fi
+""",
+    )
+    _write_executable(
+        root / "systemd-run",
+        systemd_run_contents
+        or """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FIXED_CONTROL_LOG:-}" ]]; then printf 'systemd-run\n' >>"$FIXED_CONTROL_LOG"; fi
+no_block=0
+working_directory=""
+environment=()
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+  case "$1" in
+    --no-block) no_block=1 ;;
+    --working-directory=*) working_directory="${1#*=}" ;;
+    --setenv=*) environment+=("${1#--setenv=}") ;;
+  esac
+  shift
+done
+[[ $# -gt 0 ]] || exit 2
+shift
+for variable in "${environment[@]}"; do
+  export "$variable"
+done
+if [[ -n "$working_directory" ]]; then
+  cd -- "$working_directory"
+fi
+if (( no_block )); then
+  "$@" &
+else
+  "$@"
+fi
+""",
+    )
+
+
+def _rewrite_launcher(
+    tmp_path: Path,
+    *,
+    destination: Path | None = None,
+    repo_root: Path = REPO_ROOT,
+    root_name: str = "control-bin-custom",
+    owner_uid: int | None = None,
+    systemd_run_contents: str | None = None,
+) -> Path:
+    root = tmp_path / root_name
+    _install_control_shims(root, systemd_run_contents=systemd_run_contents)
+    source = PRODUCTION_RUN_LONG_TASK.read_text(encoding="utf-8")
+    expected_owner_uid = os.geteuid() if owner_uid is None else owner_uid
+    substitutions = (
+        ('readonly setsid_path="/usr/bin/setsid"', f'readonly setsid_path="{root / "setsid"}"'),
+        (
+            'readonly systemd_run_path="/usr/bin/systemd-run"',
+            f'readonly systemd_run_path="{root / "systemd-run"}"',
+        ),
+        (
+            'readonly systemctl_path="/usr/bin/systemctl"',
+            f'readonly systemctl_path="{root / "systemctl"}"',
+        ),
+        (
+            'readonly timeout_path="/usr/bin/timeout"',
+            f'readonly timeout_path="{root / "timeout"}"',
+        ),
+        ('[[ "$owner" == "0" ]]', f'[[ "$owner" == "{expected_owner_uid}" ]]'),
+        (
+            'repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"',
+            f'repo_root="{repo_root}"',
+        ),
+    )
+    for original, replacement in substitutions:
+        assert source.count(original) == 1
+        source = source.replace(original, replacement)
+    launcher_root = destination or tmp_path / "launcher-copy"
+    scripts_root = launcher_root / "scripts"
+    scripts_root.mkdir(parents=True, exist_ok=True)
+    launcher = scripts_root / "run-long-task.sh"
+    launcher.write_text(source, encoding="utf-8")
+    launcher.chmod(0o755)
+    worker = scripts_root / "run-long-task-worker.sh"
+    worker_command = shlex.quote(str(REPO_ROOT / "scripts" / "run-long-task-worker.sh"))
+    worker.write_text(
+        f'#!/usr/bin/env bash\nexec {worker_command} "$@"\n',
+        encoding="utf-8",
+    )
+    worker.chmod(0o755)
+    return launcher
 
 
 @pytest.fixture(autouse=True)
 def launch_request_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTORESEARCH_LAUNCH_REQUESTS_DIR", str(tmp_path / "launch-requests"))
+    launcher = _rewrite_launcher(tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "RUN_LONG_TASK", launcher)
 
 
 def _manifest(
@@ -87,9 +241,12 @@ def _run_launcher_with_fake_identity_output(
     fake_repo = tmp_path / "launcher-repo"
     (fake_repo / "scripts").mkdir(parents=True)
     (fake_repo / ".venv" / "bin").mkdir(parents=True)
-    launcher = fake_repo / "scripts" / "run-long-task.sh"
-    launcher.write_text(RUN_LONG_TASK.read_text(encoding="utf-8"), encoding="utf-8")
-    launcher.chmod(0o755)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        destination=fake_repo,
+        repo_root=fake_repo,
+        root_name="launcher-control-bin",
+    )
     runtime = fake_repo / ".venv" / "bin" / "python"
     runtime.write_text(
         "#!/usr/bin/env python3\n"
@@ -562,18 +719,15 @@ def test_run_long_task_queues_when_systemd_probe_fails(tmp_path: Path) -> None:
     launch_requests = tmp_path / "launch-requests"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
     _write_command_file(command_file, command)
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    (shim_dir / "systemd-run").write_text(
-        "#!/usr/bin/env bash\nexit 1\n",
-        encoding="utf-8",
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="probe-control-bin",
+        systemd_run_contents="#!/usr/bin/env bash\nexit 1\n",
     )
-    (shim_dir / "systemd-run").chmod(0o755)
     environment = dict(os.environ)
     environment.pop("AUTORESEARCH_FORCE_LAUNCH_QUEUE", None)
     environment.update(
         {
-            "PATH": f"{shim_dir}:{environment['PATH']}",
             "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(launch_requests),
         }
     )
@@ -581,7 +735,7 @@ def test_run_long_task_queues_when_systemd_probe_fails(tmp_path: Path) -> None:
     result = subprocess.run(
         [
             "bash",
-            str(RUN_LONG_TASK),
+            str(launcher),
             "--run-dir",
             str(run_dir),
             "--runs-root",
@@ -605,7 +759,7 @@ def test_run_long_task_queues_when_systemd_probe_fails(tmp_path: Path) -> None:
 
 
 def test_run_long_task_script_defaults_match_python_constants() -> None:
-    script = RUN_LONG_TASK.read_text(encoding="utf-8")
+    script = PRODUCTION_RUN_LONG_TASK.read_text(encoding="utf-8")
     runs_match = re.search(
         r'runs_root="\$\{AUTORESEARCH_RUNS_ROOT:-([^}]+)\}"',
         script,
@@ -619,6 +773,191 @@ def test_run_long_task_script_defaults_match_python_constants() -> None:
     assert launch_requests_match is not None
     assert Path(runs_match.group(1)) == DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT
     assert Path(launch_requests_match.group(1)) == DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS
+    for name in ("setsid", "systemd-run", "systemctl", "timeout"):
+        assert f'readonly {name.replace("-", "_")}_path="/usr/bin/{name}"' in script
+    assert re.search(r'(?m)^\s*elif ! "\$timeout_path" 2s "\$systemd_run_path"', script)
+    assert '"$setsid_path" "$systemd_run_path" ' + "\\" in script
+    assert '"$systemctl_path" --user show "$unit_name" --no-pager' in script
+    assert '"$systemctl_path" --user stop "$unit_name"' in script
+    assert not re.search(r"(?m)^\s*(?:setsid|systemd-run|systemctl|timeout)(?:\s|$)", script)
+    assert '[[ "$owner" == "0" ]]' in script
+    assert "AUTORESEARCH_TEST_MODE" not in script
+    assert "AUTORESEARCH_TEST_CONTROL_BIN_ROOT" not in script
+    assert "control_bin_root" not in script
+
+
+def test_run_long_task_pins_control_plane_against_path_shims(tmp_path: Path) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    fixed_log = tmp_path / "fixed-control.log"
+    path_log = tmp_path / "path-control.log"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="fixed-control-bin",
+    )
+    path_shims = tmp_path / "path-shims"
+    path_shims.mkdir()
+    for name in ("setsid", "systemd-run", "systemctl", "timeout"):
+        _write_executable(
+            path_shims / name,
+            f"#!/usr/bin/env bash\nprintf '%s\\n' {name!r} >> {str(path_log)!r}\nexit 97\n",
+        )
+
+    environment = {
+        **os.environ,
+        "FIXED_CONTROL_LOG": str(fixed_log),
+        "PATH": f"{path_shims}:{os.environ['PATH']}",
+    }
+    environment.pop("AUTORESEARCH_FORCE_LAUNCH_QUEUE", None)
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _wait_for_terminal_status(run_dir)["state"] == RunState.SUCCEEDED.value
+    assert not path_log.exists()
+    assert {"setsid", "systemd-run", "systemctl", "timeout"} <= set(
+        fixed_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_kind", ("missing", "nonregular", "symlink", "non-executable", "writable")
+)
+@pytest.mark.parametrize("target_name", ("setsid", "systemd-run", "systemctl", "timeout"))
+def test_run_long_task_rejects_untrusted_fixed_control_executable(
+    tmp_path: Path,
+    bad_kind: str,
+    target_name: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    command = ("true",)
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(tmp_path, root_name="bad-control-bin")
+    target = tmp_path / "bad-control-bin" / target_name
+    if bad_kind == "missing":
+        target.unlink()
+    elif bad_kind == "nonregular":
+        target.unlink()
+        target.mkdir()
+    elif bad_kind == "symlink":
+        target.unlink()
+        target.symlink_to("/usr/bin/true")
+    elif bad_kind == "non-executable":
+        target.chmod(0o644)
+    elif bad_kind == "writable":
+        target.chmod(0o775)
+    else:
+        raise AssertionError(f"unhandled bad kind: {bad_kind}")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert target_name in result.stderr
+    if bad_kind in {"missing", "nonregular", "symlink"}:
+        assert "non-symlink regular file" in result.stderr
+    elif bad_kind == "non-executable":
+        assert "not executable" in result.stderr
+    else:
+        assert "group/world writable" in result.stderr
+    assert command_file.exists()
+    assert not run_dir.exists()
+    assert not runs_root.exists()
+
+
+def test_run_long_task_rejects_root_control_executable_for_nonroot_test(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    command = ("true",)
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="wrong-owner-control-bin",
+        owner_uid=0,
+    )
+    if os.geteuid() == 0:
+        try:
+            nobody = pwd.getpwnam("nobody")
+        except KeyError:
+            pytest.skip("root runner has no conventional nobody account")
+        if nobody.pw_uid == 0:
+            pytest.skip("root runner's nobody account is not unprivileged")
+        try:
+            os.chown(tmp_path / "wrong-owner-control-bin" / "setsid", nobody.pw_uid, nobody.pw_gid)
+        except OSError as exc:
+            pytest.skip(f"root runner cannot chown test shim to nobody: {exc}")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "setsid has unexpected owner" in result.stderr
+    assert command_file.exists()
+    assert not run_dir.exists()
+    assert not runs_root.exists()
 
 
 @pytest.mark.parametrize(
@@ -653,18 +992,16 @@ def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
         command=command,
     )
     write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    (shim_dir / "systemd-run").write_text(
-        "#!/usr/bin/env bash\nexit 1\n",
-        encoding="utf-8",
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="prepared-control-bin",
+        systemd_run_contents="#!/usr/bin/env bash\nexit 1\n",
     )
-    (shim_dir / "systemd-run").chmod(0o755)
 
     result = subprocess.run(
         [
             "bash",
-            str(RUN_LONG_TASK),
+            str(launcher),
             "--launch-prepared",
             "--run-dir",
             str(run_dir),
@@ -675,7 +1012,6 @@ def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
         check=False,
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{shim_dir}:{os.environ['PATH']}"},
     )
 
     assert result.returncode != 0
@@ -1087,7 +1423,7 @@ def test_operator_stop_preserves_primary_outcome_with_escaped_capture_sentinel(
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        env={**os.environ, "AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS": "0.2"},
+        env=_worker_environment(tmp_path),
     )
     sentinel_survived = False
     try:
@@ -1167,7 +1503,7 @@ def test_worker_terminalizes_after_direct_child_exits_with_a_live_descendant(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS": "0.2"},
+        env=_worker_environment(tmp_path),
     )
     try:
         stdout, stderr = proc.communicate(timeout=3.0)
@@ -1228,7 +1564,7 @@ def test_worker_keeps_escaped_sentinel_alive_and_reports_incomplete_capture(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env={**os.environ, "AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS": "0.2"},
+        env=_worker_environment(tmp_path),
     )
     sentinel_survived = False
     try:
@@ -1264,23 +1600,25 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
     captured_argv = tmp_path / "systemd-argv.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
     _write_command_file(command_file, command)
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-    (shim_dir / "systemd-run").write_text(
-        "#!/usr/bin/env python3\n"
-        "import json, os, sys\n"
-        "if '--no-block' not in sys.argv:\n"
-        "    raise SystemExit(0)\n"
-        "open(os.environ['CAPTURED_ARGV'], 'w', encoding='utf-8').write(json.dumps(sys.argv[1:]))\n"
-        "raise SystemExit(1)\n",
-        encoding="utf-8",
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="argv-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "if '--no-block' not in sys.argv:\n"
+            "    raise SystemExit(0)\n"
+            "open(os.environ['CAPTURED_ARGV'], 'w', encoding='utf-8').write(\n"
+            "    json.dumps(sys.argv[1:])\n"
+            ")\n"
+            "raise SystemExit(1)\n"
+        ),
     )
-    (shim_dir / "systemd-run").chmod(0o755)
 
     result = subprocess.run(
         [
             "bash",
-            str(RUN_LONG_TASK),
+            str(launcher),
             "--run-dir",
             str(run_dir),
             "--runs-root",
@@ -1296,7 +1634,6 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
         text=True,
         env={
             **os.environ,
-            "PATH": f"{shim_dir}:{os.environ['PATH']}",
             "CAPTURED_ARGV": str(captured_argv),
             "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(tmp_path / "launch-requests"),
         },

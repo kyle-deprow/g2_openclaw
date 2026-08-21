@@ -61,6 +61,7 @@ done
 
 [[ "$run_dir" = /* ]] || die "--run-dir must be absolute"
 [[ "$runs_root" = /* ]] || die "--runs-root must be absolute"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$launch_prepared" -eq 1 ]]; then
   [[ -z "$manifest" ]] || die "--manifest is not valid with --launch-prepared"
   [[ -z "$command_file" ]] || die "--command-file is not valid with --launch-prepared"
@@ -77,19 +78,38 @@ else
   [[ "$command_file" = /* ]] || die "--command-file must be absolute"
 fi
 [[ $# -eq 0 ]] || die "unexpected positional arguments; use --command-file"
-command -v setsid >/dev/null 2>&1 || die "setsid is required for detached launch"
-command -v systemd-run >/dev/null 2>&1 || die "systemd-run is required for isolated detached launch"
-command -v timeout >/dev/null 2>&1 || die "timeout is required for launch probing"
-command -v systemctl >/dev/null 2>&1 || die "systemctl is required for detached launch validation"
+
+validate_control_executable() {
+  local label="$1" path="$2" owner mode
+  [[ -f "$path" && ! -L "$path" ]] ||
+    die "$label must be a non-symlink regular file: $path"
+  [[ -x "$path" ]] || die "$label is not executable: $path"
+  owner="$(/usr/bin/stat -c '%u' -- "$path")" ||
+    die "cannot inspect $label ownership: $path"
+  [[ "$owner" == "0" ]] ||
+    die "$label has unexpected owner: $path"
+  mode="$(/usr/bin/stat -c '%a' -- "$path")" ||
+    die "cannot inspect $label mode: $path"
+  (( (8#$mode & 022) == 0 )) || die "$label is group/world writable: $path"
+}
+
+readonly setsid_path="/usr/bin/setsid"
+readonly systemd_run_path="/usr/bin/systemd-run"
+readonly systemctl_path="/usr/bin/systemctl"
+readonly timeout_path="/usr/bin/timeout"
+validate_control_executable "setsid" "$setsid_path"
+validate_control_executable "systemd-run" "$systemd_run_path"
+validate_control_executable "systemctl" "$systemctl_path"
+validate_control_executable "timeout" "$timeout_path"
+
 uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launch"
 uv_bin_dir="$(dirname -- "$uv_path")"
-transient_path="${PATH}:${uv_bin_dir}"
+transient_path="${systemctl_path%/*}:${PATH}:${uv_bin_dir}"
 timeout_term_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
 # /tmp is a 16G tmpfs; a large panel hydration exhausted it (ENOSPC) while the
 # root disk had 176G free. Long-task temp files belong on disk.
 long_task_tmpdir="${AUTORESEARCH_LONG_TASK_TMPDIR:-/home/dev/.openclaw/autoresearch/model-workspaces/.long-task-tmp}"
 mkdir -m 700 -p -- "$long_task_tmpdir" || die "cannot create long-task tmpdir"
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # Direct venv argv: sandboxed stage agents cannot write the uv cache or repo
 # .venv, so `uv run` fails with EROFS inside the launch sandbox.
 runtime_python=("${repo_root}/.venv/bin/python" -m gateway.autoresearch_runs)
@@ -141,7 +161,7 @@ if [[ "$launch_prepared" -eq 0 ]]; then
   launch_queue_unreachable=0
   if [[ "${AUTORESEARCH_FORCE_LAUNCH_QUEUE:-0}" == "1" ]]; then
     launch_queue_unreachable=1
-  elif ! timeout 2s systemd-run --user --collect --quiet -- true >/dev/null 2>&1; then
+  elif ! "$timeout_path" 2s "$systemd_run_path" --user --collect --quiet -- true >/dev/null 2>&1; then
     launch_queue_unreachable=1
   fi
   if [[ "$launch_queue_unreachable" -eq 1 ]]; then
@@ -187,7 +207,7 @@ trap cleanup_startup_marker EXIT
 
 unit_start_failed() {
   local properties load_state="" active_state="" result="" property value
-  properties="$(systemctl --user show "$unit_name" --no-pager \
+  properties="$("$systemctl_path" --user show "$unit_name" --no-pager \
     --property=LoadState --property=ActiveState --property=Result 2>/dev/null)" || return 1
   while IFS='=' read -r property value; do
     case "$property" in
@@ -200,7 +220,7 @@ unit_start_failed() {
 }
 
 stop_transient_unit() {
-  systemctl --user stop "$unit_name" >/dev/null 2>&1 || true
+  "$systemctl_path" --user stop "$unit_name" >/dev/null 2>&1 || true
 }
 
 # Torch/CUDA host-side allocations add pressure. MemoryHigh is a reclaim
@@ -208,7 +228,7 @@ stop_transient_unit() {
 # gives headroom without changing host-OOM arithmetic: gateway MemoryMax=10G
 # + long task 12G = 22G against 30.25 GiB of RAM. Do not raise MemoryMax; a
 # prior combined-ceiling change created a host-OOM path and was reverted.
-if ! setsid systemd-run \
+if ! "$setsid_path" "$systemd_run_path" \
   --user --no-block --collect --unit="$unit_name" --service-type=exec \
   --setenv=PATH="$transient_path" --working-directory="$working_directory" \
   --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
