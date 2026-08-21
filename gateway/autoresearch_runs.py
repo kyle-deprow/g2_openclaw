@@ -120,6 +120,8 @@ _RUN_MANIFEST_V2_KEYS: tuple[str, ...] = (
     "projected_model_seconds",
 )
 _PROJECTED_MODEL_SECONDS_MAX_JSON_BYTES = 128
+_FIRST_ATTEMPT_VERIFICATION_CPU_TIMEOUT_SECONDS = 14_400.0
+_FIRST_ATTEMPT_VERIFICATION_GPU_TIMEOUT_SECONDS = 28_800.0
 
 
 class AutoresearchRunRecordError(ValueError):
@@ -221,6 +223,27 @@ def _validate_projected_model_seconds(value: object) -> int | float | None:
             "manifest projected_model_seconds is outside the supported numeric domain"
         )
     return cast(int | float, value)
+
+
+def _validate_timeout_seconds(value: object) -> float | None:
+    if value is None:
+        return None
+    if type(value) not in (int, float):
+        raise AutoresearchRunRecordError(
+            "timeout_seconds must be a finite positive JSON number or null"
+        )
+    numeric_value = cast(int | float, value)
+    try:
+        normalized = float(numeric_value)
+    except (OverflowError, ValueError) as exc:
+        raise AutoresearchRunRecordError(
+            "timeout_seconds must be a finite positive JSON number or null"
+        ) from exc
+    if not math.isfinite(normalized) or normalized <= 0:
+        raise AutoresearchRunRecordError(
+            "timeout_seconds must be a finite positive JSON number or null"
+        )
+    return normalized
 
 
 def _require_absolute_path(value: object, *, label: str) -> str:
@@ -337,6 +360,7 @@ class RunManifest:
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int:
             raise AutoresearchRunRecordError("manifest schema_version must be an integer")
+        _validate_timeout_seconds(self.timeout_seconds)
         if self.schema_version == _HISTORIC_RUN_RECORD_SCHEMA_VERSION:
             if self.compute_target is not None or self.projected_model_seconds is not None:
                 raise AutoresearchRunRecordError(
@@ -375,13 +399,7 @@ class RunManifest:
             expected_artifact = _require_canonical_absolute_path(
                 expected_artifact, label="expected_artifact_path"
             )
-        timeout = raw["timeout_seconds"]
-        if timeout is not None:
-            if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-                raise AutoresearchRunRecordError(
-                    "timeout_seconds must be a positive number or null"
-                )
-            timeout = float(timeout)
+        timeout = _validate_timeout_seconds(raw["timeout_seconds"])
         try:
             phase = Phase(_require_non_empty_string(raw["phase"], label="phase"))
         except ValueError as exc:
@@ -2264,6 +2282,23 @@ def consume_command_input_file(path: Path) -> tuple[str, ...]:
 def _require_current_manifest_for_preparation(manifest: RunManifest) -> None:
     if manifest.schema_version != RUN_RECORD_SCHEMA_VERSION:
         raise AutoresearchRunRecordError("new run preparation requires a schema-v2 manifest")
+    if manifest.phase != Phase.VERIFICATION or manifest.attempt != 1:
+        return
+    projection = manifest.projected_model_seconds
+    if projection is not None and projection > 0:
+        return
+    if manifest.compute_target in (ComputeTarget.GPU, ComputeTarget.MIXED):
+        target_class = "gpu/mixed"
+        minimum_timeout = _FIRST_ATTEMPT_VERIFICATION_GPU_TIMEOUT_SECONDS
+    else:
+        target_class = "none/cpu"
+        minimum_timeout = _FIRST_ATTEMPT_VERIFICATION_CPU_TIMEOUT_SECONDS
+    if manifest.timeout_seconds is not None and manifest.timeout_seconds < minimum_timeout:
+        raise AutoresearchRunRecordError(
+            "first-attempt verification default timeout for target class "
+            f"{target_class} requires timeout_seconds to be null or at least "
+            f"{minimum_timeout:g} seconds"
+        )
 
 
 def prepare_run(

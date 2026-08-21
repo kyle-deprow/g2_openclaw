@@ -108,6 +108,28 @@ def _historical_manifest(run_dir: Path) -> dict[str, object]:
     return raw
 
 
+def _policy_manifest(
+    run_dir: Path,
+    *,
+    compute_target: ComputeTarget,
+    projected_model_seconds: object,
+    timeout_seconds: object,
+    attempt: int = 1,
+    phase: str = Phase.VERIFICATION.value,
+) -> dict[str, object]:
+    raw = _manifest(run_dir)
+    raw.update(
+        {
+            "phase": phase,
+            "attempt": attempt,
+            "timeout_seconds": timeout_seconds,
+            "compute_target": compute_target.value,
+            "projected_model_seconds": projected_model_seconds,
+        }
+    )
+    return raw
+
+
 def test_manifest_schema_v2_roundtrip_has_typed_timeout_basis_fields(
     tmp_path: Path,
 ) -> None:
@@ -171,6 +193,47 @@ def test_manifest_schema_v2_rejects_invalid_projected_model_seconds(
     raw = _manifest_v2(run_dir, projected_model_seconds=projected_model_seconds)
 
     with pytest.raises(AutoresearchRunRecordError, match="projected_model_seconds"):
+        RunManifest.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds",
+    (
+        True,
+        False,
+        0,
+        -1,
+        -0.0,
+        "30",
+        Decimal("30"),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**5000,
+    ),
+    ids=(
+        "bool-true",
+        "bool-false",
+        "zero",
+        "negative",
+        "negative-zero",
+        "string",
+        "decimal",
+        "nan",
+        "infinity",
+        "negative-infinity",
+        "huge-int",
+    ),
+)
+def test_manifest_schema_v2_rejects_invalid_timeout_seconds(
+    tmp_path: Path,
+    timeout_seconds: object,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir)
+    raw["timeout_seconds"] = timeout_seconds
+
+    with pytest.raises(AutoresearchRunRecordError, match="timeout_seconds"):
         RunManifest.from_dict(raw)
 
 
@@ -406,6 +469,142 @@ def test_new_preparation_rejects_historical_manifest(
                 command=command,
             )
     assert not run_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("compute_target", "projected_model_seconds", "minimum_timeout"),
+    (
+        (ComputeTarget.NONE, None, 14_400),
+        (ComputeTarget.NONE, 0, 14_400),
+        (ComputeTarget.NONE, -1, 14_400),
+        (ComputeTarget.CPU, None, 14_400),
+        (ComputeTarget.CPU, 0, 14_400),
+        (ComputeTarget.CPU, -1, 14_400),
+        (ComputeTarget.GPU, None, 28_800),
+        (ComputeTarget.GPU, 0, 28_800),
+        (ComputeTarget.GPU, -1, 28_800),
+        (ComputeTarget.MIXED, None, 28_800),
+        (ComputeTarget.MIXED, 0, 28_800),
+        (ComputeTarget.MIXED, -1, 28_800),
+    ),
+)
+def test_first_attempt_verification_default_timeout_threshold(
+    tmp_path: Path,
+    compute_target: ComputeTarget,
+    projected_model_seconds: int | None,
+    minimum_timeout: int,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-1"
+    manifest_path = tmp_path / "manifest.json"
+    raw = _policy_manifest(
+        run_dir,
+        compute_target=compute_target,
+        projected_model_seconds=projected_model_seconds,
+        timeout_seconds=minimum_timeout - 1,
+    )
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(AutoresearchRunRecordError, match="first-attempt verification default"):
+        prepare_run(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            runs_root=runs_root,
+            command=("verify-command", "--opaque-value"),
+        )
+    assert not run_dir.exists()
+
+    raw["timeout_seconds"] = minimum_timeout
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+    assert run_dir.exists()
+
+
+@pytest.mark.parametrize("with_command_file", (False, True))
+def test_first_attempt_verification_default_timeout_is_enforced_by_both_preparation_apis(
+    tmp_path: Path,
+    with_command_file: bool,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-1"
+    manifest_path = tmp_path / "manifest.json"
+    command = ("verify-command", "--opaque-value")
+    raw = _policy_manifest(
+        run_dir,
+        compute_target=ComputeTarget.NONE,
+        projected_model_seconds=None,
+        timeout_seconds=14_399,
+    )
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    if with_command_file:
+        command_file = tmp_path / "command.json"
+        command_file.write_text(json.dumps({"command": list(command)}), encoding="utf-8")
+        command_file.chmod(0o600)
+        with pytest.raises(AutoresearchRunRecordError, match="first-attempt verification default"):
+            prepare_run_with_command_file(
+                manifest_path=manifest_path,
+                run_dir=run_dir,
+                command_file=command_file,
+                runs_root=runs_root,
+            )
+        assert not command_file.exists()
+    else:
+        with pytest.raises(AutoresearchRunRecordError, match="first-attempt verification default"):
+            prepare_run(
+                manifest_path=manifest_path,
+                run_dir=run_dir,
+                runs_root=runs_root,
+                command=command,
+            )
+    assert not run_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "projected_model_seconds", "attempt", "phase"),
+    (
+        (None, None, 1, Phase.VERIFICATION.value),
+        (1, 1, 1, Phase.VERIFICATION.value),
+        (1, None, 2, Phase.VERIFICATION.value),
+        (1, None, 1, Phase.REVIEW.value),
+    ),
+)
+def test_first_attempt_verification_default_timeout_exceptions(
+    tmp_path: Path,
+    timeout_seconds: int | None,
+    projected_model_seconds: int | None,
+    attempt: int,
+    phase: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / phase / f"attempt-{attempt}"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            _policy_manifest(
+                run_dir,
+                compute_target=ComputeTarget.GPU,
+                projected_model_seconds=projected_model_seconds,
+                timeout_seconds=timeout_seconds,
+                attempt=attempt,
+                phase=phase,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+    assert run_dir.exists()
 
 
 def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path) -> None:

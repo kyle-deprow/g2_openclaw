@@ -2203,7 +2203,7 @@ def test_timeout_detached_verification_auto_advances_with_interrupted_evidence(
                 "expected_artifact_path": str(expected_run_json_path),
                 "timeout_seconds": 30.0,
                 "compute_target": "none",
-                "projected_model_seconds": None,
+                "projected_model_seconds": 1.0,
             }
         ),
         encoding="utf-8",

@@ -3172,7 +3172,7 @@ def _timeout_interrupted_quantipy_execution(
                 "expected_artifact_path": str(run_path),
                 "timeout_seconds": 30.0,
                 "compute_target": "none",
-                "projected_model_seconds": None,
+                "projected_model_seconds": 1.0,
             }
         ),
         encoding="utf-8",
