@@ -1108,6 +1108,80 @@ def _atomic_write(path: Path, payload: bytes, *, mode: int) -> None:
                 temporary_path.unlink()
 
 
+def _write_staged_file(
+    staging_descriptor: int,
+    name: str,
+    payload: bytes,
+    mode: int,
+    label: str,
+) -> None:
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            mode,
+            dir_fd=staging_descriptor,
+        )
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise AutoresearchRunRecordError(f"staged {label} already exists") from exc
+    except OSError as exc:
+        raise AutoresearchRunRecordError(f"failed to write staged {label}: {exc}") from exc
+    finally:
+        if descriptor != -1:
+            with suppress(OSError):
+                os.close(descriptor)
+
+
+def _cleanup_staged_bundle(
+    parent_descriptor: int, staging_name: str, staging_descriptor: int
+) -> None:
+    cleanup_error: OSError | None = None
+    if staging_descriptor != -1:
+        for name in ("manifest.json", _COMMAND_HANDOFF_NAME):
+            try:
+                os.unlink(name, dir_fd=staging_descriptor)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = cleanup_error or exc
+    try:
+        os.rmdir(staging_name, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise AutoresearchRunRecordError(
+            f"cannot clean failed run publication staging directory: {cleanup_error}"
+        ) from cleanup_error
+
+
+def _staging_was_published(
+    parent_descriptor: int,
+    staging_name: str,
+    final_name: str,
+    staging_descriptor: int,
+) -> bool:
+    try:
+        os.stat(staging_name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        try:
+            final_metadata = os.stat(final_name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        if os.path.samestat(final_metadata, os.fstat(staging_descriptor)):
+            return True
+        raise AutoresearchRunRecordError("run publication state could not be reconciled") from None
+    return False
+
+
 @contextmanager
 def _status_lock(run_dir: Path) -> Iterator[None]:
     lock_path = run_dir / _STATUS_LOCK_NAME
@@ -2046,14 +2120,107 @@ def prepare_run_with_command_file(
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT,
 ) -> PreparedRun:
     command = consume_command_input_file(command_file)
-    prepared = prepare_run(
-        manifest_path=manifest_path,
-        run_dir=run_dir,
-        runs_root=runs_root,
-        command=command,
-    )
-    write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
-    return prepared
+    canonical_run_dir = _validate_run_directory(run_dir, runs_root)
+    _reject_symlink(manifest_path, label="source manifest")
+    manifest = RunManifest.from_dict(_read_json(manifest_path, label="source manifest"))
+    if manifest.run_directory != str(canonical_run_dir):
+        raise AutoresearchRunRecordError("manifest run_directory does not match --run-dir")
+    if manifest.command_sha256 != command_sha256(command):
+        raise AutoresearchRunRecordError("manifest command_sha256 does not match command")
+    working_directory = Path(manifest.working_directory)
+    _reject_symlink(working_directory, label="manifest working_directory")
+    if not working_directory.is_dir():
+        raise AutoresearchRunRecordError("manifest working_directory must be a directory")
+
+    manifest_payload = _canonical_json(manifest.to_dict())
+    handoff_payload = _canonical_json({"command": list(command)})
+    _reject_symlink(run_dir.parent, label="run publication parent")
+    parent_descriptor: int | None = None
+    staging_descriptor = -1
+    staging_name: str | None = None
+    published = False
+    try:
+        parent_descriptor = _open_absolute_directory_no_follow(
+            canonical_run_dir.parent,
+            label="run publication parent",
+            create_mode=0o700,
+        )
+        assert parent_descriptor is not None
+        try:
+            _validate_partial_archive_directory(
+                parent_descriptor, label="run publication parent", exact_mode=True
+            )
+            os.fsync(parent_descriptor)
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                f"cannot durably prepare run publication parent: {exc}"
+            ) from exc
+        candidate_name = f".staging-{secrets.token_hex(16)}"
+        try:
+            os.mkdir(candidate_name, mode=0o700, dir_fd=parent_descriptor)
+            staging_name = candidate_name
+            staging_descriptor = os.open(
+                candidate_name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_descriptor,
+            )
+            os.fchmod(staging_descriptor, 0o700)
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                f"cannot create run publication staging directory: {exc}"
+            ) from exc
+        _write_staged_file(staging_descriptor, "manifest.json", manifest_payload, 0o400, "manifest")
+        _write_staged_file(
+            staging_descriptor,
+            _COMMAND_HANDOFF_NAME,
+            handoff_payload,
+            0o600,
+            "command handoff",
+        )
+        try:
+            os.fsync(staging_descriptor)
+        except OSError as exc:
+            raise AutoresearchRunRecordError(f"failed to fsync staged run bundle: {exc}") from exc
+        try:
+            _rename_directory_no_replace(
+                staging_name,
+                source_directory=parent_descriptor,
+                destination_name=canonical_run_dir.name,
+                destination_directory=parent_descriptor,
+            )
+        except FileExistsError as exc:
+            raise AutoresearchRunRecordError(
+                "cannot publish run bundle: final run path already exists"
+            ) from exc
+        except OSError as exc:
+            raise AutoresearchRunRecordError(f"cannot publish run bundle: {exc}") from exc
+        published = True
+        try:
+            os.fsync(parent_descriptor)
+        except OSError as exc:
+            raise AutoresearchRunRecordError(
+                "complete-published state: run bundle is published but final parent fsync failed"
+            ) from exc
+    finally:
+        try:
+            if parent_descriptor is not None and not published and staging_name is not None:
+                if _staging_was_published(
+                    parent_descriptor,
+                    staging_name,
+                    canonical_run_dir.name,
+                    staging_descriptor,
+                ):
+                    published = True
+                else:
+                    _cleanup_staged_bundle(parent_descriptor, staging_name, staging_descriptor)
+        finally:
+            if staging_descriptor != -1:
+                with suppress(OSError):
+                    os.close(staging_descriptor)
+            if parent_descriptor is not None:
+                with suppress(OSError):
+                    os.close(parent_descriptor)
+    return PreparedRun(manifest=manifest, manifest_sha256=_manifest_digest(manifest))
 
 
 def _load_manifest(run_dir: Path, runs_root: Path) -> tuple[Path, RunManifest, str]:
@@ -2147,7 +2314,7 @@ def _current_status(run_dir: Path, runs_root: Path) -> tuple[Path, RunManifest, 
 
 
 def _open_absolute_directory_no_follow(
-    path: Path, *, label: str, missing_ok: bool = False
+    path: Path, *, label: str, missing_ok: bool = False, create_mode: int | None = None
 ) -> int | None:
     canonical_path = Path(_require_canonical_absolute_path(str(path), label=label))
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -2158,12 +2325,22 @@ def _open_absolute_directory_no_follow(
             try:
                 next_descriptor = os.open(component, flags, dir_fd=descriptor)
             except FileNotFoundError:
-                if missing_ok:
-                    os.close(descriptor)
-                    descriptor = -1
-                    return None
-                raise
-            os.close(descriptor)
+                if create_mode is None:
+                    if missing_ok:
+                        with suppress(OSError):
+                            os.close(descriptor)
+                        descriptor = -1
+                        return None
+                    raise
+                try:
+                    os.mkdir(component, mode=create_mode, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+                else:
+                    os.fsync(descriptor)
+                next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            with suppress(OSError):
+                os.close(descriptor)
             descriptor = next_descriptor
         result = descriptor
         descriptor = -1
@@ -2171,7 +2348,8 @@ def _open_absolute_directory_no_follow(
     except FileNotFoundError as exc:
         if missing_ok:
             if descriptor != -1:
-                os.close(descriptor)
+                with suppress(OSError):
+                    os.close(descriptor)
                 descriptor = -1
             return None
         raise AutoresearchRunRecordError(f"missing {label}: {canonical_path}") from exc
@@ -2181,7 +2359,8 @@ def _open_absolute_directory_no_follow(
         ) from exc
     finally:
         if descriptor != -1:
-            os.close(descriptor)
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def _validate_partial_archive_directory(

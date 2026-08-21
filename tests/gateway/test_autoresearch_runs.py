@@ -33,6 +33,7 @@ from gateway.autoresearch_runs import (
     create_command_input_file_from_stdin,
     prepare_output_capture,
     prepare_run,
+    prepare_run_with_command_file,
     read_run_record,
     start_run,
     supervise_command,
@@ -1366,6 +1367,419 @@ def test_command_input_file_is_private_no_follow_and_one_time(tmp_path: Path) ->
     symlink.symlink_to(target)
     with pytest.raises(AutoresearchRunRecordError, match="cannot open command input"):
         consume_command_input_file(symlink)
+
+
+def _write_command_input(path: Path, command: tuple[str, ...]) -> None:
+    path.write_text(json.dumps({"command": list(command)}), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _prepare_command_file_inputs(
+    tmp_path: Path,
+    *,
+    run_name: str = "attempt-2",
+) -> tuple[Path, Path, Path, Path, tuple[str, ...]]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / run_name
+    manifest_path = tmp_path / f"{run_name}-manifest.json"
+    command_file = tmp_path / f"{run_name}-command.json"
+    command = ("verify-command", "--opaque-value")
+    manifest_path.write_text(json.dumps(_manifest(run_dir)), encoding="utf-8")
+    _write_command_input(command_file, command)
+    return runs_root, run_dir, manifest_path, command_file, command
+
+
+def _staging_paths(run_dir: Path) -> list[Path]:
+    return [
+        path
+        for path in run_dir.parent.iterdir()
+        if path.name.startswith(".") and path.name != run_dir.name
+    ]
+
+
+def test_prepare_run_with_command_file_publishes_a_complete_canonical_bundle(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, command = _prepare_command_file_inputs(
+        tmp_path
+    )
+
+    prepared = prepare_run_with_command_file(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command_file=command_file,
+        runs_root=runs_root,
+    )
+
+    manifest_bytes = (run_dir / "manifest.json").read_bytes()
+    handoff_bytes = (run_dir / ".command-handoff.json").read_bytes()
+    assert json.loads(manifest_bytes) == _manifest(run_dir)
+    assert (
+        manifest_bytes
+        == json.dumps(_manifest(run_dir), sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    )
+    assert (
+        handoff_bytes
+        == json.dumps({"command": list(command)}, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n"
+    )
+    assert prepared.manifest_sha256 == sha256(manifest_bytes).hexdigest()
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((run_dir / "manifest.json").stat().st_mode) == 0o400
+    assert stat.S_IMODE((run_dir / ".command-handoff.json").stat().st_mode) == 0o600
+    assert not command_file.exists()
+    assert _staging_paths(run_dir) == []
+
+
+def test_rename_exception_after_real_publish_preserves_complete_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_rename = autoresearch_runs._rename_directory_no_replace
+
+    def rename_then_interrupt(
+        source_name: str,
+        *,
+        source_directory: int,
+        destination_name: str,
+        destination_directory: int,
+    ) -> None:
+        real_rename(
+            source_name,
+            source_directory=source_directory,
+            destination_name=destination_name,
+            destination_directory=destination_directory,
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        autoresearch_runs,
+        "_rename_directory_no_replace",
+        rename_then_interrupt,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert (run_dir / "manifest.json").read_bytes() == json.dumps(
+        _manifest(run_dir), sort_keys=True, separators=(",", ":")
+    ).encode() + b"\n"
+    assert json.loads((run_dir / ".command-handoff.json").read_bytes()) == {
+        "command": list(command)
+    }
+    assert _staging_paths(run_dir) == []
+
+
+def test_publication_parent_creation_fsyncs_each_ancestor_before_descending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    fsynced_paths: list[str] = []
+    real_fsync = os.fsync
+
+    def record_fsync(descriptor: int) -> None:
+        fsynced_paths.append(os.readlink(f"/proc/self/fd/{descriptor}"))
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+
+    prepare_run_with_command_file(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command_file=command_file,
+        runs_root=runs_root,
+    )
+
+    ancestor = str(run_dir.parent.parent)
+    immediate_parent = str(run_dir.parent)
+    assert ancestor in fsynced_paths
+    assert immediate_parent in fsynced_paths
+    assert fsynced_paths.index(ancestor) < fsynced_paths.index(immediate_parent)
+    first_staging_fsync = next(
+        index for index, path in enumerate(fsynced_paths) if ".staging-" in path
+    )
+    assert fsynced_paths.index(immediate_parent) < first_staging_fsync
+
+
+def test_publication_parent_ancestor_fsync_failure_prevents_final_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_fsync = os.fsync
+    failed_parent = str(run_dir.parent.parent)
+
+    def fail_ancestor_fsync(descriptor: int) -> None:
+        if os.readlink(f"/proc/self/fd/{descriptor}") == failed_parent:
+            raise OSError(errno.EIO, "injected ancestor fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_ancestor_fsync)
+
+    with pytest.raises(AutoresearchRunRecordError, match="publication parent"):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert not run_dir.exists()
+    assert _staging_paths(run_dir) == []
+
+
+def test_publication_parent_rejects_existing_non_private_mode(tmp_path: Path) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    run_dir.parent.mkdir(parents=True)
+    run_dir.parent.chmod(0o755)
+
+    with pytest.raises(AutoresearchRunRecordError, match="0700"):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert not run_dir.exists()
+    assert _staging_paths(run_dir) == []
+
+
+def test_descriptor_close_failure_does_not_mask_success_or_skip_other_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_close = os.close
+    closed_parent = False
+
+    def close_with_staging_failure(descriptor: int) -> None:
+        nonlocal closed_parent
+        target = os.readlink(f"/proc/self/fd/{descriptor}")
+        if target == str(run_dir):
+            raise OSError(errno.EIO, "injected staging descriptor close failure")
+        if target == str(run_dir.parent):
+            closed_parent = True
+        real_close(descriptor)
+
+    monkeypatch.setattr(os, "close", close_with_staging_failure)
+
+    prepare_run_with_command_file(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command_file=command_file,
+        runs_root=runs_root,
+    )
+
+    assert closed_parent
+    assert (run_dir / "manifest.json").exists()
+    assert (run_dir / ".command-handoff.json").exists()
+
+
+@pytest.mark.parametrize("existing_kind", ("file", "directory", "symlink"))
+def test_prepare_run_with_command_file_never_replaces_existing_final(
+    tmp_path: Path,
+    existing_kind: str,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    run_dir.parent.mkdir(parents=True)
+    target = tmp_path / "existing-target"
+    if existing_kind == "file":
+        run_dir.write_bytes(b"existing")
+    elif existing_kind == "directory":
+        run_dir.mkdir()
+        (run_dir / "marker").write_bytes(b"existing")
+    else:
+        target.mkdir()
+        (target / "marker").write_bytes(b"existing")
+        run_dir.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(AutoresearchRunRecordError):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert _staging_paths(run_dir) == []
+    if existing_kind == "file":
+        assert run_dir.read_bytes() == b"existing"
+    elif existing_kind == "directory":
+        assert (run_dir / "marker").read_bytes() == b"existing"
+    else:
+        assert run_dir.is_symlink()
+        assert (target / "marker").read_bytes() == b"existing"
+
+
+@pytest.mark.parametrize("failed_name", ("manifest.json", ".command-handoff.json"))
+def test_bundle_write_failure_leaves_no_final_or_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failed_name: str,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_write = getattr(autoresearch_runs, "_write_staged_file", None)
+
+    def fail_write(
+        staging_descriptor: int,
+        name: str,
+        payload: bytes,
+        mode: int,
+        label: str,
+    ) -> None:
+        if name == failed_name:
+            raise AutoresearchRunRecordError(f"injected {name} write failure")
+        assert real_write is not None
+        real_write(staging_descriptor, name, payload, mode, label)
+
+    monkeypatch.setattr(autoresearch_runs, "_write_staged_file", fail_write, raising=False)
+
+    with pytest.raises(AutoresearchRunRecordError, match="write"):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert not run_dir.exists()
+    assert _staging_paths(run_dir) == []
+
+
+def test_prepublication_fsync_failure_leaves_no_final_or_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_fsync = os.fsync
+
+    def fail_staging_fsync(descriptor: int) -> None:
+        target = os.readlink(f"/proc/self/fd/{descriptor}")
+        if ".staging-" in target and stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EIO, "injected staging fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_staging_fsync)
+
+    with pytest.raises(AutoresearchRunRecordError, match="stage"):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert not run_dir.exists()
+    assert _staging_paths(run_dir) == []
+
+
+def test_post_rename_parent_fsync_failure_reports_complete_published_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs_root, run_dir, manifest_path, command_file, command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    real_fsync = os.fsync
+    parent_fsyncs = 0
+
+    def fail_parent_fsync(descriptor: int) -> None:
+        nonlocal parent_fsyncs
+        target = os.readlink(f"/proc/self/fd/{descriptor}")
+        if target == str(run_dir.parent):
+            parent_fsyncs += 1
+            if parent_fsyncs == 2:
+                raise OSError(errno.EIO, "injected parent fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", fail_parent_fsync)
+
+    with pytest.raises(AutoresearchRunRecordError, match=r"complete.*published"):
+        prepare_run_with_command_file(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            command_file=command_file,
+            runs_root=runs_root,
+        )
+
+    assert not command_file.exists()
+    assert (run_dir / "manifest.json").read_bytes() == json.dumps(
+        _manifest(run_dir), sort_keys=True, separators=(",", ":")
+    ).encode() + b"\n"
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+    assert json.loads((run_dir / ".command-handoff.json").read_bytes()) == {
+        "command": list(command)
+    }
+    assert _staging_paths(run_dir) == []
+
+
+def test_staging_directory_is_unpredictable_private_and_cleaned_on_publish_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def fail_publish(
+        source_name: str,
+        *,
+        source_directory: int,
+        destination_name: str,
+        destination_directory: int,
+    ) -> None:
+        del destination_name, destination_directory
+        staging_path = Path(os.readlink(f"/proc/self/fd/{source_directory}")) / source_name
+        metadata = staging_path.lstat()
+        seen.append(source_name)
+        assert source_name.startswith(".staging-")
+        assert len(source_name) > len(".staging-") + 16
+        assert stat.S_IMODE(metadata.st_mode) == 0o700
+        assert metadata.st_uid == os.getuid()
+        raise OSError(errno.EIO, "injected publish failure")
+
+    monkeypatch.setattr(autoresearch_runs, "_rename_directory_no_replace", fail_publish)
+    for index in range(2):
+        inputs = _prepare_command_file_inputs(tmp_path / f"case-{index}")
+        with pytest.raises(AutoresearchRunRecordError, match="publish"):
+            prepare_run_with_command_file(
+                manifest_path=inputs[2],
+                run_dir=inputs[1],
+                command_file=inputs[3],
+                runs_root=inputs[0],
+            )
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
 
 
 def test_command_input_helper_creates_private_file_with_exclusive_no_follow(
