@@ -26,6 +26,7 @@ from gateway.autoresearch_runs import (
     AutoresearchRunRecordError,
     RunFailureClassification,
     RunState,
+    capture_prepared_run_identity,
     command_sha256,
     prepare_run,
     read_run_record,
@@ -72,6 +73,73 @@ def _write_command_file(path: Path, command: tuple[str, ...]) -> None:
     path.chmod(0o600)
 
 
+def _identity_json(run_dir: Path, runs_root: Path) -> str:
+    return json.dumps(
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root).to_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _run_launcher_with_fake_identity_output(
+    tmp_path: Path, identity_output: str
+) -> subprocess.CompletedProcess[str]:
+    fake_repo = tmp_path / "launcher-repo"
+    (fake_repo / "scripts").mkdir(parents=True)
+    (fake_repo / ".venv" / "bin").mkdir(parents=True)
+    launcher = fake_repo / "scripts" / "run-long-task.sh"
+    launcher.write_text(RUN_LONG_TASK.read_text(encoding="utf-8"), encoding="utf-8")
+    launcher.chmod(0o755)
+    runtime = fake_repo / ".venv" / "bin" / "python"
+    runtime.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        "if sys.argv[3] == 'prepared-identity':\n"
+        "    sys.stdout.write(os.environ['FAKE_IDENTITY_OUTPUT'])\n",
+        encoding="utf-8",
+    )
+    runtime.chmod(0o755)
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    for command in ("setsid", "systemd-run", "systemctl", "timeout", "uv"):
+        shim = shim_dir / command
+        shim.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        shim.chmod(0o755)
+
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    _write_command_file(command_file, ("true",))
+    return subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=fake_repo,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{shim_dir}:{os.environ['PATH']}",
+            "AUTORESEARCH_FORCE_LAUNCH_QUEUE": "1",
+            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(tmp_path / "launch-requests"),
+            "AUTORESEARCH_LONG_TASK_TMPDIR": str(tmp_path / "long-task-tmp"),
+            "FAKE_IDENTITY_OUTPUT": identity_output,
+        },
+    )
+
+
 def _wait_for_terminal_status(run_dir: Path) -> dict[str, object]:
     deadline = time.monotonic() + 8.0
     while time.monotonic() < deadline:
@@ -91,6 +159,8 @@ def _run_worker_with_fake_runtime(
     archival_exit_code: int = 0,
     outcome: str = "success",
     real_archival: bool = False,
+    identity_json_override: str | None = None,
+    identity_mutation: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]], dict[str, object]]:
     fake_repo = tmp_path / "worker-repo"
     (fake_repo / "scripts").mkdir(parents=True)
@@ -106,6 +176,7 @@ def _run_worker_with_fake_runtime(
         """#!/usr/bin/env python3
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -124,6 +195,18 @@ if operation == 'prepare-output-capture':
     run_dir.mkdir(parents=True, exist_ok=True)
     for stream in ('stdout', 'stderr'):
         (run_dir / f'{stream}.log').write_bytes(b'')
+elif operation == 'validate-prepared-identity':
+    if os.environ.get('FAKE_REAL_ARCHIVAL') != '1':
+        subprocess.run(
+            [
+                sys.executable,
+                '-m',
+                'gateway.autoresearch_runs',
+                operation,
+                *arguments,
+            ],
+            check=True,
+        )
 elif operation == 'capture-output-stream':
     stream = argument('--stream')
     (run_dir / f'{stream}.log').write_bytes(sys.stdin.buffer.read())
@@ -206,13 +289,45 @@ elif operation == 'complete':
             runs_root=runs_root,
             command=command,
         )
-        start_run(run_dir=run_dir, pid=os.getpid(), runs_root=runs_root)
+        write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
     else:
-        run_dir.mkdir(parents=True)
-        (run_dir / "manifest.json").write_text(
-            json.dumps({"timeout_seconds": timeout_seconds}),
+        command = ("fake-command",)
+        manifest_path = tmp_path / "source-manifest.json"
+        manifest = _manifest(run_dir, command)
+        manifest["timeout_seconds"] = timeout_seconds
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        prepare_run(
+            manifest_path=manifest_path,
+            run_dir=run_dir,
+            runs_root=runs_root,
+            command=command,
+        )
+        write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
+    identity_json = _identity_json(run_dir, runs_root)
+    if identity_mutation == "run-inode":
+        identity = cast(dict[str, object], json.loads(identity_json))
+        identity["run_inode"] = int(cast(int, identity["run_inode"])) + 1
+        identity_json = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    elif identity_mutation == "handoff-swap":
+        handoff_path = run_dir / ".command-handoff.json"
+        replacement = tmp_path / "replacement-handoff.json"
+        replacement.write_bytes(handoff_path.read_bytes())
+        replacement.chmod(0o600)
+        os.replace(replacement, handoff_path)
+    elif identity_mutation == "manifest-swap":
+        manifest_path = run_dir / "manifest.json"
+        manifest = cast(dict[str, object], json.loads(manifest_path.read_bytes()))
+        manifest["task_label"] = "identity-swap"
+        manifest_path.chmod(0o600)
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
+        manifest_path.chmod(0o400)
+    if identity_json_override is not None:
+        identity_json = identity_json_override
+    if real_archival:
+        start_run(run_dir=run_dir, pid=os.getpid(), runs_root=runs_root)
     log_path = tmp_path / "runtime.log"
     diagnostic = "ARCHIVAL_FAILURE_SENTINEL"
     worker_arguments = [
@@ -222,6 +337,7 @@ elif operation == 'complete':
         str(runs_root),
         str(run_dir / ".startup-published.json"),
         "openclaw-long-task-test.service",
+        identity_json,
     ]
     worker_environment = {
         **os.environ,
@@ -266,8 +382,42 @@ elif operation == 'complete':
         cast(dict[str, object], json.loads(line))
         for line in log_path.read_text(encoding="utf-8").splitlines()
     ]
-    status = cast(dict[str, object], json.loads((run_dir / "status.json").read_text()))
+    status = (
+        cast(dict[str, object], json.loads((run_dir / "status.json").read_text()))
+        if (run_dir / "status.json").exists()
+        else {}
+    )
     return result, operations, status
+
+
+@pytest.mark.parametrize("failure", ("run-inode", "handoff-swap", "manifest-swap"))
+def test_worker_rejects_identity_mismatch_before_runtime_mutation(
+    tmp_path: Path, failure: str
+) -> None:
+    result, operations, status = _run_worker_with_fake_runtime(
+        tmp_path,
+        timeout_seconds=None,
+        identity_mutation=failure,
+    )
+
+    assert result.returncode != 0
+    assert [operation["operation"] for operation in operations] == ["validate-prepared-identity"]
+    assert status == {}
+
+
+@pytest.mark.parametrize("identity_json", ("not-json", "x" * 4097))
+def test_worker_rejects_malformed_or_oversized_identity_before_runtime_mutation(
+    tmp_path: Path, identity_json: str
+) -> None:
+    result, operations, status = _run_worker_with_fake_runtime(
+        tmp_path,
+        timeout_seconds=None,
+        identity_json_override=identity_json,
+    )
+
+    assert result.returncode != 0
+    assert [operation["operation"] for operation in operations] == ["validate-prepared-identity"]
+    assert status == {}
 
 
 def test_worker_timeout_archival_failure_terminalizes_timeout_and_returns_nonzero(
@@ -469,6 +619,23 @@ def test_run_long_task_script_defaults_match_python_constants() -> None:
     assert launch_requests_match is not None
     assert Path(runs_match.group(1)) == DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT
     assert Path(launch_requests_match.group(1)) == DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS
+
+
+@pytest.mark.parametrize(
+    ("identity_output", "error"),
+    (
+        ("", "output is empty"),
+        ("{}\n{}", "output is multiline"),
+        ("x" * 4097, "output exceeds 4096 bytes"),
+    ),
+)
+def test_run_long_task_rejects_invalid_launcher_identity_output(
+    tmp_path: Path, identity_output: str, error: str
+) -> None:
+    result = _run_launcher_with_fake_identity_output(tmp_path, identity_output)
+
+    assert result.returncode != 0
+    assert error in result.stderr
 
 
 def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
@@ -877,7 +1044,7 @@ def test_run_long_task_rejects_secret_bearing_argv(tmp_path: Path) -> None:
 def test_operator_stop_preserves_primary_outcome_with_escaped_capture_sentinel(
     tmp_path: Path,
 ) -> None:
-    from gateway.autoresearch_runs import prepare_run, start_run, write_command_handoff
+    from gateway.autoresearch_runs import prepare_run, write_command_handoff
 
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
@@ -913,6 +1080,7 @@ def test_operator_stop_preserves_primary_outcome_with_escaped_capture_sentinel(
             str(runs_root),
             str(startup_marker),
             "openclaw-long-task-test.service",
+            _identity_json(run_dir, runs_root),
         ],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
@@ -993,6 +1161,7 @@ def test_worker_terminalizes_after_direct_child_exits_with_a_live_descendant(
             str(runs_root),
             str(startup_marker),
             "openclaw-long-task-test.service",
+            _identity_json(run_dir, runs_root),
         ],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
@@ -1053,6 +1222,7 @@ def test_worker_keeps_escaped_sentinel_alive_and_reports_incomplete_capture(
             str(runs_root),
             str(startup_marker),
             "openclaw-long-task-test.service",
+            _identity_json(run_dir, runs_root),
         ],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
@@ -1134,6 +1304,16 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
 
     assert result.returncode != 0
     argv_text = captured_argv.read_text(encoding="utf-8")
+    argv = cast(list[str], json.loads(argv_text))
+    worker_script = str(RUN_LONG_TASK.parent / "run-long-task-worker.sh")
+    worker_index = argv.index(worker_script)
+    assert argv[worker_index + 1 : worker_index + 6] == [
+        str(run_dir),
+        str(runs_root),
+        str(run_dir / ".startup-published.json"),
+        argv[worker_index + 4],
+        _identity_json(run_dir, runs_root),
+    ]
     assert "unique-launch-payload" not in argv_text
     assert str(command_file) not in argv_text
     assert str(run_dir) in argv_text

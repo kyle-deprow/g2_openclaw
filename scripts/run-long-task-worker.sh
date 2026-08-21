@@ -7,17 +7,21 @@ die() {
   exit 1
 }
 
-[[ $# -eq 4 ]] || die "worker requires run directory, runs root, startup marker, and unit name"
+[[ $# -eq 5 ]] || die "worker requires run directory, runs root, startup marker, unit name, and identity JSON"
 run_dir="$1"
 runs_root="$2"
 startup_marker_file="$3"
 unit_name="$4"
+identity_json="$5"
 [[ "$run_dir" = /* && "$runs_root" = /* ]] || die "worker paths must be absolute"
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # Direct venv argv matches the launcher: no uv cache or repo .venv writes.
 runtime_python=("${repo_root}/.venv/bin/python" -m gateway.autoresearch_runs)
 [[ -x "${runtime_python[0]}" ]] || die "repo venv python is missing: ${runtime_python[0]}"
+"${runtime_python[@]}" validate-prepared-identity \
+  --run-dir "$run_dir" --runs-root "$runs_root" --identity-json "$identity_json" ||
+  die "prepared run identity validation failed"
 supervisor_pid=""
 monitor_pid=""
 timeout_pid=""

@@ -108,6 +108,34 @@ if [[ "$launch_prepared" -eq 0 ]]; then
     --command-file "$command_file" || die "immutable manifest and protected command handoff preparation failed"
 fi
 
+capture_prepared_identity() {
+  local raw output byte_count status
+  raw="$(
+    set +e
+    "${runtime_python[@]}" prepared-identity \
+      --run-dir "$run_dir" --runs-root "$runs_root"
+    status=$?
+    printf '\n__OPENCLAW_IDENTITY_OUTPUT_END__'
+    exit "$status"
+  )" ||
+    die "prepared run identity capture failed"
+  output="${raw%$'\n__OPENCLAW_IDENTITY_OUTPUT_END__'}"
+  [[ -n "$output" ]] || die "prepared run identity output is empty"
+  byte_count="$(printf '%s' "$output" | LC_ALL=C wc -c)" ||
+    die "prepared run identity output size could not be checked"
+  (( byte_count <= 4096 )) || die "prepared run identity output exceeds 4096 bytes"
+  if [[ "$output" == *$'\n' ]]; then
+    output="${output%$'\n'}"
+  fi
+  [[ "$output" != *$'\n'* && "$output" != *$'\r'* ]] ||
+    die "prepared run identity output is multiline"
+  [[ -n "$output" ]] || die "prepared run identity output is empty"
+  prepared_identity="$output"
+}
+
+prepared_identity=""
+capture_prepared_identity
+
 launch_requests_dir="${AUTORESEARCH_LAUNCH_REQUESTS_DIR:-/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests}"
 if [[ "$launch_prepared" -eq 0 ]]; then
   launch_queue_unreachable=0
@@ -187,6 +215,7 @@ if ! setsid systemd-run \
   --setenv=TMPDIR="$long_task_tmpdir" \
   --property=MemoryHigh=10G --property=MemoryMax=12G --property=KillMode=control-group \
   -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
+  "$prepared_identity" \
   </dev/null >/dev/null 2>&1; then
   die "detached systemd unit could not be enqueued: $unit_name"
 fi
