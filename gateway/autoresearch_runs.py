@@ -8,6 +8,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -25,16 +26,17 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType
-from typing import BinaryIO, NoReturn
+from typing import BinaryIO, NoReturn, cast
 
 from gateway.autoresearch.constants import (
     DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT,
     DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
 )
-from gateway.autoresearch.enums import Phase
+from gateway.autoresearch.enums import ComputeTarget, Phase
 
 DEFAULT_AUTORESEARCH_RUNS_ROOT = DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT
-RUN_RECORD_SCHEMA_VERSION = 1
+RUN_RECORD_SCHEMA_VERSION = 2
+_HISTORIC_RUN_RECORD_SCHEMA_VERSION = 1
 RUN_STATUS_SCHEMA_VERSION = 5
 _HISTORIC_RUN_STATUS_SCHEMA_VERSION = 1
 _PREVIOUS_RUN_STATUS_SCHEMA_VERSION = 2
@@ -98,6 +100,26 @@ _PREPARED_IDENTITY_STABLE_FIELDS: tuple[str, ...] = (
     "st_mtime_ns",
     "st_ctime_ns",
 )
+_RUN_MANIFEST_V1_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "iteration",
+    "phase",
+    "attempt",
+    "task_label",
+    "state_reference_sha256",
+    "instruction_manifest_sha256",
+    "run_directory",
+    "working_directory",
+    "command_sha256",
+    "expected_artifact_path",
+    "timeout_seconds",
+)
+_RUN_MANIFEST_V2_KEYS: tuple[str, ...] = (
+    *_RUN_MANIFEST_V1_KEYS,
+    "compute_target",
+    "projected_model_seconds",
+)
+_PROJECTED_MODEL_SECONDS_MAX_JSON_BYTES = 128
 
 
 class AutoresearchRunRecordError(ValueError):
@@ -175,6 +197,30 @@ def _require_non_empty_string(value: object, *, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AutoresearchRunRecordError(f"{label} must be a non-empty string")
     return value.strip()
+
+
+def _validate_projected_model_seconds(value: object) -> int | float | None:
+    if value is None:
+        return None
+    if type(value) not in (int, float):
+        raise AutoresearchRunRecordError(
+            "manifest projected_model_seconds must be a finite JSON number or null"
+        )
+    if type(value) is float and not math.isfinite(value):
+        raise AutoresearchRunRecordError(
+            "manifest projected_model_seconds must be a finite JSON number or null"
+        )
+    try:
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+    except (OverflowError, ValueError) as exc:
+        raise AutoresearchRunRecordError(
+            "manifest projected_model_seconds is outside the supported numeric domain"
+        ) from exc
+    if len(encoded.encode("ascii")) > _PROJECTED_MODEL_SECONDS_MAX_JSON_BYTES:
+        raise AutoresearchRunRecordError(
+            "manifest projected_model_seconds is outside the supported numeric domain"
+        )
+    return cast(int | float, value)
 
 
 def _require_absolute_path(value: object, *, label: str) -> str:
@@ -285,34 +331,41 @@ class RunManifest:
     command_sha256: str
     expected_artifact_path: str | None
     timeout_seconds: float | None
+    compute_target: ComputeTarget | None = None
+    projected_model_seconds: int | float | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int:
+            raise AutoresearchRunRecordError("manifest schema_version must be an integer")
+        if self.schema_version == _HISTORIC_RUN_RECORD_SCHEMA_VERSION:
+            if self.compute_target is not None or self.projected_model_seconds is not None:
+                raise AutoresearchRunRecordError(
+                    "schema-v1 manifest cannot contain timeout-basis fields"
+                )
+        elif self.schema_version == RUN_RECORD_SCHEMA_VERSION:
+            if type(self.compute_target) is not ComputeTarget:
+                raise AutoresearchRunRecordError(
+                    "schema-v2 manifest compute_target must be a ComputeTarget"
+                )
+            _validate_projected_model_seconds(self.projected_model_seconds)
+        else:
+            raise AutoresearchRunRecordError("manifest schema_version is unsupported")
 
     @classmethod
     def from_dict(cls, raw: object) -> RunManifest:
         if not isinstance(raw, dict):
             raise AutoresearchRunRecordError("manifest must be an object")
-        _require_exact_keys(
-            raw,
-            (
-                "schema_version",
-                "iteration",
-                "phase",
-                "attempt",
-                "task_label",
-                "state_reference_sha256",
-                "instruction_manifest_sha256",
-                "run_directory",
-                "working_directory",
-                "command_sha256",
-                "expected_artifact_path",
-                "timeout_seconds",
-            ),
-            label="manifest",
-        )
-        schema_version = raw["schema_version"]
+        schema_version = raw.get("schema_version")
+        if type(schema_version) is not int:
+            raise AutoresearchRunRecordError("manifest schema_version must be an integer")
+        if schema_version == _HISTORIC_RUN_RECORD_SCHEMA_VERSION:
+            _require_exact_keys(raw, _RUN_MANIFEST_V1_KEYS, label="historical manifest")
+        elif schema_version == RUN_RECORD_SCHEMA_VERSION:
+            _require_exact_keys(raw, _RUN_MANIFEST_V2_KEYS, label="manifest")
+        else:
+            raise AutoresearchRunRecordError("manifest schema_version is unsupported")
         iteration = raw["iteration"]
         attempt = raw["attempt"]
-        if schema_version != RUN_RECORD_SCHEMA_VERSION:
-            raise AutoresearchRunRecordError("manifest schema_version is unsupported")
         if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 1:
             raise AutoresearchRunRecordError("manifest iteration must be a positive integer")
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
@@ -333,8 +386,25 @@ class RunManifest:
             phase = Phase(_require_non_empty_string(raw["phase"], label="phase"))
         except ValueError as exc:
             raise AutoresearchRunRecordError("manifest phase is unsupported") from exc
+        compute_target: ComputeTarget | None = None
+        projected_model_seconds: int | float | None = None
+        if schema_version == RUN_RECORD_SCHEMA_VERSION:
+            compute_target_value = raw["compute_target"]
+            if not isinstance(compute_target_value, str):
+                raise AutoresearchRunRecordError(
+                    "manifest compute_target must be one of none, cpu, gpu, or mixed"
+                )
+            try:
+                compute_target = ComputeTarget(compute_target_value)
+            except ValueError as exc:
+                raise AutoresearchRunRecordError(
+                    "manifest compute_target must be one of none, cpu, gpu, or mixed"
+                ) from exc
+            projected_model_seconds = _validate_projected_model_seconds(
+                raw["projected_model_seconds"]
+            )
         return cls(
-            schema_version=RUN_RECORD_SCHEMA_VERSION,
+            schema_version=schema_version,
             iteration=iteration,
             phase=phase,
             attempt=attempt,
@@ -352,10 +422,12 @@ class RunManifest:
             command_sha256=_require_sha256(raw["command_sha256"], label="command_sha256"),
             expected_artifact_path=expected_artifact,
             timeout_seconds=timeout,
+            compute_target=compute_target,
+            projected_model_seconds=projected_model_seconds,
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "iteration": self.iteration,
             "phase": self.phase.value,
@@ -369,6 +441,15 @@ class RunManifest:
             "expected_artifact_path": self.expected_artifact_path,
             "timeout_seconds": self.timeout_seconds,
         }
+        if self.schema_version == RUN_RECORD_SCHEMA_VERSION:
+            assert self.compute_target is not None
+            payload.update(
+                {
+                    "compute_target": self.compute_target.value,
+                    "projected_model_seconds": self.projected_model_seconds,
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1065,7 +1146,9 @@ def _read_json(path: Path, *, label: str) -> dict[str, object]:
         raw = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_strict_object)
     except FileNotFoundError as exc:
         raise AutoresearchRunRecordError(f"missing {label}: {path}") from exc
-    except (OSError, json.JSONDecodeError) as exc:
+    except AutoresearchRunRecordError:
+        raise
+    except (OSError, OverflowError, ValueError) as exc:
         raise AutoresearchRunRecordError(f"invalid {label}: {path}") from exc
     if not isinstance(raw, dict):
         raise AutoresearchRunRecordError(f"{label} must be an object")
@@ -1135,7 +1218,9 @@ def _parse_prepared_identity_json(payload: bytes, *, label: str) -> object:
             object_pairs_hook=_strict_object,
             parse_constant=_reject_prepared_identity_json_constant,
         )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except AutoresearchRunRecordError:
+        raise
+    except (OverflowError, UnicodeDecodeError, ValueError) as exc:
         raise AutoresearchRunRecordError(f"invalid {label}") from exc
 
 

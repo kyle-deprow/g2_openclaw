@@ -9,13 +9,17 @@ import signal
 import stat
 import subprocess
 import sys
+from decimal import Decimal
+from enum import IntEnum
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 
 import gateway.autoresearch_runs as autoresearch_runs
 import pytest
 from gateway.autoresearch.constants import DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT
+from gateway.autoresearch.enums import ComputeTarget, Phase
 from gateway.autoresearch_runs import (
     EXPECTED_ARTIFACT_MAX_BYTES,
     OUTPUT_CAPTURE_MAX_BYTES,
@@ -36,6 +40,7 @@ from gateway.autoresearch_runs import (
     prepare_output_capture,
     prepare_run,
     prepare_run_with_command_file,
+    read_run_manifest,
     read_run_record,
     start_run,
     supervise_command,
@@ -43,6 +48,14 @@ from gateway.autoresearch_runs import (
     validate_startup_marker,
     write_command_handoff,
 )
+
+
+class _ManifestInt(int):
+    pass
+
+
+class _ManifestSchemaVersion(IntEnum):
+    V1 = 1
 
 
 def _manifest(
@@ -66,6 +79,283 @@ def _manifest(
         ),
         "timeout_seconds": None,
     }
+
+
+def _manifest_v2(
+    run_dir: Path,
+    *,
+    compute_target: object = ComputeTarget.GPU.value,
+    projected_model_seconds: object = 12.5,
+) -> dict[str, object]:
+    raw = _manifest(run_dir)
+    raw.update(
+        {
+            "schema_version": 2,
+            "compute_target": compute_target,
+            "projected_model_seconds": projected_model_seconds,
+        }
+    )
+    return raw
+
+
+def test_manifest_schema_v2_roundtrip_has_typed_timeout_basis_fields(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir)
+
+    manifest = RunManifest.from_dict(raw)
+
+    assert manifest.schema_version == 2
+    assert manifest.compute_target is ComputeTarget.GPU
+    assert isinstance(manifest.projected_model_seconds, float)
+    assert manifest.to_dict() == raw
+    assert set(manifest.to_dict()) == set(raw)
+
+
+@pytest.mark.parametrize("compute_target", tuple(ComputeTarget))
+def test_manifest_schema_v2_accepts_each_compute_target(
+    tmp_path: Path,
+    compute_target: ComputeTarget,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir, compute_target=compute_target.value)
+
+    manifest = RunManifest.from_dict(raw)
+
+    assert manifest.compute_target is compute_target
+    assert manifest.to_dict()["compute_target"] == compute_target.value
+
+
+@pytest.mark.parametrize("compute_target", ("invalid", None), ids=("invalid", "null"))
+def test_manifest_schema_v2_rejects_invalid_compute_target(
+    tmp_path: Path,
+    compute_target: object,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir, compute_target=compute_target)
+
+    with pytest.raises(AutoresearchRunRecordError, match="compute_target"):
+        RunManifest.from_dict(raw)
+
+
+@pytest.mark.parametrize(
+    "projected_model_seconds",
+    (
+        True,
+        "12.5",
+        Decimal("12.5"),
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        [],
+        10**5000,
+    ),
+    ids=("bool", "string", "decimal", "nan", "infinity", "negative-infinity", "list", "huge-int"),
+)
+def test_manifest_schema_v2_rejects_invalid_projected_model_seconds(
+    tmp_path: Path,
+    projected_model_seconds: object,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir, projected_model_seconds=projected_model_seconds)
+
+    with pytest.raises(AutoresearchRunRecordError, match="projected_model_seconds"):
+        RunManifest.from_dict(raw)
+
+
+@pytest.mark.parametrize("projected_model_seconds", (None, 0, -1, 0.0, -0.0, -1.25))
+def test_manifest_schema_v2_accepts_zero_and_negative_projection(
+    tmp_path: Path,
+    projected_model_seconds: int | float | None,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir, projected_model_seconds=projected_model_seconds)
+
+    manifest = RunManifest.from_dict(raw)
+
+    assert manifest.projected_model_seconds == projected_model_seconds
+
+
+def test_manifest_schema_v2_accepts_exact_projection_json_size_limit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    projected_model_seconds = 10**127
+
+    assert len(json.dumps(projected_model_seconds, separators=(",", ":"))) == 128
+    manifest = RunManifest.from_dict(
+        _manifest_v2(run_dir, projected_model_seconds=projected_model_seconds)
+    )
+
+    assert manifest.projected_model_seconds == projected_model_seconds
+
+
+def test_manifest_schema_v2_rejects_projection_over_json_size_limit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    projected_model_seconds = 10**128
+
+    assert len(json.dumps(projected_model_seconds, separators=(",", ":"))) == 129
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match="outside the supported numeric domain",
+    ):
+        RunManifest.from_dict(
+            _manifest_v2(run_dir, projected_model_seconds=projected_model_seconds)
+        )
+
+
+def test_manifest_schema_v1_roundtrip_preserves_historical_shape_and_digest(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest(run_dir)
+    manifest = RunManifest.from_dict(raw)
+
+    assert manifest.schema_version == 1
+    assert manifest.compute_target is None
+    assert manifest.projected_model_seconds is None
+    assert manifest.to_dict() == raw
+    canonical = autoresearch_runs._canonical_json(raw)
+    assert autoresearch_runs._manifest_digest(manifest) == sha256(canonical).hexdigest()
+    assert b"compute_target" not in canonical
+    assert b"projected_model_seconds" not in canonical
+
+
+def test_read_json_wraps_file_huge_integer_digit_limit_error(tmp_path: Path) -> None:
+    digit_limit = sys.get_int_max_str_digits()
+    if digit_limit == 0:
+        pytest.skip("Python integer digit parsing limit is disabled")
+    path = tmp_path / "huge-integer.json"
+    path.write_bytes(b'{"huge":' + b"1" * (digit_limit + 1) + b"}")
+
+    with pytest.raises(AutoresearchRunRecordError, match="invalid source manifest"):
+        autoresearch_runs._read_json(path, label="source manifest")
+
+
+@pytest.mark.parametrize("schema_version", (True, False, 0, 3, 1.0, "1", None))
+def test_manifest_rejects_unknown_or_boolean_schema_versions(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest(run_dir)
+    raw["schema_version"] = schema_version
+
+    with pytest.raises(AutoresearchRunRecordError, match="schema_version"):
+        RunManifest.from_dict(raw)
+
+
+def test_manifest_schema_v2_requires_exact_keys(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest_v2(run_dir)
+
+    with pytest.raises(AutoresearchRunRecordError, match="exact keys"):
+        RunManifest.from_dict({**raw, "extra": None})
+    with pytest.raises(AutoresearchRunRecordError, match="exact keys"):
+        RunManifest.from_dict({key: value for key, value in raw.items() if key != "compute_target"})
+
+
+def _direct_manifest(
+    run_dir: Path,
+    *,
+    schema_version: int,
+    compute_target: ComputeTarget | None = None,
+    projected_model_seconds: int | float | None = None,
+) -> RunManifest:
+    return RunManifest(
+        schema_version=schema_version,
+        iteration=7,
+        phase=Phase.VERIFICATION,
+        attempt=2,
+        task_label="verification-tests",
+        state_reference_sha256="a" * 64,
+        instruction_manifest_sha256="b" * 64,
+        run_directory=str(run_dir),
+        working_directory=str(run_dir.parents[3]),
+        command_sha256=sha256(b"verify-command\x00--opaque-value").hexdigest(),
+        expected_artifact_path=None,
+        timeout_seconds=None,
+        compute_target=compute_target,
+        projected_model_seconds=projected_model_seconds,
+    )
+
+
+def test_manifest_direct_construction_enforces_conditional_schema_invariants(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    historical = _direct_manifest(run_dir, schema_version=1)
+    current = _direct_manifest(
+        run_dir,
+        schema_version=2,
+        compute_target=ComputeTarget.CPU,
+        projected_model_seconds=-0.0,
+    )
+
+    assert historical.to_dict() == _manifest(run_dir)
+    assert current.to_dict()["compute_target"] == ComputeTarget.CPU.value
+    assert current.to_dict()["projected_model_seconds"] == -0.0
+
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(run_dir, schema_version=1, compute_target=ComputeTarget.GPU)
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(run_dir, schema_version=1, projected_model_seconds=1)
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(run_dir, schema_version=2)
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(
+            run_dir,
+            schema_version=2,
+            compute_target=cast(ComputeTarget, "gpu"),
+        )
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(
+            run_dir,
+            schema_version=2,
+            compute_target=ComputeTarget.GPU,
+            projected_model_seconds=cast(int | float, Decimal("1")),
+        )
+    with pytest.raises(AutoresearchRunRecordError):
+        _direct_manifest(run_dir, schema_version=3)
+
+
+@pytest.mark.parametrize("schema_version", (_ManifestInt(1), _ManifestSchemaVersion.V1))
+def test_manifest_parser_rejects_int_subclass_schema_versions(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
+    raw = _manifest(run_dir)
+    raw["schema_version"] = schema_version
+
+    with pytest.raises(AutoresearchRunRecordError, match="schema_version"):
+        RunManifest.from_dict(raw)
+
+
+@pytest.mark.parametrize("schema_version", (1, 2))
+def test_prepare_and_read_support_manifest_schema_versions(
+    tmp_path: Path,
+    schema_version: int,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    manifest_path = tmp_path / "manifest.json"
+    raw = _manifest(run_dir) if schema_version == 1 else _manifest_v2(run_dir)
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    prepared = prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+
+    assert prepared.manifest == RunManifest.from_dict(raw)
+    assert read_run_manifest(run_dir=run_dir, runs_root=runs_root) == prepared.manifest
+    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")) == raw
 
 
 def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path) -> None:
@@ -1891,6 +2181,13 @@ def test_validate_prepared_run_identity_cli_rejects_malformed_json(
     )
     with pytest.raises(AutoresearchRunRecordError):
         autoresearch_runs._main()
+
+
+def test_prepared_identity_json_parser_wraps_huge_integer_error() -> None:
+    payload = b'{"run_device":' + b"1" + b"0" * 5000 + b"}"
+
+    with pytest.raises(AutoresearchRunRecordError, match="invalid identity"):
+        autoresearch_runs._parse_prepared_identity_json(payload, label="identity")
 
 
 def test_validate_prepared_run_identity_cli_rejects_oversized_json(
