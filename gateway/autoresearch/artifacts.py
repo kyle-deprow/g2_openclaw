@@ -73,6 +73,9 @@ from gateway.autoresearch.enums import (
     ResearchMode as ResearchMode,
 )
 from gateway.autoresearch.enums import (
+    ReviewFindingDisposition as ReviewFindingDisposition,
+)
+from gateway.autoresearch.enums import (
     ReviewVerdict as ReviewVerdict,
 )
 from gateway.autoresearch.enums import (
@@ -1076,6 +1079,7 @@ class QuantipyExecutionInterruptedEvidence:
 class ReviewResultArtifact:
     reviewer_agent_id: str
     verdict: ReviewVerdict
+    finding_disposition: ReviewFindingDisposition
     recommended_metric_name: str
     recommended_metric_value: float
     critical_issues: tuple[str, ...]
@@ -1092,6 +1096,7 @@ class ReviewResultArtifact:
             expected=(
                 "reviewer_agent_id",
                 "verdict",
+                "finding_disposition",
                 "recommended_metric_name",
                 "recommended_metric_value",
                 "critical_issues",
@@ -1100,9 +1105,24 @@ class ReviewResultArtifact:
                 "summary",
             ),
         )
+        try:
+            finding_disposition = ReviewFindingDisposition(
+                _require_str(data, "finding_disposition")
+            )
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "review_result finding_disposition must be a known disposition"
+            ) from exc
+        try:
+            verdict = ReviewVerdict(_require_str(data, "verdict"))
+        except ValueError as exc:
+            raise AutoresearchValidationError(
+                "review_result verdict must be a known verdict"
+            ) from exc
         artifact = cls(
             reviewer_agent_id=_require_str(data, "reviewer_agent_id"),
-            verdict=ReviewVerdict(_require_str(data, "verdict")),
+            verdict=verdict,
+            finding_disposition=finding_disposition,
             recommended_metric_name=_require_str(data, "recommended_metric_name"),
             recommended_metric_value=_require_float(data, "recommended_metric_value"),
             critical_issues=_require_string_list(data, "critical_issues"),
@@ -1114,16 +1134,58 @@ class ReviewResultArtifact:
         return artifact
 
     def validate(self) -> None:
-        needs_fix = self.verdict is ReviewVerdict.FAIL or bool(self.critical_issues)
-        if needs_fix and not self.fix_requests:
+        if not isinstance(self.verdict, ReviewVerdict):
+            raise AutoresearchValidationError("review_result verdict must be a ReviewVerdict")
+        if not isinstance(self.finding_disposition, ReviewFindingDisposition):
             raise AutoresearchValidationError(
-                "review_result with critical issues or FAIL verdict requires fix_requests"
+                "review_result finding_disposition must be a ReviewFindingDisposition"
+            )
+        for field_name, values in (
+            ("critical_issues", self.critical_issues),
+            ("noncritical_issues", self.noncritical_issues),
+            ("fix_requests", self.fix_requests),
+        ):
+            if not isinstance(values, tuple):
+                raise AutoresearchValidationError(f"review_result {field_name} must be a tuple")
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise AutoresearchValidationError(
+                    f"review_result {field_name} must contain non-blank strings"
+                )
+        if self.finding_disposition is ReviewFindingDisposition.NONE:
+            if self.verdict is ReviewVerdict.FAIL or self.critical_issues or self.fix_requests:
+                raise AutoresearchValidationError(
+                    "review_result disposition NONE requires no FAIL verdict, critical issues, "
+                    "or fix requests"
+                )
+            return
+        if self.finding_disposition is ReviewFindingDisposition.FIX_REQUIRED:
+            if self.verdict is not ReviewVerdict.FAIL and not self.critical_issues:
+                raise AutoresearchValidationError(
+                    "review_result disposition FIX_REQUIRED requires FAIL or critical issues"
+                )
+            if not self.fix_requests:
+                raise AutoresearchValidationError(
+                    "review_result disposition FIX_REQUIRED requires fix_requests"
+                )
+            return
+        if self.verdict not in (ReviewVerdict.FAIL, ReviewVerdict.CONDITIONAL_PASS):
+            raise AutoresearchValidationError(
+                "review_result disposition DECISION_REQUIRED requires FAIL or CONDITIONAL PASS"
+            )
+        if not self.critical_issues:
+            raise AutoresearchValidationError(
+                "review_result disposition DECISION_REQUIRED requires critical issues"
+            )
+        if self.fix_requests:
+            raise AutoresearchValidationError(
+                "review_result disposition DECISION_REQUIRED forbids fix_requests"
             )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "reviewer_agent_id": self.reviewer_agent_id,
             "verdict": self.verdict.value,
+            "finding_disposition": self.finding_disposition.value,
             "recommended_metric_name": self.recommended_metric_name,
             "recommended_metric_value": self.recommended_metric_value,
             "critical_issues": list(self.critical_issues),
@@ -1295,13 +1357,29 @@ ARTIFACT_CONTRACTS: dict[ArtifactType, dict[str, object]] = {
         "required_fields": [
             "reviewer_agent_id",
             "verdict",
+            "finding_disposition",
             "recommended_metric_name",
             "recommended_metric_value",
             "critical_issues",
             "noncritical_issues",
             "fix_requests",
             "summary",
-        ]
+        ],
+        "field_types": {
+            "verdict": "enum[PASS,CONDITIONAL PASS,FAIL]",
+            "finding_disposition": "enum[NONE,FIX_REQUIRED,DECISION_REQUIRED]",
+            "critical_issues": "array[string]",
+            "noncritical_issues": "array[string]",
+            "fix_requests": "array[string]",
+        },
+        "shape_constraints": [
+            "NONE requires no FAIL verdict, critical issues, or fix requests",
+            "FIX_REQUIRED requires FAIL or critical issues and at least one exact fix request",
+            "DECISION_REQUIRED requires critical issues, FAIL or CONDITIONAL PASS, and "
+            "no fix requests",
+            "Use FIX_REQUIRED while any concrete defect remains; use DECISION_REQUIRED "
+            "only for an immutable evidence property",
+        ],
     },
     ArtifactType.FIX_RESULT: {
         "required_fields": [

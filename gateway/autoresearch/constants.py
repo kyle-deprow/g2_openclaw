@@ -31,7 +31,7 @@ DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT = Path(
 )
 AUTORESEARCH_LOCK_NAMESPACE = Path("/tmp") / f"g2-openclaw-autoresearch-locks-{os.getuid()}"
 
-AUTORESEARCH_STATE_SCHEMA_VERSION = 5
+AUTORESEARCH_STATE_SCHEMA_VERSION = 6
 HYPOTHESIS_FINGERPRINT_VERSION = "g2-openclaw-autoresearch-hypothesis-fingerprint-v1"
 HYPOTHESIS_FINGERPRINT_DIGEST_DOMAIN = "g2-openclaw.autoresearch.hypothesis-fingerprint"
 HYPOTHESIS_REGISTRY_REASON_MAX_CHARS = 160

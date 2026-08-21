@@ -803,6 +803,29 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "dishonest declaration" in review
     assert "mid-implementation INFRA_BLOCKED route bounds the cost" in review
     assert "named contract is recorded in the hypothesis registry" in review
+    assert "explicit finding_disposition of NONE, FIX_REQUIRED, or DECISION_REQUIRED" in review
+    assert "Do not infer finding_disposition from issue text or keywords" in review
+    assert (
+        "bootstrap interval spanning zero, fold concentration, or insufficient persistence"
+        in review
+    )
+    assert (
+        "Changing the hypothesis, pre-registration, accepted evidence, or launching a "
+        "materially new experiment is not a fix request" in review
+    )
+    assert "DECISION_REQUIRED routes directly to DECISION_LOG on the first review" in review
+    assert "Only FIX_REQUIRED critical issues route to fixer" in review
+    assert "DECISION_REQUIRED routes directly to DECISION_LOG, never fixer" in review
+
+    fix_test = autoresearch_engine._phase_instruction(
+        _state_to_review(policy),
+        Phase.FIX_TEST,
+        ArtifactType.FIX_RESULT,
+        ("fixer",),
+        state_path=Path("/tmp/state.json"),
+    )
+    assert "explicitly marked finding_disposition=FIX_REQUIRED" in fix_test
+    assert "DECISION_REQUIRED is decision work and must never be sent to fixer" in fix_test
 
 
 def test_decision_and_review_instructions_require_oos_metric_and_activity_floor(

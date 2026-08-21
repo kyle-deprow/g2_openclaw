@@ -78,9 +78,9 @@ files. No redundant manifest data is stored in campaign state.
 Before dispatch, the runner validates the operator-owned schema-v3
 platform-readiness manifest at
 `~/.openclaw/autoresearch/platform-readiness.json`. The separate live campaign
-state remains schema-v5. Any live schema-v2 state must be archived and a fresh
-schema-v5 state initialized before the supervisor restarts; in-place migration,
-repair, or overwrite is forbidden. Readiness pins canonical manifest and snapshot
+state remains schema-v6. A live schema-v5 state is incompatible and must be
+archived before fresh schema-v6 initialization; in-place migration, repair, or
+overwrite is forbidden. Readiness pins canonical manifest and snapshot
 identities and verifies SHA-256 receipts for the Quantipy data contract and
 authoritative XNYS calendar evidence. A `READY` manifest exposes the canonical
 capability object injected into every stage prompt.
@@ -99,7 +99,7 @@ After an operator changes a blocked or stale snapshot, rebuild readiness with
 `gateway-cli autoresearch-build-readiness --campaign-xnys-start 2022-01-03
 --campaign-xnys-end 2025-12-31` and then use
 `gateway-cli autoresearch-resume` to atomically replace the suspended live
-schema-v5 state with a resumed copy pinned to the new READY receipt. The
+schema-v6 state with a resumed copy pinned to the new READY receipt. The
 campaign starts after Reddit's `2021-12-31` availability boundary because the
 configured rolling aggregate entitlement rejects January/July 2021 and supports
 2022 onward. Building readiness strictly prewarms the campaign-start universe

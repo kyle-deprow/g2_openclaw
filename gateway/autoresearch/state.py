@@ -237,7 +237,7 @@ class AutoresearchState:
         if "schema_version" not in data:
             raise AutoresearchValidationError(
                 "autoresearch state missing schema_version is unsupported; archive it and "
-                "initialize a schema-v5 state with `gateway-cli autoresearch-init-state`; "
+                "initialize a schema-v6 state with `gateway-cli autoresearch-init-state`; "
                 f"expected schema_version={AUTORESEARCH_STATE_SCHEMA_VERSION}"
             )
         schema_version = _require_int(data, "schema_version")

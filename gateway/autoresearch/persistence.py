@@ -243,7 +243,7 @@ def _load_state_raw(path: Path) -> Mapping[str, object]:
 
 
 def initialize_state(readiness: PlatformReadinessManifest) -> AutoresearchState:
-    """Create a pristine v4 campaign state pinned to authoritative readiness."""
+    """Create a pristine current-schema campaign state pinned to authoritative readiness."""
     try:
         identity = readiness.require_ready()
     except ValueError as exc:

@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.18.0
+version: 8.18.1
 ---
 
 # Autoresearch
@@ -96,8 +96,8 @@ capability object injected into every stage. `BLOCKED` states the concrete
 operator action required. The runner never downloads, infers, substitutes, or
 repairs evidence.
 
-Before `autoresearch-next`, stop the supervisor and prepare schema-v5 state by
-initializing a pristine state from the READY manifest. A live schema-v2 state,
+Before `autoresearch-next`, stop the supervisor and prepare schema-v6 state by
+initializing a pristine state from the READY manifest. A live schema-v5 state,
 or state missing `schema_version`, is unsupported and must be archived, not
 migrated, repaired, or overwritten. Complete this reinitialization before
 restarting the supervisor:
@@ -113,7 +113,7 @@ restarting the supervisor:
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
-    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    archive="${state}.schema-v5.$(date -u +%Y%m%dT%H%M%SZ).archive"
     mv -- "$state" "$archive"
   fi
   mv -- "$tmp" "$state"
@@ -121,7 +121,7 @@ restarting the supervisor:
 )
 ```
 
-This procedure atomically leaves schema-v5 state at the authoritative path used
+This procedure atomically leaves schema-v6 state at the authoritative path used
 by control and the supervisor. Use that path for the first dispatch:
 
 ```bash
@@ -150,7 +150,7 @@ rejects January/July 2021 but supports 2022 onward. The readiness command
 strictly probes the campaign start through Quantipy's public
 `security_universe_screen` and daily regular-hours `prices` APIs for `AAPL`.
 This intentional operator prewarm may hydrate/cache data, and any probe failure
-must not produce a READY receipt. Then resume the same schema-v5 state
+must not produce a READY receipt. Then resume the same schema-v6 state
 atomically:
 
 ```bash
@@ -1063,7 +1063,7 @@ a fresh compact-v2 AAPL probe, and operator reason. It re-attests all hashes,
 absence/liveness and runtime facts immediately before atomic publication and
 authorizes only canonical direct-argv `-v5`; it never invokes a fixer.
 
-Schema-v4 state has no general retry migration. The only legacy bootstrap is the
+Schema-v6 state has no general retry migration. The only legacy bootstrap is the
 actual retry-receipt schema 1 for `-v2`, which binds exactly the canonical
 initial `-v1` failure. Every new receipt uses schema 2 and binds the complete
 ordered canonical digest list of prior verification artifacts. Recompute that
@@ -1304,15 +1304,28 @@ Reviewer focus:
   cost: it is a no-memory decision, and the named contract is recorded in the
   hypothesis registry before a fresh iteration.
 
-Required output: verdict (`PASS`, `CONDITIONAL PASS`, `FAIL`), recommended
-decision metric (for `ALPHA_RESEARCH`, an out-of-sample cost-net metric from
-the accepted verification artifact), critical issues, noncritical issues, and
-exact fix requests.
+Required output: verdict (`PASS`, `CONDITIONAL PASS`, `FAIL`), explicit
+`finding_disposition` (`NONE`, `FIX_REQUIRED`, or `DECISION_REQUIRED`),
+recommended decision metric (for `ALPHA_RESEARCH`, an out-of-sample cost-net
+metric from the accepted verification artifact), critical issues, noncritical
+issues, and exact fix requests. Do not infer `finding_disposition` from issue
+text or keywords. `NONE` is valid only with no `FAIL` verdict, no critical issue,
+and no fix request. `FIX_REQUIRED` requires a `FAIL` verdict or critical issue
+and at least one exact fix request; mixed findings use `FIX_REQUIRED` while any
+concrete defect remains. `DECISION_REQUIRED` requires a critical issue, permits
+`FAIL` or `CONDITIONAL PASS`, and requires zero fix requests when the issue is an
+immutable accepted-evidence property, such as a bootstrap interval spanning
+zero, fold concentration, or insufficient persistence. Changing the hypothesis,
+pre-registration, accepted evidence, or launching a materially new experiment is
+not a fix request for the current iteration. `DECISION_REQUIRED` routes directly
+to `DECISION_LOG` on the first review; `FIX_REQUIRED` uses the bounded review/fix
+loop.
 
 ## 7. Fix/Test
 
-- Critical reviewer issue: send a narrow fix to `fixer`, rerun tests/notebook,
-  then rerun the single reviewer.
+- Only `FIX_REQUIRED` critical issues route to `fixer`: send a narrow fix,
+  rerun tests/notebook, then rerun the single reviewer. `DECISION_REQUIRED`
+  routes directly to `DECISION_LOG`, never `fixer`.
 - Any long fix/test notebook, hydrate, or backtest rerun must use the detached
   launcher at `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with
   `--manifest` and a one-time `--command-file`, and preserve run-directory status until the rerun is
@@ -1419,7 +1432,7 @@ Actions:
 ## Recovery And Status
 
 - A completed decision can set `campaign_review_required=true` in the
-  authoritative schema-v5 state. The review flag is a standing advisory to the
+  authoritative schema-v6 state. The review flag is a standing advisory to the
   operator, not an infrastructure suspension and not a new phase. The
   supervisor surfaces the review reason and counters in doctor and wake
   messages, emits one structured warning per review record, and continues

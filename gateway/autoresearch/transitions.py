@@ -101,6 +101,9 @@ from gateway.autoresearch.enums import (
     ResearchMode as ResearchMode,
 )
 from gateway.autoresearch.enums import (
+    ReviewFindingDisposition as ReviewFindingDisposition,
+)
+from gateway.autoresearch.enums import (
     ReviewVerdict as ReviewVerdict,
 )
 from gateway.autoresearch.enums import (
@@ -1856,12 +1859,12 @@ def _validate_state(
             )
         if state.pending_fix_trigger is FixTriggerPhase.REVIEW:
             latest_review = state.latest_review
-            if latest_review is None or (
-                latest_review.verdict is not ReviewVerdict.FAIL
-                and not latest_review.critical_issues
+            if (
+                latest_review is None
+                or latest_review.finding_disposition is not ReviewFindingDisposition.FIX_REQUIRED
             ):
                 raise AutoresearchValidationError(
-                    "review-triggered fix_test requires a failing review_result"
+                    "review-triggered fix_test requires a FIX_REQUIRED review_result"
                 )
     if state.phase is Phase.DECISION_LOG and (
         state.latest_consensus is None
@@ -1925,6 +1928,7 @@ def _validate_review_result(review: ReviewResultArtifact, policy: AutoresearchPo
         raise AutoresearchValidationError(
             "review_result must come from the single configured reviewer"
         )
+    review.validate()
 
 
 def _validate_implementation_workspace(
@@ -2412,7 +2416,7 @@ def advance_state(
             raise AutoresearchValidationError("review phase accepts review_result only")
         transitions_module._validate_review_result(artifact, policy)
         next_review_history = (*state.review_history, artifact)
-        if artifact.verdict is ReviewVerdict.FAIL or artifact.critical_issues:
+        if artifact.finding_disposition is ReviewFindingDisposition.FIX_REQUIRED:
             # Review-fix rounds are BOUNDED. Findings that are properties of
             # the evidence (a bootstrap interval, fold concentration) cannot
             # be changed by any code fix; unbounded routing produced a

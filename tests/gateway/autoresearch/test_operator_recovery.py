@@ -1400,7 +1400,7 @@ def test_external_verification_retry_command_path_rejects_schema_v3_state(
         symbol="AAPL",
     )
 
-    with pytest.raises(AutoresearchValidationError, match="compatible schema-v4"):
+    with pytest.raises(AutoresearchValidationError, match="compatible schema-v6"):
         retry_external_verification_state_file(
             state_path,
             probe,

@@ -37,11 +37,10 @@ The PM obtains every next action from the `gateway.autoresearch` package through
   /home/dev/.openclaw/autoresearch/quantipy-state.json
 ```
 
-Before `autoresearch-next`, an operator must prepare schema-v5 state while the
-supervisor is stopped. A live schema-v2 state, or state missing
-`schema_version`, is unsupported: archive it and initialize a fresh schema-v5
-state before restarting the supervisor. Never overwrite or migrate schema-v2
-in place.
+Before `autoresearch-next`, an operator must prepare schema-v6 state while the
+supervisor is stopped. A live schema-v5 state, or state missing
+`schema_version`, is incompatible and must be archived before fresh schema-v6
+initialization. Never overwrite or migrate incompatible state in place.
 
 ```bash
 (
@@ -54,7 +53,7 @@ in place.
     --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
     --output "$tmp"
   if [ -e "$state" ]; then
-    archive="${state}.schema-v2.$(date -u +%Y%m%dT%H%M%SZ).archive"
+    archive="${state}.schema-v5.$(date -u +%Y%m%dT%H%M%SZ).archive"
     mv -- "$state" "$archive"
   fi
   mv -- "$tmp" "$state"
@@ -62,7 +61,7 @@ in place.
 )
 ```
 
-This procedure leaves schema-v5 state at the authoritative path used by
+This procedure leaves schema-v6 state at the authoritative path used by
 `autoresearch-next`, control, and the supervisor. Never run
 `autoresearch-next` against state missing `schema_version`.
 
@@ -83,7 +82,7 @@ entitlement supports 2022 onward but rejects January/July 2021. The readiness
 build runs a strict live campaign-start entitlement probe through Quantipy's
 public client (`security_universe_screen` and daily regular-hours `prices` for
 `AAPL`); it may hydrate/cache data as an intentional operator prewarm. Any
-probe failure leaves readiness blocked. Then resume the same schema-v5 state
+probe failure leaves readiness blocked. Then resume the same schema-v6 state
 atomically:
 
 ```bash

@@ -162,7 +162,8 @@ def retry_external_verification_state_file(
         schema_version = _require_int(raw, "schema_version")
         if schema_version != constants.AUTORESEARCH_STATE_SCHEMA_VERSION:
             raise AutoresearchValidationError(
-                "external verification retry accepts only the compatible schema-v4 state"
+                "external verification retry accepts only the compatible schema-v"
+                f"{constants.AUTORESEARCH_STATE_SCHEMA_VERSION} state"
             )
         state = AutoresearchState.from_dict(raw)
         transitions_module._validate_state(state, policy, validation_context)

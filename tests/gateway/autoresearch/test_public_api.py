@@ -171,6 +171,7 @@ LEGACY_EXPORTS = {
     "ResearchMode": "gateway.autoresearch.enums",
     "ResearchPanelProbeReceipt": "gateway.autoresearch_readiness",
     "ReviewResultArtifact": "gateway.autoresearch.artifacts",
+    "ReviewFindingDisposition": "gateway.autoresearch.enums",
     "ReviewVerdict": "gateway.autoresearch.enums",
     "Sequence": "gateway.autoresearch.artifacts",
     "SetupContextArtifact": "gateway.autoresearch.artifacts",

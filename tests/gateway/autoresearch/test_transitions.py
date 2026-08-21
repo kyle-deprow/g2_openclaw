@@ -43,6 +43,7 @@ from gateway.autoresearch.enums import (
     InfraGateOutcome,
     Phase,
     ResearchMode,
+    ReviewFindingDisposition,
     ReviewVerdict,
     VerificationStatus,
 )
@@ -2859,6 +2860,141 @@ def test_review_fix_cycle_routes_back_through_verification(
     )
 
 
+def test_decision_required_review_routes_directly_to_decision_log(
+    policy: AutoresearchPolicy,
+    receipts: ReceiptCatalog,
+    platform_readiness: PlatformReadinessManifest,
+) -> None:
+    state = _state_to_review(policy, platform_readiness)
+    evidence_property = replace(
+        _review_result(ReviewVerdict.FAIL, policy),
+        verdict=ReviewVerdict.CONDITIONAL_PASS,
+        finding_disposition=ReviewFindingDisposition.DECISION_REQUIRED,
+        critical_issues=("Bootstrap interval spans zero",),
+        fix_requests=(),
+    )
+
+    advanced = advance_state(state, evidence_property, policy)
+
+    assert advanced.phase is Phase.DECISION_LOG
+    assert advanced.pending_fix_trigger is None
+    assert advanced.latest_review is evidence_property
+    assert next_action(advanced, policy, receipts, platform_readiness).next_agent_ids == (
+        policy.pm.agent_id,
+    )
+
+
+def test_first_lap_decision_required_requires_discard_and_round_trips(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_review(policy)
+    evidence_property = replace(
+        _review_result(ReviewVerdict.FAIL, policy),
+        verdict=ReviewVerdict.CONDITIONAL_PASS,
+        finding_disposition=ReviewFindingDisposition.DECISION_REQUIRED,
+        critical_issues=("Fold concentration is too high",),
+        fix_requests=(),
+    )
+    state = advance_state(state, evidence_property, policy)
+
+    restored = AutoresearchState.from_dict(json.loads(json.dumps(state.to_dict())))
+    assert restored.to_dict() == state.to_dict()
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="critical review issues require final_decision=DISCARD",
+    ):
+        advance_state(
+            restored,
+            _final_decision_with(
+                decision=FinalDecision.KEEP,
+                metric_value=0.38,
+                reviewer_verdict=FinalReviewerVerdict.CONDITIONAL_PASS,
+            ),
+            policy,
+        )
+
+    discarded = advance_state(
+        restored,
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=0.38,
+            reviewer_verdict=FinalReviewerVerdict.CONDITIONAL_PASS,
+        ),
+        policy,
+    )
+    assert discarded.phase is Phase.REPEAT
+
+
+def test_mixed_fix_required_then_decision_required_ends_in_discard(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_review(policy)
+    state = advance_state(state, _review_result(ReviewVerdict.FAIL, policy), policy)
+    assert state.phase is Phase.FIX_TEST
+
+    state = advance_state(state, _fix_result(FixTriggerPhase.REVIEW), policy)
+    state = advance_state(state, _verification_result(VerificationStatus.PASS), policy)
+    evidence_property = replace(
+        _review_result(ReviewVerdict.FAIL, policy),
+        verdict=ReviewVerdict.CONDITIONAL_PASS,
+        finding_disposition=ReviewFindingDisposition.DECISION_REQUIRED,
+        critical_issues=("Insufficient persistence across folds",),
+        fix_requests=(),
+    )
+    state = advance_state(state, evidence_property, policy)
+
+    assert state.phase is Phase.DECISION_LOG
+    assert len(state.review_history) == 2
+    assert state.review_history[0].finding_disposition is ReviewFindingDisposition.FIX_REQUIRED
+    assert state.review_history[1].finding_disposition is ReviewFindingDisposition.DECISION_REQUIRED
+
+    discarded = advance_state(
+        state,
+        _final_decision_with(
+            decision=FinalDecision.DISCARD,
+            metric_value=0.38,
+            reviewer_verdict=FinalReviewerVerdict.CONDITIONAL_PASS,
+        ),
+        policy,
+    )
+    assert discarded.phase is Phase.REPEAT
+
+
+def test_review_transition_rejects_forged_direct_verdict(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_review(policy)
+    forged = replace(
+        _review_result(ReviewVerdict.PASS, policy),
+        verdict=cast(ReviewVerdict, "PASS"),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="verdict must be a ReviewVerdict"):
+        advance_state(state, forged, policy)
+
+
+@pytest.mark.parametrize("field_name", ("critical_issues", "noncritical_issues", "fix_requests"))
+@pytest.mark.parametrize("bad_container", ("forged", ["Issue"], 3))
+def test_review_transition_rejects_forged_direct_issue_containers(
+    policy: AutoresearchPolicy,
+    field_name: str,
+    bad_container: object,
+) -> None:
+    state = _state_to_review(policy)
+    artifact = _review_result(ReviewVerdict.PASS, policy)
+    forged_container = cast(tuple[str, ...], bad_container)
+    if field_name == "critical_issues":
+        forged = replace(artifact, critical_issues=forged_container)
+    elif field_name == "noncritical_issues":
+        forged = replace(artifact, noncritical_issues=forged_container)
+    else:
+        forged = replace(artifact, fix_requests=forged_container)
+
+    with pytest.raises(AutoresearchValidationError, match="must be a tuple"):
+        advance_state(state, forged, policy)
+
+
 def test_repeat_phase_requires_final_decision(
     policy: AutoresearchPolicy,
     receipts: ReceiptCatalog,
@@ -3941,20 +4077,21 @@ def test_schema_v2_state_requires_archive_and_reinitialization(
         AutoresearchState.from_dict(raw)
 
 
-def test_schema_v4_state_requires_archive_and_v5_reinitialization(
-    policy: AutoresearchPolicy,
-) -> None:
+def test_schema_v5_state_without_review_history_requires_archive_and_reinitialization() -> None:
     raw = AutoresearchState().to_dict()
-    raw["schema_version"] = 4
+    raw["schema_version"] = 5
 
     with pytest.raises(
         AutoresearchValidationError,
-        match=r"archive the live schema-v4 state.*fresh schema-v5 state.*autoresearch-init-state",
+        match=(
+            r"archive the live schema-v5 state.*fresh schema-v6 state.*"
+            r"autoresearch-init-state"
+        ),
     ):
         AutoresearchState.from_dict(raw)
 
 
-def test_schema_v5_requires_all_dispatch_a_state_keys(
+def test_schema_v6_requires_all_dispatch_a_state_keys(
     policy: AutoresearchPolicy,
 ) -> None:
     raw = AutoresearchState().to_dict()

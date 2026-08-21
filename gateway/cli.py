@@ -1355,10 +1355,12 @@ def autoresearch_init_state(
     fresh_campaign: bool = typer.Option(
         False,
         "--fresh-campaign",
-        help="Archive campaign runtime residue before writing pristine schema-v5 state.",
+        help=(
+            "Archive incompatible campaign runtime residue before writing pristine schema-v6 state."
+        ),
     ),
 ) -> None:
-    """Initialize a pristine schema-v5 campaign pinned to platform readiness."""
+    """Initialize a pristine schema-v6 campaign pinned to platform readiness."""
     from gateway.autoresearch.persistence import (
         initialize_state,
         provision_quantipy_experiment_runs_root,
@@ -1374,7 +1376,7 @@ def autoresearch_init_state(
         except ValueError as exc:
             console.print(f"autoresearch-init-state failed: {exc}", markup=False)
             raise typer.Exit(code=1) from exc
-        console.print(f"wrote pristine autoresearch state v5: {output_path}", markup=False)
+        console.print(f"wrote pristine autoresearch state v6: {output_path}", markup=False)
         return
 
     try:
@@ -1407,7 +1409,7 @@ def autoresearch_init_state(
     console.print(f"archived campaign residue: {archive.path}", markup=False)
     for note in archive.notes:
         console.print(f"  note: {note}", markup=False)
-    console.print(f"wrote pristine autoresearch state v5: {output_path}", markup=False)
+    console.print(f"wrote pristine autoresearch state v6: {output_path}", markup=False)
 
 
 def _backup_openclaw_state_db(database_path: Path) -> Path:

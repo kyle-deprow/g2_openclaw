@@ -75,6 +75,12 @@ class ReviewVerdict(StrEnum):
     FAIL = "FAIL"
 
 
+class ReviewFindingDisposition(StrEnum):
+    NONE = "NONE"
+    FIX_REQUIRED = "FIX_REQUIRED"
+    DECISION_REQUIRED = "DECISION_REQUIRED"
+
+
 class FinalReviewerVerdict(StrEnum):
     """The reviewer outcome persisted with a final decision."""
 

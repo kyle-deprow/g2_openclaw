@@ -255,7 +255,11 @@ def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspende
     )
     for path in runtime_paths:
         text = path.read_text(encoding="utf-8")
-        assert "schema-v5 state" in text
+        assert "schema-v6 state" in text
+        assert "live schema-v5 state" in text
+        assert "archiv" in text
+        if path != AGENT_CONFIG / "README.md":
+            assert 'archive="${state}.schema-v5.$(date -u +%Y%m%dT%H%M%SZ).archive"' in text
         assert "schema-v3 platform-readiness manifest" in text or "schema version 3" in text
         rebuild_index = text.index("autoresearch-build-readiness")
         resume_index = text.index("autoresearch-resume", rebuild_index)
@@ -269,7 +273,9 @@ def test_runtime_docs_distinguish_v3_state_from_v3_readiness_and_resume_suspende
 
     plan_text = " ".join(PLAN.read_text(encoding="utf-8").split())
     assert "schema-v3 platform-readiness manifest" in plan_text
-    assert "schema-v5 state" in plan_text
+    assert "schema-v6 state" in plan_text
+    assert "live schema-v5 state" in plan_text
+    assert "archiv" in plan_text
     assert "autoresearch-build-readiness" in plan_text
     assert "autoresearch-resume" in plan_text
     assert "--campaign-xnys-start" in plan_text
@@ -336,6 +342,29 @@ def test_ownership_memory_and_config_guidance_remain_explicit() -> None:
     assert "Never write or pass a raw unwrapped `verification_result`" in agents
     assert "bash scripts/push-openclaw-config.sh" in readme
     assert "restart the OpenClaw gateway service" in readme
+
+
+def test_autoresearch_review_finding_disposition_contract_is_explicit() -> None:
+    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
+
+    assert "Schema-v4 state" not in skill
+    assert "Schema-v6 state has no general retry migration" in skill
+    assert (
+        "explicit `finding_disposition` (`NONE`, `FIX_REQUIRED`, or `DECISION_REQUIRED`)" in skill
+    )
+    assert "Do not infer `finding_disposition` from issue text or keywords" in skill
+    assert "mixed findings use `FIX_REQUIRED` while any concrete defect remains" in skill
+    assert (
+        "bootstrap interval spanning zero, fold concentration, or insufficient persistence" in skill
+    )
+    assert (
+        "Changing the hypothesis, pre-registration, accepted evidence, or launching a "
+        "materially new experiment is not a fix request" in skill
+    )
+    assert "`DECISION_REQUIRED` routes directly to `DECISION_LOG` on the first review" in skill
+    assert "Only `FIX_REQUIRED` critical issues route to `fixer`: send a narrow fix" in skill
+    assert "`DECISION_REQUIRED` routes directly to `DECISION_LOG`, never `fixer`" in skill
+    assert "Critical reviewer issue: send a narrow fix to `fixer`" not in skill
 
 
 def test_long_task_docs_require_detached_launch_and_cleanup() -> None:
@@ -449,7 +478,7 @@ def test_alpha_docs_require_dynamic_coverage_and_strict_state_initialization() -
     assert "DynamicUniverseCoverageReceipt" in alpha_docs
     assert "autoresearch-migrate-state" not in alpha_docs
     normalized = " ".join(alpha_docs.split()).lower()
-    assert "schema-v2 state" in normalized
+    assert "schema-v6 state" in normalized
     assert "archive" in normalized
     assert "before restarting the supervisor" in normalized
     assert "ALPHA_RESEARCH" in alpha_docs
@@ -538,7 +567,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.18.0" in skill
+    assert "version: 8.18.1" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill

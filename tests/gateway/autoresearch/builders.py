@@ -60,6 +60,7 @@ from gateway.autoresearch.enums import (
     InfraGateOutcome,
     MetricDirection,
     ResearchMode,
+    ReviewFindingDisposition,
     ReviewVerdict,
     VerificationStatus,
 )
@@ -810,6 +811,11 @@ def _review_result(verdict: ReviewVerdict, policy: AutoresearchPolicy) -> Review
     return ReviewResultArtifact(
         reviewer_agent_id=policy.reviewer.agent_id,
         verdict=verdict,
+        finding_disposition=(
+            ReviewFindingDisposition.FIX_REQUIRED
+            if critical_issues
+            else ReviewFindingDisposition.NONE
+        ),
         recommended_metric_name="OOS Sharpe net",
         recommended_metric_value=0.38,
         critical_issues=critical_issues,

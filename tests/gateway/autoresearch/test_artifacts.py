@@ -22,6 +22,7 @@ from gateway.autoresearch.artifacts import (
     QuantipyExecutionInterruptedEvidence,
     QuantipyExecutionNotStartedEvidence,
     QuantipyExperimentEvidence,
+    ReviewResultArtifact,
     VerificationResultArtifact,
 )
 from gateway.autoresearch.compute import (
@@ -41,6 +42,8 @@ from gateway.autoresearch.enums import (
     InfraGateOutcome,
     Phase,
     ResearchMode,
+    ReviewFindingDisposition,
+    ReviewVerdict,
     VerificationStatus,
 )
 from gateway.autoresearch.errors import (
@@ -134,6 +137,310 @@ def _alpha_verification() -> VerificationResultArtifact:
         commands_run=("uv run pytest",),
         data_coverage=_coverage(),
     )
+
+
+def _review_payload(
+    disposition: ReviewFindingDisposition,
+    *,
+    verdict: ReviewVerdict,
+    critical_issues: tuple[str, ...] = (),
+    fix_requests: tuple[str, ...] = (),
+) -> dict[str, object]:
+    return {
+        "reviewer_agent_id": "reviewer",
+        "verdict": verdict.value,
+        "finding_disposition": disposition.value,
+        "recommended_metric_name": "OOS Sharpe net",
+        "recommended_metric_value": 0.38,
+        "critical_issues": list(critical_issues),
+        "noncritical_issues": ["Document feature importance caveat"],
+        "fix_requests": list(fix_requests),
+        "summary": "Methodology review complete.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("disposition", "verdict", "critical_issues", "fix_requests"),
+    (
+        (ReviewFindingDisposition.NONE, ReviewVerdict.PASS, (), ()),
+        (
+            ReviewFindingDisposition.FIX_REQUIRED,
+            ReviewVerdict.FAIL,
+            ("Coverage is incomplete",),
+            ("Expand coverage and rerun",),
+        ),
+        (
+            ReviewFindingDisposition.DECISION_REQUIRED,
+            ReviewVerdict.CONDITIONAL_PASS,
+            ("Bootstrap interval spans zero",),
+            (),
+        ),
+    ),
+)
+def test_review_result_dispositions_round_trip_with_exact_schema(
+    disposition: ReviewFindingDisposition,
+    verdict: ReviewVerdict,
+    critical_issues: tuple[str, ...],
+    fix_requests: tuple[str, ...],
+) -> None:
+    payload = _review_payload(
+        disposition,
+        verdict=verdict,
+        critical_issues=critical_issues,
+        fix_requests=fix_requests,
+    )
+
+    restored = ReviewResultArtifact.from_dict(payload)
+
+    assert restored.finding_disposition is disposition
+    assert restored.to_dict() == payload
+    assert set(payload) == {
+        "reviewer_agent_id",
+        "verdict",
+        "finding_disposition",
+        "recommended_metric_name",
+        "recommended_metric_value",
+        "critical_issues",
+        "noncritical_issues",
+        "fix_requests",
+        "summary",
+    }
+
+
+@pytest.mark.parametrize(
+    ("disposition", "verdict", "critical_issues", "fix_requests"),
+    (
+        (ReviewFindingDisposition.NONE, ReviewVerdict.FAIL, (), ()),
+        (ReviewFindingDisposition.NONE, ReviewVerdict.PASS, ("Critical",), ()),
+        (ReviewFindingDisposition.NONE, ReviewVerdict.PASS, (), ("Fix",)),
+        (ReviewFindingDisposition.FIX_REQUIRED, ReviewVerdict.PASS, (), ("Fix",)),
+        (ReviewFindingDisposition.FIX_REQUIRED, ReviewVerdict.FAIL, ("Critical",), ()),
+        (ReviewFindingDisposition.DECISION_REQUIRED, ReviewVerdict.PASS, ("Critical",), ()),
+        (ReviewFindingDisposition.DECISION_REQUIRED, ReviewVerdict.CONDITIONAL_PASS, (), ()),
+        (
+            ReviewFindingDisposition.DECISION_REQUIRED,
+            ReviewVerdict.CONDITIONAL_PASS,
+            ("Critical",),
+            ("Fix",),
+        ),
+    ),
+)
+def test_review_result_rejects_inconsistent_disposition_shapes(
+    disposition: ReviewFindingDisposition,
+    verdict: ReviewVerdict,
+    critical_issues: tuple[str, ...],
+    fix_requests: tuple[str, ...],
+) -> None:
+    with pytest.raises(AutoresearchValidationError, match="disposition"):
+        ReviewResultArtifact.from_dict(
+            _review_payload(
+                disposition,
+                verdict=verdict,
+                critical_issues=critical_issues,
+                fix_requests=fix_requests,
+            )
+        )
+
+
+def test_review_result_rejects_unknown_or_missing_disposition_key() -> None:
+    payload = _review_payload(ReviewFindingDisposition.NONE, verdict=ReviewVerdict.PASS)
+
+    missing = dict(payload)
+    del missing["finding_disposition"]
+    with pytest.raises(AutoresearchValidationError, match="exact keys"):
+        ReviewResultArtifact.from_dict(missing)
+
+    unexpected = dict(payload)
+    unexpected["extra"] = True
+    with pytest.raises(AutoresearchValidationError, match="exact keys"):
+        ReviewResultArtifact.from_dict(unexpected)
+
+    unknown = dict(payload)
+    unknown["finding_disposition"] = "UNKNOWN"
+    with pytest.raises(AutoresearchValidationError, match="known disposition"):
+        ReviewResultArtifact.from_dict(unknown)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "unknown_value", "error_message"),
+    (
+        (
+            "verdict",
+            "UNKNOWN_VERDICT",
+            "review_result verdict must be a known verdict",
+        ),
+        (
+            "finding_disposition",
+            "UNKNOWN_DISPOSITION",
+            "review_result finding_disposition must be a known disposition",
+        ),
+    ),
+)
+def test_review_result_normalizes_unknown_enum_values_to_validation_errors(
+    field_name: str,
+    unknown_value: str,
+    error_message: str,
+) -> None:
+    payload = _review_payload(ReviewFindingDisposition.NONE, verdict=ReviewVerdict.PASS)
+    payload[field_name] = unknown_value
+
+    with pytest.raises(AutoresearchValidationError, match=error_message):
+        ReviewResultArtifact.from_dict(payload)
+
+
+@pytest.mark.parametrize(
+    ("disposition", "field_name"),
+    (
+        (ReviewFindingDisposition.FIX_REQUIRED, "fix_requests"),
+        (ReviewFindingDisposition.DECISION_REQUIRED, "critical_issues"),
+    ),
+)
+@pytest.mark.parametrize("blank_value", ("", " ", "\t"))
+def test_review_result_rejects_blank_required_finding_entries(
+    disposition: ReviewFindingDisposition,
+    field_name: str,
+    blank_value: str,
+) -> None:
+    payload = _review_payload(
+        disposition,
+        verdict=ReviewVerdict.FAIL,
+        critical_issues=("Coverage is incomplete",),
+        fix_requests=("Expand coverage and rerun",),
+    )
+    if disposition is ReviewFindingDisposition.DECISION_REQUIRED:
+        payload["fix_requests"] = []
+    payload[field_name] = [blank_value]
+
+    with pytest.raises(AutoresearchValidationError, match="non-blank strings"):
+        ReviewResultArtifact.from_dict(payload)
+
+
+def test_schema_v5_state_with_legacy_review_history_requires_archive_and_reinitialization() -> None:
+    review = ReviewResultArtifact.from_dict(
+        _review_payload(
+            ReviewFindingDisposition.FIX_REQUIRED,
+            verdict=ReviewVerdict.FAIL,
+            critical_issues=("Coverage is incomplete",),
+            fix_requests=("Expand coverage and rerun",),
+        )
+    )
+    schema_v5_state = AutoresearchState(review_history=(review,)).to_dict()
+    schema_v5_state["schema_version"] = 5
+    serialized_review = cast(list[dict[str, object]], schema_v5_state["review_history"])[0]
+    del serialized_review["finding_disposition"]
+
+    with pytest.raises(
+        AutoresearchValidationError,
+        match=(
+            r"archive the live schema-v5 state.*fresh schema-v6 state.*"
+            r"autoresearch-init-state"
+        ),
+    ):
+        AutoresearchState.from_dict(schema_v5_state)
+
+
+def test_schema_v6_state_round_trips_review_disposition_without_legacy_fallback() -> None:
+    review = ReviewResultArtifact.from_dict(
+        _review_payload(
+            ReviewFindingDisposition.FIX_REQUIRED,
+            verdict=ReviewVerdict.FAIL,
+            critical_issues=("Coverage is incomplete",),
+            fix_requests=("Expand coverage and rerun",),
+        )
+    )
+    state = AutoresearchState(review_history=(review,))
+
+    restored = AutoresearchState.from_dict(state.to_dict())
+
+    assert state.to_dict()["schema_version"] == 6
+    assert restored.to_dict() == state.to_dict()
+
+
+def test_schema_v6_state_rejects_legacy_review_shape_without_fallback() -> None:
+    review = ReviewResultArtifact.from_dict(
+        _review_payload(ReviewFindingDisposition.NONE, verdict=ReviewVerdict.PASS)
+    )
+    schema_v6_state = AutoresearchState(review_history=(review,)).to_dict()
+    serialized_review = cast(list[dict[str, object]], schema_v6_state["review_history"])[0]
+    del serialized_review["finding_disposition"]
+
+    with pytest.raises(AutoresearchValidationError, match="exact keys"):
+        AutoresearchState.from_dict(schema_v6_state)
+
+
+@pytest.mark.parametrize("field_name", ("critical_issues", "noncritical_issues", "fix_requests"))
+@pytest.mark.parametrize("bad_value", ("", " ", "\t"))
+def test_review_result_rejects_blank_serialized_issue_entries(
+    field_name: str,
+    bad_value: str,
+) -> None:
+    payload = _review_payload(
+        ReviewFindingDisposition.FIX_REQUIRED,
+        verdict=ReviewVerdict.FAIL,
+        critical_issues=("Critical",),
+        fix_requests=("Fix",),
+    )
+    payload[field_name] = [bad_value]
+
+    with pytest.raises(AutoresearchValidationError, match="non-blank strings"):
+        ReviewResultArtifact.from_dict(payload)
+
+
+@pytest.mark.parametrize("field_name", ("critical_issues", "noncritical_issues", "fix_requests"))
+@pytest.mark.parametrize("bad_value", ("", " ", "\t", 3))
+def test_review_result_rejects_blank_or_non_string_direct_issue_entries(
+    field_name: str,
+    bad_value: object,
+) -> None:
+    artifact = ReviewResultArtifact.from_dict(
+        _review_payload(
+            ReviewFindingDisposition.FIX_REQUIRED,
+            verdict=ReviewVerdict.FAIL,
+            critical_issues=("Critical",),
+            fix_requests=("Fix",),
+        )
+    )
+    bad_entry = cast(str, bad_value)
+    if field_name == "critical_issues":
+        forged = replace(artifact, critical_issues=(bad_entry,))
+    elif field_name == "noncritical_issues":
+        forged = replace(artifact, noncritical_issues=(bad_entry,))
+    else:
+        forged = replace(artifact, fix_requests=(bad_entry,))
+
+    with pytest.raises(AutoresearchValidationError, match="non-blank strings"):
+        forged.validate()
+
+
+@pytest.mark.parametrize("field_name", ("critical_issues", "noncritical_issues", "fix_requests"))
+@pytest.mark.parametrize("bad_container", ("forged", ["Issue"], 3))
+def test_review_result_rejects_forged_direct_issue_containers(
+    field_name: str,
+    bad_container: object,
+) -> None:
+    artifact = ReviewResultArtifact.from_dict(
+        _review_payload(ReviewFindingDisposition.NONE, verdict=ReviewVerdict.PASS)
+    )
+    forged_container = cast(tuple[str, ...], bad_container)
+    if field_name == "critical_issues":
+        forged = replace(artifact, critical_issues=forged_container)
+    elif field_name == "noncritical_issues":
+        forged = replace(artifact, noncritical_issues=forged_container)
+    else:
+        forged = replace(artifact, fix_requests=forged_container)
+
+    with pytest.raises(AutoresearchValidationError, match="must be a tuple"):
+        forged.validate()
+
+
+def test_review_result_rejects_forged_direct_verdict_and_transition() -> None:
+    artifact = ReviewResultArtifact.from_dict(
+        _review_payload(ReviewFindingDisposition.NONE, verdict=ReviewVerdict.PASS)
+    )
+    forged = replace(artifact, verdict=cast(ReviewVerdict, "PASS"))
+
+    with pytest.raises(AutoresearchValidationError, match="verdict must be a ReviewVerdict"):
+        forged.validate()
 
 
 def _interrupted_quantipy_execution() -> QuantipyExecutionInterruptedEvidence:
@@ -559,7 +866,7 @@ def test_context_packet_rejects_unknown_extra_key_with_optional_field_present() 
     raw = artifact.to_dict()
     raw["unexpected"] = "reject"
 
-    with pytest.raises(AutoresearchValidationError, match="unexpected=\['unexpected'\]"):
+    with pytest.raises(AutoresearchValidationError, match=r"unexpected=\['unexpected'\]"):
         ContextPacketArtifact.from_dict(raw)
 
 

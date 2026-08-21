@@ -39,13 +39,13 @@ interactions. Autonomous research runs only in
 
 ## State Preparation
 
-Stop the supervisor before preparing state. The campaign uses schema-v5 state. The separate
+Stop the supervisor before preparing state. The campaign uses schema-v6 state. The separate
 schema-v3 platform-readiness manifest writes to
-`~/.openclaw/autoresearch/platform-readiness.json`. A live schema-v2 state, or
-state missing `schema_version`, is unsupported. Archive it and initialize a
-fresh schema-v5 state before restarting the supervisor; never migrate or
-overwrite incompatible state in place. The state procedure writes and validates a
-temporary replacement before archiving the old state.
+`~/.openclaw/autoresearch/platform-readiness.json`. A live schema-v5 state, or
+state missing `schema_version`, is incompatible and must be archived before
+fresh schema-v6 initialization. Never migrate or overwrite incompatible state
+in place. The state procedure writes and validates a temporary replacement
+before archiving the old state.
 
 ```bash
 (
@@ -82,7 +82,7 @@ paused until an operator reviews it and runs
 `autoresearch-acknowledge-campaign-review` with a 32-1024 character
 acknowledgement. The PM must not clear the pause or touch G2.
 There is no state-schema migration in the external-verification command. The
-only legacy retry-receipt bootstrap accepted by schema-v5 state is the actual
+only legacy retry-receipt bootstrap accepted by schema-v6 state is the actual
 schema-1 receipt for deterministic attempt `-v2`: it must bind exactly one
 canonical initial `-v1` local-panel HTTP 404 artifact. After stopping the
 supervisor and repairing the Quantipy API, invoke the operator command from the
@@ -105,7 +105,7 @@ artifact, and authorizes only the historical `-v2` bootstrap and one generic
 canonical digest list for all prior verification artifacts. It rejects arbitrary
 failures, malformed or reordered history, v4-and-later generic retries, and
 PM/fixer invocations without the explicit capability. All state-schema changes
-require archiving and fresh schema-v5 initialization; no general in-place
+require archiving and fresh schema-v6 initialization; no general in-place
 migration exists.
 
 An owner-session stop first disables the supervisor, cancels only exact owner
@@ -156,7 +156,7 @@ ALPHA_RESEARCH `DISCARD` outcomes backed by completed verification with
 Crashes, exhausted verification failures, consensus failures, and
 infrastructure control-plane outcomes proceed without a memory write.
 
-Then atomically resume the same schema-v5 state file:
+Then atomically resume the same schema-v6 state file:
 
 ```bash
 (
