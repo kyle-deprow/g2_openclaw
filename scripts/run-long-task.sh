@@ -85,6 +85,10 @@ uv_path="$(command -v uv 2>/dev/null)" || die "uv is required for detached launc
 uv_bin_dir="$(dirname -- "$uv_path")"
 transient_path="${PATH}:${uv_bin_dir}"
 timeout_term_grace_seconds="${AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS:-10}"
+# /tmp is a 16G tmpfs; a large panel hydration exhausted it (ENOSPC) while the
+# root disk had 176G free. Long-task temp files belong on disk.
+long_task_tmpdir="${AUTORESEARCH_LONG_TASK_TMPDIR:-/home/dev/.openclaw/autoresearch/model-workspaces/.long-task-tmp}"
+mkdir -m 700 -p -- "$long_task_tmpdir" || die "cannot create long-task tmpdir"
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 # Direct venv argv: sandboxed stage agents cannot write the uv cache or repo
 # .venv, so `uv run` fails with EROFS inside the launch sandbox.
@@ -180,6 +184,7 @@ if ! setsid systemd-run \
   --user --no-block --collect --unit="$unit_name" --service-type=exec \
   --setenv=PATH="$transient_path" --working-directory="$working_directory" \
   --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
+  --setenv=TMPDIR="$long_task_tmpdir" \
   --property=MemoryHigh=10G --property=MemoryMax=12G --property=KillMode=control-group \
   -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
   </dev/null >/dev/null 2>&1; then
