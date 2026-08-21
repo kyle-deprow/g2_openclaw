@@ -308,7 +308,7 @@ def _prepare_state_bound_detached_run(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": state.iteration,
                 "phase": state.phase.value,
                 "attempt": 1,
@@ -322,6 +322,8 @@ def _prepare_state_bound_detached_run(
                 "command_sha256": autoresearch_runs.command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -873,7 +875,7 @@ def test_stop_stops_only_the_current_state_bound_detached_unit_before_session_de
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": state.iteration,
                 "phase": state.phase.value,
                 "attempt": 1,
@@ -887,6 +889,8 @@ def test_stop_stops_only_the_current_state_bound_detached_unit_before_session_de
                 "command_sha256": autoresearch_runs.command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",

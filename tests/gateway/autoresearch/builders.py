@@ -1722,7 +1722,7 @@ def _write_quantipy_detached_run_record(
         )
     )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "iteration": iteration,
         "phase": "verification",
         "attempt": 1,
@@ -1734,6 +1734,8 @@ def _write_quantipy_detached_run_record(
         "command_sha256": autoresearch_runs.command_sha256(command),
         "expected_artifact_path": str(run_path),
         "timeout_seconds": None,
+        "compute_target": "none",
+        "projected_model_seconds": None,
     }
     manifest_path_input = workspace.parent / f"{run_id}-detached-manifest.json"
     manifest_path_input.write_text(json.dumps(manifest), encoding="utf-8")

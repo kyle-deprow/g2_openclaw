@@ -499,7 +499,7 @@ def public_platform_v4_recovery_fixture(
     v3_manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": v3_state.iteration,
                 "phase": "verification",
                 "attempt": 3,
@@ -524,6 +524,8 @@ def public_platform_v4_recovery_fixture(
                 "command_sha256": autoresearch_runs.command_sha256(v3_command),
                 "expected_artifact_path": str(v3_run_path),
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -592,7 +594,7 @@ def public_platform_v4_recovery_fixture(
     v4_manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": v4_state.iteration,
                 "phase": "verification",
                 "attempt": 4,
@@ -617,6 +619,8 @@ def public_platform_v4_recovery_fixture(
                 "command_sha256": autoresearch_runs.command_sha256(v4_command),
                 "expected_artifact_path": str(v4_run_path),
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",

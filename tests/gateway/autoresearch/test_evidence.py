@@ -3156,7 +3156,7 @@ def _timeout_interrupted_quantipy_execution(
     manifest_input.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": state.iteration,
                 "phase": "verification",
                 "attempt": 1,
@@ -3171,6 +3171,8 @@ def _timeout_interrupted_quantipy_execution(
                 "command_sha256": autoresearch_runs.command_sha256(contract.command),
                 "expected_artifact_path": str(run_path),
                 "timeout_seconds": 30.0,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",

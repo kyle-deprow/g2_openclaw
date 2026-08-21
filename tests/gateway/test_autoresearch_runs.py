@@ -64,7 +64,7 @@ def _manifest(
     expected_artifact_path: Path | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "iteration": 7,
         "phase": "verification",
         "attempt": 2,
@@ -78,6 +78,8 @@ def _manifest(
             str(expected_artifact_path) if expected_artifact_path is not None else None
         ),
         "timeout_seconds": None,
+        "compute_target": ComputeTarget.NONE.value,
+        "projected_model_seconds": None,
     }
 
 
@@ -95,6 +97,14 @@ def _manifest_v2(
             "projected_model_seconds": projected_model_seconds,
         }
     )
+    return raw
+
+
+def _historical_manifest(run_dir: Path) -> dict[str, object]:
+    raw = _manifest(run_dir)
+    raw["schema_version"] = 1
+    raw.pop("compute_target")
+    raw.pop("projected_model_seconds")
     return raw
 
 
@@ -211,7 +221,7 @@ def test_manifest_schema_v1_roundtrip_preserves_historical_shape_and_digest(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "runs" / "iteration-7" / "verification" / "attempt-2"
-    raw = _manifest(run_dir)
+    raw = _historical_manifest(run_dir)
     manifest = RunManifest.from_dict(raw)
 
     assert manifest.schema_version == 1
@@ -222,6 +232,12 @@ def test_manifest_schema_v1_roundtrip_preserves_historical_shape_and_digest(
     assert autoresearch_runs._manifest_digest(manifest) == sha256(canonical).hexdigest()
     assert b"compute_target" not in canonical
     assert b"projected_model_seconds" not in canonical
+    run_dir.mkdir(parents=True, mode=0o700)
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_bytes(canonical)
+    manifest_path.chmod(0o400)
+    run_dir.chmod(0o500)
+    assert read_run_manifest(run_dir=run_dir, runs_root=tmp_path / "runs") == manifest
 
 
 def test_read_json_wraps_file_huge_integer_digit_limit_error(tmp_path: Path) -> None:
@@ -295,7 +311,7 @@ def test_manifest_direct_construction_enforces_conditional_schema_invariants(
         projected_model_seconds=-0.0,
     )
 
-    assert historical.to_dict() == _manifest(run_dir)
+    assert historical.to_dict() == _historical_manifest(run_dir)
     assert current.to_dict()["compute_target"] == ComputeTarget.CPU.value
     assert current.to_dict()["projected_model_seconds"] == -0.0
 
@@ -335,7 +351,7 @@ def test_manifest_parser_rejects_int_subclass_schema_versions(
         RunManifest.from_dict(raw)
 
 
-@pytest.mark.parametrize("schema_version", (1, 2))
+@pytest.mark.parametrize("schema_version", (2,))
 def test_prepare_and_read_support_manifest_schema_versions(
     tmp_path: Path,
     schema_version: int,
@@ -356,6 +372,40 @@ def test_prepare_and_read_support_manifest_schema_versions(
     assert prepared.manifest == RunManifest.from_dict(raw)
     assert read_run_manifest(run_dir=run_dir, runs_root=runs_root) == prepared.manifest
     assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")) == raw
+
+
+@pytest.mark.parametrize("with_command_file", (False, True))
+def test_new_preparation_rejects_historical_manifest(
+    tmp_path: Path,
+    with_command_file: bool,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    manifest_path = tmp_path / "manifest.json"
+    command = ("verify-command", "--opaque-value")
+    manifest_path.write_text(json.dumps(_historical_manifest(run_dir)), encoding="utf-8")
+
+    if with_command_file:
+        command_file = tmp_path / "command.json"
+        command_file.write_text(json.dumps({"command": list(command)}), encoding="utf-8")
+        command_file.chmod(0o600)
+        with pytest.raises(AutoresearchRunRecordError, match="schema-v2"):
+            prepare_run_with_command_file(
+                manifest_path=manifest_path,
+                run_dir=run_dir,
+                command_file=command_file,
+                runs_root=runs_root,
+            )
+        assert not command_file.exists()
+    else:
+        with pytest.raises(AutoresearchRunRecordError, match="schema-v2"):
+            prepare_run(
+                manifest_path=manifest_path,
+                run_dir=run_dir,
+                runs_root=runs_root,
+                command=command,
+            )
+    assert not run_dir.exists()
 
 
 def test_prepared_run_persists_only_the_immutable_command_digest(tmp_path: Path) -> None:

@@ -699,7 +699,7 @@ def _write_matching_run(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": state.iteration,
                 "phase": state.phase.value,
                 "attempt": 1,
@@ -713,6 +713,8 @@ def _write_matching_run(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -1596,7 +1598,7 @@ def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -1608,6 +1610,8 @@ def test_symlinked_detached_run_record_alerts_without_waking_or_advancing_state(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -1649,7 +1653,7 @@ def test_latched_run_record_alert_still_allows_stale_state_nudging(
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -1661,6 +1665,8 @@ def test_latched_run_record_alert_still_allows_stale_state_nudging(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -1723,7 +1729,7 @@ def test_recovery_wake_includes_current_failed_detached_run_details(
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -1735,6 +1741,8 @@ def test_recovery_wake_includes_current_failed_detached_run_details(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -1979,7 +1987,7 @@ def test_prepared_run_awaiting_queued_launch_is_not_a_malformed_record(
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -1991,6 +1999,8 @@ def test_prepared_run_awaiting_queued_launch_is_not_a_malformed_record(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2030,7 +2040,7 @@ def test_newer_succeeded_detached_attempt_prevents_an_older_failure_from_advanci
         source_manifest.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "iteration": 4,
                     "phase": "verification",
                     "attempt": attempt,
@@ -2042,6 +2052,8 @@ def test_newer_succeeded_detached_attempt_prevents_an_older_failure_from_advanci
                     "command_sha256": command_sha256(command),
                     "expected_artifact_path": None,
                     "timeout_seconds": None,
+                    "compute_target": "none",
+                    "projected_model_seconds": None,
                 }
             ),
             encoding="utf-8",
@@ -2085,7 +2097,7 @@ def test_operator_stopped_detached_verification_alerts_without_advancing_state(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": state.iteration,
                 "phase": "verification",
                 "attempt": 1,
@@ -2097,6 +2109,8 @@ def test_operator_stopped_detached_verification_alerts_without_advancing_state(
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2176,7 +2190,7 @@ def test_timeout_detached_verification_auto_advances_with_interrupted_evidence(
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -2188,6 +2202,8 @@ def test_timeout_detached_verification_auto_advances_with_interrupted_evidence(
                 "command_sha256": command_sha256(contract.command),
                 "expected_artifact_path": str(expected_run_json_path),
                 "timeout_seconds": 30.0,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2273,7 +2289,7 @@ def test_detached_verification_instruction_digest_mismatch_is_ignored_as_stale_h
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -2285,6 +2301,8 @@ def test_detached_verification_instruction_digest_mismatch_is_ignored_as_stale_h
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2326,7 +2344,7 @@ def test_newest_matching_detached_run_ignores_older_well_formed_stale_retry_hist
         source_manifest.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "iteration": 4,
                     "phase": "verification",
                     "attempt": attempt,
@@ -2338,6 +2356,8 @@ def test_newest_matching_detached_run_ignores_older_well_formed_stale_retry_hist
                     "command_sha256": command_sha256(command),
                     "expected_artifact_path": None,
                     "timeout_seconds": None,
+                    "compute_target": "none",
+                    "projected_model_seconds": None,
                 }
             ),
             encoding="utf-8",
@@ -2387,7 +2407,7 @@ def test_running_detached_run_with_systemd_oom_result_terminalizes_as_resource_e
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -2399,6 +2419,8 @@ def test_running_detached_run_with_systemd_oom_result_terminalizes_as_resource_e
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2470,7 +2492,7 @@ def test_running_detached_run_with_collected_systemd_unit_terminalizes_as_proces
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -2482,6 +2504,8 @@ def test_running_detached_run_with_collected_systemd_unit_terminalizes_as_proces
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -2551,7 +2575,7 @@ def test_running_detached_run_with_collected_systemd_unit_preserves_live_process
     source_manifest.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": 4,
                 "phase": "verification",
                 "attempt": 1,
@@ -2563,6 +2587,8 @@ def test_running_detached_run_with_collected_systemd_unit_preserves_live_process
                 "command_sha256": command_sha256(command),
                 "expected_artifact_path": None,
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",

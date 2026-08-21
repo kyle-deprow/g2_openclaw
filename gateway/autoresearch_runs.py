@@ -2261,6 +2261,11 @@ def consume_command_input_file(path: Path) -> tuple[str, ...]:
     return command
 
 
+def _require_current_manifest_for_preparation(manifest: RunManifest) -> None:
+    if manifest.schema_version != RUN_RECORD_SCHEMA_VERSION:
+        raise AutoresearchRunRecordError("new run preparation requires a schema-v2 manifest")
+
+
 def prepare_run(
     *,
     manifest_path: Path,
@@ -2271,6 +2276,7 @@ def prepare_run(
     canonical_run_dir = _validate_run_directory(run_dir, runs_root)
     _reject_symlink(manifest_path, label="source manifest")
     manifest = RunManifest.from_dict(_read_json(manifest_path, label="source manifest"))
+    _require_current_manifest_for_preparation(manifest)
     if manifest.run_directory != str(canonical_run_dir):
         raise AutoresearchRunRecordError("manifest run_directory does not match --run-dir")
     if manifest.command_sha256 != command_sha256(command):
@@ -2341,6 +2347,7 @@ def prepare_run_with_command_file(
     canonical_run_dir = _validate_run_directory(run_dir, runs_root)
     _reject_symlink(manifest_path, label="source manifest")
     manifest = RunManifest.from_dict(_read_json(manifest_path, label="source manifest"))
+    _require_current_manifest_for_preparation(manifest)
     if manifest.run_directory != str(canonical_run_dir):
         raise AutoresearchRunRecordError("manifest run_directory does not match --run-dir")
     if manifest.command_sha256 != command_sha256(command):

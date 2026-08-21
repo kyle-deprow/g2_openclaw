@@ -205,7 +205,7 @@ def _manifest(
     expected_artifact_path: Path | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "iteration": 3,
         "phase": "verification",
         "attempt": 1,
@@ -219,7 +219,17 @@ def _manifest(
             str(expected_artifact_path) if expected_artifact_path is not None else None
         ),
         "timeout_seconds": None,
+        "compute_target": "none",
+        "projected_model_seconds": None,
     }
+
+
+def _historical_manifest(run_dir: Path, command: tuple[str, ...]) -> dict[str, object]:
+    raw = _manifest(run_dir, command)
+    raw["schema_version"] = 1
+    raw.pop("compute_target")
+    raw.pop("projected_model_seconds")
+    return raw
 
 
 def _write_command_file(path: Path, command: tuple[str, ...]) -> None:
@@ -1019,6 +1029,54 @@ def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
     assert (run_dir / "manifest.json").exists()
     assert (run_dir / ".command-handoff.json").exists()
     assert not (run_dir / "status.json").exists()
+
+
+def test_run_long_task_rejects_historical_manifest_before_publication(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    launch_requests = tmp_path / "launch-requests"
+    manifest_path.write_text(json.dumps(_historical_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    control_log = tmp_path / "control.log"
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="historical-control-bin",
+        systemd_run_contents=(
+            f"#!/usr/bin/env bash\nprintf '%s\\n' systemd-run >> {control_log!r}\nexit 99\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(launch_requests)},
+    )
+
+    assert result.returncode != 0
+    assert "schema-v2" in result.stderr
+    assert not run_dir.exists()
+    assert not launch_requests.exists()
+    assert not control_log.exists()
+    assert not command_file.exists()
 
 
 @pytest.mark.parametrize("die_case", ("missing_manifest", "already_started"))

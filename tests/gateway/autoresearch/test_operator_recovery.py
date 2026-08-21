@@ -779,7 +779,7 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": v3_state.iteration,
                 "phase": "verification",
                 "attempt": 3,
@@ -791,6 +791,8 @@ def test_interrupted_v3_recovery_records_an_interruption_without_creating_a_veri
                 "command_sha256": autoresearch_runs.command_sha256(command),
                 "expected_artifact_path": str(run_path),
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
@@ -989,7 +991,7 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "iteration": v3_state.iteration,
                 "phase": "verification",
                 "attempt": 3,
@@ -1001,6 +1003,8 @@ def test_generic_v4_http_413_retry_is_rejected_in_favor_of_platform_runtime_reco
                 "command_sha256": autoresearch_runs.command_sha256(command),
                 "expected_artifact_path": str(run_path),
                 "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
             }
         ),
         encoding="utf-8",
