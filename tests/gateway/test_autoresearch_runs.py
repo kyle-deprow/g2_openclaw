@@ -20,6 +20,7 @@ from gateway.autoresearch_runs import (
     EXPECTED_ARTIFACT_MAX_BYTES,
     OUTPUT_CAPTURE_MAX_BYTES,
     AutoresearchRunRecordError,
+    PreparedRunIdentity,
     RunFailureClassification,
     RunManifest,
     RunOutputStream,
@@ -27,6 +28,7 @@ from gateway.autoresearch_runs import (
     RunStatus,
     archive_timed_out_partial_run,
     capture_output_stream,
+    capture_prepared_run_identity,
     complete_run,
     consume_command_handoff,
     consume_command_input_file,
@@ -37,6 +39,7 @@ from gateway.autoresearch_runs import (
     read_run_record,
     start_run,
     supervise_command,
+    validate_prepared_run_identity,
     validate_startup_marker,
     write_command_handoff,
 )
@@ -1396,6 +1399,546 @@ def _staging_paths(run_dir: Path) -> list[Path]:
         for path in run_dir.parent.iterdir()
         if path.name.startswith(".") and path.name != run_dir.name
     ]
+
+
+def _prepare_identity_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    runs_root, run_dir, manifest_path, command_file, _command = _prepare_command_file_inputs(
+        tmp_path
+    )
+    prepare_run_with_command_file(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        command_file=command_file,
+        runs_root=runs_root,
+    )
+    return runs_root, run_dir
+
+
+def _identity_file(run_dir: Path, kind: str) -> Path:
+    return run_dir / ("manifest.json" if kind == "manifest" else ".command-handoff.json")
+
+
+def _rewrite_identity_file(path: Path, payload: bytes, mode: int) -> None:
+    path.chmod(mode | 0o200)
+    path.write_bytes(payload)
+    path.chmod(mode)
+
+
+def _replace_identity_file(path: Path, payload: bytes, mode: int) -> None:
+    replacement = path.with_name(f"replacement-{path.name}")
+    replacement.write_bytes(payload)
+    replacement.chmod(mode)
+    os.replace(replacement, path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("run_device", True),
+        ("run_inode", -1),
+        ("handoff_device", 1.5),
+        ("manifest_sha256", "A" * 64),
+    ),
+)
+def test_prepared_run_identity_rejects_invalid_fields(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    raw = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root).to_dict()
+    raw[field] = value
+    with pytest.raises(AutoresearchRunRecordError):
+        PreparedRunIdentity.from_dict(raw)
+
+
+def test_prepared_run_identity_roundtrip_and_validation(tmp_path: Path) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+    assert PreparedRunIdentity.from_dict(identity.to_dict()) == identity
+    assert set(identity.to_dict()) == {
+        "schema_version",
+        "run_device",
+        "run_inode",
+        "manifest_sha256",
+        "handoff_device",
+        "handoff_inode",
+        "handoff_sha256",
+    }
+    validate_prepared_run_identity(run_dir=run_dir, runs_root=runs_root, identity=identity)
+
+
+def test_prepared_run_identity_rejects_non_exact_schema_keys(tmp_path: Path) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    raw = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root).to_dict()
+    with pytest.raises(AutoresearchRunRecordError):
+        PreparedRunIdentity.from_dict({**raw, "extra": 1})
+    with pytest.raises(AutoresearchRunRecordError):
+        PreparedRunIdentity.from_dict(
+            {key: value for key, value in raw.items() if key != "run_inode"}
+        )
+
+
+def test_prepared_run_identity_rejects_a_swapped_run(tmp_path: Path) -> None:
+    first_root, first_run = _prepare_identity_fixture(tmp_path / "first")
+    second_root, second_run = _prepare_identity_fixture(tmp_path / "second")
+    identity = capture_prepared_run_identity(run_dir=first_run, runs_root=first_root)
+
+    with pytest.raises(AutoresearchRunRecordError, match="identity"):
+        validate_prepared_run_identity(
+            run_dir=second_run,
+            runs_root=second_root,
+            identity=identity,
+        )
+    assert (second_run / ".command-handoff.json").exists()
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_replaced_bundle_file(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    path = _identity_file(run_dir, kind)
+    replacement = path.with_name(f"replacement-{kind}.json")
+    replacement_bytes = path.read_bytes()
+    if kind == "manifest":
+        replacement_raw = json.loads(replacement_bytes)
+        replacement_raw["task_label"] = "replacement-task"
+        replacement_bytes = (
+            json.dumps(replacement_raw, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        )
+    replacement.write_bytes(replacement_bytes)
+    replacement.chmod(0o400 if kind == "manifest" else 0o600)
+    os.replace(replacement, path)
+
+    with pytest.raises(AutoresearchRunRecordError, match="identity"):
+        validate_prepared_run_identity(run_dir=run_dir, runs_root=runs_root, identity=identity)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_content_mutation(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    path = _identity_file(run_dir, kind)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if kind == "manifest":
+        raw["task_label"] = "changed-task"
+    else:
+        raw["command"] = ["changed-command"]
+    if kind == "manifest":
+        path.chmod(0o600)
+    path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    if kind == "manifest":
+        path.chmod(0o400)
+
+    with pytest.raises(AutoresearchRunRecordError):
+        validate_prepared_run_identity(run_dir=run_dir, runs_root=runs_root, identity=identity)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_wrong_mode(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    path.chmod(0o600 if kind == "manifest" else 0o400)
+
+    with pytest.raises(AutoresearchRunRecordError, match="mode"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_hard_link(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    link = run_dir / f"{kind}-link"
+    os.link(path, link)
+
+    with pytest.raises(AutoresearchRunRecordError, match="link"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_symlink(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    target = tmp_path / f"{kind}-target"
+    target.write_bytes(path.read_bytes())
+    target.chmod(0o400 if kind == "manifest" else 0o600)
+    path.unlink()
+    path.symlink_to(target)
+
+    with pytest.raises(AutoresearchRunRecordError):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_noncanonical_file(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if kind == "manifest":
+        path.chmod(0o600)
+    path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    if kind == "manifest":
+        path.chmod(0o400)
+
+    with pytest.raises(AutoresearchRunRecordError, match="canonical"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_accepts_legitimate_short_reads(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    real_read = os.read
+    shortened = False
+
+    def short_first_read(descriptor: int, count: int) -> bytes:
+        nonlocal shortened
+        if not shortened and os.readlink(f"/proc/self/fd/{descriptor}") == str(path):
+            shortened = True
+            return real_read(descriptor, 1)
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(os, "read", short_first_read)
+    capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    assert shortened
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_accepts_exact_file_size_limit(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    if kind == "manifest":
+        raw = json.loads(path.read_bytes())
+        raw["task_label"] = "x"
+        raw["task_label"] *= 256 * 1024 - len(autoresearch_runs._canonical_json(raw)) + 1
+        _rewrite_identity_file(path, autoresearch_runs._canonical_json(raw), 0o400)
+    else:
+        manifest_path = run_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        command = "x"
+        handoff_command = [command]
+        handoff: dict[str, object] = {"command": handoff_command}
+        manifest["command_sha256"] = sha256(command.encode()).hexdigest()
+        _rewrite_identity_file(manifest_path, autoresearch_runs._canonical_json(manifest), 0o400)
+        handoff_command[0] = "x" * (
+            256 * 1024 - len(autoresearch_runs._canonical_json(handoff)) + 1
+        )
+        manifest["command_sha256"] = sha256(handoff_command[0].encode()).hexdigest()
+        _rewrite_identity_file(manifest_path, autoresearch_runs._canonical_json(manifest), 0o400)
+        _rewrite_identity_file(path, autoresearch_runs._canonical_json(handoff), 0o600)
+    assert len(path.read_bytes()) == 256 * 1024
+    capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_over_limit_file(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    _rewrite_identity_file(path, b"x" * (256 * 1024 + 1), 0o400 if kind == "manifest" else 0o600)
+    with pytest.raises(AutoresearchRunRecordError, match="size"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_detects_read_mutation(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    mode = 0o400 if kind == "manifest" else 0o600
+    real_fstat = os.fstat
+    file_fstats = 0
+
+    def mutate_before_after_stat(descriptor: int) -> os.stat_result:
+        nonlocal file_fstats
+        target = os.readlink(f"/proc/self/fd/{descriptor}")
+        if target == str(path):
+            file_fstats += 1
+            if file_fstats == 2:
+                path.chmod(mode | 0o200)
+                path.write_bytes(path.read_bytes() + b" ")
+                path.chmod(mode)
+        return real_fstat(descriptor)
+
+    monkeypatch.setattr(os, "fstat", mutate_before_after_stat)
+    with pytest.raises(AutoresearchRunRecordError, match="changed"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_same_capture_entry_replacement(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    real_read = autoresearch_runs._read_prepared_identity_file
+
+    def read_then_replace(
+        directory_descriptor: int, name: str, mode: int
+    ) -> tuple[bytes, os.stat_result]:
+        result = real_read(directory_descriptor, name, mode)
+        if name == path.name:
+            _replace_identity_file(path, result[0], mode)
+        return result
+
+    monkeypatch.setattr(autoresearch_runs, "_read_prepared_identity_file", read_then_replace)
+    with pytest.raises(AutoresearchRunRecordError, match="changed"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_post_read_same_inode_mutation(
+    tmp_path: Path, kind: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    mode = 0o400 if kind == "manifest" else 0o600
+    real_read = autoresearch_runs._read_prepared_identity_file
+
+    def read_then_mutate(
+        directory_descriptor: int, name: str, file_mode: int
+    ) -> tuple[bytes, os.stat_result]:
+        result = real_read(directory_descriptor, name, file_mode)
+        if name == path.name:
+            path.chmod(mode | 0o200)
+            path.chmod(mode)
+        return result
+
+    monkeypatch.setattr(autoresearch_runs, "_read_prepared_identity_file", read_then_mutate)
+    with pytest.raises(AutoresearchRunRecordError, match="changed"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+def test_prepared_run_identity_rejects_run_rename_during_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    real_read = autoresearch_runs._read_prepared_identity_file
+    moved = run_dir.with_name("moved-run")
+
+    def read_then_rename(
+        directory_descriptor: int, name: str, mode: int
+    ) -> tuple[bytes, os.stat_result]:
+        result = real_read(directory_descriptor, name, mode)
+        if name == ".command-handoff.json":
+            run_dir.rename(moved)
+        return result
+
+    monkeypatch.setattr(autoresearch_runs, "_read_prepared_identity_file", read_then_rename)
+    try:
+        with pytest.raises(AutoresearchRunRecordError):
+            capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    finally:
+        moved.rename(run_dir)
+
+
+def test_prepared_run_identity_rejects_run_rename_after_final_status_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    moved = run_dir.with_name("moved-run")
+    real_listdir = os.listdir
+    listdir_calls = 0
+
+    def listdir_then_rename(path: int) -> list[str]:
+        nonlocal listdir_calls
+        entries = real_listdir(path)
+        if isinstance(path, int):
+            listdir_calls += 1
+            if listdir_calls == 2:
+                run_dir.rename(moved)
+        return entries
+
+    monkeypatch.setattr(os, "listdir", listdir_then_rename)
+    try:
+        with pytest.raises(AutoresearchRunRecordError, match="snapshot"):
+            capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    finally:
+        moved.rename(run_dir)
+
+
+def test_prepared_run_identity_rejects_late_status_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    real_read = autoresearch_runs._read_prepared_identity_file
+
+    def read_then_create_status(
+        directory_descriptor: int, name: str, mode: int
+    ) -> tuple[bytes, os.stat_result]:
+        result = real_read(directory_descriptor, name, mode)
+        if name == ".command-handoff.json":
+            status = run_dir / "status.json"
+            status.write_bytes(b"{}")
+            status.chmod(0o600)
+        return result
+
+    monkeypatch.setattr(autoresearch_runs, "_read_prepared_identity_file", read_then_create_status)
+    with pytest.raises(AutoresearchRunRecordError, match="status"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_allows_same_byte_manifest_replacement_across_calls(
+    tmp_path: Path, kind: str
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    _replace_identity_file(path, path.read_bytes(), 0o400 if kind == "manifest" else 0o600)
+
+    if kind == "manifest":
+        validate_prepared_run_identity(run_dir=run_dir, runs_root=runs_root, identity=identity)
+    else:
+        with pytest.raises(AutoresearchRunRecordError, match="identity"):
+            validate_prepared_run_identity(run_dir=run_dir, runs_root=runs_root, identity=identity)
+
+
+@pytest.mark.parametrize("kind", ("manifest", "handoff"))
+def test_prepared_run_identity_rejects_nonfinite_bundle_json(tmp_path: Path, kind: str) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    path = _identity_file(run_dir, kind)
+    raw = json.loads(path.read_bytes())
+    if kind == "manifest":
+        raw["timeout_seconds"] = float("nan")
+    else:
+        raw["command"] = [float("nan")]
+    _rewrite_identity_file(
+        path,
+        json.dumps(raw, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+        0o400 if kind == "manifest" else 0o600,
+    )
+    with pytest.raises(AutoresearchRunRecordError, match="non-finite"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+def test_prepared_run_identity_rejects_status_file_or_symlink(tmp_path: Path) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    status = run_dir / "status.json"
+    status.write_bytes(b"{}")
+    status.chmod(0o600)
+    with pytest.raises(AutoresearchRunRecordError, match="status"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    status.unlink()
+    target = tmp_path / "status-target"
+    target.write_bytes(b"{}")
+    status.symlink_to(target)
+    with pytest.raises(AutoresearchRunRecordError, match="status"):
+        capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+
+
+def test_prepared_run_identity_cli_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "prepared-identity",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
+    assert autoresearch_runs._main() == 0
+    identity_json = capsys.readouterr().out
+    identity = PreparedRunIdentity.from_dict(json.loads(identity_json))
+    assert (
+        identity_json
+        == json.dumps(identity.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "validate-prepared-identity",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--identity-json",
+            identity_json,
+        ],
+    )
+    assert autoresearch_runs._main() == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("identity_json", ("[]", '{"schema_version":1,"schema_version":1}'))
+def test_validate_prepared_run_identity_cli_rejects_malformed_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity_json: str
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "validate-prepared-identity",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--identity-json",
+            identity_json,
+        ],
+    )
+    with pytest.raises(AutoresearchRunRecordError):
+        autoresearch_runs._main()
+
+
+def test_validate_prepared_run_identity_cli_rejects_oversized_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    oversized = "{" + " " * 4096 + "}"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "validate-prepared-identity",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--identity-json",
+            oversized,
+        ],
+    )
+    with pytest.raises(AutoresearchRunRecordError, match="size"):
+        autoresearch_runs._main()
+
+
+@pytest.mark.parametrize("constant", ("NaN", "Infinity", "-Infinity"))
+def test_validate_prepared_run_identity_cli_rejects_nonfinite_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, constant: str
+) -> None:
+    runs_root, run_dir = _prepare_identity_fixture(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root).to_dict()
+    identity_json = json.dumps({**identity, "run_device": float(constant)})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "validate-prepared-identity",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--identity-json",
+            identity_json,
+        ],
+    )
+    with pytest.raises(AutoresearchRunRecordError, match="non-finite"):
+        autoresearch_runs._main()
 
 
 def test_prepare_run_with_command_file_publishes_a_complete_canonical_bundle(

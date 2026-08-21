@@ -77,6 +77,27 @@ _PARTIAL_ARCHIVE_PENDING_PREFIX = ".pending."
 _SAFE_QUANTIPY_RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _SUPERVISOR_POLL_SECONDS = 0.05
 _SUPERVISED_COMMAND_RESULT_SCHEMA_VERSION = 1
+_PREPARED_RUN_IDENTITY_SCHEMA_VERSION = 1
+_PREPARED_IDENTITY_FILE_MAX_BYTES = 256 * 1024
+_PREPARED_IDENTITY_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "run_device",
+    "run_inode",
+    "manifest_sha256",
+    "handoff_device",
+    "handoff_inode",
+    "handoff_sha256",
+)
+_PREPARED_IDENTITY_STABLE_FIELDS: tuple[str, ...] = (
+    "st_dev",
+    "st_ino",
+    "st_mode",
+    "st_uid",
+    "st_nlink",
+    "st_size",
+    "st_mtime_ns",
+    "st_ctime_ns",
+)
 
 
 class AutoresearchRunRecordError(ValueError):
@@ -982,6 +1003,48 @@ class PreparedRun:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedRunIdentity:
+    schema_version: int
+    run_device: int
+    run_inode: int
+    manifest_sha256: str
+    handoff_device: int
+    handoff_inode: int
+    handoff_sha256: str
+
+    @classmethod
+    def from_dict(cls, raw: object) -> PreparedRunIdentity:
+        if not isinstance(raw, dict):
+            raise AutoresearchRunRecordError("prepared run identity must be an object")
+        _require_exact_keys(raw, _PREPARED_IDENTITY_KEYS, label="prepared run identity")
+        if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+            raise AutoresearchRunRecordError("prepared run identity schema_version is unsupported")
+        return cls(
+            schema_version=_PREPARED_RUN_IDENTITY_SCHEMA_VERSION,
+            run_device=_prepared_identity_int(raw, "run_device"),
+            run_inode=_prepared_identity_int(raw, "run_inode"),
+            manifest_sha256=_require_sha256(
+                raw["manifest_sha256"], label="prepared run identity manifest_sha256"
+            ),
+            handoff_device=_prepared_identity_int(raw, "handoff_device"),
+            handoff_inode=_prepared_identity_int(raw, "handoff_inode"),
+            handoff_sha256=_require_sha256(
+                raw["handoff_sha256"], label="prepared run identity handoff_sha256"
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {key: getattr(self, key) for key in _PREPARED_IDENTITY_KEYS}
+
+
+def _prepared_identity_int(raw: dict[str, object], field: str) -> int:
+    value = raw[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AutoresearchRunRecordError(f"prepared run identity {field} is invalid")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
 class RunRecord:
     manifest: RunManifest
     status: RunStatus
@@ -1059,6 +1122,76 @@ def _read_private_json(
         allowed_modes=allowed_modes,
     )
     return raw
+
+
+def _reject_prepared_identity_json_constant(value: str) -> NoReturn:
+    raise AutoresearchRunRecordError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _parse_prepared_identity_json(payload: bytes, *, label: str) -> object:
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_prepared_identity_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AutoresearchRunRecordError(f"invalid {label}") from exc
+
+
+def _validate_prepared_identity_file_metadata(
+    metadata: os.stat_result, mode: int, name: str
+) -> None:
+    if not stat.S_ISREG(metadata.st_mode):
+        raise AutoresearchRunRecordError(f"{name} is not a regular file")
+    if metadata.st_uid != os.getuid():
+        raise AutoresearchRunRecordError(f"{name} has wrong owner")
+    if stat.S_IMODE(metadata.st_mode) != mode:
+        raise AutoresearchRunRecordError(f"{name} has invalid mode")
+    if metadata.st_nlink != 1:
+        raise AutoresearchRunRecordError(f"{name} has invalid link count")
+
+
+def _read_prepared_identity_file(
+    directory_descriptor: int,
+    name: str,
+    mode: int,
+) -> tuple[bytes, os.stat_result]:
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptor = os.open(name, flags, dir_fd=directory_descriptor)
+        before = os.fstat(descriptor)
+        _validate_prepared_identity_file_metadata(before, mode, name)
+        if before.st_size > _PREPARED_IDENTITY_FILE_MAX_BYTES:
+            raise AutoresearchRunRecordError(f"{name} exceeds the fixed size limit")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _PREPARED_IDENTITY_FILE_MAX_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _PREPARED_IDENTITY_FILE_MAX_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if len(payload) != after.st_size or any(
+            getattr(before, field) != getattr(after, field)
+            for field in _PREPARED_IDENTITY_STABLE_FIELDS
+        ):
+            raise AutoresearchRunRecordError(f"{name} changed while being read")
+        return payload, after
+    except FileNotFoundError as exc:
+        raise AutoresearchRunRecordError(f"missing {name}") from exc
+    except OSError as exc:
+        raise AutoresearchRunRecordError(f"cannot read {name}: {exc}") from exc
+    finally:
+        if descriptor != -1:
+            with suppress(OSError):
+                os.close(descriptor)
 
 
 def _reject_symlink(path: Path, *, label: str) -> None:
@@ -2223,6 +2356,102 @@ def prepare_run_with_command_file(
     return PreparedRun(manifest=manifest, manifest_sha256=_manifest_digest(manifest))
 
 
+def _validate_prepared_identity_snapshot(
+    directory_descriptor: int,
+    run_dir: Path,
+    run_metadata: os.stat_result,
+    manifest_metadata: os.stat_result,
+    handoff_metadata: os.stat_result,
+) -> None:
+    try:
+        for name, mode, expected in (
+            ("manifest.json", 0o400, manifest_metadata),
+            (_COMMAND_HANDOFF_NAME, 0o600, handoff_metadata),
+        ):
+            current = os.stat(name, dir_fd=directory_descriptor, follow_symlinks=False)
+            _validate_prepared_identity_file_metadata(current, mode, name)
+            if any(
+                getattr(current, field) != getattr(expected, field)
+                for field in _PREPARED_IDENTITY_STABLE_FIELDS
+            ):
+                raise AutoresearchRunRecordError(f"{name} changed during capture")
+        if "status.json" in os.listdir(directory_descriptor):
+            raise AutoresearchRunRecordError("prepared run must not have status.json")
+        current_run = os.stat(run_dir, follow_symlinks=False)
+        if not _same_directory_identity(run_metadata, current_run):
+            raise AutoresearchRunRecordError("prepared run directory changed during capture")
+    except OSError as exc:
+        raise AutoresearchRunRecordError("prepared run snapshot could not be finalized") from exc
+
+
+def capture_prepared_run_identity(
+    *, run_dir: Path, runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT
+) -> PreparedRunIdentity:
+    canonical_run_dir = _validate_run_directory(run_dir, runs_root)
+    directory_descriptor = _open_absolute_directory_no_follow(
+        canonical_run_dir, label="prepared run directory"
+    )
+    assert directory_descriptor is not None
+    try:
+        run_metadata = _validate_partial_archive_directory(
+            directory_descriptor, label="prepared run directory", exact_mode=True
+        )
+        if "status.json" in os.listdir(directory_descriptor):
+            raise AutoresearchRunRecordError("prepared run must not have status.json")
+        manifest_bytes, manifest_metadata = _read_prepared_identity_file(
+            directory_descriptor, "manifest.json", 0o400
+        )
+        manifest = RunManifest.from_dict(
+            _parse_prepared_identity_json(manifest_bytes, label="prepared manifest")
+        )
+        if manifest.run_directory != str(canonical_run_dir):
+            raise AutoresearchRunRecordError("manifest run_directory mismatch")
+        if manifest_bytes != _canonical_json(manifest.to_dict()):
+            raise AutoresearchRunRecordError("prepared manifest is not canonical")
+        handoff_bytes, handoff_metadata = _read_prepared_identity_file(
+            directory_descriptor, _COMMAND_HANDOFF_NAME, 0o600
+        )
+        command = _parse_command_input(
+            _parse_prepared_identity_json(handoff_bytes, label="prepared command handoff"),
+            label="prepared command handoff",
+        )
+        if manifest.command_sha256 != command_sha256(command):
+            raise AutoresearchRunRecordError("handoff does not match manifest digest")
+        if handoff_bytes != _canonical_json({"command": list(command)}):
+            raise AutoresearchRunRecordError("prepared command handoff is not canonical")
+        identity = PreparedRunIdentity(
+            schema_version=_PREPARED_RUN_IDENTITY_SCHEMA_VERSION,
+            run_device=run_metadata.st_dev,
+            run_inode=run_metadata.st_ino,
+            manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+            handoff_device=handoff_metadata.st_dev,
+            handoff_inode=handoff_metadata.st_ino,
+            handoff_sha256=hashlib.sha256(handoff_bytes).hexdigest(),
+        )
+        _validate_prepared_identity_snapshot(
+            directory_descriptor,
+            canonical_run_dir,
+            run_metadata,
+            manifest_metadata,
+            handoff_metadata,
+        )
+        return identity
+    finally:
+        with suppress(OSError):
+            os.close(directory_descriptor)
+
+
+def validate_prepared_run_identity(
+    *,
+    run_dir: Path,
+    runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT,
+    identity: PreparedRunIdentity,
+) -> None:
+    captured = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    if captured != identity:
+        raise AutoresearchRunRecordError("prepared run identity does not match")
+
+
 def _load_manifest(run_dir: Path, runs_root: Path) -> tuple[Path, RunManifest, str]:
     canonical_run_dir = _validate_run_directory(run_dir, runs_root)
     manifest = RunManifest.from_dict(
@@ -3037,6 +3266,15 @@ def validate_startup_marker(
         raise AutoresearchRunRecordError("startup marker does not bind the live run identity")
 
 
+def _prepared_run_identity_from_json(value: str) -> PreparedRunIdentity:
+    payload = value.encode("utf-8")
+    if len(payload) > 4 * 1024:
+        raise AutoresearchRunRecordError("prepared run identity JSON exceeds the fixed size limit")
+    return PreparedRunIdentity.from_dict(
+        _parse_prepared_identity_json(payload, label="prepared run identity JSON")
+    )
+
+
 def _main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="operation", required=True)
@@ -3047,6 +3285,13 @@ def _main() -> int:
     prepare_file.add_argument("--run-dir", type=Path, required=True)
     prepare_file.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
     prepare_file.add_argument("--command-file", type=Path, required=True)
+    prepared_identity = subparsers.add_parser("prepared-identity")
+    prepared_identity.add_argument("--run-dir", type=Path, required=True)
+    prepared_identity.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
+    validate_identity = subparsers.add_parser("validate-prepared-identity")
+    validate_identity.add_argument("--run-dir", type=Path, required=True)
+    validate_identity.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
+    validate_identity.add_argument("--identity-json", required=True)
     consume = subparsers.add_parser("consume-command-handoff")
     consume.add_argument("--run-dir", type=Path, required=True)
     consume.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
@@ -3112,6 +3357,15 @@ def _main() -> int:
             run_dir=args.run_dir,
             runs_root=args.runs_root,
             command_file=args.command_file,
+        )
+    elif args.operation == "prepared-identity":
+        identity = capture_prepared_run_identity(run_dir=args.run_dir, runs_root=args.runs_root)
+        sys.stdout.write(_canonical_json(identity.to_dict()).decode("utf-8"))
+    elif args.operation == "validate-prepared-identity":
+        validate_prepared_run_identity(
+            run_dir=args.run_dir,
+            runs_root=args.runs_root,
+            identity=_prepared_run_identity_from_json(args.identity_json),
         )
     elif args.operation == "consume-command-handoff":
         command = consume_command_handoff(run_dir=args.run_dir, runs_root=args.runs_root)
