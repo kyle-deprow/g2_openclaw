@@ -94,10 +94,11 @@ from gateway.autoresearch_readiness import (
 )
 
 CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION = (
-    "The arbiter MUST enumerate data_requirements for the winning brief: exactly price_panel "
-    "means receipt-bound 1-minute price data. Any brief needing more must be reshaped to "
-    "supported data before authorization or emitted as an operator-precondition consensus; "
-    "never authorize it for implementation."
+    "The arbiter MUST enumerate every needed transport in data_requirements. Allowed values are "
+    "exactly price_panel and sentiment_panels. price_panel means receipt-bound 1-minute price "
+    "data; sentiment_panels means receipt-bound Reddit attention/tone datasets. Any need outside "
+    "these values MUST be reshaped to supported data or emitted as an operator-precondition "
+    "consensus, never authorized for implementation."
 )
 
 

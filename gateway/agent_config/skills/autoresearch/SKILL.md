@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.18.1
+version: 8.19.0
 ---
 
 # Autoresearch
@@ -730,42 +730,25 @@ Quantipy constraints:
   execution-timing, unsupported-data, cache-reuse, and prompt-hygiene rules.
 - No overnight holds; flat by the target repo's close-out rule.
 - Use real platform OHLCV through `qp.prices()` and no synthetic research data.
-- Use a simple indicator core with optional Reddit/news sentiment conditioning.
+- Use a simple indicator core with governed Reddit sentiment only; news sentiment
+  is not a shipped transport.
 - Hyperparameter tuning uses time-series-aware splits.
 
-### Reddit Sentiment Tables
+### Governed Sentiment Panels
 
-`daily_ticker_summary` is NOT truncated: it holds every ticker with at least one
-mention in COMPLETED analyzed posts for that date and subreddit, with `rank` as
-the ordinal by mention count. Its useful columns are `summary_date`, `ticker`,
-`total_mentions`, `bullish_count`, `bearish_count`, `neutral_count`,
-`avg_confidence`, `weighted_sentiment` (= (bullish - bearish) / total, in the
-range [-1, +1]), and `rank`.
+The experiment sandbox cannot access `daily_ticker_summary`, `TradingUniverse`,
+Postgres, the network, or arbitrary files. The only shipped interface is
+`context.sentiment.load_frame(<literal>)`, with exactly these datasets:
+`attention_hourly`, `attention_daily`, `tone_subreddit`, and `tone_fused`.
+Attention datasets are deterministic all-scraped-post attention. Tone datasets
+are LLM-derived sampled tone and carry coverage/labeler identity. `tone_subreddit`
+is by subreddit; `tone_fused` is correctly mentions-weighted cross-subreddit.
 
-`TradingUniverse` IS top-N truncated, with a default of 20 per day. Absence
-from `TradingUniverse` means the ticker was not in that day's top N; absence
-from `daily_ticker_summary` means there were no mentions among analyzed posts.
-These are different facts. Absence is INFORMATIVE, not missing data: a ticker
-with no row on a date had low or no attention that day. Do not impute it, drop
-the date, or treat it as missing-at-random; encode it as an explicit
-low-attention state.
-
-Only a fraction of scraped in-window posts have been analyzed, so a raw
-mention-count feature partly measures pipeline coverage rather than market
-attention. A conditional-sentiment feature (given that mentions exist, what
-was the tone) is far less exposed to this than a mention-volume feature. Any
-experiment using attention volume must state how it handled this confound.
-
-The granularity is DAILY: one value per ticker per subreddit per date, while
-the campaign trades intraday. Sentiment therefore conditions intraday state;
-it cannot time an intraday entry by itself.
-
-**Do NOT name specific tickers as good or bad sentiment candidates.** Density
-varies by instrument and changes as the backfill progresses. The proposing
-panel must MEASURE per-instrument coverage and mention density for its own
-pre-registered universe over the campaign window, report those figures, and
-justify any instrument it leans on. Guidance must never hardcode a recommended
-ticker set.
+The consensus transport name is `sentiment_panels`; it is not a manifest key.
+The committed Quantipy manifest declares the `sentiment` field with the exact
+`api_url` and pinned `receipt_sha256`. The runtime prepares sealed receipt-bound
+artifacts from that declared field. No ticker recommendations or undeclared
+data.
 
 The implementation worker derives and prewarms the Quantipy data plan before the
 committed experiment runtime is invoked. Use the public client path
@@ -788,11 +771,13 @@ majority. Required output:
 - Explicit reasons losers were rejected.
 - Final implementation brief.
 - `data_requirements`, enumerating every transport the winning brief needs. The
-  supported experiment transports are exactly `price_panel`, meaning
-  receipt-bound regular-hours 1-minute price data. Runtime-derived provenance
-  is receipt evidence, not a requestable transport. A brief needing anything
-  else must be reshaped to supported data before authorization or emitted as an
-  operator-precondition consensus; never authorize it for implementation.
+  supported experiment transports are exactly `price_panel` and
+  `sentiment_panels`: `price_panel` means receipt-bound 1-minute price data;
+  `sentiment_panels` means receipt-bound Reddit attention/tone datasets.
+  Runtime-derived provenance is receipt evidence, not a requestable transport.
+  A brief needing anything else must be reshaped to supported data before
+  authorization or emitted as an operator-precondition consensus; never
+  authorize it for implementation.
 - Frozen canonical universe plan inputs: profile identity and digest, sorted
   full-range selection schedule, maximum members per date, and execution
   policy. Consensus stores no redundant batch boundaries. The runner derives

@@ -8,6 +8,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENT_CONFIG = REPO_ROOT / "gateway" / "agent_config"
+BOOTSTRAP = AGENT_CONFIG / "BOOTSTRAP.md"
 PLAN = REPO_ROOT / "docs" / "reference" / "quantipy-autonomous-research-plan.md"
 DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 METHODOLOGY = AGENT_CONFIG / "skills" / "quantipy-methodology" / "SKILL.md"
@@ -110,7 +111,7 @@ def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
 def test_all_runtime_routes_reference_data_contract_and_receipts() -> None:
     paths = (
         AGENT_CONFIG / "AGENTS.md",
-        AGENT_CONFIG / "BOOTSTRAP.md",
+        BOOTSTRAP,
         METHODOLOGY,
         AUTORESEARCH,
         PLAN,
@@ -562,12 +563,22 @@ def test_autoresearch_directive_distinguishes_contested_methodology_discards() -
     assert "clean negatives stay permanently burned" in skill
 
 
+def test_bootstrap_research_scope_requires_governed_reddit_and_excludes_news() -> None:
+    normalized = " ".join(BOOTSTRAP.read_text(encoding="utf-8").split()).lower()
+    research_scope = normalized.split("## research scope", 1)[1].split("## compute fit", 1)[0]
+
+    assert "optional governed reddit sentiment" in research_scope
+    assert "news sentiment is not shipped" in research_scope
+    assert "optional reddit/news sentiment" not in research_scope
+    assert "reddit/news sentiment" not in research_scope
+
+
 def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> None:
     raw_skill = AUTORESEARCH.read_text(encoding="utf-8")
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.18.1" in skill
+    assert "version: 8.19.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill
@@ -576,7 +587,9 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "reuse the same five symbols with no member substitution" not in skill
     assert "each iteration's consensus must declare a `universe_plan`" in skill
     assert "`data_requirements`" in skill
-    assert "supported experiment transports are exactly `price_panel`" in skill
+    assert (
+        "supported experiment transports are exactly `price_panel` and `sentiment_panels`" in skill
+    )
     assert "runtime-derived provenance is receipt evidence, not a requestable transport" in skill
     assert "operator-precondition consensus" in skill
     assert "data_requirements` as the arbiter's declaration trust point" in skill
@@ -618,31 +631,46 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     assert "at least 2 trades per day" not in plan
 
 
-def test_autoresearch_docs_describe_sentiment_tables_and_forbid_ticker_picks() -> None:
-    normalized = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split()).lower()
-    sentiment = normalized.split("### reddit sentiment tables", 1)[1].split(
+def test_autoresearch_docs_describe_governed_sentiment_panels() -> None:
+    raw_skill = AUTORESEARCH.read_text(encoding="utf-8")
+    normalized = " ".join(raw_skill.split()).lower()
+    sentiment = normalized.split("### governed sentiment panels", 1)[1].split(
         "the implementation worker derives and prewarms", 1
     )[0]
 
-    assert "daily_ticker_summary" in sentiment
-    assert "not truncated" in sentiment
-    assert "completed analyzed posts" in sentiment
-    assert "rank" in sentiment and "ordinal by mention count" in sentiment
-    assert "tradinguniverse" in sentiment
-    assert "top-n truncated" in sentiment
-    assert "default of 20 per day" in sentiment
-    assert "absence is informative" in sentiment
-    assert "explicit low-attention state" in sentiment
-    assert "only a fraction of scraped in-window posts have been analyzed" in sentiment
-    assert "pipeline coverage rather than market attention" in sentiment
-    assert "conditional-sentiment feature" in sentiment
-    assert "mention-volume feature" in sentiment
-    assert "one value per ticker per subreddit per date" in sentiment
-    assert "cannot time an intraday entry by itself" in sentiment
-    assert "measure per-instrument coverage and mention density" in sentiment
+    assert (
+        "cannot access `daily_ticker_summary`, `tradinguniverse`, postgres, the network, or "
+        "arbitrary files" in sentiment
+    )
+    assert "context.sentiment.load_frame(<literal>)" in sentiment
+    for dataset in (
+        "attention_hourly",
+        "attention_daily",
+        "tone_subreddit",
+        "tone_fused",
+    ):
+        assert dataset in sentiment
+    assert "exactly" in sentiment
+    assert "deterministic all-scraped-post attention" in sentiment
+    assert "llm-derived sampled tone" in sentiment
+    assert "coverage/labeler identity" in sentiment
+    assert "by subreddit" in sentiment
+    assert "correctly mentions-weighted cross-subreddit" in sentiment
+    assert (
+        "the consensus transport name is `sentiment_panels`; it is not a manifest key" in sentiment
+    )
+    assert (
+        "the committed quantipy manifest declares the `sentiment` field with the exact `api_url` "
+        "and pinned `receipt_sha256`" in sentiment
+    )
+    assert "the manifest must declare `sentiment_panels`" not in sentiment
+    assert "runtime prepares sealed receipt-bound artifacts" in sentiment
+    assert "no ticker recommendations or undeclared data" in sentiment
+    assert "governed reddit sentiment only" in normalized
+    assert "news sentiment is not a shipped transport" in normalized
+    assert "optional reddit/news sentiment conditioning" not in normalized
 
-    for ticker in ("spy", "qqq", "iwm", "tlt", "tqqq"):
-        assert ticker not in sentiment
+    assert "### reddit sentiment tables" not in normalized
 
 
 def test_autoresearch_decision_gate_uses_oos_metric_and_activity_floor() -> None:

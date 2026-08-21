@@ -571,11 +571,13 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
         "least-explored family",
         "lexicographically smallest normalized family name",
         "losing clusters in dissent_summary",
-        "enumerate data_requirements",
-        "exactly price_panel",
-        "receipt-bound 1-minute price data",
+        "enumerate every needed transport in data_requirements",
+        "Allowed values are exactly price_panel and sentiment_panels",
+        "price_panel means receipt-bound 1-minute price data",
+        "sentiment_panels means receipt-bound Reddit attention/tone datasets",
+        "Any need outside these values MUST be reshaped",
         "operator-precondition consensus",
-        "never authorize it for implementation",
+        "never authorized for implementation",
     ):
         assert phrase in alpha_prompt
     assert len(autoresearch_engine.CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION.encode()) <= 500

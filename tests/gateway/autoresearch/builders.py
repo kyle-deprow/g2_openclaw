@@ -124,26 +124,26 @@ QUANTIPY_V2_CONTRACT_FILE_SHA256 = {
     ),
     "src/quantipy/experiments/preflight.py": "".join(
         (
-            "c8265b2a223e9ffe",  # pragma: allowlist secret
-            "279742bead0e2b29",  # pragma: allowlist secret
-            "ab6df96ce21663bd",  # pragma: allowlist secret
-            "bf94569bea3019d6",  # pragma: allowlist secret
+            "f1997e18a95b7bcc",  # pragma: allowlist secret
+            "c3f9effcd26ad7e0",  # pragma: allowlist secret
+            "4f75e953ce9c7823",  # pragma: allowlist secret
+            "8e813ce6e714491c",  # pragma: allowlist secret
         )
     ),
     "src/quantipy/experiments/runtime.py": "".join(
         (
-            "407ab9b01a7d295a",  # pragma: allowlist secret
-            "f325c38fca54a2d8",  # pragma: allowlist secret
-            "aad9d85984abcc8d",  # pragma: allowlist secret
-            "cf22dd3c2949d21e",  # pragma: allowlist secret
+            "a44edce99a28a058",  # pragma: allowlist secret
+            "8e95239521096cd4",  # pragma: allowlist secret
+            "aaa5b7f15a08041c",  # pragma: allowlist secret
+            "9050bc08080ac568",  # pragma: allowlist secret
         )
     ),
     "src/quantipy/experiments/schemas.py": "".join(
         (
-            "a076357c61727419",  # pragma: allowlist secret
-            "b97cb7aba3099723",  # pragma: allowlist secret
-            "78fa9e1c43cfc0c3",  # pragma: allowlist secret
-            "e85a6c890350d0e6",  # pragma: allowlist secret
+            "71c37960d5d13eed",  # pragma: allowlist secret
+            "60c6c9355a8e4245",  # pragma: allowlist secret
+            "7386a7ee356d7067",  # pragma: allowlist secret
+            "1202d517b8478208",  # pragma: allowlist secret
         )
     ),
 }
@@ -563,7 +563,7 @@ def _majority_consensus(
         data_adequacy_score=0.9,
         overfit_risk_score=0.27,
         expected_net_sharpe=0.54,
-        data_requirements=("price_panel",),
+        data_requirements=("price_panel", "sentiment_panels"),
         rejection_reasons=("Losers lacked coverage plan",),
         implementation_brief="Implement VWAP + OBV with walk-forward tuning.",
         dissent_summary="Two dissenters preferred a simpler regime filter.",
@@ -589,7 +589,7 @@ def _operator_precondition_consensus(
         data_adequacy_score=1.0,
         overfit_risk_score=1.0,
         expected_net_sharpe=0.0,
-        data_requirements=("price_panel",),
+        data_requirements=("price_panel", "sentiment_panels"),
         rejection_reasons=("Missing immutable operator evidence bundle.",),
         implementation_brief=(
             "Do not enter ENGINEER and do not modify Quantipy. The operator "
@@ -614,7 +614,7 @@ def _no_consensus(round_number: int) -> ConsensusResultArtifact:
         data_adequacy_score=0.83,
         overfit_risk_score=0.44,
         expected_net_sharpe=0.21,
-        data_requirements=("price_panel",),
+        data_requirements=("price_panel", "sentiment_panels"),
         rejection_reasons=("No 3-of-5 majority",),
         implementation_brief=None,
         dissent_summary="Panel split between VWAP, Bollinger, and sentiment families.",
@@ -1174,6 +1174,7 @@ def _write_quantipy_v2_run(
         "schema_version": "quantipy-experiment-v2",
         "experiment_id": "gateway-runtime-audit",
         "package_path": "experiment",
+        "sentiment": None,
         "stage_files": [
             {
                 "name": stage,
@@ -1369,6 +1370,8 @@ def _write_quantipy_v2_run(
         "success": success,
         "panel_requested": panel_requested,
         "panel": run_panel,
+        "sentiment_requested": False,
+        "sentiment": None,
         "stage_receipts": stage_receipts,
         "telemetry": {
             "scope": "process_wide",

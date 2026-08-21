@@ -368,6 +368,12 @@ def test_quantipy_sentiment_run_normalizes_current_fields_and_omits_legacy_field
     _, _, legacy_run_path, _, _, _ = _write_quantipy_v2_run(
         git_worktree, run_root=trusted_quantipy_runs_root / "legacy"
     )
+    legacy_payload = cast(
+        dict[str, object], json.loads(legacy_run_path.read_text(encoding="utf-8"))
+    )
+    del legacy_payload["sentiment_requested"]
+    del legacy_payload["sentiment"]
+    _rewrite_quantipy_run_payload(legacy_run_path, legacy_payload)
     legacy = autoresearch_evidence._validate_quantipy_run_envelope(
         autoresearch_secure_io._secure_open_snapshot(
             legacy_run_path, label="legacy test Quantipy run.json"
@@ -580,6 +586,11 @@ def test_current_manifest_null_sentiment_preserves_key_and_canonical_hash(
     manifest_path, _, _, _, _, _ = _write_quantipy_v2_run(git_worktree)
     manifest_file = Path(manifest_path)
     manifest = cast(dict[str, object], json.loads(manifest_file.read_text(encoding="utf-8")))
+    del manifest["sentiment"]
+    legacy_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest_file.write_bytes(legacy_bytes)
+    _git(git_worktree.workspace, "add", "experiment-manifest.json")
+    _git(git_worktree.workspace, "commit", "-m", "construct legacy manifest omission")
     manifest["sentiment"] = None
     manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     manifest_file.write_bytes(manifest_bytes)
@@ -631,6 +642,7 @@ def test_quantipy_sentiment_run_rejects_partial_current_shape(
         git_worktree, run_root=trusted_quantipy_runs_root
     )
     payload = cast(dict[str, object], json.loads(run_path.read_text(encoding="utf-8")))
+    del payload["sentiment"]
     payload["sentiment_requested"] = True
     _rewrite_quantipy_run_payload(run_path, payload)
 

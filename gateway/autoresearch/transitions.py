@@ -255,7 +255,7 @@ DEFAULT_XNYS_CALENDAR_EVIDENCE_PATH = Path(
 
 # Extending this set requires the runtime transport to actually ship, with the
 # consensus data contract re-pinned in the same change.
-SUPPORTED_EXPERIMENT_TRANSPORTS = ("price_panel",)
+SUPPORTED_EXPERIMENT_TRANSPORTS = ("price_panel", "sentiment_panels")
 
 
 def _canonical_iteration_experiment_id(iteration: int) -> str:
@@ -1045,12 +1045,90 @@ _INFRA_BLOCKED_GENERIC_TERMS = frozenset(("runtime", "transport"))
 # A brief whose consensus declared only supported transports is implementable
 # by construction; genuine breakage of a supported transport is a verification
 # BUG_SIGNAL, never INFRA_BLOCKED.
+_EXISTING_CONTRACT_MISSING_LANGUAGE = r"(?:missing|absent|lack(?:s|ed|ing)?|does\s+not\s+exist)"
+_EXISTING_CONTRACT_MISSING = rf"\b{_EXISTING_CONTRACT_MISSING_LANGUAGE}\b"
+_EXISTING_SURFACE_ABSENCE = r"(?:(?:is|was|are|were)\s+(?:missing|absent)|does\s+not\s+exist)"
+_EXISTING_TRANSPORT_SURFACE = (
+    r"`?(?<!\bby\x20)(?<!\bthrough\x20)\b(?:price_panel|sentiment_panels)\b`?"
+)
+_EXISTING_CONTEXT_SURFACE = r"`?(?<!\bby\x20)(?<!\bthrough\x20)\bExperimentRunContext\b`?"
+_EXISTING_SENTIMENT_LOAD_FRAME_SURFACE = (
+    r"`?(?<!\bby\x20)(?<!\bthrough\x20)\bExperimentRunContext\b`?(?:'s)?"
+    r"(?:\s*[./]\s*|\s+)`?\bsentiment\b`?"
+    r"(?:\s*[./]\s*|\s+)`?\bload_frame\b"
+    r"(?:\s*\(\s*\))?`?(?:\s*\(\s*\))?"
+)
+_EXISTING_CONTEXT_PANEL_SURFACE = (
+    r"`?(?<!\bby\x20)(?<!\bthrough\x20)\bExperimentRunContext\b`?"
+    r"(?:\s*[./]\s*|\s+)"
+    r"(?:`?\bruntime\b`?(?:\s*[./]\s*|\s+))?`?\bpanel\b`?"
+    r"(?:\s*[./]\s*|\s+)(?:`?\bexecution\b`?"
+    r"(?:\s*[./]\s*|\s+))?`?\bpath\b`?"
+)
+_EXISTING_PANEL_PATH_SURFACE = (
+    r"`?(?<!\bby\x20)(?<!\bthrough\x20)\bpanel\b`?"
+    r"(?:\s*[./]\s*|\s+)(?:`?\bexecution\b`?(?:\s*[./]\s*|\s+))?"
+    r"`?\bpath\b`?"
+)
 _EXISTING_CONTRACT_CLAIMS_RE = re.compile(
-    r"(?:ExperimentRunContext[^.]{0,60}?(?:panel|load_frame|price)"
-    r"|(?:panel|load_frame|price_panel)[^.]{0,60}?ExperimentRunContext"
-    r"|price_panel[^.]{0,60}?(?:missing|absent|lack(?:s|ed|ing)?|does not exist)"
-    r"|(?:missing|absent|lack(?:s|ed|ing)?)[^.]{0,60}?price_panel)",
-    re.IGNORECASE,
+    rf"""
+    (?:
+        # Missing-before language binds the predicate to the surface that
+        # follows it.  This includes `lacks`, because its object is the
+        # missing surface.
+        {_EXISTING_CONTRACT_MISSING}\s+
+        (?:(?:the|a|an)\s+)?(?:support\s+for\s+)?(?:(?:the|a|an)\s+)?
+        {_EXISTING_TRANSPORT_SURFACE}
+        (?:\s+(?:transport|data\s+transport))?
+        |
+        # Surface-before language is deliberately limited to predicates that
+        # say the surface itself is absent; `surface lacks object` is not one.
+        {_EXISTING_TRANSPORT_SURFACE}
+        (?:\s+(?:transport|data\s+transport))?\s+
+        {_EXISTING_SURFACE_ABSENCE}
+
+        # The concrete sentiment accessor is an existing surface.  Require
+        # the complete path so a feature schema using load_frame as its
+        # consumer is not mistaken for a missing accessor.
+        |
+        {_EXISTING_CONTRACT_MISSING}\s+(?:(?:the|a|an)\s+)?
+        {_EXISTING_SENTIMENT_LOAD_FRAME_SURFACE}(?:\s+accessor)?
+        |
+        {_EXISTING_SENTIMENT_LOAD_FRAME_SURFACE}(?:\s+accessor)?\s+
+        {_EXISTING_SURFACE_ABSENCE}
+        |
+        {_EXISTING_SENTIMENT_LOAD_FRAME_SURFACE}\s+accessor,\s+but\s+
+        (?:that|this)\s+accessor\s+
+        {_EXISTING_SURFACE_ABSENCE}
+
+        # The context itself may be named directly, or its explicit runtime
+        # contract/panel path may be described as missing.
+        |
+        {_EXISTING_CONTRACT_MISSING}\s+(?:(?:the|a|an)\s+)?
+        {_EXISTING_CONTEXT_SURFACE}(?:\s+runtime\s+contract)?
+        |
+        {_EXISTING_CONTEXT_SURFACE}\s+(?:runtime\s+)?contract\s+
+        {_EXISTING_SURFACE_ABSENCE}
+        |
+        {_EXISTING_CONTEXT_SURFACE}(?:\s+itself)?\s+
+        {_EXISTING_SURFACE_ABSENCE}
+        |
+        {_EXISTING_CONTEXT_SURFACE}\s+runtime\s+contract\s+for\s+
+        (?:the\s+)?receipt-bound\s+panel(?:\s+execution)?\s+path,\s+but\s+
+        (?:the\s+)?authoritative\s+contract\s+{_EXISTING_SURFACE_ABSENCE}
+        |
+        {_EXISTING_CONTEXT_PANEL_SURFACE}\s+{_EXISTING_SURFACE_ABSENCE}
+        |
+        {_EXISTING_CONTRACT_MISSING}\s+(?:(?:the|a|an)\s+)?
+        {_EXISTING_PANEL_PATH_SURFACE}\s+(?:from|of|through|for)\s+
+        {_EXISTING_CONTEXT_SURFACE}
+        |
+        {_EXISTING_PANEL_PATH_SURFACE}\s+(?:from|of|through|for)\s+
+        {_EXISTING_CONTEXT_SURFACE}\s+
+        {_EXISTING_SURFACE_ABSENCE}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
 
 

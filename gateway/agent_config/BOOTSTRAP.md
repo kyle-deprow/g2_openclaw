@@ -27,7 +27,8 @@ receipts; do not reconstruct platform capabilities from bootstrap prose.
 ## Research Scope
 
 Research intraday equity strategies using real platform data, simple and
-defensible indicator interactions, and optional Reddit/news sentiment. Define
+defensible indicator interactions, and optional governed Reddit sentiment. News
+sentiment is not shipped. Define
 the universe, prediction and holding horizon, position sizing, transaction
 costs, train/CV/OOS split, null tests, and rejection criteria. Positions are
 intraday and obey the target repo's close-out rule.

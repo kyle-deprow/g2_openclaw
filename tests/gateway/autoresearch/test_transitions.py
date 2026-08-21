@@ -950,6 +950,30 @@ def test_majority_consensus_accepts_price_panel_requirement(
     assert advanced.phase is Phase.IMPLEMENTATION
 
 
+def test_supported_experiment_transports_are_pinned() -> None:
+    assert autoresearch_transitions.SUPPORTED_EXPERIMENT_TRANSPORTS == (
+        "price_panel",
+        "sentiment_panels",
+    )
+
+
+def test_non_operator_majority_accepts_sentiment_panels_requirement(
+    policy: AutoresearchPolicy,
+) -> None:
+    state = _state_to_consensus(policy)
+
+    advanced = advance_state(
+        state,
+        replace(
+            _majority_consensus(round_number=1, policy=policy),
+            data_requirements=("sentiment_panels",),
+        ),
+        policy,
+    )
+
+    assert advanced.phase is Phase.IMPLEMENTATION
+
+
 def test_dishonest_transport_declaration_is_left_to_the_reviewer_check(
     policy: AutoresearchPolicy,
 ) -> None:
@@ -4864,6 +4888,38 @@ def test_g0_complete_receipt_with_preflight_identity_mismatch_fails_closed(
         "receipt-bound panel execution path, but the authoritative contract is absent.",
         "The platform lacks price_panel transport required by the brief and no "
         "runtime contract exposes it through the manifest.",
+        "The platform lacks sentiment_panels transport required by the brief and no "
+        "runtime contract exposes it through the manifest.",
+        "The platform lacks `sentiment_panels` transport required by the brief and no "
+        "runtime contract exposes it through the manifest.",
+        "missing support for price_panel",
+        "missing support for `price_panel`",
+        "missing support for sentiment_panels",
+        "missing support for `sentiment_panels`",
+        "lacks a price_panel transport",
+        "lacks a `price_panel` transport",
+        "sentiment_panels is missing",
+        "`sentiment_panels` is missing",
+        "lacks an ExperimentRunContext.sentiment/load_frame accessor",
+        "lacks an `ExperimentRunContext.sentiment/load_frame` accessor",
+        "ExperimentRunContext.sentiment.load_frame is absent from the runtime contract.",
+        "`ExperimentRunContext.sentiment.load_frame` is absent from the runtime contract.",
+        "price_panel is missing",
+        "`price_panel` is missing",
+        "missing ExperimentRunContext runtime contract",
+        "`ExperimentRunContext` runtime contract is absent",
+        "The approved brief requires the ExperimentRunContext sentiment/load_frame "
+        "accessor, but that accessor is missing.",
+        "ExperimentRunContext runtime panel path is missing",
+        "`ExperimentRunContext/runtime panel path` does not exist",
+        "`ExperimentRunContext`.`runtime`.`panel`.`path` is absent",
+        "ExperimentRunContext.sentiment.load_frame() accessor is missing",
+        "`ExperimentRunContext`.`sentiment`.`load_frame`() accessor is absent",
+        "The panel path from ExperimentRunContext does not exist in the runtime contract.",
+        "The panel path from `ExperimentRunContext` does not exist in the runtime contract.",
+        "`panel path` from `ExperimentRunContext` does not exist in the runtime contract.",
+        "missing panel path from ExperimentRunContext",
+        "`panel path` from `ExperimentRunContext` is missing",
     ],
 )
 def test_infra_blocked_rationale_rejects_claims_that_existing_contracts_are_missing(
@@ -4874,14 +4930,50 @@ def test_infra_blocked_rationale_rejects_claims_that_existing_contracts_are_miss
     assert _has_runtime_or_transport_contract_term(rationale) is False
 
 
-def test_infra_blocked_rationale_accepts_a_genuinely_missing_contract() -> None:
+@pytest.mark.parametrize(
+    "rationale",
+    [
+        (
+            "The approved brief requires a receipt-bound dividend-action transport "
+            "contract from ExperimentManifest through the runtime, which does not exist."
+        ),
+        (
+            "The approved brief requires a missing sentiment feature schema consumed by "
+            "ExperimentRunContext load_frame."
+        ),
+        (
+            "The approved brief requires a receipt-bound sentiment feature schema from "
+            "ExperimentRunContext, which does not exist."
+        ),
+        "price_panel is available, but dividend_action is missing.",
+        "`price_panel` is available, but dividend_action is missing.",
+        "the feature schema consumed by ExperimentRunContext.sentiment.load_frame does not exist",
+        (
+            "the feature schema consumed through ExperimentRunContext.sentiment.load_frame "
+            "does not exist"
+        ),
+        "the feature schema consumed by price_panel does not exist",
+        "the accessor lacks a feature schema",
+        "price_panel lacks dividend metadata",
+        "ExperimentRunContext.sentiment.load_frame accessor consumes a feature schema "
+        "that is missing.",
+        "`ExperimentRunContext.sentiment.load_frame` accessor consumes a feature schema "
+        "that is missing.",
+        "The approved brief requires a missing sentiment feature schema consumed by "
+        "ExperimentRunContext.sentiment.load_frame accessor.",
+        "The approved brief requires a missing sentiment feature schema consumed by "
+        "`ExperimentRunContext.sentiment.load_frame` accessor.",
+    ],
+)
+def test_infra_blocked_rationale_accepts_a_genuinely_missing_contract(
+    rationale: str,
+) -> None:
     from gateway.autoresearch.transitions import _has_runtime_or_transport_contract_term
 
-    rationale = (
-        "The approved brief requires a receipt-bound dividend-action transport "
-        "contract from ExperimentManifest through the runtime, which does not exist."
+    candidate = (
+        rationale if len(rationale) >= 64 else f"The runtime contract reports that {rationale}"
     )
-    assert _has_runtime_or_transport_contract_term(rationale) is True
+    assert _has_runtime_or_transport_contract_term(candidate) is True
 
 
 def test_review_fix_rounds_cap_routes_to_decision_log(

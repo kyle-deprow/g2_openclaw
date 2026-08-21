@@ -1138,7 +1138,7 @@ def test_affected_artifact_contracts_match_their_serialized_fields() -> None:
     )
     assert "novelty_delta|null" in consensus_fields
     assert "data_requirements" in consensus_fields
-    assert consensus.data_requirements == ("price_panel",)
+    assert consensus.data_requirements == ("price_panel", "sentiment_panels")
     assert "novelty_delta" in consensus.to_dict()
     assert ConsensusResultArtifact.from_dict(consensus.to_dict()) == consensus
     with pytest.raises(AutoresearchValidationError, match="exact keys"):
