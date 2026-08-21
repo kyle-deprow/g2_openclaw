@@ -1856,19 +1856,11 @@ class AutoresearchSupervisor:
                             str(run_dir),
                             "--runs-root",
                             str(runs_root),
-                            "--state-path",
-                            str(self.config.state_path),
                         ],
                         cwd=repo_root,
                         capture_output=True,
                         text=True,
                         check=False,
-                        env={
-                            **os.environ,
-                            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(
-                                self.config.launch_requests_path
-                            ),
-                        },
                         timeout=LAUNCH_REQUEST_TIMEOUT_SECONDS,
                     )
                 except (OSError, subprocess.SubprocessError) as exc:

@@ -791,6 +791,7 @@ def test_launch_request_inbox_accepts_one_request_and_invokes_prepared_launcher(
         str(supervisor_env.runs_root),
     ]
     assert kwargs["cwd"] == Path(__file__).resolve().parents[2]
+    assert kwargs.get("env") is None
     assert kwargs["timeout"] == 30.0
     assert not request_path.exists()
     assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
