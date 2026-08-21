@@ -1467,7 +1467,11 @@ class AutoresearchSupervisor:
                     )
                 deadline = self._now() + self.config.poll_interval_seconds
                 while not stop_requested and self._now() < deadline:
-                    self._sleep(min(0.5, deadline - self._now()))
+                    # A clock can tick past the deadline between the loop
+                    # check and this call; a negative interval crashed the
+                    # supervisor (ValueError: sleep length must be
+                    # non-negative), and systemd restarts have a burst limit.
+                    self._sleep(max(0.0, min(0.5, deadline - self._now())))
             return 0
         finally:
             signal.signal(signal.SIGINT, previous_int)
@@ -1852,11 +1856,19 @@ class AutoresearchSupervisor:
                             str(run_dir),
                             "--runs-root",
                             str(runs_root),
+                            "--state-path",
+                            str(self.config.state_path),
                         ],
                         cwd=repo_root,
                         capture_output=True,
                         text=True,
                         check=False,
+                        env={
+                            **os.environ,
+                            "AUTORESEARCH_LAUNCH_REQUESTS_DIR": str(
+                                self.config.launch_requests_path
+                            ),
+                        },
                         timeout=LAUNCH_REQUEST_TIMEOUT_SECONDS,
                     )
                 except (OSError, subprocess.SubprocessError) as exc:
