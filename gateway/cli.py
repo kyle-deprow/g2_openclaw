@@ -1775,7 +1775,10 @@ def _active_target_writer_processes(repo_root: Path) -> tuple[str, ...]:
 
 
 def _process_touches_path(proc_dir: Path, root: Path, cmdline: str) -> bool:
-    if str(root) in cmdline:
+    # A plain substring match claims sibling checkouts: "/repos/quantipy" is a
+    # string prefix of "/repos/quantipy-worktrees/...". Require the repo root
+    # itself or a path inside it.
+    if re.search(re.escape(str(root)) + r"(?=/|[\s\"']|$)", cmdline) is not None:
         return True
     try:
         cwd = (proc_dir / "cwd").resolve()

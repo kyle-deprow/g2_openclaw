@@ -3068,6 +3068,22 @@ class TestAutoresearchCliCommands:
         assert saved["phase"] == "setup_context"
         assert saved["setup"]["metric_name"] == "OOS Sharpe net"
 
+    def test_process_touches_path_ignores_sibling_checkouts(self, tmp_path: Path) -> None:
+        from gateway.cli import _process_touches_path
+
+        root = tmp_path / "quantipy"
+        root.mkdir()
+        sibling = f"{root}-worktrees/luna-histfix"
+        proc_dir = tmp_path / "proc"
+        proc_dir.mkdir()
+
+        assert not _process_touches_path(
+            proc_dir, root, f"codex-linux-sandbox --sandbox-policy-cwd {sibling} pytest"
+        )
+        assert _process_touches_path(proc_dir, root, f"uv run pytest {root}/tests/unit")
+        assert _process_touches_path(proc_dir, root, f"python {root}/notebooks/experiments/t1.py")
+        assert _process_touches_path(proc_dir, root, f'sh -c "cd {root} && pytest"')
+
     def test_autoresearch_next_rejects_active_target_writer(self, tmp_path: Path) -> None:
         state_path = tmp_path / "state.json"
         quantipy_root = tmp_path / "quantipy"
