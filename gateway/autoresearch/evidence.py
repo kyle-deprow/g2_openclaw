@@ -1138,6 +1138,53 @@ def _run_failure_from_mapping(raw: object) -> QuantipyExperimentFailureEvidence 
     return QuantipyExperimentFailureEvidence.from_dict(raw)
 
 
+def _existing_reservation_matches(
+    root_fd: int,
+    run_id: str,
+    payload: bytes,
+) -> bool:
+    """True only when the run directory is exactly a prior reservation of `payload`.
+
+    Submission and supervisor consumption both validate the same envelope, so the
+    reservation must be idempotent for byte-identical evidence; anything else in
+    the directory keeps meaning a run started.
+    """
+    try:
+        run_fd = os.open(
+            run_id,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=root_fd,
+        )
+    except OSError:
+        return False
+    try:
+        if os.fstat(run_fd).st_mode & 0o777 != 0o700:
+            return False
+        if os.listdir(run_fd) != [QUANTIPY_EXECUTION_NOT_STARTED_TOMBSTONE]:
+            return False
+        try:
+            marker_fd = os.open(
+                QUANTIPY_EXECUTION_NOT_STARTED_TOMBSTONE,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=run_fd,
+            )
+        except OSError:
+            return False
+        try:
+            marker_stat = os.fstat(marker_fd)
+            if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_nlink != 1:
+                return False
+            if marker_stat.st_mode & 0o777 != 0o600:
+                return False
+            if marker_stat.st_size != len(payload):
+                return False
+            return os.read(marker_fd, len(payload) + 1) == payload
+        finally:
+            os.close(marker_fd)
+    finally:
+        os.close(run_fd)
+
+
 def _reserve_quantipy_execution_not_started(
     evidence: QuantipyExecutionNotStartedEvidence,
     *,
@@ -1145,6 +1192,14 @@ def _reserve_quantipy_execution_not_started(
 ) -> None:
     """Reserve the deterministic run directory so a concurrent run cannot start later."""
     _require_private_directory(runs_root, label="trusted Quantipy runs root")
+    payload = json.dumps(
+        {
+            "schema_version": "g2-quantipy-execution-not-started-v1",
+            **evidence.to_dict(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     root_fd = os.open(
         runs_root,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1153,6 +1208,8 @@ def _reserve_quantipy_execution_not_started(
         try:
             os.mkdir(evidence.expected_run_id, mode=0o700, dir_fd=root_fd)
         except FileExistsError as exc:
+            if _existing_reservation_matches(root_fd, evidence.expected_run_id, payload):
+                return
             raise AutoresearchValidationError(
                 "execution-not-started is false because expected run directory already exists"
             ) from exc
@@ -1173,14 +1230,6 @@ def _reserve_quantipy_execution_not_started(
                 dir_fd=run_fd,
             )
             try:
-                payload = json.dumps(
-                    {
-                        "schema_version": "g2-quantipy-execution-not-started-v1",
-                        **evidence.to_dict(),
-                    },
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
                 offset = 0
                 while offset < len(payload):
                     written = os.write(marker_fd, payload[offset:])

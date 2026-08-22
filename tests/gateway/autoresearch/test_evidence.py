@@ -3129,6 +3129,85 @@ def test_execution_not_started_receipt_is_rejected_when_expected_run_exists(
         )
 
 
+def test_execution_not_started_reservation_is_idempotent_for_identical_evidence(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    from gateway.autoresearch.evidence import _reserve_quantipy_execution_not_started
+
+    _state, _state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    run_path = Path(evidence.run_json_path)
+    run_path.unlink()
+    run_path.parent.rmdir()
+    command = "uv run pytest tests/alpha/test_candidate.py"
+    not_started = QuantipyExecutionNotStartedEvidence(
+        manifest_path=evidence.manifest_path,
+        manifest_sha256=evidence.manifest_sha256,
+        expected_run_id=evidence.run_id,
+        expected_run_json_path=evidence.run_json_path,
+        reason="focused_tests_failed",
+        command=command,
+        evidence="1 focused test failed before Quantipy preflight",
+    )
+
+    # Submission validation and supervisor consumption both validate the same
+    # envelope; the second reservation must accept its own prior tombstone.
+    _reserve_quantipy_execution_not_started(not_started, runs_root=trusted_quantipy_runs_root)
+    _reserve_quantipy_execution_not_started(not_started, runs_root=trusted_quantipy_runs_root)
+
+    reserved = trusted_quantipy_runs_root / evidence.run_id
+    assert sorted(entry.name for entry in reserved.iterdir()) == [
+        ".g2-execution-not-started.json"
+    ]
+
+
+def test_execution_not_started_reservation_rejects_different_evidence(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+) -> None:
+    from gateway.autoresearch.evidence import _reserve_quantipy_execution_not_started
+
+    _state, _state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+    )
+    run_path = Path(evidence.run_json_path)
+    run_path.unlink()
+    run_path.parent.rmdir()
+    command = "uv run pytest tests/alpha/test_candidate.py"
+    first = QuantipyExecutionNotStartedEvidence(
+        manifest_path=evidence.manifest_path,
+        manifest_sha256=evidence.manifest_sha256,
+        expected_run_id=evidence.run_id,
+        expected_run_json_path=evidence.run_json_path,
+        reason="focused_tests_failed",
+        command=command,
+        evidence="1 focused test failed before Quantipy preflight",
+    )
+    _reserve_quantipy_execution_not_started(first, runs_root=trusted_quantipy_runs_root)
+
+    with pytest.raises(AutoresearchValidationError, match="run directory already exists"):
+        _reserve_quantipy_execution_not_started(
+            replace(first, evidence="a different failure narrative"),
+            runs_root=trusted_quantipy_runs_root,
+        )
+
+
 def _timeout_interrupted_quantipy_execution(
     state: AutoresearchState,
     evidence: QuantipyExperimentEvidence,
