@@ -3129,6 +3129,35 @@ def test_execution_not_started_receipt_is_rejected_when_expected_run_exists(
         )
 
 
+def test_manifest_sha256_aliases_accept_null_sentiment_evolution() -> None:
+    import hashlib as _hashlib
+    import json as _json
+
+    from gateway.autoresearch.evidence import _quantipy_manifest_sha256_aliases
+
+    legacy = {"experiment_id": "t1", "package_path": "pkg", "tickers": ["AAPL"]}
+    raw = _hashlib.sha256(
+        _json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    dumped = _hashlib.sha256(
+        _json.dumps({**legacy, "sentiment": None}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    aliases = _quantipy_manifest_sha256_aliases(legacy)
+    assert aliases == (raw, dumped)
+
+    # A manifest that declares the key gets no alias: only its exact digest binds.
+    declared = {**legacy, "sentiment": None}
+    assert _quantipy_manifest_sha256_aliases(declared) == (
+        _hashlib.sha256(
+            _json.dumps(declared, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    )
+
+    # Any other content change must not collide with either alias.
+    tampered = {**legacy, "tickers": ["MSFT"]}
+    assert not set(_quantipy_manifest_sha256_aliases(tampered)) & set(aliases)
+
+
 def test_execution_not_started_reservation_is_idempotent_for_identical_evidence(
     git_worktree: GitWorktree,
     policy: AutoresearchPolicy,

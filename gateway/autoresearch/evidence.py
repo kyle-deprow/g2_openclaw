@@ -944,6 +944,24 @@ def _canonical_quantipy_manifest_sha256(manifest: Mapping[str, object]) -> str:
     return _sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
 
 
+def _quantipy_manifest_sha256_aliases(manifest: Mapping[str, object]) -> tuple[str, ...]:
+    """Digests under which the pinned runtime may record this exact manifest.
+
+    The runtime digests the parsed ExperimentManifest's canonical model dump,
+    not the file bytes. Quantipy d3987cd added the optional `sentiment` field,
+    so the dump of every pre-sentiment manifest gains `"sentiment": null` and
+    its digest diverges from the file's. Accept exactly that one evolution
+    alias for manifests that do not declare the key; any other content change
+    still fails the binding.
+    """
+    aliases = [_canonical_quantipy_manifest_sha256(manifest)]
+    if "sentiment" not in manifest:
+        aliased: dict[str, object] = dict(manifest)
+        aliased["sentiment"] = None
+        aliases.append(_canonical_quantipy_manifest_sha256(aliased))
+    return tuple(aliases)
+
+
 def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, str]:
     data = _strict_json_keys(value, label=label, expected=("category", "message"))
     return {
@@ -2493,7 +2511,7 @@ def _validate_quantipy_experiment_evidence(
     )
     if run["run_id"] != evidence.run_id or run["success"] is not evidence.success:
         raise AutoresearchValidationError("Quantipy run.json identity does not match evidence")
-    if run["manifest_sha256"] != _canonical_quantipy_manifest_sha256(manifest):
+    if run["manifest_sha256"] not in _quantipy_manifest_sha256_aliases(manifest):
         raise AutoresearchValidationError(
             "Quantipy run.json manifest_sha256 does not match manifest"
         )
