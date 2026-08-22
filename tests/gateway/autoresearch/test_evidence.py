@@ -2513,8 +2513,8 @@ def test_quantipy_compact_panel_constants_match_the_shared_gateway_contract() ->
     )
     assert 'COMPACT_PRICE_COVERAGE_CONTRACT_VERSION: Literal["price-coverage-compact-v1"]' in source
     assert 'COMPACT_PRICE_COVERAGE_ENCODING: Literal["canonical-json-zlib-base64-v1"]' in source
-    assert "MAX_COMPACT_PRICE_COVERAGE_BYTES = 32 * 1024 * 1024" in source
-    assert "MAX_COMPACT_PRICE_COVERAGE_COMPRESSED_BYTES = 4 * 1024 * 1024" in source
+    assert "MAX_COMPACT_PRICE_COVERAGE_BYTES = 128 * 1024 * 1024" in source
+    assert "MAX_COMPACT_PRICE_COVERAGE_COMPRESSED_BYTES = 16 * 1024 * 1024" in source
     assert "MAX_COMPACT_PRICE_COVERAGE_RATIO = 200.0" in source
 
 
