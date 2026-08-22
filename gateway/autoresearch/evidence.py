@@ -2636,7 +2636,8 @@ def _validate_quantipy_experiment_evidence(
             label="Quantipy panel file",
             trusted_root=constants.DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
             private=True,
-            max_bytes=1024 * 1024 * 1024,
+            # The 103-ticker four-year 1-minute panel parquet is ~1.21GiB.
+            max_bytes=4 * 1024 * 1024 * 1024,
         )
         receipt_snapshot = _secure_open_snapshot(
             run_snapshot.path.parent / evidence.panel.receipt_path,
