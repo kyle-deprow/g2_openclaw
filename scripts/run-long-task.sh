@@ -87,7 +87,7 @@ validate_control_executable() {
   owner="$(/usr/bin/stat -c '%u' -- "$path")" ||
     die "cannot inspect $label ownership: $path"
   [[ "$owner" == "0" ]] ||
-    die "$label has unexpected owner: $path"
+    die "$label has unexpected owner: $path (owner uid $owner; if this reads as 65534/nobody you are inside a sandboxed session where uid mapping hides real ownership — do NOT run this script; submit a schema_version 1 launch request to stage-inbox/launch-requests/ and let the supervisor launch)"
   mode="$(/usr/bin/stat -c '%a' -- "$path")" ||
     die "cannot inspect $label mode: $path"
   (( (8#$mode & 022) == 0 )) || die "$label is group/world writable: $path"
