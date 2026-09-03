@@ -2889,6 +2889,153 @@ def test_command_input_helper_creates_private_file_with_exclusive_no_follow(
         create_command_input_file_from_stdin(output_path=command_file, payload=payload)
 
 
+def test_command_input_helper_rejects_bash_lc_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["bash", "-lc", "echo hi"]}
+    ).encode()
+
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match=(
+            r"^command must be direct argv: shell wrappers \(bash -lc/sh -c\) seal an "
+            r"unbindable command_sha256; pass the canonical contract argv exactly$"
+        ),
+    ):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_path_bash_cl_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["/usr/bin/bash", "-cl", "echo hi"]}
+    ).encode()
+
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match=(
+            r"^command must be direct argv: shell wrappers \(bash -lc/sh -c\) seal an "
+            r"unbindable command_sha256; pass the canonical contract argv exactly$"
+        ),
+    ):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_absolute_bash_lc_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["/bin/bash", "-lc", "x"]}
+    ).encode()
+
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match=(
+            r"^command must be direct argv: shell wrappers \(bash -lc/sh -c\) seal an "
+            r"unbindable command_sha256; pass the canonical contract argv exactly$"
+        ),
+    ):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_sh_c_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["sh", "-c", "echo hi"]}
+    ).encode()
+
+    with pytest.raises(AutoresearchRunRecordError, match="shell wrappers"):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_env_prefixed_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["env", "A=B", "bash", "-lc", "echo hi"]}
+    ).encode()
+
+    with pytest.raises(AutoresearchRunRecordError, match="shell wrappers"):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_env_split_string_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["env", "-S", "bash -lc x"]}
+    ).encode()
+
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match=(
+            r"^command must be direct argv: shell wrappers \(bash -lc/sh -c\) seal an "
+            r"unbindable command_sha256; pass the canonical contract argv exactly$"
+        ),
+    ):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_rejects_absolute_env_shell_wrapper(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    payload = json.dumps(
+        {"schema_version": 1, "command": ["/usr/bin/env", "-i", "bash", "-c", "x"]}
+    ).encode()
+
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match=(
+            r"^command must be direct argv: shell wrappers \(bash -lc/sh -c\) seal an "
+            r"unbindable command_sha256; pass the canonical contract argv exactly$"
+        ),
+    ):
+        create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+
+def test_command_input_helper_accepts_canonical_env_command(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    command = [
+        "env",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "uv",
+        "--directory",
+        "/x",
+        "run",
+        "--frozen",
+        "--no-sync",
+        "quantipy",
+        "experiment",
+        "run",
+        "/m.json",
+        "--output-root",
+        "/o",
+        "--run-id",
+        "autoresearch-i9-abc",
+    ]
+    payload = json.dumps({"schema_version": 1, "command": command}).encode()
+
+    create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+    assert json.loads(command_file.read_text(encoding="utf-8")) == {"command": command}
+
+
+def test_command_input_helper_accepts_absolute_env_command(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    command = ["/usr/bin/env", "A=B", "uv", "run", "q"]
+    payload = json.dumps({"schema_version": 1, "command": command}).encode()
+
+    create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+    assert json.loads(command_file.read_text(encoding="utf-8")) == {"command": command}
+
+
+def test_command_input_helper_accepts_bare_shell_script(tmp_path: Path) -> None:
+    command_file = tmp_path / "command.json"
+    command = ["bash", "/some/script.sh"]
+    payload = json.dumps({"schema_version": 1, "command": command}).encode()
+
+    create_command_input_file_from_stdin(output_path=command_file, payload=payload)
+
+    assert json.loads(command_file.read_text(encoding="utf-8")) == {"command": command}
+
+
 def test_command_handoff_is_private_and_removed_after_consumption(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"

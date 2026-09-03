@@ -2209,6 +2209,34 @@ def _parse_command_input(raw: object, *, label: str) -> tuple[str, ...]:
         raise AutoresearchRunRecordError(f"{label} command must be a list")
     command = tuple(command_raw)
     command_sha256(command)
+    command_index = 0
+    shell_wrapper_error = (
+        "command must be direct argv: shell wrappers (bash -lc/sh -c) seal an "
+        "unbindable command_sha256; pass the canonical contract argv exactly"
+    )
+    if os.path.basename(command[command_index]) == "env":
+        command_index += 1
+        while command_index < len(command):
+            argument = command[command_index]
+            if argument.startswith("-"):
+                raise AutoresearchRunRecordError(shell_wrapper_error)
+            if "=" not in argument:
+                break
+            command_index += 1
+    if command_index < len(command) and os.path.basename(command[command_index]) in {
+        "bash",
+        "sh",
+        "zsh",
+        "dash",
+        "ksh",
+    }:
+        for argument in command[command_index + 1 :]:
+            if argument in {"-c", "-lc", "-lic", "-ic"} or (
+                argument.startswith("-")
+                and not argument.startswith("--")
+                and "c" in argument[1:]
+            ):
+                raise AutoresearchRunRecordError(shell_wrapper_error)
     return command
 
 
