@@ -49,6 +49,11 @@ from gateway.autoresearch.constants import (
     QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH as QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH,  # noqa: E501
 )
 from gateway.autoresearch.constants import (
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES,
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_NAME_MAX_LENGTH,
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_PATH_MAX_LENGTH,
+)
+from gateway.autoresearch.constants import (
     QUANTIPY_EXPERIMENT_IDENTITY_PATH_MAX_LENGTH as QUANTIPY_EXPERIMENT_IDENTITY_PATH_MAX_LENGTH,
 )
 from gateway.autoresearch.constants import (
@@ -962,9 +967,61 @@ def _quantipy_manifest_sha256_aliases(manifest: Mapping[str, object]) -> tuple[s
     return tuple(aliases)
 
 
-def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, str]:
-    data = _strict_json_keys(value, label=label, expected=("category", "message"))
-    return {
+def _validate_quantipy_failure_traceback_tail(
+    value: object,
+    *,
+    label: str,
+) -> list[dict[str, object]]:
+    if not isinstance(value, list) or not (
+        1 <= len(value) <= QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES
+    ):
+        raise AutoresearchValidationError(
+            f"{label} must be a list of 1 to "
+            f"{QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES} frames"
+        )
+    frames: list[dict[str, object]] = []
+    for index, frame_raw in enumerate(value):
+        frame_label = f"{label}[{index}]"
+        frame = _strict_json_keys(
+            frame_raw,
+            label=frame_label,
+            expected=("path", "line", "name"),
+        )
+        path = _strict_json_string(
+            frame["path"],
+            label=f"{frame_label}.path",
+            minimum=1,
+            maximum=QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_PATH_MAX_LENGTH,
+        )
+        if path.startswith("/"):
+            raise AutoresearchValidationError(f"{frame_label}.path must be workspace-relative")
+        if any(segment == ".." for segment in path.split("/")):
+            raise AutoresearchValidationError(
+                f"{frame_label}.path must not contain a parent traversal segment"
+            )
+        _strict_json_int(frame["line"], label=f"{frame_label}.line", minimum=1)
+        _strict_json_string(
+            frame["name"],
+            label=f"{frame_label}.name",
+            minimum=1,
+            maximum=QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_NAME_MAX_LENGTH,
+        )
+        frames.append(dict(frame))
+    return frames
+
+
+def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, object]:
+    has_traceback_tail = isinstance(value, Mapping) and "traceback_tail" in value
+    data = _strict_json_keys(
+        value,
+        label=label,
+        expected=(
+            "category",
+            "message",
+            *(("traceback_tail",) if has_traceback_tail else ()),
+        ),
+    )
+    normalized: dict[str, object] = {
         "category": _strict_json_enum(
             data["category"],
             label=f"{label}.category",
@@ -977,6 +1034,12 @@ def _validate_quantipy_failure(value: object, *, label: str) -> dict[str, str]:
             maximum=QUANTIPY_EXPERIMENT_FAILURE_MESSAGE_MAX_LENGTH,
         ),
     }
+    if has_traceback_tail:
+        normalized["traceback_tail"] = _validate_quantipy_failure_traceback_tail(
+            data["traceback_tail"],
+            label=f"{label}.traceback_tail",
+        )
+    return normalized
 
 
 def _quantipy_experiment_source_digest(files: Sequence[Mapping[str, object]]) -> str:
@@ -1154,6 +1217,14 @@ def _run_failure_from_mapping(raw: object) -> QuantipyExperimentFailureEvidence 
     if raw is None:
         return None
     return QuantipyExperimentFailureEvidence.from_dict(raw)
+
+
+def _quantipy_failure_category_message(
+    failure: QuantipyExperimentFailureEvidence | None,
+) -> tuple[str, str] | None:
+    if failure is None:
+        return None
+    return failure.category, failure.message
 
 
 def _existing_reservation_matches(
@@ -1906,7 +1977,7 @@ def _validate_quantipy_run_envelope(
             raise AutoresearchValidationError(f"{label} completion precedes start")
         wall_seconds = _strict_json_float(receipt["wall_seconds"], label=f"{label}.wall_seconds")
         result: dict[str, object] | None = None
-        failure: dict[str, str] | None = None
+        failure: dict[str, object] | None = None
         if receipt["result"] is not None:
             result_data = _strict_json_keys(
                 receipt["result"],
@@ -2578,7 +2649,9 @@ def _validate_quantipy_experiment_evidence(
         )
     run_failure = _run_failure_from_mapping(run["failure"])
     actual_failure = run_failure if run_failure is not None else terminal_failure
-    if evidence.failure != actual_failure:
+    if _quantipy_failure_category_message(evidence.failure) != _quantipy_failure_category_message(
+        actual_failure
+    ):
         raise AutoresearchValidationError(
             "Quantipy experiment failure evidence does not match run.json"
         )

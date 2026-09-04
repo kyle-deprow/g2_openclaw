@@ -71,6 +71,7 @@ providers, databases, cached symbols, or environment configuration.
   iterations; do not query repositories or the database directly. The committed
   v2 experiment stages are client-free and consume the runtime-owned verified panel;
   they must not call `qp.prices()` or perform external data loading.
+- Panel `volume` is exact-decimal serialized as a string by contract; cast it to a numeric dtype before any arithmetic, aggregation, or comparison. All other price columns are double-typed.
 - For `DATA_INFRA_G0`, create `platform_coverage_validation` only through
   Quantipy's shared `qp.validate_dynamic_price_coverage` validator. The native
   receipt is `dynamic-price-coverage-v1` / `price-coverage-v1` at regular-hours

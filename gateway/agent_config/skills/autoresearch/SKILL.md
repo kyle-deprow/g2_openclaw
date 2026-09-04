@@ -1,7 +1,7 @@
 ---
 name: autoresearch
 description: PM-owned autonomous research loop for Quantipy using MemPalace, five-agent debate, Codex implementation, and a single high-reasoning reviewer.
-version: 8.19.0
+version: 8.20.0
 ---
 
 # Autoresearch
@@ -34,6 +34,13 @@ Long hydrate-capable, backtest, notebook, and similar commands must not sit in
 an unbounded foreground tool call. Use the detached launcher with an immutable
 run manifest and a one-time private command input file:
 
+The launcher bash block below is only the supervisor-side and human-operator
+launch path. NEVER execute `scripts/run-long-task.sh` in your session: inside a
+sandboxed session the uid mapping makes root-owned control binaries stat as
+nobody:nogroup, so the launcher's ownership pin always fails before it can
+prepare or queue anything. Instead prepare the run yourself, then submit a
+schema_version 1 launch request and confirm acceptance:
+
 ```bash
 cd /home/dev/repos/g2_openclaw
 command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/<unique-command>.json
@@ -61,23 +68,45 @@ and waits only for coherent startup metadata; it does not retain a
 `systemd-run --wait` client in the caller lifecycle. Once the launcher returns,
 the caller may exit while the transient unit continues. To control an active
 run, resolve its exact unit with
-`systemctl --user whoami "$(cat <absolute-run-dir>/pid)"` and use
+`systemctl --user whoami "$(jq -r .pid <absolute-run-dir>/status.json)"` and use
 `systemctl --user stop <unit>` when required;
 the worker records a signal stop as terminal failure and preserves the child's
 actual exit status: an ordinary uncaught `SIGTERM` commonly yields `143`, while
 a child that handles or delays `SIGTERM` may yield its own code (for example,
 `7`).
-The launcher probes the user-systemd bus after preparation. In an OpenClaw
-sandbox where that bus is unreachable, it automatically queues the prepared
-run in the launch-request inbox and prints exactly one `LAUNCH_QUEUED: <run-dir>`
-line. `LAUNCH_QUEUED:` is success: end the turn, do not retry, and do not
-classify it as a blocker. The owner-only supervisor launches the request within
-about 60 seconds, and normal supervision wakes the session afterward.
-Direct foreground execution is invalid. If the launcher fails outside this
-queue path, fail closed and report the infrastructure blocker without emitting
-a stage artifact. Do not reduce scope simply to avoid this requirement; launch
-the real command safely, surface concise status, and clean up stale processes
-and run directories when the stage ends.
+
+1. Create the one-time command file with
+   `gateway-cli autoresearch-create-command-file` (schema-v1 stdin protocol, as
+   above).
+2. Prepare the immutable run directory with
+   `/home/dev/repos/g2_openclaw/.venv/bin/python -m gateway.autoresearch_runs
+   prepare-with-command-file --manifest <absolute-manifest.json>
+   --run-dir <absolute-run-dir> --runs-root
+   /home/dev/.openclaw/autoresearch/model-workspaces/long-runs --command-file
+   "$command_file"`.
+3. Ensure the inbox directory
+   `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/` exists first
+   with `mkdir -m 700 -p`; verify it is a non-symlink directory owned by the
+   session user.
+4. Write a schema_version 1 launch request
+   `{"schema_version":1,"run_dir":"<absolute-run-dir>","runs_root":"/home/dev/.openclaw/autoresearch/model-workspaces/long-runs"}`
+   under a unique filename ending in `.json`, such as
+   `<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json`; write it as a `.tmp`
+   sibling with mode 0600, then `mv` it into
+   `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/`.
+5. The owner-only supervisor launches the request within about 60 seconds.
+   Confirm in the same turn that the request file lands in `accepted/` (not
+   `rejected/`) before reporting the run as queued. Under low host memory, the
+   supervisor defers the launch and the request legitimately stays pending in
+   the inbox; treat a still-pending request as deferred and re-check it on the
+   next wake. Report a blocker only if the request is rejected or remains
+   pending after several wakes. If it lands in `rejected/`, quote
+   `rejected/<request-name>.reason` verbatim when present; otherwise quote the
+   supervisor advisory log line.
+
+Direct foreground execution is invalid. Do not reduce scope simply to avoid
+this requirement; launch the real command safely, surface concise status, and
+clean up stale processes and run directories when the stage ends.
 The launcher status ledger is intentionally narrow: `status.json` emits only
 `running`, `succeeded`, or `failed`. Any blocker is a PM-owned classification
 derived from bounded polling plus logs and receipts; it is not a literal
@@ -186,8 +215,9 @@ never changes an active or suspended iteration's receipt.
 
 In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, cluster closely related proposals
 into theory-family clusters before testing the 3-of-5 majority in both rounds;
-votes count together when proposals share the same economic mechanism. After
-the single retry, if no cluster reaches three votes, the arbiter MUST NOT return
+in `ALPHA_RESEARCH`, votes count together when proposals share the same economic
+mechanism; in `DATA_INFRA_G0`, votes count together when proposals share the same
+data/provenance failure mechanism. After the single retry, if no cluster reaches three votes, the arbiter MUST NOT return
 `NO_CONSENSUS`; select among tied leading clusters by the pre-registered
 deterministic tie-break: (1) most votes; (2) the family least explored in the
 hypothesis registry, meaning fewest prior entries across its families; (3) the
@@ -257,14 +287,22 @@ and unwrapped files before accepting the submission into the supervisor-owned
 inbox. Model sessions never write the authoritative state file directly — the
 Codex sandbox only permits writes to the model workspace and the stage inbox,
 and `autoresearch-advance` is reserved for the unsandboxed supervisor and
-operator. After a successful submission, the supervisor validates and applies it
-within one poll cycle (about 60 seconds) and wakes the session with the next
-instructions; end the turn after submitting instead of polling for the state
-change. The complete envelope file must be at most 64 KiB; compact the artifact
+operator. After submission, the supervisor validates and applies it within one
+poll cycle (about 60 seconds) and wakes the session with the next instructions;
+End the turn after submitting; do not poll for acceptance after submitting. The
+submission acceptance check happens on the next supervisor wake; then verify the
+submitted envelope has left the inbox root and appears under `accepted/` (not
+`rejected/`), and quote any rejection verbatim then. The complete envelope file
+must be at most 64 KiB; compact the artifact
 rather than truncating it. `autoresearch-next` also has a hard 32 KiB prompt
 budget and fails closed with an actionable error if accepted state artifacts
 would exceed it. Never replace authoritative state with a shell-created
 temporary file after a failed command.
+Submission is not acceptance. After `autoresearch-submit-stage`, end the turn
+and do not poll; on the next supervisor wake, verify the submitted envelope file
+has left the inbox root and appears under `accepted/` (not `rejected/`) before
+reporting success. Quote a rejection verbatim from that supervisor wake or
+advisory.
 
 ## Explicit Research Modes
 
@@ -710,6 +748,9 @@ Every proposal must include:
   timing. Do not claim materialization identities or digests before
   verification.
 - Feature pipeline from raw OHLCV/sentiment to model input.
+- Economic mechanism (ALPHA) or data/provenance failure mechanism (G0) in one
+  sentence plus a normalized theory-family label (clusterable with related
+  proposals).
 - Model type and hyperparameter search plan.
 - Walk-forward split, purge/embargo if applicable, and OOS holdout.
 - Transaction cost model.
@@ -730,6 +771,7 @@ Quantipy constraints:
   execution-timing, unsupported-data, cache-reuse, and prompt-hygiene rules.
 - No overnight holds; flat by the target repo's close-out rule.
 - Use real platform OHLCV through `qp.prices()` and no synthetic research data.
+- Panel `volume` is exact-decimal serialized as a string by contract; cast it to a numeric dtype before any arithmetic, aggregation, or comparison. All other price columns are double-typed.
 - Use a simple indicator core with governed Reddit sentiment only; news sentiment
   is not a shipped transport.
 - Hyperparameter tuning uses time-series-aware splits.
@@ -749,6 +791,20 @@ The committed Quantipy manifest declares the `sentiment` field with the exact
 `api_url` and pinned `receipt_sha256`. The runtime prepares sealed receipt-bound
 artifacts from that declared field. No ticker recommendations or undeclared
 data.
+
+Data sheet:
+- Coverage: 2021-01-01 through 2026-08-20.
+- Attention panel: deterministic (no LLM) mention/attention counts by ticker x
+  ET-hour x subreddit (682,056 hourly rows) plus a daily rollup (464,212 rows),
+  from 179,778 source posts.
+- Tone export: daily per-ticker LLM tone with coverage and labeler-identity
+  columns (114,761 fused rows; 155,601 subreddit-level rows); 2026 labels are
+  luna-relabeled.
+- Caveats to pre-register: WSB coverage is censored by per-day post caps in
+  some periods (roughly 8-19% coverage there); labeler mixture differs
+  before/after the 2026 relabel — use the labeler-identity and coverage
+  columns in any design.
+- Request via consensus `data_requirements`: ["sentiment_panels"].
 
 The implementation worker derives and prewarms the Quantipy data plan before the
 committed experiment runtime is invoked. Use the public client path
@@ -872,23 +928,20 @@ Implementation requirements:
   its registry reason carries the named contract, and the supervisor starts a fresh next
   iteration without suspension or resume coupling.
 - Any notebook execution, hydrate-capable run, or backtest expected to outlive
-  the watchdog must be launched detached through
-  `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with `--runs-root
-  /home/dev/.openclaw/autoresearch/model-workspaces/long-runs`, `--manifest` and
-  `--command-file`, then bounded polling. Direct foreground execution is
-  invalid. Secret-bearing command arguments are invalid; use credential files
-  or inherited auth. In the sandbox, a `LAUNCH_QUEUED:` line is success: do not
-  retry or treat it as a blocker; the supervisor launches it within about 60
-  seconds and normal supervision wakes the session. If the launcher fails
-  outside this queue path, fail closed and report the infrastructure blocker
-  without emitting a fix artifact. Record the run directory in stage notes and
-  use its status files for progress and recovery.
-  The launcher gives the detached worker a `MemoryHigh=10G` soft limit and a
-  `MemoryMax=12G` hard limit; these are separate from the OpenClaw gateway's
+  the watchdog must be launched through the detached launch mechanism (prepared
+  run + schema_version 1 launch request from a sandboxed session), then bounded
+  polling. Direct foreground execution is invalid. Secret-bearing command
+  arguments are invalid; use credential files or inherited auth. Submission is
+  not acceptance: confirm the request file lands in `accepted/` (not
+  `rejected/`) before reporting the run as queued, and report the rejection by
+  quoting `rejected/<request-name>.reason` verbatim when present, else quote the
+  supervisor advisory log line. Record the run directory in stage notes
+  and use its status files for progress and recovery.
+  The launcher gives the detached worker a `MemoryHigh=48G` soft limit and a
+  `MemoryMax=64G` hard limit (host upgraded to 92 GiB RAM on 2026-09-02);
+  these are separate from the OpenClaw gateway's
   native-crash containment limits. The worst-case simultaneous ceilings are
-  10G for the gateway plus 12G for the long task, or 22G against 30.25 GiB of
-  host RAM, leaving headroom for the Quantipy API and OS; throttle onset at
-  8G + 10G = 18G remains well below host pressure. Observed peaks are 6.2G for
+  20G for the gateway plus 64G for the long task, or 84G against 92 GiB of RAM. Observed peaks are 6.2G for
   the gateway and 2.99G for long-task runs.
 
 ## 5. Verify
@@ -961,8 +1014,9 @@ Verification order is fixed: focused tests, then launch the exact direct argv
 `env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run
 --frozen --no-sync quantipy experiment run <absolute-worktree-manifest>
 --output-root ROOT --run-id autoresearch-i<iteration>-<commit12>` through
-`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The immutable detached
-manifest must set its cwd to `/home/dev/repos/quantipy` and
+the detached launch mechanism (prepared run + schema_version 1 launch request
+from a sandboxed session). The immutable detached manifest must set its cwd to
+`/home/dev/repos/quantipy` and
 `expected_artifact_path` to the known `ROOT/RUN_ID/run.json`. The canonical
 runtime root must equal the state target repo, be tracked-file clean, preserve
 committed regular owner-controlled `pyproject.toml` (64 KiB) and `uv.lock`
@@ -983,7 +1037,10 @@ require successful terminal status, complete EOF drain, truthful truncation
 metadata for each bounded 64 KiB retained log tail, and current `run.json`
 bytes matching the worker attestation; an
 artifact-supplied hash alone is never proof. The deterministic run ID
-means the final path is known before execution: `ROOT/RUN_ID/run.json`. `ROOT`
+means the final path is known before execution: `ROOT/RUN_ID/run.json`. The
+deterministic run id derives from the experiment COMMIT sha
+(`autoresearch-i<N>-<commit12>`), never from the manifest digest; a manifest
+digest change without a new commit does not change the run id. `ROOT`
 is the runner-declared fixed private autoresearch runs root; arbitrary output
 roots and mutable workspace output are rejected. State initialization and
 verification dispatch require that root to be owner-controlled mode 0700 and
@@ -1312,9 +1369,9 @@ loop.
   rerun tests/notebook, then rerun the single reviewer. `DECISION_REQUIRED`
   routes directly to `DECISION_LOG`, never `fixer`.
 - Any long fix/test notebook, hydrate, or backtest rerun must use the detached
-  launcher at `/home/dev/repos/g2_openclaw/scripts/run-long-task.sh` with
-  `--manifest` and a one-time `--command-file`, and preserve run-directory status until the rerun is
-  accepted or explicitly cleaned up.
+  launch mechanism (prepared run + schema_version 1 launch request from a
+  sandboxed session), then bounded polling, and preserve run-directory status
+  until the rerun is accepted or explicitly cleaned up.
 - Test failure: fix up to two times, then classify and log CRASH. The disposable
   experiment worktree is not promoted.
 - Verification `BUG_SIGNAL`: fix up to two times. If the signal persists after
@@ -1446,6 +1503,9 @@ Actions:
   detached run directories before relaunching anything.
 - Report detached-run status in ordinary concise PM transcript prose derived
   from bounded polling, logs, receipts, and the launcher status ledger.
+- When relaying `autoresearch-doctor` output, quote its check lines and
+  DEGRADED issue strings verbatim; never paraphrase, re-narrate, or invent a
+  cause the doctor did not print.
 - Post progress every 10 iterations.
 - Monitoring is read-only. On confirmed shared-infrastructure failure, report
   the exact blocker evidence and await human/Codex operator action. The PM

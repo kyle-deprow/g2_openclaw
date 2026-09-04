@@ -6,6 +6,7 @@ import subprocess
 from dataclasses import (
     replace,
 )
+from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -1565,6 +1566,472 @@ def test_canonical_runtime_attestation_allows_sibling_implementation_commit(
     reattested = autoresearch_attestation._attest_canonical_quantipy_runtime(state, implementation)
 
     assert reattested != attestation
+
+
+def _prepare_runtime_reseal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> tuple[Path, AutoresearchState, AutoresearchValidationContext, Path]:
+    runtime_root = tmp_path / "runtime"
+    worktree_root = tmp_path / "model-workspaces"
+    monkeypatch.setattr(autoresearch_constants, "DEFAULT_AUTORESEARCH_WORKTREE_ROOT", worktree_root)
+    workspace = worktree_root / "alpha"
+    workspace.parent.mkdir(mode=0o700)
+    _git(tmp_path, "init", "--initial-branch=main", str(runtime_root))
+    _git(runtime_root, "config", "user.email", "autoresearch@example.test")
+    _git(runtime_root, "config", "user.name", "Autoresearch Test")
+    (runtime_root / "pyproject.toml").write_text(
+        "[project]\nname='quantipy'\n", encoding="utf-8"
+    )
+    (runtime_root / "uv.lock").write_bytes(b"# lock\n" + (b"x" * 385_043))
+    (runtime_root / "pyproject.toml").chmod(0o664)
+    (runtime_root / "uv.lock").chmod(0o664)
+    _git(runtime_root, "add", "pyproject.toml", "uv.lock")
+    _git(runtime_root, "commit", "-m", "readiness runtime")
+    readiness_commit = _git(runtime_root, "rev-parse", "HEAD")
+    _git(runtime_root, "worktree", "add", "-b", "alpha", str(workspace))
+    (workspace / "experiment.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(workspace, "add", "experiment.py")
+    _git(workspace, "commit", "-m", "immutable experiment")
+    implementation_commit = _git(workspace, "rev-parse", "HEAD")
+    entrypoint = runtime_root / ".venv" / "bin" / "quantipy"
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.parent.parent.chmod(0o775)
+    entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
+    entrypoint.chmod(0o775)
+    (runtime_root / "src" / "quantipy").mkdir(parents=True)
+    import_path = runtime_root / "src" / "quantipy" / "__init__.py"
+    import_path.write_text("", encoding="utf-8")
+    base_interpreter = tmp_path / "uv-managed-python"
+    base_interpreter.write_bytes(b"external uv interpreter")
+    base_interpreter.chmod(0o775)
+    monkeypatch.setattr(
+        runtime_attestation,
+        "_probe_quantipy_runtime_resolution",
+        lambda _root: (base_interpreter, import_path, "3.13.0"),
+    )
+    readiness_identity = ReadinessIdentity(
+        manifest_id="manifest-test",
+        snapshot_id="snapshot-test",
+        receipt_sha256="a" * 64,
+        quantipy_commit=readiness_commit,
+    )
+    validation_context = AutoresearchValidationContext(
+        readiness_identity,
+        "f" * 64,
+        (),
+        quantipy_commit=readiness_commit,
+    )
+    state = replace(
+        _state_to_consensus(policy),
+        setup=_workspace_setup(runtime_root),
+        platform_readiness=readiness_identity,
+    )
+    state = advance_state(state, _majority_consensus(round_number=1, policy=policy), policy)
+    implementation_artifact = replace(
+        _implementation_result(),
+        workspace_path=str(workspace),
+        commit_sha=implementation_commit,
+    )
+    state = advance_state(state, implementation_artifact, policy)
+    implementation = state.implementation_result
+    assert implementation is not None
+    attestation = autoresearch_attestation._attest_canonical_quantipy_runtime(
+        state,
+        implementation,
+        readiness_quantipy_commit=validation_context.quantipy_commit,
+    )
+    sealed = replace(state, canonical_quantipy_runtime_attestation=attestation)
+    state_path = tmp_path / "quantipy-state.json"
+    save_state_file(state_path, sealed)
+    return state_path, sealed, validation_context, runtime_root
+
+
+def test_reseal_canonical_runtime_advances_attestation_and_writes_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, state, validation_context, runtime_root = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    old_attestation = state.canonical_quantipy_runtime_attestation
+    assert old_attestation is not None
+    (runtime_root / "reseal-marker.txt").write_text("runtime advanced\n", encoding="utf-8")
+    _git(runtime_root, "add", "reseal-marker.txt")
+    _git(runtime_root, "commit", "-m", "advance canonical runtime")
+    runtime_head = _git(runtime_root, "rev-parse", "HEAD")
+
+    # Act
+    receipt_path = autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+        state_path,
+        operator_reason="Re-attest the current canonical runtime.",
+        policy=policy,
+        validation_context=validation_context,
+    )
+
+    # Assert
+    persisted = autoresearch_persistence.load_state_file(state_path)
+    new_attestation = persisted.canonical_quantipy_runtime_attestation
+    assert new_attestation is not None
+    assert new_attestation.commit_sha == runtime_head
+    assert new_attestation.readiness_quantipy_commit == old_attestation.readiness_quantipy_commit
+    assert receipt_path.is_file()
+    assert receipt_path.parent.name == "runtime-reseal-receipts"
+    assert receipt_path.stat().st_mode & 0o777 == 0o600
+    assert receipt_path.parent.stat().st_mode & 0o777 == 0o700
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert set(receipt) == {
+        "schema_version",
+        "receipt_type",
+        "recorded_at",
+        "operator_reason",
+        "iteration",
+        "phase",
+        "old_commit_sha",
+        "new_commit_sha",
+        "new_runtime_attestation",
+    }
+    assert receipt["schema_version"] == 1
+    assert receipt["receipt_type"] == "g2-openclaw.autoresearch.runtime-reseal-receipt"
+    assert receipt["operator_reason"] == "Re-attest the current canonical runtime."
+    assert receipt["phase"] == "verification"
+    assert receipt["old_commit_sha"] == old_attestation.commit_sha
+    assert receipt["new_commit_sha"] == new_attestation.commit_sha
+    assert receipt["new_runtime_attestation"] == new_attestation.to_dict()
+    validate_state(persisted, policy, validation_context)
+
+
+def test_reseal_canonical_runtime_collision_uses_a_unique_receipt_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, runtime_root = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    fixed_timestamp = datetime(2026, 8, 22, 12, 34, 56, tzinfo=UTC)
+
+    with patch.object(autoresearch_operator_recovery, "datetime") as datetime_mock:
+        datetime_mock.now.return_value = fixed_timestamp
+        (runtime_root / "reseal-marker-1.txt").write_text("first\n", encoding="utf-8")
+        _git(runtime_root, "add", "reseal-marker-1.txt")
+        _git(runtime_root, "commit", "-m", "first runtime reseal")
+
+        # Act
+        first_receipt = autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Record the first runtime reseal.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+        (runtime_root / "reseal-marker-2.txt").write_text("second\n", encoding="utf-8")
+        _git(runtime_root, "add", "reseal-marker-2.txt")
+        _git(runtime_root, "commit", "-m", "second runtime reseal")
+        second_receipt = autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Record the second runtime reseal.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+    # Assert
+    assert first_receipt.is_file()
+    assert second_receipt.is_file()
+    assert second_receipt.name == f"{first_receipt.stem}-2.json"
+    assert second_receipt.read_text(encoding="utf-8") != first_receipt.read_text(encoding="utf-8")
+    assert len(list(first_receipt.parent.glob("*.json"))) == 2
+
+
+def test_reseal_canonical_runtime_refuses_receipt_directory_symlink_after_state_save(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, runtime_root = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    receipt_directory = state_path.parent / "runtime-reseal-receipts"
+    receipt_directory.mkdir(mode=0o700)
+    outside_directory = tmp_path / "outside-receipts"
+    outside_directory.mkdir(mode=0o700)
+    receipt_directory.rmdir()
+    receipt_directory.symlink_to(outside_directory, target_is_directory=True)
+    (runtime_root / "reseal-marker.txt").write_text("advanced\n", encoding="utf-8")
+    _git(runtime_root, "add", "reseal-marker.txt")
+    _git(runtime_root, "commit", "-m", "advance runtime before symlink refusal")
+    expected_runtime_head = _git(runtime_root, "rev-parse", "HEAD")
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="state was saved but receipt write failed: refusing symlinked",
+    ) as error:
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Reject a replaced receipt directory.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+    persisted = autoresearch_persistence.load_state_file(state_path)
+    assert persisted.canonical_quantipy_runtime_attestation is not None
+    assert persisted.canonical_quantipy_runtime_attestation.commit_sha == expected_runtime_head
+    assert "runtime reseal state was saved" in str(error.value)
+    validate_state(persisted, policy, validation_context)
+    assert not list(outside_directory.iterdir())
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ("write", "write_runtime_error", "file_fsync", "directory_fsync"),
+)
+def test_reseal_canonical_runtime_reports_saved_state_when_receipt_publication_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+    failure_stage: str,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, runtime_root = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    receipt_directory = state_path.parent / "runtime-reseal-receipts"
+    (runtime_root / "reseal-marker.txt").write_text("advanced\n", encoding="utf-8")
+    _git(runtime_root, "add", "reseal-marker.txt")
+    _git(runtime_root, "commit", "-m", "advance runtime before write failure")
+
+    original_write = os.write
+    original_fsync = os.fsync
+    original_close = os.close
+    receipt_fds: set[int] = set()
+    closed_receipt_fds: list[int] = []
+
+    def fail_receipt_write(fd: int, data: bytes) -> int:
+        if (
+            failure_stage in ("write", "write_runtime_error")
+            and Path(os.readlink(f"/proc/self/fd/{fd}")).parent == receipt_directory
+        ):
+            if failure_stage == "write_runtime_error":
+                raise RuntimeError("injected receipt write runtime failure")
+            raise OSError("injected receipt write failure")
+        return original_write(fd, data)
+
+    def fail_receipt_fsync(fd: int) -> None:
+        fd_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if fd_path.parent == receipt_directory:
+            receipt_fds.add(fd)
+        if failure_stage == "file_fsync" and fd_path.parent == receipt_directory:
+            raise OSError("injected receipt file fsync failure")
+        if failure_stage == "directory_fsync" and fd_path == receipt_directory:
+            raise OSError("injected receipt directory fsync failure")
+        original_fsync(fd)
+
+    def record_receipt_close(fd: int) -> None:
+        if fd in receipt_fds:
+            closed_receipt_fds.append(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(os, "write", fail_receipt_write)
+    monkeypatch.setattr(os, "fsync", fail_receipt_fsync)
+    monkeypatch.setattr(os, "close", record_receipt_close)
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="runtime reseal state was saved but receipt write failed",
+    ) as error:
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Record the saved-state write failure.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+    if failure_stage == "directory_fsync":
+        assert closed_receipt_fds
+        assert len(closed_receipt_fds) == len(set(closed_receipt_fds))
+
+    persisted = autoresearch_persistence.load_state_file(state_path)
+    assert persisted.canonical_quantipy_runtime_attestation is not None
+    assert (
+        persisted.canonical_quantipy_runtime_attestation.commit_sha
+        == _git(runtime_root, "rev-parse", "HEAD")
+    )
+    expected_failure = (
+        "injected receipt write runtime failure"
+        if failure_stage == "write_runtime_error"
+        else f"injected receipt {failure_stage.replace('_', ' ')} failure"
+    )
+    assert expected_failure in str(error.value)
+    validate_state(persisted, policy, validation_context)
+    assert receipt_directory.is_dir()
+    assert not list(receipt_directory.iterdir())
+
+
+def test_reseal_canonical_runtime_close_failure_does_not_double_close_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, runtime_root = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    receipt_directory = state_path.parent / "runtime-reseal-receipts"
+    (runtime_root / "reseal-marker.txt").write_text("advanced\n", encoding="utf-8")
+    _git(runtime_root, "add", "reseal-marker.txt")
+    _git(runtime_root, "commit", "-m", "advance runtime before close failure")
+
+    original_fsync = os.fsync
+    original_close = os.close
+    receipt_fds: set[int] = set()
+    receipt_close_calls: list[int] = []
+
+    def record_receipt_fsync(fd: int) -> None:
+        fd_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if fd_path.parent == receipt_directory:
+            receipt_fds.add(fd)
+        original_fsync(fd)
+
+    def fail_receipt_close(fd: int) -> None:
+        if fd in receipt_fds:
+            receipt_close_calls.append(fd)
+            original_close(fd)
+            raise OSError("injected receipt close failure")
+        original_close(fd)
+
+    monkeypatch.setattr(os, "fsync", record_receipt_fsync)
+    monkeypatch.setattr(os, "close", fail_receipt_close)
+
+    # Act / Assert
+    with pytest.raises(
+        AutoresearchValidationError,
+        match="runtime reseal state was saved but receipt write failed",
+    ) as error:
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Record the saved-state close failure.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+    assert len(receipt_close_calls) == 1
+    assert "injected receipt close failure" in str(error.value)
+    assert receipt_directory.is_dir()
+    assert not list(receipt_directory.iterdir())
+
+
+def test_reseal_canonical_runtime_refuses_symlinked_intermediate_state_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    symlinked_parent = tmp_path / "symlinked-state-parent"
+    symlinked_parent.symlink_to(state_path.parent, target_is_directory=True)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="symlinks"):
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            symlinked_parent / state_path.name,
+            operator_reason="Reject an intermediate state-path symlink.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+
+def test_reseal_canonical_runtime_unchanged_leaves_state_bytes_and_mtime_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, _, validation_context, _ = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    before_bytes = state_path.read_bytes()
+    before_mtime_ns = state_path.stat().st_mtime_ns
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="reseal is not required"):
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Confirm the current canonical runtime.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+    assert state_path.read_bytes() == before_bytes
+    assert state_path.stat().st_mtime_ns == before_mtime_ns
+    assert not (state_path.parent / "runtime-reseal-receipts").exists()
+
+
+def test_reseal_canonical_runtime_rejects_wrong_phase_and_padded_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    state_path, state, validation_context, _ = _prepare_runtime_reseal_state(
+        tmp_path, monkeypatch, policy
+    )
+    wrong_phase = replace(state, phase=Phase.IMPLEMENTATION)
+    save_state_file(state_path, wrong_phase)
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError, match="phase verification"):
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason="Re-attest the current canonical runtime.",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+    save_state_file(state_path, state)
+    with pytest.raises(AutoresearchValidationError, match="trimmed operator reason"):
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason=" x",
+            policy=policy,
+            validation_context=validation_context,
+        )
+
+
+def test_reseal_canonical_runtime_rejects_live_platform_runtime_receipt(
+    public_platform_v4_recovery_fixture: PublicPlatformRecoveryFixture,
+    policy: AutoresearchPolicy,
+) -> None:
+    # Arrange
+    fixture = public_platform_v4_recovery_fixture
+    autoresearch_operator_recovery.recover_platform_runtime_state_file(
+        fixture.copied_state_path,
+        probe=fixture.probe,
+        operator_reason="Materialize the genuine v5 recovery topology.",
+        policy=policy,
+        validation_context=fixture.validation_context,
+        systemd_is_active=lambda _unit: False,
+        proc_root=fixture.copied_state_path.parent / "proc",
+    )
+
+    # Act / Assert
+    with pytest.raises(AutoresearchValidationError) as error:
+        autoresearch_operator_recovery.reseal_canonical_runtime_state_file(
+            fixture.copied_state_path,
+            operator_reason="Re-attest the current canonical runtime.",
+            policy=policy,
+            validation_context=fixture.validation_context,
+        )
+    assert str(error.value) == (
+        "platform runtime recovery receipt is live; reseal does not apply to the v5 topology"
+    )
 
 
 def test_canonical_runtime_cli_rejects_a_world_writable_entrypoint(tmp_path: Path) -> None:

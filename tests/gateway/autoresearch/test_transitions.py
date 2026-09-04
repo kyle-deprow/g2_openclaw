@@ -4557,15 +4557,22 @@ def test_verification_prompt_requires_terminal_structured_artifact_persistence(
     assert "Verification handoff contract" in prompt
     assert "structured JSON verification_result artifact" in prompt
     assert (
-        "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance "
+        "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-submit-stage "
         f"{json.dumps(str(state_path.resolve()))} "
         "/home/dev/.openclaw/workspace-autoresearch-pm/<artifact.json> "
         "--instruction-manifest-sha256 <source_manifest_sha256> "
         "--state-reference-sha256 <state_reference_sha256>"
     ) in prompt
     assert "before any prose completion or status report" in prompt
+    assert (
+        "End the turn after submitting; do not poll for acceptance after submitting. "
+        "The submission acceptance check happens on the next supervisor wake; then verify "
+        "the submitted envelope has left the inbox root and appears under `accepted/` "
+        "(not `rejected/`), and quote any rejection verbatim then."
+        in prompt
+    )
     assert "prose-only verification completion is invalid" in prompt
-    assert "Persist and advance the JSON artifact" in prompt
+    assert "Persist and submit the JSON artifact" in prompt
     assert "commands_run" in prompt
 
 
@@ -4594,7 +4601,10 @@ def test_verification_prompt_requires_failure_classification_and_coverage_fields
     assert "uv --directory /home/dev/repos/quantipy run --frozen --no-sync" in prompt
     assert "quantipy experiment run" in prompt
     assert "PYTHONDONTWRITEBYTECODE=1 quantipy experiment" not in prompt
-    assert "/home/dev/repos/g2_openclaw/scripts/run-long-task.sh" in prompt
+    assert "prepare-with-command-file" in prompt
+    assert "schema_version 1 launch request" in prompt
+    assert "accepted/" in prompt
+    assert "/home/dev/repos/g2_openclaw/scripts/run-long-task.sh" not in prompt
     assert "expected_artifact_path" in prompt
     assert "Direct foreground execution" in prompt
     assert "non-malicious same-host agent trust model" in prompt

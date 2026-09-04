@@ -76,13 +76,46 @@ smoke-test or render a report only and never establish PASS.
 ## Detached Long Tasks
 
 Any hydration, backtest, notebook execution, or similarly long verification
-command must create a one-time private command file with
-`/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file --output
-<absolute-command-file>` and then use
-`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh --run-dir
-<absolute-run-dir> --manifest <absolute-manifest.json> --command-file
-<absolute-command-file>` with bounded polling and the same durable run artifacts.
-The command-file helper reads the schema-v1 stdin protocol, creates the file
+command must use the detached launch mechanism. NEVER execute
+`scripts/run-long-task.sh` in your session: inside a
+sandboxed session the uid mapping makes root-owned control binaries stat as
+nobody:nogroup, so the launcher's ownership pin always fails before it can
+prepare or queue anything. Instead prepare the run yourself, then submit a
+schema_version 1 launch request and confirm acceptance:
+
+- Create the one-time private command file with
+  `/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli
+  autoresearch-create-command-file --output <absolute-command-file>` (schema-v1
+  stdin protocol: `{"schema_version":1,"command":["bash","-lc","<non-secret command>"]}`).
+- Prepare the immutable run directory with
+  `/home/dev/repos/g2_openclaw/.venv/bin/python -m gateway.autoresearch_runs
+  prepare-with-command-file --manifest <absolute-manifest.json>
+  --run-dir <absolute-run-dir> --runs-root
+  /home/dev/.openclaw/autoresearch/model-workspaces/long-runs --command-file
+  <absolute-command-file>`.
+- Ensure the inbox directory
+  `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/` exists first
+  with `mkdir -m 700 -p`; verify it is a non-symlink directory owned by the
+  session user.
+- Write a schema_version 1 launch request
+  `{"schema_version":1,"run_dir":"<absolute-run-dir>","runs_root":"/home/dev/.openclaw/autoresearch/model-workspaces/long-runs"}`
+  under a unique filename ending in `.json`, such as
+  `<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json`; write it as a `.tmp`
+  sibling with mode 0600, then `mv` it into
+  `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/`.
+- The owner-only supervisor normally launches the request within about 60
+  seconds. Confirm in the same turn that the request file lands in `accepted/`
+  (not `rejected/`) before reporting the run as queued. Under low host memory,
+  the supervisor defers the launch and the request legitimately stays pending
+  in the inbox; treat a still-pending request as deferred and re-check it on the
+  next wake. Report a blocker only if the request is rejected or remains
+  pending after several wakes. If it lands in `rejected/`, quote
+  `rejected/<request-name>.reason` verbatim when present; otherwise quote the
+  supervisor advisory log line.
+
+The supervisor-side and human-operator launch path remains
+`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The command-file helper
+reads the schema-v1 stdin protocol, creates the file
 atomically with `O_EXCL`/`O_NOFOLLOW` mode 0600, and the launcher rejects all
 positional command payloads. The launcher places the worker in a dedicated
 transient user-systemd service with explicit memory bounds, outside the OpenClaw
@@ -92,7 +125,7 @@ and waits only for coherent startup metadata; it does not retain a
 `systemd-run --wait` client in the caller lifecycle. Once the launcher returns,
 the caller may exit while the transient unit continues. To control an active
 run, resolve its exact unit with
-`systemctl --user whoami "$(cat <absolute-run-dir>/pid)"` and use
+`systemctl --user whoami "$(jq -r .pid <absolute-run-dir>/status.json)"` and use
 `systemctl --user stop <unit>` when required;
 the worker records a signal stop as terminal failure after a bounded
 TERM/grace/KILL sequence. An ordinary uncaught `SIGTERM` commonly yields `143`;

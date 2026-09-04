@@ -580,7 +580,39 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
         "never authorized for implementation",
     ):
         assert phrase in alpha_prompt
+    assert (
+        "votes count together when proposals share the same economic mechanism" in alpha_prompt
+    )
+    assert (
+        "votes count together when proposals share the same data/provenance failure mechanism"
+        in g0_prompt
+    )
+    assert "votes count together when proposals share the same economic mechanism" not in g0_prompt
     assert len(autoresearch_engine.CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION.encode()) <= 500
+
+
+def test_debate_instruction_requires_clusterable_theory_family_labels(
+    policy: AutoresearchPolicy,
+) -> None:
+    alpha_prompt = autoresearch_engine._phase_instruction(
+        _state_to_consensus(policy),
+        Phase.DEBATE,
+        ArtifactType.DEBATE_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+    g0_prompt = autoresearch_engine._phase_instruction(
+        replace(_state_to_consensus(policy), mode=ResearchMode.DATA_INFRA_G0),
+        Phase.DEBATE,
+        ArtifactType.DEBATE_RESULT,
+        ("agent",),
+        state_path=Path("/tmp/state.json"),
+    )
+
+    assert "economic mechanism" in alpha_prompt
+    assert "normalized theory-family label" in alpha_prompt
+    assert "data/provenance failure mechanism" in g0_prompt
+    assert "economic mechanism" not in g0_prompt
 
 
 def test_zero_trade_alpha_gate_pass_tuple_is_accepted_by_artifact_validator() -> None:
@@ -678,8 +710,14 @@ def test_fix_prompt_and_validator_reuse_persisted_implementation_workspace(
     assert "Never create another worktree" in prompt
     assert (
         "Any notebook, hydrate, backtest, or similarly long test command MUST be launched "
-        "through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh"
+        "through the detached launch mechanism (prepared run + schema_version 1 launch "
+        "request from a sandboxed session)"
     ) in prompt
+    assert "prepare-with-command-file" in prompt
+    assert "mkdir -m 700 -p" in prompt
+    assert "accepted/" in prompt
+    assert "/home/dev/repos/g2_openclaw/scripts/run-long-task.sh" not in prompt
+    assert "LAUNCH_QUEUED" not in prompt
     assert "direct foreground execution is invalid" in prompt
     assert "without emitting a fix_result" in prompt
     assert fixed.implementation_result is not None
@@ -787,6 +825,19 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "prefixes stripped" in verification
     assert "comparators as scalars" in verification
     assert "bulk detail in the run artifact" in verification
+    assert (
+        "command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/"
+        "<unique-command>.json"
+        in verification
+    )
+    assert 'autoresearch-create-command-file --output "$command_file"' in verification
+    assert (
+        "End the turn after submitting; do not poll for acceptance after submitting. "
+        "The submission acceptance check happens on the next supervisor wake; then verify "
+        "the submitted envelope has left the inbox root and appears under `accepted/` "
+        "(not `rejected/`), and quote any rejection verbatim then."
+        in verification
+    )
 
     review = autoresearch_engine._phase_instruction(
         _state_to_review(policy),

@@ -43,6 +43,11 @@ from gateway.autoresearch.constants import (
     QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES as QUANTIPY_EXPERIMENT_FAILURE_CATEGORIES,
 )
 from gateway.autoresearch.constants import (
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES,
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_NAME_MAX_LENGTH,
+    QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_PATH_MAX_LENGTH,
+)
+from gateway.autoresearch.constants import (
     QUANTIPY_EXPERIMENT_STAGE_ORDER as QUANTIPY_EXPERIMENT_STAGE_ORDER,
 )
 from gateway.autoresearch.enums import (
@@ -616,22 +621,87 @@ class ConsensusResultArtifact:
             )
 
 
+def _validate_quantipy_failure_traceback_tail(
+    value: object,
+    *,
+    label: str,
+) -> tuple[Mapping[str, object], ...]:
+    if not isinstance(value, list):
+        raise AutoresearchValidationError(f"{label} must be a list")
+    if not 1 <= len(value) <= QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES:
+        raise AutoresearchValidationError(
+            f"{label} must contain 1 to {QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_MAX_FRAMES} frames"
+        )
+    frames: list[Mapping[str, object]] = []
+    for index, frame_raw in enumerate(value):
+        frame_label = f"{label}[{index}]"
+        if not isinstance(frame_raw, Mapping):
+            raise AutoresearchValidationError(f"{frame_label} must be an object")
+        frame = frame_raw
+        _require_exact_keys(
+            frame,
+            label=frame_label,
+            expected=("path", "line", "name"),
+        )
+        path = frame["path"]
+        if (
+            not isinstance(path, str)
+            or not 1 <= len(path) <= QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_PATH_MAX_LENGTH
+        ):
+            raise AutoresearchValidationError(
+                f"{frame_label}.path must be a non-empty string of length at most "
+                f"{QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_PATH_MAX_LENGTH}"
+            )
+        if path.startswith("/"):
+            raise AutoresearchValidationError(f"{frame_label}.path must be workspace-relative")
+        if any(segment == ".." for segment in path.split("/")):
+            raise AutoresearchValidationError(
+                f"{frame_label}.path must not contain a parent traversal segment"
+            )
+        line = frame["line"]
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            raise AutoresearchValidationError(f"{frame_label}.line must be an integer >= 1")
+        name = frame["name"]
+        if (
+            not isinstance(name, str)
+            or not 1 <= len(name) <= QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_NAME_MAX_LENGTH
+        ):
+            raise AutoresearchValidationError(
+                f"{frame_label}.name must be a non-empty string of length at most "
+                f"{QUANTIPY_EXPERIMENT_FAILURE_TRACEBACK_NAME_MAX_LENGTH}"
+            )
+        frames.append(frame)
+    return tuple(frames)
+
+
 @dataclass(frozen=True, slots=True)
 class QuantipyExperimentFailureEvidence:
     category: str
     message: str
+    traceback_tail: tuple[Mapping[str, object], ...] | None = None
 
     @classmethod
     def from_dict(cls, raw: object) -> QuantipyExperimentFailureEvidence:
         data = _ensure_mapping(raw, label="quantipy_experiment_evidence.failure")
+        expected_keys: tuple[str, ...] = ("category", "message")
+        if "traceback_tail" in data:
+            expected_keys = (*expected_keys, "traceback_tail")
         _require_exact_keys(
             data,
             label="quantipy_experiment_evidence.failure",
-            expected=("category", "message"),
+            expected=expected_keys,
         )
         failure = cls(
             category=_require_str(data, "category"),
             message=_require_str(data, "message"),
+            traceback_tail=(
+                _validate_quantipy_failure_traceback_tail(
+                    data["traceback_tail"],
+                    label="quantipy_experiment_evidence.failure.traceback_tail",
+                )
+                if "traceback_tail" in data
+                else None
+            ),
         )
         failure.validate()
         return failure
@@ -641,9 +711,17 @@ class QuantipyExperimentFailureEvidence:
             raise AutoresearchValidationError(
                 "quantipy_experiment_evidence.failure.category is not a Quantipy failure category"
             )
+        if self.traceback_tail is not None:
+            _validate_quantipy_failure_traceback_tail(
+                list(self.traceback_tail),
+                label="quantipy_experiment_evidence.failure.traceback_tail",
+            )
 
     def to_dict(self) -> dict[str, object]:
-        return {"category": self.category, "message": self.message}
+        result: dict[str, object] = {"category": self.category, "message": self.message}
+        if self.traceback_tail is not None:
+            result["traceback_tail"] = [dict(frame) for frame in self.traceback_tail]
+        return result
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import json
 import os
+import stat
 import subprocess
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1039,6 +1044,288 @@ def recover_interrupted_verification_state_file(
         _require_absent_interrupted_run_artifact(expected_run_path)
         persistence_module._atomic_save_state_file(resolved_path, recovered)
         return recovered
+
+
+_RUNTIME_RESEAL_RECEIPT_MAX_NAME_ATTEMPTS = 1000
+_RUNTIME_RESEAL_RECEIPT_DIR_NAME = "runtime-reseal-receipts"
+
+
+def _canonical_no_symlink_state_path(state_path: Path) -> Path:
+    expanded = state_path.expanduser()
+    absolute = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    canonical = Path(os.path.normpath(os.fspath(absolute)))
+    if os.fspath(canonical) != os.fspath(absolute):
+        raise AutoresearchValidationError(
+            f"autoresearch state path must be canonical without '.' or '..': {absolute}"
+        )
+    if canonical.name in ("", ".", ".."):
+        raise AutoresearchValidationError(f"invalid autoresearch state path: {state_path}")
+    state_dir = canonical.parent
+    state_dir_fd = _open_directory_chain(state_dir)
+    try:
+        directory_stat = os.fstat(state_dir_fd)
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise AutoresearchValidationError(
+                f"autoresearch state directory is not a directory: {state_dir}"
+            )
+        if _fd_path(state_dir_fd) != state_dir:
+            raise AutoresearchValidationError(
+                "autoresearch state directory must be a canonical no-symlink path: "
+                f"{state_dir}"
+            )
+    finally:
+        os.close(state_dir_fd)
+    return canonical
+
+
+def _open_directory_chain(path: Path) -> int:
+    if not path.is_absolute():
+        raise AutoresearchValidationError(f"directory path must be absolute: {path}")
+    current_fd = os.open("/", os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in path.parts[1:]:
+            if part in ("", ".", ".."):
+                raise AutoresearchValidationError(
+                    f"directory path must be canonical without '.' or '..': {path}"
+                )
+            try:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=current_fd,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise AutoresearchValidationError(
+                        f"directory path must not contain symlinks: {path}"
+                    ) from exc
+                raise AutoresearchValidationError(
+                    f"unable to open directory without following symlinks: {path}"
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _fd_path(fd: int) -> Path:
+    try:
+        raw = os.readlink(f"/proc/self/fd/{fd}")
+    except OSError as exc:
+        raise AutoresearchValidationError("unable to verify canonical directory fd") from exc
+    return Path(raw)
+
+
+def _open_runtime_reseal_receipt_directory(
+    state_directory_fd: int,
+    receipt_directory: Path,
+) -> int:
+    try:
+        os.mkdir(_RUNTIME_RESEAL_RECEIPT_DIR_NAME, mode=0o700, dir_fd=state_directory_fd)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        raise AutoresearchValidationError(
+            f"unable to create runtime reseal receipt directory: {receipt_directory}"
+        ) from exc
+    try:
+        receipt_directory_fd = os.open(
+            _RUNTIME_RESEAL_RECEIPT_DIR_NAME,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=state_directory_fd,
+        )
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise AutoresearchValidationError(
+                f"refusing symlinked runtime reseal receipt directory: {receipt_directory}"
+            ) from exc
+        raise AutoresearchValidationError(
+            f"unable to open runtime reseal receipt directory: {receipt_directory}"
+        ) from exc
+    try:
+        receipt_directory_stat = os.fstat(receipt_directory_fd)
+        if not stat.S_ISDIR(receipt_directory_stat.st_mode):
+            raise AutoresearchValidationError(
+                f"runtime reseal receipt path is not a directory: {receipt_directory}"
+            )
+        if receipt_directory_stat.st_uid != os.getuid():
+            raise AutoresearchValidationError(
+                f"runtime reseal receipt directory has wrong owner: {receipt_directory}"
+            )
+        if stat.S_IMODE(receipt_directory_stat.st_mode) != 0o700:
+            raise AutoresearchValidationError(
+                f"runtime reseal receipt directory permissions must be 0700: {receipt_directory}"
+            )
+        if _fd_path(receipt_directory_fd) != receipt_directory:
+            raise AutoresearchValidationError(
+                "runtime reseal receipt directory must be a canonical no-symlink path: "
+                f"{receipt_directory}"
+            )
+    except Exception:
+        with suppress(OSError):
+            os.close(receipt_directory_fd)
+        raise
+    return receipt_directory_fd
+
+
+def _write_runtime_reseal_receipt(
+    receipt_directory: Path,
+    receipt_name: str,
+    content: bytes,
+) -> Path:
+    """Publish one unique receipt without following or replacing an existing name."""
+    state_directory_fd = _open_directory_chain(receipt_directory.parent)
+    try:
+        receipt_directory_fd = _open_runtime_reseal_receipt_directory(
+            state_directory_fd,
+            receipt_directory,
+        )
+    finally:
+        os.close(state_directory_fd)
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+        receipt_stem = receipt_name[:-5]
+        for suffix in range(1, _RUNTIME_RESEAL_RECEIPT_MAX_NAME_ATTEMPTS + 1):
+            candidate_name = (
+                receipt_name if suffix == 1 else f"{receipt_stem}-{suffix}.json"
+            )
+            candidate_path = receipt_directory / candidate_name
+            try:
+                receipt_fd = os.open(candidate_name, flags, 0o600, dir_fd=receipt_directory_fd)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise AutoresearchValidationError(
+                        f"runtime reseal receipt path must not be a symlink: {candidate_path}"
+                    ) from exc
+                raise AutoresearchValidationError(
+                    f"unable to create runtime reseal receipt: {candidate_path}"
+                ) from exc
+            try:
+                os.fchmod(receipt_fd, 0o600)
+                offset = 0
+                while offset < len(content):
+                    written = os.write(receipt_fd, content[offset:])
+                    if written == 0:
+                        raise OSError(
+                            errno.EIO,
+                            "zero-byte write while writing runtime reseal receipt",
+                        )
+                    offset += written
+                os.fsync(receipt_fd)
+                fd_to_close, receipt_fd = receipt_fd, -1
+                os.close(fd_to_close)
+                os.fsync(receipt_directory_fd)
+            except Exception as exc:
+                if receipt_fd >= 0:
+                    fd_to_close, receipt_fd = receipt_fd, -1
+                    with suppress(Exception):
+                        os.close(fd_to_close)
+                with suppress(Exception):
+                    os.unlink(candidate_name, dir_fd=receipt_directory_fd)
+                if isinstance(exc, OSError):
+                    raise AutoresearchValidationError(
+                        f"unable to write runtime reseal receipt: {candidate_path}: {exc}"
+                    ) from exc
+                raise
+            return candidate_path
+        raise AutoresearchValidationError(
+            "unable to allocate a unique runtime reseal receipt name after "
+            f"{_RUNTIME_RESEAL_RECEIPT_MAX_NAME_ATTEMPTS} attempts: "
+            f"{receipt_directory / receipt_name}"
+        )
+    finally:
+        with suppress(OSError):
+            os.close(receipt_directory_fd)
+
+
+def reseal_canonical_runtime_state_file(
+    state_path: Path,
+    *,
+    operator_reason: str,
+    policy: AutoresearchPolicy,
+    validation_context: AutoresearchValidationContext | None = None,
+) -> Path:
+    """Re-attest the current canonical runtime for a sealed verification dispatch."""
+    resolved_path = _canonical_no_symlink_state_path(state_path)
+    with persistence_module._exclusive_state_locks((resolved_path,)):
+        raw = persistence_module._load_state_raw(resolved_path)
+        schema_version = _require_int(raw, "schema_version")
+        if schema_version != constants.AUTORESEARCH_STATE_SCHEMA_VERSION:
+            raise AutoresearchValidationError(
+                "runtime reseal accepts only the compatible schema-v"
+                f"{constants.AUTORESEARCH_STATE_SCHEMA_VERSION} state"
+            )
+        state = persistence_module.load_state_file(resolved_path)
+        transitions_module._validate_state(state, policy, validation_context)
+        if not operator_reason or operator_reason.strip() != operator_reason:
+            raise AutoresearchValidationError(
+                "runtime reseal requires a trimmed operator reason"
+            )
+        if state.phase is not Phase.VERIFICATION or state.implementation_result is None:
+            raise AutoresearchValidationError(
+                "runtime reseal requires phase verification with a sealed implementation result"
+            )
+        if state.platform_runtime_recovery_receipt is not None:
+            raise AutoresearchValidationError(
+                "platform runtime recovery receipt is live; reseal does not apply to the v5 "
+                "topology"
+            )
+        if validation_context is None or validation_context.quantipy_commit is None:
+            raise AutoresearchValidationError(
+                "runtime reseal requires the readiness-pinned Quantipy commit"
+            )
+
+        old = state.canonical_quantipy_runtime_attestation
+        implementation = state.implementation_result
+        assert implementation is not None
+        new = attestation_module._attest_canonical_quantipy_runtime(
+            state,
+            implementation,
+            readiness_quantipy_commit=validation_context.quantipy_commit,
+        )
+        if new == old:
+            raise AutoresearchValidationError(
+                "canonical runtime attestation is unchanged; reseal is not required"
+            )
+        sealed = replace(state, canonical_quantipy_runtime_attestation=new)
+        transitions_module._validate_state(sealed, policy, validation_context)
+        attestation_module._require_canonical_verification_runtime_attestation(
+            sealed,
+            validation_context=validation_context,
+        )
+        persistence_module._atomic_save_state_file(resolved_path, sealed)
+
+        timestamp = datetime.now(tz=UTC)
+        receipt_directory = resolved_path.parent / _RUNTIME_RESEAL_RECEIPT_DIR_NAME
+        receipt_name = (
+            f"reseal-i{state.iteration:06d}-{timestamp.strftime('%Y%m%dT%H%M%SZ')}.json"
+        )
+        payload = {
+            "schema_version": 1,
+            "receipt_type": "g2-openclaw.autoresearch.runtime-reseal-receipt",
+            "recorded_at": timestamp.isoformat().replace("+00:00", "Z"),
+            "operator_reason": operator_reason,
+            "iteration": state.iteration,
+            "phase": "verification",
+            "old_commit_sha": old.commit_sha if old is not None else None,
+            "new_commit_sha": new.commit_sha,
+            "new_runtime_attestation": new.to_dict(),
+        }
+        try:
+            receipt_path = _write_runtime_reseal_receipt(
+                receipt_directory,
+                receipt_name,
+                (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+            )
+        except Exception as exc:
+            raise AutoresearchValidationError(
+                f"runtime reseal state was saved but receipt write failed: {exc}"
+            ) from exc
+        return receipt_path
 
 
 def _find_exact_interrupted_detached_run(

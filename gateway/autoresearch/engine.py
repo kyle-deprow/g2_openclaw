@@ -102,6 +102,38 @@ CONSENSUS_DATA_REQUIREMENTS_INSTRUCTION = (
 )
 
 
+_SANDBOX_LAUNCH_INSTRUCTION = (
+    "through the detached launch mechanism (prepared run + schema_version 1 launch request "
+    "from a sandboxed session): first define "
+    "`command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/"
+    "<unique-command>.json`; create the one-time command file with "
+    '`/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-create-command-file '
+    '--output "$command_file"` '
+    "using the stdin schema `{\"schema_version\":1,\"command\":[\"bash\",\"-lc\","
+    "\"<non-secret command>\"]}`; prepare the immutable run with "
+    "`/home/dev/repos/g2_openclaw/.venv/bin/python -m gateway.autoresearch_runs "
+    "prepare-with-command-file --manifest <absolute-manifest.json> --run-dir "
+    "<absolute-run-dir> --runs-root "
+    "/home/dev/.openclaw/autoresearch/model-workspaces/long-runs --command-file "
+    '\"$command_file\"`; ensure the inbox exists first with `mkdir -m 700 -p '
+    "/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/` and verify it is "
+    "a non-symlink directory owned by the session user; write the request "
+    "`{\"schema_version\":1,\"run_dir\":\"<absolute-run-dir>\",\"runs_root\":\""
+    "/home/dev/.openclaw/autoresearch/model-workspaces/long-runs\"}` under a unique "
+    "filename ending in `.json` (for example "
+    "`<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json`) as a `.tmp` sibling with "
+    "mode 0600, then `mv` it into the inbox. The owner-only supervisor normally "
+    "launches the request within about 60 seconds; confirm in the same turn that "
+    "the request file lands in `accepted/` (not `rejected/`) before reporting the "
+    "run as queued. Under low host memory, the supervisor defers the launch and the "
+    "request legitimately stays pending in the inbox; treat a still-pending request "
+    "as deferred and re-check it on the next wake. Report a blocker only if the "
+    "request is rejected or remains pending after several wakes, and quote "
+    "`rejected/<request-name>.reason` verbatim when present, else quote the "
+    "supervisor advisory log line. "
+)
+
+
 def _alpha_campaign_directive(state: AutoresearchState) -> str:
     if state.mode is not ResearchMode.ALPHA_RESEARCH:
         return ""
@@ -145,6 +177,11 @@ def _phase_instruction(
     *,
     state_path: Path,
 ) -> str:
+    debate_mechanism = (
+        "economic mechanism"
+        if state.mode is ResearchMode.ALPHA_RESEARCH
+        else "data/provenance failure mechanism"
+    )
     instructions: dict[Phase, str] = {
         Phase.SETUP_CONTEXT: (
             "Own the setup/context phase deterministically. "
@@ -169,7 +206,17 @@ def _phase_instruction(
             "contested_methodology_families is distinct from the registry/ledger "
             "contested_families, which stay treated as burned. Once a revisit has occurred, "
             "the CURATOR must move the family to burned_theory_families and must not re-list "
-            "it in contested_methodology_families."
+            "it in contested_methodology_families. Every debater proposal MUST name its "
+            f"{debate_mechanism} in one sentence and a normalized theory-family label; when a "
+            "defensible variant exists inside an already-proposed family, prefer strengthening "
+            "that family over introducing an isolated novel family, so round-1 proposals form "
+            "clusterable 3-of-5 majorities instead of burning the single consensus retry. "
+            "Operator research priority: 29 price_panel-only families have been decided across "
+            "two campaigns with zero KEEPs. Hypotheses grounded in differentiated data "
+            "(the sentiment_panels transport) are strategically underexplored; debaters should "
+            "actively consider them and the panel should weigh data-source novelty when proposals "
+            "otherwise tie. This is a priority, not a mandate — propose price_panel designs when "
+            "they are genuinely stronger."
         ),
         Phase.CONSENSUS: (
             "Decide whether the latest debate has a 3-of-5 majority; return MAJORITY or "
@@ -188,7 +235,7 @@ def _phase_instruction(
             "the CURATOR must move the family to burned_theory_families and must not re-list "
             "it in contested_methodology_families. Before testing the 3-of-5 majority in both "
             "rounds, group closely related proposals into theory-family clusters; cluster votes "
-            "count together when proposals share the same economic mechanism. After the single "
+            f"count together when proposals share the same {debate_mechanism}. After the single "
             "retry, if no cluster reaches three votes, MUST NOT return NO_CONSENSUS: use the "
             "pre-registered deterministic tie-break: most votes; least-explored family by "
             "fewest hypothesis-registry entries across its families; lexicographically smallest "
@@ -334,13 +381,10 @@ def _phase_instruction(
             "DECISION_REQUIRED is decision work and must never be sent to fixer. "
             "After a fix, the next step is always verification. Any notebook, "
             "hydrate, backtest, or similarly long test command MUST be launched "
-            "through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh with a "
-            "unique absolute --run-dir and bounded polling; direct foreground "
-            "execution is invalid. Output starting with LAUNCH_QUEUED: is success "
-            "— end the turn, do not retry, and do not classify it as a blocker; "
-            "the supervisor launches within one poll cycle. If the launcher "
-            "cannot be used outside that queue path, fail closed and report the "
-            "infrastructure blocker without emitting a fix_result."
+            f"{_SANDBOX_LAUNCH_INSTRUCTION}with a unique absolute --run-dir and "
+            "bounded polling; direct foreground execution is invalid. The supervisor "
+            "launches within one poll cycle. If the launch request is rejected, fail "
+            "closed and report the infrastructure blocker without emitting a fix_result."
         ),
         Phase.DECISION_LOG: (
             "Decide and log the completed iteration. "
@@ -482,7 +526,7 @@ def _verification_handoff_contract(
                 "for the hydrate/backtest. Emit status=BUG_SIGNAL with bug_signals "
                 "containing price_hydration_scope_exceeds_budget and the exact "
                 "preflight values, set hydrate-dependent metrics/coverage/receipts to "
-                "null, and advance the artifact.\n"
+                "null, and submit the artifact.\n"
             )
     alpha_interruption_instruction = (
         "- For ALPHA_RESEARCH runtime timeout or interruption, submit a TEST_FAILURE "
@@ -497,23 +541,28 @@ def _verification_handoff_contract(
         "Verification handoff contract:\n"
         "- Every verification attempt must terminate by writing a structured JSON "
         "verification_result artifact to an absolute path under the PM workspace, "
-        "validating that same absolute path with jq/wc, and advancing it with "
-        "`/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-advance "
+        "validating that same absolute path with jq/wc, and submitting it with "
+        "`/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-submit-stage "
         f"{_render_literal(str(state_path))} "
         "/home/dev/.openclaw/workspace-autoresearch-pm/<artifact.json> "
         "--instruction-manifest-sha256 <source_manifest_sha256> "
         "--state-reference-sha256 <state_reference_sha256>` "
-        "before any prose completion or status report. A prose-only verification "
+        "before any prose completion or status report. End the turn after submitting; "
+        "do not poll for acceptance after submitting. The submission acceptance check "
+        "happens on the next supervisor wake; then verify the submitted envelope has "
+        "left the inbox root and appears under `accepted/` (not `rejected/`), and "
+        "quote any rejection verbatim then. The supervisor applies it within one "
+        "poll cycle. A prose-only verification "
         "completion is invalid.\n"
         "- This applies to failing tests and partial runs: do not stop after "
-        "describing a failure. Persist and advance the JSON artifact with exact "
+        "describing a failure. Persist and submit the JSON artifact with exact "
         "commands in commands_run and decisive evidence in the metric fields, "
         "null_test_summary, bug_signals, data_coverage, and infra_rationale when "
         "applicable.\n"
         "- Mandatory typed Quantipy runtime gate: first run focused tests, then launch the "
         "exact direct argv `"
-        f"{execution_command}` with detached cwd equal to the canonical runtime root through "
-        "`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. Its immutable detached "
+        f"{execution_command}` with detached cwd equal to the canonical runtime root "
+        f"{_SANDBOX_LAUNCH_INSTRUCTION}Its immutable detached "
         "manifest must set expected_artifact_path to the known "
         "`<root>/<run-id>/run.json`. Direct foreground execution cannot satisfy this "
         "contract. Under the non-malicious same-host agent trust model, PASS requires the "
@@ -699,13 +748,10 @@ def _workspace_isolation_contract(state: AutoresearchState, phase: Phase) -> str
         "- Do not leave background experiment, notebook, pytest, or data-generation "
         "processes running after the stage exits.\n"
         "- Any notebook, hydrate, backtest, or similarly long test command must be "
-        "launched through /home/dev/repos/g2_openclaw/scripts/run-long-task.sh with a "
-        "unique absolute --run-dir and bounded polling. Direct foreground execution "
-        "is invalid. Output starting with LAUNCH_QUEUED: is success — end the turn, "
-        "do not retry, and do not classify it as a blocker; the supervisor launches "
-        "within one poll cycle. If the launcher cannot be used outside that queue "
-        "path, fail closed and report the infrastructure blocker without emitting a "
-        "fix_result.\n"
+        f"launched {_SANDBOX_LAUNCH_INSTRUCTION}with a unique absolute --run-dir "
+        "and bounded polling. Direct foreground execution is invalid. The supervisor "
+        "launches within one poll cycle. If the launch request is rejected, fail closed "
+        "and report the infrastructure blocker without emitting a fix_result.\n"
         "- Finish with a clean, committed result. The fix_result artifact must use the same "
         "verified workspace_path exactly and report its accepted final commit SHA in commit_sha.\n"
         "- Keep every detached Fix/Test manifest's working_directory and spawned process "

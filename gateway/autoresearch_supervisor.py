@@ -21,7 +21,7 @@ import unicodedata
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
@@ -46,6 +46,7 @@ from gateway.autoresearch.constants import (
     DEFAULT_OPENCLAW_CONFIG_PATH,
     DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
     DEFAULT_QUANTIPY_ROOT,
+    QUANTIPY_RUN_ENVELOPE_MAX_BYTES,
 )
 from gateway.autoresearch.enums import (
     FinalDecision,
@@ -175,12 +176,15 @@ from gateway.autoresearch_runs import (
     AutoresearchRunRecordError,
     ExpectedArtifactAttestationError,
     ExpectedArtifactAttestationStatus,
+    PreparedRunIdentity,
     RunFailureClassification,
     RunManifest,
     RunRecord,
     RunState,
+    _canonical_json,
     complete_run,
     read_run_record,
+    validate_prepared_run_identity,
 )
 from gateway.autoresearch_shared import (
     AUTORESEARCH_OWNER_AGENT_ID as AUTORESEARCH_OWNER_AGENT_ID,
@@ -207,6 +211,9 @@ from gateway.autoresearch_shared import (
     RECOVERY_ERROR_PATTERNS as RECOVERY_ERROR_PATTERNS,
 )
 from gateway.autoresearch_shared import (
+    RELAY_DECAY_ALERT_REASON as RELAY_DECAY_ALERT_REASON,
+)
+from gateway.autoresearch_shared import (
     RELEVANT_AGENT_IDS as RELEVANT_AGENT_IDS,
 )
 from gateway.autoresearch_shared import (
@@ -230,9 +237,20 @@ from gateway.autoresearch_shared import (
 from gateway.autoresearch_shared import (
     SupervisorError as SupervisorError,
 )
+from gateway.autoresearch_systemd import (
+    SystemdUnitStateError as SystemdUnitStateError,
+)
+from gateway.autoresearch_systemd import (
+    systemd_unit_is_active as systemd_unit_is_active,
+)
 from gateway.openclaw_client import OpenClawClient as OpenClawClient
 
 logger = logging.getLogger(__name__)
+
+
+class _SystemdProbeBudgetExhausted(Exception):
+    """The sweep cannot start another systemd subprocess this cycle."""
+
 
 DEFAULT_AUTORESEARCH_DIR = Path.home() / ".openclaw" / "autoresearch"
 DEFAULT_STATE_PATH = DEFAULT_AUTORESEARCH_DIR / "quantipy-state.json"
@@ -262,10 +280,20 @@ DEFAULT_EXPECTED_STAGE_TASK_STALE_SECONDS = 900.0
 DEFAULT_MAX_RECOVERY_ATTEMPTS = 2
 FAILED_DETACHED_RUN_STDERR_TAIL_BYTES = 400
 MAX_WAKE_MESSAGE_BYTES = 1500
+RELAY_DECAY_JOURNAL_WINDOW_MINUTES = 30
+RELAY_DECAY_BURST_THRESHOLD = 3
+RELAY_DECAY_CHECK_EVERY_CYCLES = 10
+RELAY_DECAY_MAX_JOURNAL_BYTES = 2 * 1024 * 1024
+LATCHED_ADVISORY_RELOG_EVERY_CYCLES = 60
+ORPHANED_RUN_SWEEP_MAX_PER_CYCLE = 3
+ORPHANED_RUN_SWEEP_MAX_RECORDS_EXAMINED_PER_CYCLE = 25
+ORPHANED_RUN_SWEEP_MAX_SYSTEMD_PROBES_PER_CYCLE = 6
 WATCHDOG_RECOVERY_KEY_PREFIX = "staleness-watchdog:"
 MONOTONIC_RECOVERY_KEY_PREFIX = "supervisor-clock:"
 LAUNCH_REQUEST_SCHEMA_VERSION = 1
-LAUNCH_REQUEST_MAX_BYTES = 4096
+LAUNCH_REQUEST_SCHEMA_VERSION_V2 = 2
+LAUNCH_REQUEST_MAX_BYTES = 8192
+LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB = 14 * 1024 * 1024
 LAUNCH_REQUEST_TIMEOUT_SECONDS = 30.0
 REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
 WAKE_MESSAGE = (
@@ -379,6 +407,20 @@ class SupervisorConfig:
     grace_period_seconds: float = DEFAULT_GRACE_PERIOD_SECONDS
     target_repo: Path = DEFAULT_QUANTIPY_ROOT
     proc_root: Path = Path("/proc")
+    meminfo_path: Path = Path("/proc/meminfo")
+    journal_probe_command: tuple[str, ...] = (
+        "journalctl",
+        "--user",
+        "-u",
+        "openclaw-gateway.service",
+        "--since",
+        "-30min",
+        "-n",
+        "2000",
+        "--no-pager",
+        "-o",
+        "cat",
+    )
     claim_stale_seconds: float = DEFAULT_CLAIM_STALE_SECONDS
     renudge_escalation_minutes: float = DEFAULT_RENUDGE_ESCALATION_MINUTES
     max_escalating_renudges: int = DEFAULT_MAX_ESCALATING_RENUDGES
@@ -519,6 +561,138 @@ def _structured_log(level: int, event: str, **fields: object) -> None:
     logger.log(level, json.dumps({"event": event, **fields}, sort_keys=True, default=str))
 
 
+def _read_mem_available_kib(path: Path) -> int:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "MemAvailable:":
+            continue
+        if len(fields) != 3 or fields[2] != "kB":
+            raise ValueError("MemAvailable is malformed")
+        try:
+            available_kib = int(fields[1])
+        except ValueError as exc:
+            raise ValueError("MemAvailable is malformed") from exc
+        if available_kib < 0:
+            raise ValueError("MemAvailable is malformed")
+        return available_kib
+    raise ValueError("MemAvailable is absent")
+
+
+class _LaunchRequestObject(dict[str, object]):
+    """JSON object retaining duplicate-key metadata for v2 validation."""
+
+    def __init__(self, pairs: list[tuple[str, object]]) -> None:
+        super().__init__()
+        duplicate_keys: list[str] = []
+        for key, value in pairs:
+            if key in self and key not in duplicate_keys:
+                duplicate_keys.append(key)
+            self[key] = value
+        self.duplicate_keys = tuple(duplicate_keys)
+
+
+def _request_object_pairs_track_duplicates(
+    pairs: list[tuple[str, object]],
+) -> _LaunchRequestObject:
+    return _LaunchRequestObject(pairs)
+
+
+class _LaunchRequestReasonCollision(Exception):
+    """The destination reason file belongs to another quarantined request."""
+
+
+def _write_launch_request_rejection_reason(
+    rejected_fd: int,
+    name: str,
+    reason: str,
+) -> None:
+    temporary_name = f".{name}.reason.{os.getpid()}.{time.time_ns()}.tmp"
+    reason_name = f"{name}.reason"
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=rejected_fd,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(reason[:1000].encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        except AttributeError as exc:
+            raise OSError(errno.ENOSYS, "atomic no-replace rename is unavailable") from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        if (
+            renameat2(
+                rejected_fd,
+                os.fsencode(temporary_name),
+                rejected_fd,
+                os.fsencode(reason_name),
+                1,
+            )
+            != 0
+        ):
+            error_number = ctypes.get_errno()
+            if error_number == errno.EEXIST:
+                raise _LaunchRequestReasonCollision
+            raise OSError(error_number, os.strerror(error_number))
+    except _LaunchRequestReasonCollision:
+        raise
+    except Exception as exc:
+        _structured_log(
+            logging.WARNING,
+            "supervisor.launch_request_rejection_reason_write_failed",
+            request=name,
+            detail=str(exc),
+        )
+    finally:
+        if descriptor != -1:
+            with suppress(OSError):
+                os.close(descriptor)
+        with suppress(OSError):
+            os.unlink(temporary_name, dir_fd=rejected_fd)
+
+
+def _create_expected_launch_identity_file(
+    identity: PreparedRunIdentity,
+) -> tuple[Path, Path]:
+    directory = Path(tempfile.mkdtemp(prefix="autoresearch-launch-identity-"))
+    path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=".expected-identity-",
+            suffix=".json",
+            dir=directory,
+            delete=False,
+        ) as handle:
+            path = Path(handle.name)
+            handle.write(_canonical_json(identity.to_dict()))
+            handle.flush()
+            os.fsync(handle.fileno())
+        assert path is not None
+        os.chmod(path, 0o600)
+        return directory, path
+    except BaseException:
+        if path is not None:
+            with suppress(OSError):
+                path.unlink()
+        with suppress(OSError):
+            directory.rmdir()
+        raise
+
+
 def _validate_launch_request_directory_fd(fd: int, *, label: str) -> None:
     metadata = os.fstat(fd)
     if not stat.S_ISDIR(metadata.st_mode):
@@ -562,7 +736,7 @@ def _move_launch_request_no_replace(
     destination_name: str | None = None,
     expected_stat: os.stat_result | None = None,
     source_fd: int | None = None,
-) -> None:
+) -> str:
     """Atomically move a request without replacing a destination.
 
     ``os.rename`` is atomic but replaces an existing destination on POSIX.
@@ -709,7 +883,7 @@ def _move_launch_request_no_replace(
                             f"moved entry restored as {rollback_name}"
                         )
                     raise SupervisorError("launch request changed during stale archival")
-            return
+            return target
         raise SupervisorError("cannot quarantine launch request without overwrite")
     finally:
         if close_source_fd and owned_source_fd is not None:
@@ -740,6 +914,7 @@ class AutoresearchSupervisor:
         self._stale_writer_warning_identities: set[tuple[int, float]] = set()
         self._owner_task_observations: dict[str, OwnerTaskWriteObservation] = {}
         self._owner_task_warning_identities: set[tuple[str, str, str]] = set()
+        self._cycle_count = 0
 
     def run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
@@ -759,6 +934,9 @@ class AutoresearchSupervisor:
     def _run_once(
         self, *, shutdown_requested: ShutdownRequested = _shutdown_not_requested
     ) -> SupervisorResult:
+        self._cycle_count += 1
+        self._detect_native_hook_relay_decay()
+        self._relog_latched_advisories()
         try:
             state = self._load_state()
             self._cycle_state = state
@@ -816,6 +994,24 @@ class AutoresearchSupervisor:
         if launch_result is not None:
             return launch_result
         run_record_result = self._consume_terminal_verification_run(state)
+        if run_record_result is not None and run_record_result.reason == (
+            "detached_verification_failure_advanced"
+        ):
+            # Consumption may have advanced the authoritative state.  Do not
+            # let the sweep make current-dispatch decisions from the old state.
+            try:
+                state = self._load_state()
+                self._cycle_state = state
+            except (SupervisorError, OSError, ValueError) as exc:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.sweep_skipped_after_state_advance",
+                    detail=str(exc),
+                )
+            else:
+                self._sweep_orphaned_running_runs()
+        else:
+            self._sweep_orphaned_running_runs()
         if run_record_result is not None:
             return run_record_result
         try:
@@ -949,6 +1145,105 @@ class AutoresearchSupervisor:
             recovery_key,
             sent_wake=True,
         )
+
+    def _relog_latched_advisories(self) -> None:
+        if self._cycle_count % LATCHED_ADVISORY_RELOG_EVERY_CYCLES != 0:
+            return
+        try:
+            with self._checkpoint_lock():
+                checkpoint = SupervisorCheckpoint.load(self.config.checkpoint_path)
+        except (OSError, SupervisorError, UnicodeError):
+            return
+        alerted = sorted(
+            (
+                key,
+                record,
+            )
+            for key, record in checkpoint.recovery_records.items()
+            if record.alerted is True
+        )
+        if not alerted:
+            return
+        _structured_log(
+            logging.WARNING,
+            "supervisor.latched_advisories",
+            count=len(alerted),
+            keys=",".join(key for key, _record in alerted),
+            last_errors="; ".join(
+                (record.last_error or "")[:120] for _key, record in alerted
+            ),
+        )
+
+    def _detect_native_hook_relay_decay(self) -> None:
+        if (self._cycle_count - 1) % RELAY_DECAY_CHECK_EVERY_CYCLES != 0:
+            return
+        try:
+            probe = subprocess.run(
+                self.config.journal_probe_command,
+                capture_output=True,
+                text=False,
+                check=False,
+                timeout=5.0,
+            )
+            raw_stdout = probe.stdout
+            raw_stderr = probe.stderr
+            if isinstance(raw_stdout, bytes):
+                journal = raw_stdout[:RELAY_DECAY_MAX_JOURNAL_BYTES].decode(
+                    "utf-8", errors="replace"
+                )
+            elif isinstance(raw_stdout, str):
+                # A few test doubles return text even though the real probe is
+                # byte-oriented.  Keep that compatibility while retaining the
+                # same memory bound.
+                journal = raw_stdout[:RELAY_DECAY_MAX_JOURNAL_BYTES]
+            else:
+                raise UnicodeError("journal probe stdout was not bytes or text")
+            journal_lower = journal.lower()
+            if isinstance(raw_stderr, bytes):
+                stderr = raw_stderr[:RELAY_DECAY_MAX_JOURNAL_BYTES].decode(
+                    "utf-8", errors="replace"
+                )
+            elif isinstance(raw_stderr, str):
+                stderr = raw_stderr[:RELAY_DECAY_MAX_JOURNAL_BYTES]
+            else:
+                stderr = ""
+            if probe.returncode != 0:
+                _structured_log(
+                    logging.WARNING,
+                    "supervisor.relay_probe_failed",
+                    returncode=probe.returncode,
+                    stderr=stderr[:500],
+                )
+                return
+            count = journal_lower.count("native hook relay not found") + journal_lower.count(
+                "native hook relay unavailable"
+            )
+            if count < RELAY_DECAY_BURST_THRESHOLD:
+                return
+            window = datetime.fromtimestamp(self._now(), tz=UTC).strftime("%Y%m%dT%H")
+            self._persistent_control_plane_alert(
+                key=f"native-hook-relay:{window}",
+                reason=(
+                    f"native hook relay decayed: {count} relay failures in the last "
+                    f"{RELAY_DECAY_JOURNAL_WINDOW_MINUTES} minutes; restart the gateway at the "
+                    "next phase boundary: systemctl --user restart openclaw-gateway.service; "
+                    f"alert_reason={RELAY_DECAY_ALERT_REASON}"
+                ),
+            )
+        except (
+            SupervisorError,
+            SupervisorCheckpointError,
+            OSError,
+            ValueError,
+            UnicodeError,
+            TypeError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.relay_probe_failed",
+                detail=str(exc),
+            )
 
     def _campaign_review_record_key(self, state: AutoresearchState) -> str:
         if state.campaign_review_history:
@@ -1084,7 +1379,13 @@ class AutoresearchSupervisor:
                     state_reference_sha256=state_reference_sha256,
                     instruction_manifest_sha256=instruction_manifest_sha256,
                 )
-        except (AutoresearchRunRecordError, AutoresearchValidationError, OSError, ValueError):
+        except (
+            AutoresearchRunRecordError,
+            AutoresearchValidationError,
+            OSError,
+            UnicodeError,
+            ValueError,
+        ):
             return message
         if not matching:
             return message
@@ -1113,6 +1414,27 @@ class AutoresearchSupervisor:
                     "verification artifact referencing it"
                 )
             return message
+        if (
+            latest.status.state is RunState.FAILED
+            and (
+                latest.status.output_capture is None
+                or latest.status.failure_classification is None
+            )
+        ):
+            with suppress(AutoresearchRunRecordError, OSError, UnicodeError, ValueError):
+                latest = read_run_record(
+                    run_dir=latest.run_directory,
+                    runs_root=self.config.runs_root,
+                )
+        if latest.status.state is RunState.SUCCEEDED:
+            if state.phase is Phase.VERIFICATION:
+                return (
+                    f"{message}\n\nCurrent succeeded detached verification run: "
+                    f"outcome=succeeded; run_directory={latest.run_directory.name}; "
+                    "the run sealed; submit the "
+                    "verification artifact referencing it"
+                )
+            return message
         if latest.status.state is not RunState.FAILED:
             return message
         capture = latest.status.output_capture
@@ -1131,7 +1453,7 @@ class AutoresearchSupervisor:
             except OSError:
                 stderr_tail = "<sealed stderr capture unavailable>"
         failure_classification = latest.status.failure_classification
-        return (
+        detail = (
             f"{message}\n\nCurrent failed detached run: "
             f"outcome=failed; run_directory={latest.run_directory.name}; "
             f"exit_code={latest.status.exit_code}; "
@@ -1140,6 +1462,25 @@ class AutoresearchSupervisor:
             f"sealed_stderr_truncated={json.dumps(stderr_truncated)}; "
             f"sealed_stderr_tail={json.dumps(stderr_tail)}"
         )
+        try:
+            manifest = getattr(latest, "manifest", None)
+            expected_artifact_path = getattr(manifest, "expected_artifact_path", None)
+            if isinstance(expected_artifact_path, str):
+                artifact_path = Path(expected_artifact_path)
+                if artifact_path.stat().st_size >= QUANTIPY_RUN_ENVELOPE_MAX_BYTES:
+                    return detail
+                with artifact_path.open("rb") as artifact_handle:
+                    artifact_bytes = artifact_handle.read(QUANTIPY_RUN_ENVELOPE_MAX_BYTES)
+                artifact = json.loads(artifact_bytes.decode("utf-8"))
+                failure = artifact.get("failure") if isinstance(artifact, Mapping) else None
+                if isinstance(failure, Mapping):
+                    category = failure.get("category")
+                    stage_message = failure.get("message")
+                    if isinstance(category, str) and isinstance(stage_message, str):
+                        detail += f"; stage_failure={category}: {stage_message[:200]}"
+        except (OSError, TypeError, ValueError, UnicodeError):
+            pass
+        return detail
 
     def _bounded_wake_message(self, message: str) -> str:
         encoded = message.encode("utf-8")
@@ -1157,6 +1498,7 @@ class AutoresearchSupervisor:
             r"exit_code=[^;\n]+",
             r"failure_classification=[^;\n]+",
             r"sealed_stderr_truncated=[^;\n]+",
+            r"stage_failure=[^;\n]+",
         ):
             required.extend(match.group(0) for match in re.finditer(pattern, message))
         for phrase in (
@@ -1644,10 +1986,17 @@ class AutoresearchSupervisor:
             source_fd: int | None = None,
         ) -> bool:
             nonlocal rejected_fd
+
+            def collision_name(base_name: str, attempt: int) -> str:
+                digest = hashlib.sha256(
+                    f"{base_name}\n{time.time_ns()}\n{attempt}".encode()
+                ).hexdigest()
+                return f"{base_name}.{digest[:16]}"
+
             try:
                 if rejected_fd is None:
                     rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
-                _move_launch_request_no_replace(
+                published_name = _move_launch_request_no_replace(
                     name,
                     src_dir_fd=inbox_fd,
                     dst_dir_fd=rejected_fd,
@@ -1655,6 +2004,30 @@ class AutoresearchSupervisor:
                     expected_stat=expected_stat,
                     source_fd=source_fd,
                 )
+                # Make the request rename durable before attempting the
+                # best-effort reason-file write.  A reason write failure must
+                # not leave an already-quarantined request unsynced.
+                os.fsync(rejected_fd)
+                for attempt in range(128):
+                    try:
+                        _write_launch_request_rejection_reason(
+                            rejected_fd,
+                            published_name,
+                            reason,
+                        )
+                        break
+                    except _LaunchRequestReasonCollision:
+                        published_name = _move_launch_request_no_replace(
+                            published_name,
+                            src_dir_fd=rejected_fd,
+                            dst_dir_fd=rejected_fd,
+                            destination_name=collision_name(published_name, attempt + 1),
+                        )
+                        os.fsync(rejected_fd)
+                else:
+                    raise SupervisorError(
+                        "could not allocate a unique launch request rejection reason"
+                    )
             except (OSError, SupervisorError, ValueError) as exc:
                 log_rejection(name, f"{reason}; quarantine failed: {exc}")
                 return False
@@ -1663,19 +2036,19 @@ class AutoresearchSupervisor:
 
         def validate_request(
             name: str,
-        ) -> tuple[str | None, Path | None, Path | None]:
+        ) -> tuple[str | None, Path | None, Path | None, PreparedRunIdentity | None]:
             try:
                 metadata = os.stat(name, dir_fd=inbox_fd, follow_symlinks=False)
             except FileNotFoundError:
-                return None, None, None
+                return None, None, None, None
             except OSError as exc:
-                return f"cannot inspect request: {exc}", None, None
+                return f"cannot inspect request: {exc}", None, None, None
             if not stat.S_ISREG(metadata.st_mode):
-                return "request must be a non-symlink regular file", None, None
+                return "request must be a non-symlink regular file", None, None, None
             if metadata.st_nlink != 1:
-                return "request must have exactly one hard link", None, None
+                return "request must have exactly one hard link", None, None, None
             if metadata.st_size > LAUNCH_REQUEST_MAX_BYTES:
-                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None
+                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None, None
             try:
                 request_fd = os.open(
                     name,
@@ -1683,7 +2056,7 @@ class AutoresearchSupervisor:
                     dir_fd=inbox_fd,
                 )
             except OSError as exc:
-                return f"cannot open request: {exc}", None, None
+                return f"cannot open request: {exc}", None, None, None
             try:
                 opened = os.fstat(request_fd)
                 if (
@@ -1697,73 +2070,108 @@ class AutoresearchSupervisor:
                     metadata.st_size,
                     metadata.st_nlink,
                 ):
-                    return "request changed during inspection", None, None
+                    return "request changed during inspection", None, None, None
                 raw_bytes = os.read(request_fd, LAUNCH_REQUEST_MAX_BYTES + 1)
             except OSError as exc:
-                return f"cannot read request: {exc}", None, None
+                return f"cannot read request: {exc}", None, None, None
             finally:
                 os.close(request_fd)
             if len(raw_bytes) > LAUNCH_REQUEST_MAX_BYTES:
-                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None
+                return f"request exceeds {LAUNCH_REQUEST_MAX_BYTES} bytes", None, None, None
             try:
-                raw_request = json.loads(raw_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                return f"request is not valid JSON: {exc}", None, None
+                decoded_request = raw_bytes.decode("utf-8")
+                raw_request = json.loads(
+                    decoded_request,
+                    object_pairs_hook=_request_object_pairs_track_duplicates,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                return f"request is not valid JSON: {exc}", None, None, None
             if not isinstance(raw_request, dict):
-                return "request JSON must be an object", None, None
+                return "request JSON must be an object", None, None, None
             request: dict[str, object] = raw_request
             schema_version = request.get("schema_version")
-            if isinstance(schema_version, bool) or schema_version != LAUNCH_REQUEST_SCHEMA_VERSION:
-                return "request has an unsupported schema_version", None, None
+            if isinstance(schema_version, bool):
+                return "request has an unsupported schema_version", None, None, None
+            identity: PreparedRunIdentity | None = None
+            if schema_version == LAUNCH_REQUEST_SCHEMA_VERSION_V2:
+                prepared_identity = request.get("prepared_identity")
+                if not isinstance(prepared_identity, dict):
+                    return (
+                        "request schema_version 2 requires a prepared_identity object",
+                        None,
+                        None,
+                        None,
+                    )
+                if (
+                    isinstance(prepared_identity, _LaunchRequestObject)
+                    and prepared_identity.duplicate_keys
+                ):
+                    return (
+                        "request prepared_identity is invalid: duplicate keys",
+                        None,
+                        None,
+                        None,
+                    )
+                try:
+                    identity = PreparedRunIdentity.from_dict(prepared_identity)
+                except ValueError as exc:
+                    return f"request prepared_identity is invalid: {exc}", None, None, None
+            elif schema_version != LAUNCH_REQUEST_SCHEMA_VERSION:
+                return "request has an unsupported schema_version", None, None, None
             run_dir_value = request.get("run_dir")
             runs_root_value = request.get("runs_root")
             if not isinstance(run_dir_value, str) or not isinstance(runs_root_value, str):
-                return "request paths must be strings", None, None
+                return "request paths must be strings", None, None, None
             run_dir = Path(run_dir_value)
             runs_root = Path(runs_root_value)
             if not run_dir.is_absolute() or not runs_root.is_absolute():
-                return "request paths must be absolute", None, None
+                return "request paths must be absolute", None, None, None
             if runs_root != self.config.runs_root:
-                return "request runs_root does not match the configured long-runs root", None, None
+                return (
+                    "request runs_root does not match the configured long-runs root",
+                    None,
+                    None,
+                    None,
+                )
             try:
                 configured_root = self.config.runs_root.resolve(strict=True)
                 resolved_run_dir = run_dir.resolve(strict=True)
             except (FileNotFoundError, ValueError):
-                return "run directory is missing", None, None
+                return "run directory is missing", None, None, None
             except OSError as exc:
-                return f"cannot resolve run directory: {exc}", None, None
+                return f"cannot resolve run directory: {exc}", None, None, None
             if (
                 resolved_run_dir == configured_root
                 or configured_root not in resolved_run_dir.parents
             ):
-                return "run directory must be strictly under runs_root", None, None
+                return "run directory must be strictly under runs_root", None, None, None
             try:
                 run_metadata = run_dir.stat()
             except (FileNotFoundError, ValueError):
-                return "run directory is missing", None, None
+                return "run directory is missing", None, None, None
             except OSError as exc:
-                return f"cannot inspect run directory: {exc}", None, None
+                return f"cannot inspect run directory: {exc}", None, None, None
             if not stat.S_ISDIR(run_metadata.st_mode):
-                return "run directory must be a directory", None, None
+                return "run directory must be a directory", None, None, None
             manifest_path = run_dir / "manifest.json"
             try:
                 manifest_metadata = manifest_path.stat()
             except (FileNotFoundError, ValueError):
-                return "run directory manifest.json is missing", None, None
+                return "run directory manifest.json is missing", None, None, None
             except OSError as exc:
-                return f"cannot inspect run manifest: {exc}", None, None
+                return f"cannot inspect run manifest: {exc}", None, None, None
             if not stat.S_ISREG(manifest_metadata.st_mode) or manifest_path.is_symlink():
-                return "run manifest must be a non-symlink regular file", None, None
+                return "run manifest must be a non-symlink regular file", None, None, None
             status_path = run_dir / "status.json"
             try:
                 status_path.lstat()
             except FileNotFoundError:
                 pass
             except (OSError, ValueError) as exc:
-                return f"cannot inspect run status: {exc}", None, None
+                return f"cannot inspect run status: {exc}", None, None, None
             else:
-                return "run directory already contains status.json", None, None
-            return None, run_dir, runs_root
+                return "run directory already contains status.json", None, None, None
+            return None, run_dir, runs_root, identity
 
         try:
             _validate_launch_request_directory_fd(inbox_fd, label="launch request inbox")
@@ -1836,7 +2244,7 @@ class AutoresearchSupervisor:
                 if request_fd is not None:
                     os.close(request_fd)
                 try:
-                    reason, run_dir, runs_root = validate_request(name)
+                    reason, run_dir, runs_root, identity = validate_request(name)
                 except (OSError, SupervisorError, ValueError) as exc:
                     log_rejection(name, f"request validation failed: {exc}")
                     continue
@@ -1845,35 +2253,105 @@ class AutoresearchSupervisor:
                     continue
                 if run_dir is None or runs_root is None:
                     continue
-                repo_root = Path(__file__).resolve().parents[1]
+                if identity is not None:
+                    try:
+                        validate_prepared_run_identity(
+                            run_dir=run_dir,
+                            runs_root=runs_root,
+                            identity=identity,
+                        )
+                    except ValueError as exc:
+                        reject(name, f"prepared identity validation failed: {exc}")
+                        continue
                 try:
-                    completed = subprocess.run(
-                        [
-                            "bash",
-                            str(repo_root / "scripts" / "run-long-task.sh"),
-                            "--launch-prepared",
-                            "--run-dir",
-                            str(run_dir),
-                            "--runs-root",
-                            str(runs_root),
-                        ],
-                        cwd=repo_root,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                        timeout=LAUNCH_REQUEST_TIMEOUT_SECONDS,
+                    available_kib = _read_mem_available_kib(self.config.meminfo_path)
+                except (OSError, UnicodeError, ValueError) as exc:
+                    _structured_log(
+                        logging.WARNING,
+                        "supervisor.launch_request_meminfo_unreadable",
+                        request=name,
+                        detail=str(exc),
                     )
+                else:
+                    if available_kib < LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB:
+                        _structured_log(
+                            logging.WARNING,
+                            "supervisor.launch_request_deferred_low_memory",
+                            request=name,
+                            available_kib=available_kib,
+                            required_kib=LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB,
+                        )
+                        return SupervisorResult(
+                            SupervisorOutcome.NO_ACTION,
+                            "launch_request_deferred_low_memory",
+                        )
+                repo_root = Path(__file__).resolve().parents[1]
+                expected_identity_directory: Path | None = None
+                expected_identity_path: Path | None = None
+                if identity is not None:
+                    try:
+                        expected_identity_directory, expected_identity_path = (
+                            _create_expected_launch_identity_file(identity)
+                        )
+                    except (OSError, ValueError) as exc:
+                        reject(
+                            name,
+                            "launch_request_execution_failed: "
+                            f"cannot write expected identity: {exc}",
+                        )
+                        continue
+                launcher_args = [
+                    "bash",
+                    str(repo_root / "scripts" / "run-long-task.sh"),
+                    "--launch-prepared",
+                    "--run-dir",
+                    str(run_dir),
+                    "--runs-root",
+                    str(runs_root),
+                ]
+                if expected_identity_path is not None:
+                    launcher_args.extend(
+                        ["--expected-identity-file", str(expected_identity_path)]
+                    )
+                try:
+                    try:
+                        completed = subprocess.run(
+                            launcher_args,
+                            cwd=repo_root,
+                            capture_output=True,
+                            text=False,
+                            check=False,
+                            timeout=LAUNCH_REQUEST_TIMEOUT_SECONDS,
+                        )
+                    finally:
+                        if expected_identity_path is not None:
+                            try:
+                                expected_identity_path.unlink()
+                            except OSError as exc:
+                                _structured_log(
+                                    logging.WARNING,
+                                    "supervisor.launch_request_expected_identity_cleanup_failed",
+                                    request=name,
+                                    operation="unlink",
+                                    path=str(expected_identity_path),
+                                    detail=str(exc),
+                                )
+                        if expected_identity_directory is not None:
+                            try:
+                                expected_identity_directory.rmdir()
+                            except OSError as exc:
+                                _structured_log(
+                                    logging.WARNING,
+                                    "supervisor.launch_request_expected_identity_cleanup_failed",
+                                    request=name,
+                                    operation="rmdir",
+                                    path=str(expected_identity_directory),
+                                    detail=str(exc),
+                                )
                 except (OSError, subprocess.SubprocessError) as exc:
                     reject_reason = f"launch_request_execution_failed: {exc}"
-                    try:
-                        if rejected_fd is None:
-                            rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
-                        _move_launch_request_no_replace(
-                            name,
-                            src_dir_fd=inbox_fd,
-                            dst_dir_fd=rejected_fd,
-                        )
-                    except (OSError, SupervisorError, ValueError) as quarantine_exc:
+                    if not reject(name, reject_reason):
+                        quarantine_exc = "see rejection log for quarantine failure"
                         reject_reason = f"{reject_reason}; quarantine failed: {quarantine_exc}"
                     _structured_log(
                         logging.ERROR,
@@ -1887,21 +2365,24 @@ class AutoresearchSupervisor:
                     )
                     continue
                 if completed.returncode != 0:
-                    stdout = str(completed.stdout or "")[-1000:]
-                    stderr = str(completed.stderr or "")[-1000:]
+                    stdout_value = completed.stdout or b""
+                    stderr_value = completed.stderr or b""
+                    stdout = (
+                        stdout_value.decode("utf-8", errors="replace")
+                        if isinstance(stdout_value, bytes)
+                        else str(stdout_value)
+                    )[-1000:]
+                    stderr = (
+                        stderr_value.decode("utf-8", errors="replace")
+                        if isinstance(stderr_value, bytes)
+                        else str(stderr_value)
+                    )[-1000:]
                     reject_reason = (
                         "launch_request_execution_failed: "
                         f"returncode={completed.returncode}; stdout={stdout}; stderr={stderr}"
                     )
-                    try:
-                        if rejected_fd is None:
-                            rejected_fd = _open_launch_request_child_directory(inbox_fd, "rejected")
-                        _move_launch_request_no_replace(
-                            name,
-                            src_dir_fd=inbox_fd,
-                            dst_dir_fd=rejected_fd,
-                        )
-                    except (OSError, SupervisorError, ValueError) as quarantine_exc:
+                    if not reject(name, reject_reason):
+                        quarantine_exc = "see rejection log for quarantine failure"
                         reject_reason = f"{reject_reason}; quarantine failed: {quarantine_exc}"
                     _structured_log(
                         logging.ERROR,
@@ -2194,6 +2675,203 @@ class AutoresearchSupervisor:
             )
         return tuple(sorted(records, key=lambda record: record.manifest.attempt))
 
+    def _sweep_orphaned_running_runs(self) -> None:
+        state = self._cycle_state
+        if state is None:
+            return
+        finalized = 0
+        records_examined = 0
+        systemd_probes = 0
+        budget_logged: set[str] = set()
+
+        def log_budget_once(budget: str, limit: int) -> None:
+            if budget in budget_logged:
+                return
+            budget_logged.add(budget)
+            _structured_log(
+                logging.WARNING,
+                "supervisor.sweep_budget_truncated",
+                budget=budget,
+                limit=limit,
+            )
+
+        try:
+            state_reference_sha256 = build_authoritative_state_reference(
+                state,
+                state_path=self.config.state_path,
+            ).sha256()
+            policy = load_autoresearch_policy(DEFAULT_OPENCLAW_CONFIG_PATH)
+            quantipy_root = (
+                Path(state.setup.target_repo) if state.setup is not None else DEFAULT_QUANTIPY_ROOT
+            )
+            receipts = build_receipt_catalog(quantipy_root)
+            instruction_manifest_sha256 = expected_instruction_manifest_sha256(
+                state,
+                policy,
+                receipts,
+                state_path=self.config.state_path,
+            )
+
+            root = self.config.runs_root
+            root_metadata = root.lstat()
+            if root.is_symlink() or not stat.S_ISDIR(root_metadata.st_mode):
+                raise AutoresearchRunRecordError(
+                    "runs root must be a non-symlink directory"
+                )
+
+            def run_systemd_probe(
+                command: tuple[str, ...],
+            ) -> subprocess.CompletedProcess[str]:
+                nonlocal systemd_probes
+                if systemd_probes >= ORPHANED_RUN_SWEEP_MAX_SYSTEMD_PROBES_PER_CYCLE:
+                    raise _SystemdProbeBudgetExhausted
+                systemd_probes += 1
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=5.0,
+                )
+
+            for directory, child_directories, files in os.walk(root, followlinks=False):
+                child_directories.sort()
+                files.sort()
+                parent = Path(directory)
+                if "manifest.json" not in files or "status.json" not in files:
+                    continue
+                if records_examined >= ORPHANED_RUN_SWEEP_MAX_RECORDS_EXAMINED_PER_CYCLE:
+                    log_budget_once(
+                        "records_examined",
+                        ORPHANED_RUN_SWEEP_MAX_RECORDS_EXAMINED_PER_CYCLE,
+                    )
+                    break
+                records_examined += 1
+                try:
+                    record = read_run_record(run_dir=parent, runs_root=root)
+                except (
+                    AutoresearchRunRecordError,
+                    SupervisorError,
+                    OSError,
+                    UnicodeError,
+                    ValueError,
+                ) as exc:
+                    _structured_log(
+                        logging.WARNING,
+                        "supervisor.sweep_unreadable_run_record",
+                        run_directory=str(parent),
+                        detail=str(exc),
+                    )
+                    continue
+                if record.status.state is not RunState.RUNNING:
+                    continue
+                manifest = record.manifest
+                # This is the same identity predicate used by
+                # _matching_verification_runs/_matching_current_phase_runs.
+                if (
+                    manifest.phase is state.phase
+                    and manifest.iteration == state.iteration
+                    and manifest.state_reference_sha256 == state_reference_sha256
+                    and manifest.instruction_manifest_sha256 == instruction_manifest_sha256
+                ):
+                    continue
+                try:
+                    unit = record.status.systemd_unit
+                    if unit is None:
+                        if self._detached_run_process_alive(record.status.pid):
+                            continue
+                        recovered = self._recover_terminal_systemd_run(
+                            record,
+                            finalize_without_systemd=True,
+                        )
+                    else:
+                        if finalized >= ORPHANED_RUN_SWEEP_MAX_PER_CYCLE:
+                            log_budget_once(
+                                "finalizations",
+                                ORPHANED_RUN_SWEEP_MAX_PER_CYCLE,
+                            )
+                            break
+                        try:
+                            if systemd_unit_is_active(unit, run_command=run_systemd_probe):
+                                continue
+                        except _SystemdProbeBudgetExhausted:
+                            log_budget_once(
+                                "systemd_probes",
+                                ORPHANED_RUN_SWEEP_MAX_SYSTEMD_PROBES_PER_CYCLE,
+                            )
+                            break
+                        except SystemdUnitStateError as exc:
+                            _structured_log(
+                                logging.WARNING,
+                                "supervisor.sweep_unit_state_unproven",
+                                run_directory=str(record.run_directory),
+                                systemd_unit=unit,
+                                detail=str(exc),
+                            )
+                            continue
+                        # _recover_terminal_systemd_run immediately obtains a
+                        # fresh unit snapshot before finalization.  That
+                        # re-verification closes the race where a unit restarts
+                        # after the strict inactive probe above.
+                        recovered = self._recover_terminal_systemd_run(
+                            record,
+                            finalize_without_systemd=True,
+                            treat_inactive_unit_pid_as_reused=True,
+                            run_command=run_systemd_probe,
+                        )
+                    if recovered.status.state is RunState.RUNNING:
+                        continue
+                    finalized += 1
+                    _structured_log(
+                        logging.WARNING,
+                        "supervisor.swept_orphaned_run",
+                        run_directory=str(recovered.run_directory),
+                        classification=(
+                            recovered.status.failure_classification.value
+                            if recovered.status.failure_classification is not None
+                            else None
+                        ),
+                    )
+                except _SystemdProbeBudgetExhausted:
+                    log_budget_once(
+                        "systemd_probes",
+                        ORPHANED_RUN_SWEEP_MAX_SYSTEMD_PROBES_PER_CYCLE,
+                    )
+                    break
+                except (
+                    AutoresearchRunRecordError,
+                    SupervisorError,
+                    OSError,
+                    UnicodeError,
+                    ValueError,
+                    subprocess.TimeoutExpired,
+                ) as exc:
+                    _structured_log(
+                        logging.WARNING,
+                        "supervisor.sweep_orphaned_run_failed",
+                        run_directory=str(record.run_directory),
+                        detail=str(exc),
+                    )
+                if finalized >= ORPHANED_RUN_SWEEP_MAX_PER_CYCLE:
+                    log_budget_once(
+                        "finalizations",
+                        ORPHANED_RUN_SWEEP_MAX_PER_CYCLE,
+                    )
+                    break
+        except (
+            AutoresearchRunRecordError,
+            SupervisorError,
+            OSError,
+            UnicodeError,
+            ValueError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            _structured_log(
+                logging.WARNING,
+                "supervisor.sweep_failed",
+                detail=str(exc),
+            )
+
     def _malformed_relevant_verification_run(
         self,
         run_dir: Path,
@@ -2218,31 +2896,46 @@ class AutoresearchSupervisor:
             return None
         return MalformedRunRecord(run_dir, manifest.attempt, error)
 
-    def _recover_terminal_systemd_run(self, record: RunRecord) -> RunRecord:
+    def _recover_terminal_systemd_run(
+        self,
+        record: RunRecord,
+        *,
+        finalize_without_systemd: bool = False,
+        treat_inactive_unit_pid_as_reused: bool = False,
+        run_command: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] | None = None,
+    ) -> RunRecord:
         unit = record.status.systemd_unit
         if unit is None:
-            return record
+            if not finalize_without_systemd or self._detached_run_process_alive(record.status.pid):
+                return record
+            return self._terminalize_disappeared_detached_run(record)
+        systemd_show_command = (
+            "systemctl",
+            "--user",
+            "show",
+            unit,
+            "--no-pager",
+            "--property=Result",
+            "--property=ActiveState",
+            "--property=ExecMainStatus",
+            "--property=MemoryPeak",
+        )
         try:
-            properties = subprocess.run(
-                [
-                    "systemctl",
-                    "--user",
-                    "show",
-                    unit,
-                    "--no-pager",
-                    "--property=Result",
-                    "--property=ActiveState",
-                    "--property=ExecMainStatus",
-                    "--property=MemoryPeak",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=5.0,
-            )
+            if run_command is None:
+                properties = subprocess.run(
+                    list(systemd_show_command),
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0,
+                )
+            else:
+                properties = run_command(systemd_show_command)
         except (OSError, subprocess.TimeoutExpired):
             return record
         if properties.returncode != 0:
+            if treat_inactive_unit_pid_as_reused:
+                return record
             if self._detached_run_process_alive(record.status.pid):
                 return record
             return self._terminalize_disappeared_detached_run(record)
@@ -2251,11 +2944,18 @@ class AutoresearchSupervisor:
             key, separator, value = line.partition("=")
             if separator:
                 parsed[key] = value
+        active_state = parsed.get("ActiveState")
+        if treat_inactive_unit_pid_as_reused and active_state not in {"inactive", "failed"}:
+            # In particular, do not finalize a run if the unit restarted
+            # between the sweep's strict inactive probe and this snapshot.
+            return record
         if parsed.get("Result") != "oom-kill":
-            active_state = parsed.get("ActiveState")
             if active_state not in {"inactive", "failed"}:
                 return record
-            if self._detached_run_process_alive(record.status.pid):
+            if (
+                not treat_inactive_unit_pid_as_reused
+                and self._detached_run_process_alive(record.status.pid)
+            ):
                 return record
             return self._terminalize_disappeared_detached_run(
                 record,

@@ -6,7 +6,6 @@ import json
 import os
 import pwd
 import re
-import shlex
 import signal
 import stat
 import subprocess
@@ -35,6 +34,7 @@ from gateway.autoresearch_runs import (
     start_run,
     write_command_handoff,
 )
+from gateway.autoresearch_supervisor import LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_RUN_LONG_TASK = REPO_ROOT / "scripts" / "run-long-task.sh"
@@ -181,11 +181,7 @@ def _rewrite_launcher(
     launcher.write_text(source, encoding="utf-8")
     launcher.chmod(0o755)
     worker = scripts_root / "run-long-task-worker.sh"
-    worker_command = shlex.quote(str(REPO_ROOT / "scripts" / "run-long-task-worker.sh"))
-    worker.write_text(
-        f'#!/usr/bin/env bash\nexec {worker_command} "$@"\n',
-        encoding="utf-8",
-    )
+    worker.write_bytes((REPO_ROOT / "scripts" / "run-long-task-worker.sh").read_bytes())
     worker.chmod(0o755)
     return launcher
 
@@ -193,6 +189,7 @@ def _rewrite_launcher(
 @pytest.fixture(autouse=True)
 def launch_request_inbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTORESEARCH_LAUNCH_REQUESTS_DIR", str(tmp_path / "launch-requests"))
+    monkeypatch.setenv("AUTORESEARCH_MIN_AVAILABLE_MEM_KIB", "1")
     launcher = _rewrite_launcher(tmp_path)
     monkeypatch.setattr(sys.modules[__name__], "RUN_LONG_TASK", launcher)
 
@@ -243,6 +240,22 @@ def _identity_json(run_dir: Path, runs_root: Path) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _prepare_test_run(tmp_path: Path) -> tuple[Path, Path, Path]:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=command,
+    )
+    write_command_handoff(run_dir=run_dir, runs_root=runs_root, command=command)
+    return runs_root, run_dir, manifest_path
 
 
 def _run_launcher_with_fake_identity_output(
@@ -722,6 +735,330 @@ def test_run_long_task_queues_when_systemd_user_bus_is_unreachable(
     assert not list(launch_requests.glob(".*.tmp"))
     assert not (run_dir / "status.json").exists()
     assert (run_dir / ".command-handoff.json").exists()
+    assert not (run_dir / ".run-long-task-worker.sh").exists()
+
+
+def test_run_long_task_copies_worker_before_fake_systemd_launch_and_isolates_source(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    captured_worker = tmp_path / "captured-worker.txt"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="copy-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "if [[ \"$*\" != *--no-block* ]]; then exit 0; fi\n"
+            "while [[ $# -gt 0 && \"$1\" != \"--\" ]]; do\n"
+            "  case \"$1\" in --setenv=*) export \"${1#--setenv=}\" ;; esac\n"
+            "  shift\n"
+            "done\n"
+            "shift\n"
+            "printf '%s\\n' \"$1\" >\"$CAPTURED_WORKER\"\n"
+            '"$@" &\n'
+        ),
+    )
+    worker_source = launcher.parent / "run-long-task-worker.sh"
+    worker_source_bytes = worker_source.read_bytes()
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB": "1",
+            "AUTORESEARCH_LONG_TASK_TMPDIR": str(tmp_path / "long-task-tmp"),
+            "CAPTURED_WORKER": str(captured_worker),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    worker_copy = run_dir / ".run-long-task-worker.sh"
+    assert worker_copy.is_file()
+    assert stat.S_IMODE(worker_copy.stat().st_mode) == 0o700
+    assert worker_copy.read_bytes() == worker_source_bytes
+    assert captured_worker.read_text(encoding="utf-8").strip() == str(worker_copy)
+
+    worker_source.unlink()
+    assert worker_copy.read_bytes() == worker_source_bytes
+
+
+def test_run_long_task_worker_copy_final_symlink_cannot_clobber_sentinel(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    sentinel = tmp_path / "sentinel"
+    sentinel.write_text("preserve me", encoding="utf-8")
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="temp-symlink-control-bin",
+        systemd_run_contents="#!/usr/bin/env bash\nexit 1\n",
+    )
+
+    published_worker = run_dir / ".run-long-task-worker.sh"
+    published_worker.symlink_to(sentinel)
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+    )
+
+    assert result.returncode != 0
+    assert sentinel.read_text(encoding="utf-8") == "preserve me"
+    if published_worker.is_symlink():
+        assert "worker script copy failed" in result.stderr
+    else:
+        assert published_worker.is_file() and not published_worker.is_symlink()
+        assert published_worker.read_bytes() == (
+            launcher.parent / "run-long-task-worker.sh"
+        ).read_bytes()
+
+
+def test_run_long_task_worker_copy_directory_destination_fails_closed(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="copy-directory-control-bin",
+        systemd_run_contents="#!/usr/bin/env bash\nexit 0\n",
+    )
+    (run_dir / ".run-long-task-worker.sh").mkdir()
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=dict(os.environ),
+    )
+
+    assert result.returncode != 0
+    assert "worker script copy failed" in result.stderr
+    assert (run_dir / ".run-long-task-worker.sh").is_dir()
+
+
+def test_run_long_task_worker_copy_replaces_stale_regular_file_atomically(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    captured_worker = tmp_path / "captured-worker.txt"
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="stale-copy-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "while [[ $# -gt 0 && \"$1\" != \"--\" ]]; do shift; done\n"
+            "shift\n"
+            "printf '%s\\n' \"$1\" >\"$CAPTURED_WORKER\"\n"
+            "exit 1\n"
+        ),
+    )
+    stale_copy = run_dir / ".run-long-task-worker.sh"
+    stale_copy.write_text("stale worker", encoding="utf-8")
+    stale_copy.chmod(0o600)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CAPTURED_WORKER": str(captured_worker),
+        },
+    )
+
+    assert result.returncode != 0
+    assert stale_copy.read_bytes() == (launcher.parent / "run-long-task-worker.sh").read_bytes()
+    assert stat.S_IMODE(stale_copy.stat().st_mode) == 0o700
+    assert captured_worker.read_text(encoding="utf-8").strip() == str(stale_copy)
+
+
+def test_run_long_task_direct_launch_memory_floor_blocks_systemd_enqueue(
+    tmp_path: Path,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    launch_log = tmp_path / "launch.log"
+    mem_available_kib = next(
+        int(line.split()[1])
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines()
+        if line.startswith("MemAvailable:")
+    )
+    launch_floor = max(mem_available_kib + 1, 999999999999)
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="memory-floor-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "if [[ \"$*\" == *--no-block* ]]; then\n"
+            "  printf '%s\\n' launch >>\"$LAUNCH_LOG\"\n"
+            "fi\n"
+            "exit 0\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB": str(launch_floor),
+            "AUTORESEARCH_LONG_TASK_TMPDIR": str(tmp_path / "long-task-tmp"),
+            "LAUNCH_LOG": str(launch_log),
+        },
+    )
+
+    assert result.returncode != 0
+    assert (
+        re.fullmatch(
+            rf"ERROR: host available memory [0-9]+KiB is below the {launch_floor}KiB "
+            r"launch floor; retry when hydration/interactive load drains\n",
+            result.stderr,
+        )
+        is not None
+    )
+    assert not launch_log.exists()
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_error"),
+    (
+        (
+            "bogus",
+            "ERROR: AUTORESEARCH_MIN_AVAILABLE_MEM_KIB must be a base-10 integer with 1 to "
+            "15 digits",
+        ),
+        ("08", "detached systemd unit could not be enqueued"),
+    ),
+)
+def test_run_long_task_validates_memory_override_as_decimal(
+    tmp_path: Path,
+    override: str,
+    expected_error: str,
+) -> None:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
+    command = ("true",)
+    manifest_path = tmp_path / "manifest.json"
+    command_file = tmp_path / "command.json"
+    launch_log = tmp_path / "launch.log"
+    manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
+    _write_command_file(command_file, command)
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name=f"memory-override-{override}",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "if [[ \"$*\" != *--no-block* ]]; then exit 0; fi\n"
+            "printf '%s\\n' launch >>\"$LAUNCH_LOG\"\n"
+            "exit 1\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--manifest",
+            str(manifest_path),
+            "--command-file",
+            str(command_file),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB": override,
+            "AUTORESEARCH_LONG_TASK_TMPDIR": str(tmp_path / "long-task-tmp"),
+            "LAUNCH_LOG": str(launch_log),
+        },
+    )
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    if override == "bogus":
+        assert not launch_log.exists()
+    else:
+        assert launch_log.read_text(encoding="utf-8").strip() == "launch"
 
 
 def test_run_long_task_queues_when_systemd_probe_fails(tmp_path: Path) -> None:
@@ -787,6 +1124,8 @@ def test_run_long_task_script_defaults_match_python_constants() -> None:
     assert launch_requests_match is not None
     assert Path(runs_match.group(1)) == DEFAULT_AUTORESEARCH_LONG_RUNS_ROOT
     assert Path(launch_requests_match.group(1)) == DEFAULT_AUTORESEARCH_LAUNCH_REQUESTS
+    assert "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB:-14680064" in script
+    assert LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB == 14680064
     for name in ("setsid", "systemd-run", "systemctl", "timeout"):
         assert f'readonly {name.replace("-", "_")}_path="/usr/bin/{name}"' in script
     assert re.search(r'(?m)^\s*elif ! "\$timeout_path" 2s "\$systemd_run_path"', script)
@@ -1026,13 +1365,162 @@ def test_run_long_task_launch_prepared_uses_only_prepared_run_state(
         check=False,
         capture_output=True,
         text=True,
+        env={
+            **os.environ,
+            "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB": "999999999999",
+        },
     )
 
     assert result.returncode != 0
     assert "detached systemd unit could not be enqueued" in result.stderr
+    assert "launch floor" not in result.stderr
     assert (run_dir / "manifest.json").exists()
     assert (run_dir / ".command-handoff.json").exists()
     assert not (run_dir / "status.json").exists()
+
+
+def test_run_long_task_launch_prepared_accepts_matching_expected_identity(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root)
+    expected_identity_path = tmp_path / "expected-identity.json"
+    expected_identity_path.write_bytes(
+        (
+            json.dumps(identity.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+    )
+    expected_identity_path.chmod(0o600)
+    launch_log = tmp_path / "launch.log"
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="matching-identity-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' launch >>\"$LAUNCH_LOG\"\n"
+            "exit 1\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--expected-identity-file",
+            str(expected_identity_path),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LAUNCH_LOG": str(launch_log)},
+    )
+
+    assert result.returncode != 0
+    assert (
+        "prepared run identity changed between request validation and launch"
+        not in result.stderr
+    )
+    assert "detached systemd unit could not be enqueued" in result.stderr
+    assert launch_log.read_text(encoding="utf-8").strip() == "launch"
+
+
+def test_run_long_task_launch_prepared_rejects_changed_expected_identity_before_systemd(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    identity = capture_prepared_run_identity(run_dir=run_dir, runs_root=runs_root).to_dict()
+    identity["run_inode"] = cast(int, identity["run_inode"]) + 1
+    expected_identity_path = tmp_path / "expected-identity.json"
+    expected_identity_path.write_bytes(
+        (json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    )
+    expected_identity_path.chmod(0o600)
+    launch_log = tmp_path / "launch.log"
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="mismatching-identity-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' launch >>\"$LAUNCH_LOG\"\n"
+            "exit 0\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--expected-identity-file",
+            str(expected_identity_path),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LAUNCH_LOG": str(launch_log)},
+    )
+
+    assert result.returncode != 0
+    assert (
+        "prepared run identity changed between request validation and launch"
+        in result.stderr
+    )
+    assert not launch_log.exists()
+
+
+def test_run_long_task_launch_prepared_rejects_nul_expected_identity_before_systemd(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir, _manifest_path = _prepare_test_run(tmp_path)
+    expected_identity_path = tmp_path / "expected-identity.json"
+    expected_identity_path.write_bytes(
+        _identity_json(run_dir, runs_root).encode("utf-8") + b"\x00\n"
+    )
+    expected_identity_path.chmod(0o600)
+    launch_log = tmp_path / "launch.log"
+    launcher = _rewrite_launcher(
+        tmp_path,
+        root_name="nul-identity-control-bin",
+        systemd_run_contents=(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' launch >>\"$LAUNCH_LOG\"\n"
+            "exit 0\n"
+        ),
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "--launch-prepared",
+            "--run-dir",
+            str(run_dir),
+            "--runs-root",
+            str(runs_root),
+            "--expected-identity-file",
+            str(expected_identity_path),
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LAUNCH_LOG": str(launch_log)},
+    )
+
+    assert result.returncode != 0
+    assert "must not contain NUL bytes" in result.stderr
+    assert not launch_log.exists()
 
 
 def test_run_long_task_rejects_historical_manifest_before_publication(
@@ -1172,7 +1660,15 @@ def test_run_long_task_launch_prepared_rejects_unprepared_or_started_runs(
 def test_run_long_task_writes_separate_private_secret_free_terminal_capture(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
-    command = ("bash", "-lc", "printf stdout-diagnostic; printf stderr-diagnostic >&2")
+    command = (
+        sys.executable,
+        "-c",
+        (
+            "import sys; "
+            "sys.stdout.buffer.write(b'stdout-diagnostic'); sys.stdout.buffer.flush(); "
+            "sys.stderr.buffer.write(b'stderr-diagnostic'); sys.stderr.buffer.flush()"
+        ),
+    )
     manifest_path = tmp_path / "manifest.json"
     command_file = tmp_path / "command.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
@@ -1500,15 +1996,35 @@ def test_operator_stop_preserves_primary_outcome_with_escaped_capture_sentinel(
     escaped_pid_path = tmp_path / "operator-escaped.pid"
     worker = REPO_ROOT / "scripts" / "run-long-task-worker.sh"
     command = (
-        "bash",
-        "-lc",
-        (
-            "printf operator-flush; printf operator-stderr >&2; "
-            "trap '' TERM; "
-            "setsid bash -c 'trap \"\" TERM; while true; do sleep 1; done' & "
-            f"echo $! > {escaped_pid_path}; "
-            "while true; do sleep 1; done"
-        ),
+        sys.executable,
+        "-c",
+        """
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.stdout.buffer.write(b"operator-flush")
+sys.stdout.buffer.flush()
+sys.stderr.buffer.write(b"operator-stderr")
+sys.stderr.buffer.flush()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+child_code = (
+    "import signal, time\\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n"
+    "while True:\\n"
+    "    time.sleep(1)\\n"
+)
+child = subprocess.Popen(
+    [sys.executable, "-c", child_code],
+    start_new_session=True,
+)
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+while True:
+    time.sleep(1)
+""",
+        str(escaped_pid_path),
     )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
@@ -1587,9 +2103,19 @@ def test_worker_terminalizes_after_direct_child_exits_with_a_live_descendant(
     descendant_pid_path = tmp_path / "descendant.pid"
     worker = REPO_ROOT / "scripts" / "run-long-task-worker.sh"
     command = (
-        "bash",
-        "-lc",
-        f"printf parent-finished; sleep 30 & echo $! > {descendant_pid_path}; exit 0",
+        sys.executable,
+        "-c",
+        """
+import subprocess
+import sys
+from pathlib import Path
+
+sys.stdout.buffer.write(b"parent-finished")
+sys.stdout.buffer.flush()
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+""",
+        str(descendant_pid_path),
     )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
@@ -1648,9 +2174,22 @@ def test_worker_keeps_escaped_sentinel_alive_and_reports_incomplete_capture(
     descendant_pid_path = tmp_path / "escaped-descendant.pid"
     worker = REPO_ROOT / "scripts" / "run-long-task-worker.sh"
     command = (
-        "bash",
-        "-lc",
-        f"printf escaped-parent; setsid sleep 30 & echo $! > {descendant_pid_path}; exit 0",
+        sys.executable,
+        "-c",
+        """
+import subprocess
+import sys
+from pathlib import Path
+
+sys.stdout.buffer.write(b"escaped-parent")
+sys.stdout.buffer.flush()
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    start_new_session=True,
+)
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+""",
+        str(descendant_pid_path),
     )
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
@@ -1706,7 +2245,11 @@ def test_worker_keeps_escaped_sentinel_alive_and_reports_incomplete_capture(
 def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
-    command = ("bash", "-lc", "printf unique-launch-payload")
+    command = (
+        sys.executable,
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'unique-launch-payload'); sys.stdout.buffer.flush()",
+    )
     manifest_path = tmp_path / "manifest.json"
     command_file = tmp_path / "command.json"
     captured_argv = tmp_path / "systemd-argv.json"
@@ -1754,7 +2297,7 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
     assert result.returncode != 0
     argv_text = captured_argv.read_text(encoding="utf-8")
     argv = cast(list[str], json.loads(argv_text))
-    worker_script = str(RUN_LONG_TASK.parent / "run-long-task-worker.sh")
+    worker_script = str(run_dir / ".run-long-task-worker.sh")
     worker_index = argv.index(worker_script)
     assert argv[worker_index + 1 : worker_index + 6] == [
         str(run_dir),
@@ -1766,15 +2309,15 @@ def test_run_long_task_does_not_put_command_payload_in_systemd_argv(tmp_path: Pa
     assert "unique-launch-payload" not in argv_text
     assert str(command_file) not in argv_text
     assert str(run_dir) in argv_text
-    assert "--property=MemoryHigh=10G" in argv_text
-    assert "--property=MemoryMax=12G" in argv_text
+    assert "--property=MemoryHigh=48G" in argv_text
+    assert "--property=MemoryMax=64G" in argv_text
     assert "--property=KillMode=control-group" in argv_text
 
 
 def test_run_long_task_does_not_misclassify_a_child_exit_124_as_timeout(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
-    command = ("bash", "-lc", "exit 124")
+    command = (sys.executable, "-c", "raise SystemExit(124)")
     manifest_path = tmp_path / "manifest.json"
     command_file = tmp_path / "command.json"
     manifest_path.write_text(json.dumps(_manifest(run_dir, command)), encoding="utf-8")
@@ -1808,12 +2351,21 @@ def test_run_long_task_timeout_kills_a_term_resistant_command(tmp_path: Path) ->
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-3" / "verification" / "attempt-1"
     command = (
-        "bash",
-        "-lc",
-        (
-            "printf timeout-flush; printf timeout-stderr >&2; "
-            "trap '' TERM; while true; do sleep 1; done"
-        ),
+        sys.executable,
+        "-c",
+        """
+import signal
+import sys
+import time
+
+sys.stdout.buffer.write(b"timeout-flush")
+sys.stdout.buffer.flush()
+sys.stderr.buffer.write(b"timeout-stderr")
+sys.stderr.buffer.flush()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+""",
     )
     manifest = _manifest(run_dir, command)
     manifest["timeout_seconds"] = 0.2

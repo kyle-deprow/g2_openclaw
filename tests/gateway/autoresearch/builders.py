@@ -1340,6 +1340,21 @@ def _fix_artifact(worktree: GitWorktree) -> FixResultArtifact:
     )
 
 
+def valid_quantipy_failure_traceback_tail() -> list[dict[str, object]]:
+    return [
+        {"path": "experiment/model.py", "line": 42, "name": "run"},
+        {"path": "experiment/stages.py", "line": 17, "name": "execute_stage"},
+    ]
+
+
+def attach_quantipy_failure_traceback_tail(
+    failure: Mapping[str, object],
+) -> dict[str, object]:
+    attached = dict(failure)
+    attached["traceback_tail"] = valid_quantipy_failure_traceback_tail()
+    return attached
+
+
 def _write_quantipy_v2_run(
     worktree: GitWorktree,
     *,

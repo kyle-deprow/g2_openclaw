@@ -1720,6 +1720,18 @@ def test_completed_feasibility_rejects_non_json_summary(
         "escaping_source_path",
         "oversized_stage_summary",
         "oversized_failure_message",
+        "empty_failure_traceback_tail",
+        "too_many_failure_traceback_frames",
+        "missing_failure_traceback_frame_key",
+        "extra_failure_traceback_frame_key",
+        "absolute_failure_traceback_path",
+        "escaping_failure_traceback_path",
+        "oversized_failure_traceback_path",
+        "zero_failure_traceback_line",
+        "boolean_failure_traceback_line",
+        "empty_failure_traceback_name",
+        "non_list_failure_traceback_tail",
+        "non_mapping_failure_traceback_frame",
         "oversized_identity_path",
         "extra_source_field",
     ),
@@ -1793,6 +1805,83 @@ def test_quantipy_run_parser_rejects_complete_schema_and_invariant_violations(
         payload["stage_receipts"][0]["result"]["summary"] = "x" * 4097
     elif mutation == "oversized_failure_message":
         payload["failure"] = {"category": "stage", "message": "x" * 2049}
+    elif mutation == "empty_failure_traceback_tail":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [],
+        }
+    elif mutation == "too_many_failure_traceback_frames":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [
+                {"path": "experiment/model.py", "line": index + 1, "name": "run"}
+                for index in range(11)
+            ],
+        }
+    elif mutation == "missing_failure_traceback_frame_key":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "experiment/model.py", "line": 1}],
+        }
+    elif mutation == "extra_failure_traceback_frame_key":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [
+                {"path": "experiment/model.py", "line": 1, "name": "run", "extra": True}
+            ],
+        }
+    elif mutation == "absolute_failure_traceback_path":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "/secret/model.py", "line": 1, "name": "run"}],
+        }
+    elif mutation == "escaping_failure_traceback_path":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "experiment/../secret.py", "line": 1, "name": "run"}],
+        }
+    elif mutation == "oversized_failure_traceback_path":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "x" * 513, "line": 1, "name": "run"}],
+        }
+    elif mutation == "zero_failure_traceback_line":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "experiment/model.py", "line": 0, "name": "run"}],
+        }
+    elif mutation == "boolean_failure_traceback_line":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "experiment/model.py", "line": True, "name": "run"}],
+        }
+    elif mutation == "empty_failure_traceback_name":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": [{"path": "experiment/model.py", "line": 1, "name": ""}],
+        }
+    elif mutation == "non_list_failure_traceback_tail":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": {"path": "experiment/model.py"},
+        }
+    elif mutation == "non_mapping_failure_traceback_frame":
+        payload["failure"] = {
+            "category": "stage",
+            "message": "failure",
+            "traceback_tail": ["experiment/model.py"],
+        }
     elif mutation == "oversized_identity_path":
         payload["identity"]["package_path"] = "/" + ("x" * 4096)
     else:
@@ -1815,6 +1904,106 @@ def test_quantipy_run_parser_rejects_complete_schema_and_invariant_violations(
             validation_context=_runtime_verification_context(state),
             state_path=state_path,
         )
+
+
+def test_quantipy_failure_traceback_tail_is_optional_and_preserved(
+    git_worktree: GitWorktree,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        success=False,
+        terminal_stage="model",
+        terminal_status="failed",
+    )
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    failure = autoresearch_builders.attach_quantipy_failure_traceback_tail(
+        {"category": "stage", "message": "run-level failure"}
+    )
+    payload["failure"] = failure
+    run_path.chmod(0o600)
+    run_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(
+            run_path,
+            label="traceback-tail test run.json",
+        )
+    )
+
+    assert normalized["failure"] == failure
+    assert normalized["failure"] == payload["failure"]
+
+
+@pytest.mark.parametrize("traceback_location", ("run", "stage"))
+def test_quantipy_failure_traceback_tail_is_excluded_from_terminal_cross_check(
+    git_worktree: GitWorktree,
+    traceback_location: str,
+) -> None:
+    _, _, run_path, _, _, _ = _write_quantipy_v2_run(
+        git_worktree,
+        success=False,
+        terminal_stage="model",
+        terminal_status="failed",
+    )
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    if traceback_location == "run":
+        payload["failure"] = autoresearch_builders.attach_quantipy_failure_traceback_tail(
+            {"category": "stage", "message": "run-level failure"}
+        )
+    else:
+        payload["failure"] = {"category": "stage", "message": "run-level failure"}
+        payload["stage_receipts"][-1]["failure"] = (
+            autoresearch_builders.attach_quantipy_failure_traceback_tail(
+                {"category": "stage", "message": "stage failure"}
+            )
+        )
+    run_path.chmod(0o600)
+    run_path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    normalized = autoresearch_evidence._validate_quantipy_run_envelope(
+        autoresearch_secure_io._secure_open_snapshot(
+            run_path,
+            label="traceback-tail cross-check test run.json",
+        )
+    )
+
+    assert normalized["failure"] == payload["failure"]
+    normalized_receipts = cast(list[dict[str, object]], normalized["stage_receipts"])
+    assert normalized_receipts[-1]["failure"] == payload["stage_receipts"][-1]["failure"]
+
+
+@pytest.mark.parametrize(
+    "traceback_tail",
+    (None, autoresearch_builders.valid_quantipy_failure_traceback_tail()),
+)
+def test_quantipy_failure_evidence_round_trips_optional_traceback_tail(
+    traceback_tail: list[dict[str, object]] | None,
+) -> None:
+    raw: dict[str, object] = {"category": "stage", "message": "stage failed"}
+    if traceback_tail is not None:
+        raw["traceback_tail"] = traceback_tail
+
+    evidence = QuantipyExperimentFailureEvidence.from_dict(raw)
+
+    evidence.validate()
+    assert evidence.to_dict() == raw
+
+
+def test_quantipy_failure_evidence_rejects_bad_traceback_frame() -> None:
+    evidence = QuantipyExperimentFailureEvidence(
+        category="stage",
+        message="stage failed",
+        traceback_tail=({"path": "experiment/../model.py", "line": 1, "name": "run"},),
+    )
+
+    with pytest.raises(AutoresearchValidationError, match="traceback_tail"):
+        evidence.validate()
 
 
 def test_quantipy_verification_rejects_run_outside_trusted_canonical_layout(
@@ -2697,6 +2886,70 @@ def test_requested_panel_preflight_failure_without_panel_evidence_is_valid(
     assert advanced.phase is Phase.FIX_TEST
 
 
+@pytest.mark.parametrize("traceback_location", ("run", "evidence"))
+def test_quantipy_failure_traceback_tail_is_advisory_in_verification_cross_check(
+    git_worktree: GitWorktree,
+    policy: AutoresearchPolicy,
+    platform_readiness: PlatformReadinessManifest,
+    tmp_path: Path,
+    trusted_quantipy_runs_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    traceback_location: str,
+) -> None:
+    state, state_path, evidence = _runtime_verification_state(
+        git_worktree,
+        policy,
+        platform_readiness,
+        tmp_path,
+        trusted_quantipy_runs_root,
+        success=False,
+        terminal_stage="model",
+        terminal_status="failed",
+    )
+    run_path = Path(evidence.run_json_path)
+    run = json.loads(run_path.read_text(encoding="utf-8"))
+    base_failure = {"category": "stage", "message": "run-level failure"}
+    run_failure = (
+        autoresearch_builders.attach_quantipy_failure_traceback_tail(base_failure)
+        if traceback_location == "run"
+        else base_failure
+    )
+    evidence_failure = (
+        autoresearch_builders.attach_quantipy_failure_traceback_tail(base_failure)
+        if traceback_location == "evidence"
+        else base_failure
+    )
+    run["failure"] = run_failure
+    run_bytes = json.dumps(run, sort_keys=True, separators=(",", ":")).encode()
+    run_path.chmod(0o600)
+    run_path.write_bytes(run_bytes)
+    updated_evidence = replace(
+        evidence,
+        run_json_sha256=sha256(run_bytes).hexdigest(),
+        failure=QuantipyExperimentFailureEvidence.from_dict(evidence_failure),
+    )
+    _rebind_test_detached_artifact_attestation(updated_evidence)
+    monkeypatch.setattr(
+        autoresearch_evidence,
+        "_validate_quantipy_detached_run_attestation",
+        lambda **_: None,
+    )
+
+    advanced = _runner_advance_state(
+        state,
+        replace(
+            _verification_result(VerificationStatus.TEST_FAILURE),
+            tests_passed=False,
+            quantipy_experiment_evidence=updated_evidence,
+        ),
+        policy,
+        validation_context=_runtime_verification_context(state),
+        state_path=state_path,
+    )
+
+    assert advanced.phase is Phase.FIX_TEST
+
+
 @pytest.mark.parametrize(
     ("stage_category", "run_category", "run_message"),
     (
@@ -3194,9 +3447,7 @@ def test_execution_not_started_reservation_is_idempotent_for_identical_evidence(
     _reserve_quantipy_execution_not_started(not_started, runs_root=trusted_quantipy_runs_root)
 
     reserved = trusted_quantipy_runs_root / evidence.run_id
-    assert sorted(entry.name for entry in reserved.iterdir()) == [
-        ".g2-execution-not-started.json"
-    ]
+    assert sorted(entry.name for entry in reserved.iterdir()) == [".g2-execution-not-started.json"]
 
 
 def test_execution_not_started_reservation_rejects_different_evidence(

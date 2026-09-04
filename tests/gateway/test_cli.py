@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -132,7 +133,7 @@ from gateway.cli import (
     _vite_launch_command,
     app,
 )
-from gateway.deployment.appserver_probe import AppServerProbeResult
+from gateway.deployment.appserver_probe import AppServerProbeResult, StaleArg0Directory
 from typer.testing import CliRunner
 
 from tests.gateway.autoresearch_fixtures import (
@@ -180,6 +181,31 @@ def test_platform_runtime_recovery_requires_its_own_operator_capability(
     # Assert
     assert result.exit_code == 1
     assert "G2_OPENCLAW_OPERATOR_PLATFORM_RUNTIME_RECOVERY=1" in result.output
+
+
+def test_runtime_reseal_requires_its_own_operator_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    state_path = tmp_path / "state.json"
+    state_path.write_text("{}", encoding="utf-8")
+    monkeypatch.delenv("G2_OPENCLAW_OPERATOR_RUNTIME_RESEAL", raising=False)
+
+    # Act
+    result = runner.invoke(
+        app,
+        [
+            "autoresearch-reseal-runtime",
+            str(state_path),
+            "--reason",
+            "Re-attest canonical runtime.",
+        ],
+    )
+
+    # Assert
+    assert result.exit_code == 1
+    assert "G2_OPENCLAW_OPERATOR_RUNTIME_RESEAL=1" in result.output
 
 
 @pytest.fixture(autouse=True)
@@ -672,6 +698,44 @@ def _doctor_control_status(*, last_cycle_at: float | None) -> ControlStatus:
     )
 
 
+_DOCTOR_CHECK_IDS = (
+    "systemd.gateway",
+    "systemd.supervisor",
+    "state.load",
+    "state.suspended",
+    "state.campaign_review",
+    "control.status",
+    "checkpoint.load",
+    "checkpoint.alerted_keys",
+    "checkpoint.last_nudge",
+    "appserver.probe",
+    "appserver.writable_roots",
+    "appserver.stale_arg0",
+    "supervisor.cycle_staleness",
+)
+_DOCTOR_LEDGER_PATTERN = re.compile(
+    r"^check=[a-z0-9_.]+ status=(ok|degraded|error) detail=.* remedy=.*$"
+)
+
+
+def _assert_doctor_ledger(output: str) -> list[str]:
+    lines = output.splitlines()
+    health_line_index = next(
+        index for index, line in enumerate(lines) if line.startswith("health=")
+    )
+    ledger_lines = [line for line in lines if line.startswith("check=")]
+
+    assert len(ledger_lines) == len(_DOCTOR_CHECK_IDS)
+    assert all(_DOCTOR_LEDGER_PATTERN.fullmatch(line) for line in ledger_lines)
+    for check_id in _DOCTOR_CHECK_IDS:
+        matching_lines = [
+            line for line in ledger_lines if line.startswith(f"check={check_id} ")
+        ]
+        assert len(matching_lines) == 1
+        assert lines.index(matching_lines[0]) < health_line_index
+    return ledger_lines
+
+
 def test_autoresearch_doctor_reports_healthy_status_and_d1_fields(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -697,7 +761,10 @@ def test_autoresearch_doctor_reports_healthy_status_and_d1_fields(
         result = runner.invoke(app, ["autoresearch-doctor"])
 
     assert result.exit_code == 0, result.output
+    _assert_doctor_ledger(result.output)
     assert "health=HEALTHY" in result.output
+    assert "check=systemd.gateway status=ok" in result.output
+    assert "check=appserver.stale_arg0 status=ok" in result.output
     assert "owner_lifecycle=idle" in result.output
     assert "task_count=1" in result.output
     assert "supervisor_last_outcome=no_action" in result.output
@@ -739,10 +806,20 @@ def test_autoresearch_doctor_reports_degraded_checks_and_exit_one(
         result = runner.invoke(app, ["autoresearch-doctor"])
 
     assert result.exit_code == 1, result.output
+    _assert_doctor_ledger(result.output)
     assert "INACTIVE" in result.output
     assert "suspended=True" in result.output
     assert "campaign_review=True" in result.output
     assert "alerted_keys=alerted-key" in result.output
+    assert "check=systemd.gateway status=degraded" in result.output
+    assert "check=state.suspended status=degraded" in result.output
+    assert "check=state.campaign_review status=degraded" in result.output
+    assert "check=checkpoint.alerted_keys status=degraded" in result.output
+    assert (
+        next(line for line in result.output.splitlines() if line.startswith("issues="))
+        == "issues=openclaw-gateway.service inactive; state suspended; "
+        "campaign review required; alerted recovery key"
+    )
     assert "health=DEGRADED" in result.output
 
 
@@ -811,7 +888,10 @@ def test_autoresearch_doctor_reports_systemd_probe_error_distinctly(
 
     def probe(unit: str) -> bool:
         if unit == cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE:
-            raise SystemdUnitStateError("inconclusive systemd evidence [probe]")
+            raise SystemdUnitStateError(
+                "inconclusive systemd evidence\t\r\ncontinued\x7f[probe]\n"
+                "check=fake status=ok detail=spoofed remedy=none\nhealth=HEALTHY"
+            )
         return True
 
     monkeypatch.setattr(cli_module, "_is_systemd_unit_active", probe)
@@ -823,7 +903,21 @@ def test_autoresearch_doctor_reports_systemd_probe_error_distinctly(
 
     assert result.exit_code == 1, result.output
     assert "probe-error" in result.output
-    assert "[probe]" in result.output
+    ledger_lines = _assert_doctor_ledger(result.output)
+    supervisor_cycle_line = next(
+        line for line in ledger_lines if line.startswith("check=supervisor.cycle_staleness ")
+    )
+    assert "status=error" in supervisor_cycle_line
+    assert (
+        f"{cli_module.DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE} probe-error"
+        in supervisor_cycle_line
+    )
+    supervisor_systemd_line = next(
+        line for line in ledger_lines if line.startswith("check=systemd.supervisor ")
+    )
+    assert "inconclusive systemd evidence continued [probe]" in supervisor_systemd_line
+    assert not any(line.startswith("check=fake ") for line in result.output.splitlines())
+    assert sum(line.startswith("health=") for line in result.output.splitlines()) == 1
     assert "supervisor_active=False" not in result.output
 
 
@@ -853,6 +947,86 @@ def test_autoresearch_doctor_reports_appserver_probe_error(
     assert result.exit_code == 1, result.output
     assert "app-server probe-error" in result.output
     assert "probe failed" in result.output
+
+
+def test_autoresearch_doctor_reports_stale_arg0_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=time.time()).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+    monkeypatch.setattr(
+        cli_module,
+        "probe_appserver",
+        lambda: AppServerProbeResult(
+            (),
+            (StaleArg0Directory(1234, tmp_path / "codex-arg0stale"),),
+        ),
+    )
+
+    with patch(
+        "gateway.autoresearch_control.AutoresearchControl.status",
+        return_value=_doctor_control_status(last_cycle_at=time.time()),
+    ):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    assert "check=appserver.stale_arg0 status=degraded" in result.output
+    assert (
+        "remedy=restart the gateway: systemctl --user restart openclaw-gateway.service"
+        in result.output
+    )
+
+
+def test_autoresearch_doctor_keeps_full_issues_and_caps_ledger_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state_path = tmp_path / "quantipy-state.json"
+    checkpoint_path = tmp_path / "owner-recovery.json"
+    state_path.write_text(json.dumps(AutoresearchState().to_dict()), encoding="utf-8")
+    SupervisorCheckpoint(last_cycle_at=time.time()).save(checkpoint_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_STATE_PATH", state_path)
+    monkeypatch.setattr(cli_module, "DEFAULT_AUTORESEARCH_CHECKPOINT_PATH", checkpoint_path)
+    monkeypatch.setattr(
+        cli_module, "DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH", tmp_path / "sessions.json"
+    )
+    monkeypatch.setattr(cli_module, "_is_systemd_unit_active", lambda _unit: True)
+    missing_roots = (
+        *(tmp_path / f"missing-root-{index:02d}-{'x' * 24}" for index in range(12)),
+        tmp_path / "missing-root-with-del-\x7f",
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "probe_appserver",
+        lambda: AppServerProbeResult(missing_roots, ()),
+    )
+    status = _doctor_control_status(last_cycle_at=time.time())
+
+    with patch("gateway.autoresearch_control.AutoresearchControl.status", return_value=status):
+        result = runner.invoke(app, ["autoresearch-doctor"])
+
+    assert result.exit_code == 1, result.output
+    reason = f"missing writable roots: {', '.join(map(str, missing_roots))}"
+    issues_line = next(line for line in result.output.splitlines() if line.startswith("issues="))
+    ledger_line = next(
+        line
+        for line in result.output.splitlines()
+        if line.startswith("check=appserver.writable_roots ")
+    )
+    ledger_detail = ledger_line.split(" detail=", 1)[1].split(" remedy=", 1)[0]
+    assert issues_line == f"issues={reason}"
+    assert len(issues_line) > 300
+    assert len(ledger_detail) == 300
+    assert "\x7f" not in ledger_detail
 
 
 def test_autoresearch_reset_owner_session_requires_confirmation(
@@ -1265,14 +1439,17 @@ def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(
     autoresearch_dir = tmp_path / "autoresearch"
     artifacts = autoresearch_dir / "artifacts"
     stage_inbox = autoresearch_dir / "stage-inbox"
+    decision_receipts = autoresearch_dir / "decision-receipts"
     checkpoint = autoresearch_dir / "owner-recovery.json"
     state_path = autoresearch_dir / "quantipy-state.json"
     sessions_path = tmp_path / "agent" / "sessions" / "sessions.json"
     session_file = sessions_path.parent / "ses-owner.jsonl"
     artifacts.mkdir(parents=True)
     stage_inbox.mkdir(parents=True)
+    decision_receipts.mkdir(parents=True)
     (artifacts / "old.json").write_text("{}", encoding="utf-8")
     (stage_inbox / "submission.json").write_text("{}", encoding="utf-8")
+    (decision_receipts / "iteration-000001.json").write_text("{}", encoding="utf-8")
     SupervisorCheckpoint().save(checkpoint)
     state_path.write_text(json.dumps({"prior_campaign": True}), encoding="utf-8")
     sessions_path.parent.mkdir(parents=True)
@@ -1315,6 +1492,7 @@ def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(
     archive = archive_paths[0]
     assert (archive / "artifacts/old.json").is_file()
     assert (archive / "stage-inbox/submission.json").is_file()
+    assert (archive / "decision-receipts/iteration-000001.json").is_file()
     assert (archive / "owner-recovery.json").is_file()
     assert json.loads((archive / "quantipy-state.json").read_text(encoding="utf-8")) == {
         "prior_campaign": True
@@ -1325,6 +1503,7 @@ def test_autoresearch_init_state_fresh_campaign_archives_residue_and_mapping(
     }
     assert not artifacts.exists()
     assert not stage_inbox.exists()
+    assert not decision_receipts.exists()
     assert not checkpoint.exists()
     assert not state_path.exists()
     assert not session_file.exists()
@@ -1344,13 +1523,16 @@ def test_autoresearch_init_state_save_failure_restores_archived_residue(
     autoresearch_dir = tmp_path / "autoresearch"
     artifacts = autoresearch_dir / "artifacts"
     stage_inbox = autoresearch_dir / "stage-inbox"
+    decision_receipts = autoresearch_dir / "decision-receipts"
     checkpoint = autoresearch_dir / "owner-recovery.json"
     state_path = autoresearch_dir / "quantipy-state.json"
     sessions_path = tmp_path / "sessions.json"
     artifacts.mkdir(parents=True)
     stage_inbox.mkdir(parents=True)
+    decision_receipts.mkdir(parents=True)
     (artifacts / "old.json").write_text("{}", encoding="utf-8")
     (stage_inbox / "old.json").write_text("{}", encoding="utf-8")
+    (decision_receipts / "iteration-000001.json").write_text("{}", encoding="utf-8")
     SupervisorCheckpoint().save(checkpoint)
     state_path.write_text(json.dumps({"prior_campaign": True}), encoding="utf-8")
     output = tmp_path / "new-state.json"
@@ -1386,9 +1568,15 @@ def test_autoresearch_init_state_save_failure_restores_archived_residue(
     assert "PARTIAL ARCHIVE" not in result.output
     assert artifacts.is_dir()
     assert stage_inbox.is_dir()
+    assert decision_receipts.is_dir()
+    assert (decision_receipts / "iteration-000001.json").is_file()
     assert checkpoint.is_file()
     assert state_path.is_file()
     assert not list((autoresearch_dir / "campaign-archives").glob("campaign-*"))
+    assert not any(
+        (archive_path / "decision-receipts").exists()
+        for archive_path in (autoresearch_dir / "campaign-archives").glob("campaign-*")
+    )
 
 
 def test_autoresearch_init_state_preparation_failure_occurs_before_archive(

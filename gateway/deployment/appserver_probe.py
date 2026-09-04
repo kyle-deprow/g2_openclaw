@@ -91,6 +91,20 @@ def _ppid_from_status(status: bytes) -> int | None:
     return None
 
 
+def _cgroup_path(proc_root: Path, pid: int) -> str | None:
+    """Return the cgroup v2 path for a process, if it can be parsed."""
+
+    try:
+        cgroup = (proc_root / str(pid) / "cgroup").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    for line in cgroup.splitlines():
+        fields = line.split(":", 2)
+        if len(fields) == 3 and fields[0] == "0" and fields[1] == "" and fields[2].startswith("/"):
+            return fields[2]
+    return None
+
+
 def _appserver_ancestor_pid(proc_root: Path, child_pid: int) -> int | None:
     """Find the nearest codex app-server in a process's PPid chain."""
 
@@ -146,6 +160,9 @@ def find_stale_arg0_directories(proc_root: Path = Path("/proc")) -> tuple[StaleA
                 except OSError:
                     continue
                 if not _is_codex_runtime_process(cmdline):
+                    continue
+                cgroup_path = _cgroup_path(proc_root, child_pid)
+                if cgroup_path is None or "openclaw-gateway.service" not in cgroup_path.split("/"):
                     continue
                 owner_pid = child_pid
             findings.append(StaleArg0Directory(owner_pid, arg0_directory))

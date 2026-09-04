@@ -15,6 +15,7 @@ READ_ONLY_TASK_LIST_RETRY_SECONDS = 0.5
 REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
 DEFAULT_TASK_RPC_TIMEOUT_SECONDS = 30.0
 PROVIDER_BLOCKED_ALERT_REASON = "control_plane_provider_blocked"
+RELAY_DECAY_ALERT_REASON = "control_plane_native_hook_relay_decayed"
 
 
 @dataclass(frozen=True, slots=True)

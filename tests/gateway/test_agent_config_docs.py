@@ -88,6 +88,8 @@ def test_quantipy_data_contract_covers_runtime_boundaries() -> None:
         "next-session-or-later",
         "not point-in-time certified",
         "qp.prices()",
+        "exact-decimal serialized as a string",
+        "cast it to a numeric dtype",
         "Do not apply splits or dividends",
         "qp.corporate_actions()",
         "Historical trades, quotes, and fundamentals are unavailable",
@@ -397,6 +399,24 @@ def test_long_task_docs_distinguish_launcher_status_from_pm_blocking() -> None:
         assert "bounded polling" in lowered
 
 
+def test_long_task_docs_forbid_in_session_launcher_execution() -> None:
+    for path in (AUTORESEARCH, CODEX_SUBAGENTS):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert "NEVER execute" in text
+        assert "scripts/run-long-task.sh" in text
+        assert "nobody:nogroup" in text
+        assert "schema_version 1 launch request" in text
+        assert "accepted/" in text
+        assert "mkdir -m 700 -p" in text
+        assert "non-symlink directory owned by the session user" in text
+        assert "unique filename ending in `.json`" in text
+        assert "<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json" in text
+        assert "`.tmp` sibling" in text
+        assert "mode 0600" in text
+        assert "rejected/<request-name>.reason" in text
+        assert "LAUNCH_QUEUED" not in text
+
+
 def test_dispatch_recovery_requires_task_ledger_unique_labels() -> None:
     agents = " ".join(AGENT_CONFIG.joinpath("AGENTS.md").read_text(encoding="utf-8").split())
     autoresearch = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
@@ -578,7 +598,7 @@ def test_autoresearch_directive_uses_relaxed_horizon_and_activity_rules() -> Non
     skill = " ".join(raw_skill.split()).lower()
     plan = " ".join(PLAN.read_text(encoding="utf-8").split()).lower()
 
-    assert "version: 8.19.0" in skill
+    assert "version: 8.20.0" in skill
     assert "any holding period from minutes up to a full trading session" in skill
     assert "every position must be flat by the session close" in skill
     assert "overnight carry is forbidden" in skill

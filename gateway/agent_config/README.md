@@ -213,7 +213,10 @@ Model sessions never write the authoritative state file directly; the Codex
 sandbox only permits writes to the model workspace and the stage inbox.
 `autoresearch-advance` is reserved for the unsandboxed supervisor and operator.
 The supervisor validates and applies accepted submissions from the inbox with
-the runner's locked atomic persistence within one poll cycle.
+the runner's locked atomic persistence within one poll cycle. After
+`autoresearch-submit-stage`, end the turn; do not poll for acceptance. The
+submission acceptance check happens on the next supervisor wake; quote any
+rejection verbatim then.
 
 `autoresearch-submit-stage` rejects mismatched, missing, extra-key, stale-state, and
 unwrapped files before state advance. The complete envelope file must be at most
@@ -227,17 +230,21 @@ BUG_SIGNAL or otherwise untrustworthy-evidence decisions go in
 defect/correction novelty evidence, while clean negative results remain in
 `burned_theory_families` and stay off-limits.
 
-Long verification, notebook, hydrate, and backtest commands must use
-`scripts/run-long-task.sh` with an immutable run manifest and a one-time private
-command input file. Create the command file through the repo-owned helper, which
-reads the schema-v1 stdin protocol and atomically creates a non-symlink 0600
+Long verification, notebook, hydrate, and backtest commands must use the
+detached launch mechanism (prepared run + schema_version 1 launch request from
+a sandboxed session). NEVER execute `scripts/run-long-task.sh` in your session:
+inside a sandboxed session the uid mapping makes root-owned control binaries stat
+as nobody:nogroup, so the launcher's ownership pin always fails before it can
+prepare or queue anything. Create the command file through the repo-owned helper,
+which reads the schema-v1 stdin protocol and atomically creates a non-symlink 0600
 JSON file with `O_EXCL`/`O_NOFOLLOW`:
 
 ```json
 {"schema_version":1,"command":["bash","-lc","<non-secret command>"]}
 ```
 
-Invoke the launcher from this repo with:
+The following launcher block is only the supervisor-side and human-operator path;
+the PM/model session must prepare and submit the run as described below:
 
 ```bash
 command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/<unique-command>.json
@@ -256,13 +263,28 @@ positionally. Do not pass API keys, tokens, passwords, client secrets, or
 private keys as command arguments; use credential files, environment
 references, or inherited authentication.
 
-The launcher automatically queues prepared runs when a sandbox cannot reach
-the user-systemd bus. `LAUNCH_QUEUED: <run-dir>` is successful completion:
-the PM must end the turn, must not retry, and must not report a blocker. The
-owner-only supervisor launches the request within about 60 seconds, and normal
-supervision wakes the session afterward.
+Prepare the immutable run with
+`/home/dev/repos/g2_openclaw/.venv/bin/python -m gateway.autoresearch_runs
+prepare-with-command-file --manifest <absolute-manifest.json> --run-dir
+<absolute-run-dir> --runs-root
+/home/dev/.openclaw/autoresearch/model-workspaces/long-runs --command-file
+"$command_file"`. Ensure the inbox directory
+`/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/` exists first with
+`mkdir -m 700 -p`; it must be a non-symlink directory owned by the session user.
+Then write the schema_version 1 launch request
+`{"schema_version":1,"run_dir":"<absolute-run-dir>","runs_root":"/home/dev/.openclaw/autoresearch/model-workspaces/long-runs"}`
+under a unique filename ending in `.json`, such as
+`<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json`; write a `.tmp` sibling with
+mode 0600 and `mv` it into the inbox. The owner-only supervisor normally
+launches it within about 60 seconds. Confirm in the same turn that it lands in
+`accepted/` (not `rejected/`) before reporting the run as queued. Under low host
+memory, the supervisor defers the launch and the request legitimately stays
+pending in the inbox; treat a still-pending request as deferred and re-check it
+on the next wake. Report a blocker only if it is rejected or remains pending
+after several wakes. If rejected, quote `rejected/<request-name>.reason`
+verbatim when present, else quote the supervisor advisory log line.
 
-The detached worker uses a `MemoryHigh=20G` soft limit and a `MemoryMax=24G`
+The detached worker uses a `MemoryHigh=48G` soft limit and a `MemoryMax=64G`
 hard limit. These limits apply only to the long-running research command and
 are separate from the OpenClaw gateway's own native-crash containment limits.
 
@@ -271,7 +293,7 @@ are separate from the OpenClaw gateway's own native-crash containment limits.
 Implementation must commit one canonical `quantipy-experiment-v2` manifest in
 its disposable workspace and record its absolute path and SHA-256 in
 `implementation_result`. Verification runs focused tests, then
-launches this exact command through `scripts/run-long-task.sh`:
+launches this exact command through the detached launch mechanism (prepared run + schema_version 1 launch request from a sandboxed session):
 
 ```bash
 env PYTHONDONTWRITEBYTECODE=1 uv --directory /home/dev/repos/quantipy run --frozen --no-sync quantipy experiment run "$manifest" --output-root "$root" \

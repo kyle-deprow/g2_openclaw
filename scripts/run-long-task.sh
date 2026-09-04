@@ -6,6 +6,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: scripts/run-long-task.sh --run-dir ABSOLUTE_DIR --manifest MANIFEST.json [--runs-root ROOT] --command-file COMMAND.json
        scripts/run-long-task.sh --launch-prepared --run-dir ABSOLUTE_DIR [--runs-root ROOT]
+       [--expected-identity-file FILE]
 
 The manifest is copied verbatim in canonical JSON form and contains only the
 command digest, never command arguments. Production ROOT is fixed at
@@ -26,6 +27,7 @@ run_dir=""
 manifest=""
 command_file=""
 launch_prepared=0
+expected_identity_file=""
 runs_root="${AUTORESEARCH_RUNS_ROOT:-/home/dev/.openclaw/autoresearch/model-workspaces/long-runs}"
 
 while [[ $# -gt 0 ]]; do
@@ -49,6 +51,11 @@ while [[ $# -gt 0 ]]; do
       launch_prepared=1
       shift
       ;;
+    --expected-identity-file)
+      [[ $# -ge 2 ]] || die "--expected-identity-file requires a value"
+      expected_identity_file="$2"
+      shift 2
+      ;;
     --runs-root)
       [[ $# -ge 2 ]] || die "--runs-root requires a value"
       runs_root="$2"
@@ -65,6 +72,9 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$launch_prepared" -eq 1 ]]; then
   [[ -z "$manifest" ]] || die "--manifest is not valid with --launch-prepared"
   [[ -z "$command_file" ]] || die "--command-file is not valid with --launch-prepared"
+  if [[ -n "$expected_identity_file" ]]; then
+    [[ "$expected_identity_file" = /* ]] || die "--expected-identity-file must be absolute"
+  fi
   [[ -d "$run_dir" && ! -L "$run_dir" ]] || die "prepared run directory is missing or is a symlink"
   [[ -f "$run_dir/manifest.json" && ! -L "$run_dir/manifest.json" ]] ||
     die "prepared run manifest is missing or is a symlink"
@@ -76,6 +86,8 @@ else
   [[ -n "$manifest" ]] || die "--manifest is required"
   [[ -n "$command_file" ]] || { usage; die "--command-file is required"; }
   [[ "$command_file" = /* ]] || die "--command-file must be absolute"
+  [[ -z "$expected_identity_file" ]] ||
+    die "--expected-identity-file is only valid with --launch-prepared"
 fi
 [[ $# -eq 0 ]] || die "unexpected positional arguments; use --command-file"
 
@@ -156,6 +168,38 @@ capture_prepared_identity() {
 prepared_identity=""
 capture_prepared_identity
 
+if [[ -n "$expected_identity_file" ]]; then
+  [[ -L "$expected_identity_file" ]] &&
+    die "expected prepared run identity must be a non-symlink regular file: $expected_identity_file"
+  expected_identity_metadata="$(/usr/bin/stat -c '%f %s %u %a %h' -- "$expected_identity_file")" ||
+    die "cannot inspect expected prepared run identity metadata: $expected_identity_file"
+  read -r expected_identity_type expected_identity_size expected_identity_owner \
+    expected_identity_mode expected_identity_links <<<"$expected_identity_metadata"
+  [[ "$expected_identity_type" =~ ^[0-9a-fA-F]+$ ]] ||
+    die "expected prepared run identity must be a non-symlink regular file: $expected_identity_file"
+  (( (16#$expected_identity_type & 0170000) == 0100000 )) ||
+    die "expected prepared run identity must be a non-symlink regular file: $expected_identity_file"
+  [[ "$expected_identity_owner" == "$(id -u)" ]] ||
+    die "expected prepared run identity has unexpected owner: $expected_identity_file"
+  [[ "$expected_identity_mode" == "600" ]] ||
+    die "expected prepared run identity must have mode 0600: $expected_identity_file"
+  [[ "$expected_identity_links" == "1" ]] ||
+    die "expected prepared run identity must have exactly one hard link: $expected_identity_file"
+  [[ "$expected_identity_size" =~ ^[1-9][0-9]{0,3}$ ]] ||
+    die "expected prepared run identity must be between 1 and 4096 bytes: $expected_identity_file"
+  (( expected_identity_size <= 4096 )) ||
+    die "expected prepared run identity must be between 1 and 4096 bytes: $expected_identity_file"
+  if LC_ALL=C od -An -tx1 -v -- "$expected_identity_file" |
+    LC_ALL=C grep -E '(^|[[:space:]])00([[:space:]]|$)' >/dev/null; then
+    die "expected prepared run identity must not contain NUL bytes: $expected_identity_file"
+  fi
+  # This one-open content check is bounded by the documented non-malicious same-host trust model.
+  expected_identity_content=""
+  IFS= read -r -N 4097 expected_identity_content <"$expected_identity_file" || true
+  [[ "$expected_identity_content" == "$prepared_identity"$'\n' ]] ||
+    die "prepared run identity changed between request validation and launch"
+fi
+
 launch_requests_dir="${AUTORESEARCH_LAUNCH_REQUESTS_DIR:-/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests}"
 if [[ "$launch_prepared" -eq 0 ]]; then
   launch_queue_unreachable=0
@@ -194,7 +238,32 @@ readonly command_handoff_file="${run_dir}/.command-handoff.json"
 launch_enqueued=0
 unit_name="openclaw-long-task-$(date +%s%N)-$$.service"
 worker_script="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run-long-task-worker.sh"
-[[ -x "$worker_script" ]] || die "long-task worker is missing or not executable: $worker_script"
+[[ -f "$worker_script" && ! -L "$worker_script" && -x "$worker_script" ]] ||
+  die "long-task worker is missing or not executable: $worker_script"
+worker_copy="$run_dir/.run-long-task-worker.sh"
+worker_copy_tmp="$(mktemp --tmpdir="$run_dir" '.run-long-task-worker.sh.tmp.XXXXXX')" ||
+  die "worker script copy failed: $worker_copy"
+if ! cp -- "$worker_script" "$worker_copy_tmp" ||
+  ! chmod 700 -- "$worker_copy_tmp" ||
+  ! mv -T -- "$worker_copy_tmp" "$worker_copy"; then
+  rm -f -- "$worker_copy_tmp" || true
+  die "worker script copy failed: $worker_copy"
+fi
+worker_copy_tmp=""
+[[ -L "$worker_copy" ]] && die "worker script copy failed: $worker_copy"
+worker_copy_metadata="$(/usr/bin/stat -c '%f %s %u %a' -- "$worker_copy")" ||
+  die "worker script copy failed: $worker_copy"
+read -r worker_copy_type worker_copy_size worker_copy_owner worker_copy_mode <<<"$worker_copy_metadata"
+[[ "$worker_copy_type" =~ ^[0-9a-fA-F]+$ ]] ||
+  die "worker script copy failed: $worker_copy"
+(( (16#$worker_copy_type & 0170000) == 0100000 )) ||
+  die "worker script copy failed: $worker_copy"
+[[ "$worker_copy_mode" == 700 ]] ||
+  die "worker script copy failed: $worker_copy"
+[[ "$worker_copy_size" =~ ^[1-9][0-9]*$ ]] ||
+  die "worker script copy failed: $worker_copy"
+[[ "$worker_copy_owner" == "$(id -u)" ]] ||
+  die "worker script copy failed: $worker_copy"
 
 cleanup_startup_marker() {
   rm -f -- "$startup_marker_file"
@@ -224,17 +293,35 @@ stop_transient_unit() {
 }
 
 # Torch/CUDA host-side allocations add pressure. MemoryHigh is a reclaim
-# throttle and MemoryMax is the kill point. Raising only the throttle to 10G
-# gives headroom without changing host-OOM arithmetic: gateway MemoryMax=10G
-# + long task 12G = 22G against 30.25 GiB of RAM. Do not raise MemoryMax; a
+# throttle and MemoryMax is the kill point. Host upgraded to 92 GiB RAM
+# (2026-09-02): gateway MemoryMax=20G + long task 64G = 84G against 92 GiB;
+# the long-task ceiling is intentionally generous — research jobs own this
+# host. A
 # prior combined-ceiling change created a host-OOM path and was reverted.
+if [[ "$launch_prepared" -eq 0 ]]; then
+  min_available_kib="${AUTORESEARCH_MIN_AVAILABLE_MEM_KIB:-14680064}"
+  [[ "$min_available_kib" =~ ^[0-9]{1,15}$ ]] ||
+    die "AUTORESEARCH_MIN_AVAILABLE_MEM_KIB must be a base-10 integer with 1 to 15 digits"
+  min_available_kib_value=$((10#$min_available_kib))
+  mem_available_kib=""
+  if [[ -r /proc/meminfo ]] &&
+    mem_available_kib="$(awk '$1 == "MemAvailable:" { if (NF == 3 && $3 == "kB") print $2; exit }' /proc/meminfo)" &&
+    [[ "$mem_available_kib" =~ ^[0-9]+$ ]]; then
+    if (( mem_available_kib < min_available_kib_value )); then
+      die "host available memory ${mem_available_kib}KiB is below the ${min_available_kib}KiB launch floor; retry when hydration/interactive load drains"
+    fi
+  else
+    printf '%s\n' 'WARNING: cannot read MemAvailable from /proc/meminfo' >&2
+  fi
+fi
 if ! "$setsid_path" "$systemd_run_path" \
   --user --no-block --collect --unit="$unit_name" --service-type=exec \
   --setenv=PATH="$transient_path" --working-directory="$working_directory" \
+  --setenv=AUTORESEARCH_WORKER_REPO_ROOT="$repo_root" \
   --setenv=AUTORESEARCH_TIMEOUT_TERM_GRACE_SECONDS="$timeout_term_grace_seconds" \
   --setenv=TMPDIR="$long_task_tmpdir" \
-  --property=MemoryHigh=10G --property=MemoryMax=12G --property=KillMode=control-group \
-  -- "$worker_script" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
+  --property=MemoryHigh=48G --property=MemoryMax=64G --property=KillMode=control-group \
+  -- "$worker_copy" "$run_dir" "$runs_root" "$startup_marker_file" "$unit_name" \
   "$prepared_identity" \
   </dev/null >/dev/null 2>&1; then
   die "detached systemd unit could not be enqueued: $unit_name"

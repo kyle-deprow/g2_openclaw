@@ -15,6 +15,7 @@ def _write_process(
     cmdline: bytes,
     environ: bytes,
     status: bytes | None = None,
+    cgroup: bytes | None = None,
 ) -> Path:
     process_dir = proc_root / str(pid)
     process_dir.mkdir()
@@ -22,6 +23,8 @@ def _write_process(
     (process_dir / "environ").write_bytes(environ)
     if status is not None:
         (process_dir / "status").write_bytes(status)
+    if cgroup is not None:
+        (process_dir / "cgroup").write_bytes(cgroup)
     return process_dir
 
 
@@ -88,14 +91,72 @@ def test_probe_falls_back_to_child_pid_without_appserver_ancestor(tmp_path: Path
     _write_process(
         proc_root,
         3000,
-        cmdline=b"codex-code-mode-host\0",
+        cmdline=b"codex-linux-sandbox\0",
         environ=f"PATH={stale_dir}\0".encode(),
-        status=b"Name:\tcodex-code-mode-host\nPPid:\t1\n",
+        status=b"Name:\tcodex-linux-sandbox\nPPid:\t1\n",
+        cgroup=b"0::/user.slice/user-1000.slice/openclaw-gateway.service\n",
     )
 
     assert appserver_probe.find_stale_arg0_directories(proc_root) == (
         appserver_probe.StaleArg0Directory(3000, stale_dir),
     )
+
+
+def test_probe_fallback_ignores_process_in_unrelated_cgroup(tmp_path: Path) -> None:
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    stale_dir = tmp_path / "codex-home" / "tmp" / "arg0" / "codex-arg0operator"
+    _write_process(
+        proc_root,
+        3001,
+        cmdline=b"codex-linux-sandbox\0",
+        environ=f"PATH={stale_dir}\0".encode(),
+        status=b"Name:\tcodex-linux-sandbox\nPPid:\t1\n",
+        cgroup=b"0::/user.slice/user-1000.slice/session-4.scope\n",
+    )
+
+    assert appserver_probe.find_stale_arg0_directories(proc_root) == ()
+
+
+def test_probe_fallback_ignores_process_without_readable_cgroup(tmp_path: Path) -> None:
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    stale_dir = tmp_path / "codex-home" / "tmp" / "arg0" / "codex-arg0unknown"
+    _write_process(
+        proc_root,
+        3002,
+        cmdline=b"codex-linux-sandbox\0",
+        environ=f"PATH={stale_dir}\0".encode(),
+        status=b"Name:\tcodex-linux-sandbox\nPPid:\t1\n",
+    )
+
+    assert appserver_probe.find_stale_arg0_directories(proc_root) == ()
+
+
+@pytest.mark.parametrize(
+    "cgroup",
+    [
+        b"0::/user.slice/user-1000.slice/openclaw-gateway.service.d\n",
+        b"0::/user.slice/user-1000.slice/openclaw-gateway.service-worker\n",
+    ],
+)
+def test_probe_fallback_requires_exact_gateway_cgroup_unit(
+    tmp_path: Path,
+    cgroup: bytes,
+) -> None:
+    proc_root = tmp_path / "proc"
+    proc_root.mkdir()
+    stale_dir = tmp_path / "codex-home" / "tmp" / "arg0" / "codex-arg0boundary"
+    _write_process(
+        proc_root,
+        3003,
+        cmdline=b"codex-linux-sandbox\0",
+        environ=f"PATH={stale_dir}\0".encode(),
+        status=b"Name:\tcodex-linux-sandbox\nPPid:\t1\n",
+        cgroup=cgroup,
+    )
+
+    assert appserver_probe.find_stale_arg0_directories(proc_root) == ()
 
 
 def test_probe_ignores_non_codex_processes_that_inherited_arg0_path(tmp_path: Path) -> None:

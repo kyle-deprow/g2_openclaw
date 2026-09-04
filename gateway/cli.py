@@ -917,6 +917,11 @@ def _archive_fresh_campaign() -> _CampaignArchive:
             "stage-inbox directory",
         ),
         (
+            DEFAULT_AUTORESEARCH_DIR / "decision-receipts",
+            archive_path / "decision-receipts",
+            "decision-receipts directory",
+        ),
+        (
             DEFAULT_AUTORESEARCH_CHECKPOINT_PATH,
             archive_path / "owner-recovery.json",
             "owner-recovery checkpoint",
@@ -1075,33 +1080,90 @@ def autoresearch_doctor() -> None:
 
     now = time.time()
     degraded: list[str] = []
+    checks: list[tuple[str, str, str | None, str | None]] = []
+
+    def sanitize_machine_field(value: str | None) -> str | None:
+        if value is None:
+            return None
+        flattened = "".join(
+            " " if ord(character) < 0x20 or ord(character) == 0x7F else character
+            for character in value
+        )
+        normalized = " ".join(flattened.split()).strip()
+        return normalized[:300] or None
+
+    def record_check(
+        check_id: str,
+        check_status: str,
+        detail: str | None = None,
+        remedy: str | None = None,
+    ) -> None:
+        checks.append(
+            (
+                check_id,
+                check_status,
+                sanitize_machine_field(detail),
+                sanitize_machine_field(remedy),
+            )
+        )
+
     console.print("autoresearch doctor")
     console.print("===================")
     console.print("systemd")
     for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
+        check_id = (
+            "systemd.gateway"
+            if unit == DEFAULT_OPENCLAW_GATEWAY_SERVICE
+            else "systemd.supervisor"
+        )
+        restart_remedy = f"systemctl --user restart {unit}"
         activity = service_states[unit]
         if activity is True:
             console.print(f"  {unit:<42} ACTIVE")
+            record_check(check_id, "ok")
         elif activity is False:
             console.print(f"  {unit:<42} INACTIVE")
             degraded.append(f"{unit} inactive")
+            record_check(check_id, "degraded", "inactive", restart_remedy)
         else:
+            probe_detail = sanitize_machine_field(service_errors.get(unit)) or "unknown"
             console.print(
-                f"  {unit:<42} ERROR probe-error: {service_errors.get(unit, 'unknown')}",
+                f"  {unit:<42} ERROR probe-error: {probe_detail}",
                 markup=False,
                 soft_wrap=True,
             )
             degraded.append(f"{unit} probe-error")
+            record_check(
+                check_id,
+                "error",
+                service_errors.get(unit) or "probe-error",
+                restart_remedy,
+            )
 
     console.print("state")
     if state is None:
+        state_detail = sanitize_machine_field(state_error) or "state unavailable"
         console.print(
-            f"  ERROR: {state_error or 'state unavailable'}",
+            f"  ERROR: {state_detail}",
             markup=False,
             soft_wrap=True,
         )
         degraded.append("state unavailable")
+        record_check(
+            "state.load",
+            "error",
+            state_error or "state unavailable",
+            "operator review required",
+        )
+        record_check("state.suspended", "error", "state unavailable", "operator review required")
+        record_check(
+            "state.campaign_review",
+            "error",
+            "state unavailable",
+            "operator review required",
+        )
     else:
+        record_check("state.load", "ok")
         counters = state.campaign_counters
         console.print(
             f"  schema={autoresearch_constants.AUTORESEARCH_STATE_SCHEMA_VERSION}"
@@ -1121,18 +1183,42 @@ def autoresearch_doctor() -> None:
         console.print(f"  registry_size={len(state.hypothesis_registry)}")
         if state.suspended:
             degraded.append("state suspended")
+            record_check(
+                "state.suspended",
+                "degraded",
+                "state suspended",
+                "operator review required",
+            )
+        else:
+            record_check("state.suspended", "ok")
         if state.campaign_review_required:
             degraded.append("campaign review required")
+            record_check(
+                "state.campaign_review",
+                "degraded",
+                "campaign review required",
+                "operator review required",
+            )
+        else:
+            record_check("state.campaign_review", "ok")
 
     console.print("control")
     if status is None:
+        status_detail = sanitize_machine_field(status_error) or "control status unavailable"
         console.print(
-            f"  ERROR: {status_error or 'control status unavailable'}",
+            f"  ERROR: {status_detail}",
             markup=False,
             soft_wrap=True,
         )
         degraded.append("control status unavailable")
+        record_check(
+            "control.status",
+            "error",
+            status_error or "control status unavailable",
+            "operator review required",
+        )
     else:
+        record_check("control.status", "ok")
         console.print(f"  owner={status.owner_agent_id} session={status.owner_session_key}")
         cycle_at = status.supervisor_last_cycle_at
         console.print(
@@ -1149,13 +1235,33 @@ def autoresearch_doctor() -> None:
 
     console.print("checkpoint")
     if checkpoint is None:
+        checkpoint_detail = sanitize_machine_field(checkpoint_error) or "checkpoint unavailable"
         console.print(
-            f"  ERROR: {checkpoint_error or 'checkpoint unavailable'}",
+            f"  ERROR: {checkpoint_detail}",
             markup=False,
             soft_wrap=True,
         )
         degraded.append("checkpoint unavailable")
+        record_check(
+            "checkpoint.load",
+            "error",
+            checkpoint_error or "checkpoint unavailable",
+            "operator review required",
+        )
+        record_check(
+            "checkpoint.alerted_keys",
+            "error",
+            "checkpoint unavailable",
+            "operator review required",
+        )
+        record_check(
+            "checkpoint.last_nudge",
+            "error",
+            "checkpoint unavailable",
+            "operator review required",
+        )
     else:
+        record_check("checkpoint.load", "ok")
         alerted_keys = sorted(
             key for key, record in checkpoint.recovery_records.items() if record.alerted
         )
@@ -1174,45 +1280,142 @@ def autoresearch_doctor() -> None:
         console.print(f"  last_nudge_at={nudge_recency}")
         if alerted_keys:
             degraded.append("alerted recovery key")
+            record_check(
+                "checkpoint.alerted_keys",
+                "degraded",
+                "alerted recovery key",
+                "operator review required",
+            )
+        else:
+            record_check("checkpoint.alerted_keys", "ok")
+        record_check("checkpoint.last_nudge", "ok", nudge_recency)
 
     console.print("app-server")
     if appserver_result is None:
+        appserver_detail = sanitize_machine_field(appserver_error) or "unknown"
         console.print(
-            f"  ERROR: probe-error: {appserver_error or 'unknown'}",
+            f"  ERROR: probe-error: {appserver_detail}",
             markup=False,
             soft_wrap=True,
         )
         degraded.append("app-server probe-error")
+        record_check(
+            "appserver.probe",
+            "error",
+            appserver_error or "probe-error",
+            "operator review required",
+        )
+        record_check(
+            "appserver.writable_roots",
+            "error",
+            "probe unavailable",
+            "operator review required",
+        )
+        record_check(
+            "appserver.stale_arg0",
+            "error",
+            "probe unavailable",
+            "operator review required",
+        )
     else:
+        record_check("appserver.probe", "ok")
         if appserver_result.missing_writable_roots:
             console.print("  missing writable roots:")
             for root in appserver_result.missing_writable_roots:
-                console.print(f"    {root}", markup=False)
+                root_detail = sanitize_machine_field(str(root)) or "-"
+                console.print(f"    {root_detail}", markup=False)
             missing_roots = ", ".join(str(root) for root in appserver_result.missing_writable_roots)
             degraded.append(f"missing writable roots: {missing_roots}")
+            record_check(
+                "appserver.writable_roots",
+                "degraded",
+                f"missing writable roots: {missing_roots}",
+                "operator review required",
+            )
         else:
             console.print("  writable roots=present")
+            record_check("appserver.writable_roots", "ok")
         if appserver_result.stale_arg0_directories:
+            stale_details: list[str] = []
             for finding in appserver_result.stale_arg0_directories:
+                path_detail = sanitize_machine_field(str(finding.path)) or "-"
                 console.print(
-                    f"  pid={finding.pid} stale arg0 dir={finding.path}; "
+                    f"  pid={finding.pid} stale arg0 dir={path_detail}; "
                     f"{APP_SERVER_RESTART_REMEDIATION}",
                     markup=False,
                     soft_wrap=True,
                 )
                 degraded.append(f"pid {finding.pid} stale arg0 dir: {finding.path}")
+                stale_details.append(f"pid {finding.pid} stale arg0 dir: {finding.path}")
+            record_check(
+                "appserver.stale_arg0",
+                "degraded",
+                "; ".join(stale_details),
+                APP_SERVER_RESTART_REMEDIATION,
+            )
         else:
             console.print("  arg0 directories=healthy")
+            record_check("appserver.stale_arg0", "ok")
 
     services_active = all(
         service_states.get(unit) is True
         for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE)
     )
-    if services_active and status is not None:
+    inconclusive_units = tuple(
+        unit
+        for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE)
+        if service_states.get(unit) is None
+    )
+    if inconclusive_units:
+        record_check(
+            "supervisor.cycle_staleness",
+            "error",
+            "systemd probe inconclusive: "
+            + ", ".join(f"{unit} probe-error" for unit in inconclusive_units),
+            "operator review required",
+        )
+    elif status is None:
+        record_check(
+            "supervisor.cycle_staleness",
+            "error",
+            "control status unavailable",
+            "operator review required",
+        )
+    elif services_active:
         if status.supervisor_last_cycle_at is None:
-            degraded.append("last supervisor cycle unavailable while services are active")
+            cycle_detail = "last supervisor cycle unavailable while services are active"
+            degraded.append(cycle_detail)
+            record_check(
+                "supervisor.cycle_staleness",
+                "degraded",
+                cycle_detail,
+                "operator review required",
+            )
         elif now - status.supervisor_last_cycle_at > 600:
-            degraded.append("last supervisor cycle is older than 10 minutes")
+            cycle_detail = "last supervisor cycle is older than 10 minutes"
+            degraded.append(cycle_detail)
+            record_check(
+                "supervisor.cycle_staleness",
+                "degraded",
+                cycle_detail,
+                "operator review required",
+            )
+        else:
+            record_check("supervisor.cycle_staleness", "ok")
+    else:
+        record_check(
+            "supervisor.cycle_staleness",
+            "ok",
+            "not evaluated while services are inactive",
+        )
+
+    for check_id, check_status, detail, remedy in checks:
+        console.print(
+            f"check={check_id} status={check_status} detail={detail or '-'} "
+            f"remedy={remedy or '-'}",
+            markup=False,
+            soft_wrap=True,
+        )
 
     if degraded:
         console.print("health=DEGRADED", markup=False)
@@ -2229,6 +2432,56 @@ def autoresearch_recover_platform_runtime(
     receipt = state.external_verification_retry_receipt
     assert receipt is not None
     console.print(f"[green]platform runtime recovery authorized:[/green] {receipt.expected_run_id}")
+
+
+@app.command("autoresearch-reseal-runtime")
+def autoresearch_reseal_runtime(
+    state_path: Path = _state_path_argument,
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        help="Exact non-empty operator reason for resealing the canonical runtime.",
+    ),
+    openclaw_config: Path = _openclaw_config_option,
+    readiness_manifest: Path = _readiness_manifest_option,
+) -> None:
+    """Operator-only resealing of the current canonical verification runtime."""
+    from gateway.autoresearch.configuration import (
+        load_autoresearch_policy,
+    )
+    from gateway.autoresearch.constants import (
+        RUNTIME_RESEAL_OPERATOR_ENV_VAR,
+        RUNTIME_RESEAL_OPERATOR_VALUE,
+    )
+    from gateway.autoresearch.operator_recovery import (
+        reseal_canonical_runtime_state_file,
+    )
+    from gateway.autoresearch.state import (
+        AutoresearchValidationContext,
+    )
+    from gateway.autoresearch_readiness import load_platform_readiness
+
+    try:
+        if os.environ.get(RUNTIME_RESEAL_OPERATOR_ENV_VAR) != (
+            RUNTIME_RESEAL_OPERATOR_VALUE
+        ):
+            raise ValueError(
+                "operator capability is required; set "
+                f"{RUNTIME_RESEAL_OPERATOR_ENV_VAR}=1 in the human/Codex shell"
+            )
+        policy = load_autoresearch_policy(openclaw_config)
+        readiness = load_platform_readiness(readiness_manifest)
+        receipt_path = reseal_canonical_runtime_state_file(
+            state_path,
+            operator_reason=reason,
+            policy=policy,
+            validation_context=AutoresearchValidationContext.from_readiness(readiness),
+        )
+    except ValueError as exc:
+        console.print(f"[red]autoresearch-reseal-runtime failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(f"[green]canonical runtime resealed:[/green] {receipt_path}")
 
 
 @app.command("autoresearch-suspend-infra")

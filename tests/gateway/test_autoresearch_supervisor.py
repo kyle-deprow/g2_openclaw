@@ -69,15 +69,19 @@ from gateway.autoresearch_readiness import (
 )
 from gateway.autoresearch_runs import (
     OUTPUT_CAPTURE_MAX_BYTES,
+    AutoresearchRunRecordError,
+    PreparedRunIdentity,
     RunFailureClassification,
     RunOutputStream,
     RunState,
     capture_output_stream,
+    capture_prepared_run_identity,
     command_sha256,
     complete_run,
     prepare_output_capture,
     prepare_run,
     start_run,
+    write_command_handoff,
 )
 from gateway.autoresearch_supervisor import (
     AUTORESEARCH_OWNER_AGENT_ID,
@@ -86,16 +90,20 @@ from gateway.autoresearch_supervisor import (
     DEFAULT_MAX_ESCALATING_RENUDGES,
     DEFAULT_OWNER_TASK_NO_WRITE_WARN_MINUTES,
     DEFAULT_RENUDGE_ESCALATION_MINUTES,
+    LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB,
     MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE,
     RECOVERY_MESSAGE,
+    RELAY_DECAY_ALERT_REASON,
     AutoresearchSupervisor,
     NativeGatewayRPC,
     OpenClawRPC,
     OpenClawUnavailableError,
+    RecoveryRecord,
     RecoveryStatus,
     ShutdownInterrupted,
     ShutdownRequested,
     SupervisorCheckpoint,
+    SupervisorCheckpointError,
     SupervisorConfig,
     SupervisorError,
     SupervisorOutcome,
@@ -107,6 +115,7 @@ from gateway.autoresearch_supervisor import (
     make_idempotency_key,
     memory_wake_acknowledgement_key,
 )
+from gateway.autoresearch_systemd import SystemdUnitStateError
 from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
 from tests.gateway.autoresearch_fixtures import write_xnys_calendar_evidence
@@ -397,6 +406,7 @@ class SupervisorEnv:
     marker_paths: list[Path]
     sessions_path: Path
     proc_root: Path
+    meminfo_path: Path
     checkpoint_path: Path
     readiness_manifest_path: Path
     readiness_identity: ReadinessIdentity
@@ -417,6 +427,11 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
     sessions_path.write_text("{}", encoding="utf-8")
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
+    meminfo_path = tmp_path / "meminfo"
+    meminfo_path.write_text(
+        f"MemAvailable: {15 * 1024 * 1024} kB\n",
+        encoding="utf-8",
+    )
     readiness_evidence = tmp_path / "readiness-evidence"
     readiness_evidence.mkdir()
     evidence: dict[str, dict[str, str | None]] = {}
@@ -456,6 +471,7 @@ def supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Superviso
         marker_paths=marker_paths,
         sessions_path=sessions_path,
         proc_root=proc_root,
+        meminfo_path=meminfo_path,
         checkpoint_path=tmp_path / "autoresearch" / "owner-recovery.json",
         readiness_manifest_path=readiness_manifest_path,
         readiness_identity=readiness.identity(),
@@ -488,6 +504,7 @@ def _supervisor(
             owner_sessions_path=env.sessions_path,
             target_repo=env.repo_root,
             proc_root=env.proc_root,
+            meminfo_path=env.meminfo_path,
             runs_root=env.runs_root,
             grace_period_seconds=grace_period_seconds,
             renudge_escalation_minutes=renudge_escalation_minutes,
@@ -535,6 +552,277 @@ def test_owner_task_no_write_threshold_has_a_finite_positive_cli_config() -> Non
         _build_arg_parser().parse_args(["--owner-task-no-write-warn-minutes", "inf"])
     with pytest.raises(SystemExit):
         _build_arg_parser().parse_args(["--owner-task-no-write-warn-minutes", "1e307"])
+
+
+def test_native_hook_relay_decay_probe_is_cadenced_and_latched(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    supervisor.config = replace(supervisor.config, journal_probe_command=("journal-stub",))
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.RELAY_DECAY_CHECK_EVERY_CYCLES",
+        2,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(
+        command: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=(
+                "native hook relay not found\n"
+                "NATIVE HOOK RELAY UNAVAILABLE\n"
+                "native hook relay not found\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+    assert len(calls) == 1
+    supervisor.run_once()
+    assert len(calls) == 1
+    supervisor.run_once()
+    assert len(calls) == 2
+
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    relay_records = {
+        key: record
+        for key, record in checkpoint.recovery_records.items()
+        if key.startswith("native-hook-relay:")
+    }
+    assert len(relay_records) == 1
+    assert next(iter(relay_records.values())).last_error is not None
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    advisory_events = [
+        event for event in events if event.get("event") == "supervisor.control_plane_advisory"
+    ]
+    assert len(advisory_events) == 1
+    assert "native hook relay decayed: 3 relay failures" in advisory_events[0]["reason"]
+    assert f"alert_reason={RELAY_DECAY_ALERT_REASON}" in advisory_events[0]["reason"]
+    assert RELAY_DECAY_ALERT_REASON == "control_plane_native_hook_relay_decayed"
+
+
+@pytest.mark.parametrize("state_kind", ["missing", "corrupt"])
+def test_native_hook_relay_decay_probe_runs_on_cadence_before_state_load(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    state_kind: str,
+) -> None:
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    supervisor.config = replace(supervisor.config, journal_probe_command=("journal-stub",))
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.RELAY_DECAY_CHECK_EVERY_CYCLES",
+        2,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(
+        command: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    if state_kind == "corrupt":
+        supervisor_env.state_path.parent.mkdir(parents=True, exist_ok=True)
+        supervisor_env.state_path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(SupervisorError):
+        supervisor.run_once()
+    assert calls == [("journal-stub",)]
+
+    with pytest.raises(SupervisorError):
+        supervisor.run_once()
+    assert calls == [("journal-stub",)]
+
+
+def test_native_hook_relay_decay_alert_persistence_failure_is_nonfatal(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.RELAY_DECAY_CHECK_EVERY_CYCLES",
+        1,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["journal-stub"],
+            returncode=0,
+            stdout=(
+                "native hook relay not found\n"
+                "native hook relay unavailable\n"
+                "native hook relay not found\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    def fail_alert(*, key: str, reason: str) -> None:
+        del key, reason
+        raise SupervisorCheckpointError("synthetic checkpoint save failure")
+
+    monkeypatch.setattr(supervisor, "_persistent_control_plane_alert", fail_alert)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = supervisor.run_once()
+
+    assert result.outcome is not SupervisorOutcome.ERROR
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert {
+        "event": "supervisor.relay_probe_failed",
+        "detail": "synthetic checkpoint save failure",
+    } in events
+
+
+def test_native_hook_relay_decay_probe_failures_and_low_bursts_are_nonfatal(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.RELAY_DECAY_CHECK_EVERY_CYCLES",
+        1,
+    )
+    results = iter(
+        (
+            subprocess.CompletedProcess(
+                args=["journal-stub"], returncode=0, stdout="relay unavailable", stderr=""
+            ),
+            subprocess.CompletedProcess(
+                args=["journal-stub"], returncode=1, stdout="", stderr="journal unavailable"
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.subprocess.run",
+        lambda *_args, **_kwargs: next(results),
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+    supervisor.run_once()
+
+    checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
+    assert not any(
+        key.startswith("native-hook-relay:") for key in checkpoint.recovery_records
+    )
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert not any(event.get("event") == "supervisor.control_plane_advisory" for event in events)
+    assert sum(event.get("event") == "supervisor.relay_probe_failed" for event in events) == 1
+
+
+def test_native_hook_relay_probe_replaces_invalid_utf8_and_bounds_stderr(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.RELAY_DECAY_CHECK_EVERY_CYCLES",
+        1,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.subprocess.run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            args=["journal-stub"],
+            returncode=1,
+            stdout=b"\xff\xfe",
+            stderr=b"x" * 1000,
+        ),
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor.run_once()
+
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    failures = [event for event in events if event.get("event") == "supervisor.relay_probe_failed"]
+    assert failures == [
+        {"event": "supervisor.relay_probe_failed", "returncode": 1, "stderr": "x" * 500}
+    ]
+
+
+def test_corrupt_checkpoint_is_tolerated_by_latched_advisory_relog(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor_env.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    supervisor_env.checkpoint_path.write_bytes(b"\xff\xfe")
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.LATCHED_ADVISORY_RELOG_EVERY_CYCLES",
+        1,
+    )
+
+    supervisor._cycle_count = 1
+    supervisor._relog_latched_advisories()
+
+
+def test_latched_advisories_are_relogged_as_one_structured_warning(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    checkpoint = SupervisorCheckpoint(
+        recovery_records={
+            "z-key": RecoveryRecord(alerted=True, last_error="z-error"),
+            "a-key": RecoveryRecord(alerted=True, last_error="a-error"),
+            "quiet": RecoveryRecord(alerted=False, last_error="quiet-error"),
+        }
+    )
+    checkpoint.save(supervisor_env.checkpoint_path)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.LATCHED_ADVISORY_RELOG_EVERY_CYCLES",
+        2,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor._cycle_count = 1
+    supervisor._relog_latched_advisories()
+    supervisor._cycle_count = 2
+    supervisor._relog_latched_advisories()
+
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    relogs = [event for event in events if event.get("event") == "supervisor.latched_advisories"]
+    assert relogs == [
+        {
+            "count": 2,
+            "event": "supervisor.latched_advisories",
+            "keys": "a-key,z-key",
+            "last_errors": "a-error; z-error",
+        }
+    ]
+    SupervisorCheckpoint().save(supervisor_env.checkpoint_path)
+    supervisor._cycle_count = 4
+    supervisor._relog_latched_advisories()
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert sum(event.get("event") == "supervisor.latched_advisories" for event in events) == 1
 
 
 def test_native_gateway_rpc_reports_a_websocket_timeout_without_cli_fallback(
@@ -688,6 +976,8 @@ def _write_matching_run(
     task_label: str,
     run_name: str,
     running: bool = False,
+    pid: int = 123,
+    systemd_unit: str | None = None,
 ) -> Path:
     run_dir = env.runs_root / f"iteration-{state.iteration}" / state.phase.value / run_name
     command = (task_label, "--opaque")
@@ -725,7 +1015,12 @@ def _write_matching_run(
         runs_root=env.runs_root,
         command=command,
     )
-    start_run(run_dir=run_dir, pid=123, runs_root=env.runs_root)
+    start_run(
+        run_dir=run_dir,
+        pid=pid,
+        systemd_unit=systemd_unit,
+        runs_root=env.runs_root,
+    )
     if not running:
         complete_run(
             run_dir=run_dir,
@@ -735,6 +1030,405 @@ def _write_matching_run(
             peak_rss_bytes=None,
         )
     return run_dir
+
+
+def test_sweep_finalizes_dead_stale_run_and_preserves_live_and_current_runs(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    stale_state = replace(state, iteration=state.iteration - 1)
+    dead_dir = _write_matching_run(
+        supervisor_env,
+        stale_state,
+        task_label="stale-dead",
+        run_name="stale-dead",
+        running=True,
+    )
+    live_dir = _write_matching_run(
+        supervisor_env,
+        stale_state,
+        task_label="stale-live",
+        run_name="stale-live",
+        running=True,
+    )
+    current_dir = _write_matching_run(
+        supervisor_env,
+        state,
+        task_label="current",
+        run_name="current",
+        running=True,
+    )
+    dead_status_payload = json.loads(
+        (dead_dir / "status.json").read_text(encoding="utf-8")
+    )
+    dead_status_payload["pid"] = 124
+    (dead_dir / "status.json").write_text(
+        json.dumps(dead_status_payload),
+        encoding="utf-8",
+    )
+    live_proc = supervisor_env.proc_root / "123"
+    live_proc.mkdir()
+    (live_proc / "stat").write_text("123 (worker) S 1 2 3\n", encoding="utf-8")
+    supervisor._cycle_state = state
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor._sweep_orphaned_running_runs()
+
+    dead_status = json.loads((dead_dir / "status.json").read_text(encoding="utf-8"))
+    live_status = json.loads((live_dir / "status.json").read_text(encoding="utf-8"))
+    current_status = json.loads((current_dir / "status.json").read_text(encoding="utf-8"))
+    assert dead_status["state"] == RunState.FAILED.value
+    assert dead_status["failure_classification"] == RunFailureClassification.PROCESS_ERROR.value
+    assert live_status["state"] == RunState.RUNNING.value
+    assert current_status["state"] == RunState.RUNNING.value
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    swept = [event for event in events if event.get("event") == "supervisor.swept_orphaned_run"]
+    assert len(swept) == 1
+    assert swept[0]["run_directory"] == str(dead_dir)
+
+
+def test_sweep_finalizes_at_most_three_orphaned_runs_per_cycle(
+    supervisor_env: SupervisorEnv,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    stale_state = replace(state, iteration=state.iteration - 1)
+    run_dirs = [
+        _write_matching_run(
+            supervisor_env,
+            stale_state,
+            task_label=f"stale-{index}",
+            run_name=f"stale-{index}",
+            running=True,
+        )
+        for index in range(4)
+    ]
+    supervisor._cycle_state = state
+
+    supervisor._sweep_orphaned_running_runs()
+
+    states = [
+        json.loads((run_dir / "status.json").read_text(encoding="utf-8"))["state"]
+        for run_dir in run_dirs
+    ]
+    assert states.count(RunState.FAILED.value) == 3
+    assert states.count(RunState.RUNNING.value) == 1
+
+
+def test_sweep_respects_active_and_inconclusive_units_and_classifies_oom(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    stale_state = replace(state, iteration=state.iteration - 1)
+    active_dir = _write_matching_run(
+        supervisor_env,
+        stale_state,
+        task_label="active-unit",
+        run_name="a-active",
+        running=True,
+        systemd_unit="active.service",
+    )
+    inconclusive_dir = _write_matching_run(
+        supervisor_env,
+        stale_state,
+        task_label="inconclusive-unit",
+        run_name="b-inconclusive",
+        running=True,
+        systemd_unit="inconclusive.service",
+    )
+    oom_dir = _write_matching_run(
+        supervisor_env,
+        stale_state,
+        task_label="oom-unit",
+        run_name="c-oom",
+        running=True,
+        systemd_unit="oom.service",
+    )
+    live_proc = supervisor_env.proc_root / "123"
+    live_proc.mkdir()
+    (live_proc / "stat").write_text("123 (worker) S 1 2 3\n", encoding="utf-8")
+
+    def fake_unit_active(
+        unit: str,
+        *,
+        run_command: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]],
+    ) -> bool:
+        del run_command
+        if unit == "active.service":
+            return True
+        if unit == "inconclusive.service":
+            raise SystemdUnitStateError("synthetic inconclusive state")
+        return False
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.systemd_unit_is_active",
+        fake_unit_active,
+    )
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.subprocess.run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="Result=oom-kill\nActiveState=inactive\nExecMainStatus=9\nMemoryPeak=2048\n",
+            stderr="",
+        ),
+    )
+    supervisor._cycle_state = state
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor._sweep_orphaned_running_runs()
+
+    active_status = json.loads((active_dir / "status.json").read_text(encoding="utf-8"))
+    inconclusive_status = json.loads(
+        (inconclusive_dir / "status.json").read_text(encoding="utf-8")
+    )
+    oom_status = json.loads((oom_dir / "status.json").read_text(encoding="utf-8"))
+    assert active_status["state"] == RunState.RUNNING.value
+    assert inconclusive_status["state"] == RunState.RUNNING.value
+    assert oom_status["state"] == RunState.FAILED.value
+    assert oom_status["failure_classification"] == RunFailureClassification.RESOURCE_EXHAUSTED.value
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    assert any(event.get("event") == "supervisor.swept_orphaned_run" for event in events)
+
+
+def test_sweep_defers_after_systemd_probe_budget_and_logs_once(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    stale_state = replace(state, iteration=state.iteration - 1)
+    run_dirs = [
+        _write_matching_run(
+            supervisor_env,
+            stale_state,
+            task_label=f"unit-{index}",
+            run_name=f"unit-{index}",
+            running=True,
+            systemd_unit=f"unit-{index}.service",
+        )
+        for index in range(7)
+    ]
+    probed: list[str] = []
+    systemd_calls: list[tuple[str, ...]] = []
+
+    def fake_unit_active(
+        unit: str,
+        *,
+        run_command: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]],
+    ) -> bool:
+        run_command(("systemctl", "--user", "is-active", "--quiet", unit))
+        probed.append(unit)
+        return True
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.systemd_unit_is_active",
+        fake_unit_active,
+    )
+    def fake_run(
+        command: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        systemd_calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    supervisor._cycle_state = state
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    supervisor._sweep_orphaned_running_runs()
+
+    assert len(probed) == 6
+    assert len(systemd_calls) == 6
+    assert all(
+        json.loads((run_dir / "status.json").read_text(encoding="utf-8"))["state"]
+        == RunState.RUNNING.value
+        for run_dir in run_dirs
+    )
+    events = [json.loads(record.getMessage()) for record in caplog.records]
+    budget_events = [
+        event
+        for event in events
+        if event.get("event") == "supervisor.sweep_budget_truncated"
+    ]
+    assert budget_events == [
+        {
+            "budget": "systemd_probes",
+            "event": "supervisor.sweep_budget_truncated",
+            "limit": 6,
+        }
+    ]
+
+
+def test_sweep_systemd_subprocess_budget_counts_multi_call_probes(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    state = supervisor._load_state()
+    stale_state = replace(state, iteration=state.iteration - 1)
+    run_dirs = [
+        _write_matching_run(
+            supervisor_env,
+            stale_state,
+            task_label=f"unit-{index}",
+            run_name=f"unit-{index}",
+            running=True,
+            systemd_unit=f"unit-{index}.service",
+        )
+        for index in range(10)
+    ]
+    systemd_calls: list[tuple[str, ...]] = []
+
+    def fake_run(
+        command: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        systemd_calls.append(command)
+        if "is-active" in command:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=3,
+                stdout="",
+                stderr="",
+            )
+        if "LoadState" in " ".join(command):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="LoadState=loaded\nActiveState=inactive\nSubState=dead\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="Result=success\nActiveState=inactive\nExecMainStatus=0\nMemoryPeak=2048\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    supervisor._cycle_state = state
+
+    supervisor._sweep_orphaned_running_runs()
+
+    assert len(systemd_calls) <= 6
+    assert len(systemd_calls) == 6
+    assert sum(
+        json.loads((run_dir / "status.json").read_text(encoding="utf-8"))["state"]
+        == RunState.FAILED.value
+        for run_dir in run_dirs
+    ) == 2
+
+
+def test_sweep_reloads_state_after_terminal_verification_consumption(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    seen_states: list[AutoresearchState | None] = []
+
+    def consume(state: AutoresearchState) -> SupervisorResult:
+        _write_state(
+            supervisor_env.state_path,
+            iteration=state.iteration + 1,
+            platform_readiness=supervisor_env.readiness_identity,
+        )
+        return SupervisorResult(SupervisorOutcome.NUDGED, "detached_verification_failure_advanced")
+
+    monkeypatch.setattr(supervisor, "_consume_terminal_verification_run", consume)
+    monkeypatch.setattr(
+        supervisor,
+        "_sweep_orphaned_running_runs",
+        lambda: seen_states.append(supervisor._cycle_state),
+    )
+
+    result = supervisor.run_once()
+
+    assert result.reason == "detached_verification_failure_advanced"
+    assert seen_states == [supervisor._load_state()]
+
+
+def test_failed_wake_detail_re_read_settles_to_succeeded_record(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    failed = SimpleNamespace(
+        status=SimpleNamespace(
+            state=RunState.FAILED,
+            output_capture=None,
+            failure_classification=None,
+        ),
+        run_directory=supervisor_env.runs_root / "settling-run",
+    )
+    succeeded = SimpleNamespace(
+        status=SimpleNamespace(state=RunState.SUCCEEDED),
+        run_directory=failed.run_directory,
+    )
+    monkeypatch.setattr(supervisor, "_matching_verification_runs", lambda **_kwargs: (failed,))
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.read_run_record",
+        lambda **_kwargs: succeeded,
+    )
+
+    detail = supervisor._with_current_failed_detached_run_detail(
+        supervisor._load_state(),
+        "wake",
+    )
+
+    assert "outcome=succeeded" in detail
+    assert "outcome=failed" not in detail
+
+
+def test_failed_wake_detail_includes_stage_failure_and_preserves_it_when_bounded(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _prepare_stale_state(supervisor_env)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+    expected_artifact = supervisor_env.state_path.parent / "run.json"
+    expected_artifact.write_text(
+        json.dumps({"failure": {"category": "panel", "message": "x" * 250}}),
+        encoding="utf-8",
+    )
+    failed = SimpleNamespace(
+        manifest=SimpleNamespace(expected_artifact_path=str(expected_artifact)),
+        status=SimpleNamespace(
+            state=RunState.FAILED,
+            output_capture=SimpleNamespace(
+                stderr=SimpleNamespace(relative_path="missing-stderr.log", truncated=True)
+            ),
+            failure_classification=RunFailureClassification.PROCESS_ERROR,
+            exit_code=23,
+        ),
+        run_directory=supervisor_env.runs_root / "stage-failed",
+    )
+    monkeypatch.setattr(supervisor, "_matching_verification_runs", lambda **_kwargs: (failed,))
+
+    detail = supervisor._with_current_failed_detached_run_detail(
+        supervisor._load_state(),
+        "wake",
+    )
+    bounded = supervisor._bounded_wake_message(detail + (" context" * 300))
+
+    assert "stage_failure=panel:" in detail
+    assert "stage_failure=panel:" in bounded
+    assert len(bounded.encode("utf-8")) <= 1500
 
 
 def _write_launch_request(
@@ -766,6 +1460,68 @@ def _write_launch_request(
     return request_path
 
 
+def _write_prepared_v2_launch_request(
+    env: SupervisorEnv,
+    *,
+    name: str = "request.json",
+    run_dir: Path | None = None,
+) -> tuple[Path, PreparedRunIdentity]:
+    selected_run_dir = (
+        env.runs_root / "iteration-4" / "verification" / "attempt-1" if run_dir is None else run_dir
+    )
+    command = ("verify-command", "--opaque-value")
+    manifest_path = env.state_path.parent / f"{name}-manifest.json"
+    manifest_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "iteration": 4,
+                "phase": "verification",
+                "attempt": 1,
+                "task_label": "verification",
+                "state_reference_sha256": "a" * 64,
+                "instruction_manifest_sha256": "b" * 64,
+                "run_directory": str(selected_run_dir),
+                "working_directory": str(env.repo_root),
+                "command_sha256": command_sha256(command),
+                "expected_artifact_path": None,
+                "timeout_seconds": None,
+                "compute_target": "none",
+                "projected_model_seconds": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=selected_run_dir,
+        runs_root=env.runs_root,
+        command=command,
+    )
+    write_command_handoff(
+        run_dir=selected_run_dir,
+        runs_root=env.runs_root,
+        command=command,
+    )
+    identity = capture_prepared_run_identity(
+        run_dir=selected_run_dir,
+        runs_root=env.runs_root,
+    )
+    request_path = _write_launch_request(
+        env,
+        name=name,
+        run_dir=selected_run_dir,
+        payload={
+            "schema_version": 2,
+            "run_dir": str(selected_run_dir),
+            "runs_root": str(env.runs_root),
+            "prepared_identity": identity.to_dict(),
+        },
+    )
+    return request_path, identity
+
+
 def test_launch_request_inbox_accepts_one_request_and_invokes_prepared_launcher(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
@@ -792,10 +1548,392 @@ def test_launch_request_inbox_accepts_one_request_and_invokes_prepared_launcher(
         "--runs-root",
         str(supervisor_env.runs_root),
     ]
+    assert "--expected-identity-file" not in args
     assert kwargs["cwd"] == Path(__file__).resolve().parents[2]
     assert kwargs.get("env") is None
     assert kwargs["timeout"] == 30.0
     assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+
+
+def test_launch_request_inbox_rejects_v2_without_prepared_identity(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_dir": str(
+                    supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+                ),
+                "runs_root": str(supervisor_env.runs_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert result is None
+    assert rejection_events[-1]["reason"] == (
+        "request schema_version 2 requires a prepared_identity object"
+    )
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+
+
+def test_launch_request_inbox_rejects_v2_with_invalid_prepared_identity(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_dir": str(
+                    supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+                ),
+                "runs_root": str(supervisor_env.runs_root),
+                "prepared_identity": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert result is None
+    assert rejection_events[-1]["reason"].startswith("request prepared_identity is invalid: ")
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+
+
+def test_launch_request_inbox_rejects_v2_when_prepared_identity_validation_fails(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path, _identity = _write_prepared_v2_launch_request(supervisor_env)
+
+    def fail_validation(**kwargs: object) -> None:
+        del kwargs
+        raise AutoresearchRunRecordError("identity mismatch")
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.validate_prepared_run_identity",
+        fail_validation,
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert result is None
+    assert rejection_events[-1]["reason"] == (
+        "prepared identity validation failed: identity mismatch"
+    )
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+
+
+def test_launch_request_inbox_accepts_v2_and_passes_prepared_identity_to_validator(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path, identity = _write_prepared_v2_launch_request(supervisor_env)
+    validation_calls: list[tuple[Path, Path, PreparedRunIdentity]] = []
+    launcher_calls: list[list[str]] = []
+    expected_identity_contents: list[bytes] = []
+
+    def record_validation(
+        *,
+        run_dir: Path,
+        runs_root: Path,
+        identity: PreparedRunIdentity,
+    ) -> None:
+        validation_calls.append((run_dir, runs_root, identity))
+
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del kwargs
+        launcher_calls.append(args)
+        expected_path = Path(args[args.index("--expected-identity-file") + 1])
+        expected_identity_contents.append(expected_path.read_bytes())
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "gateway.autoresearch_supervisor.validate_prepared_run_identity",
+        record_validation,
+    )
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert validation_calls == [
+        (
+            supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1",
+            supervisor_env.runs_root,
+            identity,
+        )
+    ]
+    assert len(launcher_calls) == 1
+    assert launcher_calls[0][1:7] == [
+        str(Path(__file__).resolve().parents[2] / "scripts" / "run-long-task.sh"),
+        "--launch-prepared",
+        "--run-dir",
+        str(supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"),
+        "--runs-root",
+        str(supervisor_env.runs_root),
+    ]
+    assert launcher_calls[0][7] == "--expected-identity-file"
+    expected_identity_path = Path(launcher_calls[0][8])
+    assert expected_identity_path.name.startswith(".expected-identity-")
+    assert expected_identity_contents == [
+        (
+            json.dumps(identity.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+    ]
+    assert not expected_identity_path.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+
+
+def test_launch_request_inbox_rejects_duplicate_prepared_identity_keys(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path, _identity = _write_prepared_v2_launch_request(supervisor_env)
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "run_dir": str(
+                    supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1"
+                ),
+                "runs_root": str(supervisor_env.runs_root),
+            }
+        )[:-1]
+        + ',"prepared_identity":{"schema_version":1,"schema_version":1,"unknown":1}}',
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert result is None
+    assert rejection_events[-1]["reason"] == (
+        "request prepared_identity is invalid: duplicate keys"
+    )
+    reason_path = supervisor_env.launch_requests_path / "rejected" / f"{request_path.name}.reason"
+    assert reason_path.read_text(encoding="utf-8") == rejection_events[-1]["reason"]
+
+
+def test_launch_request_inbox_does_not_reject_duplicate_keys_in_unrelated_nested_object(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path, _identity = _write_prepared_v2_launch_request(supervisor_env)
+    request_path.write_text(
+        request_path.read_text(encoding="utf-8")[:-1]
+        + ',"unrelated":{"schema_version":1,"schema_version":1}}',
+        encoding="utf-8",
+    )
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+
+
+def test_launch_request_inbox_rejects_oversized_numeric_literal(
+    supervisor_env: SupervisorEnv,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    request_path.write_text(
+        (
+            '{"schema_version":1,"run_dir":'
+            + json.dumps(
+                str(supervisor_env.runs_root / "iteration-4" / "verification" / "attempt-1")
+            )
+            + ',"runs_root":'
+            + json.dumps(str(supervisor_env.runs_root))
+            + ',"oversized":'
+            + "9" * 5000
+            + "}"
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert result is None
+    assert rejection_events[-1]["reason"].startswith("request is not valid JSON: ")
+    assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+
+
+def test_launch_request_rejection_reason_write_failure_does_not_change_rejection(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(
+        supervisor_env,
+        payload={"schema_version": 3, "run_dir": "", "runs_root": ""},
+    )
+
+    fsync_kinds: list[str] = []
+
+    def fail_reason_fsync(fd: int) -> None:
+        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        fsync_kinds.append(kind)
+        if kind == "file":
+            raise OSError("reason storage unavailable")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.os.fsync", fail_reason_fsync)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is None
+    assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+    assert fsync_kinds == ["directory", "file"]
+    assert any(
+        json.loads(record.message).get("event")
+        == "supervisor.launch_request_rejection_reason_write_failed"
+        for record in caplog.records
+    )
+
+
+def test_launch_request_inbox_defers_low_memory_and_retries(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    supervisor_env.meminfo_path.write_text(
+        f"MemAvailable: {LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB - 1} kB\n",
+        encoding="utf-8",
+    )
+    launcher_calls = 0
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal launcher_calls
+        del args, kwargs
+        launcher_calls += 1
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    supervisor = _supervisor(supervisor_env, FakeOpenClaw())
+
+    deferred = supervisor._consume_launch_request_inbox()
+
+    assert deferred == SupervisorResult(
+        SupervisorOutcome.NO_ACTION,
+        "launch_request_deferred_low_memory",
+    )
+    assert request_path.exists()
+    assert not (supervisor_env.launch_requests_path / "accepted").exists()
+    assert not (supervisor_env.launch_requests_path / "rejected").exists()
+    assert launcher_calls == 0
+
+    supervisor_env.meminfo_path.write_text(
+        f"MemAvailable: {LAUNCH_REQUEST_MIN_HOST_AVAILABLE_KIB} kB\n",
+        encoding="utf-8",
+    )
+    accepted = supervisor._consume_launch_request_inbox()
+
+    assert accepted == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert not request_path.exists()
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+    assert launcher_calls == 1
+
+
+def test_launch_request_inbox_launches_when_meminfo_is_unreadable(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    supervisor_env.meminfo_path.unlink()
+    supervisor_env.meminfo_path.mkdir()
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    meminfo_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_meminfo_unreadable"
+    ]
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert meminfo_events[-1]["request"] == request_path.name
+    assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
+
+
+def test_launch_request_inbox_treats_non_kib_meminfo_as_unreadable(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    supervisor_env.meminfo_path.write_text("MemAvailable: 999999999 MB\n", encoding="utf-8")
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        del args, kwargs
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    meminfo_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_meminfo_unreadable"
+    ]
+    assert result == SupervisorResult(SupervisorOutcome.NUDGED, "launch_request_executed")
+    assert meminfo_events[-1]["request"] == request_path.name
     assert (supervisor_env.launch_requests_path / "accepted" / request_path.name).exists()
 
 
@@ -831,12 +1969,12 @@ def test_launch_request_inbox_rejects_invalid_requests(
         target = supervisor_env.launch_requests_path / "hard-link-source"
         os.link(request_path, target)
     elif case == "oversized":
-        request_path.write_text("x" * 4097, encoding="utf-8")
+        request_path.write_text("x" * 8193, encoding="utf-8")
     elif case == "invalid_json":
         request_path.write_text("{", encoding="utf-8")
     elif case == "wrong_schema":
         request_path.write_text(
-            json.dumps({"schema_version": 2, "run_dir": "", "runs_root": ""}),
+            json.dumps({"schema_version": 3, "run_dir": "", "runs_root": ""}),
             encoding="utf-8",
         )
     elif case == "relative_path":
@@ -933,7 +2071,11 @@ def test_launch_request_inbox_rejects_invalid_requests(
     assert result is None
     assert launcher_calls == 0
     assert not request_path.exists()
-    assert any((supervisor_env.launch_requests_path / "rejected").iterdir())
+    rejected_path = supervisor_env.launch_requests_path / "rejected"
+    assert any(rejected_path.iterdir())
+    reason_path = rejected_path / f"{request_path.name}.reason"
+    assert reason_path.exists()
+    assert stat.S_IMODE(reason_path.stat().st_mode) == 0o600
 
 
 def test_launch_request_inbox_executes_at_most_one_request_per_cycle(
@@ -992,6 +2134,8 @@ def test_launch_request_ttl_archives_old_request_and_executes_fresh_request(
     assert calls == 1
     assert not old.exists()
     assert (supervisor_env.launch_requests_path / "rejected" / ".stale-old.json").exists()
+    stale_reason_path = supervisor_env.launch_requests_path / "rejected" / ".stale-old.json.reason"
+    assert stale_reason_path.exists()
     assert not fresh.exists()
     assert (supervisor_env.launch_requests_path / "accepted" / fresh.name).exists()
     stale_events = [
@@ -1001,6 +2145,12 @@ def test_launch_request_ttl_archives_old_request_and_executes_fresh_request(
     ]
     assert stale_events[0]["request"] == "old.json"
     assert stale_events[0]["age_seconds"] > 30.0 * 60.0
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert stale_reason_path.read_text(encoding="utf-8") == rejection_events[0]["reason"]
 
 
 def test_stale_launch_archive_rejects_replaced_inode(
@@ -1198,6 +2348,7 @@ def test_stale_launch_archive_cleans_archive_when_publisher_wins_rollback(
 def test_launch_request_inbox_launcher_failure_alerts_and_rejects_request(
     supervisor_env: SupervisorEnv,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     request_path = _write_launch_request(supervisor_env)
 
@@ -1205,14 +2356,78 @@ def test_launch_request_inbox_launcher_failure_alerts_and_rejects_request(
         return subprocess.CompletedProcess([], 1, stdout="out", stderr="failed")
 
     monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+    caplog.set_level(logging.WARNING, logger="gateway.autoresearch_supervisor")
 
     result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
 
     assert result is None
     assert not request_path.exists()
     assert (supervisor_env.launch_requests_path / "rejected" / request_path.name).exists()
+    rejection_events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "supervisor.launch_request_rejected"
+    ]
+    assert len(rejection_events) == 1
+    assert rejection_events[0]["reason"] == (
+        "launch_request_execution_failed: returncode=1; stdout=out; stderr=failed"
+    )
     checkpoint = SupervisorCheckpoint.load(supervisor_env.checkpoint_path)
     assert checkpoint.recovery_records[f"launch-request:{request_path.name}"].alerted is True
+
+
+def test_launch_request_inbox_quarantines_invalid_utf8_launcher_failure(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _write_launch_request(supervisor_env)
+    calls: list[dict[str, object]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        del args
+        calls.append(kwargs)
+        return subprocess.CompletedProcess([], 1, stdout=b"\xff", stderr=b"\xfe")
+
+    monkeypatch.setattr("gateway.autoresearch_supervisor.subprocess.run", fake_run)
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is None
+    assert calls[0]["text"] is False
+    assert not request_path.exists()
+    rejected_path = supervisor_env.launch_requests_path / "rejected"
+    assert (rejected_path / request_path.name).exists()
+    reason = (rejected_path / f"{request_path.name}.reason").read_text(encoding="utf-8")
+    assert "�" in reason
+
+
+def test_launch_request_rejection_reason_collision_moves_request_with_same_suffix(
+    supervisor_env: SupervisorEnv,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_path = _write_launch_request(
+        supervisor_env,
+        payload={"schema_version": 3, "run_dir": "", "runs_root": ""},
+    )
+    rejected_path = supervisor_env.launch_requests_path / "rejected"
+    rejected_path.mkdir()
+    rejected_path.chmod(0o700)
+    existing_reason = rejected_path / f"{request_path.name}.reason"
+    existing_reason.write_text("reason for another request", encoding="utf-8")
+
+    result = _supervisor(supervisor_env, FakeOpenClaw())._consume_launch_request_inbox()
+
+    assert result is None
+    assert existing_reason.read_text(encoding="utf-8") == "reason for another request"
+    quarantined_requests = [
+        path
+        for path in rejected_path.iterdir()
+        if path.is_file() and not path.name.endswith(".reason")
+    ]
+    assert len(quarantined_requests) == 1
+    quarantined = quarantined_requests[0]
+    assert quarantined.name != request_path.name
+    assert (rejected_path / f"{quarantined.name}.reason").exists()
 
 
 def test_launch_request_inbox_rejection_failure_does_not_starve_other_entries(
