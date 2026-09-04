@@ -100,6 +100,51 @@ def _manifest_v2(
     return raw
 
 
+def _write_execution_contract_state(
+    tmp_path: Path, *, implementation_result: bool = True
+) -> tuple[Path, Path, Path]:
+    from gateway.autoresearch.artifacts import ImplementationResultArtifact, SetupContextArtifact
+    from gateway.autoresearch.enums import MetricDirection
+    from gateway.autoresearch.state import AutoresearchState
+
+    quantipy_root = tmp_path / "quantipy"
+    workspace = tmp_path / "workspace"
+    manifest_path = workspace / "experiment-manifest.json"
+    artifact = (
+        ImplementationResultArtifact(
+            summary="implemented",
+            workspace_path=str(workspace),
+            commit_sha="abcdef1234567890",
+            module_path="src/quantipy/strategy.py",
+            notebook_path="notebooks/experiment.ipynb",
+            tests_added_or_updated=(),
+            commands_run=(),
+            experiment_manifest_path=str(manifest_path),
+            experiment_manifest_sha256="a" * 64,
+        )
+        if implementation_result
+        else None
+    )
+    state = AutoresearchState(
+        phase=Phase.IMPLEMENTATION,
+        iteration=7,
+        setup=SetupContextArtifact(
+            goal="implement",
+            metric_name="metric",
+            metric_direction=MetricDirection.MAXIMIZE,
+            target_repo=str(quantipy_root),
+            writable_scope="src",
+            baseline_summary="baseline",
+            hard_constraints=(),
+            data_sources=(),
+        ),
+        implementation_result=artifact,
+    )
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state.to_dict()), encoding="utf-8")
+    return state_path, quantipy_root, tmp_path / "runs"
+
+
 def _historical_manifest(run_dir: Path) -> dict[str, object]:
     raw = _manifest(run_dir)
     raw["schema_version"] = 1
@@ -1547,6 +1592,95 @@ def test_complete_killed_run_reports_resource_exhaustion_with_exact_evidence(
     assert record.status.resource_usage.peak_rss_bytes == 1024
 
 
+def _prepare_run_with_unfinalized_capture(tmp_path: Path) -> tuple[Path, Path]:
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(_manifest(run_dir)), encoding="utf-8")
+    prepare_run(
+        manifest_path=manifest_path,
+        run_dir=run_dir,
+        runs_root=runs_root,
+        command=("verify-command", "--opaque-value"),
+    )
+    prepare_output_capture(run_dir=run_dir, runs_root=runs_root)
+    start_run(run_dir=run_dir, pid=123, runs_root=runs_root)
+    (run_dir / "stdout.log").write_bytes(b"partial stdout\n")
+    (run_dir / "stderr.log").write_bytes(b"partial stderr\n")
+    return runs_root, run_dir
+
+
+def test_complete_force_unfinalizable_records_current_capture_files(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir = _prepare_run_with_unfinalized_capture(tmp_path)
+
+    complete_run(
+        run_dir=run_dir,
+        runs_root=runs_root,
+        exit_code=137,
+        signal_number=9,
+        peak_rss_bytes=None,
+        failure_classification=RunFailureClassification.RESOURCE_EXHAUSTED,
+        force_unfinalizable=True,
+    )
+
+    record = read_run_record(run_dir=run_dir, runs_root=runs_root)
+    assert record.status.state is RunState.FAILED
+    assert record.status.output_capture is not None
+    assert record.status.output_capture.capture_receipts_missing is True
+    assert record.status.output_capture.stdout.bytes_stored == len(b"partial stdout\n")
+    assert record.status.output_capture.stdout.bytes_observed == len(b"partial stdout\n")
+    assert record.status.output_capture.stdout.sha256 == sha256(
+        b"partial stdout\n"
+    ).hexdigest()
+    assert record.status.output_capture.stderr.bytes_stored == len(b"partial stderr\n")
+    assert record.status.output_capture.stderr.sha256 == sha256(
+        b"partial stderr\n"
+    ).hexdigest()
+
+
+def test_complete_without_force_unfinalizable_keeps_missing_receipt_error(
+    tmp_path: Path,
+) -> None:
+    runs_root, run_dir = _prepare_run_with_unfinalized_capture(tmp_path)
+
+    with pytest.raises(AutoresearchRunRecordError, match="missing stdout capture receipt"):
+        complete_run(
+            run_dir=run_dir,
+            runs_root=runs_root,
+            exit_code=137,
+            signal_number=9,
+            peak_rss_bytes=None,
+            failure_classification=RunFailureClassification.RESOURCE_EXHAUSTED,
+        )
+
+
+def test_force_unfinalizable_requires_a_failure_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "complete",
+            "--run-dir",
+            str(tmp_path / "run"),
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--exit-code",
+            "137",
+            "--force-unfinalizable",
+        ],
+    )
+    with pytest.raises(
+        AutoresearchRunRecordError,
+        match="force-unfinalizable requires a failure classification",
+    ):
+        autoresearch_runs._main()
+
+
 def test_output_capture_keeps_streams_private_and_out_of_status_content(tmp_path: Path) -> None:
     runs_root = tmp_path / "runs"
     run_dir = runs_root / "iteration-7" / "verification" / "attempt-2"
@@ -2407,6 +2541,69 @@ def test_prepared_run_identity_cli_roundtrip(
     )
     assert autoresearch_runs._main() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_print_execution_contract_cli_emits_the_canonical_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_path, quantipy_root, runs_root = _write_execution_contract_state(tmp_path)
+    state_before = state_path.read_bytes()
+    run_id = "autoresearch-i7-abcdef123456"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "print-execution-contract",
+            "--state-path",
+            str(state_path),
+            "--quantipy-root",
+            str(quantipy_root),
+            "--runs-root",
+            str(runs_root),
+        ],
+    )
+
+    assert autoresearch_runs._main() == 0
+
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+    command = payload["command"]
+    assert payload["schema_version"] == 1
+    assert payload["run_id"] == run_id
+    assert payload["command_sha256"] == autoresearch_runs.command_sha256(command)
+    assert payload["working_directory"] == str(quantipy_root)
+    assert payload["expected_artifact_path"] == str(
+        runs_root / run_id / "run.json"
+    )
+    assert payload["stdin_protocol"] == {"schema_version": 1, "command": command}
+    assert state_path.read_bytes() == state_before
+    assert not quantipy_root.exists()
+    assert not runs_root.exists()
+
+
+def test_print_execution_contract_cli_rejects_missing_implementation_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path, _quantipy_root, _runs_root = _write_execution_contract_state(
+        tmp_path, implementation_result=False
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "autoresearch_runs",
+            "print-execution-contract",
+            "--state-path",
+            str(state_path),
+        ],
+    )
+
+    with pytest.raises(AutoresearchRunRecordError, match="implementation_result"):
+        autoresearch_runs._main()
 
 
 @pytest.mark.parametrize("identity_json", ("[]", '{"schema_version":1,"schema_version":1}'))

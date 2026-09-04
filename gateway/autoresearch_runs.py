@@ -170,6 +170,15 @@ class RunFailureClassification(StrEnum):
     OUTPUT_CAPTURE_ERROR = "output_capture_error"
 
 
+_FORCE_UNFINALIZABLE_CLASSIFICATIONS = frozenset(
+    {
+        RunFailureClassification.RESOURCE_EXHAUSTED,
+        RunFailureClassification.OPERATOR_STOPPED,
+        RunFailureClassification.OUTPUT_CAPTURE_ERROR,
+    }
+)
+
+
 class RunOutputStream(StrEnum):
     STDOUT = "stdout"
     STDERR = "stderr"
@@ -582,19 +591,34 @@ class RunOutputStreamCapture:
 class RunOutputCapture:
     stdout: RunOutputStreamCapture
     stderr: RunOutputStreamCapture
+    capture_receipts_missing: bool = False
 
     @classmethod
     def from_dict(cls, raw: object) -> RunOutputCapture:
         if not isinstance(raw, dict):
             raise AutoresearchRunRecordError("output_capture must be an object")
-        _require_exact_keys(raw, ("stdout", "stderr"), label="output_capture")
+        keys = set(raw)
+        if keys not in (
+            {"stdout", "stderr"},
+            {"stdout", "stderr", "capture_receipts_missing"},
+        ):
+            raise AutoresearchRunRecordError("output_capture must contain exact keys")
         stdout = RunOutputStreamCapture.from_dict(raw["stdout"], label="stdout capture")
         stderr = RunOutputStreamCapture.from_dict(raw["stderr"], label="stderr capture")
         if stdout.relative_path != _OUTPUT_CAPTURE_FILE_NAMES[RunOutputStream.STDOUT]:
             raise AutoresearchRunRecordError("stdout capture path is invalid")
         if stderr.relative_path != _OUTPUT_CAPTURE_FILE_NAMES[RunOutputStream.STDERR]:
             raise AutoresearchRunRecordError("stderr capture path is invalid")
-        return cls(stdout=stdout, stderr=stderr)
+        receipts_missing = raw.get("capture_receipts_missing", False)
+        if not isinstance(receipts_missing, bool):
+            raise AutoresearchRunRecordError(
+                "output_capture capture_receipts_missing must be a boolean"
+            )
+        return cls(
+            stdout=stdout,
+            stderr=stderr,
+            capture_receipts_missing=receipts_missing,
+        )
 
     @classmethod
     def from_schema_v2_dict(cls, raw: object) -> RunOutputCapture:
@@ -613,7 +637,13 @@ class RunOutputCapture:
         )
 
     def to_dict(self) -> dict[str, object]:
-        return {"stdout": self.stdout.to_dict(), "stderr": self.stderr.to_dict()}
+        payload: dict[str, object] = {
+            "stdout": self.stdout.to_dict(),
+            "stderr": self.stderr.to_dict(),
+        }
+        if self.capture_receipts_missing:
+            payload["capture_receipts_missing"] = True
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1789,7 +1819,7 @@ def _read_capture_receipt(
 
 def _output_stream_capture_metadata(
     run_dir: Path, stream: RunOutputStream, *, require_receipt: bool
-) -> RunOutputStreamCapture:
+) -> tuple[RunOutputStreamCapture, bool]:
     stored = _read_private_bytes(_output_capture_path(run_dir, stream), label="capture output")
     if len(stored) > OUTPUT_CAPTURE_MAX_BYTES:
         raise AutoresearchRunRecordError("capture output exceeds the fixed storage limit")
@@ -1799,17 +1829,25 @@ def _output_stream_capture_metadata(
         raise AutoresearchRunRecordError(
             "capture receipt observed bytes are less than stored bytes"
         )
-    return RunOutputStreamCapture(
-        relative_path=_OUTPUT_CAPTURE_FILE_NAMES[stream],
-        bytes_observed=observed,
-        bytes_stored=len(stored),
-        sha256=hashlib.sha256(stored).hexdigest(),
-        truncated=observed > len(stored),
-        eof_observed=receipt.eof_observed if receipt is not None else False,
+    return (
+        RunOutputStreamCapture(
+            relative_path=_OUTPUT_CAPTURE_FILE_NAMES[stream],
+            bytes_observed=observed,
+            bytes_stored=len(stored),
+            sha256=hashlib.sha256(stored).hexdigest(),
+            truncated=observed > len(stored),
+            eof_observed=receipt.eof_observed if receipt is not None else False,
+        ),
+        receipt is None,
     )
 
 
-def _output_capture_metadata(run_dir: Path, *, require_receipts: bool) -> RunOutputCapture | None:
+def _output_capture_metadata(
+    run_dir: Path,
+    *,
+    require_receipts: bool,
+    mark_missing_receipts: bool = False,
+) -> RunOutputCapture | None:
     stdout_path = _output_capture_path(run_dir, RunOutputStream.STDOUT)
     stderr_path = _output_capture_path(run_dir, RunOutputStream.STDERR)
     paths = (stdout_path, stderr_path)
@@ -1820,12 +1858,17 @@ def _output_capture_metadata(run_dir: Path, *, require_receipts: bool) -> RunOut
         return None
     if not all(exists):
         raise AutoresearchRunRecordError("both stdout and stderr capture files are required")
+    stdout, stdout_receipt_missing = _output_stream_capture_metadata(
+        run_dir, RunOutputStream.STDOUT, require_receipt=require_receipts
+    )
+    stderr, stderr_receipt_missing = _output_stream_capture_metadata(
+        run_dir, RunOutputStream.STDERR, require_receipt=require_receipts
+    )
     return RunOutputCapture(
-        stdout=_output_stream_capture_metadata(
-            run_dir, RunOutputStream.STDOUT, require_receipt=require_receipts
-        ),
-        stderr=_output_stream_capture_metadata(
-            run_dir, RunOutputStream.STDERR, require_receipt=require_receipts
+        stdout=stdout,
+        stderr=stderr,
+        capture_receipts_missing=(
+            mark_missing_receipts and (stdout_receipt_missing or stderr_receipt_missing)
         ),
     )
 
@@ -3259,8 +3302,13 @@ def complete_run(
     peak_rss_bytes: int | None,
     timed_out: bool = False,
     failure_classification: RunFailureClassification | None = None,
+    force_unfinalizable: bool = False,
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT,
 ) -> RunStatus:
+    if force_unfinalizable and failure_classification not in _FORCE_UNFINALIZABLE_CLASSIFICATIONS:
+        raise AutoresearchRunRecordError(
+            "force-unfinalizable requires a failure classification"
+        )
     canonical_run_dir = _validate_run_directory(run_dir, runs_root)
     with _status_lock(canonical_run_dir):
         canonical_run_dir, manifest, digest, previous = _current_status(run_dir, runs_root)
@@ -3326,7 +3374,11 @@ def complete_run(
                 peak_rss_bytes=peak,
             ),
             output_capture=(
-                _output_capture_metadata(canonical_run_dir, require_receipts=True)
+                _output_capture_metadata(
+                    canonical_run_dir,
+                    require_receipts=not force_unfinalizable,
+                    mark_missing_receipts=force_unfinalizable,
+                )
                 if previous.output_capture is not None
                 else None
             ),
@@ -3394,7 +3446,11 @@ def read_run_record(
                         "current expected artifact does not match terminal worker attestation"
                     )
         if status.state is not RunState.RUNNING and status.output_capture is not None:
-            current_capture = _output_capture_metadata(canonical_run_dir, require_receipts=True)
+            current_capture = _output_capture_metadata(
+                canonical_run_dir,
+                require_receipts=not status.output_capture.capture_receipts_missing,
+                mark_missing_receipts=status.output_capture.capture_receipts_missing,
+            )
             if current_capture != status.output_capture:
                 raise AutoresearchRunRecordError(
                     "terminal output capture metadata does not match the private capture files"
@@ -3428,6 +3484,48 @@ def _prepared_run_identity_from_json(value: str) -> PreparedRunIdentity:
     return PreparedRunIdentity.from_dict(
         _parse_prepared_identity_json(payload, label="prepared run identity JSON")
     )
+
+
+def _print_execution_contract(
+    *,
+    state_path: Path,
+    quantipy_root: Path | None,
+    runs_root: Path,
+) -> None:
+    from gateway.autoresearch import evidence as evidence_module
+    from gateway.autoresearch import persistence as persistence_module
+
+    state = persistence_module.load_state_file(state_path)
+    if state.phase not in {Phase.IMPLEMENTATION, Phase.VERIFICATION}:
+        raise AutoresearchRunRecordError(
+            "print-execution-contract requires implementation or verification phase"
+        )
+    implementation = state.implementation_result
+    if implementation is None:
+        raise AutoresearchRunRecordError(
+            "print-execution-contract requires implementation_result"
+        )
+    runtime_root = evidence_module._target_repo_root_for_state(state)
+    if quantipy_root is not None:
+        runtime_root = quantipy_root.expanduser().resolve(strict=False)
+    run_id = f"autoresearch-i{state.iteration}-{implementation.commit_sha[:12]}"
+    contract = evidence_module.build_quantipy_execution_contract(
+        runtime_root=runtime_root,
+        manifest_path=Path(implementation.experiment_manifest_path),
+        output_root=runs_root,
+        run_id=run_id,
+    )
+    command = list(contract.command)
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "run_id": run_id,
+        "command": command,
+        "command_sha256": command_sha256(command),
+        "working_directory": str(contract.working_directory),
+        "expected_artifact_path": str(contract.output_root / run_id / "run.json"),
+        "stdin_protocol": {"schema_version": 1, "command": command},
+    }
+    sys.stdout.write(_canonical_json(payload).decode("utf-8"))
 
 
 def _main() -> int:
@@ -3476,6 +3574,14 @@ def _main() -> int:
     archive_timeout = subparsers.add_parser("archive-timeout-partial-run")
     archive_timeout.add_argument("--run-dir", type=Path, required=True)
     archive_timeout.add_argument("--runs-root", type=Path, default=DEFAULT_AUTORESEARCH_RUNS_ROOT)
+    print_contract = subparsers.add_parser("print-execution-contract")
+    print_contract.add_argument("--state-path", type=Path, required=True)
+    print_contract.add_argument("--quantipy-root", type=Path, default=None)
+    print_contract.add_argument(
+        "--runs-root",
+        type=Path,
+        default=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
+    )
     startup = subparsers.add_parser("validate-startup")
     startup.add_argument("--run-dir", type=Path, required=True)
     startup.add_argument("--marker", type=Path, required=True)
@@ -3496,6 +3602,7 @@ def _main() -> int:
     complete.add_argument("--signal-number", type=int, default=None)
     complete.add_argument("--peak-rss-bytes", type=int, default=None)
     complete.add_argument("--timed-out", action="store_true")
+    complete.add_argument("--force-unfinalizable", action="store_true")
     failure_group = complete.add_mutually_exclusive_group()
     failure_group.add_argument("--resource-exhausted", action="store_true")
     failure_group.add_argument("--operator-stopped", action="store_true")
@@ -3564,6 +3671,12 @@ def _main() -> int:
             runs_root=args.runs_root,
             artifact_root=DEFAULT_QUANTIPY_EXPERIMENT_RUNS_ROOT,
         )
+    elif args.operation == "print-execution-contract":
+        _print_execution_contract(
+            state_path=args.state_path,
+            quantipy_root=args.quantipy_root,
+            runs_root=args.runs_root,
+        )
     elif args.operation == "validate-startup":
         validate_startup_marker(
             run_dir=args.run_dir, marker_path=args.marker, runs_root=args.runs_root
@@ -3587,6 +3700,7 @@ def _main() -> int:
             signal_number=args.signal_number,
             peak_rss_bytes=args.peak_rss_bytes,
             timed_out=args.timed_out,
+            force_unfinalizable=args.force_unfinalizable,
             failure_classification=(
                 RunFailureClassification.RESOURCE_EXHAUSTED
                 if args.resource_exhausted
