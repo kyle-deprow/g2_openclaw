@@ -114,7 +114,7 @@ def _write_execution_contract_state(
         ImplementationResultArtifact(
             summary="implemented",
             workspace_path=str(workspace),
-            commit_sha="abcdef1234567890",
+            commit_sha="abcdef1234567890",  # pragma: allowlist secret
             module_path="src/quantipy/strategy.py",
             notebook_path="notebooks/experiment.ipynb",
             tests_added_or_updated=(),
@@ -519,18 +519,18 @@ def test_new_preparation_rejects_historical_manifest(
 @pytest.mark.parametrize(
     ("compute_target", "projected_model_seconds", "minimum_timeout"),
     (
-        (ComputeTarget.NONE, None, 14_400),
-        (ComputeTarget.NONE, 0, 14_400),
-        (ComputeTarget.NONE, -1, 14_400),
-        (ComputeTarget.CPU, None, 14_400),
-        (ComputeTarget.CPU, 0, 14_400),
-        (ComputeTarget.CPU, -1, 14_400),
-        (ComputeTarget.GPU, None, 28_800),
-        (ComputeTarget.GPU, 0, 28_800),
-        (ComputeTarget.GPU, -1, 28_800),
-        (ComputeTarget.MIXED, None, 28_800),
-        (ComputeTarget.MIXED, 0, 28_800),
-        (ComputeTarget.MIXED, -1, 28_800),
+        (ComputeTarget.NONE, None, 86_400),
+        (ComputeTarget.NONE, 0, 86_400),
+        (ComputeTarget.NONE, -1, 86_400),
+        (ComputeTarget.CPU, None, 86_400),
+        (ComputeTarget.CPU, 0, 86_400),
+        (ComputeTarget.CPU, -1, 86_400),
+        (ComputeTarget.GPU, None, 86_400),
+        (ComputeTarget.GPU, 0, 86_400),
+        (ComputeTarget.GPU, -1, 86_400),
+        (ComputeTarget.MIXED, None, 86_400),
+        (ComputeTarget.MIXED, 0, 86_400),
+        (ComputeTarget.MIXED, -1, 86_400),
     ),
 )
 def test_first_attempt_verification_default_timeout_threshold(
@@ -583,7 +583,7 @@ def test_first_attempt_verification_default_timeout_is_enforced_by_both_preparat
         run_dir,
         compute_target=ComputeTarget.NONE,
         projected_model_seconds=None,
-        timeout_seconds=14_399,
+        timeout_seconds=86_399,
     )
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
 
@@ -1631,13 +1631,9 @@ def test_complete_force_unfinalizable_records_current_capture_files(
     assert record.status.output_capture.capture_receipts_missing is True
     assert record.status.output_capture.stdout.bytes_stored == len(b"partial stdout\n")
     assert record.status.output_capture.stdout.bytes_observed == len(b"partial stdout\n")
-    assert record.status.output_capture.stdout.sha256 == sha256(
-        b"partial stdout\n"
-    ).hexdigest()
+    assert record.status.output_capture.stdout.sha256 == sha256(b"partial stdout\n").hexdigest()
     assert record.status.output_capture.stderr.bytes_stored == len(b"partial stderr\n")
-    assert record.status.output_capture.stderr.sha256 == sha256(
-        b"partial stderr\n"
-    ).hexdigest()
+    assert record.status.output_capture.stderr.sha256 == sha256(b"partial stderr\n").hexdigest()
 
 
 def test_complete_without_force_unfinalizable_keeps_missing_receipt_error(
@@ -2576,9 +2572,7 @@ def test_print_execution_contract_cli_emits_the_canonical_contract(
     assert payload["run_id"] == run_id
     assert payload["command_sha256"] == autoresearch_runs.command_sha256(command)
     assert payload["working_directory"] == str(quantipy_root)
-    assert payload["expected_artifact_path"] == str(
-        runs_root / run_id / "run.json"
-    )
+    assert payload["expected_artifact_path"] == str(runs_root / run_id / "run.json")
     assert payload["stdin_protocol"] == {"schema_version": 1, "command": command}
     assert state_path.read_bytes() == state_before
     assert not quantipy_root.exists()
@@ -3088,9 +3082,7 @@ def test_command_input_helper_creates_private_file_with_exclusive_no_follow(
 
 def test_command_input_helper_rejects_bash_lc_shell_wrapper(tmp_path: Path) -> None:
     command_file = tmp_path / "command.json"
-    payload = json.dumps(
-        {"schema_version": 1, "command": ["bash", "-lc", "echo hi"]}
-    ).encode()
+    payload = json.dumps({"schema_version": 1, "command": ["bash", "-lc", "echo hi"]}).encode()
 
     with pytest.raises(
         AutoresearchRunRecordError,
@@ -3120,9 +3112,7 @@ def test_command_input_helper_rejects_path_bash_cl_shell_wrapper(tmp_path: Path)
 
 def test_command_input_helper_rejects_absolute_bash_lc_shell_wrapper(tmp_path: Path) -> None:
     command_file = tmp_path / "command.json"
-    payload = json.dumps(
-        {"schema_version": 1, "command": ["/bin/bash", "-lc", "x"]}
-    ).encode()
+    payload = json.dumps({"schema_version": 1, "command": ["/bin/bash", "-lc", "x"]}).encode()
 
     with pytest.raises(
         AutoresearchRunRecordError,
@@ -3136,9 +3126,7 @@ def test_command_input_helper_rejects_absolute_bash_lc_shell_wrapper(tmp_path: P
 
 def test_command_input_helper_rejects_sh_c_shell_wrapper(tmp_path: Path) -> None:
     command_file = tmp_path / "command.json"
-    payload = json.dumps(
-        {"schema_version": 1, "command": ["sh", "-c", "echo hi"]}
-    ).encode()
+    payload = json.dumps({"schema_version": 1, "command": ["sh", "-c", "echo hi"]}).encode()
 
     with pytest.raises(AutoresearchRunRecordError, match="shell wrappers"):
         create_command_input_file_from_stdin(output_path=command_file, payload=payload)
@@ -3156,9 +3144,7 @@ def test_command_input_helper_rejects_env_prefixed_shell_wrapper(tmp_path: Path)
 
 def test_command_input_helper_rejects_env_split_string_shell_wrapper(tmp_path: Path) -> None:
     command_file = tmp_path / "command.json"
-    payload = json.dumps(
-        {"schema_version": 1, "command": ["env", "-S", "bash -lc x"]}
-    ).encode()
+    payload = json.dumps({"schema_version": 1, "command": ["env", "-S", "bash -lc x"]}).encode()
 
     with pytest.raises(
         AutoresearchRunRecordError,

@@ -995,16 +995,16 @@ semantics, and no stage may refuse work on the basis of projected cost. The
 feasibility stage must not reject on `encoded_feature_columns`,
 `calibration_fit_seconds`, or `projected_model_seconds`. Derive detached
 verification `timeout_seconds` from that projection with
-`timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 43200)`
+`timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 86400)`
 for `compute_fit.target` `gpu`/`mixed`, or
-`timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 21600)`
+`timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 86400)`
 for `cpu`/`none`, where `pre_model_seconds` is the prior attempt's measured
 wall time before the model stage started, or 1200 when no attempt has run yet.
 The projection covers only the model fit; hydration, prepare, smoke, and
 feasibility must be budgeted separately or a large panel is killed before
 modelling begins. On a first attempt there is no projection, so record that in
-the artifact and use the default 28800 seconds for `gpu`/`mixed` or the
-default 14400 seconds for `cpu`/`none`; a fix round uses prior feasibility
+the artifact and use the default 86400 seconds for `gpu`/`mixed` or the
+default 86400 seconds for `cpu`/`none`; a fix round uses prior feasibility
 output and telemetry carried into the round. Measured values still drive the
 timeout, and the ceiling is only a cap, not permission to skip projection. A
 timeout kill is recoverable execution-interrupted evidence routed to a bounded

@@ -120,8 +120,8 @@ _RUN_MANIFEST_V2_KEYS: tuple[str, ...] = (
     "projected_model_seconds",
 )
 _PROJECTED_MODEL_SECONDS_MAX_JSON_BYTES = 128
-_FIRST_ATTEMPT_VERIFICATION_CPU_TIMEOUT_SECONDS = 14_400.0
-_FIRST_ATTEMPT_VERIFICATION_GPU_TIMEOUT_SECONDS = 28_800.0
+_FIRST_ATTEMPT_VERIFICATION_CPU_TIMEOUT_SECONDS = 86_400.0
+_FIRST_ATTEMPT_VERIFICATION_GPU_TIMEOUT_SECONDS = 86_400.0
 
 
 class AutoresearchRunRecordError(ValueError):
@@ -2275,9 +2275,7 @@ def _parse_command_input(raw: object, *, label: str) -> tuple[str, ...]:
     }:
         for argument in command[command_index + 1 :]:
             if argument in {"-c", "-lc", "-lic", "-ic"} or (
-                argument.startswith("-")
-                and not argument.startswith("--")
-                and "c" in argument[1:]
+                argument.startswith("-") and not argument.startswith("--") and "c" in argument[1:]
             ):
                 raise AutoresearchRunRecordError(shell_wrapper_error)
     return command
@@ -3306,9 +3304,7 @@ def complete_run(
     runs_root: Path = DEFAULT_AUTORESEARCH_RUNS_ROOT,
 ) -> RunStatus:
     if force_unfinalizable and failure_classification not in _FORCE_UNFINALIZABLE_CLASSIFICATIONS:
-        raise AutoresearchRunRecordError(
-            "force-unfinalizable requires a failure classification"
-        )
+        raise AutoresearchRunRecordError("force-unfinalizable requires a failure classification")
     canonical_run_dir = _validate_run_directory(run_dir, runs_root)
     with _status_lock(canonical_run_dir):
         canonical_run_dir, manifest, digest, previous = _current_status(run_dir, runs_root)
@@ -3502,9 +3498,7 @@ def _print_execution_contract(
         )
     implementation = state.implementation_result
     if implementation is None:
-        raise AutoresearchRunRecordError(
-            "print-execution-contract requires implementation_result"
-        )
+        raise AutoresearchRunRecordError("print-execution-contract requires implementation_result")
     runtime_root = evidence_module._target_repo_root_for_state(state)
     if quantipy_root is not None:
         runtime_root = quantipy_root.expanduser().resolve(strict=False)

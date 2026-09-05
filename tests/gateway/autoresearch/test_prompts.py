@@ -580,9 +580,7 @@ def test_alpha_campaign_directive_is_present_only_for_alpha_stage_prompts(
         "never authorized for implementation",
     ):
         assert phrase in alpha_prompt
-    assert (
-        "votes count together when proposals share the same economic mechanism" in alpha_prompt
-    )
+    assert "votes count together when proposals share the same economic mechanism" in alpha_prompt
     assert (
         "votes count together when proposals share the same data/provenance failure mechanism"
         in g0_prompt
@@ -802,14 +800,14 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "projected_model_seconds reported in implementation_result.summary" in verification
     assert (
         "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), "
-        "43200)" in verification
+        "86400)" in verification
     )
     assert (
         "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), "
-        "21600)" in verification
+        "86400)" in verification
     )
-    assert "default 28800s for gpu or mixed" in verification
-    assert "the default 14400s for cpu or none" in verification
+    assert "default 86400s for gpu or mixed" in verification
+    assert "the default 86400s for cpu or none" in verification
     assert "Measured values still drive the timeout" in verification
     assert "ceiling is only a cap, not permission to skip projection" in verification
     assert (
@@ -827,16 +825,14 @@ def test_phase_instructions_require_feasibility_telemetry_and_projected_timeout(
     assert "bulk detail in the run artifact" in verification
     assert (
         "command_file=/home/dev/.openclaw/autoresearch/model-workspaces/command-inputs/"
-        "<unique-command>.json"
-        in verification
+        "<unique-command>.json" in verification
     )
     assert 'autoresearch-create-command-file --output "$command_file"' in verification
     assert (
         "End the turn after submitting; do not poll for acceptance after submitting. "
         "The submission acceptance check happens on the next supervisor wake; then verify "
         "the submitted envelope has left the inbox root and appears under `accepted/` "
-        "(not `rejected/`), and quote any rejection verbatim then."
-        in verification
+        "(not `rejected/`), and quote any rejection verbatim then." in verification
     )
 
     review = autoresearch_engine._phase_instruction(

@@ -750,15 +750,15 @@ def test_autoresearch_docs_describe_gpu_model_classes_and_tiered_timeouts() -> N
     assert "torch.use_deterministic_algorithms(True)" in skill
     assert "CUBLAS_WORKSPACE_CONFIG=:4096:8" in skill
     assert (
-        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 43200)"
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 86400)"
         in skill
     )
-    assert "default 28800 seconds for `gpu`/`mixed`" in skill
+    assert "default 86400 seconds for `gpu`/`mixed`" in skill
     assert (
-        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 21600)"
+        "timeout_seconds = min(max(3 * projected_model_seconds + pre_model_seconds, 1800), 86400)"
         in skill
     )
-    assert "default 14400 seconds for `cpu`/`none`" in skill
+    assert "default 86400 seconds for `cpu`/`none`" in skill
 
 
 def test_autoresearch_docs_require_visible_pm_acknowledgements_for_child_completions() -> None:

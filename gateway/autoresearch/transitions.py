@@ -924,6 +924,45 @@ def _validate_alpha_universe_chain(
         )
 
 
+def _reject_receiptless_successful_verification(
+    state: AutoresearchState,
+) -> None:
+    """Block BUG_SIGNAL submissions that are really just missing receipts.
+
+    When a verification run completes with tests_passed=True and produces
+    trade metrics (trade_count > 0), the run succeeded — the PM must produce
+    provenance receipts before submitting. Submitting BUG_SIGNAL to avoid
+    receipt production wastes fix rounds on a problem the PM can solve now.
+    """
+    if state.mode is not ResearchMode.ALPHA_RESEARCH:
+        return
+    if not state.verification_history:
+        return
+    verification = state.verification_history[-1]
+    if verification.status is not VerificationStatus.BUG_SIGNAL:
+        return
+    if not verification.tests_passed:
+        return
+    if verification.trade_count is None or verification.trade_count <= 0:
+        return
+    if (
+        verification.universe_verification_receipt is None
+        and verification.price_hydration_receipt is None
+        and verification.data_coverage is None
+    ):
+        raise AutoresearchValidationError(
+            "Verification run completed successfully (tests_passed=True, "
+            f"trade_count={verification.trade_count}) but was submitted as "
+            "BUG_SIGNAL with all provenance receipts null. Produce "
+            "universe_verification_receipt, price_hydration_receipt, and "
+            "data_coverage from the consensus universe_plan before "
+            "resubmitting. Call qp.security_universe_history() with the "
+            "plan's rebalance dates and profile, then "
+            "qp.validate_dynamic_price_coverage() for the hydration and "
+            "coverage receipts."
+        )
+
+
 def _validate_consensus_history_universe_plans(state: AutoresearchState) -> None:
     """Require a frozen plan for every persisted non-operator majority."""
     for index, consensus in enumerate(state.consensus_history, start=1):
@@ -1357,6 +1396,7 @@ def _validate_final_decision_artifact(
     validation_context: AutoresearchValidationContext | None = None,
 ) -> None:
     _validate_final_decision_memory_requirement(state, artifact)
+    _reject_receiptless_successful_verification(state)
     if artifact.recommended_metric_name == OPERATOR_INFRASTRUCTURE_SUSPENSION_METRIC_NAME:
         raise AutoresearchValidationError(
             "operator infrastructure suspension requires the dedicated operator transition"
@@ -1810,6 +1850,7 @@ def _validate_state(
         raise AutoresearchValidationError(
             "DATA_INFRA_G0 remediation must end in non-suspending DISCARD"
         )
+    _reject_receiptless_successful_verification(state)
     _validate_alpha_universe_chain(state)
     if state.memory_written and state.final_decision is None:
         raise AutoresearchValidationError("memory_written cannot be true before final_decision")
@@ -2462,6 +2503,7 @@ def advance_state(
         consumed_runtime_recovery = transitions_module._clear_consumed_platform_runtime_receipts(
             replace(state, verification_history=next_verification_history)
         )
+        _reject_receiptless_successful_verification(consumed_runtime_recovery)
         if artifact.status is VerificationStatus.PASS:
             next_state = replace(
                 consumed_runtime_recovery,
