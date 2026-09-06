@@ -56,8 +56,10 @@ from gateway.deployment.appserver_probe import (
     probe_appserver,
 )
 from gateway.deployment.codex_agents import CODEX_WRITABLE_ROOTS
+from gateway.research.cli import app as research_app
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
+app.add_typer(research_app, name="research")
 console = Console()
 
 # ---------------------------------------------------------------------------
@@ -1112,9 +1114,7 @@ def autoresearch_doctor() -> None:
     console.print("systemd")
     for unit in (DEFAULT_OPENCLAW_GATEWAY_SERVICE, DEFAULT_AUTORESEARCH_SUPERVISOR_SERVICE):
         check_id = (
-            "systemd.gateway"
-            if unit == DEFAULT_OPENCLAW_GATEWAY_SERVICE
-            else "systemd.supervisor"
+            "systemd.gateway" if unit == DEFAULT_OPENCLAW_GATEWAY_SERVICE else "systemd.supervisor"
         )
         restart_remedy = f"systemctl --user restart {unit}"
         activity = service_states[unit]
@@ -1411,8 +1411,7 @@ def autoresearch_doctor() -> None:
 
     for check_id, check_status, detail, remedy in checks:
         console.print(
-            f"check={check_id} status={check_status} detail={detail or '-'} "
-            f"remedy={remedy or '-'}",
+            f"check={check_id} status={check_status} detail={detail or '-'} remedy={remedy or '-'}",
             markup=False,
             soft_wrap=True,
         )
@@ -2462,9 +2461,7 @@ def autoresearch_reseal_runtime(
     from gateway.autoresearch_readiness import load_platform_readiness
 
     try:
-        if os.environ.get(RUNTIME_RESEAL_OPERATOR_ENV_VAR) != (
-            RUNTIME_RESEAL_OPERATOR_VALUE
-        ):
+        if os.environ.get(RUNTIME_RESEAL_OPERATOR_ENV_VAR) != (RUNTIME_RESEAL_OPERATOR_VALUE):
             raise ValueError(
                 "operator capability is required; set "
                 f"{RUNTIME_RESEAL_OPERATOR_ENV_VAR}=1 in the human/Codex shell"
