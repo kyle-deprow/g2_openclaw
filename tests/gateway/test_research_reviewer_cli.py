@@ -112,6 +112,90 @@ def test_passthrough_flags_keep_order_and_both_value_forms(
 
 
 @pytest.mark.parametrize(
+    "argv",
+    [
+        ["--replay-user-messages", ""],
+        ["--replay-user-messages="],
+    ],
+)
+def test_replay_user_messages_consumes_only_known_sdk_empty_value(
+    reviewer: ReviewerModule,
+    argv: list[str],
+) -> None:
+    normalized = reviewer.normalize(argv)
+
+    assert normalized[0] == "--replay-user-messages"
+    assert "" not in normalized
+
+
+def test_replay_user_messages_rejects_nonempty_values(
+    reviewer: ReviewerModule,
+) -> None:
+    for argv in (["--replay-user-messages", "enabled"], ["--replay-user-messages=enabled"]):
+        with pytest.raises(Exception) as raised:
+            reviewer.normalize(argv)
+        error = cast(ProfileError, raised.value)
+        assert error.code == reviewer.EXIT_USAGE
+        assert error.flag == "--replay-user-messages"
+
+
+def test_exact_acp_adapter_argv_normalizes_without_empty_positional(
+    reviewer: ReviewerModule,
+) -> None:
+    adapter_argv = [
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--tools",
+        "default",
+        "--disallowedTools",
+        "AskUserQuestion",
+        "--setting-sources",
+        "project,local",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "",
+        "--session-id",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "--model",
+        "claude-opus-5",
+    ]
+
+    normalized = reviewer.normalize(adapter_argv)
+
+    assert normalized == [
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--disallowedTools",
+        "AskUserQuestion",
+        "--include-partial-messages",
+        "--replay-user-messages",
+        "--session-id",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "--model",
+        "claude-opus-5",
+        "--effort",
+        "high",
+        "--tools",
+        "Read,Glob,Grep",
+        "--allowedTools",
+        "Read,Glob,Grep",
+        "--permission-mode",
+        "dontAsk",
+        "--setting-sources=",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--safe-mode",
+        "--restricted",
+        "--disable-slash-commands",
+    ]
+
+
+@pytest.mark.parametrize(
     ("flag", "value"),
     [
         ("--model", "claude-opus-5"),

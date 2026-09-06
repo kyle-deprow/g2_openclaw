@@ -252,6 +252,16 @@ def _normalize(argv: Sequence[str]) -> tuple[list[str], tuple[str, ...]]:
             continue
 
         needs_value = name in _PASSTHROUGH_VALUE_FLAGS or name in _CONTROLLED_VALUE_FLAGS
+        if name == "--replay-user-messages":
+            if has_inline_value:
+                if cast(str, inline_value) != "":
+                    raise _error(EXIT_USAGE, name)
+            elif index < len(argv) and argv[index] == "":
+                index += 1
+            elif index < len(argv) and not argv[index].startswith("-"):
+                raise _error(EXIT_USAGE, name)
+            forwarded.append(name)
+            continue
         if name in _PASSTHROUGH_FLAGS and not needs_value:
             if has_inline_value:
                 raise _error(EXIT_USAGE, name)
