@@ -68,6 +68,26 @@ def _reversed_mapping(value: object) -> object:
     return value
 
 
+def _set_path(root: dict[str, object], path: tuple[str | int, ...], value: object) -> None:
+    current: object = root
+    assert path
+    for key in path[:-1]:
+        if isinstance(key, str):
+            assert isinstance(current, dict)
+            current = current[key]
+        else:
+            assert isinstance(current, list)
+            current = current[key]
+
+    key = path[-1]
+    if isinstance(key, str):
+        assert isinstance(current, dict)
+        current[key] = value
+    else:
+        assert isinstance(current, list)
+        current[key] = value
+
+
 def test_valid_price_only_document_round_trips_with_stable_digest(
     document_payload: dict[str, object],
 ) -> None:
@@ -192,14 +212,7 @@ def test_types_and_bounds_are_rejected(
     value: object,
 ) -> None:
     changed = copy.deepcopy(document_payload)
-    if len(path) == 2:
-        target = changed[path[0]]
-        target[path[1]] = value  # type: ignore[index]
-    elif len(path) == 3:
-        target = changed[path[0]][path[1]]  # type: ignore[index]
-        target[path[2]] = value
-    else:
-        changed[path[0]] = value
+    _set_path(changed, path, value)
 
     with pytest.raises(ValueError):
         HypothesisDocument.from_json(_json(changed))
