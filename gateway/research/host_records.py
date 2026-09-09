@@ -1,12 +1,14 @@
-"""Read-only correlation of OpenClaw ACP records and Claude transcripts.
+"""Read-only correlation of OpenClaw task records and Codex rollouts.
 
-This module deliberately does not own review state, spawn work, or copy
-transcripts.  Callers provide the exact host paths and correlation values.
+This module deliberately does not own review state, spawn work, route lineage,
+or copy rollout text.  Callers provide exact host paths and correlation values.
 SQLite is opened with an absolute ``mode=ro`` URI and ``query_only``; reading
 an existing WAL database may still materialize SQLite ``-wal``/``-shm``
 coordination sidecars when the same-user host directory permits it.  Missing
 databases never cause a parent directory or database to be created.  These
 checks are for trusted same-user host metadata, not hostile-root security.
+Rollout service and billing tier remain unknown unless a future reader is
+given separate host evidence; this reader never labels observations verified.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from urllib.parse import quote
 from uuid import UUID
 
@@ -96,6 +98,34 @@ class ClaudeTranscriptRecord:
     cwd: str
     session_uuid: str
     content: bytes
+    sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutUsage:
+    """The latest observed token-count snapshot from one rollout.
+
+    ``model_context_window`` is optional because rollout evidence can place it
+    inside the selected usage snapshot or beside it in ``token_count.info``.
+    Only live rollout evidence can confirm which placement a deployment uses;
+    this reader does not infer a value when neither location reports one.
+    """
+
+    source: Literal["last", "total"]
+    total_tokens: int
+    model_context_window: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutHostRecord:
+    """Observed Codex rollout metadata; service and billing tier are unknown."""
+
+    path: Path
+    thread_id: str
+    model: str
+    reasoning_effort: str
+    terminal_state: Literal["succeeded", "failed", "pending"]
+    latest_usage: RolloutUsage | None
     sha256: str
 
 
@@ -214,10 +244,13 @@ def read_exact_task_run(
     reservation_label: str,
     reserved_at_ms: int,
     *,
+    expected_runtime: str,
+    expected_scope_kind: str,
+    expected_agent_id: str,
     ack_child_session_key: str | None = None,
     ack_run_id: str | None = None,
 ) -> TaskRunHostRecord:
-    """Read the unique ACP task reserved by one exact owner and label.
+    """Read one task reserved by an exact owner and caller-supplied identity.
 
     ``reserved_at_ms`` is the trusted reservation wall-clock lower bound.  A
     task created before it is invalid even if all other fields match.
@@ -226,6 +259,9 @@ def read_exact_task_run(
     owner_key = _validate_lookup_text(owner_key, "owner_key")
     reservation_label = _validate_lookup_text(reservation_label, "reservation_label")
     reserved_at_ms = _required_epoch_ms(reserved_at_ms, "reserved_at_ms")
+    expected_runtime = _validate_lookup_text(expected_runtime, "expected_runtime")
+    expected_scope_kind = _validate_lookup_text(expected_scope_kind, "expected_scope_kind")
+    expected_agent_id = _validate_lookup_text(expected_agent_id, "expected_agent_id")
     ack_child_session_key = _validate_ack(ack_child_session_key, "ack_child_session_key")
     ack_run_id = _validate_ack(ack_run_id, "ack_run_id")
 
@@ -266,7 +302,11 @@ def read_exact_task_run(
         raise HostRecordError("host task identity does not match the exact lookup")
     if requester_session_key and requester_session_key != owner_key:
         raise HostRecordError("host task requester session does not match owner_key")
-    if runtime != "acp" or scope_kind != "session" or agent_id != "claude":
+    if (
+        runtime != expected_runtime
+        or scope_kind != expected_scope_kind
+        or agent_id != expected_agent_id
+    ):
         raise HostRecordError("host task identity has an unexpected runtime, scope, or agent")
     if created_at_ms < reserved_at_ms:
         raise HostRecordError("host task was created before the reservation")
@@ -336,11 +376,11 @@ def read_exact_acp_identity(
     claude_sessions_path: Path | str,
     expected_cwd: str,
     *,
-    expected_backend: str = "acpx",
-    expected_agent: str = "claude",
-    expected_mode: str = "oneshot",
+    expected_backend: str,
+    expected_agent: str,
+    expected_mode: str,
 ) -> AcpIdentityHostRecord:
-    """Read one resolved ACP row and bind it to the exact Claude session key."""
+    """Read one resolved ACP row with caller-supplied runtime expectations."""
 
     child_session_key = _validate_lookup_text(child_session_key, "child_session_key")
     expected_cwd = _validate_canonical_cwd(expected_cwd, "expected_cwd")
@@ -445,6 +485,121 @@ def _json_object_bytes(raw: bytes, field: str) -> dict[str, object]:
     if not isinstance(decoded, dict) or any(not isinstance(key, str) for key in decoded):
         raise HostRecordError(f"{field} must contain a JSON object")
     return {key: cast(object, value) for key, value in decoded.items()}
+
+
+def _required_nonnegative_int(value: object, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise HostRecordError(f"host record {field} must be a non-negative integer")
+    return value
+
+
+def _optional_nonnegative_int(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    return _required_nonnegative_int(value, field)
+
+
+def _rollout_usage(info: object) -> RolloutUsage:
+    if not isinstance(info, dict):
+        raise HostRecordError("Codex rollout token_count info must be an object")
+    if "last_token_usage" in info:
+        source: Literal["last", "total"] = "last"
+        snapshot = info["last_token_usage"]
+    elif "total_token_usage" in info:
+        source = "total"
+        snapshot = info["total_token_usage"]
+    else:
+        raise HostRecordError("Codex rollout token_count has no usage snapshot")
+    if not isinstance(snapshot, dict):
+        raise HostRecordError("Codex rollout token_count has no usage snapshot")
+    snapshot_context = (
+        _optional_nonnegative_int(snapshot["model_context_window"], "rollout.model_context_window")
+        if "model_context_window" in snapshot
+        else None
+    )
+    sibling_context = (
+        _optional_nonnegative_int(info["model_context_window"], "rollout.model_context_window")
+        if "model_context_window" in info
+        else None
+    )
+    if (
+        snapshot_context is not None
+        and sibling_context is not None
+        and snapshot_context != sibling_context
+    ):
+        raise HostRecordError("Codex rollout context window values disagree")
+    return RolloutUsage(
+        source=source,
+        total_tokens=_required_nonnegative_int(
+            snapshot.get("total_tokens"), "rollout.total_tokens"
+        ),
+        model_context_window=snapshot_context if snapshot_context is not None else sibling_context,
+    )
+
+
+def read_exact_rollout(rollout_path: Path | str) -> RolloutHostRecord:
+    """Read one absolute caller-selected Codex rollout without retaining text.
+
+    A second terminal marker is anomalous for this oneshot evidence and fails
+    closed rather than guessing which terminal observation should win.
+    """
+
+    path = Path(rollout_path)
+    if not path.is_absolute():
+        raise HostRecordError("Codex rollout path must be absolute")
+    content = _read_regular_bounded(path, MAX_TRANSCRIPT_BYTES, "Codex rollout")
+    events = tuple(
+        _json_object_bytes(line, f"Codex rollout line {index}")
+        for index, line in enumerate(content.split(b"\n"), start=1)
+        if line.strip()
+    )
+    session_meta: dict[str, object] | None = None
+    latest_usage: RolloutUsage | None = None
+    terminal_state: Literal["succeeded", "failed", "pending"] = "pending"
+
+    for event in events:
+        if event.get("type") == "session_meta":
+            if session_meta is not None:
+                raise HostRecordError("Codex rollout contains multiple session_meta records")
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                raise HostRecordError("Codex rollout session_meta payload must be an object")
+            session_meta = payload
+
+    if session_meta is None:
+        raise HostRecordError("Codex rollout is missing session_meta")
+    thread_id = _required_text(session_meta.get("id"), "rollout.thread_id")
+    model = _required_text(session_meta.get("model"), "rollout.model")
+    reasoning_effort = _required_text(
+        session_meta.get("reasoning_effort"), "rollout.reasoning_effort"
+    )
+
+    for event in events:
+        if event.get("type") != "event_msg":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise HostRecordError("Codex rollout event_msg payload must be an object")
+        event_type = payload.get("type")
+        if event_type == "token_count":
+            latest_usage = _rollout_usage(payload.get("info"))
+        elif event_type in {"task_complete", "task_failed"}:
+            marker_thread_id = payload.get("thread_id")
+            if marker_thread_id is not None and marker_thread_id != thread_id:
+                raise HostRecordError("Codex rollout terminal marker has the wrong thread id")
+            if terminal_state != "pending":
+                raise HostRecordError("Codex rollout contains multiple terminal markers")
+            terminal_state = "succeeded" if event_type == "task_complete" else "failed"
+
+    return RolloutHostRecord(
+        path=path,
+        thread_id=thread_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        terminal_state=terminal_state,
+        latest_usage=latest_usage,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
 
 
 def _read_regular_bounded(path: Path, max_bytes: int, label: str) -> bytes:
