@@ -14,6 +14,7 @@ import websockets
 from gateway.config import GatewayConfig
 from gateway.device_identity import _generate_identity
 from gateway.openclaw_client import OpenClawClient, OpenClawError
+from gateway.research.status import build_status_frame, unavailable_status
 from gateway.server import (
     GatewayServer,
     GatewaySession,
@@ -35,6 +36,38 @@ async def _auth_connect(url: str, token: str = "test-token") -> websockets.Clien
     ws = await websockets.connect(url)
     await ws.send(json.dumps({"type": "auth", "token": token}))
     return ws
+
+
+_EXPECTED_RESEARCH_STATUS = build_status_frame(
+    unavailable_status("research state database is missing")
+)
+_RESEARCH_STATUS_NULLABLE_FIELDS = {
+    "hypothesisId",
+    "hypothesisState",
+    "attemptId",
+    "attemptState",
+    "lastAstraDecision",
+    "campaignStatus",
+    "boundaryFailure",
+    "lastEventAt",
+    "updatedAt",
+}
+
+
+def _assert_research_status_frame(frame: dict[str, Any]) -> None:
+    """Assert the exact typed frame emitted by the status publisher."""
+    assert set(frame) == set(_EXPECTED_RESEARCH_STATUS)
+    assert frame == _EXPECTED_RESEARCH_STATUS
+    assert frame["type"] == "autoresearch_status"
+    assert isinstance(frame["type"], str)
+    assert isinstance(frame["stage"], str)
+    assert isinstance(frame["ownerState"], str)
+    assert isinstance(frame["available"], bool)
+    assert frame["stage"] == "idle"
+    assert frame["ownerState"] == "unknown"
+    assert frame["available"] is False
+    assert frame["unavailableReason"] == "research state database is missing"
+    assert all(frame[field] is None for field in _RESEARCH_STATUS_NULLABLE_FIELDS)
 
 
 class _FakeStream:
@@ -362,7 +395,6 @@ class TestAutoHandlerSelection:
         config = GatewayConfig(
             gateway_token="test-token",
             openclaw_gateway_token=None,
-            autoresearch_feed_interval=0,
         )
         with pytest.raises(ValueError, match="OPENCLAW_GATEWAY_TOKEN"):
             GatewayServer(config)
@@ -372,7 +404,6 @@ class TestAutoHandlerSelection:
         config = GatewayConfig(
             gateway_token="test-token",
             openclaw_gateway_token="some-token",
-            autoresearch_feed_interval=0,
         )
         mock = _StaticResponseHandler()
         server = GatewayServer(config, handler=mock)
@@ -386,7 +417,6 @@ class TestAutoHandlerSelection:
             openclaw_host="10.0.0.1",
             openclaw_port=9999,
             agent_timeout=60,
-            autoresearch_feed_interval=0,
         )
         server = GatewayServer(config)
         assert isinstance(server._handler, OpenClawResponseHandler)
@@ -490,7 +520,6 @@ class TestFullWebSocketIntegration:
                 gateway_host="127.0.0.1",
                 gateway_port=0,
                 gateway_token="test-token",
-                autoresearch_feed_interval=0,
             )
             gw = GatewayServer(config, handler=oc_handler)
             gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)
@@ -510,6 +539,8 @@ class TestFullWebSocketIntegration:
                     # Send text
                     await ws.send(json.dumps({"type": "text", "message": "hello"}))
 
+                    research_status = await _recv_json(ws)
+                    _assert_research_status_frame(research_status)
                     thinking = await _recv_json(ws)
                     assert thinking == {"type": "status", "status": "thinking"}
 

@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 import websockets
 from gateway.config import GatewayConfig
+from gateway.research.status import build_status_frame, unavailable_status
 from gateway.server import (
     _BUFFER_TTL_SECONDS,
     GatewayServer,
@@ -35,6 +36,38 @@ async def _consume_handshake(ws: websockets.ClientConnection) -> None:
     assert status["type"] == "status" and status["status"] == "idle", (
         f"Expected status:idle, got {status}"
     )
+
+
+_EXPECTED_RESEARCH_STATUS = build_status_frame(
+    unavailable_status("research state database is missing")
+)
+_RESEARCH_STATUS_NULLABLE_FIELDS = {
+    "hypothesisId",
+    "hypothesisState",
+    "attemptId",
+    "attemptState",
+    "lastAstraDecision",
+    "campaignStatus",
+    "boundaryFailure",
+    "lastEventAt",
+    "updatedAt",
+}
+
+
+def _assert_research_status_frame(frame: dict[str, Any]) -> None:
+    """Assert the exact typed frame emitted by the status publisher."""
+    assert set(frame) == set(_EXPECTED_RESEARCH_STATUS)
+    assert frame == _EXPECTED_RESEARCH_STATUS
+    assert frame["type"] == "autoresearch_status"
+    assert isinstance(frame["type"], str)
+    assert isinstance(frame["stage"], str)
+    assert isinstance(frame["ownerState"], str)
+    assert isinstance(frame["available"], bool)
+    assert frame["stage"] == "idle"
+    assert frame["ownerState"] == "unknown"
+    assert frame["available"] is False
+    assert frame["unavailableReason"] == "research state database is missing"
+    assert all(frame[field] is None for field in _RESEARCH_STATUS_NULLABLE_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +116,6 @@ async def slow_gateway() -> AsyncIterator[tuple[str, GatewayServer, _SlowStreamH
         gateway_host="127.0.0.1",
         gateway_port=0,
         gateway_token="test-token",
-        autoresearch_feed_interval=0,
     )
     gw = GatewayServer(config, handler=handler)
     server = await websockets.serve(
@@ -170,6 +202,8 @@ class TestDisconnectDuringStream:
         await ws1.send(json.dumps({"type": "text", "message": "hello"}))
 
         # Read thinking + streaming status
+        research_status = await _recv_json(ws1)
+        _assert_research_status_frame(research_status)
         thinking = await _recv_json(ws1)
         assert thinking == {"type": "status", "status": "thinking"}
         streaming = await _recv_json(ws1)
@@ -233,6 +267,8 @@ class TestDisconnectDuringStream:
         await ws.send(json.dumps({"type": "text", "message": "hello"}))
 
         # Read thinking + streaming + all deltas + end + idle
+        research_status = await _recv_json(ws)
+        _assert_research_status_frame(research_status)
         thinking = await _recv_json(ws)
         assert thinking["status"] == "thinking"
         streaming = await _recv_json(ws)
@@ -271,6 +307,8 @@ class TestNewMessageClearsBuffer:
         await _consume_handshake(ws1)
         await ws1.send(json.dumps({"type": "text", "message": "first question"}))
 
+        research_status = await _recv_json(ws1)
+        _assert_research_status_frame(research_status)
         thinking = await _recv_json(ws1)
         assert thinking["status"] == "thinking"
         streaming = await _recv_json(ws1)
@@ -308,6 +346,8 @@ class TestNewMessageClearsBuffer:
         assert gw._inflight_buffer is None
 
         await ws2.send(json.dumps({"type": "text", "message": "second question"}))
+        research_status = await _recv_json(ws2)
+        _assert_research_status_frame(research_status)
         thinking2 = await _recv_json(ws2)
         assert thinking2["status"] == "thinking"
 
@@ -337,6 +377,8 @@ class TestExpiredBuffer:
         await _consume_handshake(ws1)
         await ws1.send(json.dumps({"type": "text", "message": "hello"}))
 
+        research_status = await _recv_json(ws1)
+        _assert_research_status_frame(research_status)
         thinking = await _recv_json(ws1)
         assert thinking["status"] == "thinking"
         streaming = await _recv_json(ws1)
@@ -365,6 +407,8 @@ class TestExpiredBuffer:
 
         # Verify we can still send messages normally
         await ws2.send(json.dumps({"type": "text", "message": "new question"}))
+        research_status = await _recv_json(ws2)
+        _assert_research_status_frame(research_status)
         thinking2 = await _recv_json(ws2)
         assert thinking2["status"] == "thinking"
 
@@ -395,6 +439,8 @@ class TestSpliceInflight:
         await _consume_handshake(ws1)
         await ws1.send(json.dumps({"type": "text", "message": "hello"}))
 
+        research_status = await _recv_json(ws1)
+        _assert_research_status_frame(research_status)
         thinking = await _recv_json(ws1)
         assert thinking["status"] == "thinking"
         streaming = await _recv_json(ws1)
@@ -480,7 +526,6 @@ class TestDiscardInflight:
             gateway_host="127.0.0.1",
             gateway_port=0,
             gateway_token="test-token",
-            autoresearch_feed_interval=0,
         )
         gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 
@@ -505,7 +550,6 @@ class TestDiscardInflight:
             gateway_host="127.0.0.1",
             gateway_port=0,
             gateway_token="test-token",
-            autoresearch_feed_interval=0,
         )
         gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 
@@ -523,7 +567,6 @@ class TestDiscardInflight:
             gateway_host="127.0.0.1",
             gateway_port=0,
             gateway_token="test-token",
-            autoresearch_feed_interval=0,
         )
         gw = GatewayServer(config, handler=_SlowStreamHandler([]))
 

@@ -93,6 +93,32 @@ describe('DisplayManager', () => {
     });
   });
 
+  describe('interaction-safe idle repaint', () => {
+    it('does not paint idle status or footer after recording starts mid-repaint', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+      let resolveTranscript!: (value: boolean) => void;
+      mock.textContainerUpgrade.mockImplementationOnce(
+        () => new Promise<boolean>((resolve) => { resolveTranscript = resolve; }),
+      );
+      mock.textContainerUpgrade.mockClear();
+
+      const idlePromise = dm.showIdle();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(resolveTranscript).toBeTypeOf('function');
+
+      await dm.showRecording();
+      resolveTranscript(true);
+      await idlePromise;
+
+      const contents = mock.textContainerUpgrade.mock.calls.map((call) => call[0].content);
+      expect(contents).toContain('OpenClaw  ● Recording');
+      expect(contents).not.toContain('OpenClaw  ● Idle');
+      expect(contents).not.toContain('Tap to interact');
+    });
+  });
+
   // -----------------------------------------------------------------------
   // Task 2: Delta Buffering During Layout Transitions (P3.6)
   // -----------------------------------------------------------------------
@@ -281,6 +307,34 @@ describe('DisplayManager', () => {
       expect(contentCall.containerID).toBe(2);
       expect(contentCall.contentOffset).toBe(0);
       expect(contentCall.content).toContain('abc');
+    });
+
+    it('does not overwrite recording when a gesture starts during finalisation', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showStreaming();
+      mock.textContainerUpgrade.mockClear();
+
+      let releaseTranscript!: (value: boolean) => void;
+      mock.textContainerUpgrade.mockImplementationOnce(
+        () => new Promise<boolean>((resolve) => { releaseTranscript = resolve; }),
+      );
+
+      const finalisePromise = dm.finaliseStream();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(releaseTranscript).toBeTypeOf('function');
+
+      await dm.showRecording();
+      releaseTranscript(true);
+      await finalisePromise;
+
+      const contents = mock.textContainerUpgrade.mock.calls.map((call) => call[0].content);
+      expect(contents).toContain('OpenClaw  ● Recording');
+      expect(contents).toContain('Tap to stop');
+      expect(contents).not.toContain('OpenClaw  ● Idle');
+      expect(contents).not.toContain('Tap to interact');
     });
   });
 
@@ -744,6 +798,76 @@ describe('DisplayManager', () => {
         (c: any[]) => c[0].containerID === 1,
       );
       expect(statusCall![0].content).toContain('● Task Running');
+    });
+  });
+
+  describe('setAutoresearchFooter', () => {
+    it('updates the footer while idle and restores the cached value on idle', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showIdle();
+      mock.textContainerUpgrade.mockClear();
+
+      await dm.setAutoresearchFooter('campaign ACTIVE · owner active');
+      const footerCall = mock.textContainerUpgrade.mock.calls.find(
+        (c: any[]) => c[0].containerID === 3,
+      );
+      expect(footerCall?.[0].content).toBe('campaign ACTIVE · owner active');
+
+      mock.textContainerUpgrade.mockClear();
+      await dm.showRecording();
+      await dm.showIdle();
+      const restored = mock.textContainerUpgrade.mock.calls.filter(
+        (c: any[]) => c[0].containerID === 3,
+      ).at(-1);
+      expect(restored?.[0].content).toBe('campaign ACTIVE · owner active');
+    });
+
+    it('does not paint research status over confirmation or recording affordances', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+
+      await dm.showIdle();
+      await dm.showConfirming('hello');
+      mock.textContainerUpgrade.mockClear();
+      await dm.setAutoresearchFooter('campaign ACTIVE · owner active');
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalledWith(
+        expect.objectContaining({ containerID: 3, content: 'campaign ACTIVE · owner active' }),
+      );
+
+      await dm.showRecording();
+      mock.textContainerUpgrade.mockClear();
+      await dm.setAutoresearchFooter('campaign PAUSED · owner inactive');
+      expect(mock.textContainerUpgrade).not.toHaveBeenCalled();
+    });
+
+    it('rechecks idle state after a queued footer update waits on the bridge', async () => {
+      const { dm, bridge } = await initDisplay();
+      const mock = asMock(bridge);
+      let release!: () => void;
+      const blocked = new Promise<boolean>((resolve) => { release = () => resolve(true); });
+
+      await dm.showIdle();
+      mock.textContainerUpgrade.mockClear();
+      mock.textContainerUpgrade.mockImplementationOnce(() => blocked);
+      const prior = dm.replaceTranscript('queued before status');
+      await Promise.resolve();
+      const queued = dm.setAutoresearchFooter('campaign ACTIVE · owner active');
+
+      await dm.showRecording();
+      release();
+      await prior;
+      await queued;
+
+      const researchFooterCalls = mock.textContainerUpgrade.mock.calls.filter(
+        (c: any[]) => c[0].containerID === 3 && c[0].content === 'campaign ACTIVE · owner active',
+      );
+      expect(researchFooterCalls).toHaveLength(0);
+      const lastFooterCall = mock.textContainerUpgrade.mock.calls
+        .filter((c: any[]) => c[0].containerID === 3)
+        .at(-1);
+      expect(lastFooterCall?.[0].content).toBe('Tap to stop');
     });
   });
 });

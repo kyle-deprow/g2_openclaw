@@ -130,6 +130,7 @@ class HistoryEntryDict(TypedDict):
 class HistoryFrame(TypedDict):
     type: Literal["history"]
     entries: list[HistoryEntryDict]
+    historyKind: NotRequired[Literal["research_owner_delta"]]
 
 
 class SessionResetFrame(TypedDict):
@@ -139,20 +140,19 @@ class SessionResetFrame(TypedDict):
 
 class AutoresearchStatusFrame(TypedDict):
     type: Literal["autoresearch_status"]
-    running: bool
-    phase: str
-    iteration: int
-    suspended: bool
-    campaignReviewRequired: bool
-    supervisorOutcome: NotRequired[str]
-    supervisorDetail: NotRequired[str]
-    lastCycleAt: NotRequired[int]
-    taskHeadline: NotRequired[str]
-
-
-class AutoresearchFeedFrame(TypedDict):
-    type: Literal["autoresearch_feed"]
-    entries: list[HistoryEntryDict]
+    hypothesisId: str | None
+    hypothesisState: str | None
+    attemptId: str | None
+    attemptState: str | None
+    stage: str
+    lastAstraDecision: str | None
+    campaignStatus: str | None
+    boundaryFailure: str | None
+    lastEventAt: str | None
+    ownerState: str
+    updatedAt: str | None
+    available: bool
+    unavailableReason: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -180,13 +180,20 @@ _OUTBOUND_FIELDS: dict[str, list[str]] = {
     "history": ["entries"],
     "session_reset": ["reason"],
     "autoresearch_status": [
-        "running",
-        "phase",
-        "iteration",
-        "suspended",
-        "campaignReviewRequired",
+        "hypothesisId",
+        "hypothesisState",
+        "attemptId",
+        "attemptState",
+        "stage",
+        "lastAstraDecision",
+        "campaignStatus",
+        "boundaryFailure",
+        "lastEventAt",
+        "ownerState",
+        "updatedAt",
+        "available",
+        "unavailableReason",
     ],
-    "autoresearch_feed": ["entries"],
 }
 
 _ALL_FIELDS: dict[str, list[str]] = {**_INBOUND_FIELDS, **_OUTBOUND_FIELDS}
@@ -207,18 +214,24 @@ _FIELD_TYPES: dict[str, type] = {
     "sessionKey": str,
     "sessionStartedAt": str,
     "entries": list,
+    "historyKind": str,
     "question": str,
     "elapsedMs": int,
     "phase": str,
     "reason": str,
-    "running": bool,
-    "suspended": bool,
-    "campaignReviewRequired": bool,
-    "iteration": int,
-    "lastCycleAt": int,
-    "supervisorOutcome": str,
-    "supervisorDetail": str,
-    "taskHeadline": str,
+    "hypothesisId": str,
+    "hypothesisState": str,
+    "attemptId": str,
+    "attemptState": str,
+    "stage": str,
+    "lastAstraDecision": str,
+    "campaignStatus": str,
+    "boundaryFailure": str,
+    "lastEventAt": str,
+    "ownerState": str,
+    "updatedAt": str,
+    "available": bool,
+    "unavailableReason": str,
 }
 
 
@@ -240,6 +253,20 @@ def _check_fields(data: dict[str, Any], required: list[str], frame_type: str) ->
         if field == "type":
             continue
         expected_type = _FIELD_TYPES.get(field)
+        nullable = frame_type == "autoresearch_status" and field in {
+            "hypothesisId",
+            "hypothesisState",
+            "attemptId",
+            "attemptState",
+            "lastAstraDecision",
+            "campaignStatus",
+            "boundaryFailure",
+            "lastEventAt",
+            "updatedAt",
+            "unavailableReason",
+        }
+        if expected_type is not None and value is None and nullable:
+            continue
         if expected_type is not None and not isinstance(value, expected_type):
             raise ProtocolError(
                 f"Field '{field}' must be {expected_type.__name__}, got {type(value).__name__}"
@@ -298,6 +325,19 @@ def validate_outbound(frame: dict[str, Any]) -> None:
         raise ProtocolError(f"Unknown outbound frame type: {frame_type}")
 
     _check_fields(frame, required, frame_type)
+
+    if (
+        frame_type == "history"
+        and "historyKind" in frame
+        and frame["historyKind"] != "research_owner_delta"
+    ):
+        raise ProtocolError("history.historyKind must be research_owner_delta")
+    if frame_type == "history" and frame.get("historyKind") == "research_owner_delta":
+        entries = frame.get("entries")
+        if isinstance(entries, list) and any(
+            not isinstance(entry, dict) or entry.get("role") != "assistant" for entry in entries
+        ):
+            raise ProtocolError("research owner history entries must be assistant messages")
 
 
 def serialize(frame: dict[str, Any]) -> str:

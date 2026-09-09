@@ -54,6 +54,7 @@ function createMockGateway() {
 function createMockConversation() {
   return {
     removeLastUser: vi.fn().mockReturnValue(true),
+    appendHistory: vi.fn(),
     addUser: vi.fn(),
     addAssistant: vi.fn(),
     addSystem: vi.fn(),
@@ -79,6 +80,7 @@ describe('InputHandler', () => {
   let gateway: ReturnType<typeof createMockGateway>;
   let bridge: ReturnType<typeof createMockBridge>;
   let conversation: ReturnType<typeof createMockConversation>;
+  let applyPendingResearchOwnerHistory: ReturnType<typeof vi.fn<() => boolean>>;
 
   beforeEach(() => {
     handler = new InputHandler();
@@ -88,6 +90,7 @@ describe('InputHandler', () => {
     gateway = createMockGateway();
     bridge = createMockBridge();
     conversation = createMockConversation();
+    applyPendingResearchOwnerHistory = vi.fn<() => boolean>(() => false);
 
     handler.init({
       sm: sm as unknown as StateMachine,
@@ -95,6 +98,7 @@ describe('InputHandler', () => {
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
       conversation: conversation as unknown as ConversationHistory,
+      applyPendingResearchOwnerHistory,
     });
   });
 
@@ -437,6 +441,7 @@ describe('InputHandler', () => {
       gateway: gateway as unknown as Gateway,
       bridge: bridge as unknown as EvenAppBridge,
       conversation: conversation as unknown as ConversationHistory,
+      applyPendingResearchOwnerHistory,
     });
     expect(warnSpy).toHaveBeenCalledWith('[Input] Already initialised — ignoring duplicate init()');
     expect(bridge.onEvenHubEvent).toHaveBeenCalledTimes(1);
@@ -490,6 +495,20 @@ describe('InputHandler', () => {
       expect(conversation.removeLastUser).toHaveBeenCalled();
       expect(sm.transition).toHaveBeenCalledWith('idle');
       expect(display.showIdle).toHaveBeenCalled();
+    });
+
+    it('drains queued owner history before returning to idle', () => {
+      const ownerEntries = [{ role: 'assistant', text: 'Astra update', ts: 3000 }];
+      applyPendingResearchOwnerHistory.mockImplementation(() => {
+        conversation.appendHistory(ownerEntries);
+        return true;
+      });
+      sm._current = 'confirming';
+      handler.setPendingTranscription('some text');
+
+      expect(handler.rejectTranscription()).toBe(true);
+      expect(conversation.appendHistory).toHaveBeenCalledWith(ownerEntries);
+      expect(applyPendingResearchOwnerHistory).toHaveBeenCalledBefore(display.showIdle);
     });
 
     it('double-tap in confirming removes entry from conversation', () => {

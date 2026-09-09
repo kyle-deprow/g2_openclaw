@@ -8,6 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from gateway.research.status import DEFAULT_RESEARCH_ROOT, resolve_research_root
+
 
 @dataclass(frozen=True)
 class GatewayConfig:
@@ -24,7 +26,8 @@ class GatewayConfig:
     openclaw_gateway_token: str | None = None
     agent_timeout: int = 120
     auth_timeout: float = 5.0
-    autoresearch_feed_interval: float = 5.0
+    research_root: Path = DEFAULT_RESEARCH_ROOT
+    research_status_interval: float = 5.0
     allowed_origins: list[str] | None = None
     local_audio: bool = False
     history_limit: int = 10
@@ -59,8 +62,9 @@ def load_config() -> GatewayConfig:
     - ``OPENCLAW_GATEWAY_TOKEN`` (required)
     - ``AGENT_TIMEOUT`` (default ``120``)
     - ``AUTH_TIMEOUT`` (default ``5.0``)
-    - ``AUTORESEARCH_FEED_INTERVAL`` (default ``5.0`` — seconds between autoresearch feed polls;
-      ``<= 0`` disables it)
+    - ``RESEARCH_V2_ROOT`` (default ``~/.openclaw/research-v2``)
+    - ``RESEARCH_STATUS_INTERVAL`` (default ``5.0`` — seconds between read-only
+      research status projections; ``<= 0`` disables it)
     - ``ALLOWED_ORIGINS`` (default ``None`` — comma-separated list of allowed origins)
     - ``G2_LOCAL_AUDIO`` (default ``false`` — capture audio from local mic instead of WebSocket)
     """
@@ -84,13 +88,14 @@ def load_config() -> GatewayConfig:
             f"Environment variable AUTH_TIMEOUT must be a number, got {auth_timeout_raw!r}"
         ) from exc
 
-    autoresearch_feed_interval_raw = os.environ.get("AUTORESEARCH_FEED_INTERVAL", "5.0")
+    research_root = resolve_research_root()
+    research_status_interval_raw = os.environ.get("RESEARCH_STATUS_INTERVAL", "5.0")
     try:
-        autoresearch_feed_interval = float(autoresearch_feed_interval_raw)
+        research_status_interval = float(research_status_interval_raw)
     except ValueError as exc:
         raise ValueError(
-            "Environment variable AUTORESEARCH_FEED_INTERVAL must be a number, "
-            f"got {autoresearch_feed_interval_raw!r}"
+            "Environment variable RESEARCH_STATUS_INTERVAL must be a number, "
+            f"got {research_status_interval_raw!r}"
         ) from exc
 
     allowed_origins_raw = os.environ.get("ALLOWED_ORIGINS")
@@ -116,7 +121,8 @@ def load_config() -> GatewayConfig:
         openclaw_gateway_token=openclaw_gateway_token if openclaw_gateway_token else None,
         agent_timeout=agent_timeout,
         auth_timeout=auth_timeout,
-        autoresearch_feed_interval=autoresearch_feed_interval,
+        research_root=research_root,
+        research_status_interval=research_status_interval,
         allowed_origins=allowed_origins,
         local_audio=local_audio,
         history_limit=history_limit,

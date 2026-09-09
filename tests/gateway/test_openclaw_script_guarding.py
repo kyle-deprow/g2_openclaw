@@ -812,15 +812,32 @@ if (process.argv[2] === "sandbox") {
     if (process.env.MOCK_CODEX_SANDBOX_STDERR) {
       process.stderr.write(`${process.env.MOCK_CODEX_SANDBOX_STDERR}\\n`);
     } else {
-      const statePath =
+      const rootPath =
         process.env.MOCK_CODEX_SANDBOX_STATE_PATH ||
-        "/home/dev/.openclaw/autoresearch/quantipy-state.json";
+        "/tmp/private-research-status-root";
       process.stderr.write(
-        "Usage: gateway-cli autoresearch-next [OPTIONS] STATE_PATH\\n" +
-        "Invalid value for 'STATE_PATH': File\\n" +
-        `'${statePath}' does not exist.\\n`
+        "Usage: gateway-cli research-status [OPTIONS]\\n" +
+        "Invalid value for '--root': Path\\n" +
+        `'${rootPath}' does not exist.\\n`
       );
     }
+  } else {
+    process.stdout.write(JSON.stringify({
+      type: "autoresearch_status",
+      hypothesisId: null,
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: "idle",
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: "unknown",
+      updatedAt: null,
+      available: false,
+      unavailableReason: "research state database is missing"
+    }) + "\\n");
   }
   process.exit(sandboxStatus);
 }
@@ -3120,23 +3137,26 @@ def test_push_script_runs_all_wake_commands_in_the_managed_sandbox(
         json.loads(line)
         for line in Path(env["CODEX_SANDBOX_LOG"]).read_text(encoding="utf-8").splitlines()
     ]
-    assert len(invocations) == 4
-    assert {invocation["codexHome"] for invocation in invocations} == {
-        str(Path(env["OPENCLAW_PUSH_HOME"]) / "agents/research-orchestrator/agent/codex-home")
-    }
-    assert {invocation["cwd"] for invocation in invocations} == {
-        str(Path(env["HOME"]) / ".openclaw/autoresearch/model-workspaces")
-    }
-    assert all(
-        invocation["argv"][:3] == ["sandbox", "-c", 'sandbox_mode="workspace-write"']
-        for invocation in invocations
-    )
-    expected_command_argv = [
-        "/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli",
-        "autoresearch-next",
-        "/home/dev/.openclaw/autoresearch/quantipy-state.json",
+    assert len(invocations) == 1
+    invocation = invocations[0]
+    probe_home = Path(invocation["codexHome"])
+    assert probe_home == Path(invocation["cwd"])
+    assert probe_home.name == "codex-home"
+    assert probe_home.parent.name.startswith("g2-research-status-probe-")
+    assert probe_home.is_relative_to(Path(env["TMPDIR"]).resolve())
+    assert invocation["argv"][:6] == [
+        "sandbox",
+        "-P",
+        "probe",
+        "-C",
+        str(probe_home),
+        "--",
     ]
-    assert all(invocation["argv"][3:] == expected_command_argv for invocation in invocations)
+    assert invocation["argv"][6:9] == ["gateway-cli", "research-status", "--root"]
+    private_root = Path(invocation["argv"][9])
+    assert private_root.name == "missing-root"
+    assert private_root.parent.name.startswith("g2-research-status-probe-")
+    assert private_root.parent == probe_home.parent
 
 
 def test_push_script_accepts_successful_gateway_cli_probe(
@@ -3163,7 +3183,7 @@ def test_push_script_rolls_back_when_the_sandbox_probe_fails(
 
     assert result.returncode != 0
     assert "command-contract probe failed" in result.stderr
-    assert "exit code: 7" in result.stderr
+    assert "exit code 7" in result.stderr
     assert "mock sandbox failure" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     assert openclaw_config.read_bytes() == original_config

@@ -5,39 +5,50 @@ from io import StringIO
 from typing import cast
 
 import pytest
-from gateway.autoresearch_control import ControlStatus, StopResult
 from gateway.g2_control_mcp_server import TOOL_NAMES, G2ControlMcpServer, run_stdio
+from gateway.research.control import StartResult, StopResult
+from gateway.research.status import ResearchStatus
 
 
 class _FakeControl:
-    def status(self) -> ControlStatus:
-        return ControlStatus(
-            owner_agent_id="autoresearch-pm",
-            owner_session_key="agent:autoresearch-pm:autoresearch:quantipy",
-            phase="repeat",
-            iteration=4,
-            owner_lifecycle_status=None,
-            supervisor_active=True,
-            tasks=(),
+    def status(self) -> ResearchStatus:
+        return ResearchStatus(
+            hypothesis_id=None,
+            hypothesis_state=None,
+            attempt_id=None,
+            attempt_state=None,
+            stage="idle",
+            last_astra_decision=None,
+            campaign_status="ACTIVE",
+            boundary_failure=None,
+            last_event_at=None,
+            owner_state="inactive",
+            updated_at=None,
         )
 
-    def start(self) -> None:
-        return None
+    def start(self) -> StartResult:
+        return StartResult(started=True, resumed=False)
 
     def stop(self) -> StopResult:
-        return StopResult(cancelled_task_ids=("task-1",), deleted_session=True)
+        return StopResult(
+            paused=True,
+            job_cancelled=False,
+            review_cancellation="not_pending",
+            owner_stopped=True,
+            completed=True,
+        )
 
 
 class _CountingControl(_FakeControl):
     calls = 0
 
-    def start(self) -> None:
+    def start(self) -> StartResult:
         type(self).calls += 1
         return super().start()
 
 
 class _ExplodingControl(_FakeControl):
-    def status(self) -> ControlStatus:
+    def status(self) -> ResearchStatus:
         raise RuntimeError("boom")
 
 
@@ -114,9 +125,9 @@ def test_g2_control_mcp_dispatches_status_start_and_stop() -> None:
     assert status is not None
     assert start is not None
     assert stop is not None
-    assert _payload(status)["phase"] == "repeat"
-    assert _payload(start) == {"started": True}
-    assert _payload(stop)["cancelled_task_ids"] == ["task-1"]
+    assert _payload(status)["stage"] == "idle"
+    assert _payload(start)["started"] is True
+    assert _payload(stop)["completed"] is True
 
 
 def test_g2_control_mcp_rejects_arbitrary_tool_names() -> None:

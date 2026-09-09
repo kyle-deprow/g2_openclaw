@@ -197,6 +197,35 @@ describe('parseFrame', () => {
     expect(frame).toEqual({ type: 'history', entries: [] });
   });
 
+  it('preserves the typed research owner delta marker', () => {
+    const frame = parseFrame(JSON.stringify({
+      type: 'history',
+      historyKind: 'research_owner_delta',
+      entries: [{ role: 'assistant', text: 'new update', ts: 3000 }],
+    }));
+    expect(frame).toEqual({
+      type: 'history',
+      historyKind: 'research_owner_delta',
+      entries: [{ role: 'assistant', text: 'new update', ts: 3000 }],
+    });
+  });
+
+  it('rejects an unknown history marker', () => {
+    expect(() => parseFrame(JSON.stringify({
+      type: 'history',
+      historyKind: 'replace_everything',
+      entries: [],
+    }))).toThrow('history.historyKind must be research_owner_delta');
+  });
+
+  it('rejects user entries in a research owner delta', () => {
+    expect(() => parseFrame(JSON.stringify({
+      type: 'history',
+      historyKind: 'research_owner_delta',
+      entries: [{ role: 'user', text: 'private prompt', ts: 3000 }],
+    }))).toThrow('research owner history entries must be assistant messages');
+  });
+
   it('throws when history frame is missing entries field', () => {
     expect(() => parseFrame('{"type":"history"}')).toThrow(
       'Frame type "history" missing required field "entries"',
@@ -216,126 +245,131 @@ describe('parseFrame', () => {
   });
 
   // --- Autoresearch status frame ---
-  it('parses autoresearch_status with minimal fields', () => {
+  it('parses an unavailable autoresearch_status frame with explicit nullable fields', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'autoresearch_status',
-      running: false,
-      phase: 'idle',
-      iteration: 0,
-      suspended: false,
-      campaignReviewRequired: false,
+      hypothesisId: null,
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: 'idle',
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: 'unknown',
+      updatedAt: null,
+      available: false,
+      unavailableReason: 'missing database',
     }));
     expect(frame).toEqual({
       type: 'autoresearch_status',
-      running: false,
-      phase: 'idle',
-      iteration: 0,
-      suspended: false,
-      campaignReviewRequired: false,
+      hypothesisId: null,
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: 'idle',
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: 'unknown',
+      updatedAt: null,
+      available: false,
+      unavailableReason: 'missing database',
     });
   });
 
-  it('parses autoresearch_status with full fields', () => {
+  it('parses an active autoresearch_status frame', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'autoresearch_status',
-      running: true,
-      phase: 'experiment',
-      iteration: 7,
-      suspended: false,
-      campaignReviewRequired: true,
-      supervisorOutcome: 'continue',
-      supervisorDetail: 'Keep testing the next hypothesis',
-      lastCycleAt: 1700000000000,
-      taskHeadline: 'Improve benchmark score',
+      hypothesisId: 'H0001',
+      hypothesisState: 'FROZEN',
+      attemptId: 'H0001-A001',
+      attemptState: 'RUNNING',
+      stage: 'running',
+      lastAstraDecision: 'continue',
+      campaignStatus: 'ACTIVE',
+      boundaryFailure: null,
+      lastEventAt: '2026-09-06T00:00:00Z',
+      ownerState: 'active',
+      updatedAt: '2026-09-06T00:00:00Z',
+      available: true,
+      unavailableReason: null,
     }));
     expect(frame).toEqual({
       type: 'autoresearch_status',
-      running: true,
-      phase: 'experiment',
-      iteration: 7,
-      suspended: false,
-      campaignReviewRequired: true,
-      supervisorOutcome: 'continue',
-      supervisorDetail: 'Keep testing the next hypothesis',
-      lastCycleAt: 1700000000000,
-      taskHeadline: 'Improve benchmark score',
+      hypothesisId: 'H0001',
+      hypothesisState: 'FROZEN',
+      attemptId: 'H0001-A001',
+      attemptState: 'RUNNING',
+      stage: 'running',
+      lastAstraDecision: 'continue',
+      campaignStatus: 'ACTIVE',
+      boundaryFailure: null,
+      lastEventAt: '2026-09-06T00:00:00Z',
+      ownerState: 'active',
+      updatedAt: '2026-09-06T00:00:00Z',
+      available: true,
+      unavailableReason: null,
     });
   });
 
-  it('rejects autoresearch_status when running is missing', () => {
+  it('rejects autoresearch_status when a required field is missing', () => {
     expect(() => parseFrame(JSON.stringify({
       type: 'autoresearch_status',
-      phase: 'idle',
-      iteration: 0,
-      suspended: false,
-      campaignReviewRequired: false,
-    }))).toThrow('Frame type "autoresearch_status" missing required field "running"');
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: 'idle',
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      ownerState: 'unknown',
+      updatedAt: null,
+      available: false,
+      unavailableReason: null,
+    }))).toThrow('Frame type "autoresearch_status" missing required field "hypothesisId"');
   });
 
-  it('rejects autoresearch_status when suspended is a string', () => {
+  it('rejects autoresearch_status when ownerState has the wrong type', () => {
     expect(() => parseFrame(JSON.stringify({
       type: 'autoresearch_status',
-      running: false,
-      phase: 'idle',
-      iteration: 0,
-      suspended: 'false',
-      campaignReviewRequired: false,
-    }))).toThrow('Field "suspended" must be boolean');
+      hypothesisId: null,
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: 'idle',
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: 123,
+      updatedAt: null,
+      available: false,
+      unavailableReason: null,
+    }))).toThrow('Field "ownerState" must be string');
   });
 
-  it('drops mistyped autoresearch_status optional fields', () => {
+  it('drops unknown autoresearch_status fields', () => {
     const frame = parseFrame(JSON.stringify({
       type: 'autoresearch_status',
-      running: true,
-      phase: 'experiment',
-      iteration: 7,
-      suspended: false,
-      campaignReviewRequired: false,
-      supervisorOutcome: 123,
-      supervisorDetail: true,
-      lastCycleAt: 'later',
-      taskHeadline: 456,
+      hypothesisId: null,
+      hypothesisState: null,
+      attemptId: null,
+      attemptState: null,
+      stage: 'idle',
+      lastAstraDecision: null,
+      campaignStatus: null,
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: 'inactive',
+      updatedAt: null,
+      available: true,
+      unavailableReason: null,
+      supervisorOutcome: 'legacy',
     }));
-    expect(frame).toEqual({
-      type: 'autoresearch_status',
-      running: true,
-      phase: 'experiment',
-      iteration: 7,
-      suspended: false,
-      campaignReviewRequired: false,
-    });
-  });
-
-  // --- Autoresearch feed frame ---
-  it('parses autoresearch_feed and filters malformed or non-assistant entries', () => {
-    const frame = parseFrame(JSON.stringify({
-      type: 'autoresearch_feed',
-      entries: [
-        { role: 'assistant', text: 'Keep this', ts: 1000 },
-        { role: 'user', text: 'Drop this', ts: 2000 },
-        { role: 'assistant', text: 'Missing timestamp' },
-        { role: 'assistant', ts: 4000 },
-        { role: 'assistant', text: 'Not numeric timestamp', ts: 'later' },
-        { role: 'assistant', text: 42, ts: 5000 },
-      ],
-    }));
-    expect(frame).toEqual({
-      type: 'autoresearch_feed',
-      entries: [{ role: 'assistant', text: 'Keep this', ts: 1000 }],
-    });
-  });
-
-  it('parses an empty autoresearch_feed', () => {
-    expect(parseFrame('{"type":"autoresearch_feed","entries":[]}')).toEqual({
-      type: 'autoresearch_feed',
-      entries: [],
-    });
-  });
-
-  it('rejects autoresearch_feed when entries is not an array', () => {
-    expect(() => parseFrame('{"type":"autoresearch_feed","entries":{}}')).toThrow(
-      'autoresearch_feed.entries must be an array',
-    );
+    expect(frame).not.toHaveProperty('supervisorOutcome');
   });
 
   // --- Connected frame with optional session fields ---

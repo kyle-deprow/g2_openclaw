@@ -1,43 +1,34 @@
-"""Probe supervisor wake commands inside the managed Codex sandbox.
+"""Probe the read-only research status command in the managed Codex sandbox.
 
-The probe extracts the first command from each supervisor wake-message constant
-and executes that command through the embedded Codex app-server with
-``sandbox_mode="workspace-write"`` from the PM's default model-workspaces cwd.
-A real deployment must return zero.  The guard-suite's isolated HOME has no
-autoresearch state fixture, so this module also accepts exactly gateway-cli's
-state-path validation failure: exit code 2 with the ``autoresearch-next`` usage
-and the matching ``STATE_PATH`` file ``does not exist`` diagnostic, but only
-after an independent unsandboxed check confirms that the state path is absent
-and its parent is traversable.  This rejects Click's identical EACCES
-masquerade.  Any other nonzero result is a deployment failure.
+This check exercises a command boundary, not an agent/model turn.  It uses the
+installed Codex CLI's named, command-only permission profile and a private
+missing-root fixture.  The replacement status command must return an explicit
+unavailable frame without creating a database, lock, or root directory.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import re
 import shlex
-import stat
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-SUPERVISOR_MESSAGE_NAMES: tuple[str, ...] = (
-    "WAKE_MESSAGE",
-    "FINALIZED_MEMORY_WAKE_MESSAGE",
-    "RECOVERY_MESSAGE",
-    "MISSING_VERIFICATION_ARTIFACT_RECOVERY_MESSAGE",
-)
-COMMAND_CONTRACT_PREFIX = "First run exactly: "
-_COMMAND_PATTERN = re.compile(
-    re.escape(COMMAND_CONTRACT_PREFIX) + r"(?P<command>(?:(?:cd\s+\S+\s+&&\s+)?\S+\s+"
-    r"autoresearch-next\s+\S+?\.json))\.\s"
-)
-_STATE_PATH_MISSING_EXIT_CODE = 2
-_ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
-_PM_WORKING_DIRECTORY = Path(".openclaw/autoresearch/model-workspaces")
+COMMAND_PROFILE = "probe"
+COMMAND_TIMEOUT_SECONDS = 20.0
+MAX_OUTPUT_CHARS = 8_000
+_COMMAND_PROFILE_CONFIG = """[permissions.probe.filesystem]
+"/" = "read"
+
+[permissions.probe.network]
+enabled = false
+"""
+_COMMAND_PROGRAM = "gateway-cli"
+_COMMAND_NAME = "research-status"
 _EMBEDDED_CODEX_SUFFIX = (
     "node_modules",
     "@openclaw",
@@ -48,51 +39,43 @@ _EMBEDDED_CODEX_SUFFIX = (
     "bin",
     "codex.js",
 )
+_STATUS_FIELDS = frozenset(
+    {
+        "type",
+        "hypothesisId",
+        "hypothesisState",
+        "attemptId",
+        "attemptState",
+        "stage",
+        "lastAstraDecision",
+        "campaignStatus",
+        "boundaryFailure",
+        "lastEventAt",
+        "ownerState",
+        "updatedAt",
+        "available",
+        "unavailableReason",
+    }
+)
 
 
 class CommandProbeError(RuntimeError):
-    """Raised when a supervisor command contract cannot be safely probed."""
+    """Raised when the status command contract cannot be safely probed."""
 
 
-def _extract_message_command(name: str, message: object) -> str:
-    if not isinstance(message, str):
-        raise CommandProbeError(f"{name} is not a wake-message string")
-    match = _COMMAND_PATTERN.search(message)
-    if match is None:
-        raise CommandProbeError(
-            f"{name} is missing the required '{COMMAND_CONTRACT_PREFIX}' command pattern"
-        )
-    command = match.group("command")
-    try:
-        tokens = shlex.split(command)
-    except ValueError as exc:
-        raise CommandProbeError(f"{name} has an invalid commanded invocation: {exc}") from exc
-    if not tokens or Path(tokens[-1]).suffix != ".json":
-        raise CommandProbeError(f"{name} has an invalid autoresearch state-path command")
-    command_start = 3 if tokens[0] == "cd" else 0
-    if tokens[0] == "cd" and (len(tokens) != 6 or tokens[2] != "&&"):
-        raise CommandProbeError(f"{name} has an unsupported shell command contract")
-    if len(tokens) - command_start != 3 or Path(tokens[command_start]).name != "gateway-cli":
-        raise CommandProbeError(f"{name} has an unsupported gateway-cli command contract")
-    if tokens[command_start + 1] != "autoresearch-next":
-        raise CommandProbeError(f"{name} has an unsupported gateway-cli command contract")
-    return command
+def extract_commanded_invocations(probe_root: Path | None = None) -> tuple[str, ...]:
+    """Return the one replacement invocation used by deployment checks.
 
-
-def extract_commanded_invocations() -> tuple[str, ...]:
-    """Extract the four exact invocations published in supervisor wake messages."""
-
-    import gateway.autoresearch_supervisor as supervisor
-
-    commands: list[str] = []
-    for name in SUPERVISOR_MESSAGE_NAMES:
-        commands.append(_extract_message_command(name, getattr(supervisor, name, None)))
-    return tuple(commands)
+    ``probe_root`` is deliberately supplied by :func:`run_probe` from a
+    private temporary directory.  The optional value keeps this helper useful
+    to static callers without reintroducing a shared or world-writable path.
+    """
+    root = probe_root or Path("<private-probe-root>")
+    return (f"{_COMMAND_PROGRAM} {_COMMAND_NAME} --root {shlex.quote(str(root))}",)
 
 
 def resolve_embedded_codex_binary(cli_path: Path) -> tuple[str, str]:
     """Resolve the Node command and embedded Codex CLI like the doctor step."""
-
     if tuple(cli_path.parts[-len(_EMBEDDED_CODEX_SUFFIX) :]) != _EMBEDDED_CODEX_SUFFIX:
         raise CommandProbeError(
             "embedded Codex CLI must be bin/codex.js under "
@@ -103,175 +86,168 @@ def resolve_embedded_codex_binary(cli_path: Path) -> tuple[str, str]:
     return "node", str(cli_path)
 
 
-def _sandbox_command(command: str) -> list[str]:
+def _sandbox_command(command: str, probe_root: Path | None = None) -> list[str]:
     try:
         tokens = shlex.split(command)
     except ValueError as exc:
         raise CommandProbeError(f"invalid commanded invocation: {exc}") from exc
-    if "&&" in tokens:
-        if len(tokens) < 4 or tokens[0] != "cd" or tokens[2] != "&&":
-            raise CommandProbeError(f"unsupported shell command contract: {command}")
-        return ["bash", "-lc", command]
+    root = probe_root or Path("<private-probe-root>")
+    expected = [_COMMAND_PROGRAM, _COMMAND_NAME, "--root", str(root)]
+    if tokens != expected:
+        raise CommandProbeError("unsupported research status command contract")
     return tokens
 
 
-def _state_path(command: str) -> str:
-    try:
-        tokens = shlex.split(command)
-    except ValueError as exc:
-        raise CommandProbeError(f"invalid commanded invocation: {exc}") from exc
-    if not tokens:
-        raise CommandProbeError("commanded invocation is empty")
-    return tokens[-1]
-
-
-def _is_gateway_cli_missing_state_signature(
-    command: str, completed: subprocess.CompletedProcess[str]
-) -> bool:
-    if completed.returncode != _STATE_PATH_MISSING_EXIT_CODE:
-        return False
-    stderr = _ANSI_ESCAPE_PATTERN.sub("", completed.stderr).replace("│", " ")
-    state_path = re.escape(_state_path(command))
-    return (
-        completed.stdout == ""
-        and "Usage: gateway-cli autoresearch-next [OPTIONS] STATE_PATH" in stderr
-        and re.search(
-            rf"Invalid value for 'STATE_PATH': File\s+['\"]?{state_path}['\"]?\s+does not exist\.",
-            stderr,
-        )
-        is not None
-    )
-
-
-def _existing_parent_is_traversable(parent: Path) -> bool:
-    try:
-        parent_stat = os.stat(parent)
-    except OSError:
-        return False
-    if not stat.S_ISDIR(parent_stat.st_mode):
-        return False
-
-    mode = stat.S_IMODE(parent_stat.st_mode)
-    effective_uid = os.geteuid()
-    effective_gid = os.getegid()
-    execute_bit: int
-    if parent_stat.st_uid == effective_uid:
-        execute_bit = stat.S_IXUSR
-    elif parent_stat.st_gid == effective_gid or parent_stat.st_gid in os.getgroups():
-        execute_bit = stat.S_IXGRP
-    else:
-        execute_bit = stat.S_IXOTH
-    return bool(mode & execute_bit) and os.access(parent, os.X_OK)
-
-
-def _state_file_is_missing_and_parent_traversable(state_path: str) -> bool:
-    try:
-        if os.path.lexists(state_path):
-            return False
-    except OSError:
-        return False
-    parent = Path(state_path).parent
-    while True:
-        try:
-            if os.path.lexists(parent):
-                return _existing_parent_is_traversable(parent)
-        except OSError:
-            return False
-        next_parent = parent.parent
-        if next_parent == parent:
-            return False
-        parent = next_parent
+def _bounded_text(value: str, *, limit: int = MAX_OUTPUT_CHARS) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…<bounded>"
 
 
 def _stderr_tail(stderr: str, *, line_count: int = 20) -> str:
-    lines = stderr.strip().splitlines()
+    lines = _bounded_text(stderr).strip().splitlines()
     return "\n".join(lines[-line_count:]) if lines else "<empty>"
 
 
-def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
-    """Run all extracted commands and return a deployment-compatible status."""
+def _validate_unavailable_frame(stdout: str) -> str | None:
+    """Validate the exact structured unavailable frame emitted by the CLI."""
+    try:
+        frame = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return f"status command did not emit JSON: {exc}"
+    if not isinstance(frame, Mapping):
+        return "status command JSON result is not an object"
+    if set(frame) != _STATUS_FIELDS:
+        return "status command returned an unexpected status frame shape"
+    if frame.get("type") != "autoresearch_status":
+        return "status command returned the wrong frame type"
+    if frame.get("available") is not False:
+        return "status command did not report an unavailable result"
+    reason = frame.get("unavailableReason")
+    if not isinstance(reason, str) or not reason.strip():
+        return "status command unavailableReason is empty"
+    if frame.get("stage") != "idle":
+        return "unavailable status did not use the idle stage"
+    return None
 
-    commands = extract_commanded_invocations()
-    node_binary, cli = resolve_embedded_codex_binary(embedded_codex_cli)
-    environment = os.environ.copy()
-    environment["CODEX_HOME"] = str(codex_home)
-    # The probe must replicate the supervisor's clean service environment; a
-    # caller-injected node preload (e.g. a stale Azure shim) would fail every
-    # spawned node process inside the sandbox.
-    environment.pop("NODE_OPTIONS", None)
-    failures: list[tuple[str, subprocess.CompletedProcess[str], str | None]] = []
 
-    working_directory = Path.home() / _PM_WORKING_DIRECTORY
-    # The runtime treats the model-workspaces dir as create-on-demand (it is the
-    # sandbox defaultWorkspaceDir); the probe provisions it the same way.
-    working_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for command in commands:
-        completed = subprocess.run(
-            [
-                node_binary,
-                cli,
-                "sandbox",
-                "-c",
-                'sandbox_mode="workspace-write"',
-                *_sandbox_command(command),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=environment,
-            cwd=working_directory,
+def _creation_error(probe_root: Path) -> str | None:
+    if probe_root.exists():
+        return "status command created the private missing root"
+    if any(
+        path.exists()
+        for path in (
+            probe_root / "state.sqlite3",
+            probe_root / "state.sqlite3-wal",
+            probe_root / "state.sqlite3-shm",
+            probe_root / "owner.lock",
         )
-        if completed.returncode == 0:
-            print(f"command-contract probe passed: {command}")
-        elif _is_gateway_cli_missing_state_signature(command, completed):
-            if _state_file_is_missing_and_parent_traversable(_state_path(command)):
-                print(f"command-contract probe accepted state-file-missing failure: {command}")
-            else:
-                failures.append(
-                    (
-                        command,
-                        completed,
-                        "state-file-missing signature rejected: independent filesystem check "
-                        "found the state path present or its parent untraversable",
-                    )
-                )
-        else:
-            failures.append((command, completed, None))
+    ):
+        return "status command created research state files"
+    return None
 
-    if failures:
-        for command, completed, rejection in failures:
-            print("command-contract probe failed:", file=sys.stderr)
-            print(f"  command: {command}", file=sys.stderr)
-            print(f"  exit code: {completed.returncode}", file=sys.stderr)
-            if rejection is not None:
-                print(f"  rejection: {rejection}", file=sys.stderr)
+
+def _provision_command_profile(parent: Path) -> Path:
+    """Create the probe-only Codex home without touching production config."""
+    codex_home = parent / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(_COMMAND_PROFILE_CONFIG, encoding="utf-8")
+    return codex_home
+
+
+def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
+    """Run the replacement status command and return a deployment status."""
+    node_binary, cli = resolve_embedded_codex_binary(embedded_codex_cli)
+    failures: list[tuple[str, str, str]] = []
+
+    with tempfile.TemporaryDirectory(prefix="g2-research-status-probe-") as temp_parent:
+        private_parent = Path(temp_parent)
+        probe_root = private_parent / "missing-root"
+        isolated_codex_home = _provision_command_profile(private_parent)
+        environment = os.environ.copy()
+        environment["CODEX_HOME"] = str(isolated_codex_home)
+        environment.pop("NODE_OPTIONS", None)
+        commands = extract_commanded_invocations(probe_root)
+        for command in commands:
+            reason: str | None = None
+            try:
+                completed = subprocess.run(
+                    [
+                        node_binary,
+                        cli,
+                        "sandbox",
+                        "-P",
+                        COMMAND_PROFILE,
+                        "-C",
+                        str(isolated_codex_home),
+                        "--",
+                        *_sandbox_command(command, probe_root),
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                    cwd=isolated_codex_home,
+                    timeout=COMMAND_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                reason = "timed out"
+                creation_error = _creation_error(probe_root)
+                if creation_error is not None:
+                    reason = f"{reason}; {creation_error}"
+                failures.append((command, reason, _bounded_text(str(exc))))
+                continue
+            except OSError as exc:
+                reason = "could not execute"
+                creation_error = _creation_error(probe_root)
+                if creation_error is not None:
+                    reason = f"{reason}; {creation_error}"
+                failures.append((command, reason, _bounded_text(str(exc))))
+                continue
+
+            if completed.returncode != 0:
+                reason = (
+                    f"exit code {completed.returncode}; stderr={_stderr_tail(completed.stderr)}"
+                )
+                creation_error = _creation_error(probe_root)
+                if creation_error is not None:
+                    reason = f"{reason}; {creation_error}"
+            else:
+                reason = _validate_unavailable_frame(completed.stdout.strip())
+                if reason is None:
+                    reason = _creation_error(probe_root)
+            if reason is None:
+                print(f"command-contract probe passed: {command}")
+            else:
+                failures.append((command, reason, _stderr_tail(completed.stderr)))
+
+    for command, reason, stderr in failures:
+        print("command-contract probe failed:", file=sys.stderr)
+        print(f"  command: {command}", file=sys.stderr)
+        print(f"  reason: {reason}", file=sys.stderr)
+        if stderr and stderr != "<empty>":
             print("  stderr tail:", file=sys.stderr)
-            print(_stderr_tail(completed.stderr), file=sys.stderr)
-        return 1
-    return 0
+            print(stderr, file=sys.stderr)
+    return 1 if failures else 0
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     probe_parser = subparsers.add_parser("probe")
-    probe_parser.add_argument("codex_home")
-    probe_parser.add_argument("embedded_codex_cli")
+    probe_parser.add_argument("codex_home", type=Path)
+    probe_parser.add_argument("embedded_codex_cli", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Dispatch the command-contract probe."""
-
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "probe":
-        try:
-            return run_probe(Path(args.codex_home), Path(args.embedded_codex_cli))
-        except (CommandProbeError, OSError) as exc:
-            print(f"command-contract probe failed: {exc}", file=sys.stderr)
-            return 1
-    parser.error(f"unknown command: {args.command}")
+    try:
+        return run_probe(args.codex_home, args.embedded_codex_cli)
+    except (CommandProbeError, OSError) as exc:
+        print(f"command-contract probe failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

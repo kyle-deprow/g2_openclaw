@@ -16,7 +16,7 @@ import { DisplayManager } from './display';
 import { Gateway } from './gateway';
 import type { GatewayEvent } from './gateway';
 import { InputHandler } from './input';
-import type { AutoresearchStatusFrame, FeedEntry, InboundFrame } from './protocol';
+import type { AutoresearchStatusFrame, HistoryEntry, InboundFrame } from './protocol';
 import { StateMachine } from './state';
 import { createAppApi, SESSION_ID_KEY } from './api';
 import type { ActiveTab } from './api';
@@ -30,29 +30,38 @@ let sm: StateMachine;
 let input: InputHandler;
 let conversation: ConversationHistory;
 let latestArStatus: AutoresearchStatusFrame | null = null;
-let pendingFeed: FeedEntry[] | null = null;
+let pendingResearchOwnerHistory: HistoryEntry[] = [];
 
 let activeTab: ActiveTab = 'openclaw';
 
 const AR_HEADER_MAX_LENGTH = 50;
 
 function formatArHeader(frame: AutoresearchStatusFrame): string {
-  if (!frame.running && frame.phase === 'not running') {
-    return 'AR not running';
-  }
+  if (!frame.available) return 'Research unavailable';
+  const hypothesis = frame.hypothesisId ?? '—';
+  const attempt = frame.attemptId ?? '—';
+  const value = `H:${hypothesis} A:${attempt} ${frame.stage}`;
+  return value.length <= AR_HEADER_MAX_LENGTH
+    ? value
+    : `${value.slice(0, AR_HEADER_MAX_LENGTH - 1)}…`;
+}
 
-  const prefix = frame.running ? 'AR ' : 'AR stopped · ';
-  const outcome = frame.running && frame.supervisorOutcome
-    ? ` · ${frame.supervisorOutcome}`
-    : '';
-  const flags = `${frame.suspended ? ' ⏸' : ''}${frame.campaignReviewRequired ? ' ⚠rev' : ''}`;
-  const suffix = ` it${frame.iteration}${outcome}${flags}`;
-  const phaseLength = Math.max(0, AR_HEADER_MAX_LENGTH - prefix.length - suffix.length);
-  const phase = frame.phase.length > phaseLength
-    ? `${frame.phase.slice(0, Math.max(0, phaseLength - 1))}…`.slice(0, phaseLength)
-    : frame.phase;
+function formatArFooter(frame: AutoresearchStatusFrame): string {
+  if (!frame.available) return `Unavailable: ${(frame.unavailableReason ?? 'unknown').slice(0, 34)}`;
+  const parts = [
+    `campaign ${frame.campaignStatus ?? '—'}`,
+    `owner ${frame.ownerState}`,
+  ];
+  if (frame.boundaryFailure) parts.push(`failure ${frame.boundaryFailure}`);
+  return parts.join(' · ').slice(0, 80);
+}
 
-  return `${prefix}${phase}${suffix}`;
+function applyPendingResearchOwnerHistory(): boolean {
+  if (pendingResearchOwnerHistory.length === 0) return false;
+  const pending = pendingResearchOwnerHistory;
+  pendingResearchOwnerHistory = [];
+  conversation.appendHistory(pending);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,12 +115,21 @@ function routeFrame(frame: InboundFrame): void {
         return;
       }
 
+      if (frame.status === 'idle') {
+        // Local input paths can return to idle without a gateway transition.
+        // Drain queued owner deltas even when this status frame is same-state.
+        const transitioned = sm.transition('idle');
+        if (!transitioned && sm.current !== 'idle') return;
+        const drained = applyPendingResearchOwnerHistory();
+        if (transitioned || drained) {
+          display.showIdle().catch(err => console.error('[Main] Display error:', err));
+        }
+        break;
+      }
+
       if (!sm.transition(frame.status)) return;  // no-op if already in target state
 
       switch (frame.status) {
-        case 'idle':
-          display.showIdle().catch(err => console.error('[Main] Display error:', err));
-          break;
         case 'thinking':
           display.showThinking().catch(err => console.error('[Main] Display error:', err));
           break;
@@ -146,6 +164,7 @@ function routeFrame(frame: InboundFrame): void {
     case 'end':
       if (sm.current === 'streaming') {
         sm.transition('idle');
+        applyPendingResearchOwnerHistory();
         display.finaliseStream().catch(err => console.error('[Main] Display error:', err));
       }
       break;
@@ -181,7 +200,27 @@ function routeFrame(frame: InboundFrame): void {
 
     // -- Conversation history replay on reconnect --------------------------
     case 'history': {
+      if (frame.historyKind === 'research_owner_delta') {
+        console.log(`[Main] Research owner history update: ${frame.entries.length} entries`);
+        // Polling can race every normal interaction state. Keep the model
+        // current, but do not mutate a live streaming turn: its final delta
+        // must remain the conversation model's last assistant entry.
+        if (sm.current !== 'idle') {
+          pendingResearchOwnerHistory.push(...frame.entries);
+        } else {
+          // Queue first so an idle event cannot strand an earlier delta while
+          // this later frame is appended.
+          pendingResearchOwnerHistory.push(...frame.entries);
+          const drained = applyPendingResearchOwnerHistory();
+          if (drained) {
+            display.showIdle().catch(err => console.error('[Main] Display error:', err));
+          }
+        }
+        break;
+      }
+
       console.log(`[Main] History replay: ${frame.entries.length} entries`);
+      pendingResearchOwnerHistory = [];
       conversation.replayHistory(frame.entries);
       if (frame.entries.length > 0) {
         display.showIdle().catch(err => console.error('[Main] Display error:', err));
@@ -193,6 +232,7 @@ function routeFrame(frame: InboundFrame): void {
     case 'session_reset': {
       const reason = frame.reason;
       console.log('[Main] Session reset (%s)', reason);
+      pendingResearchOwnerHistory = [];
       conversation.clear();
       const label = reason === 'daily_reset' ? 'New day, new session' : 'Session reset';
       conversation.addSystem(label);
@@ -206,19 +246,8 @@ function routeFrame(frame: InboundFrame): void {
       latestArStatus = frame;
       display.setAutoresearchHeader(formatArHeader(frame))
         .catch(err => console.error('[Main] Display error:', err));
-      break;
-    }
-
-    // -- Autoresearch feed ----------------------------------------------
-    case 'autoresearch_feed': {
-      if (sm.current === 'idle' || sm.current === 'error' || sm.current === 'loading') {
-        conversation.setFeedEntries(frame.entries);
-        if (sm.current === 'idle') {
-          display.showIdle().catch(err => console.error('[Main] Display error:', err));
-        }
-      } else {
-        pendingFeed = frame.entries;
-      }
+      display.setAutoresearchFooter(formatArFooter(frame))
+        .catch(err => console.error('[Main] Display error:', err));
       break;
     }
   }
@@ -236,7 +265,6 @@ function routeEvent(event: GatewayEvent): void {
 
     case 'disconnected':
       console.warn('[Main] Gateway disconnected');
-      pendingFeed = null;
       sm.transition('disconnected');
       display.showDisconnected().catch(err => console.error('[Main] Display error:', err));
       break;
@@ -275,12 +303,6 @@ async function boot(): Promise<void> {
   sm = new StateMachine();
   sm.onChange((newState, oldState) => {
     console.log(`[Main] State: ${oldState} → ${newState}`);
-    if (newState === 'idle' && pendingFeed !== null) {
-      const feed = pendingFeed;
-      pendingFeed = null;
-      conversation.setFeedEntries(feed);
-      display.showIdle().catch(err => console.error('[Main] Display error:', err));
-    }
   });
 
   // 4. Create the gateway, wire callbacks, and connect
@@ -293,7 +315,14 @@ async function boot(): Promise<void> {
 
   // 5. Initialise R1 ring input handling
   input = new InputHandler();
-  input.init({ sm, display, gateway, bridge, conversation });
+  input.init({
+    sm,
+    display,
+    gateway,
+    bridge,
+    conversation,
+    applyPendingResearchOwnerHistory,
+  });
   console.log('[Main] InputHandler initialised');
 
   // Expose app API for phone UI, automation endpoints, and external tools

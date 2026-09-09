@@ -21,7 +21,6 @@ import websockets
 import websockets.http11
 from websockets import ServerConnection
 
-from gateway import autoresearch_feed
 from gateway.audio_buffer import AudioBuffer, BufferOverflow
 from gateway.config import GatewayConfig, load_config
 from gateway.metrics import gateway_metrics
@@ -32,6 +31,12 @@ from gateway.protocol import (
     parse_text_frame,
     serialize,
     validate_outbound,
+)
+from gateway.research.status import (
+    OwnerHistoryEntry,
+    ResearchStatusPublisher,
+    read_status,
+    resolve_research_root,
 )
 from gateway.session_resolver import resolve_session
 from gateway.task_status import read_task_status
@@ -70,6 +75,29 @@ _BUFFER_MAX_CHARS = 200_000  # ~200 KB text limit
 _BUFFER_TTL_SECONDS = 300  # discard after 5 minutes
 
 _STREAM_LOG = Path(__file__).resolve().parent.parent / "logs" / "openclaw-stream.log"
+
+# The glasses continue to send spoken turns to the main G2 session.  Research
+# owner progress is a read-only transcript projection from its exact OpenClaw
+# session, merged into initial history and appended as marked deltas for display
+# only.
+_RESEARCH_OWNER_SESSION_KEY = "agent:research-orchestrator:autoresearch:quantipy-v2"
+_RESEARCH_OWNER_AGENT_ID = "research-orchestrator"
+_RESEARCH_OWNER_HISTORY_LIMIT = 10
+_RESEARCH_OWNER_HISTORY_READ_LIMIT = 100
+
+
+def _read_research_owner_history() -> list[OwnerHistoryEntry]:
+    """Read the exact bounded owner's existing transcript, read-only."""
+    from gateway.session_history import read_history
+
+    return [
+        (entry.role, entry.text, entry.ts)
+        for entry in read_history(
+            session_key=_RESEARCH_OWNER_SESSION_KEY,
+            agent_id=_RESEARCH_OWNER_AGENT_ID,
+            limit=_RESEARCH_OWNER_HISTORY_READ_LIMIT,
+        )
+    ]
 
 
 # --- Auth rate limiting ---
@@ -234,6 +262,7 @@ class GatewaySession:
         self._task_start: float | None = None
         self._server: GatewayServer | None = server
         self._on_ready: Callable[[], Awaitable[None]] | None = None
+        self._owner_history_baseline: tuple[OwnerHistoryEntry, ...] = ()
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         validate_outbound(frame)
@@ -256,11 +285,44 @@ class GatewaySession:
         try:
             from gateway.session_history import read_history
 
-            entries = read_history(
+            conversation_entries = read_history(
                 session_key=self._session_key,
                 agent_id=self._agent_id,
                 limit=self._history_limit,
             )
+            try:
+                owner_entries = read_history(
+                    session_key=_RESEARCH_OWNER_SESSION_KEY,
+                    agent_id=_RESEARCH_OWNER_AGENT_ID,
+                    limit=_RESEARCH_OWNER_HISTORY_READ_LIMIT,
+                )
+            except Exception:
+                # Owner transcript presentation is optional.  A malformed or
+                # unavailable owner file must not hide the main G2 history.
+                logger.warning("Failed to read research owner history", exc_info=True)
+                owner_entries = []
+            # Only owner assistant messages are presentation data.  Never
+            # route owner user prompts into the main spoken-conversation
+            # session, and keep exactly the newest bounded owner messages.
+            owner_entries = [entry for entry in owner_entries if entry.role == "assistant"][
+                -_RESEARCH_OWNER_HISTORY_LIMIT:
+            ]
+            owner_baseline: list[OwnerHistoryEntry] = []
+            seen_owner: set[OwnerHistoryEntry] = set()
+            for entry in owner_entries:
+                owner_entry = (entry.role, entry.text, entry.ts)
+                if owner_entry not in seen_owner:
+                    seen_owner.add(owner_entry)
+                    owner_baseline.append(owner_entry)
+            self._owner_history_baseline = tuple(owner_baseline)
+            seen: set[tuple[str, str, int]] = set()
+            entries = []
+            for entry in [*conversation_entries, *owner_entries]:
+                key = (entry.role, entry.text, entry.ts)
+                if key not in seen:
+                    seen.add(key)
+                    entries.append(entry)
+            entries.sort(key=lambda entry: entry.ts)
             await self.send_frame(
                 {
                     "type": "history",
@@ -338,18 +400,22 @@ class GatewaySession:
         parts: list[str] = []
 
         try:
-            snapshot = await asyncio.to_thread(autoresearch_feed.read_snapshot)
+            root = self._server.config.research_root if self._server else resolve_research_root()
+            research_status = await asyncio.to_thread(read_status, root)
         except Exception:
-            logger.debug("Quick status: autoresearch snapshot failed", exc_info=True)
+            logger.debug("Quick status: research status projection failed", exc_info=True)
             parts.append("AR unavailable")
         else:
-            if snapshot.running:
+            if not research_status.available:
                 parts.append(
-                    f"AR {snapshot.phase} it{snapshot.iteration} · last cycle "
-                    f"{snapshot.supervisor_outcome or 'n/a'}"
+                    f"Research unavailable: {research_status.unavailable_reason or 'unknown'}"
                 )
             else:
-                parts.append("AR not running")
+                parts.append(
+                    f"Research {research_status.stage} · "
+                    f"{research_status.campaign_status or 'no campaign'} · "
+                    f"owner {research_status.owner_state}"
+                )
 
         # 1. Task status from transcript
         task_info = read_task_status(
@@ -1011,11 +1077,17 @@ class GatewayServer:
         config: GatewayConfig,
         handler: ResponseHandler | None = None,
         transcriber: Transcriber | None = None,
+        *,
+        research_owner_deltas_enabled: bool = False,
     ) -> None:
         self.config = config
         self._transcriber = transcriber
+        # Additive owner-history frames are an explicit rollout gate.  Older
+        # clients treat every history frame as a full replay, so they must not
+        # receive the marked delta form until the frontend rollout is complete.
+        self._research_owner_deltas_enabled = research_owner_deltas_enabled
         self._current_session: GatewaySession | None = None
-        self._feed_publisher: autoresearch_feed.AutoresearchFeedPublisher | None = None
+        self._status_publisher: ResearchStatusPublisher | None = None
         self._inflight_buffer: InflightBuffer | None = None
         self._inflight_task: asyncio.Task[None] | None = None
         self._session_key: str = f"agent:{config.openclaw_agent_id}:g2"
@@ -1129,7 +1201,7 @@ class GatewayServer:
                 self._current_session = None
                 # Detach before awaiting: a new connection may install its own
                 # publisher while stop() yields, and must not be clobbered.
-                publisher, self._feed_publisher = self._feed_publisher, None
+                publisher, self._status_publisher = self._status_publisher, None
                 if publisher is not None:
                     await publisher.stop()
             # NOTE: Do NOT cancel _inflight_task — it must finish draining
@@ -1202,20 +1274,24 @@ class GatewayServer:
         if session is not self._current_session:
             return
 
-        if self.config.autoresearch_feed_interval > 0:
-            publisher, self._feed_publisher = self._feed_publisher, None
+        if self.config.research_status_interval > 0:
+            publisher, self._status_publisher = self._status_publisher, None
             if publisher is not None:
                 await publisher.stop()
                 # stop() yields: the session may have been replaced meanwhile,
                 # and the replacement owns publisher creation for itself.
                 if session is not self._current_session:
                     return
-            self._feed_publisher = autoresearch_feed.AutoresearchFeedPublisher(
+            self._status_publisher = ResearchStatusPublisher(
                 send=session.send_frame,
-                poll_interval=self.config.autoresearch_feed_interval,
-                read=autoresearch_feed.read_snapshot,
+                root=self.config.research_root,
+                poll_interval=self.config.research_status_interval,
+                read_owner_history=(
+                    _read_research_owner_history if self._research_owner_deltas_enabled else None
+                ),
+                owner_history_baseline=session._owner_history_baseline,
             )
-            self._feed_publisher.start()
+            self._status_publisher.start()
 
         # Send pending reset notification
         if self._pending_reset_reason is not None:

@@ -12,7 +12,6 @@ from urllib.parse import urlparse
 import pytest
 import pytest_asyncio
 import websockets
-from gateway.autoresearch_feed import AutoresearchSnapshot, FeedEntry
 from gateway.config import GatewayConfig
 from gateway.server import GatewayServer, SessionState, main
 from gateway.session_resolver import SessionMeta
@@ -378,6 +377,68 @@ class TestHistoryFrame:
                 idle = await _recv_json(ws)
                 assert idle == {"type": "status", "status": "idle"}
 
+    async def test_history_projects_newest_owner_assistant_messages_without_rebinding_session(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        url, server = auth_gateway
+        from gateway.session_history import HistoryEntry
+
+        main_entries = [HistoryEntry(role="user", text="spoken turn", ts=100)]
+        owner_entries = [
+            HistoryEntry(role="assistant", text=f"owner update {index}", ts=200 + index)
+            for index in range(12)
+        ]
+        with patch(
+            "gateway.session_history.read_history",
+            side_effect=[main_entries, owner_entries],
+        ) as read_history:
+            ws = await _auth_connect(url)
+            async with ws:
+                await _recv_json(ws)  # connected
+                history = await _recv_json(ws)
+                await _recv_json(ws)  # idle
+
+        assert history["type"] == "history"
+        assert history["entries"][0] == {
+            "role": "user",
+            "text": "spoken turn",
+            "ts": 100,
+        }
+        assert [entry["text"] for entry in history["entries"][1:]] == [
+            f"owner update {index}" for index in range(2, 12)
+        ]
+        assert read_history.call_args_list[0].kwargs["session_key"] == "agent:main:g2"
+        assert read_history.call_args_list[1].kwargs["session_key"] == (
+            "agent:research-orchestrator:autoresearch:quantipy-v2"
+        )
+        assert read_history.call_args_list[1].kwargs["agent_id"] == "research-orchestrator"
+        assert server._session_key == "agent:main:g2"
+
+    async def test_owner_history_failure_keeps_main_history_frame(
+        self, auth_gateway: tuple[str, GatewayServer]
+    ) -> None:
+        url, _server = auth_gateway
+        from gateway.session_history import HistoryEntry
+
+        main_entries = [HistoryEntry(role="user", text="spoken turn", ts=100)]
+
+        def read_history(session_key: str, **_kwargs: object) -> list[HistoryEntry]:
+            if session_key == "agent:main:g2":
+                return main_entries
+            raise RuntimeError("owner history unavailable")
+
+        with patch("gateway.session_history.read_history", side_effect=read_history):
+            ws = await _auth_connect(url)
+            async with ws:
+                await _recv_json(ws)  # connected
+                history = await _recv_json(ws)
+                await _recv_json(ws)  # idle
+
+        assert history == {
+            "type": "history",
+            "entries": [{"role": "user", "text": "spoken turn", "ts": 100}],
+        }
+
     async def test_history_failure_does_not_block_session(
         self, auth_gateway: tuple[str, GatewayServer]
     ) -> None:
@@ -478,7 +539,7 @@ class TestQuickCommand:
             # Should get an assistant frame with summary (not thinking/streaming)
             resp = await _recv_json(ws)
             assert resp["type"] == "assistant"
-            assert resp["delta"].startswith("AR not running")
+            assert resp["delta"].startswith("Research unavailable: test database")
 
             # Followed by idle status
             idle = await _recv_json(ws)
@@ -502,48 +563,18 @@ class TestQuickCommand:
             assert thinking == {"type": "status", "status": "thinking"}
 
 
-def _autoresearch_snapshot(
-    *,
-    running: bool = False,
-    phase: str = "not running",
-    iteration: int = 0,
-    supervisor_outcome: str | None = None,
-    feed: tuple[FeedEntry, ...] = (),
-) -> AutoresearchSnapshot:
-    """Build a compact autoresearch snapshot for publisher integration tests."""
-    return AutoresearchSnapshot(
-        running=running,
-        header_ok=True,
-        phase=phase,
-        iteration=iteration,
-        suspended=False,
-        campaign_review_required=False,
-        supervisor_outcome=supervisor_outcome,
-        supervisor_detail=None,
-        last_cycle_at_ms=None,
-        task_headline=None,
-        feed=feed,
-    )
-
-
-async def _collect_autoresearch_frames(
-    ws: websockets.ClientConnection,
-    timeout: float = 1.0,
-) -> list[dict[str, object]]:
-    """Collect frames until both autoresearch startup frames have arrived."""
-    frames: list[dict[str, object]] = []
-    autoresearch_types: set[str] = set()
+async def _recv_research_status(
+    ws: websockets.ClientConnection, timeout: float = 1.0
+) -> dict[str, object]:
+    """Collect frames until the publisher sends one research status frame."""
     deadline = asyncio.get_running_loop().time() + timeout
-    while autoresearch_types != {"autoresearch_status", "autoresearch_feed"}:
+    while True:
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            raise TimeoutError("Timed out waiting for autoresearch frames")
+            raise TimeoutError("Timed out waiting for research status")
         frame = await asyncio.wait_for(_recv_json(ws), timeout=remaining)
-        frames.append(frame)
-        frame_type = frame.get("type")
-        if frame_type in {"autoresearch_status", "autoresearch_feed"}:
-            autoresearch_types.add(frame_type)
-    return frames
+        if frame.get("type") == "autoresearch_status":
+            return frame
 
 
 async def _drain_frames(
@@ -563,26 +594,70 @@ async def _drain_frames(
             return frames
 
 
+async def _recv_owner_history(
+    ws: websockets.ClientConnection, timeout: float = 1.0
+) -> dict[str, Any]:
+    """Collect frames until one additive owner-history update arrives."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("Timed out waiting for research owner history")
+        frame = await asyncio.wait_for(_recv_json(ws), timeout=remaining)
+        if frame.get("type") == "history" and frame.get("historyKind") == "research_owner_delta":
+            return frame
+
+
 @pytest_asyncio.fixture
-async def autoresearch_gateway(
+async def research_status_gateway(
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[str, GatewayServer, dict[str, Any]]]:
-    """Start a gateway with a controllable autoresearch snapshot reader."""
-    holder: dict[str, Any] = {"snapshot": _autoresearch_snapshot(), "reads": 0}
+    """Start a gateway with a controllable replacement status projection."""
+    from gateway.research.status import ResearchStatus
 
-    def read_snapshot() -> AutoresearchSnapshot:
+    holder: dict[str, Any] = {
+        "status": ResearchStatus(
+            hypothesis_id=None,
+            hypothesis_state=None,
+            attempt_id=None,
+            attempt_state=None,
+            stage="idle",
+            last_astra_decision=None,
+            campaign_status="ACTIVE",
+            boundary_failure=None,
+            last_event_at=None,
+            owner_state="inactive",
+            updated_at=None,
+        ),
+        "reads": 0,
+        "owner_history": [],
+        "owner_reads": 0,
+    }
+
+    def read_snapshot(*_: object, **__: object) -> ResearchStatus:
         holder["reads"] += 1
-        snapshot: AutoresearchSnapshot = holder["snapshot"]
-        return snapshot
+        status = holder["status"]
+        assert isinstance(status, ResearchStatus)
+        return status
 
-    monkeypatch.setattr("gateway.autoresearch_feed.read_snapshot", read_snapshot)
+    monkeypatch.setattr("gateway.research.status.read_status", read_snapshot)
+
+    def read_owner_history() -> list[tuple[str, str, int]]:
+        holder["owner_reads"] += 1
+        return list(holder["owner_history"])
+
+    monkeypatch.setattr("gateway.server._read_research_owner_history", read_owner_history)
     config = GatewayConfig(
         gateway_host="127.0.0.1",
         gateway_port=0,
         gateway_token="test-token",
-        autoresearch_feed_interval=0.05,
+        research_status_interval=0.05,
     )
-    gw = GatewayServer(config, handler=_StaticResponseHandler())
+    gw = GatewayServer(
+        config,
+        handler=_StaticResponseHandler(),
+        research_owner_deltas_enabled=True,
+    )
     server = await websockets.serve(
         gw.handler,
         config.gateway_host,
@@ -593,126 +668,243 @@ async def autoresearch_gateway(
     try:
         yield f"ws://127.0.0.1:{port}", gw, holder
     finally:
-        if gw._feed_publisher is not None:
-            await gw._feed_publisher.stop()
-            gw._feed_publisher = None
         server.close()
         await server.wait_closed()
 
 
-class TestAutoresearchPush:
-    """Autoresearch status and feed frames are pushed to the connected phone."""
+class TestResearchStatusPush:
+    """Replacement research status frames are pushed to the connected phone."""
 
-    async def test_initial_and_changed_snapshots_are_pushed(
-        self,
-        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    async def test_owner_history_delta_rollout_is_closed_by_default(self) -> None:
+        config = GatewayConfig(
+            gateway_host="127.0.0.1",
+            gateway_port=0,
+            gateway_token="test-token",
+            research_status_interval=0.05,
+        )
+        gateway = GatewayServer(config, handler=_StaticResponseHandler())
+
+        assert gateway._research_owner_deltas_enabled is False
+
+    async def test_disabled_owner_history_gate_sends_no_delta(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        url, _gw, holder = autoresearch_gateway
+        """A default gateway must not emit marked owner-history frames."""
+        owner_history: list[tuple[str, str, int]] = []
+        owner_reads = 0
+
+        def read_owner_history() -> list[tuple[str, str, int]]:
+            nonlocal owner_reads
+            owner_reads += 1
+            return list(owner_history)
+
+        monkeypatch.setattr("gateway.server._read_research_owner_history", read_owner_history)
+        config = GatewayConfig(
+            gateway_host="127.0.0.1",
+            gateway_port=0,
+            gateway_token="test-token",
+            research_status_interval=0.05,
+        )
+        gateway = GatewayServer(config, handler=_StaticResponseHandler())
+        server = await websockets.serve(
+            gateway.handler,
+            config.gateway_host,
+            0,
+            process_request=gateway._process_request,
+        )
+        port = server.sockets[0].getsockname()[1]
+        try:
+            ws = await _auth_connect(f"ws://127.0.0.1:{port}")
+            async with ws:
+                await _recv_json(ws)  # connected
+                await _recv_json(ws)  # initial history
+                await _recv_json(ws)  # status:idle
+                await _recv_research_status(ws)
+
+                owner_history.append(("assistant", "new owner update", 200))
+                frames = await _drain_frames(ws, timeout=0.2)
+
+                assert not [
+                    frame
+                    for frame in frames
+                    if frame.get("type") == "history"
+                    and frame.get("historyKind") == "research_owner_delta"
+                ]
+                assert owner_reads == 0
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_initial_and_changed_status_are_pushed(
+        self,
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        from gateway.research.status import ResearchStatus
+
+        url, _gw, holder = research_status_gateway
         ws = await _auth_connect(url)
         async with ws:
             await _recv_json(ws)  # connected
             await _recv_json(ws)  # history
             await _recv_json(ws)  # status:idle
 
-            initial = await _collect_autoresearch_frames(ws)
-            initial_status = next(
-                frame for frame in initial if frame.get("type") == "autoresearch_status"
-            )
-            initial_feed = next(
-                frame for frame in initial if frame.get("type") == "autoresearch_feed"
-            )
-            assert initial_status == {
-                "type": "autoresearch_status",
-                "running": False,
-                "phase": "not running",
-                "iteration": 0,
-                "suspended": False,
-                "campaignReviewRequired": False,
-            }
-            assert initial_feed == {"type": "autoresearch_feed", "entries": []}
+            initial = await _recv_research_status(ws)
+            assert initial["stage"] == "idle"
+            assert initial["campaignStatus"] == "ACTIVE"
+            assert initial["available"] is True
 
-            holder["snapshot"] = _autoresearch_snapshot(
-                running=True,
-                phase="experiment",
-                iteration=4,
-                supervisor_outcome="success",
-                feed=(FeedEntry(role="assistant", text="Cycle complete", ts=123),),
+            holder["status"] = ResearchStatus(
+                hypothesis_id="H0001",
+                hypothesis_state="FROZEN",
+                attempt_id="H0001-A001",
+                attempt_state="RUNNING",
+                stage="running",
+                last_astra_decision="RETRY_SAME_HYPOTHESIS",
+                campaign_status="ACTIVE",
+                boundary_failure="review_failed",
+                last_event_at="2026-09-06T00:02:00Z",
+                owner_state="active",
+                updated_at="2026-09-06T00:02:00Z",
             )
-            changed = await _collect_autoresearch_frames(ws)
-            changed_status = next(
-                frame for frame in changed if frame.get("type") == "autoresearch_status"
-            )
-            changed_feed = next(
-                frame for frame in changed if frame.get("type") == "autoresearch_feed"
-            )
-            assert changed_status["phase"] == "experiment"
-            assert changed_status["iteration"] == 4
-            assert changed_status["supervisorOutcome"] == "success"
-            assert changed_feed["entries"] == [
-                {"role": "assistant", "text": "Cycle complete", "ts": 123}
-            ]
+            changed = await _recv_research_status(ws)
+            assert changed["hypothesisId"] == "H0001"
+            assert changed["attemptId"] == "H0001-A001"
+            assert changed["boundaryFailure"] == "review_failed"
 
-    async def test_unchanged_snapshot_is_not_repeated(
+    async def test_unchanged_status_is_not_repeated(
         self,
-        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
     ) -> None:
-        url, _gw, _holder = autoresearch_gateway
+        url, _gw, _holder = research_status_gateway
         ws = await _auth_connect(url)
         async with ws:
             await _recv_json(ws)  # connected
             await _recv_json(ws)  # history
             await _recv_json(ws)  # status:idle
-            await _collect_autoresearch_frames(ws)
+            await _recv_research_status(ws)
 
             frames = await _drain_frames(ws)
+            assert not [frame for frame in frames if frame.get("type") == "autoresearch_status"]
+
+    async def test_owner_history_is_bounded_changed_only_and_not_flooded(
+        self,
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        url, _gw, holder = research_status_gateway
+        ws = await _auth_connect(url)
+        async with ws:
+            await _recv_json(ws)  # connected
+            await _recv_json(ws)  # initial history
+            await _recv_json(ws)  # status:idle
+            await _recv_research_status(ws)
+
+            holder["owner_history"] = [
+                ("user", "private Astra prompt", 100),
+                *[("assistant", f"owner update {index}", 200 + index) for index in range(12)],
+            ]
+            first = await _recv_owner_history(ws)
+            assert [entry["text"] for entry in first["entries"]] == [
+                f"owner update {index}" for index in range(2, 12)
+            ]
+            assert all(entry["role"] == "assistant" for entry in first["entries"])
+
+            # The same snapshot is observed on repeated polls without another
+            # history frame or a duplicate status frame.
             assert not [
                 frame
-                for frame in frames
-                if frame.get("type") in {"autoresearch_status", "autoresearch_feed"}
+                for frame in await _drain_frames(ws)
+                if frame.get("type") == "history"
+                and frame.get("historyKind") == "research_owner_delta"
             ]
+
+            holder["owner_history"].append(("assistant", "owner update 12", 212))
+            second = await _recv_owner_history(ws)
+            assert second["entries"] == [
+                {"role": "assistant", "text": "owner update 12", "ts": 212}
+            ]
+
+    async def test_owner_history_callback_stays_on_reconnect_history_boundary(
+        self,
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
+    ) -> None:
+        """A replacement connection gets initial history, not a duplicate delta."""
+        url, _gw, holder = research_status_gateway
+        holder["owner_history"] = [("assistant", "owner update", 200)]
+
+        # The fixture's callback is the periodic reader; patching the normal
+        # history reader supplies the same owner snapshot during initial replay.
+        from gateway.session_history import HistoryEntry
+
+        with patch(
+            "gateway.session_history.read_history",
+            side_effect=[
+                [],
+                [HistoryEntry(role="assistant", text="owner update", ts=200)],
+                [],
+                [HistoryEntry(role="assistant", text="owner update", ts=200)],
+            ],
+        ):
+            ws = await _auth_connect(url)
+            async with ws:
+                await _recv_json(ws)  # connected
+                initial = await _recv_json(ws)
+                await _recv_json(ws)  # status:idle
+                await _recv_research_status(ws)
+                assert initial["entries"] == [
+                    {"role": "assistant", "text": "owner update", "ts": 200}
+                ]
+                assert not [
+                    frame
+                    for frame in await _drain_frames(ws)
+                    if frame.get("type") == "history"
+                    and frame.get("historyKind") == "research_owner_delta"
+                ]
+
+            ws = await _auth_connect(url)
+            async with ws:
+                await _recv_json(ws)  # connected
+                replacement = await _recv_json(ws)
+                await _recv_json(ws)  # status:idle
+                await _recv_research_status(ws)
+                assert replacement["entries"] == [
+                    {"role": "assistant", "text": "owner update", "ts": 200}
+                ]
 
     async def test_disconnect_stops_publisher(
         self,
-        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
     ) -> None:
-        url, gw, holder = autoresearch_gateway
+        url, gw, holder = research_status_gateway
         ws = await _auth_connect(url)
         await _recv_json(ws)  # connected
         await _recv_json(ws)  # history
         await _recv_json(ws)  # status:idle
-        await _collect_autoresearch_frames(ws)
+        await _recv_research_status(ws)
 
-        publisher = gw._feed_publisher
+        publisher = gw._status_publisher
         assert publisher is not None
-
         await ws.close()
         deadline = asyncio.get_running_loop().time() + 1.0
         while asyncio.get_running_loop().time() < deadline:
-            task = publisher._task
-            if gw._feed_publisher is None and (task is None or task.done()):
+            if gw._status_publisher is None:
                 break
             await asyncio.sleep(0.01)
-        assert gw._feed_publisher is None
-        task = publisher._task
-        assert task is None or task.done()
-
-        # The poll loop must actually have stopped, not just been detached.
+        assert gw._status_publisher is None
         reads_after_stop = holder["reads"]
-        await asyncio.sleep(0.15)  # ~3 poll intervals
+        await asyncio.sleep(0.15)
         assert holder["reads"] == reads_after_stop
 
     async def test_connection_replacement_keeps_single_publisher(
         self,
-        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
+        research_status_gateway: tuple[str, GatewayServer, dict[str, Any]],
     ) -> None:
-        url, gw, _holder = autoresearch_gateway
+        url, gw, _holder = research_status_gateway
         ws_a = await _auth_connect(url)
         await _recv_json(ws_a)  # connected
         await _recv_json(ws_a)  # history
         await _recv_json(ws_a)  # status:idle
-        await _collect_autoresearch_frames(ws_a)
-
-        publisher_a = gw._feed_publisher
+        await _recv_research_status(ws_a)
+        publisher_a = gw._status_publisher
         assert publisher_a is not None
 
         ws_b = await _auth_connect(url)
@@ -720,46 +912,13 @@ class TestAutoresearchPush:
             await _recv_json(ws_b)  # connected
             await _recv_json(ws_b)  # history
             await _recv_json(ws_b)  # status:idle
-            await _collect_autoresearch_frames(ws_b)
-
-            publisher_b = gw._feed_publisher
-            assert publisher_b is not None
-            assert publisher_b is not publisher_a
-
-            deadline = asyncio.get_running_loop().time() + 1.0
-            while asyncio.get_running_loop().time() < deadline:
-                task_a = publisher_a._task
-                if task_a is None or task_a.done():
-                    break
-                await asyncio.sleep(0.01)
-            task_a = publisher_a._task
-            assert task_a is None or task_a.done()
-
-            task_b = publisher_b._task
-            assert task_b is not None and not task_b.done()
-
-    async def test_removed_session_frames_are_invalid(
-        self,
-        autoresearch_gateway: tuple[str, GatewayServer, dict[str, Any]],
-    ) -> None:
-        url, _gw, _holder = autoresearch_gateway
-        ws = await _auth_connect(url)
-        async with ws:
-            await _recv_json(ws)  # connected
-            await _recv_json(ws)  # history
-            await _recv_json(ws)  # status:idle
-            await _collect_autoresearch_frames(ws)
-
-            for frame_type in ("session_list_request", "session_switch", "session_create"):
-                await ws.send(json.dumps({"type": frame_type}))
-                deadline = asyncio.get_running_loop().time() + 2.0
-                while True:
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    assert remaining > 0, f"timed out waiting for error frame for {frame_type}"
-                    error = await asyncio.wait_for(_recv_json(ws), timeout=remaining)
-                    if error.get("type") == "error":
-                        break
-                assert error["code"] == "INVALID_FRAME"
+            await _recv_research_status(ws_b)
+            publisher_b = gw._status_publisher
+            assert publisher_b is not None and publisher_b is not publisher_a
+            await asyncio.sleep(0.05)
+            assert publisher_a._task is None or publisher_a._task.done()
+            assert publisher_b._task is not None and not publisher_b._task.done()
+        await ws_a.wait_closed()
 
 
 class TestSessionReset:

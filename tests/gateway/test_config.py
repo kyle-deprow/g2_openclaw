@@ -46,6 +46,14 @@ class TestLoadConfig:
         assert cfg.gateway_port == 9000
         assert cfg.gateway_token == "gateway-token-abcdef"
 
+    def test_reads_shared_research_v2_root(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RESEARCH_V2_ROOT", "/tmp/research#status?root")
+        monkeypatch.delenv("RESEARCH_ROOT", raising=False)
+
+        cfg = load_config()
+
+        assert str(cfg.research_root) == "/tmp/research#status?root"
+
     def test_optional_defaults_when_env_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("gateway.config.load_dotenv", lambda *a, **kw: None)
         monkeypatch.delenv("GATEWAY_HOST", raising=False)
@@ -245,23 +253,21 @@ class TestSecurityConfig:
         with pytest.raises(ValueError, match="must be a number"):
             load_config()
 
-    def test_autoresearch_feed_interval_default(self) -> None:
-        """AUTORESEARCH_FEED_INTERVAL defaults to 5.0."""
+    def test_research_status_interval_default(self) -> None:
+        """RESEARCH_STATUS_INTERVAL defaults to 5.0."""
         cfg = load_config()
-        assert cfg.autoresearch_feed_interval == 5.0
+        assert cfg.research_status_interval == 5.0
 
-    def test_autoresearch_feed_interval_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AUTORESEARCH_FEED_INTERVAL is parsed from env."""
-        monkeypatch.setenv("AUTORESEARCH_FEED_INTERVAL", "0")
+    def test_research_status_interval_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """RESEARCH_STATUS_INTERVAL is parsed from env."""
+        monkeypatch.setenv("RESEARCH_STATUS_INTERVAL", "0")
 
         cfg = load_config()
-        assert cfg.autoresearch_feed_interval == 0.0
+        assert cfg.research_status_interval == 0.0
 
-    def test_autoresearch_feed_interval_invalid_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Non-numeric AUTORESEARCH_FEED_INTERVAL raises ValueError."""
-        monkeypatch.setenv("AUTORESEARCH_FEED_INTERVAL", "nope")
+    def test_research_status_interval_invalid_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-numeric RESEARCH_STATUS_INTERVAL raises ValueError."""
+        monkeypatch.setenv("RESEARCH_STATUS_INTERVAL", "nope")
 
         with pytest.raises(ValueError, match="must be a number"):
             load_config()

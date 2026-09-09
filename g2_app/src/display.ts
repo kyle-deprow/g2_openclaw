@@ -76,6 +76,7 @@ export class DisplayManager {
   private bridge: EvenAppBridge | null = null;
   private _started = false;
   private _arHeader: string | null = null;
+  private _arFooter: string | null = null;
   private _idleStatusShown = false;
 
   /** Reference to the shared conversation model */
@@ -239,7 +240,8 @@ export class DisplayManager {
 
   private async _doReplace(transcriptText: string): Promise<void> {
     if (transcriptText.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this._doRebuild(this._resolveIdleStatus(), 'Tap to interact');
+      const footer = this._idleStatusShown ? (this._arFooter ?? 'Tap to interact') : 'Tap to interact';
+      await this._doRebuild(this._resolveIdleStatus(), footer);
       return;
     }
     const b = this.requireBridge();
@@ -322,6 +324,10 @@ export class DisplayManager {
   }
 
   async flushRemainingDeltas(): Promise<void> {
+    return this.enqueue(() => this._flushRemainingDeltas());
+  }
+
+  private async _flushRemainingDeltas(): Promise<void> {
     if (this._deltaTimer) {
       clearTimeout(this._deltaTimer);
       this._deltaTimer = null;
@@ -331,7 +337,7 @@ export class DisplayManager {
       const transcript = this.conversation
         ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
         : '';
-      await this.replaceTranscript(transcript);
+      await this._doReplace(transcript);
     }
   }
 
@@ -342,21 +348,29 @@ export class DisplayManager {
   async showIdle(): Promise<void> {
     this.clearDeltaTimer();
     this.clearResetTimer();
-    const transcript = this.conversation
-      ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
-      : 'Ready.';
-
-    // Detect task status from latest system message
-    const statusLabel = this._resolveIdleStatus();
     this._idleStatusShown = true;
 
-    if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
-      await this.rebuildTranscript(statusLabel, 'Tap to interact');
-    } else {
-      await this.replaceTranscript(transcript);
+    // Keep the complete idle repaint in one serialized operation.  A local
+    // gesture flips _idleStatusShown synchronously while a bridge call is in
+    // flight; every follow-up repaint checks it before touching the display.
+    await this.enqueue(async () => {
+      if (!this._idleStatusShown) return;
+      const transcript = this.conversation
+        ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
+        : 'Ready.';
+      const statusLabel = this._resolveIdleStatus();
+      const footerHint = this._arFooter ?? 'Tap to interact';
+
+      if (transcript.length > UPGRADE_CHAR_LIMIT - 100) {
+        await this._doRebuild(statusLabel, footerHint);
+      } else {
+        await this._doReplace(transcript);
+      }
+      if (!this._idleStatusShown) return;
       await this.updateStatus(statusLabel);
-      await this.updateFooter('Tap to interact');
-    }
+      if (!this._idleStatusShown) return;
+      await this.updateFooter(footerHint);
+    });
   }
 
   /** Check the latest system message for a [TASK:*] marker and return an appropriate status label. */
@@ -379,8 +393,26 @@ export class DisplayManager {
   async setAutoresearchHeader(header: string | null): Promise<void> {
     this._arHeader = header;
     if (this._idleStatusShown) {
-      await this.enqueue(() => this.updateStatus(this._resolveIdleStatus()));
+      await this.enqueue(async () => {
+        if (!this._idleStatusShown) return;
+        await this.updateStatus(this._resolveIdleStatus());
+      });
     }
+  }
+
+  /**
+   * Cache research status footer text, but only paint it while the normal
+   * idle layout is still visible.  Status polling can race a user gesture;
+   * rechecking inside the serialized operation keeps a queued update from
+   * overwriting confirmation, recording, or streaming affordances.
+   */
+  async setAutoresearchFooter(footer: string | null): Promise<void> {
+    this._arFooter = footer;
+    if (!this._idleStatusShown) return;
+    await this.enqueue(async () => {
+      if (!this._idleStatusShown) return;
+      await this.updateFooter(this._arFooter ?? 'Tap to interact');
+    });
   }
 
   async showRecording(): Promise<void> {
@@ -441,12 +473,22 @@ export class DisplayManager {
   }
 
   async finaliseStream(): Promise<void> {
-    await this.flushRemainingDeltas();
-    const transcript = this.conversation ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100) : '';
-    await this.replaceTranscript(transcript);
     this._idleStatusShown = true;
-    await this.updateStatus(this._resolveIdleStatus());
-    await this.updateFooter('Tap to interact');
+    await this.enqueue(async () => {
+      if (!this._idleStatusShown) return;
+      await this._flushRemainingDeltas();
+      if (!this._idleStatusShown) return;
+
+      const transcript = this.conversation
+        ? this.conversation.formatReverse(UPGRADE_CHAR_LIMIT - 100)
+        : '';
+      await this._doReplace(transcript);
+      if (!this._idleStatusShown) return;
+
+      await this.updateStatus(this._resolveIdleStatus());
+      if (!this._idleStatusShown) return;
+      await this.updateFooter(this._arFooter ?? 'Tap to interact');
+    });
   }
 
   async showError(message: string, hint = 'Tap to continue'): Promise<void> {

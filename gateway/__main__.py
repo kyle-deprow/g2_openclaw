@@ -6,6 +6,7 @@ Subcommands
 - ``python -m gateway init-env``    → generate ``.env`` from system detection
 - ``python -m gateway init-env --force`` → overwrite existing ``.env``
 - ``python -m gateway stop``        → stop all G2 OpenClaw processes
+- ``python -m gateway research-status`` → print read-only research status
 """
 
 import sys
@@ -45,14 +46,8 @@ _cli_commands = {
     "launch",
     "push-config",
     "stop",
-    "autoresearch-next",
-    "autoresearch-advance",
-    "autoresearch-pin-readiness",
-    "autoresearch-build-readiness",
-    "autoresearch-resume",
-    "autoresearch-acknowledge-campaign-review",
-    "autoresearch-retry-external-verification",
-    "autoresearch-init-state",
+    "research",
+    "research-status",
 }
 if len(sys.argv) > 1 and sys.argv[1] in _cli_commands:
     _run_cli()

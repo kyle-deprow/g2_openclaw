@@ -63,6 +63,8 @@ export interface HistoryEntry {
 export interface HistoryFrame {
   type: 'history';
   entries: HistoryEntry[];
+  /** Additive owner projection; an absent value is the initial replay. */
+  historyKind?: 'research_owner_delta';
 }
 
 export interface SessionResetFrame {
@@ -72,26 +74,19 @@ export interface SessionResetFrame {
 
 export interface AutoresearchStatusFrame {
   type: 'autoresearch_status';
-  running: boolean;
-  phase: string;
-  iteration: number;
-  suspended: boolean;
-  campaignReviewRequired: boolean;
-  supervisorOutcome?: string;
-  supervisorDetail?: string;
-  lastCycleAt?: number;
-  taskHeadline?: string;
-}
-
-export interface FeedEntry {
-  role: 'assistant';
-  text: string;
-  ts: number;
-}
-
-export interface AutoresearchFeedFrame {
-  type: 'autoresearch_feed';
-  entries: FeedEntry[];
+  hypothesisId: string | null;
+  hypothesisState: string | null;
+  attemptId: string | null;
+  attemptState: string | null;
+  stage: string;
+  lastAstraDecision: string | null;
+  campaignStatus: string | null;
+  boundaryFailure: string | null;
+  lastEventAt: string | null;
+  ownerState: 'active' | 'inactive' | 'unknown';
+  updatedAt: string | null;
+  available: boolean;
+  unavailableReason: string | null;
 }
 
 export type InboundFrame =
@@ -104,8 +99,7 @@ export type InboundFrame =
   | PingFrame
   | HistoryFrame
   | SessionResetFrame
-  | AutoresearchStatusFrame
-  | AutoresearchFeedFrame;
+  | AutoresearchStatusFrame;
 
 // === Outbound frames (App → Gateway) ===
 export interface TextFrame {
@@ -144,7 +138,7 @@ export interface ForceStopFrame {
 export type OutboundFrame = TextFrame | PongFrame | StartAudioFrame | StopAudioFrame | StatusRequestFrame | ResetSessionFrame | ForceStopFrame;
 
 // === Frame parsing ===
-const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'autoresearch_status', 'autoresearch_feed']);
+const INBOUND_TYPES = new Set(['status', 'transcription', 'assistant', 'end', 'error', 'connected', 'ping', 'history', 'session_reset', 'autoresearch_status']);
 
 /** Required fields per inbound frame type (mirrors Python gateway validation). */
 const REQUIRED_FIELDS: Record<string, string[]> = {
@@ -157,8 +151,11 @@ const REQUIRED_FIELDS: Record<string, string[]> = {
   ping: [],
   history: ['entries'],
   session_reset: ['reason'],
-  autoresearch_status: ['running', 'phase', 'iteration', 'suspended', 'campaignReviewRequired'],
-  autoresearch_feed: ['entries'],
+  autoresearch_status: [
+    'hypothesisId', 'hypothesisState', 'attemptId', 'attemptState', 'stage',
+    'lastAstraDecision', 'campaignStatus', 'boundaryFailure', 'lastEventAt', 'ownerState',
+    'updatedAt', 'available', 'unavailableReason',
+  ],
 };
 
 /** Valid status values (matches GatewayStatus union). */
@@ -181,13 +178,19 @@ const FIELD_TYPES: Record<string, Record<string, string>> = {
   assistant: { delta: 'string' },
   error: { detail: 'string', code: 'string' },
   connected: { version: 'string', sessionId: 'string', sessionKey: 'string', sessionStartedAt: 'string', taskSummary: 'string' },
-  history: { entries: 'object' },
+  history: { entries: 'object', historyKind: 'string' },
   session_reset: { reason: 'string' },
   autoresearch_status: {
-    running: 'boolean', phase: 'string', iteration: 'number', suspended: 'boolean', campaignReviewRequired: 'boolean',
+    hypothesisId: 'string', hypothesisState: 'string', attemptId: 'string', attemptState: 'string',
+    stage: 'string', lastAstraDecision: 'string', campaignStatus: 'string', boundaryFailure: 'string',
+    lastEventAt: 'string', ownerState: 'string', updatedAt: 'string', available: 'boolean', unavailableReason: 'string',
   },
-  autoresearch_feed: { entries: 'object' },
 };
+
+const NULLABLE_AUTORESEARCH_FIELDS = new Set([
+  'hypothesisId', 'hypothesisState', 'attemptId', 'attemptState',
+  'lastAstraDecision', 'campaignStatus', 'boundaryFailure', 'lastEventAt', 'updatedAt', 'unavailableReason',
+]);
 
 export function parseFrame(data: string): InboundFrame {
   let parsed: unknown;
@@ -217,6 +220,9 @@ export function parseFrame(data: string): InboundFrame {
   const typeChecks = FIELD_TYPES[frame.type as string];
   if (typeChecks) {
     for (const [field, expectedType] of Object.entries(typeChecks)) {
+      if (field in frame && frame[field] === null && frame.type === 'autoresearch_status' && NULLABLE_AUTORESEARCH_FIELDS.has(field)) {
+        continue;
+      }
       if (field in frame && typeof frame[field] !== expectedType) {
         throw new Error(`Field "${field}" must be ${expectedType}, got ${typeof frame[field]}`);
       }
@@ -243,14 +249,6 @@ export function parseFrame(data: string): InboundFrame {
     if (typeof frame.phase === 'string') clean.phase = frame.phase;
   }
 
-  // Copy optional autoresearch status fields, dropping mistyped values.
-  if (clean.type === 'autoresearch_status') {
-    if (typeof frame.supervisorOutcome === 'string') clean.supervisorOutcome = frame.supervisorOutcome;
-    if (typeof frame.supervisorDetail === 'string') clean.supervisorDetail = frame.supervisorDetail;
-    if (typeof frame.lastCycleAt === 'number') clean.lastCycleAt = frame.lastCycleAt;
-    if (typeof frame.taskHeadline === 'string') clean.taskHeadline = frame.taskHeadline;
-  }
-
   // Copy history entries array (filter out malformed entries)
   if (clean.type === 'history') {
     if (!Array.isArray(frame.entries)) {
@@ -272,19 +270,18 @@ export function parseFrame(data: string): InboundFrame {
       }
       return { role: e.role, text: e.text, ts: e.ts };
     });
-  }
-
-  // Copy autoresearch feed entries, filtering out malformed or non-assistant entries.
-  if (clean.type === 'autoresearch_feed') {
-    if (!Array.isArray(frame.entries)) {
-      throw new Error('autoresearch_feed.entries must be an array');
+    if (frame.historyKind !== undefined) {
+      if (frame.historyKind !== 'research_owner_delta') {
+        throw new Error('history.historyKind must be research_owner_delta');
+      }
+      if ((frame.entries as unknown[]).some((entry) => (
+        typeof entry !== 'object' || entry === null
+        || (entry as Record<string, unknown>).role !== 'assistant'
+      ))) {
+        throw new Error('research owner history entries must be assistant messages');
+      }
+      clean.historyKind = frame.historyKind;
     }
-    clean.entries = (frame.entries as unknown[]).flatMap((entry) => {
-      if (typeof entry !== 'object' || entry === null) return [];
-      const e = entry as Record<string, unknown>;
-      if (e.role !== 'assistant' || typeof e.text !== 'string' || typeof e.ts !== 'number') return [];
-      return [{ role: 'assistant', text: e.text, ts: e.ts }];
-    });
   }
 
   // M-5: Validate status value against known union

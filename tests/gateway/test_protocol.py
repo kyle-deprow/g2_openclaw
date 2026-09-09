@@ -126,7 +126,6 @@ class TestInboundOnly:
             "history",
             "session_reset",
             "autoresearch_status",
-            "autoresearch_feed",
         ],
     )
     def test_outbound_type_rejected_by_parse(self, frame_type: str) -> None:
@@ -216,6 +215,35 @@ class TestHistoryFrame:
     def test_history_frame_missing_entries(self) -> None:
         with pytest.raises(ProtocolError, match="missing required field 'entries'"):
             validate_outbound({"type": "history"})
+
+    def test_history_owner_delta_frame_validates(self) -> None:
+        validate_outbound(
+            {
+                "type": "history",
+                "historyKind": "research_owner_delta",
+                "entries": [{"role": "assistant", "text": "update", "ts": 1700000001000}],
+            }
+        )
+
+    def test_history_rejects_unknown_delta_kind(self) -> None:
+        with pytest.raises(ProtocolError, match=r"history\.historyKind"):
+            validate_outbound(
+                {
+                    "type": "history",
+                    "historyKind": "not-a-history-kind",
+                    "entries": [],
+                }
+            )
+
+    def test_history_owner_delta_rejects_non_assistant_entries(self) -> None:
+        with pytest.raises(ProtocolError, match="research owner history"):
+            validate_outbound(
+                {
+                    "type": "history",
+                    "historyKind": "research_owner_delta",
+                    "entries": [{"role": "user", "text": "prompt", "ts": 1}],
+                }
+            )
 
 
 class TestStatusRequestFrame:
@@ -342,88 +370,75 @@ class TestForceStopFrame:
 class TestAutoresearchStatusFrame:
     """autoresearch_status outbound frame validation."""
 
-    def test_minimal_status_valid(self) -> None:
+    def test_empty_campaign_status_valid(self) -> None:
         validate_outbound(
             {
                 "type": "autoresearch_status",
-                "running": True,
-                "phase": "verification",
-                "iteration": 3,
-                "suspended": False,
-                "campaignReviewRequired": False,
+                "hypothesisId": None,
+                "hypothesisState": None,
+                "attemptId": None,
+                "attemptState": None,
+                "stage": "idle",
+                "lastAstraDecision": None,
+                "campaignStatus": "ACTIVE",
+                "boundaryFailure": None,
+                "lastEventAt": None,
+                "ownerState": "inactive",
+                "updatedAt": None,
+                "available": True,
+                "unavailableReason": None,
             }
         )
 
-    def test_status_with_optional_fields_valid(self) -> None:
+    def test_status_with_values_valid(self) -> None:
         validate_outbound(
             {
                 "type": "autoresearch_status",
-                "running": True,
-                "phase": "verification",
-                "iteration": 3,
-                "suspended": False,
-                "campaignReviewRequired": False,
-                "supervisorOutcome": "healthy",
-                "supervisorDetail": "cycle complete",
-                "lastCycleAt": 1770000000000,
-                "taskHeadline": "[RUNNING] Verify results",
+                "hypothesisId": "H0001",
+                "hypothesisState": "FROZEN",
+                "attemptId": "H0001-A001",
+                "attemptState": "RUNNING",
+                "stage": "running",
+                "lastAstraDecision": "RETRY",
+                "campaignStatus": "ACTIVE",
+                "boundaryFailure": None,
+                "lastEventAt": "2026-09-06T12:00:00Z",
+                "ownerState": "active",
+                "updatedAt": "2026-09-06T12:00:00Z",
+                "available": True,
+                "unavailableReason": None,
             }
         )
 
-    def test_status_missing_running_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'running'"):
+    def test_status_missing_stage_raises(self) -> None:
+        with pytest.raises(ProtocolError, match="missing required field 'stage'"):
             validate_outbound(
                 {
                     "type": "autoresearch_status",
-                    "phase": "verification",
-                    "iteration": 3,
-                    "suspended": False,
-                    "campaignReviewRequired": False,
+                    "hypothesisId": None,
+                    "hypothesisState": None,
+                    "attemptId": None,
+                    "attemptState": None,
                 }
             )
 
-    def test_status_wrong_type_suspended_raises(self) -> None:
+    def test_status_wrong_type_available_raises(self) -> None:
         with pytest.raises(ProtocolError, match="must be bool"):
             validate_outbound(
                 {
                     "type": "autoresearch_status",
-                    "running": True,
-                    "phase": "verification",
-                    "iteration": 3,
-                    "suspended": "yes",
-                    "campaignReviewRequired": False,
+                    "hypothesisId": None,
+                    "hypothesisState": None,
+                    "attemptId": None,
+                    "attemptState": None,
+                    "stage": "idle",
+                    "lastAstraDecision": None,
+                    "campaignStatus": None,
+                    "boundaryFailure": None,
+                    "lastEventAt": None,
+                    "ownerState": "unknown",
+                    "updatedAt": None,
+                    "available": "yes",
+                    "unavailableReason": None,
                 }
             )
-
-    def test_status_wrong_type_iteration_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="must be int"):
-            validate_outbound(
-                {
-                    "type": "autoresearch_status",
-                    "running": True,
-                    "phase": "verification",
-                    "iteration": "3",
-                    "suspended": False,
-                    "campaignReviewRequired": False,
-                }
-            )
-
-
-class TestAutoresearchFeedFrame:
-    """autoresearch_feed outbound frame validation."""
-
-    def test_feed_with_entries_valid(self) -> None:
-        validate_outbound(
-            {
-                "type": "autoresearch_feed",
-                "entries": [{"role": "assistant", "text": "hello", "ts": 1770000000000}],
-            }
-        )
-
-    def test_feed_missing_entries_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="missing required field 'entries'"):
-            validate_outbound({"type": "autoresearch_feed"})
-
-    def test_feed_non_list_entries_raises(self) -> None:
-        with pytest.raises(ProtocolError, match="must be list"):
-            validate_outbound({"type": "autoresearch_feed", "entries": "not_a_list"})

@@ -11,11 +11,9 @@ export interface ConversationEntry {
   role: 'user' | 'assistant' | 'system';
   text: string;
   timestamp: number;
-  source?: 'local' | 'feed';
 }
 
 const SEPARATOR = '\n─ ─ ─ ─ ─ ─ ─ ─\n';
-const FEED_DISPLAY_LIMIT = 10;
 
 export class ConversationHistory {
   private entries: ConversationEntry[] = [];
@@ -35,7 +33,7 @@ export class ConversationHistory {
   /** Append a delta to the most recent assistant entry. */
   appendToLastAssistant(delta: string): void {
     const last = this.entries[this.entries.length - 1];
-    if (last && last.role === 'assistant' && last.source !== 'feed') {
+    if (last && last.role === 'assistant') {
       last.text += delta;
     } else {
       console.warn('[Conversation] appendToLastAssistant: no assistant entry found — dropping delta');
@@ -71,7 +69,6 @@ export class ConversationHistory {
         case 'user':
           return `» ${entry.text}`;
         case 'assistant':
-          if (entry.source === 'feed') return `◆ ${stripMarkdown(entry.text) || '...'}`;
           return stripMarkdown(entry.text) || '...';
         case 'system':
           return `[${entry.text}]`;
@@ -113,7 +110,6 @@ export class ConversationHistory {
         case 'user':
           return `» ${entry.text}`;
         case 'assistant':
-          if (entry.source === 'feed') return `◆ ${stripMarkdown(entry.text) || '...'}`;
           return stripMarkdown(entry.text) || '...';
         case 'system':
           return `[${entry.text}]`;
@@ -160,8 +156,8 @@ export class ConversationHistory {
   }
 
   /** Get a copy of all entries (for dev tools). */
-  getEntries(): Array<{ role: 'user' | 'assistant' | 'system'; text: string; timestamp: number; source?: 'local' | 'feed' }> {
-    return this.entries.map(e => ({ role: e.role, text: e.text, timestamp: e.timestamp, source: e.source }));
+  getEntries(): Array<{ role: 'user' | 'assistant' | 'system'; text: string; timestamp: number }> {
+    return this.entries.map(e => ({ role: e.role, text: e.text, timestamp: e.timestamp }));
   }
 
   /** Remove the last user entry (e.g. rejected transcription). */
@@ -177,7 +173,7 @@ export class ConversationHistory {
 
   /** Replace all entries with history from the gateway. */
   replayHistory(entries: Array<{ role: 'user' | 'assistant'; text: string; ts: number }>): void {
-    this.entries = this.entries.filter(entry => entry.source === 'feed');
+    this.entries = [];
     for (const entry of entries) {
       this.entries.push({
         role: entry.role,
@@ -189,13 +185,17 @@ export class ConversationHistory {
     this._trim();
   }
 
-  /** Replace all autoresearch feed entries and re-merge by timestamp. */
-  setFeedEntries(entries: Array<{ role: string; text: string; ts: number }>): void {
-    this.entries = this.entries.filter(entry => entry.source !== 'feed');
-    for (const entry of entries.slice(-FEED_DISPLAY_LIMIT)) {
+  /** Add history entries without replacing the live spoken conversation. */
+  appendHistory(entries: Array<{ role: 'user' | 'assistant'; text: string; ts: number }>): void {
+    const seen = new Set(
+      this.entries.map((entry) => `${entry.role}\u0000${entry.timestamp}\u0000${entry.text}`),
+    );
+    for (const entry of entries) {
+      const key = `${entry.role}\u0000${entry.ts}\u0000${entry.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
       this.entries.push({
-        role: 'assistant',
-        source: 'feed',
+        role: entry.role,
         text: entry.text,
         timestamp: entry.ts,
       });

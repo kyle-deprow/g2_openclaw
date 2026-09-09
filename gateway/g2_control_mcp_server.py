@@ -9,8 +9,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from typing import Protocol, TextIO
 
-from gateway.autoresearch_control import AutoresearchControl, ControlStatus, StopResult
-from gateway.autoresearch_supervisor import SupervisorError
+from gateway.research.control import ControlError, OwnerControl, StartResult, StopResult
+from gateway.research.status import ResearchStatus
 
 TOOL_NAMES = (
     "g2_autoresearch_status",
@@ -20,18 +20,18 @@ TOOL_NAMES = (
 
 
 class _ControlProtocol(Protocol):
-    def status(self) -> ControlStatus: ...
+    def status(self) -> ResearchStatus: ...
 
-    def start(self) -> None: ...
+    def start(self) -> StartResult: ...
 
     def stop(self) -> StopResult: ...
 
 
 def _tool_schema(name: str) -> dict[str, object]:
     descriptions = {
-        "g2_autoresearch_status": "Return deterministic Quantipy autoresearch control status.",
-        "g2_autoresearch_start": "Start the deterministic Quantipy autoresearch supervisor.",
-        "g2_autoresearch_stop": "Stop deterministic Quantipy autoresearch work.",
+        "g2_autoresearch_status": "Return deterministic research campaign status.",
+        "g2_autoresearch_start": "Start the configured research owner.",
+        "g2_autoresearch_stop": "Pause the campaign and stop the research owner.",
     }
     annotations = {
         "g2_autoresearch_status": {
@@ -70,7 +70,7 @@ class G2ControlMcpServer:
 
     def __init__(
         self,
-        control_factory: Callable[[], _ControlProtocol] = AutoresearchControl,
+        control_factory: Callable[[], _ControlProtocol] = OwnerControl,
     ) -> None:
         self._control_factory = control_factory
 
@@ -118,7 +118,7 @@ class G2ControlMcpServer:
             if is_notification:
                 return None
             return {"jsonrpc": "2.0", "id": request_id, "result": result}
-        except SupervisorError as exc:
+        except ControlError as exc:
             if is_notification:
                 return None
             return self._error(request_id, -32000, str(exc))
@@ -144,8 +144,7 @@ class G2ControlMcpServer:
         if name == "g2_autoresearch_status":
             return _content(asdict(control.status()))
         if name == "g2_autoresearch_start":
-            control.start()
-            return _content({"started": True})
+            return _content(asdict(control.start()))
         return _content(asdict(control.stop()))
 
     @classmethod

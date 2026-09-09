@@ -20,6 +20,7 @@ export class InputHandler {
   private gateway!: Gateway;
   private bridge!: EvenAppBridge;
   private conversation!: ConversationHistory;
+  private applyPendingResearchOwnerHistory!: () => boolean;
   private _lastScrollTime = 0;
   private _initialised = false;
   private _pendingTranscription: string | null = null;
@@ -31,6 +32,7 @@ export class InputHandler {
     gateway: Gateway;
     bridge: EvenAppBridge;
     conversation: ConversationHistory;
+    applyPendingResearchOwnerHistory: () => boolean;
   }): void {
     if (this._initialised) {
       console.warn('[Input] Already initialised — ignoring duplicate init()');
@@ -42,6 +44,7 @@ export class InputHandler {
     this.gateway = deps.gateway;
     this.bridge = deps.bridge;
     this.conversation = deps.conversation;
+    this.applyPendingResearchOwnerHistory = deps.applyPendingResearchOwnerHistory;
 
     deps.bridge.onEvenHubEvent((event) => {
       console.log('[Input] Event received:', JSON.stringify(event));
@@ -95,7 +98,7 @@ export class InputHandler {
       this.sm.transition('idle');
     }
     this.conversation.addUser(trimmed);
-    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    this.returnToIdle();
     this.gateway.sendJson({ type: 'text', message: trimmed });
     return true;
   }
@@ -178,7 +181,7 @@ export class InputHandler {
     this._pendingTranscription = null;
     this.conversation.removeLastUser();
     this.sm.transition('idle');
-    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    this.returnToIdle();
     return true;
   }
 
@@ -245,7 +248,7 @@ export class InputHandler {
         break;
       case 'error':
         this.sm.transition('idle');
-        this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+        this.returnToIdle();
         break;
       case 'disconnected':
         this.gateway.connect();
@@ -264,10 +267,10 @@ export class InputHandler {
       console.log('[Input] Force stop — killing OpenClaw session');
       this.gateway.sendForceStop();
       this.sm.transition('idle');
-      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+      this.returnToIdle();
     } else if (state === 'error') {
       this.sm.transition('idle');
-      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+      this.returnToIdle();
     }
   }
 
@@ -291,7 +294,7 @@ export class InputHandler {
     }
     console.log('[Input] Cancelling response');
     this.sm.transition('idle');
-    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+    this.returnToIdle();
     return true;
   }
 
@@ -306,7 +309,7 @@ export class InputHandler {
     const current = this.sm.current;
     if (current !== 'idle' && current !== 'loading' && current !== 'disconnected') {
       this.sm.transition('idle');
-      this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
+      this.returnToIdle();
     }
     return true;
   }
@@ -320,6 +323,11 @@ export class InputHandler {
     this.gateway.sendJson({ type: 'reset_session' });
     console.log('[Input] Session reset requested');
     return true;
+  }
+
+  private returnToIdle(): void {
+    this.applyPendingResearchOwnerHistory();
+    this.display.showIdle().catch(err => console.error('[Input] Display error:', err));
   }
 
 }

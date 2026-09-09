@@ -32,7 +32,7 @@ const mockConversation = {
   startAssistantStream: vi.fn(),
   appendToLastAssistant: vi.fn(),
   replayHistory: vi.fn(),
-  setFeedEntries: vi.fn(),
+  appendHistory: vi.fn(),
   formatReverse: vi.fn().mockReturnValue('Ready.'),
   format: vi.fn().mockReturnValue('Ready.'),
   get length() { return 0; },
@@ -53,6 +53,7 @@ const mockDisplay = {
   showError: vi.fn(() => Promise.resolve()),
   showConfirming: vi.fn(() => Promise.resolve()),
   setAutoresearchHeader: vi.fn(() => Promise.resolve()),
+  setAutoresearchFooter: vi.fn(() => Promise.resolve()),
   showSessionReset: vi.fn(() => Promise.resolve()),
   appendDelta: vi.fn(() => Promise.resolve()),
   finaliseStream: vi.fn(() => Promise.resolve()),
@@ -169,13 +170,14 @@ describe('main.ts boot()', () => {
     await runBoot();
 
     expect(mockInput.init).toHaveBeenCalledOnce();
-    expect(mockInput.init).toHaveBeenCalledWith({
+    expect(mockInput.init).toHaveBeenCalledWith(expect.objectContaining({
       sm: mockSm,
       display: mockDisplay,
       gateway: mockGateway,
       bridge: mockBridge,
       conversation: mockConversation,
-    });
+      applyPendingResearchOwnerHistory: expect.any(Function),
+    }));
   });
 
   it('connects gateway before initialising input handler', async () => {
@@ -241,109 +243,158 @@ describe('main.ts boot()', () => {
 
   });
 
+  describe('history frame routing', () => {
+    const entries = [{ role: 'assistant' as const, text: 'Astra update', ts: 3000 }];
+
+    it('replaces conversation only for an initial/reconnect history frame', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+
+      routeFrame({
+        type: 'history',
+        entries: [
+          { role: 'user', text: 'spoken question', ts: 1000 },
+          { role: 'assistant', text: 'spoken answer', ts: 2000 },
+        ],
+      });
+
+      expect(mockConversation.replayHistory).toHaveBeenCalledWith([
+        { role: 'user', text: 'spoken question', ts: 1000 },
+        { role: 'assistant', text: 'spoken answer', ts: 2000 },
+      ]);
+      expect(mockConversation.appendHistory).not.toHaveBeenCalled();
+      expect(mockDisplay.showIdle).toHaveBeenCalled();
+    });
+
+    it('applies owner deltas while idle and repaints the newest-first transcript', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'idle';
+
+      routeFrame({ type: 'history', historyKind: 'research_owner_delta', entries });
+
+      expect(mockConversation.appendHistory).toHaveBeenCalledWith(entries);
+      expect(mockConversation.replayHistory).not.toHaveBeenCalled();
+      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+    });
+
+    it('queues owner deltas while confirming and drains them on a later idle delta', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      const laterEntries = [{ role: 'assistant' as const, text: 'Later update', ts: 4000 }];
+      mockSm._current = 'confirming';
+      vi.clearAllMocks();
+
+      routeFrame({ type: 'history', historyKind: 'research_owner_delta', entries });
+      mockSm._current = 'idle';
+      routeFrame({
+        type: 'history',
+        historyKind: 'research_owner_delta',
+        entries: laterEntries,
+      });
+
+      expect(mockConversation.appendHistory).toHaveBeenCalledOnce();
+      expect(mockConversation.appendHistory).toHaveBeenCalledWith([
+        ...entries,
+        ...laterEntries,
+      ]);
+    });
+
+    it('drains queued owner deltas on a same-state idle status', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'recording';
+      vi.clearAllMocks();
+
+      routeFrame({ type: 'history', historyKind: 'research_owner_delta', entries });
+      mockSm._current = 'idle';
+      routeFrame({ type: 'status', status: 'idle' });
+
+      expect(mockConversation.appendHistory).toHaveBeenCalledWith(entries);
+      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+    });
+
+    it('drains queued owner deltas when a streaming end frame returns idle', async () => {
+      await runBoot();
+      const routeFrame = getRouteFrame();
+      mockSm._current = 'streaming';
+      vi.clearAllMocks();
+
+      routeFrame({ type: 'history', historyKind: 'research_owner_delta', entries });
+      routeFrame({ type: 'end' });
+
+      expect(mockConversation.appendHistory).toHaveBeenCalledWith(entries);
+      expect(mockDisplay.finaliseStream).toHaveBeenCalledOnce();
+    });
+
+    it.each(['recording', 'confirming', 'transcribing', 'thinking', 'streaming'] as const)(
+      'keeps the %s interaction visible when an owner delta arrives',
+      async (state) => {
+        await runBoot();
+        const routeFrame = getRouteFrame();
+        vi.clearAllMocks();
+        mockSm._current = state;
+
+        routeFrame({ type: 'history', historyKind: 'research_owner_delta', entries });
+
+        expect(mockConversation.appendHistory).not.toHaveBeenCalled();
+        expect(mockDisplay.showIdle).not.toHaveBeenCalled();
+
+        if (state === 'confirming') {
+          routeFrame({ type: 'status', status: 'thinking' });
+        }
+        routeFrame({ type: 'status', status: 'idle' });
+        expect(mockConversation.appendHistory).toHaveBeenCalledWith(entries);
+        expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
+      },
+    );
+  });
+
   describe('autoresearch frame routing', () => {
     const statusFrame = (overrides: Record<string, unknown> = {}) => ({
       type: 'autoresearch_status',
-      running: true,
-      phase: 'cycling',
-      iteration: 4,
-      suspended: false,
-      campaignReviewRequired: false,
+      hypothesisId: 'H0001',
+      hypothesisState: 'FROZEN',
+      attemptId: 'H0001-A001',
+      attemptState: 'RUNNING',
+      stage: 'running',
+      lastAstraDecision: null,
+      campaignStatus: 'ACTIVE',
+      boundaryFailure: null,
+      lastEventAt: null,
+      ownerState: 'active',
+      updatedAt: '2026-09-06T00:00:00Z',
+      available: true,
+      unavailableReason: null,
       ...overrides,
     });
 
-    it('formats and routes running, stopped, and not-running headers', async () => {
+    it('maps hypothesis, attempt, and stage into the header', async () => {
       await runBoot();
       const routeFrame = getRouteFrame();
 
       routeFrame(statusFrame());
-      routeFrame(statusFrame({ running: false, phase: 'paused', iteration: 7 }));
-      routeFrame(statusFrame({ running: false, phase: 'not running', iteration: 0 }));
+      routeFrame(statusFrame({ hypothesisId: null, attemptId: null, stage: 'idle' }));
+      routeFrame(statusFrame({ available: false, unavailableReason: 'missing database' }));
 
-      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(1, 'AR cycling it4');
-      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(2, 'AR stopped · paused it7');
-      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(3, 'AR not running');
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(1, 'H:H0001 A:H0001-A001 running');
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(2, 'H:— A:— idle');
+      expect(mockDisplay.setAutoresearchHeader).toHaveBeenNthCalledWith(3, 'Research unavailable');
+      expect(mockDisplay.setAutoresearchFooter).toHaveBeenNthCalledWith(1, 'campaign ACTIVE · owner active');
+      expect(mockDisplay.setAutoresearchFooter).toHaveBeenNthCalledWith(3, 'Unavailable: missing database');
     });
 
-    it('formats outcome, suspended, and review suffixes', async () => {
+    it('includes boundary failures in the footer', async () => {
       await runBoot();
       const routeFrame = getRouteFrame();
 
       routeFrame(statusFrame({
-        supervisorOutcome: 'continue',
-        suspended: true,
-        campaignReviewRequired: true,
+        boundaryFailure: 'review_failed',
       }));
 
-      expect(mockDisplay.setAutoresearchHeader).toHaveBeenCalledWith(
-        'AR cycling it4 · continue ⏸ ⚠rev',
+      expect(mockDisplay.setAutoresearchFooter).toHaveBeenCalledWith(
+        'campaign ACTIVE · owner active · failure review_failed',
       );
-    });
-
-    it('truncates a long phase while preserving the autoresearch suffix', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-
-      routeFrame(statusFrame({
-        phase: '1234567890123456789012345678901234567890',
-        supervisorOutcome: 'continue',
-        suspended: true,
-        campaignReviewRequired: true,
-      }));
-
-      const header = (mockDisplay.setAutoresearchHeader.mock.calls[0] as unknown as [string])[0];
-      const phaseEnd = header.indexOf(' it4');
-      expect(header.length).toBeLessThanOrEqual(50);
-      expect(header.slice(3, phaseEnd).endsWith('…')).toBe(true);
-      expect(header.endsWith(' ⏸ ⚠rev')).toBe(true);
-    });
-
-    it('applies an autoresearch feed immediately while idle', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      const entries = [{ role: 'assistant', text: 'update', ts: 10 }];
-      mockSm._current = 'idle';
-
-      routeFrame({ type: 'autoresearch_feed', entries });
-
-      expect(mockConversation.setFeedEntries).toHaveBeenCalledWith(entries);
-      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
-    });
-
-    it('defers streaming feeds and applies only the latest feed on idle', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      const first = [{ role: 'assistant', text: 'first', ts: 10 }];
-      const latest = [{ role: 'assistant', text: 'latest', ts: 20 }];
-      mockSm._current = 'streaming';
-
-      routeFrame({ type: 'autoresearch_feed', entries: first });
-      routeFrame({ type: 'autoresearch_feed', entries: latest });
-
-      expect(mockConversation.setFeedEntries).not.toHaveBeenCalled();
-      expect(mockDisplay.showIdle).not.toHaveBeenCalled();
-
-      mockSm.transition('idle');
-
-      expect(mockConversation.setFeedEntries).toHaveBeenCalledOnce();
-      expect(mockConversation.setFeedEntries).toHaveBeenCalledWith(latest);
-      expect(mockDisplay.showIdle).toHaveBeenCalledOnce();
-      mockSm.transition('idle');
-      expect(mockConversation.setFeedEntries).toHaveBeenCalledOnce();
-    });
-
-    it('drops a stashed feed when disconnected before reconnecting', async () => {
-      await runBoot();
-      const routeFrame = getRouteFrame();
-      const routeEvent = getRouteEvent();
-      const stale = [{ role: 'assistant', text: 'stale', ts: 10 }];
-      mockSm._current = 'streaming';
-
-      routeFrame({ type: 'autoresearch_feed', entries: stale });
-      routeEvent('disconnected');
-      routeFrame({ type: 'connected', version: '1.0' });
-
-      expect(mockConversation.setFeedEntries).not.toHaveBeenCalledWith(stale);
     });
   });
 });
