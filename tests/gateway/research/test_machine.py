@@ -125,6 +125,8 @@ def test_new_implementation_clears_review_metadata() -> None:
             state=__import__(
                 "gateway.research.contracts", fromlist=["HypothesisState"]
             ).HypothesisState.FROZEN,
+            dividends_path="/dividends",
+            dividends_sha256="f" * 64,
         ),
         (),
         "/tmp/worktree",
@@ -174,6 +176,8 @@ def test_terminal_status_controls_run_success() -> None:
         "e" * 40,
         "2026-01-01T00:00:00Z",
         state=HypothesisState.FROZEN,
+        dividends_path="/dividends",
+        dividends_sha256="e" * 64,
     )
     opened = open_attempt(hypothesis, (), "/tmp/worktree", "2026-01-01T00:00:00Z")
     implemented = submit_implementation(

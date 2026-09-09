@@ -55,6 +55,8 @@ class HypothesisDecision(StrEnum):
 
 
 class JobState(StrEnum):
+    QUEUED = "QUEUED"
+    LAUNCH_RESERVED = "LAUNCH_RESERVED"
     LAUNCHED = "LAUNCHED"
     ATTACHED = "ATTACHED"
     EXITED = "EXITED"
@@ -108,6 +110,8 @@ class HypothesisSpec:
     max_attempts: int
     base_commit: str
     created_at: str
+    dividends_path: str
+    dividends_sha256: str
     state: HypothesisState = HypothesisState.DRAFT
 
     def __post_init__(self) -> None:
@@ -129,6 +133,8 @@ class HypothesisSpec:
             (self.evaluation_spec_path, "evaluation_spec_path"),
         ):
             require_str(value, name)
+        require_str(self.dividends_path, "dividends_path")
+        require_sha256(self.dividends_sha256, "dividends_sha256")
         _check_commit(self.base_commit, "base_commit")
         if self.max_attempts < 1:
             raise ValueError("max_attempts must be positive")

@@ -32,6 +32,9 @@ def test_hypothesis_round_trip_is_strict() -> None:
         3,
         "a" * 40,
         "2026-01-01T00:00:00Z",
+        "/dividends",
+        digest,
+        HypothesisState.DRAFT,
     )
     assert HypothesisSpec.from_json(value.to_json()) == value
     raw = json.loads(value.to_json())

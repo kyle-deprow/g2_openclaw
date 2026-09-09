@@ -123,7 +123,7 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
             resume_seq,
         )
     state = attempt.state.value
-    if attempt.state == AttemptState.RUNNING:
+    if attempt.state in {AttemptState.RUN_QUEUED, AttemptState.RUNNING}:
         return None
     if attempt.state == AttemptState.OPENED:
         action = f"dispatch coder; submit with `gateway-cli research implementation-submit {attempt.attempt_id} --root ROOT --file impl.json`"

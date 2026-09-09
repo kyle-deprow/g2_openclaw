@@ -169,11 +169,24 @@ def test_run_reservation_is_atomic_before_worker_launch(
     store.submit_review(
         attempt.attempt_id, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256)
     )
-    running = store.reserve_and_start_run(attempt.attempt_id, "job-reserved", store.root / "run")
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    store.queue_run_request(attempt.attempt_id, "job-reserved", run_dir, 30, 256)
+    store.acquire_run_lock()
+    try:
+        running = store.claim_queued_job(attempt.attempt_id, "job-reserved")
+    finally:
+        store.release_run_lock()
     assert running.state == AttemptState.RUNNING
     row = store.job_for(attempt.attempt_id)
     assert row is not None
-    assert json.loads(row["payload_json"])["state"] == "RESERVED"
+    assert json.loads(row["payload_json"])["state"] == "LAUNCH_RESERVED"
 
 
 def test_frozen_payload_authority_cannot_be_rewritten(
@@ -223,8 +236,8 @@ def test_hypothesis_create_requires_decided_previous_and_reconcile_repairs(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    with pytest.raises(ValueError):
-        store.create_hypothesis(
+    with pytest.raises(TypeError):
+        store.create_hypothesis(  # type: ignore[call-arg]
             "second",
             Path(hypothesis.evaluation_spec_path),
             Path(hypothesis.panel_path),
@@ -249,5 +262,6 @@ def test_hypothesis_create_requires_decided_previous_and_reconcile_repairs(
         Path(hypothesis.receipt_path),
         Path(hypothesis.evaluation_spec_path),
         "b" * 40,
+        dividends=Path(hypothesis.dividends_path),
     )
     assert second.hypothesis_id == "H0002"

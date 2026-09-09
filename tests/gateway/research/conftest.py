@@ -4,6 +4,7 @@ from __future__ import annotations
 # ruff: noqa: E501
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,28 +29,58 @@ def campaign(tmp_path: Path) -> tuple[ResearchStore, Path, HypothesisSpec]:
     panel = tmp_path / "panel.json"
     receipt = tmp_path / "receipt.json"
     eval_spec = tmp_path / "eval-spec.json"
+    dividends = tmp_path / "dividends.json"
+    dividends.write_text('{"contract":"trusted-dividends-v2"}', encoding="utf-8")
+    universe = tmp_path / "universe.json"
+    universe.write_text('{"contract":"trusted-universe-v2"}', encoding="utf-8")
     spec.write_text(json.dumps({"title": "fixture"}), encoding="utf-8")
     panel.write_text("panel", encoding="utf-8")
     receipt.write_text("receipt", encoding="utf-8")
     eval_spec.write_text("eval", encoding="utf-8")
-    evaluator = tmp_path / "evaluator"
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "src" / "quantipy").mkdir(parents=True)
+    (snapshot / "src" / "quantipy" / "__init__.py").write_text("VERSION = 'v2'\n")
+    (snapshot / "pyproject.toml").write_text("[project]\nname='quantipy'\n")
+    (snapshot / "uv.lock").write_text("version = 1\n")
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    os.symlink(str(Path(sys.executable).resolve()), venv / "bin" / "python")
+    (venv / "pyvenv.cfg").write_text(
+        f"home = {Path(sys.executable).resolve().parent}\n", encoding="utf-8"
+    )
+    evaluator = venv / "bin" / "quantipy"
     evaluation_digest = hashlib.sha256(eval_spec.read_bytes()).hexdigest()
     evaluator.write_text(
         "#!/usr/bin/env python3\n"
-        "import argparse, json, pathlib\n"
-        "p=argparse.ArgumentParser(); p.add_argument('command', nargs='*'); p.add_argument('--out'); p.add_argument('--spec'); p.add_argument('--targets'); p.add_argument('--panel'); p.add_argument('--receipt')\n"
-        "a=p.parse_args(); pathlib.Path(a.out).mkdir(parents=True, exist_ok=True); json.dump({'evaluator_version':'research-evaluator-v1','spec_sha256':'"
+        "import argparse, hashlib, json, pathlib, sys\n"
+        "p=argparse.ArgumentParser(); p.add_argument('command', nargs='*'); p.add_argument('--out'); p.add_argument('--spec'); p.add_argument('--targets'); p.add_argument('--panel'); p.add_argument('--receipt'); p.add_argument('--dividends'); p.add_argument('--universe'); p.add_argument('--require-source-root')\n"
+        "a=p.parse_args(); semantic=hashlib.sha256(b'fixture-semantic-spec').hexdigest()\n"
+        "if 'validate-inputs' in a.command:\n"
+        " print(json.dumps({'verdict':'PASS','reasons':[],'spec_sha256_semantic':semantic,'spec_sha256_raw':'"
         + evaluation_digest
+        + "','panel_sha256':'"
+        + hashlib.sha256(panel.read_bytes()).hexdigest()
+        + "','receipt_sha256':'"
+        + hashlib.sha256(receipt.read_bytes()).hexdigest()
+        + "','universe_file_sha256':'"
+        + hashlib.sha256(universe.read_bytes()).hexdigest()
+        + "','dividends_sha256':'"
+        + hashlib.sha256(dividends.read_bytes()).hexdigest()
+        + "'}); sys.exit(0)\n"
+        "pathlib.Path(a.out).mkdir(parents=True, exist_ok=True); json.dump({'evaluator_version':'research-evaluator-v2','spec_sha256':semantic,'dividends_sha256':'"
+        + hashlib.sha256(dividends.read_bytes()).hexdigest()
         + "','compliant':True,'zero_trade':False,'metrics_available':True,'acceptance_class':'accepted','earnings_provenance':'fixture'}, open(pathlib.Path(a.out)/'result.json','w'))\n",
         encoding="utf-8",
     )
     evaluator.chmod(0o555)
-    for frozen_input in (panel, receipt, eval_spec):
+    for frozen_input in (panel, receipt, eval_spec, dividends):
         frozen_input.chmod(0o444)
     store = ResearchStore(root)
-    store.configure(Path("/usr/bin/python3"), evaluator)
+    store.configure(venv / "bin" / "python", evaluator, snapshot, universe)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    hypothesis = store.create_hypothesis("fixture", spec, panel, receipt, eval_spec, commit)
+    hypothesis = store.create_hypothesis(
+        "fixture", spec, panel, receipt, eval_spec, commit, dividends=dividends
+    )
     source.chmod(0o555)
     return store, source, hypothesis
 

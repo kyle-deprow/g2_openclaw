@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import typer
 
+from .containment import runtime_pins_from_record
 from .contracts import (
     Attempt,
     AttemptDecision,
@@ -21,12 +24,22 @@ from .contracts import (
     ReviewRecord,
     RunOutcome,
 )
-from .jobs import JobError, JobRecord, attach, cleanup_stage, launch, new_job_id, preflight
+from .jobs import (
+    JobError,
+    JobRecord,
+    attach,
+    cleanup_stage,
+    launch,
+    lifecycle_lock,
+    new_job_id,
+    preflight,
+)
 from .jobs import cancel as cancel_job
-from .store import ResearchStore, now_utc
+from .store import OwnerLockHeld, ResearchStore, StoreConflict, now_utc
 from .wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
 app = typer.Typer(help="Durable, bounded Quantipy research driver.")
+_SERVE_FATAL_EXIT = 78
 
 
 def _root(value: Path) -> Path:
@@ -40,14 +53,35 @@ def _fail(exc: Exception) -> None:
     raise typer.Exit(code=1)
 
 
+def _fatal_serve_failure(store: ResearchStore | None, exc: Exception) -> None:
+    """Pause visibly before terminating so a service supervisor cannot retry."""
+    detail = f"{type(exc).__name__}: {exc}"
+    if store is None:
+        typer.echo(f"fatal serve iteration: {detail}", err=True)
+        raise typer.Exit(code=_SERVE_FATAL_EXIT)
+    try:
+        store.pause_for_failure(detail)
+    except Exception as pause_exc:
+        typer.echo(
+            f"fatal serve iteration: {detail}; failed to persist pause: "
+            f"{type(pause_exc).__name__}: {pause_exc}",
+            err=True,
+        )
+        raise typer.Exit(code=_SERVE_FATAL_EXIT) from pause_exc
+    typer.echo(f"fatal serve iteration; campaign paused: {detail}", err=True)
+    raise typer.Exit(code=_SERVE_FATAL_EXIT)
+
+
 @app.command("init")
 def init(
     root: Path = typer.Option(..., "--root"),
     shared_python: Path = typer.Option(..., "--shared-python"),
     evaluator: Path = typer.Option(..., "--evaluator"),
+    snapshot_dir: Path = typer.Option(..., "--snapshot-dir"),
+    universe: Path = typer.Option(..., "--universe"),
 ) -> None:
     try:
-        ResearchStore(_root(root)).configure(shared_python, evaluator)
+        ResearchStore(_root(root)).configure(shared_python, evaluator, snapshot_dir, universe)
         typer.echo(f"initialized research store: {root}")
     except Exception as exc:
         _fail(exc)
@@ -61,11 +95,12 @@ def hypothesis_create(
     panel: Path = typer.Option(..., "--panel"),
     receipt: Path = typer.Option(..., "--receipt"),
     eval_spec: Path = typer.Option(..., "--eval-spec"),
+    dividends: Path = typer.Option(..., "--dividends"),
     base_commit: str = typer.Option(..., "--base-commit"),
 ) -> None:
     try:
         spec = ResearchStore(_root(root)).create_hypothesis(
-            title, spec_file, panel, receipt, eval_spec, base_commit
+            title, spec_file, panel, receipt, eval_spec, base_commit, dividends=dividends
         )
         typer.echo(spec.hypothesis_id)
     except Exception as exc:
@@ -130,6 +165,7 @@ def _terminal_outcome(
             / "attempts"
             / attempt_id
             / "run"
+            / "evaluator-stage"
             / "out"
             / "result.json"
         )
@@ -167,10 +203,10 @@ def _job_from_row(row: object) -> JobRecord:
     return JobRecord(
         str(payload["job_id"]),
         str(payload["attempt_id"]),
-        int(payload["worker_pid"]),
-        int(payload["worker_starttime"]),
+        int(payload.get("worker_pid", 0)),
+        int(payload.get("worker_starttime", 0)),
         str(payload["run_dir"]),
-        str(payload.get("state", "LAUNCHED")),
+        str(payload.get("state", str(row["state"]))),  # type: ignore[index]
     )
 
 
@@ -211,6 +247,15 @@ def _finish_if_running(store: ResearchStore, attempt_id: str, outcome: RunOutcom
         store.release_run_lock()
 
 
+def _mark_job_state(store: ResearchStore, attempt_id: str, state: str) -> None:
+    row = store.job_for(attempt_id)
+    if row is None or str(row["state"]) == state:
+        return
+    payload = json.loads(str(row["payload_json"]))
+    payload["state"] = state
+    store.update_job(payload, attempt_id, event="job_finished")
+
+
 def _finish_orphan(store: ResearchStore, job: JobRecord, outcome: RunOutcome) -> Attempt:
     store.acquire_run_lock()
     try:
@@ -236,109 +281,351 @@ def _finish_orphan(store: ResearchStore, job: JobRecord, outcome: RunOutcome) ->
         store.release_run_lock()
 
 
+def _write_terminal(run_dir: Path, outcome: RunOutcome, *, detail: str | None = None) -> None:
+    """Write trusted host-side failure evidence for a job that never ran."""
+    with lifecycle_lock(run_dir):
+        # Cancellation's marker is the same per-job authority used by the
+        # detached worker.  A host-side orphan record must never race in after
+        # a cancellation request has won that authority.
+        cancel_path = run_dir / "cancel.json"
+        if cancel_path.exists() or cancel_path.is_symlink():
+            return
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(run_dir / "terminal.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            payload: dict[str, object] = {
+                "job_id": outcome.job_id,
+                "attempt_id": outcome.attempt_id,
+                "targets_exit": outcome.exit_code,
+                "evaluator_exit": outcome.exit_code,
+                "checks": [{"name": outcome.status, "ok": False}],
+                "started_at": outcome.started_at,
+                "finished_at": outcome.finished_at,
+                "status": outcome.status,
+            }
+            if detail is not None:
+                payload["error"] = detail
+            stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+            stream.flush()
+            os.fsync(stream.fileno())
+
+
+def _failure(attempt_id: str, job_id: str, status: str, *, exit_code: int = -1) -> RunOutcome:
+    started = now_utc()
+    return RunOutcome(
+        attempt_id,
+        job_id,
+        exit_code,
+        False,
+        False,
+        False,
+        status,
+        "none",
+        "",
+        started,
+        now_utc(),
+        status,
+    )
+
+
+def _host_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
+    del store, attempt_id
+    return False
+
+
+def _native_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
+    del store, attempt_id
+    return False
+
+
+def _budget_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
+    """Integration hook for campaign-level budget accounting (P3b-1b)."""
+    del store, attempt_id
+    return False
+
+
+def _dispatch_queued_job(store: ResearchStore) -> str | None:
+    """Claim and launch one queue item under the already-held owner authority."""
+    if not store.owner_lock_held():
+        raise JobError("host queue dispatch requires owner lock")
+    if store.campaign()[0] != "ACTIVE":
+        return None
+    if store.running_job_rows():
+        return None
+    rows = store.queued_jobs()
+    if not rows:
+        return None
+    row = rows[0]
+    payload = json.loads(str(row["payload_json"]))
+    attempt_id = str(row["attempt_id"])
+    job_id = str(row["job_id"])
+
+    def reject(status: str) -> str | None:
+        """Finalize only the still-canonical queue row under the short lock."""
+        try:
+            store.acquire_run_lock()
+        except OwnerLockHeld:
+            return None
+        try:
+            current = store.get_attempt(attempt_id)
+            canonical_row = store.job_for(attempt_id)
+            if canonical_row is None or str(canonical_row["job_id"]) != job_id:
+                return None
+            if (
+                current.state != AttemptState.RUN_QUEUED
+                or current.run_job_id != job_id
+                or str(canonical_row["state"]) != "QUEUED"
+            ):
+                return None
+            canonical_job = _job_from_row(canonical_row)
+            if _completion_payload(canonical_job) is not None:
+                return None
+            outcome = _failure(attempt_id, job_id, status)
+            _write_terminal(Path(canonical_job.run_dir), outcome)
+            try:
+                store.finalize_queued_run(attempt_id, outcome, "EXITED")
+            except StoreConflict:
+                # A cancellation/finalization that won the canonical race is
+                # expected; its terminal artifact remains authoritative.
+                return None
+            return status
+        finally:
+            store.release_run_lock()
+
+    try:
+        attempt = store.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_QUEUED or attempt.run_job_id != job_id:
+            return reject("queue_identity_mismatch")
+        if attempt.review_verdict != "PASS" or attempt.commit is None:
+            return reject("review_gate_unavailable")
+        review = ReviewRecord.from_json(store.evidence(attempt_id, "review"))
+        implementation = ImplementationRecord.from_json(
+            store.evidence(attempt_id, "implementation")
+        )
+        if (
+            review.verdict != "PASS"
+            or review.commit != attempt.commit
+            or review.spec_sha256 != attempt.review_spec_sha256
+            or implementation.commit != attempt.commit
+        ):
+            return reject("review_gate_unavailable")
+        hypothesis = store.get_hypothesis(attempt.hypothesis_id)
+        expected_artifacts = {
+            "spec": (
+                str(store.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json"),
+                hypothesis.spec_sha256,
+            ),
+            "panel": (hypothesis.panel_path, hypothesis.panel_sha256),
+            "receipt": (hypothesis.receipt_path, hypothesis.receipt_sha256),
+            "evaluation_spec": (
+                hypothesis.evaluation_spec_path,
+                hypothesis.evaluation_spec_sha256,
+            ),
+            "dividends": (hypothesis.dividends_path, hypothesis.dividends_sha256),
+        }
+        queued_paths = payload.get("artifact_paths")
+        queued_digests = payload.get("artifact_digests")
+        if not isinstance(queued_paths, dict) or not isinstance(queued_digests, dict):
+            return reject("input_binding_mismatch")
+        if any(
+            str(queued_paths.get(key)) != path or str(queued_digests.get(key)) != digest
+            for key, (path, digest) in expected_artifacts.items()
+        ):
+            return reject("input_binding_mismatch")
+        if (
+            tuple(str(item) for item in payload.get("targets_argv", ()))
+            != implementation.targets_argv
+        ):
+            return reject("implementation_pin_mismatch")
+        if not _host_execution_ready(store, attempt_id):
+            return reject("host_execution_unavailable")
+        if not _native_execution_ready(store, attempt_id):
+            return reject("native_execution_unavailable")
+        if not _budget_execution_ready(store, attempt_id):
+            return reject("budget_unavailable")
+        config = store.config()
+        pins = runtime_pins_from_record(dict(config))
+        expected = {
+            "shared_python": str(pins.shared_python),
+            "shared_python_sha256": pins.shared_python_sha256,
+            "shared_python_resolved": str(pins.resolved_python),
+            "snapshot_dir": str(pins.snapshot_dir),
+            "snapshot_sha256": pins.snapshot_sha256,
+            "pyvenv_cfg": str(pins.pyvenv_cfg),
+            "pyvenv_sha256": pins.pyvenv_sha256,
+            "distribution_dir": str(pins.distribution_dir),
+            "evaluator_source": str(pins.evaluator),
+            "evaluator_source_sha256": pins.evaluator_sha256,
+            "universe": str(pins.universe),
+            "universe_sha256": pins.universe_sha256,
+        }
+        if any(str(payload.get(key)) != value for key, value in expected.items()):
+            return reject("runtime_pin_mismatch")
+        if str(payload.get("expected_commit")) != attempt.commit:
+            return reject("implementation_pin_mismatch")
+        try:
+            preflight(Path(str(payload["worktree"])), attempt.commit)
+        except JobError:
+            return reject("source_mutated")
+        store.acquire_run_lock()
+        claimed = False
+        try:
+            # Re-read and claim only after all checks; no lock spans worker polling.
+            if store.campaign()[0] != "ACTIVE":
+                return None
+            locked_attempt = store.get_attempt(attempt_id)
+            locked_row = store.job_for(attempt_id)
+            if (
+                locked_row is None
+                or str(locked_row["job_id"]) != job_id
+                or str(locked_row["state"]) != "QUEUED"
+                or locked_attempt.state != AttemptState.RUN_QUEUED
+                or locked_attempt.run_job_id != job_id
+            ):
+                return None
+            store.claim_queued_job(attempt_id, job_id)
+            claimed = True
+            artifact_paths = {
+                key: Path(value) for key, value in dict(payload["artifact_paths"]).items()
+            }
+            artifact_digests = {
+                key: str(value) for key, value in dict(payload["artifact_digests"]).items()
+            }
+            job = launch(
+                Path(str(payload["run_dir"])).parent,
+                Path(str(payload["worktree"])),
+                tuple(str(item) for item in payload["targets_argv"]),
+                float(payload["timeout_seconds"]),
+                int(payload["max_rss_mb"]),
+                shared_python=Path(str(payload["shared_python"])),
+                expected_commit=str(payload["expected_commit"]),
+                artifact_paths=artifact_paths,
+                artifact_digests=artifact_digests,
+                evaluator_source=Path(str(payload["evaluator_source"])),
+                evaluator_source_sha256=str(payload["evaluator_source_sha256"]),
+                configured_pins=pins,
+                dividends_path=Path(str(payload["dividends_path"])),
+                job_id=job_id,
+            )
+            updated_payload = {**payload, **json.loads(job.to_json()), "state": "LAUNCHED"}
+            store.update_job(updated_payload, attempt_id)
+        except (StoreConflict, OwnerLockHeld):
+            return None
+        except Exception as exc:
+            if not claimed:
+                raise
+            outcome = _failure(attempt_id, job_id, "launch_failed")
+            _write_terminal(Path(str(payload["run_dir"])), outcome, detail=str(exc))
+            store.finish_run(attempt_id, outcome)
+            store.update_job({**payload, "state": "EXITED"}, attempt_id)
+            return "launch_failed"
+        finally:
+            store.release_run_lock()
+        return job_id
+    except OwnerLockHeld:
+        # Another lifecycle operation currently owns the short lock.
+        return None
+
+
+def _reconcile_jobs(store: ResearchStore) -> None:
+    """Reconcile every active job, including reservations left by a host crash."""
+    for attempt in [
+        item
+        for spec in store.hypotheses()
+        for item in store.attempts_for(spec.hypothesis_id)
+        if item.state == AttemptState.RUNNING
+    ]:
+        row = store.job_for(attempt.attempt_id)
+        if row is None:
+            continue
+        payload = json.loads(str(row["payload_json"]))
+        job = _recover_reserved_job(_job_from_row(row))
+        if job.worker_pid == 0:
+            terminal = _completion_payload(job)
+            if terminal is None:
+                outcome = _failure(attempt.attempt_id, job.job_id, "interrupted_before_launch")
+                _write_terminal(Path(job.run_dir), outcome)
+                store.acquire_run_lock()
+                try:
+                    current = store.get_attempt(attempt.attempt_id)
+                    if current.state == AttemptState.RUNNING:
+                        store.finish_run(attempt.attempt_id, outcome)
+                        store.update_job({**payload, "state": "EXITED"}, attempt.attempt_id)
+                finally:
+                    store.release_run_lock()
+            else:
+                _finish_if_running(
+                    store,
+                    attempt.attempt_id,
+                    _terminal_outcome(store, attempt.attempt_id, terminal),
+                )
+                _mark_job_state(store, attempt.attempt_id, "EXITED")
+            continue
+        if (
+            payload.get("worker_pid") != job.worker_pid
+            or payload.get("worker_starttime") != job.worker_starttime
+        ):
+            store.update_job({**payload, **json.loads(job.to_json())}, attempt.attempt_id)
+        state = attach(job)
+        if state == "ORPHANED":
+            finished = _finish_orphan(
+                store, job, _failure(attempt.attempt_id, job.job_id, "orphaned")
+            )
+            if finished.state != AttemptState.RUNNING:
+                _mark_job_state(store, attempt.attempt_id, "ORPHANED")
+        elif state in {"EXITED", "TIMED_OUT", "CANCELLED"}:
+            terminal = _completion_payload(job)
+            if terminal is not None:
+                _finish_if_running(
+                    store,
+                    attempt.attempt_id,
+                    _terminal_outcome(store, attempt.attempt_id, terminal),
+                )
+                _mark_job_state(store, attempt.attempt_id, state)
+
+
 @app.command("run")
 def run_command(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    timeout_seconds: int = typer.Option(7200, "--timeout-seconds"),
+    timeout_seconds: float = typer.Option(7200, "--timeout-seconds"),
     max_rss_mb: int = typer.Option(8192, "--max-rss-mb"),
     no_wait: bool = typer.Option(False, "--no-wait"),
+    wait_seconds: float = typer.Option(5.0, "--wait-seconds"),
 ) -> None:
     store: ResearchStore | None = None
     try:
         store = ResearchStore(_root(root))
-        attempt = store.get_attempt(attempt_id)
-        implementation = ImplementationRecord.from_json(
-            store.evidence(attempt_id, "implementation")
-        )
-        config = store.config()
-        evaluator = Path(str(config["evaluator"]))
-        run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id
-        hypothesis = store.get_hypothesis(attempt.hypothesis_id)
-        evaluator_argv = [
-            str(evaluator),
-            "research",
-            "evaluate",
-            "--panel",
-            hypothesis.panel_path,
-            "--receipt",
-            hypothesis.receipt_path,
-            "--spec",
-            hypothesis.evaluation_spec_path,
-            "--targets",
-            str(run_dir / "run" / "targets.json"),
-            "--out",
-            str(run_dir / "run" / "out"),
-        ]
-        # Cheap checks happen before the irreversible queue transition.
-        preflight(Path(attempt.worktree_path), attempt.commit)
+        if not math.isfinite(wait_seconds) or wait_seconds < 0:
+            raise JobError("wait-seconds must be finite and non-negative")
         store.acquire_run_lock()
         try:
             job_id = new_job_id()
-            store.reserve_and_start_run(attempt_id, job_id, run_dir / "run")
-            job = launch(
-                run_dir,
-                Path(attempt.worktree_path),
-                implementation.targets_argv,
-                evaluator_argv,
-                timeout_seconds,
-                max_rss_mb,
-                shared_python=Path(str(config["shared_python"])),
-                expected_commit=attempt.commit,
-                artifact_paths={
-                    "spec": store.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
-                    "panel": Path(hypothesis.panel_path),
-                    "receipt": Path(hypothesis.receipt_path),
-                    "evaluation_spec": Path(hypothesis.evaluation_spec_path),
-                },
-                artifact_digests={
-                    "spec": hypothesis.spec_sha256,
-                    "panel": hypothesis.panel_sha256,
-                    "receipt": hypothesis.receipt_sha256,
-                    "evaluation_spec": hypothesis.evaluation_spec_sha256,
-                },
-                evaluator_source=evaluator,
-                evaluator_source_sha256=str(config["evaluator_source_sha256"]),
-                evaluator_implementation_pinned=bool(config["evaluator_implementation_pinned"]),
-                job_id=job_id,
+            attempt = store.get_attempt(attempt_id)
+            run_dir = (
+                store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
             )
-            store.update_job(json.loads(job.to_json()), attempt_id)
+            store.queue_run_request(attempt_id, job_id, run_dir, timeout_seconds, max_rss_mb)
         finally:
             store.release_run_lock()
-        typer.echo(f"accepted {job.job_id}")
+        typer.echo(f"accepted {job_id} state=QUEUED")
         if no_wait:
             return
-        while True:
-            state = attach(job)
-            if state == "ATTACHED":
-                time.sleep(0.1)
-                continue
-            if state == "ORPHANED":
-                outcome = RunOutcome(
-                    attempt_id,
-                    job.job_id,
-                    -1,
-                    False,
-                    False,
-                    False,
-                    "orphaned",
-                    "none",
-                    "",
-                    now_utc(),
-                    now_utc(),
-                    "orphaned",
-                )
-                _finish_orphan(store, job, outcome)
-                raise JobError("orphaned")
-            terminal = _completion_payload(job)
-            if terminal is None:
-                raise JobError("terminal evidence missing")
-            outcome = _terminal_outcome(store, attempt_id, terminal)
-            finished = _finish_if_running(store, attempt_id, outcome)
-            typer.echo(finished.state.value)
-            if finished.state != AttemptState.RUN_SUCCEEDED:
-                raise JobError(f"run finished with status {outcome.status}")
-            return
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            current = store.get_attempt(attempt_id)
+            if current.state in {AttemptState.RUN_SUCCEEDED, AttemptState.RUN_FAILED}:
+                typer.echo(current.state.value)
+                if current.state != AttemptState.RUN_SUCCEEDED:
+                    raise JobError("run finished unsuccessfully")
+                return
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        current = store.get_attempt(attempt_id)
+        state = "queued" if current.state == AttemptState.RUN_QUEUED else "running"
+        typer.echo(f"{state} {job_id}")
     except Exception as exc:
         _fail(exc)
     finally:
@@ -352,44 +639,7 @@ def reconcile(root: Path = typer.Option(..., "--root")) -> None:
     try:
         store = ResearchStore(_root(root))
         store.repair_projections()
-        for attempt in [
-            item
-            for spec in store.hypotheses()
-            for item in store.attempts_for(spec.hypothesis_id)
-            if item.state == AttemptState.RUNNING
-        ]:
-            row = store.job_for(attempt.attempt_id)
-            if row is None:
-                continue
-            job = _recover_reserved_job(_job_from_row(row))
-            state = attach(job)
-            if state == "ORPHANED":
-                _finish_orphan(
-                    store,
-                    job,
-                    RunOutcome(
-                        attempt.attempt_id,
-                        job.job_id,
-                        -1,
-                        False,
-                        False,
-                        False,
-                        "orphaned",
-                        "none",
-                        "",
-                        now_utc(),
-                        now_utc(),
-                        "orphaned",
-                    ),
-                )
-            elif state in {"EXITED", "TIMED_OUT", "CANCELLED"}:
-                terminal = _completion_payload(job)
-                if terminal is not None:
-                    _finish_if_running(
-                        store,
-                        attempt.attempt_id,
-                        _terminal_outcome(store, attempt.attempt_id, terminal),
-                    )
+        _reconcile_jobs(store)
         typer.echo("reconciled")
     except Exception as exc:
         _fail(exc)
@@ -403,33 +653,51 @@ def cancel(attempt_id: str, root: Path = typer.Option(..., "--root")) -> None:
     store: ResearchStore | None = None
     try:
         store = ResearchStore(_root(root))
-        store.get_attempt(attempt_id)
-        row = store.job_for(attempt_id)
-        if row is None:
-            raise JobError("no job for attempt")
-        job = _job_from_row(row)
-        cancel_job(job)
+        # Re-read the job while holding the short lifecycle lock.  In
+        # particular, a LAUNCH_RESERVED snapshot must not cause pid 0 to be
+        # signalled after a concurrent host dispatch has registered its child.
+        store.acquire_run_lock()
+        try:
+            attempt = store.get_attempt(attempt_id)
+            row = store.job_for(attempt_id)
+            if row is None:
+                raise JobError("no job for attempt")
+            job = _job_from_row(row)
+            if str(row["state"]) == "QUEUED":
+                outcome = _failure(attempt_id, job.job_id, "cancelled", exit_code=-15)
+                _write_terminal(Path(job.run_dir), outcome)
+                store.finalize_queued_run(attempt_id, outcome, "CANCELLED")
+                typer.echo("CANCELLED")
+                return
+            if attempt.state != AttemptState.RUNNING:
+                raise JobError(f"job is not cancellable from {attempt.state.value}")
+            # A reservation with no worker identity is settled without
+            # signalling pid 0.  This is also crash-safe because row is fresh.
+            if job.worker_pid == 0:
+                outcome = _failure(attempt_id, job.job_id, "cancelled", exit_code=-15)
+                _write_terminal(Path(job.run_dir), outcome)
+                store.finish_run(attempt_id, outcome)
+                store.update_job(
+                    {**json.loads(str(row["payload_json"])), "state": "CANCELLED"},
+                    attempt_id,
+                )
+                typer.echo("CANCELLED")
+                return
+        finally:
+            store.release_run_lock()
+        cancellation = cancel_job(job)
         terminal = _completion_payload(job)
         outcome = (
             _terminal_outcome(store, attempt_id, terminal)
             if terminal is not None
-            else RunOutcome(
-                attempt_id,
-                job.job_id,
-                -15,
-                False,
-                False,
-                False,
-                "cancelled",
-                "none",
-                "",
-                now_utc(),
-                now_utc(),
-                "cancelled",
-            )
+            else _failure(attempt_id, job.job_id, "cancelled", exit_code=-15)
         )
         _finish_if_running(store, attempt_id, outcome)
-        typer.echo("CANCELLED")
+        _mark_job_state(store, attempt_id, attach(job))
+        if cancellation == "ALREADY_FINISHED":
+            typer.echo(f"ALREADY_FINISHED status={outcome.status}")
+        else:
+            typer.echo("CANCELLED")
     except Exception as exc:
         _fail(exc)
     finally:
@@ -502,9 +770,17 @@ def status(
             (event.to_json() for event in reversed(events) if event.kind == "owner_turn_failed"),
             None,
         )
+        config = store.config()
         data = {
             "campaign": store.campaign(),
-            "evaluator_implementation_pin": "unavailable (P3b gate)",
+            "containment": "configured" if bool(config["containment_ready"]) else "unavailable",
+            # A console-script digest and source snapshot prove the selected
+            # bytes, but do not attest the evaluator's external implementation
+            # review.  Keep that readiness distinction visible until P3b-1b.
+            "evaluator_source_snapshot": (
+                "configured" if bool(config["containment_ready"]) else "unavailable"
+            ),
+            "evaluator_implementation_pin": "unavailable (implementation attestation pending)",
             "hypotheses": [
                 {
                     "hypothesis_id": h.hypothesis_id,
@@ -558,6 +834,11 @@ def serve(
         )
         store.acquire_owner_lock()
         while True:
+            # A concurrent cancel/reconcile owns the short lifecycle lock;
+            # leave canonical state untouched and try on the next turn.
+            with suppress(OwnerLockHeld):
+                _reconcile_jobs(store)
+            _dispatch_queued_job(store)
             plan = compose_wake(store)
             if plan is not None:
                 deliver(store, sender, plan, session_key)
@@ -565,8 +846,10 @@ def serve(
             if once:
                 return
             time.sleep(max(1, poll_seconds))
-    except Exception as exc:
+    except OwnerLockHeld as exc:
         _fail(exc)
+    except Exception as exc:
+        _fatal_serve_failure(store, exc)
     finally:
         if store is not None:
             store.release_owner_lock()

@@ -8,14 +8,17 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO, cast
 
 from .codec import to_json
+from .containment import ContainmentError, runtime_pins
 from .contracts import (
     Attempt,
     AttemptDecision,
@@ -26,6 +29,7 @@ from .contracts import (
     HypothesisState,
     ImplementationRecord,
     ReviewRecord,
+    RunOutcome,
 )
 from .machine import (
     close_attempt as machine_close_attempt,
@@ -49,6 +53,27 @@ class OwnerLockHeld(RuntimeError):
 
 class StoreConflict(RuntimeError):
     """A repeat operation supplied a different immutable payload."""
+
+
+MAX_QUEUE_TIMEOUT_SECONDS = 7200.0
+MAX_QUEUE_RSS_MB = 8192
+
+
+def validate_queue_limits(timeout_seconds: int | float, max_rss_mb: int) -> None:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(float(timeout_seconds))
+        or timeout_seconds <= 0
+        or timeout_seconds > MAX_QUEUE_TIMEOUT_SECONDS
+    ):
+        raise ValueError("timeout-seconds must be finite, positive, and at most 7200")
+    if (
+        isinstance(max_rss_mb, bool)
+        or not isinstance(max_rss_mb, int)
+        or not 0 < max_rss_mb <= MAX_QUEUE_RSS_MB
+    ):
+        raise ValueError("max-rss-mb must be positive and at most 8192")
 
 
 def now_utc() -> str:
@@ -93,7 +118,8 @@ class ResearchStore:
                   spec_json TEXT NOT NULL, spec_sha256 TEXT NOT NULL, panel_path TEXT NOT NULL,
                   receipt_path TEXT NOT NULL, evaluation_spec_path TEXT NOT NULL,
                   evaluation_spec_sha256 TEXT NOT NULL, panel_sha256 TEXT NOT NULL,
-                  receipt_sha256 TEXT NOT NULL, max_attempts INTEGER NOT NULL,
+                  receipt_sha256 TEXT NOT NULL, dividends_path TEXT NOT NULL,
+                  dividends_sha256 TEXT NOT NULL, max_attempts INTEGER NOT NULL,
                   base_commit TEXT NOT NULL, created_at TEXT NOT NULL,
                   payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL
                 );
@@ -127,7 +153,11 @@ class ResearchStore:
                   shared_python_sha256 TEXT NOT NULL, evaluator TEXT NOT NULL,
                   evaluator_sha256 TEXT NOT NULL, evaluator_source TEXT NOT NULL,
                   evaluator_source_sha256 TEXT NOT NULL,
-                  evaluator_implementation_pinned INTEGER NOT NULL DEFAULT 0
+                  snapshot_dir TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL,
+                  pyvenv_cfg TEXT NOT NULL, pyvenv_sha256 TEXT NOT NULL,
+                  distribution_dir TEXT NOT NULL, shared_python_resolved TEXT NOT NULL,
+                  universe TEXT NOT NULL, universe_sha256 TEXT NOT NULL,
+                  containment_ready INTEGER NOT NULL CHECK(containment_ready=1)
                 );
                 CREATE TABLE IF NOT EXISTS campaign (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), status TEXT NOT NULL,
@@ -143,6 +173,7 @@ class ResearchStore:
                   (NEW.spec_json != OLD.spec_json OR NEW.spec_sha256 != OLD.spec_sha256 OR
                    NEW.panel_sha256 != OLD.panel_sha256 OR NEW.receipt_sha256 != OLD.receipt_sha256 OR
                    NEW.evaluation_spec_sha256 != OLD.evaluation_spec_sha256 OR
+                   NEW.dividends_path != OLD.dividends_path OR NEW.dividends_sha256 != OLD.dividends_sha256 OR
                    json_remove(NEW.payload_json, '$.state') != json_remove(OLD.payload_json, '$.state') OR
                    json_extract(NEW.payload_json, '$.hypothesis_id') != NEW.hypothesis_id OR
                    json_extract(NEW.payload_json, '$.state') != NEW.state OR
@@ -155,6 +186,8 @@ class ResearchStore:
                    json_extract(NEW.payload_json, '$.evaluation_spec_sha256') != NEW.evaluation_spec_sha256 OR
                    json_extract(NEW.payload_json, '$.panel_sha256') != NEW.panel_sha256 OR
                    json_extract(NEW.payload_json, '$.receipt_sha256') != NEW.receipt_sha256 OR
+                   json_extract(NEW.payload_json, '$.dividends_path') != NEW.dividends_path OR
+                   json_extract(NEW.payload_json, '$.dividends_sha256') != NEW.dividends_sha256 OR
                    json_extract(NEW.payload_json, '$.max_attempts') != NEW.max_attempts OR
                    json_extract(NEW.payload_json, '$.base_commit') != NEW.base_commit OR
                    json_extract(NEW.payload_json, '$.created_at') != NEW.created_at)
@@ -208,37 +241,54 @@ class ResearchStore:
         self.release_owner_lock()
         self.release_run_lock()
 
-    def configure(self, shared_python: Path, evaluator: Path) -> None:
-        shared_python = shared_python.resolve()
+    def configure(
+        self,
+        shared_python: Path,
+        evaluator: Path,
+        snapshot_dir: Path,
+        universe: Path,
+    ) -> None:
+        shared_python = shared_python.absolute()
         evaluator = evaluator.resolve()
         for path in (shared_python, evaluator):
-            if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
+            if (
+                not path.is_absolute()
+                or not path.is_file()
+                or not os.access(path.resolve(), os.X_OK)
+            ):
                 raise ValueError(f"trusted executable is missing or not executable: {path}")
-        # The executable path is retained for launch provenance, but it is not
-        # an implementation pin: a console-script stub does not authenticate
-        # the evaluator package.  P3b must provide a trusted distribution/source
-        # attestation before real execution can be enabled.
+        try:
+            pins = runtime_pins(snapshot_dir, shared_python, evaluator, universe)
+        except ContainmentError as exc:
+            raise ValueError(str(exc)) from exc
         source = evaluator
-        values = (
+        values: tuple[object, ...] = (
             str(shared_python),
             sha256_file(shared_python),
             str(evaluator),
             sha256_file(evaluator),
             str(source),
             sha256_file(source),
-            0,
+            str(pins.snapshot_dir),
+            pins.snapshot_sha256,
+            str(pins.pyvenv_cfg),
+            pins.pyvenv_sha256,
+            str(pins.distribution_dir),
+            str(pins.resolved_python),
+            str(pins.universe),
+            pins.universe_sha256,
+            1,
         )
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM driver_config").fetchone() is not None:
                 raise StoreConflict("driver configuration already initialized")
-            conn.execute("INSERT INTO driver_config VALUES (1,?,?,?,?,?,?,?)", values)
+            conn.execute(
+                "INSERT INTO driver_config(singleton,shared_python,shared_python_sha256,evaluator,evaluator_sha256,evaluator_source,evaluator_source_sha256,snapshot_dir,snapshot_sha256,pyvenv_cfg,pyvenv_sha256,distribution_dir,shared_python_resolved,universe,universe_sha256,containment_ready) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (1, *values),
+            )
             self._event(conn, "H0001", None, "driver_configured", {}, "driver")
             conn.commit()
-
-    def init(self, shared_python: Path, evaluator: Path) -> None:
-        """Compatibility spelling for the explicit CLI initialization action."""
-        self.configure(shared_python, evaluator)
 
     def config(self) -> sqlite3.Row:
         with self._connect() as conn:
@@ -359,10 +409,19 @@ class ResearchStore:
         receipt: Path,
         eval_spec: Path,
         base_commit: str,
+        dividends: Path,
         max_attempts: int = 3,
     ) -> HypothesisSpec:
         if any(h.state != HypothesisState.DECIDED for h in self.hypotheses()):
             raise ValueError("hypothesis-create requires every existing hypothesis to be DECIDED")
+        with self._connect() as conn:
+            configured = conn.execute(
+                "SELECT containment_ready FROM driver_config WHERE singleton=1"
+            ).fetchone()
+        if configured is None or not bool(configured[0]):
+            raise ValueError("contained runtime must be configured before hypothesis-create")
+        if dividends.is_symlink() or not dividends.is_file():
+            raise ValueError("dividends must be a regular non-symlink file")
         raw = json.loads(spec_file.read_text(encoding="utf-8"))
         spec_json = to_json(raw)
         with self._connect() as conn:
@@ -373,6 +432,8 @@ class ResearchStore:
             number = int(row[0])
             hid = f"H{number:04d}"
             created = now_utc()
+            dividends_path = str(dividends.resolve())
+            dividends_sha256 = sha256_file(dividends)
             spec = HypothesisSpec(
                 hid,
                 title,
@@ -387,10 +448,13 @@ class ResearchStore:
                 max_attempts,
                 base_commit,
                 created,
+                dividends_path,
+                dividends_sha256,
+                HypothesisState.DRAFT,
             )
             payload = spec.to_json()
             conn.execute(
-                "INSERT INTO hypotheses VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO hypotheses(hypothesis_id,state,title,spec_json,spec_sha256,panel_path,receipt_path,evaluation_spec_path,evaluation_spec_sha256,panel_sha256,receipt_sha256,dividends_path,dividends_sha256,max_attempts,base_commit,created_at,payload_json,payload_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     hid,
                     spec.state.value,
@@ -403,6 +467,8 @@ class ResearchStore:
                     spec.evaluation_spec_sha256,
                     spec.panel_sha256,
                     spec.receipt_sha256,
+                    spec.dividends_path,
+                    spec.dividends_sha256,
                     max_attempts,
                     base_commit,
                     created,
@@ -712,6 +778,33 @@ class ResearchStore:
             )
             conn.commit()
 
+    def pause_for_failure(self, reason: str) -> None:
+        """Persist a fatal owner failure and pause the campaign atomically."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("UPDATE campaign SET status='PAUSED' WHERE singleton=1")
+            row = conn.execute(
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+            ).fetchone()
+            hypothesis_id = str(row[0]) if row else "H0001"
+            self._event(
+                conn,
+                hypothesis_id,
+                None,
+                "serve_failed",
+                {"reason": reason},
+                "driver",
+            )
+            self._event(
+                conn,
+                hypothesis_id,
+                None,
+                "campaign_paused",
+                {"reason": reason, "fatal": True},
+                "driver",
+            )
+            conn.commit()
+
     def resume(self, reason: str) -> int:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -968,6 +1061,267 @@ class ResearchStore:
         with self._connect() as conn:
             return conn.execute("SELECT * FROM wake_deliveries ORDER BY sent_at").fetchall()
 
+    def owner_lock_held(self) -> bool:
+        return self._lock_file is not None
+
+    def queued_jobs(self) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM jobs WHERE state='QUEUED' ORDER BY rowid").fetchall()
+        for row in rows:
+            if _digest(str(row["payload_json"])) != str(row["payload_sha256"]):
+                raise StoreConflict("queued job payload digest mismatch")
+        return list(rows)
+
+    def running_job_rows(self) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT jobs.* FROM jobs JOIN attempts ON attempts.attempt_id=jobs.attempt_id "
+                "WHERE attempts.state='RUNNING' ORDER BY jobs.rowid"
+            ).fetchall()
+        for row in rows:
+            if _digest(str(row["payload_json"])) != str(row["payload_sha256"]):
+                raise StoreConflict("running job payload digest mismatch")
+        return list(rows)
+
+    def queue_run_request(
+        self,
+        attempt_id: str,
+        job_id: str,
+        run_dir: Path,
+        timeout_seconds: int | float,
+        max_rss_mb: int,
+    ) -> Attempt:
+        """Persist one validated run request without starting a process."""
+        if not isinstance(job_id, str) or not job_id:
+            raise ValueError("job_id must be a non-empty string")
+        validate_queue_limits(timeout_seconds, max_rss_mb)
+        attempt = self.get_attempt(attempt_id)
+        hypothesis = self.get_hypothesis(attempt.hypothesis_id)
+        expected_run_dir = (
+            self.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / attempt_id / "run"
+        ).resolve()
+        if run_dir.resolve() != expected_run_dir:
+            raise StoreConflict("run directory is not the canonical attempt directory")
+        implementation = ImplementationRecord.from_json(self.evidence(attempt_id, "implementation"))
+        config = self.config()
+        if attempt.commit is None or attempt.implementation_sha256 is None:
+            raise StoreConflict("implementation binding is incomplete")
+        if implementation.commit != attempt.commit:
+            raise StoreConflict("implementation commit changed")
+        artifact_paths = {
+            "spec": self.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
+            "panel": Path(hypothesis.panel_path),
+            "receipt": Path(hypothesis.receipt_path),
+            "evaluation_spec": Path(hypothesis.evaluation_spec_path),
+            "dividends": Path(hypothesis.dividends_path),
+        }
+        artifact_digests = {
+            "spec": hypothesis.spec_sha256,
+            "panel": hypothesis.panel_sha256,
+            "receipt": hypothesis.receipt_sha256,
+            "evaluation_spec": hypothesis.evaluation_spec_sha256,
+            "dividends": hypothesis.dividends_sha256,
+        }
+        payload: dict[str, object] = {
+            "job_id": job_id,
+            "attempt_id": attempt_id,
+            "run_dir": str(run_dir.resolve()),
+            "state": "QUEUED",
+            "requested_at": now_utc(),
+            "timeout_seconds": float(timeout_seconds),
+            "max_rss_mb": max_rss_mb,
+            "worktree": attempt.worktree_path,
+            "targets_argv": list(implementation.targets_argv),
+            "expected_commit": attempt.commit,
+            "implementation_sha256": attempt.implementation_sha256,
+            "review_commit": attempt.review_commit,
+            "review_spec_sha256": attempt.review_spec_sha256,
+            "artifact_paths": {key: str(value.resolve()) for key, value in artifact_paths.items()},
+            "artifact_digests": artifact_digests,
+            "shared_python": str(config["shared_python"]),
+            "shared_python_sha256": str(config["shared_python_sha256"]),
+            "evaluator_source": str(config["evaluator_source"]),
+            "evaluator_source_sha256": str(config["evaluator_source_sha256"]),
+            "evaluator_sha256": str(config["evaluator_sha256"]),
+            "snapshot_dir": str(config["snapshot_dir"]),
+            "snapshot_sha256": str(config["snapshot_sha256"]),
+            "resolved_python": str(config["shared_python_resolved"]),
+            "shared_python_resolved": str(config["shared_python_resolved"]),
+            "pyvenv_cfg": str(config["pyvenv_cfg"]),
+            "pyvenv_sha256": str(config["pyvenv_sha256"]),
+            "distribution_dir": str(config["distribution_dir"]),
+            "universe": str(config["universe"]),
+            "universe_sha256": str(config["universe_sha256"]),
+            "dividends_path": hypothesis.dividends_path,
+            "dividends_sha256": hypothesis.dividends_sha256,
+        }
+        # A retried request with the same caller-selected id is idempotent.  The
+        # timestamp is observational and therefore excluded from this replay
+        # comparison; all execution-affecting fields must still match.
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT state,payload_json,payload_sha256,attempt_id FROM jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if existing is not None:
+            if _digest(str(existing["payload_json"])) != str(existing["payload_sha256"]):
+                raise StoreConflict("replayed job payload digest mismatch")
+            if str(existing["attempt_id"]) != attempt_id:
+                raise StoreConflict("job id is already used by another attempt")
+            old_payload = json.loads(str(existing["payload_json"]))
+            comparable = {
+                key: value for key, value in payload.items() if key not in {"requested_at", "state"}
+            }
+            old_comparable = {key: old_payload.get(key) for key in comparable}
+            if old_comparable == comparable:
+                return self.get_attempt(attempt_id)
+            raise StoreConflict("replayed job id has a different payload")
+        queued = replace(queue_run(attempt, now_utc()), run_job_id=job_id)
+        attempt_payload = queued.to_json()
+        job_text = to_json(payload)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT state,run_job_id FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if current is None or current["state"] != AttemptState.REVIEW_PASSED.value:
+                raise StoreConflict("attempt is no longer review-passed")
+            existing = conn.execute(
+                "SELECT payload_json FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            if existing is not None:
+                raise StoreConflict("attempt already has a queued or running job")
+            conn.execute(
+                "UPDATE attempts SET state=?,run_job_id=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=?",
+                (
+                    queued.state.value,
+                    queued.run_job_id,
+                    queued.updated_at,
+                    attempt_payload,
+                    _digest(attempt_payload),
+                    attempt_id,
+                    AttemptState.REVIEW_PASSED.value,
+                ),
+            )
+            if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                raise StoreConflict("attempt changed while queueing run")
+            conn.execute(
+                "INSERT INTO jobs(job_id,attempt_id,state,payload_json,payload_sha256) VALUES(?,?,?,?,?)",
+                (job_id, attempt_id, "QUEUED", job_text, _digest(job_text)),
+            )
+            self._event(
+                conn, attempt.hypothesis_id, attempt_id, "run_queued", {"job_id": job_id}, "driver"
+            )
+            conn.commit()
+        return queued
+
+    def claim_queued_job(self, attempt_id: str, job_id: str) -> Attempt:
+        """Atomically claim a queued request for one host launch."""
+        attempt = self.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_QUEUED or attempt.run_job_id != job_id:
+            raise StoreConflict("queued attempt changed before launch claim")
+        running = start_run(attempt, job_id, now_utc())
+        payload = running.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE attempts SET state=?,run_job_id=?,updated_at=?,payload_json=?,payload_sha256=? "
+                "WHERE attempt_id=? AND state=? AND run_job_id=?",
+                (
+                    running.state.value,
+                    running.run_job_id,
+                    running.updated_at,
+                    payload,
+                    _digest(payload),
+                    attempt_id,
+                    AttemptState.RUN_QUEUED.value,
+                    job_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("queued attempt changed before launch claim")
+            job_payload = json.loads(self._job_payload(conn, job_id))
+            job_payload["state"] = "LAUNCH_RESERVED"
+            job_text = to_json(job_payload)
+            changed = conn.execute(
+                "UPDATE jobs SET state=?,payload_json=?,payload_sha256=? WHERE job_id=? AND attempt_id=? AND state=?",
+                ("LAUNCH_RESERVED", job_text, _digest(job_text), job_id, attempt_id, "QUEUED"),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("queued job changed before launch claim")
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "job_launch_reserved",
+                {"job_id": job_id},
+                "driver",
+            )
+            conn.commit()
+        return running
+
+    @staticmethod
+    def _job_payload(conn: sqlite3.Connection, job_id: str) -> str:
+        row = conn.execute("SELECT payload_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise StoreConflict(f"unknown job: {job_id}")
+        return str(row[0])
+
+    def finalize_queued_run(self, attempt_id: str, outcome: RunOutcome, job_state: str) -> Attempt:
+        if outcome.attempt_id != attempt_id:
+            raise ValueError("run outcome does not match attempt")
+        attempt = self.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_QUEUED:
+            raise StoreConflict("queued attempt is no longer pending")
+        updated = replace(
+            attempt,
+            state=AttemptState.RUN_FAILED,
+            run_outcome=outcome.to_json(),
+            updated_at=now_utc(),
+        )
+        payload = updated.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE attempts SET state=?,run_outcome=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=? AND run_job_id=?",
+                (
+                    updated.state.value,
+                    outcome.to_json(),
+                    updated.updated_at,
+                    payload,
+                    _digest(payload),
+                    attempt_id,
+                    AttemptState.RUN_QUEUED.value,
+                    outcome.job_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("queued attempt changed before finalization")
+            self._set_job_state(conn, outcome.job_id, job_state)
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "run_finished",
+                {"status": outcome.status},
+                "driver",
+            )
+            conn.commit()
+        return updated
+
+    def _set_job_state(self, conn: sqlite3.Connection, job_id: str, state: str) -> None:
+        row = conn.execute("SELECT payload_json FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        if row is None:
+            raise StoreConflict(f"unknown job: {job_id}")
+        payload = json.loads(str(row[0]))
+        payload["state"] = state
+        text = to_json(payload)
+        conn.execute(
+            "UPDATE jobs SET state=?,payload_json=?,payload_sha256=? WHERE job_id=?",
+            (state, text, _digest(text), job_id),
+        )
+
     def save_job(self, job_id: str, attempt_id: str, state: str, payload: object) -> None:
         text = to_json(payload)
         with self._connect() as conn:
@@ -989,58 +1343,7 @@ class ResearchStore:
             )
             conn.commit()
 
-    def reserve_and_start_run(self, attempt_id: str, job_id: str, run_dir: Path) -> Attempt:
-        """Atomically persist the running attempt and a pre-launch job reservation."""
-        attempt = self.get_attempt(attempt_id)
-        at = now_utc()
-        queued = queue_run(attempt, at)
-        running = start_run(queued, job_id, at)
-        attempt_payload = running.to_json()
-        job_payload = {
-            "job_id": job_id,
-            "attempt_id": attempt_id,
-            "worker_pid": 0,
-            "worker_starttime": 0,
-            "run_dir": str(run_dir),
-            "state": "RESERVED",
-        }
-        job_text = to_json(job_payload)
-        with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "UPDATE attempts SET state=?,run_job_id=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=?",
-                (
-                    running.state.value,
-                    running.run_job_id,
-                    running.updated_at,
-                    attempt_payload,
-                    _digest(attempt_payload),
-                    attempt_id,
-                    AttemptState.REVIEW_PASSED.value,
-                ),
-            )
-            if conn.execute("SELECT changes()").fetchone()[0] != 1:
-                raise StoreConflict("attempt changed while reserving run")
-            conn.execute(
-                "INSERT INTO jobs(job_id,attempt_id,state,payload_json,payload_sha256) VALUES(?,?,?,?,?)",
-                (job_id, attempt_id, "RESERVED", job_text, _digest(job_text)),
-            )
-            self._event(conn, attempt.hypothesis_id, attempt_id, "run_queued", {}, "driver")
-            self._event(
-                conn, attempt.hypothesis_id, attempt_id, "run_started", {"job_id": job_id}, "driver"
-            )
-            self._event(
-                conn,
-                attempt.hypothesis_id,
-                attempt_id,
-                "job_reserved",
-                {"job_id": job_id},
-                "driver",
-            )
-            conn.commit()
-        return running
-
-    def update_job(self, job: object, attempt_id: str) -> None:
+    def update_job(self, job: object, attempt_id: str, *, event: str = "job_launched") -> None:
         text = to_json(job)
         if not isinstance(job, dict) or not isinstance(job.get("job_id"), str):
             raise ValueError("job payload must include job_id")
@@ -1060,7 +1363,7 @@ class ResearchStore:
                 conn,
                 str(row[0]) if row else "H0001",
                 attempt_id,
-                "job_launched",
+                event,
                 {"job_id": job_id},
                 "driver",
             )
