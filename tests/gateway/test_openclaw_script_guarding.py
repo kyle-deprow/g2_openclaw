@@ -2216,7 +2216,8 @@ def test_push_script_invariants_target_research_owner_not_main() -> None:
     assert "_walk_remove_keys" in config_merge
     assert "RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS=(" in script
     assert "def orchestrator_model_primary" in config_merge
-    assert 'item.get("id") != "research-orchestrator"' in config_merge
+    assert 'entries = agents.get("entries")' in config_merge
+    assert 'owner = entries.get("research-orchestrator")' in config_merge
     assert "main interface, Astra research owner" in script
     assert 'CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")' in script
     assert "Research orchestrator tool policy" in script
