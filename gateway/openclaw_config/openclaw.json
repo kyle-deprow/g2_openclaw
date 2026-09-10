@@ -5,7 +5,8 @@
   "models": {
     "providers": {
       "openai": {
-        "api": "openai-responses",
+        "api": "openai-chatgpt-responses",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
         "agentRuntime": {
           "id": "codex"
         },

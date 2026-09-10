@@ -9,7 +9,11 @@ restart services, or run the publish script while reviewing source changes.
 
 The managed runtime is OpenClaw 2026.8.1, @openclaw/codex 2026.8.1, and
 embedded @openai/codex 0.151.0. The default route is OpenAI/Codex app-server
-through OAuth. Azure or OpenRouter are explicit operator-selected routes only;
+through OAuth. Its managed `openai` provider uses the native
+`openai-chatgpt-responses` API with
+`https://chatgpt.com/backend-api/codex` and `agentRuntime.id: codex`; this
+selects OAuth and does not add an API-key or fallback route. Azure or OpenRouter
+are explicit operator-selected routes only;
 an unavailable route is a fail-closed error, never an invented alias or silent
 provider switch.
 
