@@ -2153,8 +2153,12 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert config["agents"]["defaults"]["maxConcurrent"] == 2
     assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 1
     assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
+    assert config["agents"]["ownership"] == "explicit"
+    assert "list" not in config["agents"]
+    assert all("id" not in agent for agent in config["agents"]["entries"].values())
+    assert "maxConcurrentSessions" not in config["acp"]
 
-    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+    agents = config["agents"]["entries"]
 
     main = agents["main"]
     assert main["model"]["primary"] == "openai/gpt-5.4"
@@ -2272,7 +2276,7 @@ def test_push_script_rejects_non_python_push_impl_without_filesystem_mutation(
 
 def test_installed_codex_native_surface_is_not_enabled_by_main_wildcard_allow() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
-    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+    agents = config["agents"]["entries"]
     main_tools = agents["main"]["tools"]
     assert main_tools["profile"] == "minimal"
     assert main_tools["allow"] == EXPECTED_MAIN_ALLOW
@@ -2298,7 +2302,7 @@ def test_installed_codex_native_surface_is_not_enabled_by_main_wildcard_allow() 
 
 def test_installed_runtime_projects_main_mcp_servers_from_codex_agent_scope() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
-    agents = {agent["id"]: agent for agent in config["agents"]["list"]}
+    agents = config["agents"]["entries"]
     main_allow = agents["main"]["tools"]["allow"]
     assert main_allow == EXPECTED_MAIN_ALLOW
     servers = config["mcp"]["servers"]
@@ -3130,7 +3134,7 @@ def test_push_script_paused_mode_publishes_gated_config_without_lifecycle_side_e
     assert published["agents"]["defaults"]["heartbeat"]["every"] == "0m"
     assert all(
         "heartbeat" not in agent or agent["heartbeat"]["every"] == "0m"
-        for agent in published["agents"]["list"]
+        for agent in published["agents"]["entries"].values()
     )
     assert "DEFERRED: paused mode skipped Codex auth-file synchronization." in result.stdout
     assert "DEFERRED: paused mode skipped systemd user-manager daemon-reload." in result.stdout
@@ -3492,10 +3496,9 @@ def test_push_script_uses_recorded_owner_workspace_for_native_layers(tmp_path: P
     original_config = OPENCLAW_CONFIG.read_bytes()
     overridden_workspace = "workspace-research-owner override with spaces"
     config = json.loads(original_config)
-    for agent in config["agents"]["list"]:
-        if agent["id"] == "research-orchestrator":
-            agent["workspace"] = overridden_workspace
-            break
+    owner = config["agents"]["entries"].get("research-orchestrator")
+    if isinstance(owner, dict):
+        owner["workspace"] = overridden_workspace
     else:
         pytest.fail("research-orchestrator missing from fixture config")
     OPENCLAW_CONFIG.write_text(json.dumps(config), encoding="utf-8")
@@ -4068,7 +4071,7 @@ def test_push_script_uses_repo_config_for_runtime_preflight_and_replaces_stale_l
     assert result.returncode == 0, result.stderr
     deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
     assert "nativeToolSurfaceEnabled" not in deployed["plugins"]["entries"]["codex"]["config"]
-    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {
+    assert set(deployed["agents"]["entries"]) >= {
         "main",
         "research-orchestrator",
     }
@@ -6313,7 +6316,7 @@ def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
     assert "Restoring managed OpenClaw artifacts after failed publication." not in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
-    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {
+    assert set(deployed["agents"]["entries"]) >= {
         "main",
         "research-orchestrator",
     }

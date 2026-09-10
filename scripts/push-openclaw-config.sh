@@ -1632,7 +1632,7 @@ if ! require_gateway_service_loadable; then
 fi
 
 if ! jq -e '
-  [(.agents.defaults.skills // [])[], (.agents.list[]?.skills // [])[]]
+  [(.agents.defaults.skills // [])[], ((.agents.entries // {}) | .[]?.skills // [])[]]
   | all(.[]; type == "string" and length > 0)
 ' "${REPO_CONFIG}" >/dev/null; then
   echo "ERROR: Every configured skill in ${REPO_CONFIG} must be a non-empty string." >&2
@@ -1646,7 +1646,7 @@ REQUIRED_REPO_SKILLS=(
 )
 
 mapfile -t CONFIGURED_SKILLS < <(jq -r '
-  [(.agents.defaults.skills // [])[], (.agents.list[]?.skills // [])[]]
+  [(.agents.defaults.skills // [])[], ((.agents.entries // {}) | .[]?.skills // [])[]]
   | map(select(type == "string" and length > 0))
   | unique[]
 ' "${REPO_CONFIG}")
@@ -1839,7 +1839,7 @@ assemble_openclaw_config() {
     return 1
   fi
   if [[ -z "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" ]]; then
-    echo "ERROR: Repo config must pin agents.list[].id == \"research-orchestrator\" to a model.primary." >&2
+    echo "ERROR: Repo config must pin agents.entries.research-orchestrator to a model.primary." >&2
     return 1
   fi
   if [[ "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" != openai/* ]]; then
@@ -1881,8 +1881,8 @@ apply_paused_config_gates() {
     .cron = ((.cron // {}) | .enabled = false)
     | .agents.defaults = ((.agents.defaults // {})
         | .heartbeat = ((.heartbeat // {}) | .every = "0m"))
-    | .agents.list = ((.agents.list // [])
-        | map(if has("heartbeat") then .heartbeat.every = "0m" else . end))
+    | .agents.entries = ((.agents.entries // {})
+        | with_entries(if (.value | has("heartbeat")) then .value.heartbeat.every = "0m" else . end))
   ')"; then
     echo "ERROR: Could not apply paused cron and heartbeat gates to the assembled OpenClaw config." >&2
     return 1
@@ -1894,7 +1894,7 @@ apply_paused_config_gates() {
       and (.plugins.entries.codex == $codex_plugin)
       and (.cron.enabled == false)
       and (.agents.defaults.heartbeat.every == "0m")
-      and all(.agents.list[]?;
+      and all((.agents.entries // {}) | .[]?;
         (.heartbeat? == null)
         or ((.heartbeat | type) == "object" and .heartbeat.every == "0m")
       )
@@ -1915,7 +1915,7 @@ fi
 if ! echo "${MERGED}" | jq -e \
   --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" '
   def denies: (.tools.deny // []);
-  ([.agents.list[] | select(.id == "research-orchestrator")
+  ([.agents.entries["research-orchestrator"] | select(type == "object")
     | select(denies == $owner_denies)
     | select((.tools.allow // []) == ["sessions_spawn"])
   ] | length) == 1
@@ -1949,6 +1949,10 @@ if ! echo "${MERGED}" | jq -e \
   def main_allow: (.tools.allow // []);
   def expected_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
   (.agents.defaults.thinkingDefault == "high")
+  and (.agents.ownership == "explicit")
+  and ((.agents | has("list")) | not)
+  and ((.agents.entries | type) == "object")
+  and all(.agents.entries | to_entries[]; (.value | type) == "object" and ((.value | has("id")) | not))
   and ((.plugins.allow // []) | contains(["codex", "acpx"]))
   and (.plugins.entries.codex.enabled == true)
   and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
@@ -1966,7 +1970,7 @@ if ! echo "${MERGED}" | jq -e \
     "openClawToolsMcpBridge":false,
     "mcpServers":{}
   }
-  and .acp == {"enabled":true,"dispatch":{"enabled":true},"backend":"acpx","allowedAgents":["claude"],"maxConcurrentSessions":1}
+  and .acp == {"enabled":true,"dispatch":{"enabled":true},"backend":"acpx","allowedAgents":["claude"]}
   and (.agents.defaults.maxConcurrent == 2)
   and (.agents.defaults.subagents.maxConcurrent == 1)
   and (.agents.defaults.subagents.maxSpawnDepth == 1)
@@ -1992,29 +1996,27 @@ if ! echo "${MERGED}" | jq -e \
     "PYTHONPATH": $repo,
     "RESEARCH_V2_ROOT": $research_root
   })
-  and (([.agents.list[].id] | sort) == (expected_models | keys | sort))
-  and all(.agents.list[]; .model.primary == expected_models[.id])
-  and all(.agents.list[]; .thinkingDefault == "high")
-  and ([.agents.list[] | select(.id == "main" and .tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
-  and ([.agents.list[] | select(
-    .id == "research-orchestrator"
-    and .model.primary == $owner
+  and (((.agents.entries // {}) | keys | sort) == (expected_models | keys | sort))
+  and all((.agents.entries // {}) | to_entries[]; .value.model.primary == expected_models[.key])
+  and all((.agents.entries // {}) | to_entries[]; .value.thinkingDefault == "high")
+  and ([.agents.entries.main | select(.tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
+  and ([.agents.entries["research-orchestrator"] | select(
+    .model.primary == $owner
     and .thinkingDefault == "high"
     and ((.skills // []) == ["research-loop"])
     and denies == $owner_denies
     and ((.tools.allow // []) == ["sessions_spawn"])
     and ((.subagents.allowAgents? // []) == ["claude"])
   )] | length) == 1
-  and ([.agents.list[] | select(
-    .id == "main"
-    and .model.primary == "openai/gpt-5.4"
+  and ([.agents.entries.main | select(
+    .model.primary == "openai/gpt-5.4"
     and .thinkingDefault == "high"
     and (((.skills // []) | index("mempalace")) == null)
     and (((.skills // []) | index("autoresearch")) == null)
     and ((.skills // []) == ["mempalace-readonly"])
     and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
-' >/dev/null; then
+  ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates the managed route invariants." >&2
   echo "       Check ACPX wiring, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
   exit 1
@@ -2070,7 +2072,7 @@ if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]] && ! jq -e \
     and (.plugins.entries.codex == $codex_plugin)
     and (.cron.enabled == false)
     and (.agents.defaults.heartbeat.every == "0m")
-    and all(.agents.list[]?;
+    and all((.agents.entries // {}) | .[]?;
       (.heartbeat? == null)
       or ((.heartbeat | type) == "object" and .heartbeat.every == "0m")
     )
@@ -2300,7 +2302,8 @@ mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
     else
       "workspace-\(.id)"
     end;
-  [.agents.list[]? | {agent: .id, workspace: workspace_target}]
+  [((.agents.entries // {}) | to_entries[] | .value + {id: .key})
+    | {agent: .id, workspace: workspace_target}]
   | group_by(.workspace)
   | map({workspace: .[0].workspace, agents: (map(.agent) | sort | join(","))})
   | sort_by(.workspace)
@@ -2369,7 +2372,7 @@ for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   MANAGED_AGENT_DIR_SNAPSHOT_IDS["${CODEX_RUNTIME_AGENT_ID}"]=1
 done
 mapfile -t OPENAI_AGENT_IDS_FOR_SNAPSHOT < <(jq -r '
-  .agents.list[]?
+  ((.agents.entries // {}) | to_entries[] | .value + {id: .key})
   | select((.model.primary // "") | startswith("openai/"))
   | .id
 ' "${REPO_CONFIG}")

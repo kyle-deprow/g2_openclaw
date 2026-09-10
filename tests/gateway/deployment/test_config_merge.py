@@ -512,13 +512,14 @@ def _jq_full_assembly(
         ],
         input_bytes=merged,
     )
-    agents_list = repo_agents["list"]
+    agents_entries = repo_agents["entries"]
     merged = _run_jq(
         [
             "--argjson",
-            "agents_list",
-            _json_arg(agents_list),
-            ".agents.list = $agents_list",
+            "agents_entries",
+            _json_arg(agents_entries),
+            '.agents.ownership = "explicit" | del(.agents.list) | '
+            ".agents.entries = $agents_entries",
         ],
         input_bytes=merged,
     )
@@ -562,8 +563,8 @@ def _jq_full_assembly(
             "--arg",
             "owner",
             inputs.orchestrator_model_primary,
-            '(.agents.list[] | select(.id == "research-orchestrator") | .model.primary) = $owner | '
-            '(.agents.list[] | select(.id == "research-orchestrator") | '
+            '(.agents.entries["research-orchestrator"] | .model.primary) = $owner | '
+            '(.agents.entries["research-orchestrator"] | '
             '.thinkingDefault) = "high" | '
             "if .plugins.entries.codex.config.appServer.defaultWorkspaceDir == "
             '"/home/dev/.openclaw/autoresearch/model-workspaces" then '
@@ -598,8 +599,7 @@ def _jq_full_assembly(
             "adapter",
             inputs.acpx_adapter_bin,
             '.acp = {"enabled":true,"dispatch":{"enabled":true},'
-            '"backend":"acpx","allowedAgents":["claude"],'
-            '"maxConcurrentSessions":1} | '
+            '"backend":"acpx","allowedAgents":["claude"]} | '
             ".plugins.entries.acpx.config = {"
             '"agents":{"claude":{"command":"/usr/bin/env","args":[('
             '"CLAUDE_CODE_EXECUTABLE=" + $launcher),$adapter]}},'
@@ -642,7 +642,9 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
                 "subagents": {"archiveAfterMinutes": 7, "requireAgentId": True},
                 "memorySearch": {"enabled": False},
             },
-            "list": [],
+            "list": [
+                {"id": "stale-local", "model": {"primary": "local/stale"}},
+            ],
         },
         "acp": {
             "stream": {"coalesceIdleMs": 99},
@@ -697,8 +699,15 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
         "dispatch": {"enabled": True},
         "backend": "acpx",
         "allowedAgents": ["claude"],
-        "maxConcurrentSessions": 1,
     }
+    assembled_agents = cast(JsonObject, python_config["agents"])
+    assert assembled_agents["ownership"] == "explicit"
+    assert "list" not in assembled_agents
+    assembled_entries = cast(JsonObject, assembled_agents["entries"])
+    assert set(assembled_entries) == {"main", "research-orchestrator"}
+    assert all(
+        isinstance(entry, dict) and "id" not in entry for entry in assembled_entries.values()
+    )
     defaults = cast(JsonObject, cast(JsonObject, python_config["agents"])["defaults"])
     subagents = cast(JsonObject, defaults["subagents"])
     assert subagents["archiveAfterMinutes"] == JsonNumber("7")

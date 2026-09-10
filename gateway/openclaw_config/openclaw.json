@@ -151,6 +151,7 @@
     }
   },
   "agents": {
+    "ownership": "explicit",
     "defaults": {
       "model": {
         "primary": "openai/gpt-5.4"
@@ -170,9 +171,8 @@
         "runTimeoutSeconds": 1800
       }
     },
-    "list": [
-      {
-        "id": "main",
+    "entries": {
+      "main": {
         "skills": [
           "mempalace-readonly"
         ],
@@ -217,8 +217,7 @@
           ]
         }
       },
-      {
-        "id": "research-orchestrator",
+      "research-orchestrator": {
         "workspace": "workspace-research-orchestrator",
         "skills": [
           "research-loop"
@@ -267,7 +266,7 @@
           ]
         }
       }
-    ]
+    }
   },
   "memory": {
     "citations": "off",
@@ -347,8 +346,7 @@
     "backend": "acpx",
     "allowedAgents": [
       "claude"
-    ],
-    "maxConcurrentSessions": 1
+    ]
   },
   "messages": {
     "ackReactionScope": "group-mentions"

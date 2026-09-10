@@ -88,19 +88,19 @@ def _openai_agent_ids(repo_config: str) -> list[str]:
         return []
     if not isinstance(raw, dict) or not isinstance(raw.get("agents"), dict):
         return []
-    agents = raw["agents"].get("list")
-    if not isinstance(agents, list):
+    entries = raw["agents"].get("entries")
+    if not isinstance(entries, dict):
         return []
     result: list[str] = []
-    for agent in agents:
+    for agent_id, agent in entries.items():
+        if not isinstance(agent_id, str):
+            continue
         if not isinstance(agent, dict):
             continue
         model = agent.get("model")
         primary = model.get("primary") if isinstance(model, dict) else None
         if isinstance(primary, str) and primary.startswith("openai/"):
-            agent_id = agent.get("id")
-            if isinstance(agent_id, str):
-                result.append(agent_id)
+            result.append(agent_id)
     return result
 
 

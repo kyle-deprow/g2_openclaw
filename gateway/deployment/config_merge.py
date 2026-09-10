@@ -506,13 +506,12 @@ def orchestrator_model_primary(repo: JsonObject) -> str:
     agents = _get_object(repo, "agents")
     if agents is None:
         return ""
-    raw_list = agents.get("list")
-    if not isinstance(raw_list, list):
+    entries = agents.get("entries")
+    if not isinstance(entries, dict):
         return ""
-    for item in raw_list:
-        if not isinstance(item, dict) or item.get("id") != "research-orchestrator":
-            continue
-        model = item.get("model")
+    owner = entries.get("research-orchestrator")
+    if isinstance(owner, dict):
+        model = owner.get("model")
         if isinstance(model, dict):
             primary = model.get("primary")
             if isinstance(primary, str):
@@ -589,10 +588,21 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             compaction_target["memoryFlush"] = _copy(memory_flush)
 
     repo_agents = _get_object(repo, "agents")
-    agents_list = repo_agents.get("list") if repo_agents is not None else None
-    if _jq_truthy(agents_list):
-        agents = _object(merged.setdefault("agents", {}), "merged agents")
-        agents["list"] = _copy(agents_list)
+    repo_entries = repo_agents.get("entries") if repo_agents is not None else None
+    if not isinstance(repo_entries, dict) or not repo_entries:
+        raise ConfigMergeError("ERROR: Repo config must define a non-empty agents.entries map.")
+    if any(not isinstance(agent_id, str) for agent_id in repo_entries):
+        raise ConfigMergeError("ERROR: Repo config agents.entries keys must be strings.")
+    if any(not isinstance(agent, dict) or "id" in agent for agent in repo_entries.values()):
+        raise ConfigMergeError(
+            "ERROR: Repo config agents.entries values must be objects without authored id fields."
+        )
+    agents = _object(merged.setdefault("agents", {}), "merged agents")
+    # The managed roster is authoritative. Discard a machine-local legacy list
+    # once while replacing it with the canonical keyed entries map.
+    agents.pop("list", None)
+    agents["ownership"] = "explicit"
+    agents["entries"] = _copy(repo_entries)
 
     models = _object(merged.setdefault("models", {}), "merged models")
     providers = _object(models.setdefault("providers", {}), "merged model providers")
@@ -624,7 +634,7 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
 
     if not inputs.orchestrator_model_primary:
         raise ConfigMergeError(
-            "ERROR: Repo config must pin agents.list[].id == "
+            "ERROR: Repo config must pin agents.entries.research-orchestrator "
             '"research-orchestrator" to a model.primary.'
         )
     if not inputs.orchestrator_model_primary.startswith("openai/"):
@@ -645,17 +655,20 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
     defaults["models"] = {inputs.model_primary: {}}
 
     agents = _object(merged.get("agents"), "merged agents")
-    managed_agents = agents.get("list")
-    if isinstance(managed_agents, list):
-        for item in managed_agents:
-            if not isinstance(item, dict) or item.get("id") != "research-orchestrator":
-                continue
-            model = item.get("model")
-            if not isinstance(model, dict):
-                model = {}
-                item["model"] = model
-            model["primary"] = inputs.orchestrator_model_primary
-            item["thinkingDefault"] = "high"
+    managed_entries = _get_object(agents, "entries")
+    if managed_entries is None:
+        raise ConfigMergeError("ERROR: Assembled config lost the canonical agents.entries map.")
+    owner_entry = managed_entries.get("research-orchestrator")
+    if not isinstance(owner_entry, dict):
+        raise ConfigMergeError(
+            "ERROR: Assembled config must contain agents.entries.research-orchestrator."
+        )
+    model = owner_entry.get("model")
+    if not isinstance(model, dict):
+        model = {}
+        owner_entry["model"] = model
+    model["primary"] = inputs.orchestrator_model_primary
+    owner_entry["thinkingDefault"] = "high"
 
     merged = _object(
         _walk_remove_keys(
@@ -684,7 +697,6 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
         "dispatch": {"enabled": True},
         "backend": "acpx",
         "allowedAgents": ["claude"],
-        "maxConcurrentSessions": 1,
     }
     plugins = _object(merged.setdefault("plugins", {}), "merged plugins")
     entries = _object(plugins.setdefault("entries", {}), "merged plugin entries")

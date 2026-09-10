@@ -322,9 +322,11 @@ def test_deleted_mempalace_finalizer_has_no_owned_source_claim() -> None:
 
 def test_repo_config_keeps_current_route_and_memory_guards() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
-    agents = config["agents"]["list"]
-    assert [agent["id"] for agent in agents] == ["main", "research-orchestrator"]
-    owner = next(agent for agent in agents if agent["id"] == "research-orchestrator")
+    agents = config["agents"]["entries"]
+    assert config["agents"]["ownership"] == "explicit"
+    assert list(agents) == ["main", "research-orchestrator"]
+    assert all("id" not in agent for agent in agents.values())
+    owner = agents["research-orchestrator"]
     assert owner["model"]["primary"] == "openai/gpt-6-astra"
     defaults = config["agents"]["defaults"]
     assert config["memory"]["search"]["enabled"] is False

@@ -54,10 +54,10 @@ def _write_config(path: Path, *agent_ids: str) -> None:
         json.dumps(
             {
                 "agents": {
-                    "list": [
-                        {"id": agent_id, "model": {"primary": "openai/gpt-5.4"}}
-                        for agent_id in agent_ids
-                    ]
+                    "ownership": "explicit",
+                    "entries": {
+                        agent_id: {"model": {"primary": "openai/gpt-5.4"}} for agent_id in agent_ids
+                    },
                 }
             }
         ),
