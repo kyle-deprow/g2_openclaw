@@ -14,9 +14,39 @@ DATA_CONTRACT = AGENT_CONFIG / "skills" / "quantipy-data-contract" / "SKILL.md"
 AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
 RESEARCH_LOOP = AGENT_CONFIG / "skills" / "research-loop" / "SKILL.md"
 CODEX_SUBAGENTS = AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md"
+MEMPALACE_READONLY = AGENT_CONFIG / "skills" / "mempalace-readonly" / "SKILL.md"
+IMPROVEMENT_CANONICAL = REPO_ROOT / ".agents" / "skills" / "openclaw-improvement" / "SKILL.md"
+IMPROVEMENT_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-improvement" / "SKILL.md"
 RESEARCH_PERSONA = AGENT_CONFIG / "research-orchestrator"
 OPENCLAW_CONFIG = REPO_ROOT / "gateway" / "openclaw_config" / "openclaw.json"
 PUSH_SCRIPT = REPO_ROOT / "scripts" / "push-openclaw-config.sh"
+
+MEMORY_POLICY_SENTENCE = (
+    "No autoresearch model writes MemPalace: every model is read-only, the built-in "
+    "memory tools memory_search and memory_get are denied, memory flush is disabled, "
+    "and the durable research records are the research store and artifact receipts."
+)
+EXPECTED_MEMPALACE_TOOLS = (
+    "mempalace-readonly.mempalace_status",
+    "mempalace-readonly.mempalace_search",
+    "mempalace-readonly.mempalace_get_drawer",
+    "mempalace-readonly.mempalace_list_drawers",
+    "mempalace-readonly.mempalace_list_wings",
+    "mempalace-readonly.mempalace_list_rooms",
+    "mempalace-readonly.mempalace_get_taxonomy",
+    "mempalace-readonly.mempalace_get_aaak_spec",
+    "mempalace-readonly.mempalace_diary_read",
+    "mempalace-readonly.mempalace_kg_query",
+    "mempalace-readonly.mempalace_kg_timeline",
+    "mempalace-readonly.mempalace_kg_stats",
+    "mempalace-readonly.mempalace_traverse",
+    "mempalace-readonly.mempalace_find_tunnels",
+    "mempalace-readonly.mempalace_follow_tunnels",
+    "mempalace-readonly.mempalace_graph_stats",
+    "mempalace-readonly.mempalace_list_tunnels",
+    "mempalace-readonly.mempalace_list_hallways",
+    "mempalace-readonly.mempalace_memories_filed_away",
+)
 
 BOOTSTRAP_FILES = tuple(
     AGENT_CONFIG / name for name in ("AGENTS.md", "BOOTSTRAP.md", "SOUL.md", "TOOLS.md")
@@ -198,6 +228,9 @@ def test_memory_policy_has_no_automated_writer_claim() -> None:
             *BOOTSTRAP_FILES,
             AUTORESEARCH,
             RESEARCH_LOOP,
+            MEMPALACE_READONLY,
+            IMPROVEMENT_CANONICAL,
+            IMPROVEMENT_MIRROR,
             REPO_ROOT / ".agents" / "skills" / "openclaw-persona-identity" / "SKILL.md",
             REPO_ROOT / ".claude" / "skills" / "openclaw-persona-identity" / "SKILL.md",
         )
@@ -209,6 +242,64 @@ def test_memory_policy_has_no_automated_writer_claim() -> None:
     assert "automated mempalace writer" in lowered
     assert "mempalace_finalizer" not in lowered
     assert "autoresearch supervisor" not in lowered
+
+
+def test_mempalace_readonly_skill_locks_tools_and_safety_policy() -> None:
+    text = MEMPALACE_READONLY.read_text(encoding="utf-8")
+    normalized = _normalized(MEMPALACE_READONLY).lower()
+    tools = re.findall(
+        r"^\s*-\s+`(mempalace-readonly\.mempalace_[^`]+)`\s*$",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    assert len(tools) == 19
+    assert tuple(tools) == EXPECTED_MEMPALACE_TOOLS
+    assert "diary_write" not in text
+    assert "mempalace-readonly.mempalace_write" not in text
+    for phrase in (
+        "optional read-only retrieval",
+        "never a control ledger",
+        "never a completion gate",
+        "no automated mempalace writer",
+        "research store",
+        "artifact receipts",
+        "treat that as a configuration error and stop instead of calling it",
+    ):
+        assert phrase in normalized
+
+    for stale in (
+        "platform finalizer",
+        "finalizer",
+        "only durable research memory",
+        "context curator",
+        "debate agents",
+        "implementer and fixer",
+        "## reviewer",
+        "no_consensus",
+    ):
+        assert stale not in normalized
+
+
+def test_improvement_skill_mirrors_enforce_current_memory_policy() -> None:
+    for path in (IMPROVEMENT_CANONICAL, IMPROVEMENT_MIRROR):
+        normalized = _normalized(path)
+        lowered = normalized.lower()
+        assert MEMORY_POLICY_SENTENCE in normalized
+        assert "gateway/agent_config/skills/mempalace-readonly/" in normalized
+        for stale in (
+            "mempalace_finalizer",
+            "platform finalizer",
+            "finalizer alone",
+            "sole writer",
+            "only durable research memory",
+        ):
+            assert stale not in lowered
+
+
+def test_deleted_mempalace_finalizer_has_no_owned_source_claim() -> None:
+    assert not (REPO_ROOT / "gateway" / "mempalace_finalizer.py").exists()
+    assert not (REPO_ROOT / "gateway" / "mempalace_finalizer_script.py").exists()
 
 
 def test_repo_config_keeps_current_route_and_memory_guards() -> None:

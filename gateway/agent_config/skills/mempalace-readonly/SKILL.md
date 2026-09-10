@@ -1,7 +1,7 @@
 ---
 name: mempalace-readonly
 description: Read-only MemPalace context access for every autoresearch model thread. Provides search, diary, traversal, and knowledge graph query guidance without any write-capable workflows.
-version: 1.0.0
+version: 1.1.0
 ---
 
 # MemPalace Read-Only Context
@@ -12,13 +12,16 @@ This skill is for every autoresearch model thread. It provides read access
 to MemPalace context so debates, reviews, implementation, and fixes can account
 for prior experiments without mutating durable memory.
 
-No autoresearch model receives a write-capable MemPalace server or skill.
-Final decision persistence is performed only by the deterministic platform
-finalizer at the validated repeat transition.
+No autoresearch model writes MemPalace: every model is read-only, the built-in memory tools memory_search and memory_get are denied, memory flush is disabled, and the durable research records are the research store and artifact receipts.
+
+MemPalace is optional read-only retrieval for prior context. It is never a
+control ledger; it is never a completion gate, and this loop has no automated
+MemPalace writer. The research store and artifact receipts remain the durable
+records.
 
 Do not use OpenClaw built-in memory tools (`memory_search`, `memory_get`) or
 Markdown memory files (`MEMORY.md`, `memory/YYYY-MM-DD.md`) for research
-continuity. MemPalace is the only durable research memory layer.
+continuity. This skill does not make Markdown files a research authority.
 
 ## Allowed Read Tools
 
@@ -48,36 +51,13 @@ No autoresearch model should receive write-capable MemPalace tools in config.
 If a `mcp__mempalace__*` write tool appears available, treat that as a
 configuration error and stop instead of calling it.
 
-## Stage Usage
+## Usage
 
-### Context Curator
-
-Build a compact packet for debate:
-
-- Current best metrics and baseline.
-- Last 10 experiment outcomes from MemPalace and canonical decision receipts.
-- Prior failures, reviewer objections, data coverage issues, and feature/model
-  families already tried.
-- Any prior KEEP decisions that should shape the next proposal.
-
-### Debate Agents
-
-Read prior context only when it helps evaluate novelty, leakage risk, data
-coverage, overfit risk, or implementation cost. Do not write debate notes,
-candidate theories, winning theories, dissent summaries, or `NO_CONSENSUS`
-outcomes to MemPalace.
-
-### Implementer And Fixer
-
-Use MemPalace reads to avoid repeating failed feature families or methodology
-mistakes. Do not write implementation plans, intermediate metrics, test
-failures, or fix notes to MemPalace.
-
-### Reviewer
-
-Use MemPalace reads to compare against prior methodology failures, reviewer
-objections, data-coverage requirements, and overfit patterns. Do not write
-review findings to MemPalace.
+Use read-only retrieval when prior context helps evaluate a current admitted
+hypothesis, review, implementation, or run. Search only as needed; MemPalace
+is optional and never a control ledger or completion gate. Do not write notes,
+theories, outcomes, plans, metrics, failures, or verdicts. The research store
+and artifact receipts remain the durable records.
 
 ## Failure Policy
 

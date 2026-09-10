@@ -18,8 +18,9 @@ skills. Never hand-edit an installed workspace.
 - G2 remains the read-only main interface. Research-owner status, typed
   refusals, policy-unset pause, exact cancel, owner wake, and immutable receipts
   are authoritative.
-- Models receive read-only MemPalace context. Built-in memory search and
-  pre-compaction flush are disabled; model turns never write durable memory.
+- No autoresearch model writes MemPalace: every model is read-only, the built-in memory tools memory_search and memory_get are denied, memory flush is disabled, and the durable research records are the research store and artifact receipts.
+- The active read-only MemPalace skill is
+  `gateway/agent_config/skills/mempalace-readonly/`.
 - OpenAI/Codex OAuth is the configured route. Do not invent a provider, retry
   through another route, or alter auth while diagnosing.
 - Research is price-panel-only and ETF-scoped. Stock work needs trusted

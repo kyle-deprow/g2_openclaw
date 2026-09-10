@@ -146,8 +146,7 @@ canonical decision receipts and MemPalace readonly retrieval with
 ### OpenClaw repeats failed experiments
 **Cause:** Not checking memory before proposing.
 **Fix:** Enforce MemPalace readonly retrieval at the start of each new context
-pass in autoresearch. The platform finalizer alone persists a validated,
-retention-eligible canonical decision after the model turn completes.
+pass in autoresearch. No autoresearch model writes MemPalace: every model is read-only, the built-in memory tools memory_search and memory_get are denied, memory flush is disabled, and the durable research records are the research store and artifact receipts.
 
 ### Research owner reports a missing or invalid status
 **Symptom:** The bounded owner cannot prove admission, review, run, or terminal
