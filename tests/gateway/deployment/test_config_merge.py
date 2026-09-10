@@ -161,14 +161,18 @@ def test_assembly_removes_local_openai_api_key_for_managed_oauth_route(tmp_path:
             }
         },
     )
+    local_path = tmp_path / "local.json"
+    _write_json(local_path, local)
+    inputs = _assembly_inputs(tmp_path)
     assembled = assemble_config(
         local,
         cast(JsonObject, load_json(REPO_CONFIG)),
-        _assembly_inputs(tmp_path),
+        inputs,
     )
 
     providers = cast(JsonObject, cast(JsonObject, assembled["models"])["providers"])
     assert "apiKey" not in cast(JsonObject, providers["openai"])
+    assert serialize_json(assembled) == _jq_full_assembly(local_path, REPO_CONFIG, inputs)
 
 
 def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
@@ -718,6 +722,13 @@ def _jq_full_assembly(
             ],
             input_bytes=merged,
         )
+    merged = _run_jq(
+        [
+            'if .models.providers.openai.auth == "oauth" then '
+            "del(.models.providers.openai.apiKey) else . end"
+        ],
+        input_bytes=merged,
+    )
     merged = _run_jq(
         [
             "(.models.providers // {}) as $provs | "

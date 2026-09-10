@@ -25,9 +25,9 @@ SUMMARY_ITEMS=()
 REQUIRED_OPENCLAW_VERSION="2026.8.1"
 REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"
-# OpenClaw 8.1 requires explicit capability consent.  The migration proof
-# supplies this exact local archive; do not resolve a registry or fallback spec.
-CODEX_PLUGIN_INSTALL_SPEC="npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz"
+# OpenClaw 8.1 requires explicit capability consent.  Use the reviewed exact
+# npm package/version with a pinned install; do not use npm-pack or a fallback.
+CODEX_PLUGIN_INSTALL_SPEC="npm:@openclaw/codex@2026.8.1"
 OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
@@ -489,7 +489,7 @@ validate_live_state_candidate_openclaw_config_for_preflight() {
 
 reconcile_codex_plugin_in_context() {
   local runner="$1"
-  if ! "${runner}" plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --force --accept-capabilities; then
+  if ! "${runner}" plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --pin --force --accept-capabilities; then
     fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
     return 1
   fi

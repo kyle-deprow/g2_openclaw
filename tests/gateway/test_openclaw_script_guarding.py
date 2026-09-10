@@ -1942,7 +1942,7 @@ def test_bootstrap_reconciles_exact_codex_runtime_and_installs_daemon() -> None:
     assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"' in script
     assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"' in script
     install = script.index(
-        'plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --force --accept-capabilities'
+        'plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --pin --force --accept-capabilities'
     )
     inspect = script.index(
         "if ! require_codex_plugin_exact run_openclaw_cli_for_candidate_config; then", install
@@ -1963,15 +1963,11 @@ def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Pa
     assert result.returncode == 0, result.stderr
     assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
         "openclaw daemon install --force --port 18789 --json",
@@ -2027,9 +2023,7 @@ def test_bootstrap_invalid_repo_overlay_aborts_before_onboarding_or_live_writes(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2051,9 +2045,7 @@ def test_bootstrap_rejects_repo_schema_warnings_before_live_writes(tmp_path: Pat
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2076,9 +2068,7 @@ def test_bootstrap_invalid_candidate_overlay_aborts_before_onboarding_or_live_wr
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2100,9 +2090,7 @@ def test_bootstrap_rejects_candidate_schema_warnings_before_inspect_or_daemon(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2131,9 +2119,7 @@ def test_bootstrap_rejects_repo_preflight_topology_replacement_with_identical_by
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     assert "Repo OpenClaw config failed schema validation" in result.stdout
@@ -2158,9 +2144,7 @@ def test_bootstrap_rejects_candidate_preflight_topology_replacement_with_identic
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install "
-        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
-        "--force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]

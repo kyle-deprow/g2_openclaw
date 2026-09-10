@@ -28,7 +28,7 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 ```bash
 node --version                 # must be >= 22
 openclaw --version             # expected local install: exactly 2026.8.1
-openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
+openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities
 openclaw plugins inspect codex --runtime --json  # loaded runtime proof: plugin 2026.8.1, @openai/codex 0.151.0
 openclaw models auth login --provider openai
 openclaw models list --provider openai
@@ -110,11 +110,12 @@ or model.
   OAuth only.
 - Treat core, plugin, and embedded app-server versions as one exact runtime
   tuple: OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, and
-  `@openai/codex` `0.151.0`. Do not use minimum-version checks, registry
-  installs, or unpinned fallbacks. The migration command consumes the reviewed
-  local archive with `--accept-capabilities` and then verifies all three
-  versions. The plugin package has no `bin`; the embedded `@openai/codex`
-  package owns `bin/codex.js`.
+  `@openai/codex` `0.151.0`. Do not use minimum-version checks, unpinned
+  fallbacks, or `npm-pack:` tarballs. Install the official npm package spec at
+  the exact version with `--pin --force --accept-capabilities`, backed by the
+  reviewed offline npm cache, and then verify all three versions. The plugin
+  package has no `bin`; the embedded `@openai/codex` package owns
+  `bin/codex.js`.
 - After every OpenClaw install or upgrade, use
   `openclaw daemon install --force --port 18789 --json` only as the final
   explicit start gate. It writes and enables the unit, then restarts
