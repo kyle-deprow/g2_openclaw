@@ -18,6 +18,8 @@ def _create_auth_database(
     *,
     profile_json: str | None,
     state_json: str,
+    agent_id: str = "reviewer",
+    native_schema: bool = True,
     wal: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,6 +28,15 @@ def _create_auth_database(
             assert connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
         connection.executescript(
             """
+            CREATE TABLE schema_meta (
+                meta_key TEXT NOT NULL PRIMARY KEY,
+                role TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                agent_id TEXT NOT NULL,
+                app_version TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE auth_profile_store (
                 store_key TEXT NOT NULL PRIMARY KEY,
                 store_json TEXT NOT NULL,
@@ -38,6 +49,11 @@ def _create_auth_database(
             );
             """
         )
+        if native_schema:
+            connection.execute(
+                "INSERT INTO schema_meta VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("primary", "agent", 19, agent_id, "2026.8.1", 1, 1),
+            )
         if profile_json is not None:
             connection.execute(
                 "INSERT INTO auth_profile_store VALUES (?, ?, ?)",
@@ -90,7 +106,12 @@ def test_sync_managed_agent_codex_auth_copies_rows_and_preserves_wal(tmp_path: P
     push_home = tmp_path / "openclaw"
     source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
     source_profile = '{"provider":"openai","mode":"oauth"}'
-    _create_auth_database(source_db, profile_json=source_profile, state_json='{"source":true}')
+    _create_auth_database(
+        source_db,
+        profile_json=source_profile,
+        state_json='{"source":true}',
+        agent_id="main",
+    )
     (source_db.parent / "auth-profiles.json").write_text('{"profiles":[]}', encoding="utf-8")
 
     target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
@@ -98,6 +119,7 @@ def test_sync_managed_agent_codex_auth_copies_rows_and_preserves_wal(tmp_path: P
         target_db,
         profile_json='{"provider":"azure"}',
         state_json='{"old":true}',
+        agent_id="reviewer",
         wal=True,
     )
     config = tmp_path / "openclaw.json"
@@ -126,13 +148,23 @@ def test_sync_managed_agent_codex_auth_copies_rows_and_preserves_wal(tmp_path: P
 def test_sync_guard_failure_has_frozen_message_without_traceback(tmp_path: Path) -> None:
     push_home = tmp_path / "openclaw"
     source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
-    _create_auth_database(source_db, profile_json='{"provider":"openai"}', state_json="{}")
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+    )
     config = tmp_path / "openclaw.json"
     _write_config(config, "main", "reviewer")
 
     target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
     alias_db = tmp_path / "external.sqlite"
-    _create_auth_database(alias_db, profile_json='{"provider":"azure"}', state_json="{}")
+    _create_auth_database(
+        alias_db,
+        profile_json='{"provider":"azure"}',
+        state_json="{}",
+        agent_id="reviewer",
+    )
     target_db.parent.mkdir(parents=True)
     target_db.hardlink_to(alias_db)
     original = alias_db.read_bytes()
@@ -156,7 +188,12 @@ def test_sync_guard_failure_has_frozen_message_without_traceback(tmp_path: Path)
 def test_sync_missing_openai_profile_has_frozen_message(tmp_path: Path) -> None:
     push_home = tmp_path / "openclaw"
     source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
-    _create_auth_database(source_db, profile_json=None, state_json="{}")
+    _create_auth_database(
+        source_db,
+        profile_json=None,
+        state_json="{}",
+        agent_id="main",
+    )
     config = tmp_path / "openclaw.json"
     _write_config(config, "main")
 
@@ -169,3 +206,72 @@ def test_sync_missing_openai_profile_has_frozen_message(tmp_path: Path) -> None:
         "       Run: /opt/openclaw models auth login --provider openai\n"
     )
     assert "Traceback" not in result.stderr
+
+
+def test_sync_refuses_missing_native_target_before_creating_database(tmp_path: Path) -> None:
+    push_home = tmp_path / "openclaw"
+    source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+    )
+    config = tmp_path / "openclaw.json"
+    _write_config(config, "main", "reviewer")
+    target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+
+    result = _run_sync(push_home, config, "/opt/openclaw")
+
+    assert result.returncode == 1
+    assert not target_db.exists()
+    assert "Native agent store" in result.stderr
+    assert "public OpenClaw native initialization" in result.stderr
+
+
+def test_sync_refuses_target_without_native_ownership_metadata(tmp_path: Path) -> None:
+    push_home = tmp_path / "openclaw"
+    source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+    )
+    config = tmp_path / "openclaw.json"
+    _write_config(config, "main", "reviewer")
+    target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        target_db,
+        profile_json='{"provider":"azure"}',
+        state_json='{"old":true}',
+        agent_id="unexpected",
+    )
+    prior_bytes = target_db.read_bytes()
+
+    result = _run_sync(push_home, config, "/opt/openclaw")
+
+    assert result.returncode == 1
+    assert target_db.read_bytes() == prior_bytes
+    assert "native ownership metadata" in result.stderr
+    assert "public OpenClaw native initialization" in result.stderr
+
+
+def test_sync_refuses_source_without_native_ownership_metadata(tmp_path: Path) -> None:
+    push_home = tmp_path / "openclaw"
+    source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+        native_schema=False,
+    )
+    config = tmp_path / "openclaw.json"
+    _write_config(config, "main")
+
+    result = _run_sync(push_home, config, "/opt/openclaw")
+
+    assert result.returncode == 1
+    assert "native ownership metadata" in result.stderr
+    assert "public OpenClaw native initialization" in result.stderr

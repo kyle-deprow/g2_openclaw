@@ -22,6 +22,18 @@ from .guarded_fs import (
 AUTH_PROFILE_QUERY = (
     'select 1 from auth_profile_store where store_json like \'%"provider":"openai"%\' limit 1;'
 )
+NATIVE_AGENT_SCHEMA_QUERY = """
+SELECT role, schema_version, agent_id, app_version
+FROM schema_meta
+WHERE meta_key = 'primary';
+"""
+NATIVE_AGENT_SCHEMA_VERSION = 19
+NATIVE_AGENT_ROLE = "agent"
+NATIVE_INIT_GUIDANCE = (
+    "Initialize the store through the public OpenClaw native initialization path for this agent "
+    "(the native agent-store path) "
+    "before auth sync; never create or mark SQLite schema manually."
+)
 AUTH_SYNC_SQL_TEMPLATE = """ATTACH DATABASE {source_db} AS source_auth;
 BEGIN IMMEDIATE;
 CREATE TABLE IF NOT EXISTS auth_profile_store (
@@ -65,17 +77,73 @@ def _guarded_chmod(mode: int, destination: str, context: str) -> None:
 
 def _has_openai_profile(database: str) -> bool:
     try:
-        with sqlite3.connect(database) as connection:
+        with sqlite3.connect(_native_agent_database_uri(database, "ro"), uri=True) as connection:
             return connection.execute(AUTH_PROFILE_QUERY).fetchone() is not None
     except sqlite3.Error:
         return False
 
 
+def _native_agent_database_uri(database: str, mode: str) -> str:
+    return f"{Path(database).absolute().as_uri()}?mode={mode}"
+
+
+def _raise_native_store_error(database: str, agent_id: str, detail: str) -> None:
+    raise SystemExit(
+        f"ERROR: Native agent store {database} is not initialized and owned by agent "
+        f"{agent_id}: {detail}.\n"
+        f"       {NATIVE_INIT_GUIDANCE}"
+    )
+
+
+def _validate_native_agent_database(
+    database: str,
+    agent_id: str,
+    *,
+    mode: str,
+    context: str,
+) -> None:
+    path = Path(database)
+    if path.is_symlink() or not path.is_file():
+        _raise_native_store_error(database, agent_id, "the existing regular database is missing")
+    try:
+        guard_destination_path_chain(
+            database,
+            context,
+        )
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        with sqlite3.connect(_native_agent_database_uri(database, mode), uri=True) as connection:
+            connection.execute("PRAGMA query_only = ON;")
+            row = connection.execute(NATIVE_AGENT_SCHEMA_QUERY).fetchone()
+    except sqlite3.Error as exc:
+        _raise_native_store_error(database, agent_id, f"schema_meta validation failed ({exc})")
+    if row is None:
+        _raise_native_store_error(
+            database,
+            agent_id,
+            "schema_meta native ownership metadata row is absent",
+        )
+    role, schema_version, stored_agent_id, app_version = row
+    if (
+        role != NATIVE_AGENT_ROLE
+        or schema_version != NATIVE_AGENT_SCHEMA_VERSION
+        or stored_agent_id != agent_id
+        or not isinstance(app_version, str)
+        or not app_version
+    ):
+        _raise_native_store_error(
+            database,
+            agent_id,
+            "schema_meta native ownership metadata does not identify the native agent store",
+        )
+
+
 def _sync_database(target: str, source: str) -> None:
-    source_sql = quote_sqlite_literal(source)
+    source_sql = quote_sqlite_literal(_native_agent_database_uri(source, "ro"))
     script = AUTH_SYNC_SQL_TEMPLATE.format(source_db=source_sql)
     try:
-        with sqlite3.connect(target) as connection:
+        with sqlite3.connect(_native_agent_database_uri(target, "rw"), uri=True) as connection:
             connection.executescript(script)
     except sqlite3.Error as exc:
         raise RuntimeError(str(exc)) from exc
@@ -120,6 +188,12 @@ def sync_managed_agent_codex_auth(
             f"ERROR: Missing main OpenClaw auth store {source_db}.\n"
             f"       Run: {openclaw_bin} models auth login --provider openai"
         )
+    _validate_native_agent_database(
+        source_db,
+        "main",
+        mode="ro",
+        context=f"validating native OpenClaw agent database {source_db}",
+    )
     if not _has_openai_profile(source_db):
         raise SystemExit(
             "ERROR: Main OpenClaw auth store has no OpenAI/Codex OAuth profile.\n"
@@ -137,6 +211,12 @@ def sync_managed_agent_codex_auth(
         if agent_id == "main":
             print(f"  {agent_id} → {target_db} (source)")
             continue
+        _validate_native_agent_database(
+            target_db,
+            agent_id,
+            mode="rw",
+            context=f"syncing managed OpenClaw agent auth database {target_db}",
+        )
         _guarded_mkdir(
             agent_dir,
             f"creating managed OpenClaw agent auth directory {agent_dir}",
@@ -153,10 +233,6 @@ def sync_managed_agent_codex_auth(
                 target_profiles,
                 f"chmod managed OpenClaw auth profile {target_profiles}",
             )
-        guard_destination_path_chain(
-            target_db,
-            f"syncing managed OpenClaw agent auth database {target_db}",
-        )
         _sync_database(target_db, source_db)
         _guarded_chmod(
             0o600,

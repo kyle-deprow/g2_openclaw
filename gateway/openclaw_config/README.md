@@ -66,3 +66,17 @@ generated diff. The deployment checkpoint must prove the configured route,
 workspace ownership, provider/auth invariants, service lifecycle, and clean
 rollback. This document authorizes no deployment, service, auth, database,
 network, or dependency action.
+
+## Native auth-store maintenance order
+
+The paused push publishes the configuration and managed artifacts but defers
+Codex auth synchronization. On a later operator-authorized maintenance window,
+complete the steps in this order: run the paused push; let the supported native
+OpenClaw runtime initialize each managed agent store; then run the normal push
+to synchronize the existing stores. Auth synchronization requires both the
+main source store and every target `openclaw-agent.sqlite` to be existing native
+stores with a valid `schema_meta` primary ownership row (`role=agent`, schema
+version 19, and the expected agent ID). A missing or unowned target is a
+fail-closed prerequisite failure: initialize it through the public native
+OpenClaw path first. The deployment helper never creates an auth database or
+inserts schema metadata manually.
