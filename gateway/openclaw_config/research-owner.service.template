@@ -10,6 +10,7 @@ BindsTo=openclaw-gateway.service
 Type=simple
 ExecStart=@REPO_ROOT@/.venv/bin/gateway-cli research serve --root "@RESEARCH_V2_ROOT@" --session-key agent:research-orchestrator:autoresearch:quantipy-v2 --poll-seconds 60
 EnvironmentFile=@REPO_ROOT@/.env
+Environment=RESEARCH_CORE_DATABASE=@RESEARCH_CORE_DATABASE@
 Restart=on-failure
 RestartSec=30
 # Exit 78 records a fatal owner failure with state PAUSED; do not loop-restart

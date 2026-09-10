@@ -1665,6 +1665,9 @@ def _prepare_push_script_home(
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(f"# Test {skill_name} skill\n", encoding="utf-8")
     openclaw_home.mkdir()
+    core_database = openclaw_home / "state/openclaw.sqlite"
+    core_database.parent.mkdir(parents=True)
+    core_database.write_bytes(b"synthetic core database fixture\n")
     auth_db = openclaw_home / "agents/main/agent/openclaw-agent.sqlite"
     auth_db.parent.mkdir(parents=True)
     with sqlite3.connect(auth_db) as connection:
@@ -1768,6 +1771,7 @@ def _prepare_push_script_home(
                 f"OPENCLAW_PUSH_HOME={tmp_path / 'env-file-push-home'}",
                 f"OPENCLAW_STATE_DIR={tmp_path / 'env-file-state-dir'}",
                 f"OPENCLAW_CONFIG_PATH={tmp_path / 'env-file-config.json'}",
+                f"RESEARCH_CORE_DATABASE='{core_database}'",
                 "",
             ]
         ),
@@ -1840,6 +1844,21 @@ def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         text=True,
         env=script_env,
     )
+
+
+def _schema_validation_status(payload: dict[str, object]) -> int:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+    start = script.index("openclaw_schema_validation_is_clean() {")
+    end = script.index("\n}\n\nfile_sha256", start) + 2
+    function = script[start:end]
+    result = subprocess.run(
+        ["bash", "-c", f"{function}\nopenclaw_schema_validation_is_clean"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode
 
 
 def _prepare_paused_push_script_home(tmp_path: Path) -> dict[str, str]:
@@ -3029,6 +3048,77 @@ def test_push_script_rejects_unsafe_research_root_before_live_write(
     assert not list(live_config.parent.glob("openclaw.json.bak.*"))
 
 
+def test_push_script_rejects_missing_core_database_before_live_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env_file = Path(env["OPENCLAW_PUSH_ENV_FILE"])
+    env_file.write_text(
+        "\n".join(
+            line
+            for line in env_file.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("RESEARCH_CORE_DATABASE=")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "RESEARCH_CORE_DATABASE is required" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+
+
+def test_push_script_rejects_core_database_outside_configured_state_root(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    wrong = tmp_path / "wrong-state" / "openclaw.sqlite"
+    wrong.parent.mkdir()
+    wrong.write_bytes(b"wrong state fixture\n")
+    env_file = Path(env["OPENCLAW_PUSH_ENV_FILE"])
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8").replace(
+            next(
+                line
+                for line in env_file.read_text(encoding="utf-8").splitlines()
+                if line.startswith("RESEARCH_CORE_DATABASE=")
+            ),
+            f"RESEARCH_CORE_DATABASE={wrong}",
+        ),
+        encoding="utf-8",
+    )
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "must equal the configured OpenClaw state database" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+
+
+def test_push_script_rejects_symlinked_core_database_before_live_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    core_database = Path(env["OPENCLAW_PUSH_HOME"]) / "state/openclaw.sqlite"
+    core_database.unlink()
+    target = core_database.with_name("actual.sqlite")
+    target.write_bytes(b"symlink target fixture\n")
+    core_database.symlink_to(target)
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "regular non-symlink file" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+
+
 def test_push_script_installs_but_does_not_start_the_research_owner_service() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
     template = RESEARCH_OWNER_UNIT_TEMPLATE.read_text(encoding="utf-8")
@@ -3056,6 +3146,7 @@ def test_push_script_installs_but_does_not_start_the_research_owner_service() ->
     assert "--session-key agent:research-orchestrator:autoresearch:quantipy-v2" in template
     assert "--poll-seconds 60" in template
     assert "EnvironmentFile=@REPO_ROOT@/.env" in template
+    assert "Environment=RESEARCH_CORE_DATABASE=@RESEARCH_CORE_DATABASE@" in template
     assert "Requires=openclaw-gateway.service" not in template
     assert "Restart=on-failure" in template
     assert "RestartSec=30" in template
@@ -3077,6 +3168,31 @@ def test_push_script_installs_but_does_not_start_the_research_owner_service() ->
     assert "KillMode=control-group" in api_template
     assert "Restart=on-failure" in api_template
     assert "Restart=always" not in api_template
+
+
+def test_schema_guard_accepts_only_the_known_disabled_heartbeat_warning() -> None:
+    accepted = {
+        "valid": True,
+        "errors": [],
+        "warnings": [
+            {
+                "path": "agents.defaults.heartbeat.agentId",
+                "message": (
+                    "Multi-agent config has no ambient heartbeat owner; heartbeats stay "
+                    "disabled until agents.defaults.heartbeat.agentId or "
+                    "agents.defaults.systemAgent.agentId is set."
+                ),
+            }
+        ],
+    }
+    unknown = {
+        "valid": True,
+        "errors": [],
+        "warnings": [{"path": "agents.defaults.heartbeat.agentId", "message": "unexpected"}],
+    }
+
+    assert _schema_validation_status(accepted) == 0
+    assert _schema_validation_status(unknown) != 0
 
 
 def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
@@ -3296,13 +3412,17 @@ def test_push_script_selector_is_immutable_before_publication(
     else:
         env = _prepare_push_script_home(tmp_path)
     env.update(mode_env)
+    env_file_was_supplied = bool(env_file_text)
+    if not env_file_text:
+        core_database = Path(env["OPENCLAW_PUSH_HOME"]) / "state/openclaw.sqlite"
+        env_file_text = f"RESEARCH_CORE_DATABASE='{core_database}'\n"
     Path(env["OPENCLAW_PUSH_ENV_FILE"]).write_text(env_file_text, encoding="utf-8")
     live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
     original = live_config.read_bytes()
 
     result = _run_push_script(env)
 
-    if env_file_text:
+    if env_file_was_supplied:
         assert result.returncode != 0
         assert live_config.read_bytes() == original
         assert not list(live_config.parent.glob("openclaw.json.bak.*"))
@@ -3517,6 +3637,9 @@ def test_push_script_renders_native_codex_children_for_owner_workspace(
     owner_root = str(rendered_research_root)
     owner_unit_text = owner_unit.read_text(encoding="utf-8")
     assert f'--root "{owner_root}"' in owner_unit_text
+    assert (
+        f"Environment=RESEARCH_CORE_DATABASE={openclaw_home / 'state/openclaw.sqlite'}"
+    ) in owner_unit_text
     assert "%h/.openclaw/research-v2" not in owner_unit_text
     assert "RestartPreventExitStatus=78" in owner_unit_text
     assert "KillMode=process" in owner_unit_text

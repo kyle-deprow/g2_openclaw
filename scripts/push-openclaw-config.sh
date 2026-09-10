@@ -277,6 +277,32 @@ validate_bounded_research_roots() {
   fi
 }
 
+validate_research_core_database() {
+  local expected_path="${OPENCLAW_PUSH_HOME}/state/openclaw.sqlite"
+  if [[ -z "${RESEARCH_CORE_DATABASE:-}" ]]; then
+    echo "ERROR: RESEARCH_CORE_DATABASE is required; refusing to infer a task database path." >&2
+    return 1
+  fi
+  if [[ "${RESEARCH_CORE_DATABASE}" != "${expected_path}" ]]; then
+    echo "ERROR: RESEARCH_CORE_DATABASE must equal the configured OpenClaw state database ${expected_path}." >&2
+    return 1
+  fi
+  if [[ "${RESEARCH_CORE_DATABASE}" != /* || "${RESEARCH_CORE_DATABASE}" == "/" ]]; then
+    echo "ERROR: RESEARCH_CORE_DATABASE must be an absolute non-root path." >&2
+    return 1
+  fi
+  case "${RESEARCH_CORE_DATABASE}" in
+    *$'\n'*|*$'\r'*|*$'\t'*|*'"'*|*'\\'*|*'@'*|*'%'*)
+      echo "ERROR: RESEARCH_CORE_DATABASE contains an unsafe control, quoting, or unresolved-placeholder character." >&2
+      return 1
+      ;;
+  esac
+  if [[ -L "${RESEARCH_CORE_DATABASE}" || ! -f "${RESEARCH_CORE_DATABASE}" ]]; then
+    echo "ERROR: RESEARCH_CORE_DATABASE must be an existing regular non-symlink file: ${RESEARCH_CORE_DATABASE}" >&2
+    return 1
+  fi
+}
+
 OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
 MIGRATION_RECORD_DST="${OPENCLAW_PUSH_HOME}/.openclaw.migration-record.json"
@@ -318,10 +344,20 @@ run_openclaw_cli_for_config() {
 
 openclaw_schema_validation_is_clean() {
   jq -se '
+    def accepted_disabled_heartbeat_warning:
+      .path == "agents.defaults.heartbeat.agentId"
+      and .message == "Multi-agent config has no ambient heartbeat owner; heartbeats stay disabled until agents.defaults.heartbeat.agentId or agents.defaults.systemAgent.agentId is set.";
     length == 1
     and (.[0] | type == "object")
     and (.[0].valid == true)
-    and (.[0].warnings | type == "array" and length == 0)
+    and ((.[0].errors // []) | type == "array" and length == 0)
+    and (
+      (.[0].warnings | type == "array" and length == 0)
+      or (
+        (.[0].warnings | length == 1)
+        and (.[0].warnings[0] | accepted_disabled_heartbeat_warning)
+      )
+    )
   ' >/dev/null 2>&1
 }
 
@@ -542,7 +578,8 @@ validate_native_crash_hardening_dropin_file() {
 }
 
 validate_research_owner_unit_file() {
-  local path="$1" expected_root="${2:-}" exec_start_ok=0 environment_file_ok=0
+  local path="$1" expected_root="${2:-}" expected_core_database="${3:-}" \
+    exec_start_ok=0 environment_file_ok=0 core_database_ok=0
   if [[ ! -f "${path}" ]]; then
     echo "ERROR: Repo-managed research owner unit not found at ${path}" >&2
     return 1
@@ -556,12 +593,18 @@ validate_research_owner_unit_file() {
     || grep -Fxq "EnvironmentFile=${REPO_ROOT}/.env" "${path}"; then
     environment_file_ok=1
   fi
+  if grep -Fxq "Environment=RESEARCH_CORE_DATABASE=@RESEARCH_CORE_DATABASE@" "${path}" \
+    || { [[ -n "${expected_core_database}" ]] \
+      && grep -Fxq "Environment=RESEARCH_CORE_DATABASE=${expected_core_database}" "${path}"; }; then
+    core_database_ok=1
+  fi
   if ! grep -Fxq "Description=G2 research owner loop" "${path}" \
     || ! grep -Fxq "BindsTo=${GATEWAY_SERVICE_NAME}" "${path}" \
     || ! grep -Fxq "After=${GATEWAY_SERVICE_NAME}" "${path}" \
     || ! grep -Fxq "Type=simple" "${path}" \
     || [[ "${exec_start_ok}" -ne 1 ]] \
     || [[ "${environment_file_ok}" -ne 1 ]] \
+    || [[ "${core_database_ok}" -ne 1 ]] \
     || ! grep -Fxq "Restart=on-failure" "${path}" \
     || ! grep -Fxq "RestartSec=30" "${path}" \
     || ! grep -Fxq "RestartPreventExitStatus=78" "${path}" \
@@ -1747,6 +1790,7 @@ PRESERVE_ENV_VARS=(
   MEMPALACE_EXPECTED_EMBEDDING_MODEL
   MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
   RESEARCH_V2_ROOT
+  RESEARCH_CORE_DATABASE
   HYPOTHESIS_WORKTREES_ROOT
 )
 declare -A PRESERVED_ENV=()
@@ -1794,6 +1838,9 @@ HYPOTHESIS_WORKTREES_ROOT="${HYPOTHESIS_WORKTREES_ROOT:-${RESEARCH_V2_ROOT}/hypo
 export RESEARCH_V2_ROOT HYPOTHESIS_WORKTREES_ROOT
 
 if ! validate_bounded_research_roots; then
+  exit 1
+fi
+if ! validate_research_core_database; then
   exit 1
 fi
 
@@ -2587,6 +2634,7 @@ sed \
   -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
   -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
   -e "s|@RESEARCH_V2_ROOT@|$(escape_sed_replacement "${RESEARCH_V2_ROOT}")|g" \
+  -e "s|@RESEARCH_CORE_DATABASE@|$(escape_sed_replacement "${RESEARCH_CORE_DATABASE}")|g" \
   -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
   "${RESEARCH_OWNER_UNIT_TEMPLATE}" > "${RESEARCH_OWNER_UNIT_TMP}"
 guard_destination_path_chain "${RESEARCH_OWNER_UNIT_TMP}" "wrote generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
@@ -2594,7 +2642,7 @@ if grep -q '@[A-Z_][A-Z_]*@' "${RESEARCH_OWNER_UNIT_TMP}"; then
   echo "ERROR: Unresolved placeholder in generated ${RESEARCH_OWNER_SERVICE_NAME}." >&2
   exit 1
 fi
-if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_V2_ROOT}"; then
+if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_V2_ROOT}" "${RESEARCH_CORE_DATABASE}"; then
   exit 1
 fi
 guarded_chmod 0644 "${RESEARCH_OWNER_UNIT_TMP}" "chmod generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
