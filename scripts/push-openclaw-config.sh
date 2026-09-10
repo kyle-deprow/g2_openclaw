@@ -87,6 +87,7 @@ QUANTIPY_API_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 NATIVE_CRASH_HARDENING_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${NATIVE_CRASH_HARDENING_DROPIN_NAME}"
+OBSOLETE_CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/20-openclaw-codex-runtime.conf"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
 REQUIRED_OPENCLAW_VERSION="2026.8.1"
@@ -701,6 +702,23 @@ validate_native_crash_hardening_dropin_file() {
     echo "ERROR: OpenClaw native-crash hardening drop-in must match the repo-managed memory, OOM, and restart policy exactly." >&2
     return 1
   fi
+}
+
+retire_obsolete_codex_runtime_dropin() {
+  if [[ ! -e "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" \
+    && ! -L "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" || -L "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" ]]; then
+    echo "ERROR: Obsolete OpenClaw Codex runtime drop-in is not a regular file: ${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" >&2
+    return 1
+  fi
+  snapshot_managed_artifact_path "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" || return 1
+  guarded_rm_f \
+    "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" \
+    "retiring obsolete OpenClaw Codex runtime drop-in ${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" \
+    || return 1
+  echo "Retired obsolete OpenClaw Codex runtime drop-in → ${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}"
 }
 
 validate_research_owner_unit_file() {
@@ -2836,6 +2854,9 @@ validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP
 guarded_mv_replace "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}" "publishing managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP=""
 validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+if ! retire_obsolete_codex_runtime_dropin; then
+  run_deployment_rollback_and_exit 1
+fi
 if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
   echo "DEFERRED: paused mode skipped systemd user-manager daemon-reload."
 else

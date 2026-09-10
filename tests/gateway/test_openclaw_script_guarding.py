@@ -3203,11 +3203,17 @@ def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
     )
 
 
-def test_push_script_does_not_reference_retired_codex_runtime_dropin() -> None:
+def test_push_script_retires_obsolete_codex_runtime_dropin_transactionally() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
-    assert "openclaw-codex-runtime.conf" not in script
+    assert (
+        'OBSOLETE_CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/'
+        '20-openclaw-codex-runtime.conf"'
+    ) in script
+    assert "retire_obsolete_codex_runtime_dropin()" in script
+    assert 'snapshot_managed_artifact_path "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}"' in script
+    assert "guarded_rm_f" in script
+    assert '"${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}"' in script
     assert "ensure-openclaw-codex-runtime.mjs" not in script
-    assert "CODEX_RUNTIME_DROPIN" not in script
 
 
 def test_native_crash_hardening_dropin_contains_memory_and_restart_policy() -> None:
@@ -3597,6 +3603,50 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert "env-file-push-home" not in openclaw_log
     assert "env-file-state-dir" not in openclaw_log
     assert "env-file-config.json" not in openclaw_log
+
+
+def test_push_script_retires_obsolete_codex_runtime_dropin_after_native_install(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    obsolete = _runtime_caps_dropin_dst(home).with_name("20-openclaw-codex-runtime.conf")
+    obsolete.parent.mkdir(parents=True)
+    obsolete.write_text(
+        "[Service]\n"
+        "ExecStartPre=/usr/bin/env node /home/dev/repos/g2_openclaw/scripts/"
+        "ensure-openclaw-codex-runtime.mjs\n",
+        encoding="utf-8",
+    )
+    obsolete.chmod(0o600)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert not obsolete.exists()
+    assert _native_crash_hardening_dropin_dst(home).is_file()
+    assert "Retired obsolete OpenClaw Codex runtime drop-in" in result.stdout
+
+
+def test_push_script_rolls_back_obsolete_codex_runtime_dropin_on_reload_failure(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    home = Path(env["HOME"])
+    obsolete = _runtime_caps_dropin_dst(home).with_name("20-openclaw-codex-runtime.conf")
+    obsolete.parent.mkdir(parents=True)
+    prior_contents = b"[Service]\nExecStartPre=/usr/bin/env node stale-runtime.mjs\n"
+    obsolete.write_bytes(prior_contents)
+    obsolete.chmod(0o600)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert obsolete.read_bytes() == prior_contents
+    assert _mode(obsolete) == 0o600
+    assert not _native_crash_hardening_dropin_dst(home).exists()
+    assert "Restoring managed OpenClaw artifacts after failed publication." in result.stderr
 
 
 def test_push_script_ignores_signal_during_final_commit_boundary(
