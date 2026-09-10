@@ -21,6 +21,7 @@ import websockets
 import websockets.asyncio.server
 from gateway.config import GatewayConfig
 from gateway.openclaw_client import OpenClawClient
+from gateway.research.status import build_status_frame, unavailable_status
 from gateway.server import GatewayServer, OpenClawResponseHandler
 from gateway.transcriber import Transcriber
 
@@ -29,6 +30,21 @@ from gateway.transcriber import Transcriber
 # ---------------------------------------------------------------------------
 
 TIMEOUT = 10.0
+
+_EXPECTED_RESEARCH_STATUS = build_status_frame(
+    unavailable_status("research state database is missing")
+)
+_RESEARCH_STATUS_NULLABLE_FIELDS = {
+    "hypothesisId",
+    "hypothesisState",
+    "attemptId",
+    "attemptState",
+    "lastAstraDecision",
+    "campaignStatus",
+    "boundaryFailure",
+    "lastEventAt",
+    "updatedAt",
+}
 
 
 def _agent_event(
@@ -92,6 +108,15 @@ async def _consume_handshake(
     history = await _recv(ws)
     assert history["type"] == "history"
     idle = await _recv(ws)
+    research_status = await _recv(ws)
+    assert set(research_status) == set(_EXPECTED_RESEARCH_STATUS)
+    assert research_status == _EXPECTED_RESEARCH_STATUS
+    assert research_status["type"] == "autoresearch_status"
+    assert research_status["stage"] == "idle"
+    assert research_status["ownerState"] == "unknown"
+    assert research_status["available"] is False
+    assert research_status["unavailableReason"] == "research state database is missing"
+    assert all(research_status[field] is None for field in _RESEARCH_STATUS_NULLABLE_FIELDS)
     return connected, idle
 
 
@@ -408,7 +433,6 @@ async def _make_openclaw_gateway(
         openclaw_port=oc_port,
         openclaw_gateway_token="oc-token",
         agent_timeout=agent_timeout,
-        autoresearch_feed_interval=0,
     )
     gw = GatewayServer(
         config,
@@ -662,7 +686,6 @@ class TestOpenClawNotRunning:
             openclaw_port=dead_port,
             openclaw_gateway_token="oc-token",
             agent_timeout=10,
-            autoresearch_feed_interval=0,
         )
         gw = GatewayServer(config, handler=oc_handler)
         gw_server = await websockets.serve(gw.handler, "127.0.0.1", 0)

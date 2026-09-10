@@ -143,7 +143,7 @@ TypeScript thin client running on iPhone via EvenHub. Bridges G2 glasses (BLE) t
 **Key features:**
 
 - Boots directly into the single autoresearch thread view (idle) — no session menu
-- Autoresearch status header (`AR <phase> it<n> · <outcome>`) plus the PM session's latest messages rendered as `◆` feed entries, interleaved with voice exchanges
+- Autoresearch status header (`AR <phase> it<n> · <outcome>`) plus the single research-owner thread's latest messages rendered as `◆` feed entries, interleaved with voice exchanges
 - Reverse chronological display — newest messages at top
 - Streaming delta display with 100ms debounced batching
 - Display layout: 576×288 canvas — status bar (y=2, 24px), content (y=34, 212px), footer (y=256, 26px)

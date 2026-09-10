@@ -280,11 +280,12 @@ Update MEMORY.md when:
 - A fact is critical across all future sessions
 ```
 
-**Deployment policy (this repo):** no model writes memory. The sole memory
-writer is the non-model finalizer `gateway/mempalace_finalizer.py`; agents get
-read-only mempalace-readonly MCP retrieval only, `memory_search`/`memory_get`
-are globally denied, and `compaction.memoryFlush` is disabled deliberately. Do
-not add memory-writing instructions to agent files in this deployment.
+**Deployment policy (this repo):** no model writes memory. Agents get only
+read-only mempalace-readonly MCP retrieval; `memory_search`/`memory_get` are
+globally denied and `compaction.memoryFlush` is disabled deliberately. The
+current research loop keeps host receipts in its research store; it has no
+automated MemPalace writer. Do not add memory-writing instructions to agent
+files in this deployment.
 
 ### `agents-safety-rules`
 Non-negotiable safety rules belong in AGENTS.md, not SOUL.md:
