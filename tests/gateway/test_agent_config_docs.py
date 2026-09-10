@@ -255,6 +255,7 @@ def test_mempalace_readonly_skill_locks_tools_and_safety_policy() -> None:
 
     assert len(tools) == 19
     assert tuple(tools) == EXPECTED_MEMPALACE_TOOLS
+    assert MEMORY_POLICY_SENTENCE in text
     assert "diary_write" not in text
     assert "mempalace-readonly.mempalace_write" not in text
     for phrase in (
