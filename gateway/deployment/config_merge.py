@@ -38,6 +38,16 @@ class ConfigMergeError(RuntimeError):
 
 STALE_CODING_PROVIDER_KEYS = frozenset({"github-copilot", "copilot-proxy", "copilot-cli"})
 
+# These are the exact paths rejected by the OpenClaw 8.1 runtime schema.  The
+# migration intentionally does not walk by key name: similarly named nested
+# settings must survive the candidate unchanged.
+UNSUPPORTED_OPENCLAW_8_1_PATHS: tuple[tuple[str, ...], ...] = (
+    ("meta", "lastTouchedAt"),
+    ("agents", "defaults", "memorySearch"),
+    ("commands", "ownerDisplay"),
+    ("memory", "backend"),
+)
+
 
 @dataclass(frozen=True)
 class AssemblyInputs:
@@ -135,6 +145,70 @@ def _set_path(root: JsonObject, path: Sequence[str], value: JsonValue) -> None:
             current[key] = child
         current = child
     current[path[-1]] = value
+
+
+def _pop_path(root: JsonObject, path: Sequence[str]) -> tuple[bool, JsonValue | None]:
+    """Remove one exact object path, preserving whether its value was null."""
+
+    current: JsonObject = root
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            return False, None
+        current = child
+    leaf = path[-1]
+    if leaf not in current:
+        return False, None
+    return True, current.pop(leaf)
+
+
+def _path_exists(root: JsonObject, path: Sequence[str]) -> bool:
+    current: JsonValue = root
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+    return True
+
+
+def migrate_8_1_config(config: JsonObject) -> tuple[JsonObject, JsonObject]:
+    """Remove the exact unsupported 8.1 paths and return a private record."""
+
+    candidate = cast(JsonObject, _copy(config))
+    removed: list[JsonValue] = []
+    for path in UNSUPPORTED_OPENCLAW_8_1_PATHS:
+        found, value = _pop_path(candidate, path)
+        if found:
+            removed.append(
+                {
+                    "path": ".".join(path),
+                    "value": _copy(value),
+                }
+            )
+
+    record: JsonObject = {"removed": removed}
+    remaining = [
+        ".".join(path) for path in UNSUPPORTED_OPENCLAW_8_1_PATHS if _path_exists(candidate, path)
+    ]
+    if remaining:
+        raise ConfigMergeError(
+            "8.1 schema migration left unsupported paths: " + ", ".join(remaining)
+        )
+    return candidate, record
+
+
+def write_migration_record(path: str | Path, record: JsonObject) -> None:
+    """Write a deterministic migration record with owner-only permissions."""
+
+    encoded = serialize_json(record)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(encoded)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        raise ConfigMergeError(f"could not write migration record {path}: {exc}") from exc
 
 
 def _jq_truthy(value: JsonValue | object) -> bool:
@@ -296,7 +370,7 @@ def _model_declared(config: JsonObject, provider: str, model_id: str) -> bool:
     return any(isinstance(item, dict) and item.get("id") == model_id for item in declared)
 
 
-def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:
+def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:
     """Apply every managed jq assembly operation to two decoded configs."""
 
     merged = _object(deep_merge(local, repo), "merged config")
@@ -345,9 +419,6 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
         agents = _object(merged["agents"], "merged agents")
         agents["defaults"] = defaults
     if repo_defaults is not None:
-        memory_search = repo_defaults.get("memorySearch")
-        if _jq_truthy(memory_search):
-            defaults["memorySearch"] = _copy(memory_search)
         compaction = _get_object(repo_defaults, "compaction")
         memory_flush = compaction.get("memoryFlush") if compaction is not None else None
         if _jq_truthy(memory_flush):
@@ -478,6 +549,21 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
     return merged
 
 
+def assemble_config_with_migration(
+    local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
+) -> tuple[JsonObject, JsonObject]:
+    """Assemble a candidate, then apply the one-time 8.1 schema migration."""
+
+    return migrate_8_1_config(_assemble_config(local, repo, inputs))
+
+
+def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:
+    """Assemble and migrate a candidate while preserving the legacy return contract."""
+
+    config, _ = assemble_config_with_migration(local, repo, inputs)
+    return config
+
+
 def _json_object_arg(raw: str, name: str) -> JsonObject | list[str]:
     try:
         value = json.loads(raw)
@@ -525,7 +611,11 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         research_reviewer_launcher=args.research_reviewer_launcher,
         acpx_adapter_bin=args.acpx_adapter_bin,
     )
-    return serialize_json(assemble_config(local, repo, inputs))
+    config, migration_record = assemble_config_with_migration(local, repo, inputs)
+    migration_record_path = getattr(args, "migration_record", None)
+    if migration_record_path is not None:
+        write_migration_record(migration_record_path, migration_record)
+    return serialize_json(config)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -548,6 +638,11 @@ def _build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("g2_agents_json")
     assemble.add_argument("research_reviewer_launcher")
     assemble.add_argument("acpx_adapter_bin")
+    assemble.add_argument(
+        "--migration-record",
+        type=Path,
+        help="write the private 8.1 schema migration record with mode 0600",
+    )
 
     orchestrator_parser = subparsers.add_parser("orchestrator-model")
     orchestrator_parser.add_argument("repo_config")

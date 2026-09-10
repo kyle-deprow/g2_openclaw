@@ -17,9 +17,11 @@ from gateway.deployment.config_merge import (
     JsonObject,
     JsonValue,
     assemble_config,
+    assemble_config_with_migration,
     deep_merge,
     load_json,
     serialize_json,
+    write_migration_record,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -127,6 +129,114 @@ def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> Non
     codex_config = cast(JsonObject, codex["config"])
     app_server = cast(JsonObject, codex_config["appServer"])
     assert "defaultWorkspaceDir" not in app_server
+
+
+def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
+    tmp_path: Path,
+) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "meta": {"lastTouchedAt": "local-timestamp", "lastTouchedVersion": "local"},
+            "agents": {
+                "defaults": {
+                    "memorySearch": {"enabled": True, "provider": "mempalace"},
+                    "nested": {"memorySearch": {"enabled": True}},
+                }
+            },
+            "commands": {"ownerDisplay": "hash", "nested": {"ownerDisplay": "raw"}},
+            "memory": {"backend": None, "citations": "off", "nested": {"backend": "keep"}},
+        },
+    )
+
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {
+        "backend": None,
+        "citations": "off",
+        "nested": {"backend": "keep"},
+    }
+    migrated, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert record == {
+        "removed": [
+            {"path": "meta.lastTouchedAt", "value": "local-timestamp"},
+            {
+                "path": "agents.defaults.memorySearch",
+                "value": {"enabled": True, "provider": "mempalace"},
+            },
+            {"path": "commands.ownerDisplay", "value": "hash"},
+            {"path": "memory.backend", "value": None},
+        ]
+    }
+    assert "lastTouchedAt" not in cast(JsonObject, migrated["meta"])
+    assert cast(JsonObject, migrated["meta"])["lastTouchedVersion"] == "2026.8.1"
+    defaults = cast(JsonObject, cast(JsonObject, migrated["agents"])["defaults"])
+    assert "memorySearch" not in defaults
+    assert cast(JsonObject, defaults["nested"])["memorySearch"] == {"enabled": True}
+    assert "ownerDisplay" not in cast(JsonObject, migrated["commands"])
+    memory = cast(JsonObject, migrated["memory"])
+    assert "backend" not in memory
+    assert memory["citations"] == "off"
+    assert cast(JsonObject, memory["nested"])["backend"] == "keep"
+
+
+def test_schema_migration_preserves_provider_and_auth_objects(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "gateway": {"auth": {"token": "machine-local-token"}},
+            "models": {
+                "providers": {
+                    "azure-oai-g2": {"apiKey": "local-azure-key"},  # pragma: allowlist secret
+                    "private": {
+                        "apiKey": "private-key",  # pragma: allowlist secret
+                        "headers": {"X-Auth": "value"},
+                    },
+                }
+            },
+        },
+    )
+
+    migrated, _ = assemble_config_with_migration(
+        local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+    )
+
+    assert cast(JsonObject, migrated["gateway"])["auth"] == {"token": "machine-local-token"}
+    providers = cast(JsonObject, cast(JsonObject, migrated["models"])["providers"])
+    azure = cast(JsonObject, providers["azure-oai-g2"])
+    assert azure["apiKey"] == "local-azure-key"  # pragma: allowlist secret
+    assert cast(JsonObject, providers["private"]) == {
+        "apiKey": "private-key",  # pragma: allowlist secret
+        "headers": {"X-Auth": "value"},
+    }
+
+
+def test_migration_record_file_is_deterministic_and_private(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "meta": {"lastTouchedAt": "machine-local"},
+            "commands": {"ownerDisplay": "raw"},
+        },
+    )
+    _, record = assemble_config_with_migration(
+        local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+    )
+    record_path = tmp_path / "migration-record.json"
+
+    write_migration_record(record_path, record)
+
+    assert record_path.read_bytes() == serialize_json(record)
+    assert record_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_overlay_does_not_contain_removed_8_1_paths() -> None:
+    overlay = cast(JsonObject, load_json(REPO_CONFIG))
+
+    assert "memorySearch" not in cast(JsonObject, cast(JsonObject, overlay["agents"])["defaults"])
+    assert "backend" not in cast(JsonObject, overlay["memory"])
+    assert "ownerDisplay" not in cast(JsonObject, overlay["commands"])
+    assert "lastTouchedAt" not in cast(JsonObject, overlay["meta"])
 
 
 def _assembly_inputs(
@@ -247,16 +357,6 @@ def _jq_full_assembly(
             )
     repo_agents = cast(JsonObject, repo["agents"])
     repo_defaults = cast(JsonObject, repo_agents["defaults"])
-    memory_search = repo_defaults.get("memorySearch")
-    merged = _run_jq(
-        [
-            "--argjson",
-            "memory_search",
-            _json_arg(memory_search),
-            ".agents.defaults.memorySearch = $memory_search",
-        ],
-        input_bytes=merged,
-    )
     repo_compaction = cast(JsonObject, repo_defaults["compaction"])
     memory_flush = repo_compaction["memoryFlush"]
     merged = _run_jq(
@@ -362,6 +462,15 @@ def _jq_full_assembly(
             '"permissionMode":"approve-reads","nonInteractivePermissions":"fail",'
             '"pluginToolsMcpBridge":false,"openClawToolsMcpBridge":false,"mcpServers":{}'
             "}",
+        ],
+        input_bytes=merged,
+    )
+    merged = _run_jq(
+        [
+            "del(.meta.lastTouchedAt) | "
+            "del(.agents.defaults.memorySearch) | "
+            "del(.commands.ownerDisplay) | "
+            "del(.memory.backend)"
         ],
         input_bytes=merged,
     )
@@ -504,11 +613,20 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     local_path = tmp_path / "live.json"
-    _write_json(local_path, {})
+    _write_json(
+        local_path,
+        {
+            "meta": {"lastTouchedAt": "machine-local"},
+            "agents": {"defaults": {"memorySearch": {"enabled": True}}},
+            "commands": {"ownerDisplay": "raw"},
+        },
+    )
     home = tmp_path / "fake-home"
     push_home = home / ".openclaw"
     arguments = [
         "assemble",
+        "--migration-record",
+        str(tmp_path / "migration-record.json"),
         "--",
         str(local_path),
         str(REPO_CONFIG),
@@ -545,6 +663,14 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     assert result.returncode == 0, result.stderr
     published = json.loads(result.stdout)
     assert published["agents"]["defaults"]["model"]["primary"] == "openai/gpt-5.4"
+    assert json.loads((tmp_path / "migration-record.json").read_text()) == {
+        "removed": [
+            {"path": "meta.lastTouchedAt", "value": "machine-local"},
+            {"path": "agents.defaults.memorySearch", "value": {"enabled": True}},
+            {"path": "commands.ownerDisplay", "value": "raw"},
+        ]
+    }
+    assert (tmp_path / "migration-record.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_python_serializer_uses_jq_style_unicode_and_newline() -> None:
