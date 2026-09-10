@@ -149,28 +149,15 @@ canonical decision receipts and MemPalace readonly retrieval with
 pass in autoresearch. The platform finalizer alone persists a validated,
 retention-eligible canonical decision after the model turn completes.
 
-### Supervisor repeatedly reports invalid autoresearch state JSON
-**Symptom:** The supervisor restarts repeatedly with `invalid autoresearch state
-JSON`, then systemd start-limits the service. The authoritative state may be an
-empty file while a `.quantipy-state.json.*` temp file remains nearby.
+### Research owner reports a missing or invalid status
+**Symptom:** The bounded owner cannot prove admission, review, run, or terminal
+state.
 
-**Root cause:** A shell workflow created an empty temp output, ran
-`autoresearch-advance`, and moved the temp file over authoritative state even
-after advancement failed.
-
-**Fix:** Persist directly to the authoritative path. The runner locks and
-atomically replaces it:
-
-```bash
-uv run gateway-cli autoresearch-advance "$state" "$artifact" \
-  --instruction-manifest-sha256 "$manifest_sha" \
-  --state-reference-sha256 "$state_sha" \
-  --output "$state"
-```
-
-Never use an unconditional shell `mv` to publish autoresearch state. Preserve
-the invalid file as evidence, restore the latest independently validated state,
-then restart supervision.
+**Fix:** Read the existing research status surface and immutable receipts.
+Preserve the exact typed refusal or pause, including its evidence and
+correlation identifiers. Do not invent a state transition, retry a lost child,
+replace unknown evidence, or clear a readiness pause. Escalate the exact
+missing proof to the operator.
 
 ### OpenClaw invents strategies from training data
 **Cause:** Violating "Research before invention" principle.
@@ -305,11 +292,11 @@ after cleanup with `df -h /tmp /home/dev`.
 
 | Skill | Location | Purpose |
 |-------|----------|---------|
-| codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Codex invocation, background exec, detached runs, resume, debugging |
-| autoresearch | `gateway/agent_config/skills/autoresearch/` | Autonomous research loop protocol |
+| codex-subagents | `gateway/agent_config/skills/codex-subagents/` | Native Codex delegation and bounded child evidence |
+| autoresearch | `gateway/agent_config/skills/autoresearch/` | Current bounded research-owner contract |
 | mempalace-readonly | `gateway/agent_config/skills/mempalace-readonly/` | Read-only MemPalace context access (search, diary, traversal, KG query) for model threads |
-| quantipy-data-contract | `gateway/agent_config/skills/quantipy-data-contract/` | Runtime data-access and point-in-time contract for Quantipy autoresearch stages |
-| quantipy-methodology | `gateway/agent_config/skills/quantipy-methodology/` | Deterministic source-of-truth routing for Quantipy autoresearch stages |
+| quantipy-data-contract | `gateway/agent_config/skills/quantipy-data-contract/` | Runtime data-access and point-in-time contract for research |
+| research-loop | `gateway/agent_config/skills/research-loop/` | Canonical route-neutral owner contract |
 | *(this skill)* | `.agents/skills/openclaw-improvement/` | Meta: how to improve OpenClaw itself |
 
 When creating new skills for OpenClaw, place them at `gateway/agent_config/skills/<name>/SKILL.md`.

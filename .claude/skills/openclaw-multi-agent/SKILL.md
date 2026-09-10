@@ -30,14 +30,13 @@ Design and operate multi-agent systems: orthogonal specialists, controlled commu
 
 ## This repo
 
-- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4; `autoresearch-pm`/`consensus_arbiter`/`reviewer`=gpt-5.6-sol; `debater_data`=gpt-5.6-terra; `debater_microstructure`/`debater_skeptic`=gpt-5.5; others gpt-5.4.
-- **Session topology:** G2 traffic → `agent:main:g2`; autoresearch runs only in `agent:autoresearch-pm:autoresearch:quantipy`.
-- **Orchestration driver:** `gateway/autoresearch_supervisor.py` + the `gateway/autoresearch/` package (systemd user unit `quantipy-autoresearch-supervisor.service`, 60s poll, `BindsTo=openclaw-gateway.service`); control/receipts in `gateway/autoresearch_control.py`, `gateway/autoresearch_decision_receipts.py`, `gateway/autoresearch_panel_receipts.py`.
+- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4 and `research-orchestrator`=openai/gpt-6-astra. Native Luna and ACP Opus are bounded child routes.
+- **Session topology:** G2 traffic → `agent:main:g2`; research-owner traffic uses `agent:research-orchestrator:autoresearch:quantipy-v2`.
+- **Orchestration driver:** `gateway/research/` and `research-owner.service`; status and receipts remain in the bounded research store. The owner unit is bound to `openclaw-gateway.service`.
 - **Config changes** go through `gateway/openclaw_config/` + `bash scripts/push-openclaw-config.sh`, never `~/.openclaw/` edits.
-- **Long-task helpers:** `scripts/run-long-task.sh`, `scripts/run-long-task-worker.sh`.
 
 ## Repo policy overrides
 
-- **OpenClaw session tools are NOT the multi-agent mechanism here.** `main` denies all `sessions_*` tools; `autoresearch-pm` denies `sessions_spawn`/`sessions_yield`/`sessions_list`/`sessions_history`/`agents_list`. The canonical `sessions_send`/`sessions_spawn` playbook does not apply — native Codex `spawn_agent` is used instead of OpenClaw session spawning.
+- **OpenClaw session tools are NOT the research delegation mechanism here.** `main` denies all `sessions_*` tools; `research-orchestrator` uses native Codex `spawn_agent` for bounded Luna children and ACP Opus review. The canonical session-spawning playbook does not apply to the owner.
 - **No per-spawn model or tool broadening:** models are pinned per agent in `openclaw.json` (single provider: OpenAI/Codex app-server via OAuth, no fallback, no aliases); the canonical example models/emojis are illustrative only.
-- **Supervisor pattern is external, not cron-in-agent:** orchestration health is driven by the systemd supervisor unit, not by an agent running `sessions_list` on a cron job.
+- **Owner cadence is external, not cron-in-agent:** research health is driven by the research-owner unit, not by an agent running `sessions_list` on a cron job.

@@ -32,14 +32,13 @@ Schedule tasks, react to lifecycle events, and integrate external systems throug
 
 ## This repo
 
-- **The load-bearing automation is a systemd user unit, not OpenClaw cron:** `quantipy-autoresearch-supervisor.service` (template in `gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template`), 60s poll, `BindsTo=openclaw-gateway.service`; logic in `gateway/autoresearch_supervisor.py` and `gateway/autoresearch_systemd.py`.
-- **The supervisor drives** autoresearch runs in `agent:autoresearch-pm:autoresearch:quantipy` (the `gateway/autoresearch/` package, `gateway/autoresearch_runs.py`) and the MemPalace finalizer (`gateway/mempalace_finalizer.py`).
+- **The load-bearing automation is a systemd user unit, not OpenClaw cron:** `research-owner.service` (template in `gateway/openclaw_config/research-owner.service.template`), bound to `openclaw-gateway.service`; logic is in `gateway/research/`.
+- **The owner drives** bounded research in `agent:research-orchestrator:autoresearch:quantipy-v2`; model turns read MemPalace only and platform receipts remain authoritative.
 - **Webhook/daemon endpoints:** OpenClaw Gateway daemon on port `18789`; the repo's G2 gateway WebSocket runs on port `8765`.
 - **Config changes** (cron jobs, webhooks, heartbeat settings) are edited in `gateway/openclaw_config/openclaw.json` and deployed with `bash scripts/push-openclaw-config.sh` — never hand-edit `~/.openclaw/`.
-- **Long-running task scripts:** `scripts/run-long-task.sh`, `scripts/run-long-task-worker.sh`.
 
 ## Repo policy overrides
 
-- **No ad hoc model refs in scheduled jobs:** the canonical example (`"model": "openai/gpt-5-mini"`) is illustrative only. This deployment pins models per agent in `openclaw.json` (main gpt-5.4; autoresearch-pm/consensus_arbiter/reviewer gpt-5.6-sol; debater_data gpt-5.6-terra; debater_microstructure/debater_skeptic gpt-5.5; others gpt-5.4) on a single OpenAI/Codex OAuth provider — no alias-based model guidance applies.
-- **Supervisor-driven automation supersedes in-agent scheduling:** autoresearch orchestration and the memory finalizer are driven by the external systemd supervisor, not agent-created cron jobs; do not replicate them as `cron_create` jobs.
+- **No ad hoc model refs in scheduled jobs:** the canonical example (`"model": "openai/gpt-5-mini"`) is illustrative only. This deployment pins `main` to gpt-5.4 and `research-orchestrator` to gpt-6-astra; native Luna and ACP Opus are bounded children on the single OpenAI/Codex OAuth provider.
+- **Owner-driven automation supersedes in-agent scheduling:** bounded research cadence is external and deterministic, not an agent-created cron job; do not replicate it as a `cron_create` job.
 - **Hooks that write memory are off-policy:** the `session-memory` bundled hook (transcript indexing into vector memory) conflicts with this repo's read-only MemPalace architecture (`memorySearch.enabled: false`, memory tools denied); leave it out of any hook plans.

@@ -31,14 +31,14 @@ Keep the Gateway control plane predictable, session keys deliberate, and context
 ## This repo
 
 - **Gateway daemon port `18789`; G2 gateway WebSocket port `8765`** (repo gateway server in `gateway/server.py`, protocol in `gateway/protocol.py`).
-- **Session keys in use:** G2 traffic → `agent:main:g2`; autoresearch runs only in `agent:autoresearch-pm:autoresearch:quantipy`. Resolution helpers: `gateway/session_resolver.py`, history in `gateway/session_history.py`.
+- **Session keys in use:** G2 traffic → `agent:main:g2`; research-owner traffic uses `agent:research-orchestrator:autoresearch:quantipy-v2`. Resolution helpers: `gateway/session_resolver.py`, history in `gateway/session_history.py`.
 - **Config deployment:** edit `gateway/openclaw_config/openclaw.json` or `gateway/agent_config/`, then run `bash scripts/push-openclaw-config.sh` (guarded, transactional, fail-closed). Never hand-edit `~/.openclaw/` files.
 - **Bootstrap files** live in `gateway/agent_config/` (AGENTS.md, SOUL.md, TOOLS.md, BOOTSTRAP.md).
 - **Lifecycle via Makefile:** `make launch` (foreground gateway), `make sim` (full stack + OTel), `make sim-lite`, `make stop`.
-- **Supervisor coupling:** `quantipy-autoresearch-supervisor.service` (systemd user unit, template in `gateway/openclaw_config/`) has `BindsTo=openclaw-gateway.service` — gateway restarts take the supervisor down with it.
+- **Owner coupling:** `research-owner.service` (systemd user unit, template in `gateway/openclaw_config/`) has `BindsTo=openclaw-gateway.service` — gateway restarts take the owner down with it.
 
 ## Repo policy overrides
 
-- **Do NOT enable `compaction.memoryFlush`:** the canonical skill says to always enable the pre-compaction memory flush; this deployment deliberately sets `compaction.memoryFlush.enabled: false`. Memory persistence is handled exclusively by the non-model MemPalace finalizer (`gateway/mempalace_finalizer.py`), not by an agent flush turn.
+- **Do NOT enable `compaction.memoryFlush`:** this deployment deliberately sets `compaction.memoryFlush.enabled: false`. Model turns never write durable memory; research receipts and any later persistence are platform-owned, not an agent flush turn.
 - **`cache-ttl` pruning guidance is Anthropic-oriented:** this deployment's provider is OpenAI/Codex app-server via OAuth only, so the "prune when Anthropic cache is stale" rationale does not transfer directly — treat pruning changes as reviewed config edits against `gateway/openclaw_config/openclaw.json`.
 - **No manual `~/.openclaw` edits:** the canonical skill discusses workspace files directly; here every change flows through `scripts/push-openclaw-config.sh`.

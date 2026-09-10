@@ -1,423 +1,64 @@
-# OpenClaw Config (Repo-Managed)
-
-This directory contains the **repo-maintained** subset of the OpenClaw
-configuration used by the G2 Gateway.
-
-## Files
-
-| File | Purpose |
-|---|---|
-| `openclaw.json` | Model providers (OpenAI/Codex + Azure + OpenRouter), agent defaults, session settings |
-| `.env.example` | Template for API keys and provider selection env vars |
-| `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
-| `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
-| `openclaw-gateway-native-crash-hardening.conf` | User-systemd drop-in source for OpenClaw memory and native-crash restart containment |
-| `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for all autoresearch models |
-| `README.md` | This file |
-
-## Cold-Start Install (Fresh Machine)
-
-```bash
-# 1. Verify the approved OpenClaw build is already installed (Node.js 22+ required)
-openclaw --version  # must be exactly 2026.8.1
-
-# 2. Create the ~/.openclaw/ scaffold
-openclaw onboard --local
-
-# 3. Reconcile the exact Codex plugin/runtime tuple, then authenticate
-openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
-openclaw plugins inspect codex --json  # must embed @openai/codex 0.151.0
-openclaw models auth login --provider openai
-
-# 4. Rewrite the user service so ExecStart targets this exact core package
-openclaw daemon install --force --port 18789 --json
-
-# 5. Install/upgrade required MemPalace MCP server
-make mempalace-install
-
-# 6. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
-cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
-
-# 7. Push config (merges provider/runtime config and copies bootstrap files)
-uv run python -m gateway push-config
-
-# 8. Launch everything
-uv run python -m gateway launch
-```
-
-The full path is also available as `bash scripts/bootstrap.sh`. The exact
-supported tuple is OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, and
-embedded `@openai/codex` `0.151.0`; newer and older versions both fail closed.
-The reviewed local plugin archive is installed with explicit capability
-consent; registry and alternate-runtime fallbacks are not permitted. The
-plugin package has no `bin`; the embedded `@openai/codex` package owns
-`bin/codex.js`.
-`daemon install --force` rewrites the systemd unit but does not start or restart
-the service.
-
-Steps 3-5 and 7 are idempotent. Re-run the push step after any config change or
-key rotation. The push step copies OpenClaw's local Codex OAuth profile from
-the `main` agent into each managed autoresearch agent's own auth store; this is
-required because some OpenClaw Codex compaction paths read the per-agent SQLite
-store directly.
-The default OpenAI/Codex route must not set Azure `NODE_OPTIONS` preload state.
-Azure preload is explicit Azure-only setup.
-
-## How It Works
-
-The local OpenClaw installation keeps its full config at
-`~/.openclaw/openclaw.json`. That file contains machine-local settings (gateway
-auth tokens, wizard state, metadata timestamps) that **must not** be
-overwritten.
-
-The `openclaw.json` in this directory holds only the settings we want to
-version-control — primarily the OpenAI/Codex runtime path, optional Azure and
-OpenRouter providers, and agent defaults. The companion push script
-(`scripts/push-openclaw-config.sh`) merges
-these settings into the local config with `jq`, preserving everything else.
-
-### What is managed here
-
-- **Codex runtime** — enables the `codex` plugin, sets the OpenAI provider
-  `agentRuntime.id` to `codex`, defaults bounded execution stages to
-  `openai/gpt-5.4`, keeps `main` as a G2 interface agent, and pins
-  high-judgment PM/review/consensus stages to `openai/gpt-5.6-sol` high.
-- **OpenAI provider** — declares `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`,
-  `gpt-5.6-terra`, and `gpt-5-mini` model refs for authenticated OpenAI/Codex
-  use.
-- **MemPalace-only research memory** — disables built-in OpenClaw memory search
-  and memory flush, keeps OpenClaw compaction in `default` mode so Codex
-  app-server native compaction owns Codex sessions, denies
-  `memory_search`/`memory_get`, and projects only filtered
-  `mempalace-readonly` into every model thread, including the G2 `main`
-  interface, the PM, and every native Codex stage agent.
-  The state-bound platform finalizer, outside every model thread, performs
-  canonical final-decision persistence through the installed MemPalace venv.
-- **Main control boundary** — keeps `main` on an exact non-wildcard OpenClaw
-  allowlist so the Codex native tool surface stays disabled by current
-  `@openclaw/codex` policy, and loads exactly
-  `g2-control` plus read-only MemPalace through `main`'s direct Codex
-  `agent/codex-home/config.toml`. The rejected wildcard plus
-  `codexDynamicToolsExclude` pattern and unsupported
-  `nativeToolSurfaceEnabled` plugin config key are not used.
-- **Scoped Codex homes** — writes and validates per-agent direct Codex
-  `agent/codex-home/config.toml` for `main`, the PM, and spawned native children with
-  `approval_policy=never`, `sandbox_mode=workspace-write`,
-  `sandbox_workspace_write.writable_roots` limited to
-  `/home/dev/.openclaw/autoresearch/model-workspaces` and
-  `/home/dev/.openclaw/autoresearch/stage-inbox`, and supported Codex 0.151.0
-  `network_access=true` rather than the removed OpenClaw plugin `networkProxy`
-  profile.
-- **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
-  deployment (`gpt-5-4` on `oai-ss-aisense-dev-eastus2.openai.azure.com`).
-- **Agent roster** — exact `main` interface agent, `autoresearch-pm`, and
-  audited autoresearch stage-agent IDs, model assignments, high reasoning,
-  MemPalace skill split, Quantipy methodology loading, tool denies, disabled
-  built-in memory search/flush, and native Codex delegation guards. The actual
-  stage launches use `.codex/agents/*.toml` through native Codex `spawn_agent`;
-  OpenClaw `sessions_spawn` is forbidden.
-- **Managed bootstrap files** — `AGENTS.md`, `SOUL.md`, `TOOLS.md`, and
-  `BOOTSTRAP.md` are copied to every configured OpenClaw agent workspace derived
-  from `agents.list`; `main` uses `~/.openclaw/workspace`, `autoresearch-pm`
-  and stage agents default to `~/.openclaw/workspace-{id}` unless `.workspace`
-  is set, and local files such as `USER.md` and `IDENTITY.md` are left
-  untouched.
-- **Numerical runtime caps** — installs the repo-managed user-systemd drop-in
-  `openclaw-gateway.service.d/10-quantipy-runtime-caps.conf` so
-  OpenClaw-launched Quantipy children inherit one-thread BLAS/joblib caps and
-  `PYTHONFAULTHANDLER=1` after the gateway is externally restarted. Its
-  `[Unit]` section also declares
-  `Upholds=quantipy-autoresearch-supervisor.service`: while the gateway is up,
-  manually stopping the supervisor will be undone by systemd. Operators must
-  stop the gateway too, or mask the supervisor first.
-- **Native-crash containment** — installs a repo-managed user-systemd drop-in
-  with `MemoryHigh=8G`, `MemoryMax=10G`, and `OOMPolicy=kill`. `SIGKILL` is
-  omitted from `RestartPreventExitStatus`, so a memory-limit OOM auto-restarts
-  the gateway within `RestartSec`; `StartLimitBurst=5` over 60 seconds still
-  bounds genuine crash loops. Native fatal signals such as `SIGSEGV` and
-  `SIGABRT` remain in `RestartPreventExitStatus` and prevent restart.
-- **Session / command settings** — DM scope, reaction scope, command modes.
-
-### What is NOT managed here
-
-- `gateway.auth.token` — generated locally by `openclaw onboard`.
-- `wizard` / `meta` — bookkeeping written by the OpenClaw binary.
-- Actual API keys — stored in `.env` (gitignored) or env vars.
-
-## Deploying Config to the Local Machine
-
-> **First time?** See the [Cold-Start Install](#cold-start-install-fresh-machine) section above.
-
-### 1. Install or upgrade the exact OpenClaw/Codex runtime
-
-The default provider is `codex`, which uses OpenAI/Codex OAuth auth managed by
-OpenClaw, not an OpenAI API key:
-
-```bash
-openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
-openclaw plugins inspect codex --json
-openclaw daemon install --force --port 18789 --json
-openclaw models auth login --provider openai
-```
-
-The inspect result must report plugin version `2026.8.1` and dependency
-`@openai/codex` spec `0.151.0`. The exact local plugin archive and core tuple
-are required; registry, newer, older, and alternate-runtime fallbacks fail
-closed. The forced daemon install repairs a stale service path without
-starting or restarting the gateway. Run `bash scripts/bootstrap.sh` to
-validate this sequence.
-
-No OpenAI key is stored in this repo. The login populates the local OpenClaw
-auth store. `scripts/push-openclaw-config.sh` then syncs the portable auth
-profile rows into the managed `autoresearch-pm` and stage-agent stores so
-agent-scoped Codex turns and transcript compaction can use the same OAuth
-profile.
-
-Keep `agents.defaults.compaction.mode` set to `default` for the Codex route.
-OpenClaw 2026.8.1 and native Codex 0.151.0 own automatic compaction. The
-retired 7.1 verifier/drop-in is not installed or validated; no API-key
-compactor or alternate runtime is permitted.
-
-The repo-managed agent defaults intentionally set `maxConcurrent=2` to cap the
-main lane while preserving headroom for `autoresearch-pm`. Autoresearch stage
-delegation is native Codex `spawn_agent`, governed by the `.codex/agents/*.toml`
-stage roster and PM task supervision. Do not configure OpenClaw
-`subagents.allowAgents` as a sessions-based replacement.
-
-It also installs `30-openclaw-native-crash-hardening.conf`. The memory limits
-apply to the gateway control group, including its child processes.
-`OOMPolicy=kill` terminates the remaining processes in that cgroup after an OOM
-kill. Because `SIGKILL` is omitted from `RestartPreventExitStatus`, a
-memory-limit OOM auto-restarts the gateway within `RestartSec`. The
-`StartLimitBurst=5`/`StartLimitIntervalSec=60` limit still bounds genuine crash
-loops. Native fatal signals such as `SIGSEGV` and `SIGABRT` remain listed in
-`RestartPreventExitStatus`, preventing restart for those failures; the
-autoresearch supervisor's `BindsTo` relationship remains active during the
-restart sequence.
-
-### 2. Install/upgrade required MemPalace MCP
-
-```bash
-make mempalace-install
-```
-
-The push script fails closed if MemPalace is missing or the MCP module is not
-runnable.
-
-### 3. Optional env file
-
-Copy the example env file when changing models or selecting Azure/OpenRouter:
-
-```bash
-cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
-# Edit .env
-```
-
-For Azure, retrieve the key if your local config does not already have one:
-
-```bash
-az cognitiveservices account keys list \
-  --name oai-ss-aisense-dev-eastus2 \
-  --resource-group rg-ss-aisense-dev-eastus2 \
-  --query key1 -o tsv
-```
-
-### 4. Run the push script
-
-From the repo root:
-
-```bash
-# One-liner: push config and restart the daemon
-uv run python -m gateway push-config
-
-# Or push-only (no daemon restart)
-uv run python -m gateway push-config --no-restart
-```
-
-Or run the underlying shell script directly:
-
-```bash
-bash scripts/push-openclaw-config.sh
-```
-
-The script will:
-
-1. Verify `openclaw-gateway.service` is loadable before any backup, config,
-   bootstrap, skill, or unit-file mutation
-2. Back up `~/.openclaw/openclaw.json` → `~/.openclaw/openclaw.json.bak.<timestamp>`
-3. Deep-merge the repo config into the local config (local-only keys preserved)
-4. Set the selected default model, force the repo-managed agent roster, and
-   fail if any pinned agent model is not declared
-5. Install the repo-managed MemPalace read-only wrapper and resolve its palace path
-6. Resolve `env:OPENROUTER_API_KEY` when OpenRouter is selected
-7. Validate repo-managed invariants for `main` interface isolation,
-   `autoresearch-pm`, exact stage-agent models, high reasoning, memory policy,
-   the read-only-only MemPalace MCP projection, and native Codex stage-agent
-   MCP inheritance
-8. Copy managed agent bootstrap files to every configured agent workspace, copy
-   repo skills after validating the referenced skill directories, and copy
-   `azure-api-version-preload.cjs`
-9. Validate the generated config with `openclaw config validate --json` before
-   writing, validate the written result with `openclaw config validate`, and
-   inspect the Codex plugin
-10. Install the supervisor service definition, the persistent OpenClaw Gateway
-   runtime-cap and native-crash hardening drop-ins,
-   then run `systemctl --user daemon-reload`. These four managed systemd files
-   are restored to their prior contents, or removed when previously absent, if
-   any later install, validation, or reload step fails.
-
-When `OPENCLAW_PROVIDER=codex`, the script also removes stale systemd
-`NODE_OPTIONS` state that references `azure-api-version-preload.cjs` from the
-systemd user-manager environment, OpenClaw gateway unit, and drop-ins. Codex
-uses OpenClaw-managed OpenAI OAuth; do not keep Azure fetch monkey-patches in
-that route.
-
-The script is idempotent — safe to run repeatedly.
-
-`systemctl --user daemon-reload` only refreshes systemd's view of unit files and
-drop-ins. It does not update the environment of an already running
-`openclaw-gateway.service` process. The push script intentionally keeps its
-no-restart behavior; operators must restart the gateway externally when they
-want the runtime caps or native-crash hardening to
-take effect. The runtime-cap drop-in's `Upholds` relationship also means that
-stopping the supervisor while the gateway remains up is undone by systemd;
-stop the gateway too, or mask the supervisor first.
-
-### 5. Enable the api-version preload for Azure only
-
-`gateway launch` does not inject this preload on the default Codex path. If you
-explicitly select Azure and run OpenClaw standalone:
-
-```bash
-export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
-openclaw daemon
-```
-
-## Provider Selection
-
-The push script selects the active provider via `OPENCLAW_PROVIDER`.
-
-```bash
-# Default OpenAI/Codex path
-uv run python -m gateway push-config
-
-# Use a specific configured OpenAI model for unspecified/default agents
-OPENCLAW_PROVIDER=codex OPENAI_MODEL=gpt-5-mini uv run python -m gateway push-config
-
-# Use Azure explicitly
-OPENCLAW_PROVIDER=azure uv run python -m gateway push-config
-
-# Use OpenRouter explicitly
-OPENCLAW_PROVIDER=openrouter OPENROUTER_MODEL=openai/gpt-4.1 uv run python -m gateway push-config
-```
-
-The default provider is `codex`. Unsupported model selections fail instead of
-falling back to another provider or model.
-
-Autoresearch stage-agent models are not selected by environment variables.
-Change them in `gateway/openclaw_config/openclaw.json` and run the push script;
-the script validates the exact model matrix before writing local OpenClaw
-config.
-
-## G2 Interface and PM Session
-
-G2 traffic routes to `main`, the human-facing interface agent. It does not load
-`mempalace` or `autoresearch`, has no stage-agent allowlist, and may only hand
-human start/status/stop requests to deterministic control commands. Autonomous
-research runs in `agent:autoresearch-pm:autoresearch:quantipy`; supervisors and
-control commands communicate with OpenClaw there directly.
-
-## OpenAI/Codex Provider Details
-
-| Setting | Value |
-|---|---|
-| Auth | `openclaw models auth login --provider openai`, then push config to sync the OAuth profile into managed agent stores |
-| Runtime | OpenAI provider `agentRuntime.id: "codex"` |
-| Plugin | `@openclaw/codex` exactly `2026.8.1`, enabled, embedding `@openai/codex` exactly `0.151.0` |
-| Default stage model | `openai/gpt-5.4` |
-| G2 interface model | `openai/gpt-5.4` for `main` |
-| Autoresearch PM model | `openai/gpt-5.6-sol` for `autoresearch-pm` |
-| Frontier judgment model | `openai/gpt-5.6-sol` for PM, consensus, and review |
-| Data debate model | `openai/gpt-5.6-terra` |
-| Microstructure/skeptic debate model | `openai/gpt-5.5` |
-| Alternate model | `openai/gpt-5-mini` |
-
-## Azure OpenAI Provider Details
-
-| Setting | Value |
-|---|---|
-| Endpoint | `https://oai-ss-aisense-dev-eastus2.openai.azure.com/` |
-| Deployment name | `gpt-5-4` |
-| Model | GPT-5.4 (Azure OpenAI, eastus) |
-| API type | `openai-completions` (OpenClaw's label for OpenAI-compatible APIs) |
-| Context window | 1 047 576 tokens |
-| Max output tokens | 32 768 |
-
-OpenClaw auto-detects `*.openai.azure.com` URLs and rewrites them internally
-to `<baseUrl>/openai/deployments/<modelId>`, so the deployment name must match
-the model ID in the config (`gpt-5.4`).
-
-## OpenRouter Provider
-
-OpenRouter is an OpenAI-compatible router that gives access to models from
-Anthropic, OpenAI, Google, and others through a single API key.
-
-### Setup
-
-1. Get an API key at <https://openrouter.ai/keys>
-2. Add it to your `.env` file:
-   ```bash
-   cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
-   # Edit .env and set OPENROUTER_API_KEY=sk-or-...
-   ```
-
-### Available Models
-
-| Model ID | Name | Context | Max Tokens |
-|---|---|---|---|
-| `anthropic/claude-sonnet-4-20250514` | Claude Sonnet 4 | 200 000 | 16 384 |
-| `openai/gpt-4.1` | GPT-4.1 | 1 047 576 | 32 768 |
-| `google/gemini-2.5-flash-preview` | Gemini 2.5 Flash Preview | 1 048 576 | 65 536 |
-
-OpenRouter does **not** need the `azure-api-version-preload.cjs` workaround —
-it uses standard OpenAI-compatible endpoints.
-
-## Azure API-Version Preload Workaround
-
-Azure OpenAI requires every request to carry an `api-version` query parameter.
-The official `AzureOpenAI` SDK client adds it automatically, but OpenClaw uses
-the **regular `OpenAI` client**, which does not. Without the parameter Azure
-returns **404**.
-
-OpenClaw's config schema is validated with Zod and rejects unknown keys like
-`defaultQuery`, so there is no declarative way to inject the parameter.
-
-### How it works
-
-`azure-api-version-preload.cjs` is a tiny CommonJS module that monkey-patches
-`globalThis.fetch`. For any request whose hostname matches
-`*.openai.azure.com`, it appends `?api-version=2024-12-01-preview` if the parameter
-is not already present. All other requests pass through untouched.
-
-### Enabling the preload
-
-The push script (`scripts/push-openclaw-config.sh`) copies the file to
-`~/.openclaw/`. Then export `NODE_OPTIONS` before starting the daemon:
-
-```bash
-export NODE_OPTIONS="--require $HOME/.openclaw/azure-api-version-preload.cjs"
-openclaw daemon
-```
-
-Do not add this export to a shared shell profile used for Codex. Persistent
-Azure `NODE_OPTIONS` in the shell or systemd user manager can leak into later
-Codex runs; `OPENCLAW_PROVIDER=codex` pushes remove it from managed systemd
-state.
-
-### Debugging
-
-Set `AZURE_PRELOAD_DEBUG=1` to log every patched URL to stderr:
-
-```bash
-AZURE_PRELOAD_DEBUG=1 openclaw daemon
-```
+# OpenClaw configuration
+
+This directory is the source of truth for the guarded OpenClaw deployment.
+Changes are reviewed in the repository and later published by the operator with
+scripts/push-openclaw-config.sh. Do not hand-edit ~/.openclaw, authenticate,
+restart services, or run the publish script while reviewing source changes.
+
+## Runtime tuple and provider
+
+The managed runtime is OpenClaw 2026.8.1, @openclaw/codex 2026.8.1, and
+embedded @openai/codex 0.151.0. The default route is OpenAI/Codex app-server
+through OAuth. Azure or OpenRouter are explicit operator-selected routes only;
+an unavailable route is a fail-closed error, never an invented alias or silent
+provider switch.
+
+The config keeps the G2 interface agent main on openai/gpt-5.4 and the bounded
+research owner research-orchestrator on openai/gpt-6-astra. Native Luna is the
+approved implementation/runner child and Claude Code Opus via ACP is the
+review-only child. Child identity, attempt, commit, spec digest, and evidence
+are bound by the research owner; no deleted debate roster or retired service
+unit is configured.
+
+## Sessions and lifecycle
+
+G2 traffic uses agent:main:g2. Research-owner traffic uses
+agent:research-orchestrator:autoresearch:quantipy-v2. The source unit
+research-owner.service owns the deterministic cadence and is bound to
+openclaw-gateway.service. Its source template is
+gateway/openclaw_config/research-owner.service.template.
+
+The owner loop is hypothesis equals iteration and each attempt is code → review
+→ run, with at most three attempts. Astra explicitly chooses FINISH, ABANDON,
+or PAUSE after exhaustion. Preserve typed admission refusals, policy-unset
+pause, exhausted-attempt completion, exact cancel, owner wake, and immutable
+receipts. Main controls remain read-only.
+
+## Memory and scientific boundary
+
+memory_search and memory_get are denied. agents.defaults.memorySearch.enabled
+and compaction.memoryFlush.enabled are false. Models receive read-only
+MemPalace context and never write durable memory. Research receipts and later
+persistence are platform-owned.
+
+The initial capability is price-panel-only and ETF-scoped. Stock work requires
+trusted point-in-time earnings coverage and fails closed on unknown earnings.
+A holding horizon above five sessions is refused. Trusted panel sessions,
+immutable receipts, the exposure ledger, and evaluator bounds are mandatory for
+scientific statements. Smoke or synthetic data does not prove installed
+readiness or alpha.
+
+## Guarded publication
+
+The push script validates the generated JSON against the installed 8.1 schema,
+the OpenAI/Codex provider, the main and research-owner agent IDs, bounded tool
+profiles, memory denial, and the research-owner unit. It publishes atomically
+with rollback evidence and prunes stale installed copies using its declared
+arrays. Keep those prune arrays and route checks unchanged when editing this
+README.
+
+Before a later authorized deployment, run source-only checks and inspect the
+generated diff. The deployment checkpoint must prove the configured route,
+workspace ownership, provider/auth invariants, service lifecycle, and clean
+rollback. This document authorizes no deployment, service, auth, database,
+network, or dependency action.

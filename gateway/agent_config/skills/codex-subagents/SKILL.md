@@ -1,176 +1,68 @@
 ---
 name: codex-subagents
-description:
-  Delegating implementation, review, and research work from OpenClaw to Codex subagents. Use when running the autonomous Quantipy research loop, splitting work into implementation/review/fix phases, monitoring long-running Codex tasks, or recovering stuck Codex sessions.
+description: Native Codex delegation contract for bounded G2 and research work.
 ---
 
-# Codex Subagent Delegation
+# Native Codex delegation
 
-OpenClaw is the PM and conversation surface. Native Codex `spawn_agent` is the
-execution surface for target-repo research, implementation, review, and fixes.
-OpenClaw `sessions_spawn` is not a valid substitute for autoresearch stages.
+This runtime skill governs delegation from the configured OpenClaw Codex
+runtime. It does not create a second orchestration route.
 
-## Delegation Contract
+## Research roles
 
-Every delegated Codex task needs:
+- Astra is the research owner and receives every child result.
+- Native Luna is the approved implementer and experiment runner.
+- Claude Code Opus via ACP is reviewer-only and receives one reserved review
+  bundle per attempt.
+- Main is read-only and never dispatches research work.
 
-1. Target repo and working directory.
-2. Native Codex stage agent name from `.codex/agents/*.toml`.
-3. Exact task objective.
-4. Files or directories to inspect first.
-5. Verification commands.
-6. Expected return summary.
+Use only configured native Codex roles. Do not discover roles from session
+history, invent a role, override a model, or switch provider. The research
+owner uses the exact route and session supplied by the current admission
+receipt. OpenClaw session spawning is not the research delegation mechanism.
 
-Use native Codex stage agents only when a task benefits from isolated context
-or parallel work. For small edits in this repo, a single Codex turn is usually
-enough.
+## Dispatch contract
 
-## Quantipy Loop
+A dispatch prompt names the hypothesis, attempt, exact worktree, allowed files,
+scope fence, evidence contract, finite verification command, and completion
+sentinel. Bind the child task to the attempt, commit, and specification digest.
+The implementer changes only its experiment worktree. The runner executes only
+the admitted committed worktree and performs no repair, retry, substitution,
+evaluator substitution, or invented result.
 
-Use the native Codex stage agents from the `autoresearch` skill. Existing
-target repo Codex instructions can inform prompt content, but the stage names
-below are authoritative:
+Reserve immutable review evidence before the one ACP Opus review. Verify the
+acknowledgement, child task identity, run, mode, attempt, commit, and spec
+digest. Collect a strict bound verdict. Never retype a verdict or respawn after
+an unknown acknowledgement. An exact cancel rereads the current task and is
+sent once; unknown correlation remains pending and pauses the owner.
 
-Call `spawn_agent` with these configured agent names directly. Do not use
-OpenClaw `sessions_spawn`, generic/default agents, inherited models, or
-per-spawn model overrides for autoresearch stages; the repo config and native
-Codex TOMLs bind each stage to its model.
+Every completion-required child handoff receives a non-empty normal Astra
+acknowledgement, including while another required child remains pending. Do not
+use a tool-only wait, conceal an error, send an autonomous G2 announcement, or
+claim completion without the durable artifact.
 
-| Native Codex stage | Role |
-|---|---|
-| `context_curator` | Read-only MemPalace and canonical decision-receipt context packet |
-| `debater_microstructure` | Market mechanics theory |
-| `debater_data` | Data availability, coverage, and target construction |
-| `debater_skeptic` | Leakage, overfit, and cherry-picking pressure |
-| `debater_theory` | Statistical and finance rationale |
-| `debater_implementation` | Buildability and verification cost |
-| `consensus_arbiter` | 3-of-5 majority decision and implementation brief |
-| `implementer` | End-to-end implementation |
-| `reviewer` | Single GPT-5.6-sol high methodology review |
-| `fixer` | Concrete fixes only |
+## Verification and boundaries
 
-## Implementation/Review/Fix Pattern
+A hypothesis equals one iteration; each attempt is code → review → run, with at
+most three attempts. Astra explicitly chooses FINISH, ABANDON, or PAUSE after
+exhaustion. Typed admission refusals, policy-unset pause, exhausted-attempt
+completion, owner wake, exact cancel, and read-only main controls are durable
+contract behavior.
 
-1. Call native `spawn_agent` for the configured `implementer` agent with a narrow prompt and required tests.
-2. Wait for completion and inspect the returned summary, changed files, and
-   verification output.
-3. Call native `spawn_agent` for exactly one configured `reviewer` agent against the diff.
-4. If findings exist, call native `spawn_agent` for the configured `fixer` agent with only those findings.
-5. Repeat review/fix until the reviewer reports no must-fix issues.
-6. Run final verification from the parent context.
+The scientific boundary is price-panel-only and ETF-scoped. Refuse stock work
+without trusted point-in-time earnings coverage; unknown earnings and horizons
+above five sessions fail closed. Require trusted panel sessions, immutable
+receipts, the exposure ledger, and evaluator bounds. Smoke or synthetic data
+proves contracts only.
 
-For Quantipy work, require a committed `quantipy-experiment-v2` manifest with
-exactly `prepare`, `smoke`, `feasibility`, and `model`. Run focused tests, then detach
-the exact `env PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync quantipy experiment run MANIFEST
---output-root ROOT --run-id
-autoresearch-i<iteration>-<commit12>` command. Only `ROOT/run-id/run.json`
-under the runner-declared fixed private runs root proves full verification.
-Requested panels require their nested typed receipt and bound files. If
-focused tests prevent execution, return the exact failed command
-and evidence needed for `quantipy_execution_not_started`; do not claim a
-missing runtime receipt. G2 reserves that absent run directory with a private
-tombstone; retry only from a new implementation/fix commit with its new
-deterministic run ID. Notebook, `nbconvert`, and `papermill` execution can
-smoke-test or render a report only and never establish PASS.
+Use quantipy-data-contract readiness receipts. Do not query a database or
+provider directly, install dependencies, edit shared gateway/runtime/auth
+files, write MemPalace, or deploy source changes. Models have read-only
+MemPalace context; memory search and pre-compaction flush are disabled.
 
-## Detached Long Tasks
+The frozen command vocabulary is available from:
 
-Any hydration, backtest, notebook execution, or similarly long verification
-command must use the detached launch mechanism. NEVER execute
-`scripts/run-long-task.sh` in your session: inside a
-sandboxed session the uid mapping makes root-owned control binaries stat as
-nobody:nogroup, so the launcher's ownership pin always fails before it can
-prepare or queue anything. Instead prepare the run yourself, then submit a
-schema_version 1 launch request and confirm acceptance:
+uv run gateway-cli research --help
 
-- Create the one-time private command file with
-  `/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli
-  autoresearch-create-command-file --output <absolute-command-file>` (schema-v1
-  stdin protocol: `{"schema_version":1,"command":["bash","-lc","<non-secret command>"]}`).
-- Prepare the immutable run directory with
-  `/home/dev/repos/g2_openclaw/.venv/bin/python -m gateway.autoresearch_runs
-  prepare-with-command-file --manifest <absolute-manifest.json>
-  --run-dir <absolute-run-dir> --runs-root
-  /home/dev/.openclaw/autoresearch/model-workspaces/long-runs --command-file
-  <absolute-command-file>`.
-- Ensure the inbox directory
-  `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/` exists first
-  with `mkdir -m 700 -p`; verify it is a non-symlink directory owned by the
-  session user.
-- Write a schema_version 1 launch request
-  `{"schema_version":1,"run_dir":"<absolute-run-dir>","runs_root":"/home/dev/.openclaw/autoresearch/model-workspaces/long-runs"}`
-  under a unique filename ending in `.json`, such as
-  `<run-name>-$(date -u +%Y%m%dT%H%M%S%N)-$$.json`; write it as a `.tmp`
-  sibling with mode 0600, then `mv` it into
-  `/home/dev/.openclaw/autoresearch/stage-inbox/launch-requests/`.
-- The owner-only supervisor normally launches the request within about 60
-  seconds. Confirm in the same turn that the request file lands in `accepted/`
-  (not `rejected/`) before reporting the run as queued. Under low host memory,
-  the supervisor defers the launch and the request legitimately stays pending
-  in the inbox; treat a still-pending request as deferred and re-check it on the
-  next wake. Report a blocker only if the request is rejected or remains
-  pending after several wakes. If it lands in `rejected/`, quote
-  `rejected/<request-name>.reason` verbatim when present; otherwise quote the
-  supervisor advisory log line.
-
-The supervisor-side and human-operator launch path remains
-`/home/dev/repos/g2_openclaw/scripts/run-long-task.sh`. The command-file helper
-reads the schema-v1 stdin protocol, creates the file
-atomically with `O_EXCL`/`O_NOFOLLOW` mode 0600, and the launcher rejects all
-positional command payloads. The launcher places the worker in a dedicated
-transient user-systemd service with explicit memory bounds, outside the OpenClaw
-gateway cgroup.
-It submits that unit with `systemd-run --no-block`, validates the unit start,
-and waits only for coherent startup metadata; it does not retain a
-`systemd-run --wait` client in the caller lifecycle. Once the launcher returns,
-the caller may exit while the transient unit continues. To control an active
-run, resolve its exact unit with
-`systemctl --user whoami "$(jq -r .pid <absolute-run-dir>/status.json)"` and use
-`systemctl --user stop <unit>` when required;
-the worker records a signal stop as terminal failure after a bounded
-TERM/grace/KILL sequence. An ordinary uncaught `SIGTERM` commonly yields `143`;
-a TERM-resistant child is killed after grace and records signal `9`.
-Direct foreground execution is invalid. If `systemd-run` or the launcher cannot be
-used, fail closed and report the infrastructure blocker without emitting a
-stage artifact. Foreground tool calls that can outlive the OpenClaw watchdog are
-unsafe because the PM can lose status and recovery evidence while the tool is
-still blocked in the foreground.
-
-Requirements:
-
-1. Use a unique absolute run directory per launched command.
-2. Record and read `pid`, `started_at`, `stdout.log`, `stderr.log`,
-   `exit_code`, and `status.json`.
-3. Treat launcher `status.json` as a narrow process ledger: it emits only
-   `running`, `succeeded`, or `failed`.
-   Any actionable blocker is inferred from bounded polling, logs, and recovery
-   evidence; it is not a literal launcher status.
-4. Poll status on a bounded interval; do not wait forever on a foreground tool
-   call.
-5. Derive concise PM status from that ledger and the logs.
-6. Emit concise progress and completion prose tied to the launched run.
-7. Clean up stale processes and stale run directories when they are no longer
-   needed.
-8. Do not reduce scope just to avoid detached execution. If the task requires a
-   long command, launch it safely and report the real status.
-
-For the mandatory Quantipy verification run, the exact command is `env
-PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync quantipy experiment run MANIFEST --output-root ROOT
---run-id RUN_ID`. It must be launched here, never directly in a foreground
-tool call. Set the immutable run manifest's `expected_artifact_path` to the
-known `ROOT/RUN_ID/run.json`. Under the non-malicious same-host agent model,
-PASS requires the detached worker's sealed artifact/status attestation; a
-verifier claim cannot replace it. Evidence must bind the detached run
-directory and manifest digest, require EOF-drained bounded-tail log receipts
-with truthful truncation metadata, and match current artifact bytes to the
-worker's size/SHA-256 attestation.
-
-## Recovery
-
-- If a subagent exits after planning only, resume with: "Skip exploration.
-  Execute the implementation plan now."
-- If auth fails, run `openclaw models auth login --provider openai` for
-  OpenClaw-routed Codex work, or `codex login` for direct local Codex CLI work.
-- If a session is silent for several minutes, inspect the detached run
-  directory, process state, and logs before killing it.
-- Do not retry through another runtime.
+Report exact evidence and stop when route, policy, review, input, or job proof
+is missing.

@@ -31,4 +31,4 @@ Configure and validate the G2 OpenClaw agent path: G2 messages execute agent tur
 - Deploy: `scripts/push-openclaw-config.sh` (guarded, transactional, fail-closed) or `make push-config`; bootstrap via `scripts/bootstrap.sh`.
 - Push-script guarding is tested by `tests/gateway/test_openclaw_guarding.py` and `tests/gateway/test_openclaw_script_guarding.py`.
 - Systemd drop-ins: `openclaw-gateway-native-crash-hardening.conf`, `openclaw-gateway-runtime-caps.conf`.
-- Model pins in this deployment: `main`=openai/gpt-5.4; `autoresearch-pm`/`consensus_arbiter`/`reviewer`=gpt-5.6-sol; `debater_data`=gpt-5.6-terra; `debater_microstructure`/`debater_skeptic`=gpt-5.5; all others gpt-5.4; all `thinkingDefault: "high"`.
+- Model pins in this deployment: `main`=openai/gpt-5.4 and `research-orchestrator`=openai/gpt-6-astra. Native Luna and ACP Opus are bounded child routes, not ad-hoc model overrides; all use the single OpenAI/Codex OAuth provider.

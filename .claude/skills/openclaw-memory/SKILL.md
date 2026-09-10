@@ -32,7 +32,7 @@ Durable knowledge in plain Markdown with derived vector indexes — heavily over
 ## This repo
 
 - **MemPalace read-only MCP:** all agents get 19 `mempalace-readonly__*` tools served by `gateway/mempalace_readonly_server.py`; that is the only agent-facing memory access.
-- **The only memory writer** is the non-model finalizer `gateway/mempalace_finalizer.py` / `gateway/mempalace_finalizer_script.py`, driven by the autoresearch supervisor (`gateway/autoresearch_supervisor.py`).
+- **Model turns never write durable memory.** Research receipts and any later persistence are platform-owned; agents receive read-only MemPalace context.
 - **Policy lives in** `gateway/openclaw_config/openclaw.json`: `tools.deny` includes `memory_search` and `memory_get`; `agents.defaults.memorySearch.enabled: false`; `compaction.memoryFlush.enabled: false` — all deliberate.
 - **Health/install:** `make mempalace-install` (idempotent MCP server install) and `make mempalace-health` (`scripts/check-mempalace-health.py` validates embedding/index invariants).
 - **Config changes** go through `gateway/openclaw_config/` + `bash scripts/push-openclaw-config.sh`; never hand-edit `~/.openclaw/`.

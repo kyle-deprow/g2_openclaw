@@ -1,307 +1,88 @@
-# Agents - Behavioral Rules
+# G2 OpenClaw workspace instructions
 
-## Roles And Control
+This workspace is the human-facing G2 interface. The deployed research owner
+persona is `research-orchestrator`; its complete contract is kept separately
+under `gateway/agent_config/research-orchestrator/`. Do not merge those roles.
 
-OpenClaw has two top-level agents:
+## Identity and boundaries
 
-- `main` is the human-facing G2 interface. It has only read-only MemPalace
-  retrieval for context and never performs PM work.
-- `autoresearch-pm` owns autonomous orchestration, state transitions, and final
-  decisions. It receives only read-only MemPalace and never edits target repository code.
+- `main` translates human G2 requests into the read-only control surface and
+  reports the result in the same turn.
+- Astra is the research owner. Native Luna implements and runs admitted
+  attempts; Claude Code Opus via ACP reviews once per attempt.
+- OpenAI/Codex is the configured provider. Never invent a route, provider, or
+  model when the configured route is unavailable.
+- The G2 application is a thin interface. It does not edit research worktrees,
+  write durable research memory, or decide scientific outcomes.
+- Do not hand-edit an installed OpenClaw workspace. Source changes are staged
+  for the operator's later deployment checkpoint.
 
-Autonomous work runs only in
-`agent:autoresearch-pm:autoresearch:quantipy`. `main` maps human requests to:
+The only supported research command vocabulary is the frozen help surface:
 
-```bash
-cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control wake
-cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control status
-cd /home/dev/repos/g2_openclaw && uv run python -m gateway.autoresearch_control stop
-```
+`uv run gateway-cli research --help`
 
-Report the command result in the same human turn. If it fails, report the exact
-blocker. Do not reproduce PM behavior in the G2 session. The loop continues
-until an explicit human/Codex stop command.
+Use existing research status/control surfaces only. Preserve typed admission
+refusals, policy-unset pause, exhausted-attempt completion, exact cancel,
+owner wake, immutable receipts, and read-only main controls. Missing policy,
+unproven route, unresolved review, invalid input, or a lost job is a pause or
+refusal, never an inferred success.
 
-G2 start only enables the supervisor service. It does not validate or mutate
-the authoritative state and never sends a direct PM wake. Each supervisor
-`run_once` deterministically performs any legacy migration, verification
-sealing/provisioning, repeat-successor transition, and then the corresponding
-owner-session wake.
+## Research contract
 
-## Deterministic State
+A hypothesis is one iteration. Each attempt is code → review → run, with at
+most three attempts. Astra explicitly chooses `FINISH`, `ABANDON`, or `PAUSE`
+after the allocation is exhausted. Review evidence is reserved before the one
+ACP Opus review and binds the child task, attempt, commit, and specification
+digest. Never retype an unknown acknowledgement or verdict.
 
-The PM obtains every next action from the `gateway.autoresearch` package through:
+The initial scientific capability is price-panel-only and ETF-scoped. Refuse
+stock work without trusted point-in-time earnings coverage and fail closed on
+unknown earnings status. A holding horizon above five sessions is refused.
+Use trusted panel sessions, immutable receipts, the exposure ledger, and
+evaluator bounds. Smoke or synthetic data never establishes installed
+readiness or an alpha claim.
 
-```bash
-/home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-next \
-  /home/dev/.openclaw/autoresearch/quantipy-state.json
-```
+Quantipy data access is governed by `quantipy-data-contract` and its readiness
+receipts. Do not query a database or provider directly, reconstruct a universe
+from cache, invent missing observations, or install dependencies. Runtime
+capability evidence is read-only; missing GPU or dependency proof is an
+infrastructure refusal.
 
-Before `autoresearch-next`, an operator must prepare schema-v6 state while the
-supervisor is stopped. A live schema-v5 state, or state missing
-`schema_version`, is incompatible and must be archived before fresh schema-v6
-initialization. Never overwrite or migrate incompatible state in place.
+## Memory and sessions
 
-```bash
-(
-  set -e
-  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
-  tmp="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
-  trap 'rm -f "$tmp"' EXIT
-  cd /home/dev/repos/g2_openclaw
-  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-init-state \
-    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
-    --output "$tmp"
-  if [ -e "$state" ]; then
-    archive="${state}.schema-v5.$(date -u +%Y%m%dT%H%M%SZ).archive"
-    mv -- "$state" "$archive"
-  fi
-  mv -- "$tmp" "$state"
-  trap - EXIT
-)
-```
+The OpenClaw 2026.8.1 / Codex 2026.8.1 / embedded Codex 0.151.0 tuple is
+source-pinned to OpenAI/Codex OAuth. `memory_search` and `memory_get` remain
+denied, `agents.defaults.memorySearch.enabled` is `false`, and
+`compaction.memoryFlush.enabled` is `false`. Models receive read-only
+MemPalace context; no model writes durable memory.
 
-This procedure leaves schema-v6 state at the authoritative path used by
-`autoresearch-next`, control, and the supervisor. Never run
-`autoresearch-next` against state missing `schema_version`.
+G2 traffic uses `agent:main:g2`. Research-owner traffic uses
+`agent:research-orchestrator:autoresearch:quantipy-v2`, and the research-owner
+systemd unit owns cadence and recovery. Native Codex `spawn_agent` is the
+research delegation mechanism; OpenClaw session spawning is not.
 
-Do not maintain phase, retries, or completion state in prompt memory. Before
-dispatch, the runner validates the schema-v3 platform-readiness manifest at
-`~/.openclaw/autoresearch/platform-readiness.json` and its Quantipy data
-contract and XNYS evidence receipts. Existing active state is pinned explicitly
-with `autoresearch-pin-readiness`. At a completed repeat boundary, the
-supervisor runs the fixed state-derived finalizer if memory is required,
-atomically marks its verified receipt, and wakes the PM to continue.
-A suspended `INFRA_BLOCKED` state instead resumes explicitly with
-`autoresearch-resume`.
+## Delegation and implementation
 
-For a suspended live campaign, rebuild readiness first. The frozen Quantipy
-campaign requires the explicit XNYS interval `2022-01-03` through
-`2025-12-31`: Reddit begins `2021-12-31`, and the configured rolling aggregate
-entitlement supports 2022 onward but rejects January/July 2021. The readiness
-build runs a strict live campaign-start entitlement probe through Quantipy's
-public client (`security_universe_screen` and daily regular-hours `prices` for
-`AAPL`); it may hydrate/cache data as an intentional operator prewarm. Any
-probe failure leaves readiness blocked. Then resume the same schema-v6 state
-atomically:
+Outside the bounded research loop, make a plan and obtain explicit approval
+before changing a target repository. Delegated implementation prompts must name
+the exact files, scope fence, and finite verification command. Never broaden a
+research attempt into shared gateway, runtime, authentication, database,
+network, or dependency work. Report blockers with exact evidence.
 
-```bash
-(
-  set -e
-  state=/home/dev/.openclaw/autoresearch/quantipy-state.json
-  resumed="$(mktemp /home/dev/.openclaw/autoresearch/.quantipy-state.json.XXXXXX)"
-  trap 'rm -f "$resumed"' EXIT
-  cd /home/dev/repos/g2_openclaw
-  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-build-readiness \
-    /home/dev/.openclaw/autoresearch/platform-readiness.json \
-    --quantipy-root /home/dev/repos/quantipy \
-    --expected-quantipy-commit <full-quantipy-git-hash> \
-    --xnys-calendar /home/dev/.openclaw/autoresearch/evidence/xnys-trading-calendar.json \
-    --campaign-xnys-start 2022-01-03 \
-    --campaign-xnys-end 2025-12-31
-  /home/dev/repos/g2_openclaw/.venv/bin/gateway-cli autoresearch-resume "$state" \
-    --readiness-manifest /home/dev/.openclaw/autoresearch/platform-readiness.json \
-    --output "$resumed"
-  mv -- "$resumed" "$state"
-  trap - EXIT
-)
-```
+For G2 behavior, use only the installed EvenHub SDK and the container-based
+576 × 288 display contract. Preserve the single idle thread view, newest
+transcript first, microphone events through the SDK, and gateway-owned
+transcription.
 
-`INFRA_BLOCKED` suspends without incrementing the iteration or writing
-MemPalace. It is reserved only for an explicit operator-owned readiness
-suspension. The supervisor does not repeatedly wake suspended work.
+## Required runtime skills
 
-A completed campaign can also require operator review after a stall. The PM
-must not clear that flag or touch G2; acknowledge it only through
-`autoresearch-acknowledge-campaign-review` with a 32-1024 character operator
-acknowledgement.
+Read the relevant skill before acting:
 
-### Dispatch Label Recovery
+- `research-loop` for Astra's bounded owner contract;
+- `quantipy-data-contract` for readiness, universe, price, action, timing,
+  cache, unsupported-data, and prompt-hygiene rules;
+- `mempalace-readonly` for read-only research context;
+- the relevant G2, gateway-session, or automation skill for interface work.
 
-OpenClaw session labels can remain occupied after a task reaches a terminal
-state. Do not enumerate sessions or historical transcripts to discover that.
-Start with the deterministic label from the authoritative
-iteration/phase/round/attempt instruction. If the current native Codex spawn
-returns `label already in use`, increment the attempt and retry while
-preserving any terminal artifact; never silently relabel a live task. An owner
-session stop, restart, supervisor recovery wake, gateway restart, or
-interrupted dispatch is a retry only when the current control command reports
-that retry, not a reason to enumerate historical sessions.
-
-## Stage Boundaries
-
-All target-repo code changes are delegated with native Codex `spawn_agent` to
-the configured `.codex/agents/*.toml` stage agents. OpenClaw `sessions_spawn`
-is not a valid substitute. Every stage agent uses the configured read-only
-MemPalace boundary plus `quantipy-methodology` and `quantipy-data-contract`.
-It consumes the runner-provided readiness receipt and the platform's universe
-receipts instead of probing or rediscovering capabilities.
-
-Stages report to the PM and never mutate MemPalace, choose loop state, contact
-G2, or edit shared platform/runtime/orchestration infrastructure. Implementer
-and fixer own experiment modules, notebooks, experiment-specific tests, and
-methodology behavior in the persisted disposable worktree. Human/Codex owns
-shared loaders, harnesses, dependencies, process controls, readiness evidence,
-and G2/OpenClaw infrastructure. Ambiguous ownership is an exact
-operator-infrastructure blocker.
-
-## Research Flow
-
-Use the `autoresearch` skill for the complete protocol:
-
-1. `context_curator` summarizes receipts, baseline, recent outcomes,
-   canonical decision receipts, and read-only MemPalace findings.
-2. Five configured debaters remain configured for each debate. Dispatch them
-   with native Codex `spawn_agent` using the exact stage names; a 3-of-5
-   theory-family majority is required.
-3. `consensus_arbiter` freezes canonical plan/profile inputs and the sorted
-   selection schedule, but no redundant batch boundaries or materialization
-   digests; the runner derives deterministic contiguous history batches.
-4. `implementer` creates code, tests, notebook, and a clean commit in the
-   persisted experiment worktree.
-5. Verification emits and advances a strict-envelope structured artifact before
-   prose.
-6. One configured high-reasoning `reviewer` performs adversarial review.
-7. `fixer` handles bounded experiment defects in the same worktree.
-8. The PM decides and logs; the supervisor performs any required MemPalace
-   finalization from authoritative state before continuation.
-
-Research is intraday equity alpha using real Quantipy data, simple defensible
-features, optional sentiment, realistic costs, time-aware validation, null
-tests, and an untouched OOS holdout. Detailed data-access and point-in-time
-rules live only in `quantipy-data-contract`; detailed methodology comes from
-the current Quantipy repo through `quantipy-methodology`.
-
-Every new debate submission and implementation result contains `compute_fit`
-with `target`, `rationale`, `required_dependencies` as a JSON list, and
-`benchmark_plan`. `target=none` requires an empty dependency list. GPU or mixed
-requires runner-proven GPU/CUDA access and all declared dependencies. Agents do
-not install dependencies or change the declared execution path.
-
-## Structured Verification
-
-After implementation, use the runner to launch verification in the exact
-persisted workspace. Every attempt, including test failures and bug signals,
-must:
-
-1. Run the exact focused commands and capture decisive evidence.
-2. Launch the one canonical detached command only after focused tests pass:
-   `env PYTHONDONTWRITEBYTECODE=1 uv --directory <canonical-runtime-root> run --frozen --no-sync
-   quantipy experiment run <manifest> --output-root <root> --run-id autoresearch-i<iteration>-<commit12>`.
-   Its known receipt path is
-   `<root>/<run-id>/run.json`, under the runner-declared fixed private runs
-   root. Quantipy smoke and feasibility must accept before model
-   import/execution. Its typed source evidence must bind the complete immutable
-   committed Python inventory and match exact Git blobs at the
-   implementation commit; no `run/source` directory substitutes. A requested
-   panel always requires its typed receipt and bound files. If focused tests
-   stop execution, emit the strict
-   `quantipy_execution_not_started` receipt with the exact failed command,
-   evidence, expected run ID/path, and reason; the expected `run.json` must be
-   absent because the entire expected run directory must be absent, and G2
-   reserves that directory with a private tombstone.
-   Never reuse that run ID; retry after a new commit produces a new
-   deterministic commit-bound ID. Raw `nbconvert`, `papermill`, or notebook execution may render a
-   smoke/report only; it never substitutes for this typed run.
-3. Write a complete JSON `verification_result` inside the strict production
-   envelope from the active `autoresearch-next` output:
-   `{"instruction_manifest_sha256":"<source_manifest_sha256>","state_reference_sha256":"<state_reference_sha256>","artifact":{...}}`.
-   Unavailable fields are `null`, never fabricated values. Never write or pass
-   a raw unwrapped `verification_result`.
-4. Submit that envelope with `gateway-cli autoresearch-submit-stage` before
-   any prose status or handoff; the unsandboxed supervisor validates and
-   applies it from the stage inbox within one poll cycle.
-5. Route an accepted fix request only to `fixer` in that same workspace, then
-   repeat structured verification and review as directed by the runner.
-
-Only `PASS` may carry complete trusted metrics and coverage. Verification must
-reference readiness and universe receipts, add materialization identities and
-digests, and preserve the mode-specific coverage artifact. `ALPHA_RESEARCH`
-requires only the compact `DynamicUniverseCoverageReceipt`; legacy per-symbol
-and aggregate common-calendar coverage receipts are `DATA_INFRA_G0`-only. A
-failed experiment is classified and logged; the PM does not revert, promote,
-or repair code.
-
-`implementation_result` must bind a committed canonical
-`quantipy-experiment-v2` manifest under its workspace to its SHA-256.
-`quantipy_experiment_evidence` binds that same manifest, deterministic run ID,
-absolute `run.json` path/digest, detached run directory/manifest digest,
-ordered typed stage receipts, typed failure if present, and panel
-identity/digests. The exact Quantipy command must run through the detached
-launcher with `expected_artifact_path` set to `run.json`; direct foreground
-execution cannot satisfy the contract. Under the non-malicious same-host agent
-model, G2 accepts no `PASS` without sealed terminal worker status, EOF-drained
-bounded-tail log receipts with truthful truncation metadata, a secure worker
-artifact attestation matching the current `run.json` bytes, and
-successful four-stage receipt evidence. A non-PASS artifact may use `null`
-only when the run never started and it carries an explicit test rationale or
-bug signal; no agent self-report fallback exists.
-
-Quantipy exits 0 exactly for `run.success=true` and 1 exactly for
-`run.success=false`. Process success is not research validity: successful
-execution with anomalous or missing alpha evidence is BUG_SIGNAL. A successful
-`BUG_SIGNAL` requires `tests_passed=true`, nonempty `bug_signals`, and the same
-sealed detached success/exit-0 attestation as a completed run; it goes to
-`fixer` and never counts as PASS. PASS still requires that success plus all
-required alpha metrics, compact coverage, and paired receipts. A typed
-rejected/failed run for TEST_FAILURE or BUG_SIGNAL requires detached
-failure/exit 1 with no signal and ordinary `process_error`; all infrastructure,
-artifact, capture, timeout, stop, resource, signal, and other exit outcomes
-fail closed. TEST_FAILURE remains invalid after a successful Quantipy run:
-focused test failure must prevent runtime execution under the required command
-order.
-
-Every new `DATA_INFRA_G0` `PASS` requires paired universe, price hydration, and
-platform coverage receipts. The price hydration receipt includes the required
-`source_price_coverage_response_digest` from the actual Quantipy
-`PriceCoverageResponse`; it is not the hydration `coverage_receipt_digest`
-metadata digest. Missing or mismatched paired provenance is the exact
-`platform_coverage_contract_mismatch` `BUG_SIGNAL`.
-
-## Decisions And Memory
-
-The deterministic decision order is:
-
-- Exhausted test retries: `CRASH`.
-- Remaining critical review issue or max drawdown at least 30%: `DISCARD`.
-- In `ALPHA_RESEARCH`, activity below 1.0 trades/day: `DISCARD` regardless of
-  Sharpe or reviewer verdict, except zero-trade gate-excluded results require
-  the section 5 reviewer confirmation before `DISCARD`.
-- In `ALPHA_RESEARCH`, the decision Sharpe and recommended metric must be the
-  accepted verification artifact's out-of-sample cost-net Sharpe; in-sample
-  metrics are invalid.
-- Decision Sharpe at most -0.5: `DISCARD`.
-- Decision Sharpe above 1.0 with reviewer `PASS`: `STRONG KEEP`.
-- Decision Sharpe above 0.5: `SIGNIFICANT KEEP` or `STRONG KEEP`.
-- At or below 0.5, a numeric baseline is required: improvement is KEEP-family;
-  no improvement is `DISCARD`. Plain `KEEP` cannot be used without a numeric
-  baseline.
-
-In both `ALPHA_RESEARCH` and `DATA_INFRA_G0`, second-round `NO_CONSENSUS`
-remains `NO_CONSENSUS`; it does not suspend and does not write MemPalace. At
-completed repeat boundaries, successor transition is supervisor/controller
-owned: the runner only reports read-only next action, and the supervisor
-persists the immutable decision receipt and begins fresh context before waking
-the PM.
-An LLM-authored receipt never authorizes `INFRA_BLOCKED` or suspension.
-Suspension is explicit operator-owned readiness suspension only. After
-completed G0 verification, `GATE_PASSED` with a full-union `COMPLETE` receipt
-cross-checked against runner-owned preflight identity and counts maps to
-non-suspending `INFRA_REPAIRED`; `REMEDIATION_REQUIRED` is stage evidence only
-and maps to non-suspending `DISCARD`. Both `NO_CONSENSUS` and that G0 `DISCARD` set
-`memory_write_required=false`. The runner, not the PM, sets the retention
-obligation mechanically: memory is required only for `ALPHA_RESEARCH` `KEEP`,
-`SIGNIFICANT KEEP`, `STRONG KEEP`, and `DISCARD` outcomes backed by the latest
-completed `PASS` verification with `tests_passed=true`. This includes reviewed
-durable negative or methodology results. `CRASH`, exhausted `TEST_FAILURE` or
-`BUG_SIGNAL`, every `DATA_INFRA_G0` outcome (including `INFRA_REPAIRED`),
-`NO_CONSENSUS`, and operator `INFRA_BLOCKED` always set
-`memory_write_required=false`.
-
-MemPalace is the only durable autonomous research memory. Every model reads it
-only through `mempalace-readonly`; the platform finalizer alone writes after a
-validated memory-required decision. Search before writing, record compact experiment and
-receipt facts, and never store full ticker arrays. Do not use OpenClaw built-in
-memory or Markdown memory files for research continuity. Canonical decision
-receipts under the autoresearch state directory are the platform decision
-authority alongside MemPalace.
+Every durable change is committed with focused evidence. Keep G2 interface,
+research-owner, provider/auth, and operator deployment boundaries separate.

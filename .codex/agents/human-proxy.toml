@@ -19,7 +19,7 @@ You are the human's delegate inside VS Code / Codex subagent. The human interact
 | Artifact | Location | Purpose |
 |----------|----------|---------|
 | OpenClaw agent config | `gateway/agent_config/` | SOUL.md, AGENTS.md, TOOLS.md, BOOTSTRAP.md |
-| OpenClaw skills | `gateway/agent_config/skills/` | autoresearch, quantipy-data-contract, quantipy-methodology, mempalace-readonly, codex-subagents |
+| OpenClaw skills | `gateway/agent_config/skills/` | autoresearch, research-loop, quantipy-data-contract, mempalace-readonly, codex-subagents |
 | OpenClaw daemon config | `gateway/openclaw_config/` | openclaw.json, provider settings, preload |
 | MemPalace config | `gateway/openclaw_config/` | MemPalace MCP server configuration |
 | Push script | `scripts/push-openclaw-config.sh` | Deploys agent config + skills to ~/.openclaw/ |
@@ -153,10 +153,10 @@ Config changes take effect after:
 
 The system is a **fully autonomous quantitative research loop**:
 
-1. **OpenClaw PM** (`autoresearch-pm`, woken by the systemd supervisor every 60s) drives the deterministic runner: context → five-debater debate → 3-of-5 consensus → implementation → detached verification → adversarial review → bounded fixes → final decision. Immutable per-iteration decision receipts are the audit trail; the MemPalace finalizer — not any model — persists memory for qualifying outcomes.
-2. **Codex stage agents** execute in isolated workspaces — implement strategy modules + tests + notebooks, commit on success; verification runs detached via `scripts/run-long-task.sh` with sealed, attested run records.
+1. **Astra** (`research-orchestrator`, served by `research-owner.service`) owns the deterministic bounded loop: admission → Native Luna implementation/run → one ACP Opus review → typed decision. Immutable attempt receipts are the audit trail; model turns read MemPalace only.
+2. **Native Luna** executes admitted work in isolated workspaces and commits only its scoped experiment changes; the runner performs no repair, retry, or substitution.
 3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence ("focus on sentiment" / "try regime detection"), disconnects for hours/days. Only `main` can start/stop/inspect the loop, through the three `g2-control` tools.
-4. **Supervisor** (`quantipy-autoresearch-supervisor.service`, `BindsTo=openclaw-gateway.service`) owns cadence, staleness probes, recovery wakes, and memory finalization. Infrastructure failures stop the loop fail-closed; experiment decisions stay with the loop.
+4. **Research owner service** (`research-owner.service`, `BindsTo=openclaw-gateway.service`) owns cadence, status, recovery, and owner wakes. Infrastructure failures stop the loop fail-closed; experiment decisions stay with Astra.
 
 Success = two complete, implementation-capable iterations finish without infrastructure intervention, the human reconnects to a status briefing not a blank slate, and every code change is committed and reversible.
 

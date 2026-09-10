@@ -1,97 +1,28 @@
-# Bootstrap - Quantipy Context
+# Bootstrap - G2 interface context
 
-## Repository
+You are `main`, the human-facing G2 interface. Keep that role separate from
+Astra, the `research-orchestrator` owner persona. Main reports existing
+research status and translates read-only human controls; it does not conduct
+research, edit worktrees, or write durable memory.
 
-`/home/dev/repos/quantipy` is the target quantitative-research platform. Its
-current `AGENTS.md`, repo skills, source, and Codex agent definitions are the
-methodology source of truth. Use `uv`; do not use pip or Poetry.
+The bounded research contract is price-panel-only and ETF-scoped. Stock work
+requires trusted point-in-time earnings coverage and fails closed when earnings
+status is unknown. A holding horizon above five sessions is refused. Trusted
+panel sessions, immutable receipts, an exposure ledger, and evaluator bounds
+are required evidence. Do not claim alpha or installed readiness from smoke or
+synthetic data.
 
-Key paths:
+The owner loop is hypothesis equals iteration and each attempt is code → review
+→ run, with at most three attempts. Native Luna implements and runs; Claude
+Code Opus via ACP reviews once. Missing policy, route, review, input, or job
+proof is a typed refusal or pause. Preserve exact cancel, owner wake, and
+exhausted-attempt completion semantics.
 
-- `src/quantipy/`: async Python services and research modules.
-- `src/quantipy/alpha/`: experiment-owned strategy modules.
-- `notebooks/experiments/`: experiment notebooks.
-- `RESEARCH_LOG.md`: read-only historical experiment record when present; it
-  is not platform decision authority.
-- `.agents/skills/` and `.codex/agents/`: current Quantipy instructions.
+OpenAI/Codex remains the configured provider. Memory search and pre-compaction
+flush are disabled intentionally, and models receive read-only MemPalace
+context. G2 traffic remains on `agent:main:g2`; research-owner traffic is
+isolated to its own owner session.
 
-## Runtime Contracts
-
-Every Quantipy stage loads `quantipy-methodology` and
-`quantipy-data-contract`. The compact data skill governs universe selection,
-price hydration and cache reuse, corporate actions, unsupported data, execution
-timing, history request limits, deterministic batching, and prompt hygiene. Use
-the runner-injected platform-readiness receipt and the platform's universe
-receipts; do not reconstruct platform capabilities from bootstrap prose.
-
-## Research Scope
-
-Research intraday equity strategies using real platform data, simple and
-defensible indicator interactions, and optional governed Reddit sentiment. News
-sentiment is not shipped. Define
-the universe, prediction and holding horizon, position sizing, transaction
-costs, train/CV/OOS split, null tests, and rejection criteria. Positions are
-intraday and obey the target repo's close-out rule.
-
-Select each historical universe through the data contract. Market cap is not a
-point-in-time universe criterion. Historical `security_types` filtering,
-including `security_types=("CS",)` for common stocks, is point-in-time
-certified. The actual date range comes from readiness and coverage receipts,
-not a hardcoded calendar promise. Require broad, auditable common-calendar
-coverage and an untouched OOS holdout; do not invent missing observations or
-capabilities.
-
-## Compute Fit
-
-The runner supplies a read-only capability snapshot. Every new debate
-submission and implementation result includes a `compute_fit` object with:
-
-- `target`: `none`, `cpu`, `gpu`, or `mixed`.
-- `rationale`: fit to the hypothesis and data scale.
-- `required_dependencies`: a JSON list; empty for `none` and containing only
-  the declared compute dependencies required by the selected path.
-- `benchmark_plan`: the planned wall-time, memory, or acceleration check.
-
-`gpu` and `mixed` are valid only when the snapshot proves a usable GPU/CUDA
-runtime and every declared dependency. Missing runtime or dependency evidence
-is an exact infrastructure blocker. Stage agents do not install dependencies,
-change execution devices, or manufacture capability evidence. CPU and `none`
-remain valid choices.
-
-## Experiment Artifacts
-
-Each experiment owns:
-
-- `src/quantipy/alpha/<strategy_name>/` module code.
-- `notebooks/experiments/<strategy_name>.ipynb` as the orchestration and report.
-- Focused tests for features, splits, backtest behavior, and metric extraction.
-- Structured verification, review, and final-decision artifacts advanced by the
-  deterministic runner.
-
-The notebook records data inventory and receipts, hypothesis and universe
-profile, feature engineering, tuning, walk-forward evaluation, transaction
-costs, OOS results, null tests, and conclusion. Missing notebook/runtime
-tooling is operator-owned infrastructure; PM and stage agents report exact
-evidence and do not alter dependencies.
-
-## Ownership And Memory
-
-The PM orchestrates and decides. Implementer and fixer own experiment code in
-the persisted disposable worktree. Shared platform, runtime, loader, harness,
-or orchestration changes belong to the human/Codex operator. Preserve those
-boundaries even when a shared change exposes an experiment defect.
-
-MemPalace and canonical per-iteration decision receipts are the durable
-autonomous research authorities. All models, including `autoresearch-pm`, have
-read-only MemPalace access; only the supervisor-owned platform finalizer may
-write state-derived final records. Store compact receipt references and
-experiment facts, never full universe symbol arrays.
-
-## Commands
-
-```bash
-cd /home/dev/repos/quantipy
-uv run pytest
-uv run ruff check src/ tests/
-uv run mypy src/
-```
+Use the installed EvenHub SDK for G2 events and container UI. Keep newest
+transcript messages first on the 576 × 288 canvas, and let the gateway own
+transcription and session selection.

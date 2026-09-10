@@ -335,11 +335,11 @@ and `memory_get` to read a specific day's notes.
 
 > **Deployment policy (this repo):** `memory_search` and `memory_get` are
 > globally denied (`gateway/openclaw_config/openclaw.json` `tools.deny`) and
-> `agents.defaults.memorySearch.enabled` is `false` — deliberately. Agents read
-> memory only via the read-only MemPalace MCP (`mempalace-readonly__*` tools);
-> the ONLY memory writer is the non-model finalizer
-> (`gateway/mempalace_finalizer.py` / `mempalace_finalizer_script.py`) driven by
-> the autoresearch supervisor. Do not re-enable these tools.
+> `agents.defaults.memorySearch.enabled` is `false` — deliberately. Agents
+> read memory only via the read-only MemPalace MCP
+> (`mempalace-readonly__*` tools); model turns never write durable memory.
+> Research receipts and any later persistence are platform-owned. Do not
+> re-enable built-in memory tools.
 
 ### `workflow-precompaction-flush`
 The most important memory workflow: automatic flush before compaction.

@@ -130,12 +130,11 @@ Preserve repo-managed model selections unless an operator explicitly changes
 the scheduled job model.
 
 > **Deployment policy (this repo):** the example model above is illustrative
-> only. Models are pinned in `gateway/openclaw_config/openclaw.json`
-> (`main`=openai/gpt-5.4; `autoresearch-pm`/`consensus_arbiter`/`reviewer`=
-> gpt-5.6-sol; `debater_data`=gpt-5.6-terra; `debater_microstructure`/
-> `debater_skeptic`=gpt-5.5; others gpt-5.4) on a single OpenAI/Codex OAuth
-> provider — no alias-based model guidance applies. Config is deployed only via
-> `bash scripts/push-openclaw-config.sh`; never hand-edit `~/.openclaw/`.
+> only. `main` and `research-orchestrator` are pinned in
+> `gateway/openclaw_config/openclaw.json`; native Luna and ACP Opus remain
+> bounded child routes on the single OpenAI/Codex OAuth provider. Config is
+> deployed only via `bash scripts/push-openclaw-config.sh`; never hand-edit
+> `~/.openclaw/`.
 
 ### `cron-agent-binding`
 Bind cron jobs to specific agents in multi-agent setups:

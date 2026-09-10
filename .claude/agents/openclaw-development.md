@@ -27,7 +27,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 
 - **One Gateway per workspace.** Never run multiple Gateways against the same `~/.openclaw` directory — they corrupt session state.
 - **Always set `OPENCLAW_GATEWAY_TOKEN`.** Without it, WebSocket API and webhook endpoints are open.
-- **Session keys are structured patterns.** `agent:<agentId>:main`, `cron:<jobId>`, `hook:<uuid>`, `agent:<agentId>:subagent:<uuid>`. Use SDK helpers — never construct keys manually. In this repo: G2 traffic is `agent:main:g2`; autoresearch is `agent:autoresearch-pm:autoresearch:quantipy`.
+- **Session keys are structured patterns.** `agent:<agentId>:main`, `cron:<jobId>`, `hook:<uuid>`, `agent:<agentId>:subagent:<uuid>`. Use SDK helpers — never construct keys manually. In this repo: G2 traffic is `agent:main:g2`; bounded research is `agent:research-orchestrator:autoresearch:quantipy-v2`.
 - **Runs are serialized per session key.** No concurrent agent calls on the same session.
 - **Session resets clear conversation history but NOT files.** Bootstrap files persist across resets, compaction, and Gateway restarts.
 - **Restrict CORS in production.** Default allows localhost only. Never use `"*"` for `allowedOrigins`.
@@ -57,7 +57,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 - **Preserve configured model selections.** Use the model fields declared in repo-managed OpenClaw and Codex agent config; never replace them with generic role-based aliases.
 - **Hub-and-spoke topology.** Specialists report back through the coordinator only.
 - **Avoid deep spawn nesting (>2 levels).** Use sequential spawns from the coordinator.
-- **In this repo, OpenClaw session tools are NOT the delegation path for autoresearch:** `autoresearch-pm` has `sessions_spawn`/`sessions_yield`/`sessions_list`/`sessions_history`/`agents_list` denied and delegates via native Codex `spawn_agent` to the stage agents in `.codex/agents/`.
+- **In this repo, OpenClaw session tools are NOT the delegation path for research:** `research-orchestrator` delegates bounded work via native Codex `spawn_agent` to the configured Luna child and reserves one ACP Opus review.
 
 ## Priority 5: Automation — Cron, Hooks, Webhooks (HIGH)
 
@@ -65,7 +65,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 - **Hooks:** directory with `HOOK.md` + `handler.ts`; command, agent-lifecycle, gateway, and message events.
 - **Webhooks:** `POST /hooks/wake` (lightweight) and `POST /hooks/agent` (full run, `wait: true` for sync). Always authenticate with the gateway token.
 - **Heartbeats:** run in main session; 15–30 min minimum interval.
-- **In this repo the autoresearch cadence is NOT OpenClaw cron/heartbeats:** the systemd user unit `quantipy-autoresearch-supervisor.service` (60 s poll, `BindsTo=openclaw-gateway.service`) drives wakes deterministically.
+- **In this repo research cadence is NOT OpenClaw cron/heartbeats:** the systemd user unit `research-owner.service` (`BindsTo=openclaw-gateway.service`) drives owner wakes deterministically.
 
 ## Priority 6: Persona & Identity Design (MEDIUM)
 
@@ -76,7 +76,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 
 ## Repo Policy Overrides (this repo wins over generic guidance)
 
-- **Memory is locked down by design.** `memory_search`/`memory_get` are globally denied, `agents.defaults.memorySearch.enabled: false`, and `compaction.memoryFlush.enabled: false`. Do NOT "always enable pre-compaction memory flush" here. No model writes memory; the sole writer is the state-derived MemPalace finalizer (`gateway/mempalace_finalizer.py`) driven by the autoresearch supervisor. Agents get the read-only `mempalace-readonly` MCP only.
+- **Memory is locked down by design.** `memory_search`/`memory_get` are globally denied, `agents.defaults.memorySearch.enabled: false`, and `compaction.memoryFlush.enabled: false`. Do NOT "always enable pre-compaction memory flush" here. Model turns never write durable memory; agents get the read-only `mempalace-readonly` MCP only.
 - **Runtime tuple is pinned fail-closed:** OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, embedded `@openai/codex` `0.151.0`. Both newer and older versions fail deployment. Do not run `openclaw update` here.
 - **Provider is OpenAI/Codex app-server via OAuth only.** No Copilot path, no alternate-provider retry, no silent compatibility fallback.
 - **Never hand-edit `~/.openclaw/`.** Edit `gateway/agent_config/` or `gateway/openclaw_config/` and deploy via `bash scripts/push-openclaw-config.sh` (guarded, transactional, atomic publish + rollback), then restart the gateway service.

@@ -273,9 +273,8 @@ The flush gives the agent one silent turn to persist important information befor
 the session is summarized. Without it, nuanced context is lost to compaction.
 
 > **Deployment policy (this repo):** `compaction.memoryFlush.enabled` is `false`
-> deliberately. The ONLY memory writer is the non-model MemPalace finalizer
-> (`gateway/mempalace_finalizer.py`) driven by the autoresearch supervisor —
-> do NOT enable the flush here.
+> deliberately. Model turns never write durable memory; research receipts and
+> any later persistence are platform-owned. Do NOT enable the flush here.
 
 ### `pruning-manual-compact`
 Users can trigger compaction manually with `/compact` (optional instructions).

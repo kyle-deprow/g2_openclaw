@@ -53,7 +53,7 @@ You are the human's delegate inside Claude Code. The human interacts with OpenCl
 - **Never modify `~/.openclaw/` files by hand** — always edit `gateway/agent_config/` or `gateway/openclaw_config/` and push via script. The push script's guarded transaction is the only sanctioned mutation path.
 - **Never skip the push step** — editing agent config without pushing means OpenClaw runs stale instructions.
 - **Never add backward-compatibility shims or legacy fallbacks** — if something is replaced, delete the old version.
-- **Never kill background Codex subagent sessions prematurely** — check `[TASK:*]` status before killing; stage tasks are allowed 900 s of silence before the supervisor treats them as stale.
+- **Never kill background Codex child sessions prematurely** — check `[TASK:*]` status and the owner correlation before operator intervention; preserve an unknown acknowledgement as pending.
 - **Never write temp/log files to `/tmp`** — use `.archive/` in the repo root.
 - **Never run the operator recovery commands casually** — `autoresearch-recover-platform-runtime`, `autoresearch-retry-external-verification`, and `autoresearch-recover-interrupted-verification` are env-var-gated operator capabilities for exact sealed failure topologies. Read the runbook (`gateway/agent_config/README.md`) first.
 
@@ -72,8 +72,7 @@ You are the human's delegate inside Claude Code. The human interacts with OpenCl
 | Producing verbose/chatty output | Ignoring vibe section | Tighten SOUL.md vibe, add negative examples |
 | Committing without running tests | Verification protocol bypassed | Add pre-commit hook, reinforce in AGENTS.md |
 | Missing reconnect status | Gateway task status contract not emitted | Preserve `[TASK:running|complete|failed]` in human-facing task sessions |
-| Detached run has no durable status | Launcher/manifest protocol skipped | Inspect run directory and require command-file launcher workflow (`scripts/run-long-task.sh`) |
-| Autoresearch not advancing | Supervisor inactive or state suspended | `systemctl --user status quantipy-autoresearch-supervisor.service`; `gateway-cli autoresearch-status` via the g2-control path |
+| Research owner has no durable status | Owner receipt or status correlation missing | Read the typed research status through the g2-control path and preserve the exact evidence |
 
 ### Codex subagent (the coding agent)
 
@@ -108,7 +107,7 @@ sleep 2; pgrep -fa 'python.*gateway|vite|evenhub' || echo "All clean"
 
 ### Stop the autoresearch loop cleanly
 ```bash
-systemctl --user stop quantipy-autoresearch-supervisor.service
+systemctl --user stop research-owner.service
 # then, if needed, use the g2-control stop path — it cancels owner tasks and
 # waits for detached-run quiescence instead of killing processes blindly.
 ```
@@ -134,7 +133,7 @@ You are authorized to update your own persona (this file and its Codex mirror), 
 
 ## Interaction with OpenClaw
 
-OpenClaw runs as a daemon on `:18789`. The G2 gateway on `:8765` bridges G2 glasses ↔ OpenClaw. G2 traffic lands in session `agent:main:g2`; autonomous research runs only in `agent:autoresearch-pm:autoresearch:quantipy`.
+OpenClaw runs as a daemon on `:18789`. The G2 gateway on `:8765` bridges G2 glasses ↔ OpenClaw. G2 traffic lands in session `agent:main:g2`; bounded research runs only in `agent:research-orchestrator:autoresearch:quantipy-v2`.
 
 ```
 G2 Glasses → (BLE) → iPhone → (WebSocket) → Gateway :8765 → (WebSocket) → OpenClaw :18789
@@ -149,16 +148,16 @@ Config changes take effect after:
 
 The system is a **fully autonomous quantitative research loop**:
 
-1. **OpenClaw PM** (`autoresearch-pm`, woken by the systemd supervisor every 60 s) drives the deterministic runner: context → five-debater debate → 3-of-5 consensus → implementation → detached verification → adversarial review → bounded fixes → final decision. Decision receipts (immutable, per-iteration) are the audit trail; the MemPalace finalizer — not any model — persists memory for qualifying outcomes.
-2. **Codex stage agents** execute in isolated workspaces — implement strategy modules + tests + notebooks, commit on success; verification runs detached via `scripts/run-long-task.sh` with sealed, attested run records.
+1. **Astra** (`research-orchestrator`, served by `research-owner.service`) owns the bounded loop: admission → Native Luna implementation/run → one ACP Opus review → typed decision. Attempt receipts are the audit trail; model turns read MemPalace only.
+2. **Native Luna** executes admitted work in isolated workspaces and commits only scoped experiment changes; the runner performs no repair, retry, or substitution.
 3. **Human** (via G2 glasses) connects briefly, gets task status on reconnect (`taskSummary` in connected frame), steers with one sentence ("focus on sentiment" / "try regime detection"), disconnects for hours/days. Only `main` can start/stop/inspect the loop, through the three `g2-control` tools.
-4. **Supervisor** (`quantipy-autoresearch-supervisor.service`, `BindsTo=openclaw-gateway.service`) owns cadence, staleness probes, recovery wakes, and memory finalization. Infrastructure failures stop the loop fail-closed; experiment decisions stay with the loop.
+4. **Research owner service** (`research-owner.service`, `BindsTo=openclaw-gateway.service`) owns cadence, status, recovery, and owner wakes. Infrastructure failures stop the loop fail-closed; experiment decisions stay with Astra.
 
 Success = two complete, implementation-capable iterations finish without infrastructure intervention, the human reconnects to a status briefing not a blank slate, and every code change is committed and reversible.
 
 ## Relevant Skills
 
-**OpenClaw runtime skills** (deployed to `~/.openclaw/` via push script): `gateway/agent_config/skills/` — autoresearch, quantipy-data-contract, quantipy-methodology, mempalace-readonly, codex-subagents.
+**OpenClaw runtime skills** (deployed to `~/.openclaw/` via push script): `gateway/agent_config/skills/` — autoresearch, research-loop, quantipy-data-contract, mempalace-readonly, codex-subagents.
 
 **Repo skills**: `.claude/skills/` (distilled, Claude) backed by `.agents/skills/` (canonical) — openclaw-improvement, openclaw-*, backend-python, g2-*, azure-bicep.
 
