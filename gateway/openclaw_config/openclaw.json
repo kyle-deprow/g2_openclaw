@@ -1,4 +1,7 @@
 {
+  "cron": {
+    "enabled": false
+  },
   "models": {
     "providers": {
       "openai": {
@@ -157,6 +160,9 @@
         "primary": "openai/gpt-5.4"
       },
       "thinkingDefault": "high",
+      "heartbeat": {
+        "every": "0m"
+      },
       "compaction": {
         "mode": "default",
         "memoryFlush": {
@@ -335,6 +341,13 @@
       "acpx": {
         "enabled": true,
         "config": {}
+      }
+    }
+  },
+  "skills": {
+    "workshop": {
+      "autonomous": {
+        "mode": "off"
       }
     }
   },

@@ -43,7 +43,10 @@ MemPalace is optional read-only retrieval, never a control ledger or completion
 gate, and this loop has no automated MemPalace writer. The managed OpenClaw 8.1
 config explicitly sets `memory.search.enabled` and
 `agents.defaults.compaction.memoryFlush.enabled` to `false`; do not enable
-built-in memory or add a provider fallback.
+built-in memory or add a provider fallback. It also keeps
+`cron.enabled=false`, sets the default heartbeat cadence to `0m`, and sets
+`skills.workshop.autonomous.mode=off`; the host research-owner service is the
+only intended loop owner.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed on unknown earnings.
