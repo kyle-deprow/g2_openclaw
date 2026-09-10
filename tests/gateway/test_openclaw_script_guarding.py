@@ -2200,6 +2200,7 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert config["memory"]["search"]["enabled"] is False
     assert config["agents"]["defaults"]["heartbeat"]["every"] == "0m"
     assert config["skills"]["workshop"]["autonomous"]["mode"] == "off"
+    assert config["plugins"]["allow"] == ["codex", "acpx", "openai"]
     assert "__RESEARCH_REVIEWER_LAUNCHER__" not in repo_config_text
     assert "__ACPX_ADAPTER_BIN__" not in repo_config_text
     assert config["plugins"]["entries"]["acpx"]["config"] == {}

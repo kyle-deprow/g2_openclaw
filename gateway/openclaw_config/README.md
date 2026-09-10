@@ -47,6 +47,8 @@ built-in memory or add a provider fallback. It also keeps
 `cron.enabled=false`, sets the default heartbeat cadence to `0m`, and sets
 `skills.workshop.autonomous.mode=off`; the host research-owner service is the
 only intended loop owner.
+The provider allowlist retains the bundled `codex`, `acpx`, and `openai`
+plugins; `memory-core` remains excluded.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed on unknown earnings.

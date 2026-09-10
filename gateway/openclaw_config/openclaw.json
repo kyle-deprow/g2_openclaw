@@ -327,7 +327,8 @@
   "plugins": {
     "allow": [
       "codex",
-      "acpx"
+      "acpx",
+      "openai"
     ],
     "entries": {
       "codex": {
