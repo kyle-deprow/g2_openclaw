@@ -13,13 +13,16 @@ from typing import cast
 import pytest
 from gateway.deployment.config_merge import (
     AssemblyInputs,
+    ConfigMergeError,
     JsonNumber,
     JsonObject,
     JsonValue,
     assemble_config,
+    assemble_config_with_migration,
     deep_merge,
     load_json,
     serialize_json,
+    write_migration_record,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -127,6 +130,257 @@ def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> Non
     codex_config = cast(JsonObject, codex["config"])
     app_server = cast(JsonObject, codex_config["appServer"])
     assert "defaultWorkspaceDir" not in app_server
+
+
+def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
+    tmp_path: Path,
+) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "meta": {"lastTouchedAt": "local-timestamp", "lastTouchedVersion": "local"},
+            "agents": {
+                "defaults": {
+                    "memorySearch": {"enabled": False},
+                    "nested": {"memorySearch": {"enabled": True}},
+                }
+            },
+            "commands": {"ownerDisplay": "hash", "nested": {"ownerDisplay": "raw"}},
+            "memory": {"backend": None, "citations": "off", "nested": {"backend": "keep"}},
+        },
+    )
+
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {
+        "backend": None,
+        "citations": "off",
+        "search": {"enabled": False},
+        "nested": {"backend": "keep"},
+    }
+    migrated, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert record == {
+        "removed": [
+            {"path": "meta.lastTouchedAt", "value": "local-timestamp"},
+            {
+                "path": "agents.defaults.memorySearch",
+                "value": {"enabled": False},
+                "mapped_to": "memory.search.enabled",
+            },
+            {"path": "commands.ownerDisplay", "value": "hash"},
+            {"path": "memory.backend", "value": None},
+        ]
+    }
+    assert "lastTouchedAt" not in cast(JsonObject, migrated["meta"])
+    assert cast(JsonObject, migrated["meta"])["lastTouchedVersion"] == "2026.8.1"
+    defaults = cast(JsonObject, cast(JsonObject, migrated["agents"])["defaults"])
+    assert "memorySearch" not in defaults
+    assert cast(JsonObject, defaults["nested"])["memorySearch"] == {"enabled": True}
+    assert "ownerDisplay" not in cast(JsonObject, migrated["commands"])
+    memory = cast(JsonObject, migrated["memory"])
+    assert "backend" not in memory
+    assert memory["citations"] == "off"
+    assert cast(JsonObject, memory["search"])["enabled"] is False
+    assert cast(JsonObject, memory["nested"])["backend"] == "keep"
+
+
+def test_local_memory_backend_is_recorded_before_repository_memory_overlay(
+    tmp_path: Path,
+) -> None:
+    local = cast(JsonObject, {"memory": {"backend": "builtin"}})
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {"citations": "off", "search": {"enabled": False}}
+
+    migrated, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert "backend" not in cast(JsonObject, migrated["memory"])
+    assert record["removed"] == [
+        {
+            "path": "memory.backend",
+            "value": "builtin",
+            "source": "local_pre_overlay",
+        }
+    ]
+
+
+def test_absent_local_memory_backend_is_not_recorded(tmp_path: Path) -> None:
+    local = cast(JsonObject, {"memory": {"citations": "local"}})
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {"citations": "off", "search": {"enabled": False}}
+
+    _, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert record == {"removed": []}
+
+
+def test_legacy_memory_search_extra_keys_fail_closed(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {"agents": {"defaults": {"memorySearch": {"enabled": False, "provider": "old"}}}},
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"agents\.defaults\.memorySearch"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
+
+
+@pytest.mark.parametrize(
+    "legacy_value",
+    [{}, {"enabled": "false"}, None],
+    ids=["missing-enabled", "non-boolean-enabled", "non-object"],
+)
+def test_legacy_memory_search_requires_exact_boolean_enabled(
+    tmp_path: Path, legacy_value: object
+) -> None:
+    local = cast(
+        JsonObject,
+        {"agents": {"defaults": {"memorySearch": legacy_value}}},
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"agents\.defaults\.memorySearch"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
+
+
+def test_legacy_memory_search_conflict_is_checked_before_memory_overlay(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "agents": {"defaults": {"memorySearch": {"enabled": False}}},
+            "memory": {"search": {"enabled": True}},
+        },
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"memory\.search\.enabled"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
+
+
+def test_schema_migration_preserves_provider_and_auth_objects(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "gateway": {"auth": {"token": "machine-local-token"}},
+            "models": {
+                "providers": {
+                    "azure-oai-g2": {"apiKey": "local-azure-key"},  # pragma: allowlist secret
+                    "private": {
+                        "apiKey": "private-key",  # pragma: allowlist secret
+                        "headers": {"X-Auth": "value"},
+                    },
+                }
+            },
+        },
+    )
+
+    migrated, _ = assemble_config_with_migration(
+        local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+    )
+
+    assert cast(JsonObject, migrated["gateway"])["auth"] == {"token": "machine-local-token"}
+    providers = cast(JsonObject, cast(JsonObject, migrated["models"])["providers"])
+    azure = cast(JsonObject, providers["azure-oai-g2"])
+    assert azure["apiKey"] == "local-azure-key"  # pragma: allowlist secret
+    assert cast(JsonObject, providers["private"]) == {
+        "apiKey": "private-key",  # pragma: allowlist secret
+        "headers": {"X-Auth": "value"},
+    }
+
+
+def test_migration_record_file_is_deterministic_and_private(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "meta": {"lastTouchedAt": "machine-local"},
+            "commands": {"ownerDisplay": "raw"},
+        },
+    )
+    _, record = assemble_config_with_migration(
+        local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+    )
+    record_path = tmp_path / "migration-record.json"
+
+    write_migration_record(record_path, record)
+
+    assert record_path.read_bytes() == serialize_json(record)
+    assert record_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_migration_record_rejects_symlinked_immediate_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    parent = tmp_path / "record-parent"
+    parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(parent / "migration-record.json", {"removed": []})
+
+    assert parent.is_symlink()
+    assert not (outside / "migration-record.json").exists()
+
+
+def test_migration_record_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    ancestor = tmp_path / "record-root"
+    ancestor.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(ancestor / "nested/migration-record.json", {"removed": []})
+
+    assert ancestor.is_symlink()
+    assert not (outside / "nested/migration-record.json").exists()
+
+
+def test_migration_record_rejects_preexisting_final_symlink(tmp_path: Path) -> None:
+    parent = tmp_path / "record-parent"
+    parent.mkdir()
+    outside = tmp_path / "outside-record.json"
+    outside.write_bytes(b"outside\n")
+    record_path = parent / "migration-record.json"
+    record_path.symlink_to(outside)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(record_path, {"removed": []})
+
+    assert record_path.is_symlink()
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_migration_record_rejects_absent_parent(tmp_path: Path) -> None:
+    record_path = tmp_path / "missing-parent/migration-record.json"
+
+    with pytest.raises(ConfigMergeError, match="parent"):
+        write_migration_record(record_path, {"removed": []})
+
+    assert not record_path.parent.exists()
+
+
+def test_migration_record_safely_rewrites_existing_private_record(tmp_path: Path) -> None:
+    record_path = tmp_path / "migration-record.json"
+    record_path.write_bytes(b'{"removed": []}\n')
+    record_path.chmod(0o600)
+    record = cast(JsonObject, {"removed": [{"path": "memory.backend", "value": "builtin"}]})
+
+    write_migration_record(record_path, record)
+
+    assert record_path.read_bytes() == serialize_json(record)
+    assert record_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_overlay_does_not_contain_removed_8_1_paths() -> None:
+    overlay = cast(JsonObject, load_json(REPO_CONFIG))
+
+    assert "memorySearch" not in cast(JsonObject, cast(JsonObject, overlay["agents"])["defaults"])
+    assert "backend" not in cast(JsonObject, overlay["memory"])
+    assert "ownerDisplay" not in cast(JsonObject, overlay["commands"])
+    assert "lastTouchedAt" not in cast(JsonObject, overlay["meta"])
+    memory = cast(JsonObject, overlay["memory"])
+    assert memory["citations"] == "off"
+    assert cast(JsonObject, memory["search"])["enabled"] is False
 
 
 def _assembly_inputs(
@@ -247,16 +501,6 @@ def _jq_full_assembly(
             )
     repo_agents = cast(JsonObject, repo["agents"])
     repo_defaults = cast(JsonObject, repo_agents["defaults"])
-    memory_search = repo_defaults.get("memorySearch")
-    merged = _run_jq(
-        [
-            "--argjson",
-            "memory_search",
-            _json_arg(memory_search),
-            ".agents.defaults.memorySearch = $memory_search",
-        ],
-        input_bytes=merged,
-    )
     repo_compaction = cast(JsonObject, repo_defaults["compaction"])
     memory_flush = repo_compaction["memoryFlush"]
     merged = _run_jq(
@@ -365,6 +609,17 @@ def _jq_full_assembly(
         ],
         input_bytes=merged,
     )
+    merged = _run_jq(
+        [
+            "(if .agents.defaults.memorySearch? != null then "
+            ".memory.search.enabled = .agents.defaults.memorySearch.enabled else . end) | "
+            "del(.meta.lastTouchedAt) | "
+            "del(.agents.defaults.memorySearch) | "
+            "del(.commands.ownerDisplay) | "
+            "del(.memory.backend)"
+        ],
+        input_bytes=merged,
+    )
     return _run_jq(["."], input_bytes=merged)
 
 
@@ -385,6 +640,7 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
             "defaults": {
                 "model": {"primary": "local/model"},
                 "subagents": {"archiveAfterMinutes": 7, "requireAgentId": True},
+                "memorySearch": {"enabled": False},
             },
             "list": [],
         },
@@ -504,11 +760,20 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     local_path = tmp_path / "live.json"
-    _write_json(local_path, {})
+    _write_json(
+        local_path,
+        {
+            "meta": {"lastTouchedAt": "machine-local"},
+            "agents": {"defaults": {"memorySearch": {"enabled": False}}},
+            "commands": {"ownerDisplay": "raw"},
+        },
+    )
     home = tmp_path / "fake-home"
     push_home = home / ".openclaw"
     arguments = [
         "assemble",
+        "--migration-record",
+        str(tmp_path / "migration-record.json"),
         "--",
         str(local_path),
         str(REPO_CONFIG),
@@ -545,6 +810,19 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     assert result.returncode == 0, result.stderr
     published = json.loads(result.stdout)
     assert published["agents"]["defaults"]["model"]["primary"] == "openai/gpt-5.4"
+    assert published["memory"]["search"]["enabled"] is False
+    assert json.loads((tmp_path / "migration-record.json").read_text()) == {
+        "removed": [
+            {"path": "meta.lastTouchedAt", "value": "machine-local"},
+            {
+                "path": "agents.defaults.memorySearch",
+                "value": {"enabled": False},
+                "mapped_to": "memory.search.enabled",
+            },
+            {"path": "commands.ownerDisplay", "value": "raw"},
+        ]
+    }
+    assert (tmp_path / "migration-record.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_python_serializer_uses_jq_style_unicode_and_newline() -> None:

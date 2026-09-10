@@ -156,9 +156,6 @@
         "primary": "openai/gpt-5.4"
       },
       "thinkingDefault": "high",
-      "memorySearch": {
-        "enabled": false
-      },
       "compaction": {
         "mode": "default",
         "memoryFlush": {
@@ -273,8 +270,10 @@
     ]
   },
   "memory": {
-    "backend": "builtin",
-    "citations": "off"
+    "citations": "off",
+    "search": {
+      "enabled": false
+    }
   },
   "mcp": {
     "servers": {
@@ -357,8 +356,7 @@
   "commands": {
     "native": "auto",
     "nativeSkills": "auto",
-    "restart": true,
-    "ownerDisplay": "raw"
+    "restart": true
   },
   "session": {
     "dmScope": "per-channel-peer"
@@ -367,7 +365,6 @@
     "mode": "local"
   },
   "meta": {
-    "lastTouchedVersion": "2026.8.1",
-    "lastTouchedAt": "2026-03-14T20:35:31.110Z"
+    "lastTouchedVersion": "2026.8.1"
   }
 }
