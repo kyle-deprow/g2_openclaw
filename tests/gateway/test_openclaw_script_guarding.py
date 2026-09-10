@@ -3051,6 +3051,7 @@ def test_push_script_rejects_unsafe_research_root_before_live_write(
 
 def test_push_script_rejects_missing_core_database_before_live_write(tmp_path: Path) -> None:
     env = _prepare_push_script_home(tmp_path)
+    env["RESEARCH_CORE_DATABASE"] = str(Path(env["OPENCLAW_PUSH_HOME"]) / "state/openclaw.sqlite")
     env_file = Path(env["OPENCLAW_PUSH_ENV_FILE"])
     env_file.write_text(
         "\n".join(
@@ -4092,10 +4093,36 @@ def test_push_script_codex_doctor_websocket_transient_dns_variants(
 
     if expect_ok:
         assert result.returncode == 0, result.stderr
+
         assert "network.websocket_reachability" in result.stdout
     else:
         assert result.returncode != 0
         assert "network.websocket_reachability=warning" in result.stderr
+
+
+def test_push_script_reads_owner_env_as_data_without_shell_evaluation(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    marker = tmp_path / "owner-env-command-marker"
+    caller_database = tmp_path / "caller-database.sqlite"
+    caller_database.write_bytes(b"caller value must not win\n")
+    env["RESEARCH_CORE_DATABASE"] = str(caller_database)
+    Path(env["OPENCLAW_PUSH_ENV_FILE"]).write_text(
+        Path(env["OPENCLAW_PUSH_ENV_FILE"]).read_text(encoding="utf-8")
+        + f"UNRELATED_RUNTIME='$(touch {marker})'\n",
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    owner_unit = _supervisor_unit_dst(Path(env["HOME"]))
+    assert str(Path(env["OPENCLAW_PUSH_HOME"]) / "state/openclaw.sqlite") in owner_unit.read_text(
+        encoding="utf-8"
+    )
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+    assert 'source "${APPROVED_OWNER_ENV_FILE}"' not in script
+    assert "set -a" not in script
 
 
 @pytest.mark.parametrize(

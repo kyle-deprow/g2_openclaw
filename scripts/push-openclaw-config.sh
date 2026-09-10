@@ -334,6 +334,101 @@ validate_owner_env_file() {
   fi
 }
 
+# Read the approved deployment env file as data.  Never evaluate its contents:
+# the file is also consumed by the owner unit and may contain unrelated
+# provider/runtime settings, but it must not redefine shell functions/options
+# or execute command substitutions in this process.
+OWNER_ENV_DATA_KEYS=(
+  OPENCLAW_PROVIDER
+  OPENAI_MODEL
+  OPENROUTER_MODEL
+  OPENROUTER_API_KEY
+  AZURE_OAI_API_KEY
+  FASTEMBED_CACHE_PATH
+  HF_HUB_OFFLINE
+  MEMPALACE_EMBEDDING_MODEL
+  MEMPALACE_EXPECTED_EMBEDDING_MODEL
+  MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+  RESEARCH_V2_ROOT
+  HYPOTHESIS_WORKTREES_ROOT
+  RESEARCH_CORE_DATABASE
+  OPENCLAW_HOST
+  OPENCLAW_PORT
+)
+declare -A OWNER_ENV_DATA_ALLOWED=()
+for ENV_KEY in "${OWNER_ENV_DATA_KEYS[@]}"; do
+  OWNER_ENV_DATA_ALLOWED["${ENV_KEY}"]=1
+done
+
+load_owner_env_data_only() {
+  local path="$1" line line_number=0 key raw value trimmed
+  declare -A seen=()
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    ((line_number += 1))
+    if [[ "${line}" == *$'\r'* ]]; then
+      echo "ERROR: ${path}:${line_number}: carriage returns are not allowed in G2_OWNER_ENV_FILE." >&2
+      return 1
+    fi
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [[ -z "${trimmed}" || "${trimmed:0:1}" == "#" ]]; then
+      continue
+    fi
+    if [[ "${trimmed}" == export[[:space:]]* ]]; then
+      trimmed="${trimmed#export}"
+      trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    fi
+    if [[ "${trimmed}" != *=* ]]; then
+      echo "ERROR: ${path}:${line_number}: expected KEY=VALUE in G2_OWNER_ENV_FILE." >&2
+      return 1
+    fi
+    key="${trimmed%%=*}"
+    key="${key%"${key##*[![:space:]]}"}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    if [[ ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "ERROR: ${path}:${line_number}: invalid environment key in G2_OWNER_ENV_FILE." >&2
+      return 1
+    fi
+    if [[ "${key}" == OPENCLAW_PUSH_MODE || "${key}" == OPENCLAW_PUSH_MODE_REQUESTED ]]; then
+      echo "ERROR: ${path}:${line_number}: ${key} must be selected in the invoking environment, not OPENCLAW_PUSH_ENV_FILE." >&2
+      return 1
+    fi
+    # Unknown keys remain data for systemd/the owner loader and are ignored by
+    # this shell process.  Never parse or assign their values.
+    if [[ -z "${OWNER_ENV_DATA_ALLOWED[${key}]+x}" ]]; then
+      continue
+    fi
+    if [[ -n "${seen[${key}]+x}" ]]; then
+      echo "ERROR: ${path}:${line_number}: duplicate selected key ${key} in G2_OWNER_ENV_FILE." >&2
+      return 1
+    fi
+    seen["${key}"]=1
+    raw="${trimmed#*=}"
+    raw="${raw#"${raw%%[![:space:]]*}"}"
+    if [[ "${raw:0:1}" == "'" ]]; then
+      if [[ "${#raw}" -lt 2 || "${raw: -1}" != "'" ]]; then
+        echo "ERROR: ${path}:${line_number}: unterminated single-quoted value for ${key}." >&2
+        return 1
+      fi
+      value="${raw:1:${#raw}-2}"
+    elif [[ "${raw:0:1}" == '"' ]]; then
+      if [[ "${#raw}" -lt 2 || "${raw: -1}" != '"' ]]; then
+        echo "ERROR: ${path}:${line_number}: unterminated double-quoted value for ${key}." >&2
+        return 1
+      fi
+      value="${raw:1:${#raw}-2}"
+    else
+      value="${raw%"${raw##*[![:space:]]}"}"
+    fi
+    if [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* || "${value}" == *$'\t'* ]]; then
+      echo "ERROR: ${path}:${line_number}: control characters are not allowed for ${key}." >&2
+      return 1
+    fi
+    printf -v "${key}" '%s' "${value}"
+    export "${key}"
+  done < "${path}"
+}
+
 OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
 MIGRATION_RECORD_DST="${OPENCLAW_PUSH_HOME}/.openclaw.migration-record.json"
@@ -1806,7 +1901,7 @@ if [[ "${#MISSING_SKILL_FILES[@]}" -gt 0 ]]; then
 fi
 echo "Verified repo-managed skill definitions: ${SKILLS_TO_CHECK[*]}"
 
-# ── Load env vars from .env ───────────────────────────────────────────────────
+# ── Load selected env data from .env ─────────────────────────────────────────
 PRESERVE_ENV_VARS=(
   HOME
   PATH
@@ -1822,7 +1917,6 @@ PRESERVE_ENV_VARS=(
   MEMPALACE_EXPECTED_EMBEDDING_MODEL
   MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
   RESEARCH_V2_ROOT
-  RESEARCH_CORE_DATABASE
   HYPOTHESIS_WORKTREES_ROOT
 )
 declare -A PRESERVED_ENV=()
@@ -1832,19 +1926,17 @@ for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
   fi
 done
 
+# The explicit core database contract comes only from the approved file; a
+# caller export must not silently fill a missing file key.
+unset RESEARCH_CORE_DATABASE
 if ! validate_owner_env_file "${APPROVED_OWNER_ENV_FILE}"; then
   exit 1
 fi
 
 if [[ -f "${APPROVED_OWNER_ENV_FILE}" ]]; then
-  # shellcheck disable=SC1090
-  set -a
-  if ! source "${APPROVED_OWNER_ENV_FILE}"; then
-    set +a
-    echo "ERROR: OPENCLAW_PUSH_MODE_REQUESTED is immutable and may not be set by OPENCLAW_PUSH_ENV_FILE." >&2
+  if ! load_owner_env_data_only "${APPROVED_OWNER_ENV_FILE}"; then
     exit 1
   fi
-  set +a
 fi
 
 if [[ "${OPENCLAW_PUSH_MODE_INVOCATION_SET}" -eq 1 ]]; then
