@@ -282,6 +282,7 @@ def migrate_8_1_config(
     config: JsonObject,
     *,
     memory_search_mapping: tuple[JsonObject, bool] | None = None,
+    memory_backend_record: JsonObject | None = None,
 ) -> tuple[JsonObject, JsonObject]:
     """Map the supported legacy policy, remove exact unsupported paths, and record it."""
 
@@ -311,6 +312,8 @@ def migrate_8_1_config(
                 removed.append(_copy(mapped_legacy_record))
             else:
                 removed.append({"path": ".".join(path), "value": _copy(value)})
+        elif path == ("memory", "backend") and memory_backend_record is not None:
+            removed.append(_copy(memory_backend_record))
 
     if memory_search_mapping is not None:
         enabled = memory_search_mapping[1]
@@ -687,9 +690,20 @@ def assemble_config_with_migration(
     """Assemble a candidate, then apply the one-time 8.1 schema migration."""
 
     memory_search_mapping = _legacy_memory_search_mapping(local, repo)
+    memory_backend_present, memory_backend = _read_path(local, ("memory", "backend"))
+    memory_backend_record = (
+        {
+            "path": "memory.backend",
+            "value": _copy(memory_backend),
+            "source": "local_pre_overlay",
+        }
+        if memory_backend_present
+        else None
+    )
     return migrate_8_1_config(
         _assemble_config(local, repo, inputs),
         memory_search_mapping=memory_search_mapping,
+        memory_backend_record=memory_backend_record,
     )
 
 

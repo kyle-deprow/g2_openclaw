@@ -279,6 +279,7 @@ validate_bounded_research_roots() {
 
 OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
 LOCAL_CONFIG="${OPENCLAW_PUSH_HOME}/openclaw.json"
+MIGRATION_RECORD_DST="${OPENCLAW_PUSH_HOME}/.openclaw.migration-record.json"
 GENERATED_OPENCLAW_CONFIG_TMP=""
 GENERATED_OPENCLAW_CONFIG_HASH=""
 GENERATED_OPENCLAW_CONFIG_BYTES=""
@@ -656,11 +657,19 @@ require_paused_mask_path() {
 }
 
 require_paused_systemd_state() {
-  local unit="$1" label="$2" expected_load_states="$3" expected_active_states="$4" expected_sub_states="$5" expected_unit_file_states="$6"
-  local state load_state active_state sub_state unit_file_state main_pid
+  local unit="$1" label="$2" expected_load_states="$3" expected_active_states="$4" expected_sub_states="$5" expected_unit_file_states="$6" require_main_pid="$7"
+  local state load_state active_state sub_state unit_file_state main_pid state_details
+  local -a show_properties=(
+    --property=LoadState
+    --property=ActiveState
+    --property=SubState
+    --property=UnitFileState
+  )
+  if [[ "${require_main_pid}" == "1" ]]; then
+    show_properties+=(--property=MainPID)
+  fi
   if ! state="$(systemctl --user show "${unit}" \
-    --property=LoadState --property=ActiveState --property=SubState \
-    --property=UnitFileState --property=MainPID 2>&1)"; then
+    "${show_properties[@]}" 2>&1)"; then
     echo "ERROR: Could not inspect ${label} in paused mode." >&2
     echo "       systemctl output: ${state}" >&2
     return 1
@@ -669,13 +678,20 @@ require_paused_systemd_state() {
   active_state="$(systemd_show_value "${state}" ActiveState)"
   sub_state="$(systemd_show_value "${state}" SubState)"
   unit_file_state="$(systemd_show_value "${state}" UnitFileState)"
-  main_pid="$(systemd_show_value "${state}" MainPID)"
+  main_pid=""
+  if [[ "${require_main_pid}" == "1" ]]; then
+    main_pid="$(systemd_show_value "${state}" MainPID)"
+  fi
+  state_details="LoadState=${load_state:-<missing>} ActiveState=${active_state:-<missing>} SubState=${sub_state:-<missing>} UnitFileState=${unit_file_state:-<missing>}"
+  if [[ "${require_main_pid}" == "1" ]]; then
+    state_details+=" MainPID=${main_pid:-<missing>}"
+  fi
   if [[ " ${expected_load_states} " != *" ${load_state} "* \
     || " ${expected_active_states} " != *" ${active_state} "* \
     || ( -n "${expected_sub_states}" && " ${expected_sub_states} " != *" ${sub_state} "* ) \
-    || "${main_pid}" != "0" ]]; then
+    || ( "${require_main_pid}" == "1" && "${main_pid}" != "0" ) ]]; then
     echo "ERROR: Paused mode requires ${label} to be quiescent." >&2
-    echo "       LoadState=${load_state:-<missing>} ActiveState=${active_state:-<missing>} SubState=${sub_state:-<missing>} UnitFileState=${unit_file_state:-<missing>} MainPID=${main_pid:-<missing>}" >&2
+    echo "       ${state_details}" >&2
     return 1
   fi
   if [[ -n "${expected_unit_file_states}" \
@@ -684,7 +700,7 @@ require_paused_systemd_state() {
       || -n "${unit_file_state}" \
       || " ${expected_unit_file_states} " != *" not-found "* ]]; then
       echo "ERROR: Paused mode requires ${label} to be quiescent." >&2
-      echo "       LoadState=${load_state:-<missing>} ActiveState=${active_state:-<missing>} SubState=${sub_state:-<missing>} UnitFileState=${unit_file_state:-<missing>} MainPID=${main_pid:-<missing>}" >&2
+      echo "       ${state_details}" >&2
       return 1
     fi
   fi
@@ -699,19 +715,36 @@ require_paused_deployment_preconditions() {
   runtime_gateway_unit="${XDG_RUNTIME_DIR}/systemd/user/${GATEWAY_SERVICE_NAME}"
   require_paused_systemd_state \
     "${GATEWAY_SERVICE_NAME}" "${GATEWAY_SERVICE_NAME}" \
-    "masked" "inactive" "dead" "" || return 1
+    "masked" "inactive" "dead" "" 1 || return 1
   require_paused_mask_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}" "persistent gateway mask" || return 1
   require_paused_mask_path "${runtime_gateway_unit}" "runtime gateway mask" || return 1
   require_paused_systemd_state \
     "${HEALTHCHECK_TIMER_NAME}" "${HEALTHCHECK_TIMER_NAME}" \
-    "loaded not-found" "inactive" "dead inactive" "" || return 1
+    "loaded not-found" "inactive" "dead inactive" "" 0 || return 1
   require_paused_systemd_state \
     "${HEALTHCHECK_SERVICE_NAME}" "${HEALTHCHECK_SERVICE_NAME}" \
-    "loaded not-found" "inactive failed" "dead failed inactive" "" || return 1
+    "loaded not-found" "inactive failed" "dead failed inactive" "" 1 || return 1
   require_paused_systemd_state \
     "${RESEARCH_OWNER_SERVICE_NAME}" "${RESEARCH_OWNER_SERVICE_NAME}" \
-    "loaded not-found" "inactive" "dead inactive" "disabled masked not-found masked-runtime" || return 1
+    "loaded not-found" "inactive" "dead inactive" "disabled masked not-found masked-runtime" 1 || return 1
   echo "Verified paused deployment preconditions: masked gateway, stopped healthcheck, and quiescent research owner."
+}
+
+validate_migration_record() {
+  local path="$1" mode
+  guard_destination_path_chain "${path}" "validating generated migration record ${path}" || return 1
+  if [[ ! -f "${path}" || -L "${path}" ]]; then
+    echo "ERROR: Generated migration record is not a regular non-symlink file: ${path}" >&2
+    return 1
+  fi
+  if ! mode="$(stat -c '%a' -- "${path}")" || [[ "${mode}" != "600" ]]; then
+    echo "ERROR: Generated migration record must have mode 0600: ${path}" >&2
+    return 1
+  fi
+  if ! jq -e 'type == "object" and (.removed | type == "array")' "${path}" >/dev/null; then
+    echo "ERROR: Generated migration record must contain a .removed array: ${path}" >&2
+    return 1
+  fi
 }
 
 prepare_runtime_caps_dropin_dir() {
@@ -826,6 +859,9 @@ snapshot_stale_systemd_environment_paths() {
     shopt -s nullglob
     shopt -s dotglob
     for path in "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"/*.conf; do
+      if [[ -d "${path}" && ! -L "${path}" ]]; then
+        continue
+      fi
       if [[ ! -f "${path}" && ! -L "${path}" ]]; then
         echo "ERROR: Managed systemd drop-in path is not a regular file: ${path}" >&2
         [[ "${nullglob_was_set}" -eq 1 ]] || shopt -u nullglob
@@ -898,7 +934,7 @@ require_acpx_plugin_exact() {
     printf '%s\n' "${inventory}" >&2
     return 1
   fi
-  if plugin_path="$(printf '%s\n' "${inventory}" | jq -r --arg version "2026.7.1" '
+  if plugin_path="$(printf '%s\n' "${inventory}" | jq -r --arg version "2026.8.1" '
     def plugin_objects:
       if type == "array" then .[] else .. | objects end;
     [plugin_objects
@@ -913,7 +949,7 @@ require_acpx_plugin_exact() {
     plugin_path=""
   fi
   if [[ -z "${plugin_path}" ]]; then
-    echo "ERROR: Installed @openclaw/acpx version 2026.7.1 was not found; refusing network or install fallback." >&2
+    echo "ERROR: Installed @openclaw/acpx version 2026.8.1 was not found; refusing network or install fallback." >&2
     return 1
   fi
   if ! resolved="$(env -u NODE_OPTIONS node - "${plugin_path}" <<'NODE'
@@ -937,20 +973,45 @@ while (packageRoot !== path.dirname(packageRoot) && !fs.existsSync(path.join(pac
 }
 const packageJsonPath = path.join(packageRoot, "package.json");
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-if (packageJson.name !== "@openclaw/acpx" || packageJson.version !== "2026.7.1") {
-  throw new Error("reported ACPX path does not resolve to @openclaw/acpx 2026.7.1");
+if (packageJson.name !== "@openclaw/acpx" || packageJson.version !== "2026.8.1") {
+  throw new Error("reported ACPX path does not resolve to @openclaw/acpx 2026.8.1");
+}
+const pluginAcpxDependency = packageJson.dependencies?.acpx;
+if (pluginAcpxDependency !== undefined && pluginAcpxDependency !== "0.13.1") {
+  throw new Error(`ACPX plugin dependency acpx must be 0.13.1, got ${pluginAcpxDependency || "<missing>"}`);
 }
 const requireFromPlugin = Module.createRequire(packageJsonPath);
 const adapterPackageJsonPath = requireFromPlugin.resolve("@agentclientprotocol/claude-agent-acp/package.json");
 const adapterRoot = path.dirname(adapterPackageJsonPath);
 const adapterPackageJson = JSON.parse(fs.readFileSync(adapterPackageJsonPath, "utf8"));
-if (adapterPackageJson.version !== "0.55.0") {
-  throw new Error(`Claude ACP adapter must be 0.55.0, got ${adapterPackageJson.version || "<missing>"}`);
+if (adapterPackageJson.name !== "@agentclientprotocol/claude-agent-acp" || adapterPackageJson.version !== "0.70.0") {
+  throw new Error(`Claude ACP adapter must be @agentclientprotocol/claude-agent-acp 0.70.0, got ${adapterPackageJson.version || "<missing>"}`);
 }
-const sdkPackageJsonPath = requireFromPlugin.resolve("@agentclientprotocol/sdk/package.json");
+const requireFromAdapter = Module.createRequire(adapterPackageJsonPath);
+function resolveAdapterOwned(packageName) {
+  const resolved = requireFromAdapter.resolve(packageName);
+  const relative = path.relative(adapterRoot, resolved);
+  if (path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)
+      || !relative.startsWith(`node_modules${path.sep}`)) {
+    throw new Error(`${packageName} must resolve from the adapter-owned node_modules tree`);
+  }
+  return resolved;
+}
+const sdkPackageJsonPath = resolveAdapterOwned("@agentclientprotocol/sdk/package.json");
 const sdkPackageJson = JSON.parse(fs.readFileSync(sdkPackageJsonPath, "utf8"));
-if (sdkPackageJson.version !== "0.3.198") {
-  throw new Error(`Agent Client Protocol SDK must be 0.3.198, got ${sdkPackageJson.version || "<missing>"}`);
+if (sdkPackageJson.name !== "@agentclientprotocol/sdk" || sdkPackageJson.version !== "1.3.0") {
+  throw new Error(`Agent Client Protocol SDK must be 1.3.0, got ${sdkPackageJson.version || "<missing>"}`);
+}
+if (adapterPackageJson.dependencies?.["@agentclientprotocol/sdk"] !== sdkPackageJson.version) {
+  throw new Error("Adapter ACP SDK dependency declaration does not match the resolved package");
+}
+const claudeSdkPackageJsonPath = resolveAdapterOwned("@anthropic-ai/claude-agent-sdk/package.json");
+const claudeSdkPackageJson = JSON.parse(fs.readFileSync(claudeSdkPackageJsonPath, "utf8"));
+if (claudeSdkPackageJson.name !== "@anthropic-ai/claude-agent-sdk" || claudeSdkPackageJson.version !== "0.3.232") {
+  throw new Error(`Claude Agent SDK must be 0.3.232, got ${claudeSdkPackageJson.version || "<missing>"}`);
+}
+if (adapterPackageJson.dependencies?.["@anthropic-ai/claude-agent-sdk"] !== claudeSdkPackageJson.version) {
+  throw new Error("Adapter Claude Agent SDK dependency declaration does not match the resolved package");
 }
 const bin = typeof adapterPackageJson.bin === "string"
   ? adapterPackageJson.bin
@@ -971,7 +1032,7 @@ NODE
     echo "ERROR: Research reviewer launcher is missing or not executable: ${RESEARCH_REVIEWER_LAUNCHER}" >&2
     return 1
   fi
-  echo "ACPX plugin validated: @openclaw/acpx 2026.7.1; Claude adapter ${ACPX_ADAPTER_BIN}"
+  echo "ACPX plugin validated: @openclaw/acpx 2026.8.1; Claude adapter ${ACPX_ADAPTER_BIN}"
 }
 
 require_codex_runtime_exact() {
@@ -1135,24 +1196,6 @@ rollback_managed_unit_transaction() {
   fi
   MANAGED_UNIT_TRANSACTION_ARMED=0
   return 0
-}
-
-restore_managed_unit_paths_from_backup_fallback() {
-  if [[ -z "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
-    return 0
-  fi
-  local index=0
-  local path backup_path fallback_failed=0
-  for path in "${MANAGED_UNIT_PATHS[@]}"; do
-    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
-    if [[ -e "${backup_path}" || -L "${backup_path}" ]]; then
-      if ! guarded_copy_path_topology "${backup_path}" "${path}" "fallback restoring managed systemd file ${path}"; then
-        fallback_failed=1
-      fi
-    fi
-    index=$((index + 1))
-  done
-  return "${fallback_failed}"
 }
 
 finalize_managed_unit_transaction() {
@@ -1458,9 +1501,6 @@ run_deployment_rollback_and_exit() {
   fi
   if ! rollback_managed_unit_transaction; then
     rollback_step_failed=1
-    if ! restore_managed_unit_paths_from_backup_fallback; then
-      rollback_step_failed=1
-    fi
   fi
   if ! rollback_managed_artifact_transaction; then
     rollback_step_failed=1
@@ -1733,6 +1773,8 @@ trap 'exit 143' TERM
 echo "Backed up local config → ${BACKUP}"
 begin_managed_artifact_transaction
 capture_runtime_caps_dropin_dir_state || exit 1
+guard_destination_path_chain "${MIGRATION_RECORD_DST}" "preparing managed OpenClaw migration record ${MIGRATION_RECORD_DST}" || exit 1
+snapshot_managed_artifact_path "${MIGRATION_RECORD_DST}" || exit 1
 
 assemble_openclaw_config() {
   MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
@@ -1807,6 +1849,7 @@ assemble_openclaw_config() {
 
   if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
+    --migration-record "${MIGRATION_RECORD_DST}" \
     -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
     "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
@@ -1816,6 +1859,7 @@ assemble_openclaw_config() {
     "${ACPX_ADAPTER_BIN}")"; then
     return 1
   fi
+  validate_migration_record "${MIGRATION_RECORD_DST}" || return 1
   echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
   echo "Resolved MemPalace embedding: ${MEMPALACE_EMBEDDING_MODEL} (cache: ${FASTEMBED_CACHE_PATH})"
   if [[ "${PROVIDER}" == "openrouter" ]] && [[ -n "${OPENROUTER_API_KEY:-}" ]]; then

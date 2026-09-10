@@ -1239,7 +1239,7 @@ JSON
     {
       "id": "acpx",
       "name": "@openclaw/acpx",
-      "version": "2026.7.1",
+      "version": "2026.8.1",
       "path": "${MOCK_ACPX_PLUGIN_PATH}"
     }
   ]
@@ -1369,6 +1369,8 @@ manager_node_options_should_emit() {{
 printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
 paused_show_properties="--property=LoadState --property=ActiveState "\
 "--property=SubState --property=UnitFileState --property=MainPID"
+paused_timer_show_properties="--property=LoadState --property=ActiveState "\
+"--property=SubState --property=UnitFileState"
 case "$*" in
   "--user show-environment")
     if [[ -n "${{SYSTEMD_MANAGER_EXTRA_ENV:-}}" ]]; then
@@ -1419,14 +1421,16 @@ case "$*" in
       "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
     exit 0
     ;;
-  "--user show openclaw-gateway-healthcheck.timer ${{paused_show_properties}}")
+  "--user show openclaw-gateway-healthcheck.timer ${{paused_timer_show_properties}}")
     load_state="${{HEALTHCHECK_TIMER_LOAD_STATE:-loaded}}"
     active_state="${{HEALTHCHECK_TIMER_ACTIVE_STATE:-inactive}}"
     sub_state="${{HEALTHCHECK_TIMER_SUB_STATE:-dead}}"
     unit_file_state="${{HEALTHCHECK_TIMER_UNIT_FILE_STATE:-enabled}}"
-    main_pid="${{HEALTHCHECK_TIMER_MAIN_PID:-0}}"
-    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nMainPID=%s\n' \
-      "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\n' \
+      "$load_state" "$active_state" "$sub_state" "$unit_file_state"
+    if [[ -v HEALTHCHECK_TIMER_MAIN_PID ]]; then
+      printf 'MainPID=%s\n' "$HEALTHCHECK_TIMER_MAIN_PID"
+    fi
     exit 0
     ;;
   "--user show openclaw-gateway-healthcheck.service ${{paused_show_properties}}")
@@ -1669,27 +1673,43 @@ def _prepare_push_script_home(
     )
     acpx_root = tmp_path / "mock-acpx/node_modules/@openclaw/acpx"
     adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
-    sdk_root = acpx_root / "node_modules/@agentclientprotocol/sdk"
-    adapter_bin = adapter_root / "bin/claude-agent-acp"
+    sdk_root = adapter_root / "node_modules/@agentclientprotocol/sdk"
+    claude_sdk_root = adapter_root / "node_modules/@anthropic-ai/claude-agent-sdk"
+    adapter_bin = adapter_root / "dist/index.js"
     acpx_root.mkdir(parents=True)
     adapter_root.mkdir(parents=True)
     sdk_root.mkdir(parents=True)
+    claude_sdk_root.mkdir(parents=True)
     (acpx_root / "package.json").write_text(
-        json.dumps({"name": "@openclaw/acpx", "version": "2026.7.1"}),
+        json.dumps(
+            {
+                "name": "@openclaw/acpx",
+                "version": "2026.8.1",
+                "dependencies": {"acpx": "0.13.1"},
+            }
+        ),
         encoding="utf-8",
     )
     (adapter_root / "package.json").write_text(
         json.dumps(
             {
                 "name": "@agentclientprotocol/claude-agent-acp",
-                "version": "0.55.0",
-                "bin": {"claude-agent-acp": "bin/claude-agent-acp"},
+                "version": "0.70.0",
+                "bin": {"claude-agent-acp": "dist/index.js"},
+                "dependencies": {
+                    "@agentclientprotocol/sdk": "1.3.0",
+                    "@anthropic-ai/claude-agent-sdk": "0.3.232",
+                },
             }
         ),
         encoding="utf-8",
     )
     (sdk_root / "package.json").write_text(
-        json.dumps({"name": "@agentclientprotocol/sdk", "version": "0.3.198"}),
+        json.dumps({"name": "@agentclientprotocol/sdk", "version": "1.3.0"}),
+        encoding="utf-8",
+    )
+    (claude_sdk_root / "package.json").write_text(
+        json.dumps({"name": "@anthropic-ai/claude-agent-sdk", "version": "0.3.232"}),
         encoding="utf-8",
     )
     _write_executable(adapter_bin, "#!/usr/bin/env bash\nexit 0\n")
@@ -1722,7 +1742,6 @@ def _prepare_push_script_home(
             "HEALTHCHECK_TIMER_ACTIVE_STATE": "inactive",
             "HEALTHCHECK_TIMER_SUB_STATE": "dead",
             "HEALTHCHECK_TIMER_UNIT_FILE_STATE": "enabled",
-            "HEALTHCHECK_TIMER_MAIN_PID": "0",
             "HEALTHCHECK_SERVICE_LOAD_STATE": "loaded",
             "HEALTHCHECK_SERVICE_ACTIVE_STATE": "failed",
             "HEALTHCHECK_SERVICE_SUB_STATE": "failed",
@@ -2198,6 +2217,7 @@ def test_push_script_invariants_target_research_owner_not_main() -> None:
     assert "main interface" in script
     assert "and (.memory.search.enabled == false)" in script
     assert ".agents.defaults.memorySearch.enabled == false" not in script
+    assert "restore_managed_unit_paths_from_backup_fallback" not in script
     assert 'snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"' not in script
     assert "rollback_runtime_caps_dropin_dir_state" in script
     assert 'guarded_rmdir "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"' in script
@@ -2711,10 +2731,135 @@ def test_push_script_missing_pinned_acpx_fails_before_live_write(tmp_path: Path)
     result = _run_push_script(env)
 
     assert result.returncode != 0
-    assert "@openclaw/acpx version 2026.7.1 was not found" in result.stderr
+    assert "@openclaw/acpx version 2026.8.1 was not found" in result.stderr
     assert live_config.read_bytes() == original
     assert not (live_config.parent / "openclaw.json.bak").exists()
     assert not Path(env["CP_LOG"]).exists() or "openclaw.json.bak" not in _read_cp_log(env)
+
+
+def test_push_script_acpx_resolver_uses_adapter_owned_sdk_tuple_without_separate_binary() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    assert '"2026.8.1"' in script
+    assert '"0.13.1"' in script
+    assert '"@agentclientprotocol/claude-agent-acp"' in script
+    assert '"0.70.0"' in script
+    assert '"@agentclientprotocol/sdk"' in script
+    assert '"1.3.0"' in script
+    assert '"@anthropic-ai/claude-agent-sdk"' in script
+    assert '"0.3.232"' in script
+    assert 'resolve("@agentclientprotocol/sdk/package.json")' not in script
+    assert 'resolve("@anthropic-ai/claude-agent-sdk/package.json")' not in script
+    assert 'resolve("acpx/package.json")' not in script
+    assert 'require("acpx")' not in script
+    assert "claude-agent-acp executable" not in script
+
+
+@pytest.mark.parametrize(
+    ("dependency_value", "expected_error"),
+    [
+        (None, None),
+        ("9.9.9", "ACPX plugin dependency acpx must be 0.13.1"),
+    ],
+)
+def test_push_script_acpx_plugin_dependency_is_optional_but_exact_when_declared(
+    tmp_path: Path,
+    dependency_value: str | None,
+    expected_error: str | None,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    plugin_package_path = Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "package.json"
+    plugin_package = json.loads(plugin_package_path.read_text(encoding="utf-8"))
+    if dependency_value is None:
+        plugin_package["dependencies"].pop("acpx")
+    else:
+        plugin_package["dependencies"]["acpx"] = dependency_value
+    plugin_package_path.write_text(json.dumps(plugin_package), encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    if expected_error is None:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+
+
+def test_push_script_acpx_rejects_reversed_adapter_sdk_tuple(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    adapter_root = (
+        Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "node_modules/@agentclientprotocol/claude-agent-acp"
+    )
+    sdk_package_path = adapter_root / "node_modules/@agentclientprotocol/sdk/package.json"
+    claude_sdk_package_path = (
+        adapter_root / "node_modules/@anthropic-ai/claude-agent-sdk/package.json"
+    )
+    sdk_package = json.loads(sdk_package_path.read_text(encoding="utf-8"))
+    claude_sdk_package = json.loads(claude_sdk_package_path.read_text(encoding="utf-8"))
+    sdk_package["version"], claude_sdk_package["version"] = (
+        claude_sdk_package["version"],
+        sdk_package["version"],
+    )
+    sdk_package_path.write_text(json.dumps(sdk_package), encoding="utf-8")
+    claude_sdk_package_path.write_text(json.dumps(claude_sdk_package), encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Agent Client Protocol SDK must be 1.3.0" in result.stderr
+
+
+def test_push_script_acpx_rejects_plugin_context_only_sdk(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    acpx_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
+    adapter_sdk_package_path = (
+        acpx_root
+        / "node_modules/@agentclientprotocol/claude-agent-acp/node_modules"
+        / "@agentclientprotocol/sdk/package.json"
+    )
+    adapter_sdk_package_path.unlink()
+    plugin_sdk_package_path = acpx_root / "node_modules/@agentclientprotocol/sdk/package.json"
+    plugin_sdk_package_path.parent.mkdir(parents=True)
+    plugin_sdk_package_path.write_text(
+        json.dumps({"name": "@agentclientprotocol/sdk", "version": "1.3.0"}),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "adapter-owned node_modules tree" in result.stderr
+
+
+def test_push_script_acpx_rejects_adapter_sdk_declaration_mismatch(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    adapter_package_path = (
+        Path(env["MOCK_ACPX_PLUGIN_PATH"])
+        / "node_modules/@agentclientprotocol/claude-agent-acp/package.json"
+    )
+    adapter_package = json.loads(adapter_package_path.read_text(encoding="utf-8"))
+    adapter_package["dependencies"]["@agentclientprotocol/sdk"] = "1.2.0"
+    adapter_package_path.write_text(json.dumps(adapter_package), encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Adapter ACP SDK dependency declaration does not match" in result.stderr
+
+
+def test_push_script_acpx_rejects_missing_claude_agent_sdk(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    claude_sdk_package_path = (
+        Path(env["MOCK_ACPX_PLUGIN_PATH"])
+        / "node_modules/@agentclientprotocol/claude-agent-acp/node_modules"
+        / "@anthropic-ai/claude-agent-sdk/package.json"
+    )
+    claude_sdk_package_path.unlink()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Could not resolve the installed Claude ACP adapter" in result.stderr
 
 
 def test_push_script_missing_research_persona_is_explicit_p4_gate(tmp_path: Path) -> None:
@@ -3064,6 +3209,20 @@ def test_push_script_paused_mode_rejects_nonquiescent_preconditions(
     assert not list(live_config.parent.glob("openclaw.json.bak.*"))
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
     assert "daemon-reload" not in systemctl_log
+
+
+def test_push_script_paused_mode_accepts_timer_without_main_pid(tmp_path: Path) -> None:
+    env = _prepare_paused_push_script_home(tmp_path)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    timer_show = next(
+        line
+        for line in Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8").splitlines()
+        if "show openclaw-gateway-healthcheck.timer" in line
+    )
+    assert "--property=MainPID" not in timer_show
 
 
 def test_push_script_paused_mode_rejects_missing_persistent_gateway_mask(tmp_path: Path) -> None:
@@ -5425,6 +5584,39 @@ def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 2
 
 
+def test_push_script_real_assembly_writes_deterministic_private_migration_record(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    record = Path(env["OPENCLAW_PUSH_HOME"]) / ".openclaw.migration-record.json"
+
+    first = _run_push_script(env)
+    assert first.returncode == 0, first.stderr
+    first_bytes = record.read_bytes()
+    second = _run_push_script(env)
+
+    assert second.returncode == 0, second.stderr
+    assert first_bytes == record.read_bytes()
+    assert _mode(record) == 0o600
+    assert isinstance(json.loads(first_bytes)["removed"], list)
+
+
+def test_push_script_migration_record_rollback_restores_prior_bytes(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    record = Path(env["OPENCLAW_PUSH_HOME"]) / ".openclaw.migration-record.json"
+    prior_bytes = b'{"removed":[{"path":"memory.backend","value":"prior"}]}\n'
+    record.write_bytes(prior_bytes)
+    record.chmod(0o600)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert record.read_bytes() == prior_bytes
+    assert _mode(record) == 0o600
+    assert str(record) in Path(env["CP_LOG"]).read_text(encoding="utf-8")
+
+
 def test_gateway_cli_does_not_inject_azure_preload_into_codex_daemon() -> None:
     cli_source = (REPO_ROOT / "gateway/cli.py").read_text(encoding="utf-8")
 
@@ -5519,6 +5711,24 @@ def test_push_script_rollback_restores_existing_dropin_mode_without_deleting_non
     assert not _native_crash_hardening_dropin_dst(home).exists()
 
 
+def test_push_script_normal_mode_preserves_dropin_subdirectory(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    dropin_dir = _runtime_caps_dropin_dst(home).parent
+    nested = dropin_dir / "05-nonowned.conf"
+    nested.mkdir(parents=True)
+    marker = nested / "keep.txt"
+    marker.write_text("keep nested drop-in data\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert nested.is_dir()
+    assert marker.read_text(encoding="utf-8") == "keep nested drop-in data\n"
+
+
 def test_push_script_final_daemon_reload_runs_after_systemd_artifact_restore(
     tmp_path: Path,
 ) -> None:
@@ -5579,6 +5789,26 @@ def test_push_script_failed_unit_snapshot_state_retains_original_unit(tmp_path: 
     assert _mode(runtime_caps) == 0o600
     recovery_dirs = sorted((home / ".config/systemd/user").glob(".push-openclaw-config-units.*"))
     assert len(recovery_dirs) == 1
+
+
+def test_push_script_managed_systemd_rollback_removes_newly_installed_units_when_prior_absent(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    home = Path(env["HOME"])
+    managed_paths = (
+        _supervisor_unit_dst(home),
+        _quantipy_api_unit_dst(home),
+        _runtime_caps_dropin_dst(home),
+        _native_crash_hardening_dropin_dst(home),
+    )
+    assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert all(not path.exists() and not path.is_symlink() for path in managed_paths)
 
 
 def test_push_script_managed_systemd_symlink_fails_closed_and_rolls_back_artifacts(

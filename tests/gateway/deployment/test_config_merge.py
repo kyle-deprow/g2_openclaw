@@ -184,6 +184,35 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
     assert cast(JsonObject, memory["nested"])["backend"] == "keep"
 
 
+def test_local_memory_backend_is_recorded_before_repository_memory_overlay(
+    tmp_path: Path,
+) -> None:
+    local = cast(JsonObject, {"memory": {"backend": "builtin"}})
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {"citations": "off", "search": {"enabled": False}}
+
+    migrated, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert "backend" not in cast(JsonObject, migrated["memory"])
+    assert record["removed"] == [
+        {
+            "path": "memory.backend",
+            "value": "builtin",
+            "source": "local_pre_overlay",
+        }
+    ]
+
+
+def test_absent_local_memory_backend_is_not_recorded(tmp_path: Path) -> None:
+    local = cast(JsonObject, {"memory": {"citations": "local"}})
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    repo["memory"] = {"citations": "off", "search": {"enabled": False}}
+
+    _, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
+
+    assert record == {"removed": []}
+
+
 def test_legacy_memory_search_extra_keys_fail_closed(tmp_path: Path) -> None:
     local = cast(
         JsonObject,
@@ -520,6 +549,8 @@ def _jq_full_assembly(
     )
     merged = _run_jq(
         [
+            "(if .agents.defaults.memorySearch? != null then "
+            ".memory.search.enabled = .agents.defaults.memorySearch.enabled else . end) | "
             "del(.meta.lastTouchedAt) | "
             "del(.agents.defaults.memorySearch) | "
             "del(.commands.ownerDisplay) | "
@@ -547,6 +578,7 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
             "defaults": {
                 "model": {"primary": "local/model"},
                 "subagents": {"archiveAfterMinutes": 7, "requireAgentId": True},
+                "memorySearch": {"enabled": False},
             },
             "list": [],
         },
