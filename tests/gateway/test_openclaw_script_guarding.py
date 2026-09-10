@@ -2110,6 +2110,7 @@ def test_push_script_rejects_corrupted_quantipy_api_unit_template(tmp_path: Path
 def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
     repo_config_text = json.dumps(config)
+    assert config["memory"]["search"]["enabled"] is False
     assert "__RESEARCH_REVIEWER_LAUNCHER__" not in repo_config_text
     assert "__ACPX_ADAPTER_BIN__" not in repo_config_text
     assert config["plugins"]["entries"]["acpx"]["config"] == {}
@@ -2195,6 +2196,11 @@ def test_push_script_invariants_target_research_owner_not_main() -> None:
     assert ".subagents.allowAgents?" in script
     assert "strict concurrency caps" in script
     assert "main interface" in script
+    assert "and (.memory.search.enabled == false)" in script
+    assert ".agents.defaults.memorySearch.enabled == false" not in script
+    assert 'snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"' not in script
+    assert "rollback_runtime_caps_dropin_dir_state" in script
+    assert 'guarded_rmdir "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"' in script
 
 
 @pytest.mark.parametrize("push_impl", ["bash", "Bash"])
@@ -2987,6 +2993,50 @@ def test_push_script_paused_mode_publishes_gated_config_without_lifecycle_side_e
     assert (home / ".config/systemd/user/openclaw-gateway.service").is_symlink()
     assert (Path(env["XDG_RUNTIME_DIR"]) / "systemd/user/openclaw-gateway.service").is_symlink()
     assert _supervisor_unit_dst(home).is_file()
+
+
+@pytest.mark.parametrize(
+    ("mode_env", "env_file_text"),
+    [
+        ({}, ""),
+        ({"OPENCLAW_PUSH_MODE": "normal"}, ""),
+        ({"OPENCLAW_PUSH_MODE": "paused"}, ""),
+        (
+            {"OPENCLAW_PUSH_MODE": "normal"},
+            "OPENCLAW_PUSH_MODE=paused\n"
+            "OPENCLAW_PUSH_MODE_REQUESTED=paused\n",  # pragma: allowlist secret
+        ),
+        ({}, "OPENCLAW_PUSH_MODE_REQUESTED=paused\n"),
+    ],
+    ids=[
+        "unset-normal",
+        "explicit-normal",
+        "explicit-paused",
+        "both-smuggle",
+        "requested-only-smuggle",
+    ],
+)
+def test_push_script_selector_is_immutable_before_publication(
+    tmp_path: Path, mode_env: dict[str, str], env_file_text: str
+) -> None:
+    if mode_env.get("OPENCLAW_PUSH_MODE") == "paused":
+        env = _prepare_paused_push_script_home(tmp_path)
+    else:
+        env = _prepare_push_script_home(tmp_path)
+    env.update(mode_env)
+    Path(env["OPENCLAW_PUSH_ENV_FILE"]).write_text(env_file_text, encoding="utf-8")
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    if env_file_text:
+        assert result.returncode != 0
+        assert live_config.read_bytes() == original
+        assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+        assert "OPENCLAW_PUSH_MODE" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize(
@@ -3995,6 +4045,7 @@ def test_push_script_rejects_final_live_config_warnings_and_rolls_back(tmp_path:
     assert not _supervisor_unit_dst(home).exists()
     assert not _runtime_caps_dropin_dst(home).exists()
     assert not _native_crash_hardening_dropin_dst(home).exists()
+    assert not _runtime_caps_dropin_dst(home).parent.exists()
 
 
 def test_push_script_rejects_live_config_mutation_during_final_validation(
@@ -5442,6 +5493,30 @@ def test_push_script_managed_systemd_publication_rolls_back_existing_files(
     assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
         initial_config
     )
+
+
+def test_push_script_rollback_restores_existing_dropin_mode_without_deleting_nonowned_files(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
+    home = Path(env["HOME"])
+    dropin_dir = _runtime_caps_dropin_dst(home).parent
+    dropin_dir.mkdir(parents=True)
+    dropin_dir.chmod(0o700)
+    nonowned = dropin_dir / "05-nonowned.conf"
+    nonowned.write_text("[Service]\nEnvironment=KEEP=1\n", encoding="utf-8")
+    nonowned.chmod(0o640)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert dropin_dir.is_dir()
+    assert _mode(dropin_dir) == 0o700
+    assert nonowned.read_text(encoding="utf-8") == "[Service]\nEnvironment=KEEP=1\n"
+    assert _mode(nonowned) == 0o640
+    assert not _runtime_caps_dropin_dst(home).exists()
+    assert not _native_crash_hardening_dropin_dst(home).exists()
 
 
 def test_push_script_final_daemon_reload_runs_after_systemd_artifact_restore(

@@ -23,7 +23,20 @@ set -euo pipefail
 # The push mode is deliberately selected before the optional env file is
 # sourced.  An env file may configure provider credentials and roots, but it
 # must never be able to opt an ordinary push into paused deployment semantics.
-OPENCLAW_PUSH_MODE_REQUESTED="${OPENCLAW_PUSH_MODE:-normal}"
+# Capture both the value and whether the caller supplied the selector so a
+# sourced env file cannot unset, replace, or smuggle a second selector.
+if [[ -v OPENCLAW_PUSH_MODE_REQUESTED ]]; then
+  echo "ERROR: OPENCLAW_PUSH_MODE_REQUESTED is reserved and must not be supplied by the invoking environment." >&2
+  exit 1
+fi
+if [[ -v OPENCLAW_PUSH_MODE ]]; then
+  readonly OPENCLAW_PUSH_MODE_INVOCATION_SET=1
+  readonly OPENCLAW_PUSH_MODE_INVOCATION_VALUE="${OPENCLAW_PUSH_MODE}"
+else
+  readonly OPENCLAW_PUSH_MODE_INVOCATION_SET=0
+  readonly OPENCLAW_PUSH_MODE_INVOCATION_VALUE=""
+fi
+readonly OPENCLAW_PUSH_MODE_REQUESTED="${OPENCLAW_PUSH_MODE:-normal}"
 case "${OPENCLAW_PUSH_MODE_REQUESTED}" in
   normal | paused)
     ;;
@@ -784,6 +797,60 @@ remove_stale_azure_node_options_for_codex() {
   fi
   return "${module_status}"
 }
+
+snapshot_stale_systemd_environment_paths() {
+  local service_path="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
+  local path
+  local nullglob_was_set=0
+  local dotglob_was_set=0
+  local -a candidates=()
+  if [[ -e "${service_path}" || -L "${service_path}" ]]; then
+    if [[ ! -f "${service_path}" || -L "${service_path}" ]]; then
+      echo "ERROR: Managed systemd service path is not a regular file: ${service_path}" >&2
+      return 1
+    fi
+    candidates+=("${service_path}")
+  fi
+  if [[ -e "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || -L "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    if [[ ! -d "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || -L "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+      echo "ERROR: Managed systemd drop-in path is not a real directory: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
+      return 1
+    fi
+    guard_destination_path_chain "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "scanning managed systemd drop-in paths for rollback snapshots" || return 1
+    if shopt -q nullglob; then
+      nullglob_was_set=1
+    fi
+    if shopt -q dotglob; then
+      dotglob_was_set=1
+    fi
+    shopt -s nullglob
+    shopt -s dotglob
+    for path in "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"/*.conf; do
+      if [[ ! -f "${path}" && ! -L "${path}" ]]; then
+        echo "ERROR: Managed systemd drop-in path is not a regular file: ${path}" >&2
+        [[ "${nullglob_was_set}" -eq 1 ]] || shopt -u nullglob
+        [[ "${dotglob_was_set}" -eq 1 ]] || shopt -u dotglob
+        return 1
+      fi
+      if [[ "${path}" == "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" \
+        || "${path}" == "${NATIVE_CRASH_HARDENING_DROPIN_DST}" ]]; then
+        continue
+      fi
+      candidates+=("${path}")
+    done
+    [[ "${nullglob_was_set}" -eq 1 ]] || shopt -u nullglob
+    [[ "${dotglob_was_set}" -eq 1 ]] || shopt -u dotglob
+  fi
+  for path in "${candidates[@]}"; do
+    if [[ -L "${path}" ]]; then
+      echo "ERROR: Managed systemd file ${path} is a symlink to $(readlink -- "${path}" 2>/dev/null || printf '<unreadable>');" >&2
+      echo "       Refusing before mutating managed systemd files." >&2
+      return 1
+    fi
+    guard_destination_path_chain "${path}" "rewriting managed systemd environment file ${path}" || return 1
+    snapshot_managed_artifact_path "${path}" || return 1
+  done
+}
 resolve_openclaw_bin() {
   local -a candidates=()
   local candidate path_entry
@@ -958,6 +1025,8 @@ MANAGED_UNIT_PATHS=(
 MANAGED_ARTIFACT_TRANSACTION_ARMED=0
 MANAGED_ARTIFACT_BACKUP_DIR=""
 MANAGED_ARTIFACT_RESTORED_SYSTEMD=0
+RUNTIME_CAPS_DROPIN_DIR_EXISTED=0
+RUNTIME_CAPS_DROPIN_DIR_MODE=""
 SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
 SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
 SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
@@ -970,6 +1039,43 @@ cleanup_deployment_temp_file() {
     ROLLBACK_FAILED=1
     return 1
   fi
+}
+
+capture_runtime_caps_dropin_dir_state() {
+  if [[ ! -e "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" && ! -L "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    RUNTIME_CAPS_DROPIN_DIR_EXISTED=0
+    RUNTIME_CAPS_DROPIN_DIR_MODE=""
+    return 0
+  fi
+  if [[ ! -d "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || -L "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    echo "ERROR: Managed systemd drop-in path exists but is not a real directory: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
+    return 1
+  fi
+  guard_destination_path_chain "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "capturing managed systemd drop-in directory state ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || return 1
+  if ! RUNTIME_CAPS_DROPIN_DIR_MODE="$(stat -c '%a' -- "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}")"; then
+    echo "ERROR: Could not capture managed systemd drop-in directory mode: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
+    return 1
+  fi
+  RUNTIME_CAPS_DROPIN_DIR_EXISTED=1
+}
+
+rollback_runtime_caps_dropin_dir_state() {
+  if [[ "${RUNTIME_CAPS_DROPIN_DIR_EXISTED:-0}" -eq 1 ]]; then
+    if ! guarded_chmod "${RUNTIME_CAPS_DROPIN_DIR_MODE}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "restoring managed systemd drop-in directory mode ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"; then
+      echo "ERROR: Failed to restore managed systemd drop-in directory mode ${RUNTIME_CAPS_DROPIN_DIR_MODE} for ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}." >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+    return 0
+  fi
+  if [[ -e "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" || -L "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" ]]; then
+    if ! guarded_rmdir "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" "removing newly created empty managed systemd drop-in directory ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"; then
+      echo "ERROR: Failed to remove newly created managed systemd drop-in directory; it was not empty or could not be guarded: ${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}" >&2
+      ROLLBACK_FAILED=1
+      return 1
+    fi
+  fi
+  return 0
 }
 
 begin_managed_unit_transaction() {
@@ -1029,6 +1135,24 @@ rollback_managed_unit_transaction() {
   fi
   MANAGED_UNIT_TRANSACTION_ARMED=0
   return 0
+}
+
+restore_managed_unit_paths_from_backup_fallback() {
+  if [[ -z "${MANAGED_UNIT_BACKUP_DIR:-}" ]]; then
+    return 0
+  fi
+  local index=0
+  local path backup_path fallback_failed=0
+  for path in "${MANAGED_UNIT_PATHS[@]}"; do
+    backup_path="${MANAGED_UNIT_BACKUP_DIR}/${index}"
+    if [[ -e "${backup_path}" || -L "${backup_path}" ]]; then
+      if ! guarded_copy_path_topology "${backup_path}" "${path}" "fallback restoring managed systemd file ${path}"; then
+        fallback_failed=1
+      fi
+    fi
+    index=$((index + 1))
+  done
+  return "${fallback_failed}"
 }
 
 finalize_managed_unit_transaction() {
@@ -1334,8 +1458,14 @@ run_deployment_rollback_and_exit() {
   fi
   if ! rollback_managed_unit_transaction; then
     rollback_step_failed=1
+    if ! restore_managed_unit_paths_from_backup_fallback; then
+      rollback_step_failed=1
+    fi
   fi
   if ! rollback_managed_artifact_transaction; then
+    rollback_step_failed=1
+  fi
+  if ! rollback_runtime_caps_dropin_dir_state; then
     rollback_step_failed=1
   fi
   if ! final_systemd_reload_after_artifact_rollback; then
@@ -1534,13 +1664,25 @@ done
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   set -a
-  source "${ENV_FILE}"
+  if ! source "${ENV_FILE}"; then
+    set +a
+    echo "ERROR: OPENCLAW_PUSH_MODE_REQUESTED is immutable and may not be set by OPENCLAW_PUSH_ENV_FILE." >&2
+    exit 1
+  fi
   set +a
 fi
 
-if [[ -v OPENCLAW_PUSH_MODE && "${OPENCLAW_PUSH_MODE}" != "${OPENCLAW_PUSH_MODE_REQUESTED}" ]]; then
-  echo "ERROR: OPENCLAW_PUSH_MODE must be selected in the invoking environment, not OPENCLAW_PUSH_ENV_FILE." >&2
-  exit 1
+if [[ "${OPENCLAW_PUSH_MODE_INVOCATION_SET}" -eq 1 ]]; then
+  if [[ ! -v OPENCLAW_PUSH_MODE \
+    || "${OPENCLAW_PUSH_MODE}" != "${OPENCLAW_PUSH_MODE_INVOCATION_VALUE}" ]]; then
+    echo "ERROR: OPENCLAW_PUSH_MODE must be selected in the invoking environment, not OPENCLAW_PUSH_ENV_FILE." >&2
+    exit 1
+  fi
+else
+  if [[ ! -v OPENCLAW_PUSH_MODE || "${OPENCLAW_PUSH_MODE}" != "normal" ]]; then
+    echo "ERROR: OPENCLAW_PUSH_MODE must be selected in the invoking environment, not OPENCLAW_PUSH_ENV_FILE." >&2
+    exit 1
+  fi
 fi
 OPENCLAW_PUSH_MODE="${OPENCLAW_PUSH_MODE_REQUESTED}"
 
@@ -1590,6 +1732,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 echo "Backed up local config → ${BACKUP}"
 begin_managed_artifact_transaction
+capture_runtime_caps_dropin_dir_state || exit 1
 
 assemble_openclaw_config() {
   MEMPALACE_VENV="${HOME}/.local/share/mempalace/venv"
@@ -1784,7 +1927,7 @@ if ! echo "${MERGED}" | jq -e \
   and (.agents.defaults.subagents.maxConcurrent == 1)
   and (.agents.defaults.subagents.maxSpawnDepth == 1)
   and (.agents.defaults.subagents.runTimeoutSeconds == 1800)
-  and (.agents.defaults.memorySearch.enabled == false)
+  and (.memory.search.enabled == false)
   and (.agents.defaults.compaction.mode == "default")
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
   and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
@@ -2296,7 +2439,7 @@ if [[ "${PROVIDER}" == "codex" ]]; then
     echo "DEFERRED: paused mode skipped Codex auth-file synchronization."
   else
     snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
-    snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+    snapshot_stale_systemd_environment_paths
     remove_stale_azure_node_options_for_codex
     sync_managed_agent_codex_auth
   fi

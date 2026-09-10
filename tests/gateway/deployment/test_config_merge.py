@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 from gateway.deployment.config_merge import (
     AssemblyInputs,
+    ConfigMergeError,
     JsonNumber,
     JsonObject,
     JsonValue,
@@ -140,7 +141,7 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
             "meta": {"lastTouchedAt": "local-timestamp", "lastTouchedVersion": "local"},
             "agents": {
                 "defaults": {
-                    "memorySearch": {"enabled": True, "provider": "mempalace"},
+                    "memorySearch": {"enabled": False},
                     "nested": {"memorySearch": {"enabled": True}},
                 }
             },
@@ -153,6 +154,7 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
     repo["memory"] = {
         "backend": None,
         "citations": "off",
+        "search": {"enabled": False},
         "nested": {"backend": "keep"},
     }
     migrated, record = assemble_config_with_migration(local, repo, _assembly_inputs(tmp_path))
@@ -162,7 +164,8 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
             {"path": "meta.lastTouchedAt", "value": "local-timestamp"},
             {
                 "path": "agents.defaults.memorySearch",
-                "value": {"enabled": True, "provider": "mempalace"},
+                "value": {"enabled": False},
+                "mapped_to": "memory.search.enabled",
             },
             {"path": "commands.ownerDisplay", "value": "hash"},
             {"path": "memory.backend", "value": None},
@@ -177,7 +180,54 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
     memory = cast(JsonObject, migrated["memory"])
     assert "backend" not in memory
     assert memory["citations"] == "off"
+    assert cast(JsonObject, memory["search"])["enabled"] is False
     assert cast(JsonObject, memory["nested"])["backend"] == "keep"
+
+
+def test_legacy_memory_search_extra_keys_fail_closed(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {"agents": {"defaults": {"memorySearch": {"enabled": False, "provider": "old"}}}},
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"agents\.defaults\.memorySearch"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
+
+
+@pytest.mark.parametrize(
+    "legacy_value",
+    [{}, {"enabled": "false"}, None],
+    ids=["missing-enabled", "non-boolean-enabled", "non-object"],
+)
+def test_legacy_memory_search_requires_exact_boolean_enabled(
+    tmp_path: Path, legacy_value: object
+) -> None:
+    local = cast(
+        JsonObject,
+        {"agents": {"defaults": {"memorySearch": legacy_value}}},
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"agents\.defaults\.memorySearch"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
+
+
+def test_legacy_memory_search_conflict_is_checked_before_memory_overlay(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "agents": {"defaults": {"memorySearch": {"enabled": False}}},
+            "memory": {"search": {"enabled": True}},
+        },
+    )
+
+    with pytest.raises(ConfigMergeError, match=r"memory\.search\.enabled"):
+        assemble_config_with_migration(
+            local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+        )
 
 
 def test_schema_migration_preserves_provider_and_auth_objects(tmp_path: Path) -> None:
@@ -237,6 +287,9 @@ def test_overlay_does_not_contain_removed_8_1_paths() -> None:
     assert "backend" not in cast(JsonObject, overlay["memory"])
     assert "ownerDisplay" not in cast(JsonObject, overlay["commands"])
     assert "lastTouchedAt" not in cast(JsonObject, overlay["meta"])
+    memory = cast(JsonObject, overlay["memory"])
+    assert memory["citations"] == "off"
+    assert cast(JsonObject, memory["search"])["enabled"] is False
 
 
 def _assembly_inputs(
@@ -617,7 +670,7 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
         local_path,
         {
             "meta": {"lastTouchedAt": "machine-local"},
-            "agents": {"defaults": {"memorySearch": {"enabled": True}}},
+            "agents": {"defaults": {"memorySearch": {"enabled": False}}},
             "commands": {"ownerDisplay": "raw"},
         },
     )
@@ -663,10 +716,15 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
     assert result.returncode == 0, result.stderr
     published = json.loads(result.stdout)
     assert published["agents"]["defaults"]["model"]["primary"] == "openai/gpt-5.4"
+    assert published["memory"]["search"]["enabled"] is False
     assert json.loads((tmp_path / "migration-record.json").read_text()) == {
         "removed": [
             {"path": "meta.lastTouchedAt", "value": "machine-local"},
-            {"path": "agents.defaults.memorySearch", "value": {"enabled": True}},
+            {
+                "path": "agents.defaults.memorySearch",
+                "value": {"enabled": False},
+                "mapped_to": "memory.search.enabled",
+            },
             {"path": "commands.ownerDisplay", "value": "raw"},
         ]
     }

@@ -48,6 +48,9 @@ UNSUPPORTED_OPENCLAW_8_1_PATHS: tuple[tuple[str, ...], ...] = (
     ("memory", "backend"),
 )
 
+LEGACY_MEMORY_SEARCH_PATH = ("agents", "defaults", "memorySearch")
+CANONICAL_MEMORY_SEARCH_ENABLED_PATH = ("memory", "search", "enabled")
+
 
 @dataclass(frozen=True)
 class AssemblyInputs:
@@ -136,6 +139,17 @@ def _get_path(root: JsonValue, path: Sequence[str]) -> JsonValue | None:
     return current
 
 
+def _read_path(root: JsonValue, path: Sequence[str]) -> tuple[bool, JsonValue | None]:
+    """Read one exact path while preserving the distinction between absent/null."""
+
+    current = root
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return False, None
+        current = current[key]
+    return True, current
+
+
 def _set_path(root: JsonObject, path: Sequence[str], value: JsonValue) -> None:
     current = root
     for key in path[:-1]:
@@ -171,20 +185,138 @@ def _path_exists(root: JsonObject, path: Sequence[str]) -> bool:
     return True
 
 
-def migrate_8_1_config(config: JsonObject) -> tuple[JsonObject, JsonObject]:
-    """Remove the exact unsupported 8.1 paths and return a private record."""
+def _validate_legacy_memory_search(value: JsonValue) -> bool:
+    """Return the exact supported legacy memory-search policy."""
+
+    if not isinstance(value, dict) or set(value) != {"enabled"}:
+        raise ConfigMergeError(
+            "agents.defaults.memorySearch must contain only a boolean enabled field"
+        )
+    enabled = value["enabled"]
+    if not isinstance(enabled, bool):
+        raise ConfigMergeError("agents.defaults.memorySearch.enabled must be a boolean")
+    return enabled
+
+
+def _validate_canonical_memory_shape(root: JsonObject) -> tuple[bool, bool | None]:
+    """Validate canonical memory-search containers and return enabled presence/value."""
+
+    memory_present, memory_value = _read_path(root, ("memory",))
+    if not memory_present:
+        return False, None
+    if not isinstance(memory_value, dict):
+        raise ConfigMergeError("memory must be an object when mapping memorySearch")
+    search_present, search_value = _read_path(memory_value, ("search",))
+    if not search_present:
+        return False, None
+    if not isinstance(search_value, dict):
+        raise ConfigMergeError("memory.search must be an object when mapping memorySearch")
+    enabled_present, enabled_value = _read_path(search_value, ("enabled",))
+    if not enabled_present:
+        return False, None
+    if not isinstance(enabled_value, bool):
+        raise ConfigMergeError("memory.search.enabled must be a boolean")
+    return True, enabled_value
+
+
+def _legacy_memory_search_mapping(
+    local: JsonObject, repo: JsonObject
+) -> tuple[JsonObject, bool] | None:
+    """Validate and resolve the old policy before a memory overlay can hide it."""
+
+    legacy_values: list[bool] = []
+    for source in (local, repo):
+        found, value = _read_path(source, LEGACY_MEMORY_SEARCH_PATH)
+        if found:
+            legacy_values.append(_validate_legacy_memory_search(value))
+
+    if not legacy_values:
+        return None
+    if any(value != legacy_values[0] for value in legacy_values[1:]):
+        raise ConfigMergeError(
+            "conflicting agents.defaults.memorySearch.enabled values cannot be mapped"
+        )
+
+    enabled = legacy_values[0]
+    for source in (local, repo):
+        canonical_present, canonical_enabled = _validate_canonical_memory_shape(source)
+        if canonical_present and canonical_enabled != enabled:
+            raise ConfigMergeError(
+                "conflicting memory.search.enabled and agents.defaults.memorySearch.enabled values"
+            )
+    return (
+        {
+            "path": ".".join(LEGACY_MEMORY_SEARCH_PATH),
+            "value": {"enabled": enabled},
+            "mapped_to": ".".join(CANONICAL_MEMORY_SEARCH_ENABLED_PATH),
+        },
+        enabled,
+    )
+
+
+def _set_canonical_memory_search_enabled(config: JsonObject, enabled: bool) -> None:
+    """Set the mapped policy after validating its container shape."""
+
+    _validate_canonical_memory_shape(config)
+    memory = config.get("memory")
+    if memory is None:
+        memory = {}
+        config["memory"] = memory
+    if not isinstance(memory, dict):
+        raise ConfigMergeError("memory must be an object when mapping memorySearch")
+    search = memory.get("search")
+    if search is None:
+        search = {}
+        memory["search"] = search
+    if not isinstance(search, dict):
+        raise ConfigMergeError("memory.search must be an object when mapping memorySearch")
+    existing = search.get("enabled")
+    if existing is not None and (not isinstance(existing, bool) or existing != enabled):
+        raise ConfigMergeError(
+            "conflicting memory.search.enabled and agents.defaults.memorySearch.enabled values"
+        )
+    search["enabled"] = enabled
+
+
+def migrate_8_1_config(
+    config: JsonObject,
+    *,
+    memory_search_mapping: tuple[JsonObject, bool] | None = None,
+) -> tuple[JsonObject, JsonObject]:
+    """Map the supported legacy policy, remove exact unsupported paths, and record it."""
 
     candidate = cast(JsonObject, _copy(config))
+    if memory_search_mapping is None:
+        memory_search_mapping = _legacy_memory_search_mapping(candidate, {})
+
+    mapped_legacy_record: JsonObject | None = None
+    if memory_search_mapping is not None:
+        mapped_legacy_record, enabled = memory_search_mapping
+        found, legacy_value = _read_path(candidate, LEGACY_MEMORY_SEARCH_PATH)
+        if not found:
+            raise ConfigMergeError(
+                "8.1 schema migration could not find the legacy memorySearch policy"
+            )
+        if _validate_legacy_memory_search(legacy_value) != enabled:
+            raise ConfigMergeError("conflicting memorySearch values changed during config assembly")
+        _set_canonical_memory_search_enabled(candidate, enabled)
+
     removed: list[JsonValue] = []
     for path in UNSUPPORTED_OPENCLAW_8_1_PATHS:
         found, value = _pop_path(candidate, path)
         if found:
-            removed.append(
-                {
-                    "path": ".".join(path),
-                    "value": _copy(value),
-                }
-            )
+            if path == LEGACY_MEMORY_SEARCH_PATH:
+                if mapped_legacy_record is None:
+                    raise ConfigMergeError("legacy memorySearch policy was not mapped")
+                removed.append(_copy(mapped_legacy_record))
+            else:
+                removed.append({"path": ".".join(path), "value": _copy(value)})
+
+    if memory_search_mapping is not None:
+        enabled = memory_search_mapping[1]
+        canonical_present, canonical_enabled = _validate_canonical_memory_shape(candidate)
+        if not canonical_present or canonical_enabled != enabled:
+            raise ConfigMergeError("mapped memory.search.enabled policy was not preserved")
 
     record: JsonObject = {"removed": removed}
     remaining = [
@@ -554,7 +686,11 @@ def assemble_config_with_migration(
 ) -> tuple[JsonObject, JsonObject]:
     """Assemble a candidate, then apply the one-time 8.1 schema migration."""
 
-    return migrate_8_1_config(_assemble_config(local, repo, inputs))
+    memory_search_mapping = _legacy_memory_search_mapping(local, repo)
+    return migrate_8_1_config(
+        _assemble_config(local, repo, inputs),
+        memory_search_mapping=memory_search_mapping,
+    )
 
 
 def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:

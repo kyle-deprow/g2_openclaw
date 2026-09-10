@@ -270,7 +270,10 @@
     ]
   },
   "memory": {
-    "citations": "off"
+    "citations": "off",
+    "search": {
+      "enabled": false
+    }
   },
   "mcp": {
     "servers": {
