@@ -126,11 +126,16 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
     attempts = store.attempts_for(frozen.hypothesis_id)
     attempt = next((item for item in attempts if item.state != AttemptState.CLOSED), None)
     if attempt is None:
+        refusal = store.latest_admission_refusal(frozen.hypothesis_id)
+        refusal_suffix = ""
+        if refusal is not None:
+            reason, detail = refusal
+            refusal_suffix = f" admission_refusal={reason}: {detail or 'typed admission refused'}."
         return WakePlan(
             frozen.hypothesis_id,
             None,
             frozen.state.value,
-            f"Astra: open an attempt for {frozen.hypothesis_id} with `gateway-cli research attempt-open {frozen.hypothesis_id} --root ROOT --worktree PATH`.",
+            f"Astra: open an attempt for {frozen.hypothesis_id} with `gateway-cli research attempt-open {frozen.hypothesis_id} --root ROOT --worktree PATH`.{refusal_suffix}",
             _key(frozen.hypothesis_id, None, frozen.state.value, resume_seq),
             resume_seq,
         )
@@ -152,7 +157,12 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
         action = f"run with `gateway-cli research run {attempt.attempt_id} --root ROOT`"
     else:
         action = f"ask Astra for close decision using `gateway-cli research attempt-close {attempt.attempt_id} --root ROOT --decision RETRY|FINISH|PAUSE --reason TEXT`"
-    message = f"Astra owner action: hypothesis_id={frozen.hypothesis_id}; attempt_id={attempt.attempt_id}; state={state}; paths={attempt.worktree_path}; {action}."
+    refusal = store.latest_admission_refusal(frozen.hypothesis_id)
+    refusal_suffix = ""
+    if refusal is not None:
+        reason, detail = refusal
+        refusal_suffix = f" admission_refusal={reason}: {detail or 'typed admission refused'}."
+    message = f"Astra owner action: hypothesis_id={frozen.hypothesis_id}; attempt_id={attempt.attempt_id}; state={state}; paths={attempt.worktree_path}; {action}.{refusal_suffix}"
     return WakePlan(
         frozen.hypothesis_id,
         attempt.attempt_id,

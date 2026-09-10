@@ -11,12 +11,14 @@ import json
 import math
 import os
 import sqlite3
+import stat
 import tempfile
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TextIO, cast
 
+from .admission import AdmissionDecision, CampaignPolicy
 from .codec import to_json
 from .containment import ContainmentError, runtime_pins
 from .contracts import (
@@ -57,6 +59,7 @@ class StoreConflict(RuntimeError):
 
 MAX_QUEUE_TIMEOUT_SECONDS = 7200.0
 MAX_QUEUE_RSS_MB = 8192
+MAX_EXPOSURE_LEDGER_BYTES = 8 * 1024 * 1024
 
 
 def validate_queue_limits(timeout_seconds: int | float, max_rss_mb: int) -> None:
@@ -86,6 +89,44 @@ def sha256_bytes(data: bytes) -> str:
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
+
+
+def _read_bounded_exposure_ledger(path: Path) -> bytes:
+    """Read one immutable, bounded ledger artifact before changing campaign state."""
+    if path.is_symlink():
+        raise ValueError("exposure ledger must not be a symlink")
+    descriptor = -1
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise ValueError("exposure ledger is missing or unreadable") from exc
+    try:
+        first = os.fstat(descriptor)
+        if not stat.S_ISREG(first.st_mode) or first.st_size > MAX_EXPOSURE_LEDGER_BYTES:
+            raise ValueError("exposure ledger is not a bounded regular file")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                min(1024 * 1024, MAX_EXPOSURE_LEDGER_BYTES - total + 1),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_EXPOSURE_LEDGER_BYTES:
+                raise ValueError("exposure ledger exceeds its size limit")
+        if os.fstat(descriptor).st_size != total:
+            raise ValueError("exposure ledger changed while being read")
+        return b"".join(chunks)
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("exposure ledger could not be read") from exc
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def _digest(text: str) -> str:
@@ -161,7 +202,13 @@ class ResearchStore:
                 );
                 CREATE TABLE IF NOT EXISTS campaign (
                   singleton INTEGER PRIMARY KEY CHECK(singleton=1), status TEXT NOT NULL,
-                  resume_seq INTEGER NOT NULL
+                  resume_seq INTEGER NOT NULL,
+                  attempt_cap INTEGER,
+                  wall_clock_cap_seconds REAL,
+                  policy_set_at TEXT,
+                  policy_operator_reference TEXT,
+                  exposure_ledger_path TEXT,
+                  exposure_ledger_sha256 TEXT
                 );
                 CREATE TABLE IF NOT EXISTS wake_deliveries (
                   pending_key TEXT PRIMARY KEY, attempt_id TEXT, state TEXT NOT NULL,
@@ -203,7 +250,35 @@ class ResearchStore:
                 BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
                 """
             )
-            conn.execute("INSERT OR IGNORE INTO campaign VALUES (1, 'ACTIVE', 0)")
+            columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(campaign)").fetchall()
+            }
+            additions = (
+                ("attempt_cap", "ALTER TABLE campaign ADD COLUMN attempt_cap INTEGER"),
+                (
+                    "wall_clock_cap_seconds",
+                    "ALTER TABLE campaign ADD COLUMN wall_clock_cap_seconds REAL",
+                ),
+                ("policy_set_at", "ALTER TABLE campaign ADD COLUMN policy_set_at TEXT"),
+                (
+                    "policy_operator_reference",
+                    "ALTER TABLE campaign ADD COLUMN policy_operator_reference TEXT",
+                ),
+                (
+                    "exposure_ledger_path",
+                    "ALTER TABLE campaign ADD COLUMN exposure_ledger_path TEXT",
+                ),
+                (
+                    "exposure_ledger_sha256",
+                    "ALTER TABLE campaign ADD COLUMN exposure_ledger_sha256 TEXT",
+                ),
+            )
+            for name, statement in additions:
+                if name not in columns:
+                    conn.execute(statement)
+            conn.execute(
+                "INSERT OR IGNORE INTO campaign(singleton,status,resume_seq) VALUES (1, 'ACTIVE', 0)"
+            )
 
     def acquire_owner_lock(self) -> None:
         lock = open(self.root / "owner.lock", "a+", encoding="utf-8")  # noqa: SIM115
@@ -304,6 +379,116 @@ class ResearchStore:
             ).fetchone()
         assert row is not None
         return str(row[0]), int(row[1])
+
+    def _campaign_row(self) -> sqlite3.Row:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM campaign WHERE singleton=1").fetchone()
+        if row is None:
+            raise StoreConflict("campaign singleton is missing")
+        return cast(sqlite3.Row, row)
+
+    def campaign_policy(self) -> CampaignPolicy:
+        """Return the explicit operator policy, or an unset policy."""
+        row = self._campaign_row()
+        raw_attempt_cap = row["attempt_cap"]
+        raw_wall_clock = row["wall_clock_cap_seconds"]
+        if raw_attempt_cap is None:
+            if raw_wall_clock is not None:
+                raise StoreConflict("campaign policy has a wall-clock cap without an attempt cap")
+            return CampaignPolicy(False)
+        if isinstance(raw_attempt_cap, bool) or not isinstance(raw_attempt_cap, int):
+            raise StoreConflict("campaign attempt cap is malformed")
+        try:
+            if raw_wall_clock is not None and (
+                isinstance(raw_wall_clock, bool) or not isinstance(raw_wall_clock, (int, float))
+            ):
+                raise ValueError("campaign wall-clock cap is malformed")
+            if not isinstance(row["policy_set_at"], str) or not row["policy_set_at"]:
+                raise ValueError("campaign policy set-at timestamp is missing")
+            if (
+                not isinstance(row["policy_operator_reference"], str)
+                or not row["policy_operator_reference"]
+            ):
+                raise ValueError("campaign policy operator reference is missing")
+            wall_clock = None if raw_wall_clock is None else float(raw_wall_clock)
+            return CampaignPolicy(True, raw_attempt_cap, wall_clock)
+        except (TypeError, ValueError) as exc:
+            raise StoreConflict(str(exc)) from exc
+
+    def set_campaign_policy(
+        self,
+        attempt_cap: int,
+        wall_clock_cap_seconds: float | None,
+        operator_reference: str,
+    ) -> CampaignPolicy:
+        """Persist one explicit operator policy on the singleton campaign row."""
+        policy = CampaignPolicy(True, attempt_cap, wall_clock_cap_seconds)
+        if not isinstance(operator_reference, str) or not operator_reference:
+            raise ValueError("policy operator reference must be a non-empty string")
+        set_at = now_utc()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE campaign SET attempt_cap=?,wall_clock_cap_seconds=?,policy_set_at=?,policy_operator_reference=? WHERE singleton=1",
+                (policy.attempt_cap, policy.wall_clock_cap_seconds, set_at, operator_reference),
+            )
+            row = conn.execute(
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+            ).fetchone()
+            self._event(
+                conn,
+                str(row[0]) if row else "H0001",
+                None,
+                "campaign_policy_set",
+                {"operator_reference": operator_reference, "set_at": set_at},
+                "operator",
+            )
+            conn.commit()
+        return policy
+
+    def register_exposure_ledger(self, path: Path, sha256: str) -> tuple[str, str]:
+        """Register operator-supplied ledger provenance after verifying its bytes."""
+        if not isinstance(sha256, str) or len(sha256) != 64:
+            raise ValueError("exposure ledger SHA256 must be 64 hexadecimal characters")
+        try:
+            int(sha256, 16)
+        except ValueError as exc:
+            raise ValueError("exposure ledger SHA256 must be hexadecimal") from exc
+        resolved_path = path.absolute()
+        ledger_bytes = _read_bounded_exposure_ledger(resolved_path)
+        actual_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+        if actual_sha256 != sha256:
+            raise ValueError("exposure ledger SHA256 does not match file bytes")
+        resolved = str(resolved_path)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE campaign SET exposure_ledger_path=?,exposure_ledger_sha256=? WHERE singleton=1",
+                (resolved, sha256),
+            )
+            row = conn.execute(
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+            ).fetchone()
+            self._event(
+                conn,
+                str(row[0]) if row else "H0001",
+                None,
+                "exposure_ledger_registered",
+                {"path": resolved, "sha256": sha256},
+                "operator",
+            )
+            conn.commit()
+        return resolved, sha256
+
+    def exposure_ledger_registration(self) -> tuple[str, str] | None:
+        row = self._campaign_row()
+        path = row["exposure_ledger_path"]
+        digest = row["exposure_ledger_sha256"]
+        if path is None and digest is None:
+            return None
+        if not isinstance(path, str) or not isinstance(digest, str):
+            raise StoreConflict("exposure ledger registration is incomplete")
+        return path, digest
 
     def _event(
         self,
@@ -527,11 +712,23 @@ class ResearchStore:
             conn.commit()
         return spec
 
-    def open_attempt(self, hypothesis_id: str, worktree: Path) -> Attempt:
+    def open_attempt(
+        self,
+        hypothesis_id: str,
+        worktree: Path,
+        *,
+        admission: AdmissionDecision | None = None,
+    ) -> Attempt:
         spec = self.get_hypothesis(hypothesis_id)
+        if admission is not None:
+            if not admission.admitted:
+                raise StoreConflict("attempt admission decision is not admitted")
+            if admission.hypothesis_spec.hypothesis_id != hypothesis_id:
+                raise StoreConflict("attempt admission decision does not match hypothesis")
         existing = self.attempts_for(hypothesis_id)
         attempt = machine_open_attempt(spec, existing, str(worktree.resolve()), now_utc())
         payload = attempt.to_json()
+        admission_payload = admission.to_json() if admission is not None else None
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
@@ -562,6 +759,16 @@ class ResearchStore:
                     _digest(payload),
                 ),
             )
+            if admission_payload is not None:
+                conn.execute(
+                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                    (
+                        attempt.attempt_id,
+                        "admission_decision",
+                        admission_payload,
+                        _digest(admission_payload),
+                    ),
+                )
             self._event(
                 conn,
                 hypothesis_id,
@@ -570,7 +777,18 @@ class ResearchStore:
                 {"number": attempt.number},
                 "astra",
             )
+            if admission is not None:
+                self._event(
+                    conn,
+                    hypothesis_id,
+                    attempt.attempt_id,
+                    "admission_accepted",
+                    {"decision_sha256": admission.sha256},
+                    "driver",
+                )
             conn.commit()
+        if admission_payload is not None:
+            self._repair_evidence_projection(attempt, "admission_decision", admission_payload)
         return attempt
 
     def submit_implementation(self, attempt_id: str, record: ImplementationRecord) -> Attempt:
@@ -657,6 +875,136 @@ class ResearchStore:
             )
             conn.commit()
         self._repair_evidence_projection(attempt, kind, payload)
+
+    def insert_admission_decision(self, attempt_id: str, decision: AdmissionDecision) -> None:
+        """Persist one accepted typed admission decision as insert-only evidence."""
+        if not isinstance(decision, AdmissionDecision) or not decision.admitted:
+            raise ValueError("only an admitted decision can be persisted")
+        attempt = self.get_attempt(attempt_id)
+        if decision.hypothesis_spec.hypothesis_id != attempt.hypothesis_id:
+            raise StoreConflict("admission decision does not match attempt hypothesis")
+        payload = decision.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence WHERE attempt_id=? AND kind='admission_decision'",
+                (attempt_id,),
+            ).fetchone()
+            if old is not None:
+                if _digest(str(old[0])) != str(old[1]) or str(old[0]) != payload:
+                    raise StoreConflict("admission decision differs from stored payload")
+                conn.commit()
+                self._repair_evidence_projection(attempt, "admission_decision", payload)
+                return
+            conn.execute(
+                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                (attempt_id, "admission_decision", payload, _digest(payload)),
+            )
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "admission_accepted",
+                {"decision_sha256": decision.sha256},
+                "driver",
+            )
+            conn.commit()
+        self._repair_evidence_projection(attempt, "admission_decision", payload)
+
+    def record_admission_refusal(
+        self,
+        hypothesis_id: str,
+        decision: AdmissionDecision,
+        *,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Record the latest typed refusal for status and owner wake surfaces."""
+        if decision.admitted or decision.hypothesis_spec.hypothesis_id != hypothesis_id:
+            raise ValueError("admission refusal does not match hypothesis")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._event(
+                conn,
+                hypothesis_id,
+                attempt_id,
+                "admission_refused",
+                {
+                    "detail": decision.detail,
+                    "reason": decision.reason.value if decision.reason is not None else None,
+                },
+                "driver",
+            )
+            conn.commit()
+
+    def record_admission_failure(
+        self,
+        hypothesis_id: str,
+        reason: str,
+        detail: str,
+        *,
+        attempt_id: str | None = None,
+    ) -> None:
+        """Record a fail-closed input failure before typed admission can run."""
+        if not reason or not detail:
+            raise ValueError("admission failure reason and detail are required")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._event(
+                conn,
+                hypothesis_id,
+                attempt_id,
+                "admission_refused",
+                {"detail": detail, "reason": reason},
+                "driver",
+            )
+            conn.commit()
+
+    def latest_admission_refusal(self, hypothesis_id: str) -> tuple[str, str | None] | None:
+        """Return the latest refusal, clearing only reasons fixed by updates."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT kind,detail FROM events WHERE hypothesis_id=? "
+                "OR kind IN ('campaign_policy_set','exposure_ledger_registered') "
+                "ORDER BY seq",
+                (hypothesis_id,),
+            ).fetchall()
+        refusal: tuple[str, str | None] | None = None
+        for row in rows:
+            kind = str(row["kind"])
+            if kind in {"campaign_policy_set", "exposure_ledger_registered"}:
+                if refusal is None:
+                    continue
+                reason = refusal[0]
+                if (
+                    kind == "campaign_policy_set"
+                    and reason
+                    in {
+                        "CAMPAIGN_POLICY_UNSET",
+                        "CAMPAIGN_ATTEMPT_CAP_EXCEEDED",
+                    }
+                ) or (
+                    kind == "exposure_ledger_registered"
+                    and reason
+                    in {
+                        "EXPOSURE_LEDGER_INVALID",
+                        "HOLDOUT_KNOWN_EXPOSED",
+                        "HOLDOUT_HISTORY_UNKNOWN",
+                    }
+                ):
+                    refusal = None
+                continue
+            if kind != "admission_refused":
+                continue
+            try:
+                detail = json.loads(str(row["detail"]))
+            except json.JSONDecodeError as exc:
+                raise StoreConflict("admission refusal event is malformed") from exc
+            if not isinstance(detail, dict) or not isinstance(detail.get("reason"), str):
+                raise StoreConflict("admission refusal event is malformed")
+            reason = cast(str, detail["reason"])
+            refusal_detail = detail.get("detail")
+            refusal = (reason, refusal_detail if isinstance(refusal_detail, str) else None)
+        return refusal
 
     def record_review_event(self, attempt_id: str, kind: str, detail: object) -> None:
         attempt = self.get_attempt(attempt_id)
@@ -1377,10 +1725,10 @@ class ResearchStore:
             if current is None or current["state"] != AttemptState.REVIEW_PASSED.value:
                 raise StoreConflict("attempt is no longer review-passed")
             existing = conn.execute(
-                "SELECT payload_json FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                "SELECT state,payload_json FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
                 (attempt_id,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and str(existing["state"]) != "ADMISSION_REFUSED":
                 raise StoreConflict("attempt already has a queued or running job")
             conn.execute(
                 "UPDATE attempts SET state=?,run_job_id=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=?",
@@ -1405,6 +1753,49 @@ class ResearchStore:
             )
             conn.commit()
         return queued
+
+    def release_queued_run(self, attempt_id: str, job_id: str, reason: str) -> Attempt:
+        """Return a refused queued run to its review-passed owner-pending state."""
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("admission release reason must be a non-empty string")
+        attempt = self.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_QUEUED or attempt.run_job_id != job_id:
+            raise StoreConflict("queued attempt is no longer pending")
+        updated = replace(
+            attempt,
+            state=AttemptState.REVIEW_PASSED,
+            run_job_id=None,
+            run_outcome=None,
+            updated_at=now_utc(),
+        )
+        payload = updated.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                "UPDATE attempts SET state=?,run_job_id=NULL,run_outcome=NULL,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=? AND run_job_id=?",
+                (
+                    updated.state.value,
+                    updated.updated_at,
+                    payload,
+                    _digest(payload),
+                    attempt_id,
+                    AttemptState.RUN_QUEUED.value,
+                    job_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("queued attempt changed before admission release")
+            self._set_job_state(conn, job_id, "ADMISSION_REFUSED")
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "admission_dispatch_released",
+                {"job_id": job_id, "reason": reason},
+                "driver",
+            )
+            conn.commit()
+        return updated
 
     def claim_queued_job(self, attempt_id: str, job_id: str) -> Attempt:
         """Atomically claim a queued request for one host launch."""

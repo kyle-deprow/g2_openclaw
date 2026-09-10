@@ -5,18 +5,39 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import math
 import os
 import time
+import zlib
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import typer
 
 from gateway.openclaw_client import OpenClawClient
 
+from .admission import (
+    AdmissionDecision,
+    AdmissionReason,
+    CampaignPolicy,
+    EarningsCoverage,
+    EarningsCoverageStatus,
+    EvaluatorBounds,
+    ExecutionCapability,
+    ExposureLedger,
+    ExposureRange,
+    Instrument,
+    InstrumentClass,
+    ValidationReceipt,
+    admit_hypothesis,
+)
 from .containment import runtime_pins_from_record
 from .contracts import (
     Attempt,
@@ -26,6 +47,7 @@ from .contracts import (
     ImplementationRecord,
     RunOutcome,
 )
+from .hypothesis import HypothesisDocument
 from .jobs import (
     JobError,
     JobRecord,
@@ -99,6 +121,46 @@ def init(
         _fail(exc)
 
 
+@app.command("campaign-policy-set")
+def campaign_policy_set(
+    root: Path = typer.Option(..., "--root"),
+    attempt_cap: int = typer.Option(..., "--attempt-cap"),
+    wall_clock_cap_seconds: float | None = typer.Option(None, "--wall-clock-cap-seconds"),
+    operator_reference: str = typer.Option(..., "--operator-reference"),
+) -> None:
+    try:
+        policy = ResearchStore(_root(root)).set_campaign_policy(
+            attempt_cap, wall_clock_cap_seconds, operator_reference
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "attempt_cap": policy.attempt_cap,
+                    "is_set": policy.is_set,
+                    "wall_clock_cap_seconds": policy.wall_clock_cap_seconds,
+                },
+                sort_keys=True,
+            )
+        )
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("exposure-ledger-register")
+def exposure_ledger_register(
+    root: Path = typer.Option(..., "--root"),
+    path: Path = typer.Option(..., "--path"),
+    sha256: str = typer.Option(..., "--sha256"),
+) -> None:
+    try:
+        registered_path, registered_sha = ResearchStore(_root(root)).register_exposure_ledger(
+            path, sha256
+        )
+        typer.echo(json.dumps({"path": registered_path, "sha256": registered_sha}, sort_keys=True))
+    except Exception as exc:
+        _fail(exc)
+
+
 @app.command("hypothesis-create")
 def hypothesis_create(
     root: Path = typer.Option(..., "--root"),
@@ -133,8 +195,19 @@ def attempt_open(
     root: Path = typer.Option(..., "--root"),
     worktree: Path = typer.Option(..., "--worktree"),
 ) -> None:
+    store: ResearchStore | None = None
     try:
-        typer.echo(ResearchStore(_root(root)).open_attempt(hypothesis_id, worktree).attempt_id)
+        store = ResearchStore(_root(root))
+        try:
+            decision = _admission_for_hypothesis(store, hypothesis_id)
+        except _AdmissionInputError as exc:
+            store.record_admission_failure(hypothesis_id, exc.reason, exc.detail)
+            raise StoreConflict(f"admission refused: {exc.reason}: {exc.detail}") from exc
+        if not decision.admitted:
+            _record_admission_refusal(store, hypothesis_id, decision)
+            reason = decision.reason.value if decision.reason is not None else "UNKNOWN"
+            raise StoreConflict(f"admission refused: {reason}: {decision.detail or ''}".strip())
+        typer.echo(store.open_attempt(hypothesis_id, worktree, admission=decision).attempt_id)
     except Exception as exc:
         _fail(exc)
 
@@ -272,6 +345,264 @@ def review_cancel(
         typer.echo(json.dumps({"status": outcome.status, "pending": outcome.pending}))
     except Exception as exc:
         _fail(exc)
+
+
+class _AdmissionInputError(ValueError):
+    """A stored admission input could not be verified at the wiring boundary."""
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+        self.detail = detail
+
+
+def _strict_object(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    return {str(key): item for key, item in value.items()}
+
+
+def _decode_panel_sessions(
+    receipt_wire: dict[str, object], receipt: ValidationReceipt
+) -> tuple[str, ...]:
+    """Decode the trusted compact receipt artifact; never derive calendar dates."""
+    raw_coverage = _strict_object(receipt_wire.get("coverage"), "receipt.coverage")
+    expected_keys = {
+        "compressed_size",
+        "compression_ratio",
+        "contract_version",
+        "coverage_sha256",
+        "encoding",
+        "expanded_size",
+        "payload",
+    }
+    if set(raw_coverage) != expected_keys:
+        raise ValueError("receipt.coverage has unexpected keys")
+    compressed_size = raw_coverage.get("compressed_size")
+    expanded_size = raw_coverage.get("expanded_size")
+    payload = raw_coverage.get("payload")
+    if (
+        type(compressed_size) is not int
+        or type(expanded_size) is not int
+        or compressed_size < 1
+        or expanded_size < 1
+        or not isinstance(payload, str)
+        or raw_coverage.get("contract_version") != "price-coverage-compact-v1"
+        or raw_coverage.get("encoding") != "canonical-json-zlib-base64-v1"
+        or raw_coverage.get("coverage_sha256") != receipt.coverage_sha256
+    ):
+        raise ValueError("receipt coverage is not the pinned compact contract")
+    try:
+        compressed = base64.b64decode(payload.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, binascii.Error) as exc:
+        raise ValueError("receipt coverage payload is not canonical base64") from exc
+    if len(compressed) != compressed_size:
+        raise ValueError("receipt coverage compressed size does not match payload")
+    try:
+        decompressor = zlib.decompressobj()
+        expanded = decompressor.decompress(compressed, expanded_size + 1)
+    except zlib.error as exc:
+        raise ValueError("receipt coverage payload is not valid zlib") from exc
+    if (
+        len(expanded) != expanded_size
+        or not decompressor.eof
+        or decompressor.unused_data
+        or decompressor.unconsumed_tail
+    ):
+        raise ValueError("receipt coverage payload is incomplete or has trailing data")
+    if hashlib.sha256(expanded).hexdigest() != receipt.coverage_sha256:
+        raise ValueError("receipt coverage digest does not match expanded evidence")
+    try:
+        expanded_object = json.loads(expanded.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("receipt coverage payload is not JSON") from exc
+    canonical = json.dumps(expanded_object, sort_keys=True, separators=(",", ":")).encode()
+    if expanded != canonical:
+        raise ValueError("receipt coverage payload is not canonical JSON")
+    coverage = _strict_object(expanded_object, "expanded receipt coverage")
+    if coverage.get("contract_version") != "price-coverage-v1":
+        raise ValueError("expanded receipt coverage contract is unsupported")
+    tickers = coverage.get("tickers")
+    if not isinstance(tickers, list) or not tickers:
+        raise ValueError("expanded receipt coverage has no tickers")
+    session_sets: list[tuple[str, ...]] = []
+    for ticker_index, raw_ticker in enumerate(tickers):
+        ticker = _strict_object(raw_ticker, f"expanded receipt tickers[{ticker_index}]")
+        sessions = ticker.get("sessions")
+        if not isinstance(sessions, list) or not sessions:
+            raise ValueError("expanded receipt ticker has no sessions")
+        dates: list[str] = []
+        for session_index, raw_session in enumerate(sessions):
+            session = _strict_object(
+                raw_session,
+                f"expanded receipt tickers[{ticker_index}].sessions[{session_index}]",
+            )
+            date_text = session.get("session_date")
+            if not isinstance(date_text, str):
+                raise ValueError("expanded receipt session date is not text")
+            try:
+                parsed = date.fromisoformat(date_text)
+            except ValueError as exc:
+                raise ValueError("expanded receipt session date is not ISO") from exc
+            if parsed.isoformat() != date_text:
+                raise ValueError("expanded receipt session date is not canonical")
+            if session.get("coverage_state") != "observed":
+                raise ValueError("expanded receipt session is not observed")
+            dates.append(date_text)
+        if dates != sorted(set(dates)):
+            raise ValueError("expanded receipt sessions are not unique and ordered")
+        session_sets.append(tuple(dates))
+    if any(item != session_sets[0] for item in session_sets[1:]):
+        raise ValueError("expanded receipt tickers disagree on panel sessions")
+    return session_sets[0]
+
+
+def _parse_evaluator_bounds(
+    path: Path, evaluation_spec_sha256: str, panel_sessions: tuple[str, ...]
+) -> EvaluatorBounds:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        document = _strict_object(raw, "evaluator spec")
+        instruments_raw = document.get("instruments")
+        if not isinstance(instruments_raw, list) or not instruments_raw:
+            raise ValueError("evaluator instruments missing")
+        instruments: list[Instrument] = []
+        for index, raw_instrument in enumerate(instruments_raw):
+            item = _strict_object(raw_instrument, f"evaluator instruments[{index}]")
+            instruments.append(
+                Instrument(
+                    str(item["ticker"]),
+                    InstrumentClass(str(item["instrument_class"])),
+                )
+            )
+        start = str(document["start_session"])
+        end = str(document["end_session"])
+        holding = _strict_object(document["holding"], "evaluator holding")
+        max_holding = holding["max_sessions"]
+        if type(max_holding) is not int:
+            raise ValueError("evaluator holding.max_sessions must be an integer")
+        return EvaluatorBounds(
+            start,
+            end,
+            tuple(instruments),
+            evaluation_spec_sha256,
+            max_holding,
+            EarningsCoverage(EarningsCoverageStatus.UNAVAILABLE),
+            panel_sessions,
+        )
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise _AdmissionInputError(
+            "EVALUATION_SPEC_DIGEST_MISMATCH", f"invalid evaluator bounds: {exc}"
+        ) from exc
+
+
+def _parse_exposure_ledger(store: ResearchStore) -> ExposureLedger | None:
+    registration = store.exposure_ledger_registration()
+    if registration is None:
+        return None
+    path_text, registered_sha = registration
+    try:
+        path = Path(path_text)
+        raw_bytes = path.read_bytes()
+        if hashlib.sha256(raw_bytes).hexdigest() != registered_sha:
+            return ExposureLedger((), False, None, "")
+        raw = json.loads(raw_bytes.decode("utf-8"))
+        data = _strict_object(raw, "exposure ledger")
+        if set(data) != {"history_unknown", "known_exposed_ranges", "trial_count"}:
+            raise ValueError("exposure ledger has unexpected keys")
+        ranges = data["known_exposed_ranges"]
+        if not isinstance(ranges, list):
+            raise ValueError("exposure ledger ranges must be an array")
+        typed_ranges_list: list[ExposureRange] = []
+        for item in ranges:
+            raw_range = _strict_object(item, "exposure range")
+            if set(raw_range) != {"start", "end"}:
+                raise ValueError("exposure range has unexpected keys")
+            typed_ranges_list.append(ExposureRange(str(raw_range["start"]), str(raw_range["end"])))
+        typed_ranges = tuple(typed_ranges_list)
+        history_unknown = data["history_unknown"]
+        trial_count = data["trial_count"]
+        if not isinstance(history_unknown, bool) or (
+            trial_count is not None and type(trial_count) is not int
+        ):
+            raise ValueError("exposure ledger scalar fields are malformed")
+        unsigned = ExposureLedger(typed_ranges, history_unknown, trial_count, "")
+        return replace(unsigned, ledger_sha256=unsigned.computed_sha256)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        # An invalid artifact must never inherit the digest of a real empty
+        # ledger; the empty string is intentionally unmatchable.
+        return ExposureLedger((), False, None, "")
+
+
+def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> AdmissionDecision:
+    hypothesis_spec = store.get_hypothesis(hypothesis_id)
+    try:
+        hypothesis = HypothesisDocument.from_json(hypothesis_spec.spec_json)
+    except ValueError as exc:
+        raise _AdmissionInputError("HYPOTHESIS_SPEC_MISMATCH", str(exc)) from exc
+    receipt_path = Path(hypothesis_spec.receipt_path)
+    try:
+        receipt_bytes = receipt_path.read_bytes()
+    except OSError as exc:
+        raise _AdmissionInputError("RECEIPT_DIGEST_MISMATCH", str(exc)) from exc
+    receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
+    if receipt_sha != hypothesis_spec.receipt_sha256:
+        raise _AdmissionInputError("RECEIPT_DIGEST_MISMATCH", "stored receipt digest differs")
+    try:
+        receipt_wire = _strict_object(json.loads(receipt_bytes.decode("utf-8")), "receipt")
+        receipt = ValidationReceipt.from_wire(
+            receipt_wire,
+            acceptance_class="wire",
+            receipt_sha256=receipt_sha,
+        )
+        panel_sessions = _decode_panel_sessions(receipt_wire, receipt)
+    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise _AdmissionInputError("RECEIPT_REJECTED", str(exc)) from exc
+    evaluation_path = Path(hypothesis_spec.evaluation_spec_path)
+    try:
+        evaluation_bytes = evaluation_path.read_bytes()
+    except OSError as exc:
+        raise _AdmissionInputError("EVALUATION_SPEC_DIGEST_MISMATCH", str(exc)) from exc
+    if hashlib.sha256(evaluation_bytes).hexdigest() != hypothesis_spec.evaluation_spec_sha256:
+        raise _AdmissionInputError(
+            "EVALUATION_SPEC_DIGEST_MISMATCH", "stored evaluator spec digest differs"
+        )
+    bounds = _parse_evaluator_bounds(
+        evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
+    )
+    try:
+        policy = store.campaign_policy()
+    except StoreConflict as exc:
+        policy = CampaignPolicy(False)
+        store.record_admission_failure(hypothesis_id, "CAMPAIGN_POLICY_UNSET", str(exc))
+    return admit_hypothesis(
+        hypothesis,
+        hypothesis_spec,
+        receipt,
+        _parse_exposure_ledger(store),
+        bounds,
+        policy,
+        ExecutionCapability(frozenset({"panel"})),
+    )
+
+
+def _record_admission_refusal(
+    store: ResearchStore,
+    hypothesis_id: str,
+    decision: AdmissionDecision,
+    *,
+    attempt_id: str | None = None,
+) -> None:
+    store.record_admission_refusal(hypothesis_id, decision, attempt_id=attempt_id)
+    if decision.reason is AdmissionReason.CAMPAIGN_POLICY_UNSET:
+        store.pause(decision.detail or "campaign remains paused until policy is set")
 
 
 def _terminal_outcome(
@@ -463,9 +794,64 @@ def _native_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
 
 
 def _budget_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
-    """Integration hook for campaign-level budget accounting (P3b-1b)."""
+    """Budget/native readiness remains unavailable until separately authorized."""
     del store, attempt_id
     return False
+
+
+def _release_admission_pending(store: ResearchStore, attempt_id: str, reason: str) -> None:
+    attempt = store.get_attempt(attempt_id)
+    if attempt.state != AttemptState.RUN_QUEUED or not attempt.run_job_id:
+        return
+    with suppress(StoreConflict):
+        store.release_queued_run(attempt_id, attempt.run_job_id, reason)
+
+
+def _admission_execution_ready(store: ResearchStore, attempt_id: str) -> str | None:
+    """Recheck typed admission before readiness hooks and preserve owner control."""
+    attempt = store.get_attempt(attempt_id)
+    try:
+        store.evidence(attempt_id, "admission_decision")
+    except ValueError:
+        # Preserve older directly-created test/driver attempts; the CLI
+        # admission path always persists this evidence at attempt-open.
+        return None
+    except StoreConflict as exc:
+        reason = "ADMISSION_EVIDENCE_INVALID"
+        store.record_admission_failure(
+            attempt.hypothesis_id, reason, str(exc), attempt_id=attempt_id
+        )
+        _release_admission_pending(store, attempt_id, reason)
+        return reason
+    try:
+        decision = _admission_for_hypothesis(store, attempt.hypothesis_id)
+    except _AdmissionInputError as exc:
+        store.record_admission_failure(
+            attempt.hypothesis_id, exc.reason, exc.detail, attempt_id=attempt_id
+        )
+        _release_admission_pending(store, attempt_id, exc.reason)
+        return exc.reason
+    except (StoreConflict, OSError, TypeError, ValueError) as exc:
+        reason = "ADMISSION_INPUT_INVALID"
+        detail = f"admission inputs are invalid: {exc}"
+        store.record_admission_failure(attempt.hypothesis_id, reason, detail, attempt_id=attempt_id)
+        _release_admission_pending(store, attempt_id, reason)
+        return reason
+    if not decision.admitted:
+        reason = decision.reason.value if decision.reason is not None else "ADMISSION_REFUSED"
+        _record_admission_refusal(store, attempt.hypothesis_id, decision, attempt_id=attempt_id)
+        _release_admission_pending(store, attempt_id, reason)
+        return reason
+    try:
+        store.insert_admission_decision(attempt_id, decision)
+    except StoreConflict as exc:
+        reason = "ADMISSION_POLICY_RACE"
+        store.record_admission_failure(
+            attempt.hypothesis_id, reason, str(exc), attempt_id=attempt_id
+        )
+        _release_admission_pending(store, attempt_id, reason)
+        return reason
+    return None
 
 
 def _dispatch_queued_job(store: ResearchStore) -> str | None:
@@ -566,6 +952,9 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             != implementation.targets_argv
         ):
             return reject("implementation_pin_mismatch")
+        admission_reject = _admission_execution_ready(store, attempt_id)
+        if admission_reject is not None:
+            return admission_reject
         if not _host_execution_ready(store, attempt_id):
             return reject("host_execution_unavailable")
         if not _native_execution_ready(store, attempt_id):
@@ -884,6 +1273,31 @@ def resume(
         _fail(exc)
 
 
+def _status_admission(store: ResearchStore, attempt_id: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(store.evidence(attempt_id, "admission_decision"))
+    except (ValueError, json.JSONDecodeError, StoreConflict):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "admitted": payload.get("admitted"),
+        "reason": payload.get("reason"),
+        "detail": payload.get("detail"),
+    }
+
+
+def _status_refusal(store: ResearchStore, hypothesis_id: str) -> dict[str, object] | None:
+    try:
+        refusal = store.latest_admission_refusal(hypothesis_id)
+    except StoreConflict as exc:
+        return {"unavailable_reason": str(exc)}
+    if refusal is None:
+        return None
+    reason, detail = refusal
+    return {"reason": reason, "detail": detail}
+
+
 @app.command("status")
 def status(
     root: Path = typer.Option(..., "--root"), as_json: bool = typer.Option(False, "--json")
@@ -896,9 +1310,14 @@ def status(
             (event.to_json() for event in reversed(events) if event.kind == "owner_turn_failed"),
             None,
         )
+        try:
+            policy = store.campaign_policy()
+        except StoreConflict:
+            policy = CampaignPolicy(False)
         config = store.config()
         data = {
             "campaign": store.campaign(),
+            "policy_set": policy.is_set,
             "containment": "configured" if bool(config["containment_ready"]) else "unavailable",
             # A console-script digest and source snapshot prove the selected
             # bytes, but do not attest the evaluator's external implementation
@@ -911,6 +1330,7 @@ def status(
                 {
                     "hypothesis_id": h.hypothesis_id,
                     "state": h.state.value,
+                    "admission_refusal": _status_refusal(store, h.hypothesis_id),
                     "attempts": [
                         {
                             "attempt_id": a.attempt_id,
@@ -922,6 +1342,7 @@ def status(
                             "run_status": (
                                 json.loads(a.run_outcome).get("status") if a.run_outcome else None
                             ),
+                            "admission": _status_admission(store, a.attempt_id),
                             "model_identity": "reported, unverified",
                         }
                         for a in store.attempts_for(h.hypothesis_id)

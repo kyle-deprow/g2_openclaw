@@ -39,8 +39,7 @@ UNIVERSE_SHA = hashlib.sha256(b"universe").hexdigest()
 DIVIDENDS_SHA = hashlib.sha256(b"dividends").hexdigest()
 
 
-@pytest.fixture
-def payload() -> dict[str, object]:
+def _payload() -> dict[str, object]:
     return {
         "contract": "research-hypothesis-v1",
         "mechanism": "A short-term reversal after an overnight move.",
@@ -75,6 +74,11 @@ def payload() -> dict[str, object]:
         "compute": {"max_wall_seconds": 120.0, "max_rss_mb": 1024},
         "deliverables": ["reports/summary.json"],
     }
+
+
+@pytest.fixture
+def payload() -> dict[str, object]:
+    return _payload()
 
 
 def _document(payload: dict[str, object]) -> HypothesisDocument:
@@ -147,6 +151,8 @@ def _spec(document: HypothesisDocument, *, max_attempts: int = 3) -> HypothesisS
         max_attempts,
         "a" * 40,
         "2026-09-09T00:00:00Z",
+        "/dividends",
+        DIVIDENDS_SHA,
     )
 
 
