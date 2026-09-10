@@ -36,10 +36,14 @@ receipts. Main controls remain read-only.
 
 ## Memory and scientific boundary
 
-memory_search and memory_get are denied. agents.defaults.memorySearch.enabled
-and compaction.memoryFlush.enabled are false. Models receive read-only
-MemPalace context and never write durable memory. Research receipts and later
-persistence are platform-owned.
+No autoresearch model writes MemPalace: every model is read-only, the built-in
+memory tools memory_search and memory_get are denied, memory flush is disabled,
+and the durable research records are the research store and artifact receipts.
+MemPalace is optional read-only retrieval, never a control ledger or completion
+gate, and this loop has no automated MemPalace writer. The managed OpenClaw 8.1
+config explicitly sets `memory.search.enabled` and
+`agents.defaults.compaction.memoryFlush.enabled` to `false`; do not enable
+built-in memory or add a provider fallback.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed on unknown earnings.

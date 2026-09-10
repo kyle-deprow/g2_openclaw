@@ -17,6 +17,9 @@ CODEX_SUBAGENTS = AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md"
 MEMPALACE_READONLY = AGENT_CONFIG / "skills" / "mempalace-readonly" / "SKILL.md"
 IMPROVEMENT_CANONICAL = REPO_ROOT / ".agents" / "skills" / "openclaw-improvement" / "SKILL.md"
 IMPROVEMENT_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-improvement" / "SKILL.md"
+MEMORY_CANONICAL = REPO_ROOT / ".agents" / "skills" / "openclaw-memory" / "SKILL.md"
+MEMORY_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-memory" / "SKILL.md"
+CONFIG_README = REPO_ROOT / "gateway" / "openclaw_config" / "README.md"
 RESEARCH_PERSONA = AGENT_CONFIG / "research-orchestrator"
 OPENCLAW_CONFIG = REPO_ROOT / "gateway" / "openclaw_config" / "openclaw.json"
 PUSH_SCRIPT = REPO_ROOT / "scripts" / "push-openclaw-config.sh"
@@ -242,6 +245,20 @@ def test_memory_policy_has_no_automated_writer_claim() -> None:
     assert "automated mempalace writer" in lowered
     assert "mempalace_finalizer" not in lowered
     assert "autoresearch supervisor" not in lowered
+
+
+def test_memory_guidance_matches_openclaw_81_read_only_policy() -> None:
+    for path in (MEMORY_CANONICAL, MEMORY_MIRROR, CONFIG_README):
+        text = path.read_text(encoding="utf-8")
+        lowered = text.lower()
+        assert " ".join(MEMORY_POLICY_SENTENCE.split()) in " ".join(text.split())
+        assert "memory.search.enabled" in lowered
+        assert "agents.defaults.compaction.memoryflush.enabled" in lowered
+        assert "agents.defaults.memorysearch" not in lowered
+        assert "platform finalizer" not in lowered
+        assert "sole writer" not in lowered
+        assert "research store" in lowered
+        assert "artifact receipts" in lowered
 
 
 def test_mempalace_readonly_skill_locks_tools_and_safety_policy() -> None:
