@@ -20,6 +20,24 @@
 
 set -euo pipefail
 
+# The push mode is deliberately selected before the optional env file is
+# sourced.  An env file may configure provider credentials and roots, but it
+# must never be able to opt an ordinary push into paused deployment semantics.
+OPENCLAW_PUSH_MODE_REQUESTED="${OPENCLAW_PUSH_MODE:-normal}"
+case "${OPENCLAW_PUSH_MODE_REQUESTED}" in
+  normal | paused)
+    ;;
+  *)
+    echo "ERROR: Unsupported OPENCLAW_PUSH_MODE '${OPENCLAW_PUSH_MODE_REQUESTED}'. Use 'normal' or 'paused'." >&2
+    exit 1
+    ;;
+esac
+OPENCLAW_PUSH_MODE="${OPENCLAW_PUSH_MODE_REQUESTED}"
+if [[ "${OPENCLAW_PUSH_MODE}" == "paused" && -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  echo "ERROR: Paused mode requires XDG_RUNTIME_DIR to inspect the runtime gateway mask." >&2
+  exit 1
+fi
+
 OPENCLAW_PUSH_IMPL="${OPENCLAW_PUSH_IMPL:-python}"
 if [[ "${OPENCLAW_PUSH_IMPL}" != "python" ]]; then
   echo "ERROR: the bash implementation was removed in the P4 cutover; unset OPENCLAW_PUSH_IMPL." >&2
@@ -44,6 +62,8 @@ QUANTIPY_API_SERVICE_NAME="quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 NATIVE_CRASH_HARDENING_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
+HEALTHCHECK_TIMER_NAME="openclaw-gateway-healthcheck.timer"
+HEALTHCHECK_SERVICE_NAME="openclaw-gateway-healthcheck.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
 NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"
 STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
@@ -580,6 +600,10 @@ validate_quantipy_api_unit_file() {
 
 require_gateway_service_loadable() {
   local service_state load_state active_state
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    require_paused_deployment_preconditions || return 1
+    return 0
+  fi
   if ! service_state="$(systemctl --user show "${GATEWAY_SERVICE_NAME}" --property=LoadState --property=ActiveState 2>&1)"; then
     echo "ERROR: Could not inspect ${GATEWAY_SERVICE_NAME} as a user service." >&2
     echo "       systemctl output: ${service_state}" >&2
@@ -603,6 +627,78 @@ require_gateway_service_loadable() {
       return 1
       ;;
   esac
+}
+
+systemd_show_value() {
+  local output="$1" property="$2"
+  printf '%s\n' "${output}" | awk -F= -v property="${property}" '$1 == property { print substr($0, index($0, "=") + 1); exit }'
+}
+
+require_paused_mask_path() {
+  local path="$1" label="$2" resolved
+  if [[ ! -L "${path}" ]] || ! resolved="$(readlink -e -- "${path}" 2>/dev/null)" || [[ "${resolved}" != "/dev/null" ]]; then
+    echo "ERROR: Paused mode requires ${label} to be a symlink resolving to /dev/null: ${path}" >&2
+    return 1
+  fi
+}
+
+require_paused_systemd_state() {
+  local unit="$1" label="$2" expected_load_states="$3" expected_active_states="$4" expected_sub_states="$5" expected_unit_file_states="$6"
+  local state load_state active_state sub_state unit_file_state main_pid
+  if ! state="$(systemctl --user show "${unit}" \
+    --property=LoadState --property=ActiveState --property=SubState \
+    --property=UnitFileState --property=MainPID 2>&1)"; then
+    echo "ERROR: Could not inspect ${label} in paused mode." >&2
+    echo "       systemctl output: ${state}" >&2
+    return 1
+  fi
+  load_state="$(systemd_show_value "${state}" LoadState)"
+  active_state="$(systemd_show_value "${state}" ActiveState)"
+  sub_state="$(systemd_show_value "${state}" SubState)"
+  unit_file_state="$(systemd_show_value "${state}" UnitFileState)"
+  main_pid="$(systemd_show_value "${state}" MainPID)"
+  if [[ " ${expected_load_states} " != *" ${load_state} "* \
+    || " ${expected_active_states} " != *" ${active_state} "* \
+    || ( -n "${expected_sub_states}" && " ${expected_sub_states} " != *" ${sub_state} "* ) \
+    || "${main_pid}" != "0" ]]; then
+    echo "ERROR: Paused mode requires ${label} to be quiescent." >&2
+    echo "       LoadState=${load_state:-<missing>} ActiveState=${active_state:-<missing>} SubState=${sub_state:-<missing>} UnitFileState=${unit_file_state:-<missing>} MainPID=${main_pid:-<missing>}" >&2
+    return 1
+  fi
+  if [[ -n "${expected_unit_file_states}" \
+    && " ${expected_unit_file_states} " != *" ${unit_file_state} "* ]]; then
+    if [[ "${load_state}" != "not-found" \
+      || -n "${unit_file_state}" \
+      || " ${expected_unit_file_states} " != *" not-found "* ]]; then
+      echo "ERROR: Paused mode requires ${label} to be quiescent." >&2
+      echo "       LoadState=${load_state:-<missing>} ActiveState=${active_state:-<missing>} SubState=${sub_state:-<missing>} UnitFileState=${unit_file_state:-<missing>} MainPID=${main_pid:-<missing>}" >&2
+      return 1
+    fi
+  fi
+}
+
+require_paused_deployment_preconditions() {
+  local runtime_gateway_unit
+  if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+    echo "ERROR: Paused mode requires XDG_RUNTIME_DIR to inspect the runtime gateway mask." >&2
+    return 1
+  fi
+  runtime_gateway_unit="${XDG_RUNTIME_DIR}/systemd/user/${GATEWAY_SERVICE_NAME}"
+  require_paused_systemd_state \
+    "${GATEWAY_SERVICE_NAME}" "${GATEWAY_SERVICE_NAME}" \
+    "masked" "inactive" "dead" "" || return 1
+  require_paused_mask_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}" "persistent gateway mask" || return 1
+  require_paused_mask_path "${runtime_gateway_unit}" "runtime gateway mask" || return 1
+  require_paused_systemd_state \
+    "${HEALTHCHECK_TIMER_NAME}" "${HEALTHCHECK_TIMER_NAME}" \
+    "loaded not-found" "inactive" "dead inactive" "" || return 1
+  require_paused_systemd_state \
+    "${HEALTHCHECK_SERVICE_NAME}" "${HEALTHCHECK_SERVICE_NAME}" \
+    "loaded not-found" "inactive failed" "dead failed inactive" "" || return 1
+  require_paused_systemd_state \
+    "${RESEARCH_OWNER_SERVICE_NAME}" "${RESEARCH_OWNER_SERVICE_NAME}" \
+    "loaded not-found" "inactive" "dead inactive" "disabled masked not-found masked-runtime" || return 1
+  echo "Verified paused deployment preconditions: masked gateway, stopped healthcheck, and quiescent research owner."
 }
 
 prepare_runtime_caps_dropin_dir() {
@@ -877,6 +973,21 @@ cleanup_deployment_temp_file() {
 }
 
 begin_managed_unit_transaction() {
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    # Paused publication keeps the existing gateway masks untouched.  The
+    # artifact transaction still snapshots every file this script may write,
+    # while avoiding the unit transaction's unconditional daemon-reload during
+    # rollback.
+    local path
+    for path in \
+      "${RESEARCH_OWNER_UNIT_DST}" \
+      "${QUANTIPY_API_UNIT_DST}" \
+      "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" \
+      "${NATIVE_CRASH_HARDENING_DROPIN_DST}"; do
+      snapshot_managed_artifact_path "${path}" || return 1
+    done
+    return 0
+  fi
   guard_destination_path_chain "${SYSTEMD_USER_DIR}" "creating managed systemd transaction backup directory under ${SYSTEMD_USER_DIR}" || return 1
   MANAGED_UNIT_BACKUP_DIR="$(mktemp -d "${SYSTEMD_USER_DIR}/.push-openclaw-config-units.XXXXXX")"
   guard_destination_path_chain "${MANAGED_UNIT_BACKUP_DIR}" "created managed systemd transaction backup directory ${MANAGED_UNIT_BACKUP_DIR}" || return 1
@@ -921,6 +1032,9 @@ rollback_managed_unit_transaction() {
 }
 
 finalize_managed_unit_transaction() {
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" && "${MANAGED_UNIT_TRANSACTION_ARMED:-0}" -ne 1 ]]; then
+    return 0
+  fi
   if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.transactions finalize-unit-tx \
     -- "${MANAGED_UNIT_BACKUP_DIR:-}"; then
@@ -1004,6 +1118,9 @@ rollback_managed_artifact_transaction() {
 }
 
 final_systemd_reload_after_artifact_rollback() {
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    return 0
+  fi
   if [[ "${MANAGED_ARTIFACT_RESTORED_SYSTEMD:-0}" -ne 1 ]]; then
     return 0
   fi
@@ -1043,6 +1160,12 @@ cleanup_managed_artifact_backup_dir() {
 }
 
 restore_systemd_manager_environment_snapshot() {
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
+    SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
+    SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
+    return 0
+  fi
   if [[ "${SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED:-0}" -ne 1 ]]; then
     return 0
   fi
@@ -1415,6 +1538,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +a
 fi
 
+if [[ -v OPENCLAW_PUSH_MODE && "${OPENCLAW_PUSH_MODE}" != "${OPENCLAW_PUSH_MODE_REQUESTED}" ]]; then
+  echo "ERROR: OPENCLAW_PUSH_MODE must be selected in the invoking environment, not OPENCLAW_PUSH_ENV_FILE." >&2
+  exit 1
+fi
+OPENCLAW_PUSH_MODE="${OPENCLAW_PUSH_MODE_REQUESTED}"
+
 for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
   printf -v "${VAR_NAME}" '%s' "${PRESERVED_ENV[${VAR_NAME}]}"
   export "${VAR_NAME}"
@@ -1554,6 +1683,44 @@ assemble_openclaw_config() {
 }
 
 assemble_openclaw_config
+
+PAUSED_PRE_FIELDS_PROVIDERS=""
+PAUSED_PRE_FIELDS_CODEX_PLUGIN=""
+
+apply_paused_config_gates() {
+  PAUSED_PRE_FIELDS_PROVIDERS="$(printf '%s\n' "${MERGED}" | jq -c '.models.providers')" || return 1
+  PAUSED_PRE_FIELDS_CODEX_PLUGIN="$(printf '%s\n' "${MERGED}" | jq -c '.plugins.entries.codex')" || return 1
+  if ! MERGED="$(printf '%s\n' "${MERGED}" | jq '
+    .cron = ((.cron // {}) | .enabled = false)
+    | .agents.defaults = ((.agents.defaults // {})
+        | .heartbeat = ((.heartbeat // {}) | .every = "0m"))
+    | .agents.list = ((.agents.list // [])
+        | map(if has("heartbeat") then .heartbeat.every = "0m" else . end))
+  ')"; then
+    echo "ERROR: Could not apply paused cron and heartbeat gates to the assembled OpenClaw config." >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${MERGED}" | jq -e \
+    --argjson providers "${PAUSED_PRE_FIELDS_PROVIDERS}" \
+    --argjson codex_plugin "${PAUSED_PRE_FIELDS_CODEX_PLUGIN}" '
+      (.models.providers == $providers)
+      and (.plugins.entries.codex == $codex_plugin)
+      and (.cron.enabled == false)
+      and (.agents.defaults.heartbeat.every == "0m")
+      and all(.agents.list[]?;
+        (.heartbeat? == null)
+        or ((.heartbeat | type) == "object" and .heartbeat.every == "0m")
+      )
+    ' >/dev/null; then
+    echo "ERROR: Paused config gates changed provider/plugin policy or are incomplete." >&2
+    return 1
+  fi
+  echo "Applied paused config gates: cron disabled and all heartbeat cadences set to 0m."
+}
+
+if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+  apply_paused_config_gates || exit 1
+fi
 
 # No model thread is projected a write-capable MemPalace server. The platform
 # finalizer is the sole write boundary, so stage tool-deny compatibility lists
@@ -1709,6 +1876,21 @@ validate_generated_openclaw_config
 push_test_checkpoint "before-config-publication"
 guarded_mv_replace_preserving_final_symlink_topology "${GENERATED_OPENCLAW_CONFIG_TMP}" "${LOCAL_CONFIG}" "publishing validated local OpenClaw config ${LOCAL_CONFIG}" -f
 GENERATED_OPENCLAW_CONFIG_TMP=""
+if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]] && ! jq -e \
+  --argjson providers "${PAUSED_PRE_FIELDS_PROVIDERS}" \
+  --argjson codex_plugin "${PAUSED_PRE_FIELDS_CODEX_PLUGIN}" '
+    (.models.providers == $providers)
+    and (.plugins.entries.codex == $codex_plugin)
+    and (.cron.enabled == false)
+    and (.agents.defaults.heartbeat.every == "0m")
+    and all(.agents.list[]?;
+      (.heartbeat? == null)
+      or ((.heartbeat | type) == "object" and .heartbeat.every == "0m")
+    )
+  ' "${LOCAL_CONFIG}" >/dev/null; then
+  echo "ERROR: Published paused config failed provider/plugin preservation or pause-field assertions." >&2
+  exit 1
+fi
 echo "Atomically published validated repo config to ${LOCAL_CONFIG}"
 
 # ── Copy bootstrap files ────────────────────────────────────────────────────
@@ -1828,6 +2010,11 @@ validate_codex_doctor_owned_checks() {
   local codex_home="$1"
   local config_path="$2"
   local doctor_stdout doctor_stderr doctor_status app_server_package_root
+
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    echo "DEFERRED: paused mode skipped Codex doctor/update/websocket probes."
+    return 0
+  fi
 
   doctor_stdout="$(mktemp)"
   doctor_stderr="$(mktemp)"
@@ -2030,6 +2217,10 @@ done
 
 run_research_owner_command_contract_probe() {
   local codex_home="${OPENCLAW_PUSH_HOME}/agents/research-orchestrator/agent/codex-home"
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    echo "DEFERRED: paused mode skipped research-owner command-contract and sandbox probes."
+    return 0
+  fi
   if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.command_probe probe \
     -- "${codex_home}" "${CODEX_APP_SERVER_CLI_RESOLVED}"; then
@@ -2100,10 +2291,15 @@ elif [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" && -f "${PRELOAD_DST}" ]]; then
 fi
 
 if [[ "${PROVIDER}" == "codex" ]]; then
-  snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
-  snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
-  remove_stale_azure_node_options_for_codex
-  sync_managed_agent_codex_auth
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    echo "DEFERRED: paused mode skipped stale Azure user-manager environment cleanup."
+    echo "DEFERRED: paused mode skipped Codex auth-file synchronization."
+  else
+    snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
+    snapshot_managed_artifact_path "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}"
+    remove_stale_azure_node_options_for_codex
+    sync_managed_agent_codex_auth
+  fi
 fi
 
 # ── Validate ─────────────────────────────────────────────────────────────────
@@ -2201,8 +2397,12 @@ validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP
 guarded_mv_replace "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}" "publishing managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP=""
 validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
-if ! systemctl --user daemon-reload; then
-  run_deployment_rollback_and_exit 1
+if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+  echo "DEFERRED: paused mode skipped systemd user-manager daemon-reload."
+else
+  if ! systemctl --user daemon-reload; then
+    run_deployment_rollback_and_exit 1
+  fi
 fi
 if ! commit_deployment_boundary; then
   if [[ "${DEPLOYMENT_COMMITTED:-0}" -eq 1 ]]; then
@@ -2215,7 +2415,11 @@ if [[ "${POST_COMMIT_CLEANUP_FAILED:-0}" -ne 0 ]]; then
 fi
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} native-crash hardening → ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
-echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
+if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+  echo "Deferred user systemd reload; restart ${GATEWAY_SERVICE_NAME} externally after leaving paused mode."
+else
+  echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
+fi
 
 echo ""
 echo "Done. Config pushed successfully."
