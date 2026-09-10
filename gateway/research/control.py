@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import stat
 import subprocess
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Protocol
+
+from dotenv import dotenv_values
 
 from gateway.openclaw_client import OpenClawClient
 
@@ -18,15 +23,156 @@ from .jobs import JobRecord
 from .jobs import cancel as cancel_job
 from .readiness import build_readiness_gate
 from .review_evidence import cancel_review, request_cancel
-from .status import ResearchStatus, read_status, resolve_research_root
+from .status import ResearchStatus, read_status, resolve_research_root, unavailable_status
 from .store import ResearchStore
 
 OWNER_UNIT = "research-owner.service"
 _SYSTEMD_TIMEOUT_SECONDS = 5.0
+_OWNER_ENV_FILE = "G2_OWNER_ENV_FILE"
+_OWNER_ENV_KEYS = frozenset(
+    {
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "RESEARCH_CORE_DATABASE",
+        "RESEARCH_V2_ROOT",
+    }
+)
+_OWNER_ENV_MAX_BYTES = 64 * 1024
+_UNRESOLVED_PLACEHOLDER = re.compile(r"\$(?:\{[^}]*\}|[A-Za-z_][A-Za-z0-9_]*|\()")
 
 
 class ControlError(RuntimeError):
     """Raised when an owner-only control operation cannot be proven safe."""
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnerEnvironment:
+    """Allowlisted deployment contract without mutating process environment."""
+
+    values: Mapping[str, str]
+    refusal: str | None = None
+
+
+def _owner_environment_refusal(reason: str) -> _OwnerEnvironment:
+    return _OwnerEnvironment({}, f"owner_environment_{reason}")
+
+
+def _read_protected_owner_env(path_text: str) -> tuple[str | None, str | None]:
+    """Read one private dotenv file through a non-following descriptor."""
+    if not path_text or "\x00" in path_text:
+        return None, "invalid"
+    path = Path(path_text)
+    if not path.is_absolute():
+        return None, "not_absolute"
+    try:
+        path_stat = path.lstat()
+    except OSError:
+        return None, "missing"
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        return None, "not_regular"
+    if path_stat.st_uid != os.geteuid():
+        return None, "owner"
+    if stat.S_IMODE(path_stat.st_mode) & 0o077:
+        return None, "permissions"
+    if path_stat.st_nlink != 1:
+        return None, "hardlink"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as source:
+            opened_stat = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or stat.S_ISLNK(opened_stat.st_mode)
+                or opened_stat.st_uid != os.geteuid()
+                or stat.S_IMODE(opened_stat.st_mode) & 0o077
+                or opened_stat.st_nlink != 1
+            ):
+                return None, "identity"
+            raw = source.read(_OWNER_ENV_MAX_BYTES + 1)
+    except OSError:
+        return None, "unreadable"
+    if len(raw) > _OWNER_ENV_MAX_BYTES:
+        return None, "too_large"
+    try:
+        return raw.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, "encoding"
+
+
+def _parse_owner_environment(raw: str) -> _OwnerEnvironment:
+    """Parse dotenv syntax while enforcing the exact production allowlist."""
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#"):
+            continue
+        if candidate.startswith("export "):
+            candidate = candidate[7:].lstrip()
+        if "=" not in candidate:
+            return _owner_environment_refusal("malformed")
+        key = candidate.split("=", 1)[0].strip()
+        if key not in _OWNER_ENV_KEYS:
+            return _owner_environment_refusal("unknown_key")
+        if key in seen:
+            return _owner_environment_refusal("duplicate_key")
+        seen.add(key)
+    try:
+        parsed = dotenv_values(stream=StringIO(raw), interpolate=False)
+    except (OSError, UnicodeError, ValueError):
+        return _owner_environment_refusal("malformed")
+    if set(parsed) != seen:
+        return _owner_environment_refusal("malformed")
+    values: dict[str, str] = {}
+    for key in _OWNER_ENV_KEYS:
+        value = parsed.get(key)
+        if not isinstance(value, str) or not value:
+            return _owner_environment_refusal("missing_or_empty")
+        if _UNRESOLVED_PLACEHOLDER.search(value):
+            return _owner_environment_refusal("unresolved_placeholder")
+        values[key] = value
+    host = values["OPENCLAW_HOST"]
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        return _owner_environment_refusal("host")
+    try:
+        port = int(values["OPENCLAW_PORT"])
+    except ValueError:
+        return _owner_environment_refusal("port")
+    if not 1 <= port <= 65535:
+        return _owner_environment_refusal("port")
+    core_database = Path(values["RESEARCH_CORE_DATABASE"])
+    root = Path(values["RESEARCH_V2_ROOT"])
+    if not core_database.is_absolute() or core_database.is_symlink():
+        return _owner_environment_refusal("core_database_path")
+    if not root.is_absolute() or root.is_symlink():
+        return _owner_environment_refusal("research_root_path")
+    for key, value in values.items():
+        process_value = os.environ.get(key)
+        if process_value is None:
+            continue
+        if key in {"RESEARCH_CORE_DATABASE", "RESEARCH_V2_ROOT"}:
+            same = Path(process_value).expanduser().resolve(strict=False) == Path(value).resolve(
+                strict=False
+            )
+        else:
+            same = process_value == value
+        if not same:
+            return _owner_environment_refusal("contract_mismatch")
+    return _OwnerEnvironment(values)
+
+
+def _load_owner_environment() -> _OwnerEnvironment:
+    """Load only the explicitly deployed protected owner environment file."""
+    path_text = os.environ.get(_OWNER_ENV_FILE)
+    if not path_text:
+        return _owner_environment_refusal("file_unset")
+    raw, refusal = _read_protected_owner_env(path_text)
+    if refusal is not None:
+        return _owner_environment_refusal(f"file_{refusal}")
+    if raw is None:
+        return _owner_environment_refusal("file_unreadable")
+    return _parse_owner_environment(raw)
 
 
 class OwnerUnit(Protocol):
@@ -224,6 +370,7 @@ class OwnerControl:
         job_cancel: Callable[[JobRecord], str] = cancel_job,
         status_reader: Callable[..., ResearchStatus] = read_status,
         readiness_gate: Callable[[ResearchStatus], str | None] | None = None,
+        status_unavailable_reason: str | None = None,
     ) -> None:
         self.root = resolve_research_root(root)
         self.owner_unit = owner_unit
@@ -232,8 +379,11 @@ class OwnerControl:
         self._job_cancel = job_cancel
         self._status_reader = status_reader
         self._readiness_gate = readiness_gate
+        self._status_unavailable_reason = status_unavailable_reason
 
     def status(self) -> ResearchStatus:
+        if self._status_unavailable_reason is not None:
+            return unavailable_status(self._status_unavailable_reason)
         return self._status_reader(
             self.root, unit_state=self._unit.state, owner_unit=self.owner_unit
         )
@@ -412,33 +562,59 @@ class OwnerControl:
         return next((item for item in reversed(attempts) if item.state == "IMPLEMENTED"), None)
 
 
-def _required_environment(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise ControlError(f"{name} is required for production research control")
-    return value
+def _valid_core_database(value: str) -> tuple[Path | None, str | None]:
+    path = Path(value)
+    if not path.is_absolute() or path.is_symlink():
+        return None, "core_database_path"
+    try:
+        path_stat = path.lstat()
+    except OSError:
+        return None, "core_database_missing"
+    if not stat.S_ISREG(path_stat.st_mode):
+        return None, "core_database_not_regular"
+    if stat.S_IMODE(path_stat.st_mode) & 0o022:
+        return None, "core_database_permissions"
+    return path, None
 
 
 def production_owner_control(root: Path | None = None) -> OwnerControl:
-    """Construct the production control surface from deployment-provided env."""
-    core_database = Path(_required_environment("RESEARCH_CORE_DATABASE"))
-    if not core_database.is_absolute() or core_database.is_symlink() or not core_database.is_file():
-        raise ControlError("RESEARCH_CORE_DATABASE must be an absolute regular file")
-    host = _required_environment("OPENCLAW_HOST")
-    if host not in {"localhost", "127.0.0.1", "::1"}:
-        raise ControlError("OPENCLAW_HOST must be a loopback host")
-    raw_port = _required_environment("OPENCLAW_PORT")
-    try:
-        port = int(raw_port)
-    except ValueError as exc:
-        raise ControlError("OPENCLAW_PORT must be an integer") from exc
-    if not 1 <= port <= 65535:
-        raise ControlError("OPENCLAW_PORT must be in the valid TCP range")
-    token = _required_environment("OPENCLAW_GATEWAY_TOKEN")
-    client = OpenClawClient(host, port, token)
-    resolved_root = resolve_research_root(root)
+    """Construct production control from one protected deployment contract."""
+    environment = _load_owner_environment()
+    values = environment.values
+    configured_root: Path | None = root
+    if configured_root is None and "RESEARCH_V2_ROOT" in values:
+        configured_root = Path(values["RESEARCH_V2_ROOT"])
+    status_reason = None
+    if configured_root is None:
+        status_reason = environment.refusal or "owner_environment_unset"
+        configured_root = Path("/nonexistent/g2-openclaw-owner")
+    elif "RESEARCH_V2_ROOT" in values:
+        expected_root = Path(values["RESEARCH_V2_ROOT"]).resolve(strict=False)
+        if configured_root.resolve(strict=False) != expected_root:
+            environment = _owner_environment_refusal("root_mismatch")
+
+    core_database: Path | None = None
+    if "RESEARCH_CORE_DATABASE" in values:
+        core_database, database_refusal = _valid_core_database(values["RESEARCH_CORE_DATABASE"])
+        if database_refusal is not None and environment.refusal is None:
+            environment = _owner_environment_refusal(database_refusal)
+
+    review_canceller: ReviewCanceller | None = None
+    if environment.refusal is None and core_database is not None:
+        client = OpenClawClient(
+            values["OPENCLAW_HOST"],
+            int(values["OPENCLAW_PORT"]),
+            values["OPENCLAW_GATEWAY_TOKEN"],
+        )
+        review_canceller = OpenClawReviewCanceller(core_database, client.request_once)
+
     return OwnerControl(
-        resolved_root,
-        review_canceller=OpenClawReviewCanceller(core_database, client.request_once),
-        readiness_gate=build_readiness_gate(resolved_root),
+        configured_root,
+        review_canceller=review_canceller,
+        readiness_gate=build_readiness_gate(
+            configured_root,
+            core_database=core_database,
+            configuration_refusal=environment.refusal,
+        ),
+        status_unavailable_reason=status_reason,
     )

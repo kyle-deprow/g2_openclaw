@@ -130,10 +130,11 @@ def test_g2_control_mcp_dispatches_status_start_and_stop() -> None:
     assert _payload(stop)["completed"] is True
 
 
-def test_g2_control_default_factory_requires_deployment_contract(
+def test_g2_control_default_factory_keeps_status_visible_without_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
+        "G2_OWNER_ENV_FILE",
         "RESEARCH_CORE_DATABASE",
         "OPENCLAW_HOST",
         "OPENCLAW_PORT",
@@ -151,10 +152,9 @@ def test_g2_control_default_factory_requires_deployment_contract(
     )
 
     assert response is not None
-    error = response["error"]
-    assert isinstance(error, dict)
-    assert error["code"] == -32000
-    assert "RESEARCH_CORE_DATABASE" in error["message"]
+    payload = _payload(response)
+    assert payload["available"] is False
+    assert payload["unavailable_reason"] == "owner_environment_file_unset"
 
 
 def test_g2_control_mcp_rejects_arbitrary_tool_names() -> None:

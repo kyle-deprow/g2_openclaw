@@ -229,12 +229,20 @@ def _native_failure(store: ResearchStore, attempt_id: str | None, reason: str) -
     return _record_refusal(store, attempt_id, "native", reason)
 
 
-def native_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
+def native_execution_ready(
+    store: ResearchStore,
+    attempt_id: str | None,
+    *,
+    core_database: Path | None = None,
+) -> str | None:
     """Validate the trusted core task surface and registered native receipt."""
-    database_text = os.environ.get("RESEARCH_CORE_DATABASE")
-    if not database_text:
+    database_text = os.environ.get("RESEARCH_CORE_DATABASE") if core_database is None else None
+    if core_database is not None:
+        database = core_database
+    elif not database_text:
         return _native_failure(store, attempt_id, "core_database_unset")
-    database = Path(database_text)
+    else:
+        database = Path(database_text)
     if not database.is_absolute() or database.is_symlink():
         return _native_failure(store, attempt_id, "core_database_invalid")
     try:
@@ -285,16 +293,25 @@ def budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str 
     return None
 
 
-def build_readiness_gate(root: Path) -> Callable[[object], str | None]:
+def build_readiness_gate(
+    root: Path,
+    *,
+    core_database: Path | None = None,
+    configuration_refusal: str | None = None,
+) -> Callable[[object], str | None]:
     """Build the owner start gate over the shared research root."""
 
     def gate(_status: object) -> str | None:
+        if configuration_refusal is not None:
+            return configuration_refusal
         from .store import ResearchStore
 
         store = ResearchStore(root)
         for check in (
             host_execution_ready,
-            native_execution_ready,
+            lambda store, attempt_id: native_execution_ready(
+                store, attempt_id, core_database=core_database
+            ),
             budget_execution_ready,
         ):
             reason = check(store, None)

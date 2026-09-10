@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from gateway.openclaw_client import OpenClawClient
@@ -22,6 +23,7 @@ from gateway.research.readiness import (
     register_native_capability_receipt,
     validate_native_capability_registration,
 )
+from gateway.research.status import ResearchStatus
 from gateway.research.store import ResearchStore
 from gateway.research.wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
@@ -67,6 +69,26 @@ def _native_receipt(path: Path, *, identity: str = "implementer") -> tuple[Path,
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     path.write_bytes(raw)
     return path, hashlib.sha256(raw).hexdigest()
+
+
+def _owner_env_file(
+    path: Path, database: Path, root: Path, *, token: str = "synthetic-token"
+) -> Path:
+    path.write_text(
+        "\n".join(
+            (
+                "OPENCLAW_HOST=127.0.0.1",
+                "OPENCLAW_PORT=18789",
+                f"OPENCLAW_GATEWAY_TOKEN={token}",
+                f"RESEARCH_CORE_DATABASE={database}",
+                f"RESEARCH_V2_ROOT={root}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    return path
 
 
 def test_native_guard_accepts_only_registered_synthetic_receipt(
@@ -177,15 +199,120 @@ def test_production_factory_consumes_explicit_deployment_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = _native_database(tmp_path / "core.sqlite")
-    monkeypatch.setenv("RESEARCH_CORE_DATABASE", str(database))
-    monkeypatch.setenv("OPENCLAW_HOST", "127.0.0.1")
-    monkeypatch.setenv("OPENCLAW_PORT", "18789")
-    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "synthetic-token")
+    for name in (
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "RESEARCH_CORE_DATABASE",
+        "RESEARCH_V2_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = _owner_env_file(tmp_path / "owner.env", database, tmp_path)
+    monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
 
     control = production_owner_control(tmp_path)
 
     assert isinstance(control._review_canceller, OpenClawReviewCanceller)
     assert control._readiness_gate is not None
+
+
+def test_production_factory_gate_uses_file_database_without_process_mutation(
+    campaign: tuple[ResearchStore, Path, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, _hypothesis = campaign
+    database = _native_database(tmp_path / "core.sqlite")
+    receipt, digest = _native_receipt(store.root / "native-receipt.json")
+    register_native_capability_receipt(store.root, receipt, digest)
+    store.set_campaign_policy(2, None, "synthetic-protected-env-fixture")
+    for name in (
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "RESEARCH_CORE_DATABASE",
+        "RESEARCH_V2_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = _owner_env_file(tmp_path / "owner.env", database, store.root)
+    monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
+
+    control = production_owner_control(store.root)
+
+    assert control._readiness_gate is not None
+    assert control._readiness_gate(cast(ResearchStatus, None)) is None
+    assert "RESEARCH_CORE_DATABASE" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("content", "mode", "expected"),
+    (
+        ("OPENCLAW_HOST=127.0.0.1\nUNKNOWN=value\n", 0o600, "owner_environment_unknown_key"),
+        ("OPENCLAW_HOST=127.0.0.1\n", 0o600, "owner_environment_missing_or_empty"),
+        (
+            "\n".join(
+                (
+                    "OPENCLAW_HOST=127.0.0.1",
+                    "OPENCLAW_PORT=18789",
+                    "OPENCLAW_GATEWAY_TOKEN=${TOKEN}",
+                    "RESEARCH_CORE_DATABASE=/tmp/core.sqlite",
+                    "RESEARCH_V2_ROOT=/tmp/research",
+                )
+            )
+            + "\n",
+            0o600,
+            "owner_environment_unresolved_placeholder",
+        ),
+        ("OPENCLAW_HOST 127.0.0.1\n", 0o600, "owner_environment_malformed"),
+        ("OPENCLAW_HOST=127.0.0.1\n", 0o640, "owner_environment_file_permissions"),
+    ),
+)
+def test_production_factory_refuses_invalid_protected_owner_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+    mode: int,
+    expected: str,
+) -> None:
+    env_file = tmp_path / "owner.env"
+    env_file.write_text(content, encoding="utf-8")
+    env_file.chmod(mode)
+    monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
+
+    control = production_owner_control(tmp_path)
+
+    assert control._readiness_gate is not None
+    assert control._readiness_gate(cast(ResearchStatus, None)) == expected
+    assert control._review_canceller is None
+
+
+def test_production_factory_keeps_status_available_without_auth_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("G2_OWNER_ENV_FILE", raising=False)
+
+    control = production_owner_control(tmp_path)
+
+    status = control.status()
+    assert status.available is False
+    assert status.unavailable_reason == "research state database is missing"
+
+
+def test_production_factory_rejects_process_contract_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _native_database(tmp_path / "core.sqlite")
+    env_file = _owner_env_file(tmp_path / "owner.env", database, tmp_path)
+    monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OPENCLAW_PORT", "18790")
+
+    control = production_owner_control(tmp_path)
+
+    assert control._readiness_gate is not None
+    assert (
+        control._readiness_gate(cast(ResearchStatus, None)) == "owner_environment_contract_mismatch"
+    )
+    assert control._review_canceller is None
 
 
 class _FakeGateway:
