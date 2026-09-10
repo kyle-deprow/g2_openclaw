@@ -2417,39 +2417,7 @@ validate_codex_runtime_config() {
     "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}" \
     "${G2_OWNER_ENV_FILE}" "${RESEARCH_CORE_DATABASE}" "${OPENCLAW_HOST}" "${OPENCLAW_PORT}" \
     "${RESEARCH_V2_ROOT}" "${HYPOTHESIS_WORKTREES_ROOT}"
-  repair_codex_runtime_log_db "${codex_home}"
-  repair_codex_runtime_state_db "${codex_home}"
   validate_codex_doctor_owned_checks "${codex_home}" "${config_path}"
-}
-
-repair_codex_runtime_log_db() {
-  local codex_home="$1"
-  local log_db="${codex_home}/logs_2.sqlite"
-  local repair_output
-
-  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-log-db -- "${log_db}" 2>&1)"; then
-    echo "ERROR: Scoped Codex log DB validation/repair failed for ${log_db}." >&2
-    printf '%s\n' "${repair_output}" >&2
-    exit 1
-  fi
-  if [[ -n "${repair_output}" ]]; then
-    printf '%s\n' "${repair_output}"
-  fi
-}
-
-repair_codex_runtime_state_db() {
-  local codex_home="$1"
-  local state_db="${codex_home}/state_5.sqlite"
-  local repair_output
-
-  if ! repair_output="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_db_repair repair-state-db -- "${state_db}" 2>&1)"; then
-    echo "ERROR: Scoped Codex state DB validation/repair failed for ${state_db}." >&2
-    printf '%s\n' "${repair_output}" >&2
-    exit 1
-  fi
-  if [[ -n "${repair_output}" ]]; then
-    printf '%s\n' "${repair_output}"
-  fi
 }
 
 validate_codex_doctor_owned_checks() {
