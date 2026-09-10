@@ -309,6 +309,68 @@ def test_migration_record_file_is_deterministic_and_private(tmp_path: Path) -> N
     assert record_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_migration_record_rejects_symlinked_immediate_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    parent = tmp_path / "record-parent"
+    parent.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(parent / "migration-record.json", {"removed": []})
+
+    assert parent.is_symlink()
+    assert not (outside / "migration-record.json").exists()
+
+
+def test_migration_record_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    ancestor = tmp_path / "record-root"
+    ancestor.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(ancestor / "nested/migration-record.json", {"removed": []})
+
+    assert ancestor.is_symlink()
+    assert not (outside / "nested/migration-record.json").exists()
+
+
+def test_migration_record_rejects_preexisting_final_symlink(tmp_path: Path) -> None:
+    parent = tmp_path / "record-parent"
+    parent.mkdir()
+    outside = tmp_path / "outside-record.json"
+    outside.write_bytes(b"outside\n")
+    record_path = parent / "migration-record.json"
+    record_path.symlink_to(outside)
+
+    with pytest.raises(ConfigMergeError, match="symlink"):
+        write_migration_record(record_path, {"removed": []})
+
+    assert record_path.is_symlink()
+    assert outside.read_bytes() == b"outside\n"
+
+
+def test_migration_record_rejects_absent_parent(tmp_path: Path) -> None:
+    record_path = tmp_path / "missing-parent/migration-record.json"
+
+    with pytest.raises(ConfigMergeError, match="parent"):
+        write_migration_record(record_path, {"removed": []})
+
+    assert not record_path.parent.exists()
+
+
+def test_migration_record_safely_rewrites_existing_private_record(tmp_path: Path) -> None:
+    record_path = tmp_path / "migration-record.json"
+    record_path.write_bytes(b'{"removed": []}\n')
+    record_path.chmod(0o600)
+    record = cast(JsonObject, {"removed": [{"path": "memory.backend", "value": "builtin"}]})
+
+    write_migration_record(record_path, record)
+
+    assert record_path.read_bytes() == serialize_json(record)
+    assert record_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_overlay_does_not_contain_removed_8_1_paths() -> None:
     overlay = cast(JsonObject, load_json(REPO_CONFIG))
 

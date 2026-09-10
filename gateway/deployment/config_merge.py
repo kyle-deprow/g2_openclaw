@@ -12,11 +12,14 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias, cast
+
+from .guarded_fs import guard_destination_path_chain
 
 
 @dataclass(frozen=True)
@@ -335,15 +338,37 @@ def migrate_8_1_config(
 def write_migration_record(path: str | Path, record: JsonObject) -> None:
     """Write a deterministic migration record with owner-only permissions."""
 
+    record_path = os.path.abspath(os.fspath(path))
+    parent_path = os.path.dirname(record_path)
+    guard_context = f"preparing migration record {record_path}"
+    try:
+        guard_destination_path_chain(parent_path, guard_context)
+    except (OSError, RuntimeError) as exc:
+        raise ConfigMergeError(f"could not prepare migration record {record_path}: {exc}") from exc
+    try:
+        parent_stat = os.lstat(parent_path)
+    except OSError as exc:
+        raise ConfigMergeError(
+            f"migration record parent is not an existing directory: {parent_path}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ConfigMergeError(
+            f"migration record parent is not an existing directory: {parent_path}"
+        )
+    try:
+        guard_destination_path_chain(record_path, guard_context)
+    except (OSError, RuntimeError) as exc:
+        raise ConfigMergeError(f"could not prepare migration record {record_path}: {exc}") from exc
+
     encoded = serialize_json(record)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = os.open(record_path, flags, 0o600)
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(encoded)
-        os.chmod(path, 0o600)
+        os.chmod(record_path, 0o600)
     except OSError as exc:
-        raise ConfigMergeError(f"could not write migration record {path}: {exc}") from exc
+        raise ConfigMergeError(f"could not write migration record {record_path}: {exc}") from exc
 
 
 def _jq_truthy(value: JsonValue | object) -> bool:
