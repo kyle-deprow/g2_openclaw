@@ -1367,6 +1367,8 @@ manager_node_options_should_emit() {{
   [[ ! -f "$manager_node_options_unset_marker" ]]
 }}
 printf 'systemctl %s\n' "$*" >> "$SYSTEMCTL_LOG"
+paused_show_properties="--property=LoadState --property=ActiveState "\
+"--property=SubState --property=UnitFileState --property=MainPID"
 case "$*" in
   "--user show-environment")
     if [[ -n "${{SYSTEMD_MANAGER_EXTRA_ENV:-}}" ]]; then
@@ -1405,6 +1407,46 @@ case "$*" in
     load_state="${{GATEWAY_LOAD_STATE:-{gateway_load_state}}}"
     active_state="${{GATEWAY_ACTIVE_STATE:-{gateway_active_state}}}"
     printf 'LoadState=%s\nActiveState=%s\n' "$load_state" "$active_state"
+    exit 0
+    ;;
+  "--user show openclaw-gateway.service ${{paused_show_properties}}")
+    load_state="${{GATEWAY_LOAD_STATE:-loaded}}"
+    active_state="${{GATEWAY_ACTIVE_STATE:-inactive}}"
+    sub_state="${{GATEWAY_SUB_STATE:-dead}}"
+    unit_file_state="${{GATEWAY_UNIT_FILE_STATE:-masked}}"
+    main_pid="${{GATEWAY_MAIN_PID:-0}}"
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nMainPID=%s\n' \
+      "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
+    exit 0
+    ;;
+  "--user show openclaw-gateway-healthcheck.timer ${{paused_show_properties}}")
+    load_state="${{HEALTHCHECK_TIMER_LOAD_STATE:-loaded}}"
+    active_state="${{HEALTHCHECK_TIMER_ACTIVE_STATE:-inactive}}"
+    sub_state="${{HEALTHCHECK_TIMER_SUB_STATE:-dead}}"
+    unit_file_state="${{HEALTHCHECK_TIMER_UNIT_FILE_STATE:-enabled}}"
+    main_pid="${{HEALTHCHECK_TIMER_MAIN_PID:-0}}"
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nMainPID=%s\n' \
+      "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
+    exit 0
+    ;;
+  "--user show openclaw-gateway-healthcheck.service ${{paused_show_properties}}")
+    load_state="${{HEALTHCHECK_SERVICE_LOAD_STATE:-loaded}}"
+    active_state="${{HEALTHCHECK_SERVICE_ACTIVE_STATE:-failed}}"
+    sub_state="${{HEALTHCHECK_SERVICE_SUB_STATE:-failed}}"
+    unit_file_state="${{HEALTHCHECK_SERVICE_UNIT_FILE_STATE:-masked}}"
+    main_pid="${{HEALTHCHECK_SERVICE_MAIN_PID:-0}}"
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nMainPID=%s\n' \
+      "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
+    exit 0
+    ;;
+  "--user show research-owner.service ${{paused_show_properties}}")
+    load_state="${{RESEARCH_OWNER_LOAD_STATE:-not-found}}"
+    active_state="${{RESEARCH_OWNER_ACTIVE_STATE:-inactive}}"
+    sub_state="${{RESEARCH_OWNER_SUB_STATE:-dead}}"
+    unit_file_state="${{RESEARCH_OWNER_UNIT_FILE_STATE:-not-found}}"
+    main_pid="${{RESEARCH_OWNER_MAIN_PID:-0}}"
+    printf 'LoadState=%s\nActiveState=%s\nSubState=%s\nUnitFileState=%s\nMainPID=%s\n' \
+      "$load_state" "$active_state" "$sub_state" "$unit_file_state" "$main_pid"
     exit 0
     ;;
   "--user daemon-reload")
@@ -1674,6 +1716,23 @@ def _prepare_push_script_home(
             "EXPECTED_OPENCLAW_STATE_DIR": str(openclaw_home),
             "EXPECTED_OPENCLAW_CONFIG_PATH": str(openclaw_home / "openclaw.json"),
             "EXPECTED_REPO_OPENCLAW_CONFIG_PATH": str(OPENCLAW_CONFIG),
+            "GATEWAY_SUB_STATE": "dead",
+            "GATEWAY_MAIN_PID": "0",
+            "HEALTHCHECK_TIMER_LOAD_STATE": "loaded",
+            "HEALTHCHECK_TIMER_ACTIVE_STATE": "inactive",
+            "HEALTHCHECK_TIMER_SUB_STATE": "dead",
+            "HEALTHCHECK_TIMER_UNIT_FILE_STATE": "enabled",
+            "HEALTHCHECK_TIMER_MAIN_PID": "0",
+            "HEALTHCHECK_SERVICE_LOAD_STATE": "loaded",
+            "HEALTHCHECK_SERVICE_ACTIVE_STATE": "failed",
+            "HEALTHCHECK_SERVICE_SUB_STATE": "failed",
+            "HEALTHCHECK_SERVICE_UNIT_FILE_STATE": "masked",
+            "HEALTHCHECK_SERVICE_MAIN_PID": "0",
+            "RESEARCH_OWNER_LOAD_STATE": "not-found",
+            "RESEARCH_OWNER_ACTIVE_STATE": "inactive",
+            "RESEARCH_OWNER_SUB_STATE": "dead",
+            "RESEARCH_OWNER_UNIT_FILE_STATE": "not-found",
+            "RESEARCH_OWNER_MAIN_PID": "0",
             "OPENCLAW_BIN": str(mock_bin / "openclaw"),
             "OPENCLAW_PROVIDER": "codex",
             "OPENAI_MODEL": "gpt-5.4",
@@ -1715,6 +1774,29 @@ def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         text=True,
         env=script_env,
     )
+
+
+def _prepare_paused_push_script_home(tmp_path: Path) -> dict[str, str]:
+    env = _prepare_push_script_home(tmp_path)
+    home = Path(env["HOME"])
+    runtime_dir = tmp_path / "xdg-runtime"
+    persistent_user_dir = home / ".config/systemd/user"
+    runtime_user_dir = runtime_dir / "systemd/user"
+    persistent_user_dir.mkdir(parents=True)
+    runtime_user_dir.mkdir(parents=True)
+    (persistent_user_dir / "openclaw-gateway.service").symlink_to("/dev/null")
+    (runtime_user_dir / "openclaw-gateway.service").symlink_to("/dev/null")
+    env.update(
+        {
+            "OPENCLAW_PUSH_MODE": "paused",
+            "XDG_RUNTIME_DIR": str(runtime_dir),
+            "GATEWAY_LOAD_STATE": "masked",
+            "GATEWAY_ACTIVE_STATE": "inactive",
+            "GATEWAY_SUB_STATE": "dead",
+            "GATEWAY_MAIN_PID": "0",
+        }
+    )
+    return env
 
 
 def _mode(path: Path) -> int:
@@ -2863,6 +2945,128 @@ def test_push_script_fails_before_dropin_when_gateway_service_missing(tmp_path: 
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
     assert "systemctl --user show openclaw-gateway.service" in systemctl_log
     assert "daemon-reload" not in systemctl_log
+
+
+def test_push_script_paused_mode_publishes_gated_config_without_lifecycle_side_effects(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_paused_push_script_home(tmp_path)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    published = json.loads(
+        (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+    )
+    assert published["cron"]["enabled"] is False
+    assert published["agents"]["defaults"]["heartbeat"]["every"] == "0m"
+    assert all(
+        "heartbeat" not in agent or agent["heartbeat"]["every"] == "0m"
+        for agent in published["agents"]["list"]
+    )
+    assert "DEFERRED: paused mode skipped Codex auth-file synchronization." in result.stdout
+    assert "DEFERRED: paused mode skipped systemd user-manager daemon-reload." in result.stdout
+
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    for forbidden in (
+        "daemon-reload",
+        "set-environment",
+        "unset-environment",
+        " enable ",
+        " start ",
+        " restart ",
+    ):
+        assert forbidden not in systemctl_log
+    assert not Path(env["CODEX_DOCTOR_LOG"]).exists()
+    assert not Path(env["CODEX_SANDBOX_LOG"]).exists()
+
+    home = Path(env["HOME"])
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    assert not (openclaw_home / "agents/research-orchestrator/agent/openclaw-agent.sqlite").exists()
+    assert not (openclaw_home / "agents/research-orchestrator/agent/auth-profiles.json").exists()
+    assert (home / ".config/systemd/user/openclaw-gateway.service").is_symlink()
+    assert (Path(env["XDG_RUNTIME_DIR"]) / "systemd/user/openclaw-gateway.service").is_symlink()
+    assert _supervisor_unit_dst(home).is_file()
+
+
+@pytest.mark.parametrize(
+    ("env_name", "value", "expected_error"),
+    [
+        ("GATEWAY_ACTIVE_STATE", "active", "openclaw-gateway.service"),
+        ("GATEWAY_MAIN_PID", "123", "openclaw-gateway.service"),
+        ("HEALTHCHECK_TIMER_ACTIVE_STATE", "active", "openclaw-gateway-healthcheck.timer"),
+        ("RESEARCH_OWNER_UNIT_FILE_STATE", "enabled", "research-owner.service"),
+    ],
+)
+def test_push_script_paused_mode_rejects_nonquiescent_preconditions(
+    tmp_path: Path, env_name: str, value: str, expected_error: str
+) -> None:
+    env = _prepare_paused_push_script_home(tmp_path)
+    env[env_name] = value
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    assert live_config.read_bytes() == original
+    assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "daemon-reload" not in systemctl_log
+
+
+def test_push_script_paused_mode_rejects_missing_persistent_gateway_mask(tmp_path: Path) -> None:
+    env = _prepare_paused_push_script_home(tmp_path)
+    (Path(env["HOME"]) / ".config/systemd/user/openclaw-gateway.service").unlink()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "persistent gateway mask" in result.stderr
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob("openclaw.json.bak.*"))
+
+
+def test_push_script_rejects_masked_gateway_without_explicit_paused_mode(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path, gateway_load_state="masked")
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "not loadable" in result.stderr
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob("openclaw.json.bak.*"))
+
+
+def test_push_script_rejects_unknown_or_env_file_push_mode_before_publication(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["OPENCLAW_PUSH_MODE"] = "future"
+    result = _run_push_script(env)
+    assert result.returncode != 0
+    assert "Unsupported OPENCLAW_PUSH_MODE 'future'" in result.stderr
+    assert not Path(env["OPENCLAW_LOG"]).exists()
+
+    env_file_root = tmp_path / "env-file"
+    env_file_root.mkdir()
+    env = _prepare_push_script_home(env_file_root)
+    Path(env["OPENCLAW_PUSH_ENV_FILE"]).write_text("OPENCLAW_PUSH_MODE=paused\n", encoding="utf-8")
+    result = _run_push_script(env)
+    assert result.returncode != 0
+    assert "must be selected in the invoking environment" in result.stderr
+    assert not list(Path(env["OPENCLAW_PUSH_HOME"]).glob("openclaw.json.bak.*"))
+
+
+def test_push_script_paused_mode_requires_runtime_directory_before_cli_checks(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_paused_push_script_home(tmp_path)
+    env.pop("XDG_RUNTIME_DIR")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "requires XDG_RUNTIME_DIR" in result.stderr
+    assert not Path(env["OPENCLAW_LOG"]).exists()
 
 
 def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restart(
