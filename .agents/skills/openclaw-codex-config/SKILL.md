@@ -29,12 +29,12 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 node --version                 # must be >= 22
 openclaw --version             # expected local install: exactly 2026.8.1
 openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
-openclaw plugins inspect codex --json  # plugin 2026.8.1, @openai/codex 0.151.0
-openclaw daemon install --force --port 18789 --json
+openclaw plugins inspect codex --runtime --json  # loaded runtime proof: plugin 2026.8.1, @openai/codex 0.151.0
 openclaw models auth login --provider openai
 openclaw models list --provider openai
 openclaw models status --plain
 bash scripts/push-openclaw-config.sh
+openclaw daemon install --force --port 18789 --json  # final start gate: writes, enables, and restarts the service
 ```
 
 For headless machines, use:
@@ -56,10 +56,14 @@ Do not edit `~/.openclaw/openclaw.json` directly. Edit repo files, then push:
 
 ```bash
 bash scripts/push-openclaw-config.sh
-systemctl --user restart openclaw-gateway.service
+openclaw daemon install --force --port 18789 --json
 openclaw gateway health
 openclaw models status --plain
 ```
+
+`openclaw daemon install --force` is the final explicit start gate on 2026.8.1:
+it writes the unit, enables it, and restarts the service. Do not use
+it as a preparation step or describe it as a no-start unit rewrite.
 
 ## Provider Selection Rules
 
@@ -76,7 +80,8 @@ or model.
 
 ## Validation Checklist
 
-1. `openclaw plugins inspect codex --json` reports plugin `2026.8.1`, enabled
+1. `openclaw plugins inspect codex --runtime --json` reports the loaded plugin
+   `2026.8.1`, enabled
    and loaded, with embedded `@openai/codex` `0.151.0`.
 2. `openclaw models list --provider openai` lists the selected model.
 3. `openclaw models status --plain` reports a usable OpenAI/Codex route.
@@ -95,6 +100,10 @@ or model.
   run `bash scripts/push-openclaw-config.sh`; the push script syncs the
   portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
   store. Do not replace this with API-key fallback.
+- Astra (`openai/gpt-6-astra`) and Luna (`openai/gpt-5.6-luna`) are native
+  OpenAI/Codex routes. Reviewer-only Opus is an explicit Claude Code ACP
+  exception, not an OpenAI OAuth model; do not add it to the OpenAI provider
+  catalog or model policy.
 - Keep `agents.defaults.compaction.mode` at `default` for Codex. OpenClaw
   2026.8.1 and its native Codex runtime own automatic compaction; do not add a
   compatibility shim or generic OpenAI API-key fallback. This repo uses Codex
@@ -106,14 +115,13 @@ or model.
   local archive with `--accept-capabilities` and then verifies all three
   versions. The plugin package has no `bin`; the embedded `@openai/codex`
   package owns `bin/codex.js`.
-- After every OpenClaw install or upgrade, run
-  `openclaw daemon install --force --port 18789 --json`. A package upgrade can
-  leave `openclaw-gateway.service` pointing into the old global package. This
-  command rewrites the unit; it does not start or restart the service.
+- After every OpenClaw install or upgrade, use
+  `openclaw daemon install --force --port 18789 --json` only as the final
+  explicit start gate. It writes and enables the unit, then restarts
+  the service so it points at the current package.
 - Prefer canonical model refs like `openai/gpt-5.4` or `openai/gpt-5.5` in
-  OpenClaw config. Legacy Codex-prefixed refs should be repaired with
-  `openclaw doctor --fix`.
-- Do not configure legacy external coding-agent runtimes. OpenClaw coding and
-  research work goes through Codex subagents.
+  OpenClaw config. OpenClaw coding and research worker routes use native Codex
+  subagents; the reviewer-only Opus route is the explicit Claude Code ACP
+  exception described above.
 - If Codex inspection fails after an upgrade, rerun `bash scripts/bootstrap.sh`;
   do not fall back to another plugin, provider, or app-server binary.

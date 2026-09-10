@@ -30,13 +30,13 @@ Design and operate multi-agent systems: orthogonal specialists, controlled commu
 
 ## This repo
 
-- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4 and `research-orchestrator`=openai/gpt-6-astra. Native Luna and ACP Opus are bounded child routes.
+- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4 and `research-orchestrator`=openai/gpt-6-astra. Native Luna is a bounded OpenAI/Codex child route; reviewer-only Opus is an explicit Claude Code ACP exception, not an OpenAI OAuth route.
 - **Session topology:** G2 traffic → `agent:main:g2`; research-owner traffic uses `agent:research-orchestrator:autoresearch:quantipy-v2`.
 - **Orchestration driver:** `gateway/research/` and `research-owner.service`; status and receipts remain in the bounded research store. The owner unit is bound to `openclaw-gateway.service`.
 - **Config changes** go through `gateway/openclaw_config/` + `bash scripts/push-openclaw-config.sh`, never `~/.openclaw/` edits.
 
 ## Repo policy overrides
 
-- **OpenClaw session tools are NOT the research delegation mechanism here.** `main` denies all `sessions_*` tools; `research-orchestrator` uses native Codex `spawn_agent` for bounded Luna children and ACP Opus review. The canonical session-spawning playbook does not apply to the owner.
+- **OpenClaw session tools are not the general research delegation mechanism here.** `main` denies all `sessions_*` tools; `research-orchestrator` has a bounded `sessions_spawn` exception for managed ACP review, while native Codex `spawn_agent` handles bounded Luna children. The canonical session-spawning playbook does not otherwise apply to the owner.
 - **No per-spawn model or tool broadening:** models are pinned per agent in `openclaw.json` (single provider: OpenAI/Codex app-server via OAuth, no fallback, no aliases); the canonical example models/emojis are illustrative only.
 - **Owner cadence is external, not cron-in-agent:** research health is driven by the research-owner unit, not by an agent running `sessions_list` on a cron job.

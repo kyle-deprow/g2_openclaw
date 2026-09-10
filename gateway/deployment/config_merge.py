@@ -41,6 +41,11 @@ class ConfigMergeError(RuntimeError):
 
 STALE_CODING_PROVIDER_KEYS = frozenset({"github-copilot", "copilot-proxy", "copilot-cli"})
 
+# These are native OpenAI/Codex routes used by the managed research owner and
+# its bounded stage agents.  The reviewer-only Claude Code ACP route is not an
+# OpenAI model and must never be added to this policy.
+NATIVE_LUNA_MODEL_REF = "openai/gpt-5.6-luna"
+
 # These are the exact paths rejected by the OpenClaw 8.1 runtime schema.  The
 # migration intentionally does not walk by key name: similarly named nested
 # settings must survive the candidate unchanged.
@@ -649,10 +654,28 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             "is not declared in repo config.\n"
             "       Add it to gateway/openclaw_config/openclaw.json before pushing."
         )
+    if not _model_declared(merged, "openai", NATIVE_LUNA_MODEL_REF.removeprefix("openai/")):
+        raise ConfigMergeError(
+            f"ERROR: Native research model '{NATIVE_LUNA_MODEL_REF}' is not declared in "
+            "repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
+        )
 
     defaults["model"] = _get_object(defaults, "model") or {}
     cast(JsonObject, defaults["model"])["primary"] = inputs.model_primary
-    defaults["models"] = {inputs.model_primary: {}}
+    model_policy_allow: list[JsonValue] = []
+    for model_ref in (
+        inputs.model_primary,
+        inputs.orchestrator_model_primary,
+        NATIVE_LUNA_MODEL_REF,
+    ):
+        if model_ref not in model_policy_allow:
+            model_policy_allow.append(model_ref)
+    defaults["modelPolicy"] = {"allow": model_policy_allow}
+    # OpenClaw 8.1 treats defaults.models as a legacy override restriction until
+    # it is migrated.  The native policy above is authoritative, so retaining
+    # the legacy map would reintroduce migration and stale fallback semantics.
+    defaults.pop("models", None)
 
     agents = _object(merged.get("agents"), "merged agents")
     managed_entries = _get_object(agents, "entries")

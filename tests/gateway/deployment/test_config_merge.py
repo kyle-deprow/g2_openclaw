@@ -132,6 +132,125 @@ def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> Non
     assert "defaultWorkspaceDir" not in app_server
 
 
+def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
+    tmp_path: Path,
+) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "gateway": {"auth": {"token": "machine-local-token"}},
+            "agents": {
+                "defaults": {
+                    "models": {"openai/unselected": {}},
+                    "modelPolicy": {"allow": ["openrouter/unselected"]},
+                }
+            },
+            "models": {
+                "providers": {
+                    "private": {
+                        "apiKey": "private-key",  # pragma: allowlist secret
+                        "headers": {"X-Auth": "value"},
+                    }
+                }
+            },
+        },
+    )
+
+    assembled, migration_record = assemble_config_with_migration(
+        local, cast(JsonObject, load_json(REPO_CONFIG)), _assembly_inputs(tmp_path)
+    )
+
+    defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
+    assert "models" not in defaults
+    assert migration_record == {"removed": []}
+    assert defaults["modelPolicy"] == {
+        "allow": [
+            "openai/gpt-5.4",
+            "openai/gpt-6-astra",
+            "openai/gpt-5.6-luna",
+        ]
+    }
+    assert cast(JsonObject, cast(JsonObject, assembled["gateway"])["auth"]) == {
+        "token": "machine-local-token"
+    }
+    providers = cast(JsonObject, cast(JsonObject, assembled["models"])["providers"])
+    assert cast(JsonObject, providers["private"]) == {
+        "apiKey": "private-key",  # pragma: allowlist secret
+        "headers": {"X-Auth": "value"},
+    }
+    entries = cast(JsonObject, cast(JsonObject, assembled["agents"])["entries"])
+    assert cast(JsonObject, entries["main"])["model"] == {"primary": "openai/gpt-5.4"}
+    assert cast(JsonObject, entries["research-orchestrator"])["model"] == {
+        "primary": "openai/gpt-6-astra"
+    }
+
+
+def test_assembly_keeps_explicit_alternate_interface_route_without_opus_fallback(
+    tmp_path: Path,
+) -> None:
+    inputs = _assembly_inputs(
+        tmp_path,
+        provider="openrouter",
+        model_primary="openrouter/anthropic/claude-sonnet-4-20250514",
+        model_provider="openrouter",
+        model_id="anthropic/claude-sonnet-4-20250514",
+    )
+
+    assembled = assemble_config(
+        cast(JsonObject, {"agents": {"defaults": {"models": {"openai/unselected": {}}}}}),
+        cast(JsonObject, load_json(REPO_CONFIG)),
+        inputs,
+    )
+
+    defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
+    assert "models" not in defaults
+    assert defaults["modelPolicy"] == {
+        "allow": [
+            "openrouter/anthropic/claude-sonnet-4-20250514",
+            "openai/gpt-6-astra",
+            "openai/gpt-5.6-luna",
+        ]
+    }
+    policy = defaults["modelPolicy"]
+    assert isinstance(policy, dict)
+    allow = cast(list[JsonValue], policy["allow"])
+    assert all(isinstance(ref, str) and "opus" not in ref.lower() for ref in allow)
+
+
+def test_assembly_deduplicates_native_model_policy_and_jq_oracle(tmp_path: Path) -> None:
+    inputs = _assembly_inputs(
+        tmp_path,
+        model_primary="openai/gpt-6-astra",
+        model_provider="openai",
+        model_id="gpt-6-astra",
+        orchestrator_model_primary="openai/gpt-6-astra",
+    )
+    local = cast(JsonObject, {"agents": {"defaults": {"models": {"openai/unselected": {}}}}})
+
+    assembled = assemble_config(local, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+
+    defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
+    assert defaults["modelPolicy"] == {"allow": ["openai/gpt-6-astra", "openai/gpt-5.6-luna"]}
+
+    local_path = tmp_path / "local.json"
+    _write_json(local_path, local)
+    assert serialize_json(assembled) == _jq_full_assembly(local_path, REPO_CONFIG, inputs)
+
+
+def test_assembly_fails_closed_when_native_luna_route_is_undeclared(tmp_path: Path) -> None:
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    providers = cast(JsonObject, cast(JsonObject, repo["models"])["providers"])
+    openai_models = cast(list[JsonValue], cast(JsonObject, providers["openai"])["models"])
+    cast(JsonObject, providers["openai"])["models"] = [
+        item
+        for item in openai_models
+        if not (isinstance(item, dict) and item.get("id") == "gpt-5.6-luna")
+    ]
+
+    with pytest.raises(ConfigMergeError, match=r"Native research model 'openai/gpt-5\.6-luna'"):
+        assemble_config(cast(JsonObject, {}), repo, _assembly_inputs(tmp_path))
+
+
 def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
     tmp_path: Path,
 ) -> None:
@@ -390,6 +509,7 @@ def _assembly_inputs(
     model_primary: str = "openai/gpt-5.4",
     model_provider: str = "openai",
     model_id: str = "gpt-5.4",
+    orchestrator_model_primary: str = "openai/gpt-6-astra",
     research_v2_root: str | None = None,
 ) -> AssemblyInputs:
     home = tmp_path / "fake-home"
@@ -412,7 +532,7 @@ def _assembly_inputs(
         model_primary=model_primary,
         model_provider=model_provider,
         model_id=model_id,
-        orchestrator_model_primary="openai/gpt-6-astra",
+        orchestrator_model_primary=orchestrator_model_primary,
         research_reviewer_launcher=str(REPO_ROOT / "scripts/research-reviewer-cli.py"),
         acpx_adapter_bin="/opt/acpx/claude-agent-acp",
     )
@@ -553,8 +673,14 @@ def _jq_full_assembly(
             "--arg",
             "primary",
             inputs.model_primary,
+            "--arg",
+            "owner",
+            inputs.orchestrator_model_primary,
             ".agents.defaults.model.primary = $primary | "
-            ".agents.defaults.models = {($primary): {}}",
+            ".agents.defaults.modelPolicy = "
+            '{"allow": ([$primary, $owner, "openai/gpt-5.6-luna"] | '
+            "reduce .[] as $ref ([]; if index($ref) then . else . + [$ref] end))} | "
+            "del(.agents.defaults.models)",
         ],
         input_bytes=merged,
     )
