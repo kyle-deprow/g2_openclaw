@@ -11,7 +11,6 @@ configuration used by the G2 Gateway.
 | `.env.example` | Template for API keys and provider selection env vars |
 | `azure-api-version-preload.cjs` | Fetch preload that injects `?api-version=` for Azure |
 | `openclaw-gateway-runtime-caps.conf` | User-systemd drop-in source for numerical runtime caps inherited by OpenClaw-launched Quantipy children |
-| `openclaw-codex-runtime.conf` | User-systemd drop-in source for the fail-closed Codex compaction verifier |
 | `openclaw-gateway-native-crash-hardening.conf` | User-systemd drop-in source for OpenClaw memory and native-crash restart containment |
 | `../mempalace_readonly_server.py` | Repo-managed read-only MemPalace MCP wrapper for all autoresearch models |
 | `README.md` | This file |
@@ -19,17 +18,15 @@ configuration used by the G2 Gateway.
 ## Cold-Start Install (Fresh Machine)
 
 ```bash
-# 1. Install the supported OpenClaw build globally (Node.js 22+ required)
-sudo npm install -g openclaw@2026.7.1-2
+# 1. Verify the approved OpenClaw build is already installed (Node.js 22+ required)
+openclaw --version  # must be exactly 2026.8.1
 
 # 2. Create the ~/.openclaw/ scaffold
 openclaw onboard --local
 
 # 3. Reconcile the exact Codex plugin/runtime tuple, then authenticate
-openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
-openclaw plugins update codex
-openclaw plugins enable codex
-openclaw plugins inspect codex --json  # must embed @openai/codex 0.144.3
+openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
+openclaw plugins inspect codex --json  # must embed @openai/codex 0.151.0
 openclaw models auth login --provider openai
 
 # 4. Rewrite the user service so ExecStart targets this exact core package
@@ -41,7 +38,7 @@ make mempalace-install
 # 6. Optional: copy env template if selecting Azure/OpenRouter or a non-default OpenAI model
 cp gateway/openclaw_config/.env.example gateway/openclaw_config/.env
 
-# 7. Push config + install the Codex runtime verifier (merges provider/runtime config and copies bootstrap files)
+# 7. Push config (merges provider/runtime config and copies bootstrap files)
 uv run python -m gateway push-config
 
 # 8. Launch everything
@@ -49,10 +46,12 @@ uv run python -m gateway launch
 ```
 
 The full path is also available as `bash scripts/bootstrap.sh`. The exact
-supported tuple is OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, and
-embedded `@openai/codex` `0.144.3`; newer and older versions both fail closed.
-The plugin update is intentional even after the exact pinned install because
-OpenClaw upgrades do not reliably reconcile an existing tracked plugin.
+supported tuple is OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, and
+embedded `@openai/codex` `0.151.0`; newer and older versions both fail closed.
+The reviewed local plugin archive is installed with explicit capability
+consent; registry and alternate-runtime fallbacks are not permitted. The
+plugin package has no `bin`; the embedded `@openai/codex` package owns
+`bin/codex.js`.
 `daemon install --force` rewrites the systemd unit but does not start or restart
 the service.
 
@@ -106,7 +105,7 @@ these settings into the local config with `jq`, preserving everything else.
   `approval_policy=never`, `sandbox_mode=workspace-write`,
   `sandbox_workspace_write.writable_roots` limited to
   `/home/dev/.openclaw/autoresearch/model-workspaces` and
-  `/home/dev/.openclaw/autoresearch/stage-inbox`, and supported Codex 0.144.3
+  `/home/dev/.openclaw/autoresearch/stage-inbox`, and supported Codex 0.151.0
   `network_access=true` rather than the removed OpenClaw plugin `networkProxy`
   profile.
 - **Custom provider** `azure-oai-g2` — points at the Azure OpenAI GPT-5.4
@@ -155,21 +154,18 @@ The default provider is `codex`, which uses OpenAI/Codex OAuth auth managed by
 OpenClaw, not an OpenAI API key:
 
 ```bash
-openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
-openclaw plugins update codex
-openclaw plugins enable codex
+openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
 openclaw plugins inspect codex --json
 openclaw daemon install --force --port 18789 --json
 openclaw models auth login --provider openai
 ```
 
-The inspect result must report plugin version `2026.7.1-1` and dependency
-`@openai/codex` spec `0.144.3`. Reinstalling the core CLI alone is incomplete:
-an existing plugin can remain stale, and the user systemd unit can retain an
-`ExecStart` path into the old global package. The explicit plugin update and
-forced daemon install repair both forms of upgrade drift without starting or
-restarting the gateway. Run `bash scripts/bootstrap.sh` to execute and validate
-this sequence automatically.
+The inspect result must report plugin version `2026.8.1` and dependency
+`@openai/codex` spec `0.151.0`. The exact local plugin archive and core tuple
+are required; registry, newer, older, and alternate-runtime fallbacks fail
+closed. The forced daemon install repairs a stale service path without
+starting or restarting the gateway. Run `bash scripts/bootstrap.sh` to
+validate this sequence.
 
 No OpenAI key is stored in this repo. The login populates the local OpenClaw
 auth store. `scripts/push-openclaw-config.sh` then syncs the portable auth
@@ -178,18 +174,9 @@ agent-scoped Codex turns and transcript compaction can use the same OAuth
 profile.
 
 Keep `agents.defaults.compaction.mode` set to `default` for the Codex route.
-OpenClaw `safeguard` compaction can route automatic CLI-budget compaction
-through the generic OpenAI API-key compactor after the Codex app-server
-declines non-manual compaction. That is wrong for this repo because auth is
-Codex OAuth, not `OPENAI_API_KEY`.
-
-The managed gateway also installs
-`20-openclaw-codex-runtime.conf`. Its `ExecStartPre` verifier applies the
-repo-owned, version-checked OpenClaw 2026.7.1-2 fix that treats Codex's
-automatic-compaction ownership response as a native deferral, never as
-permission to invoke the generic API-key summarizer. The verifier fails closed
-on an unknown OpenClaw version, package layout, or source branch. This keeps a
-package reinstall or gateway restart from silently restoring the wrong route.
+OpenClaw 2026.8.1 and native Codex 0.151.0 own automatic compaction. The
+retired 7.1 verifier/drop-in is not installed or validated; no API-key
+compactor or alternate runtime is permitted.
 
 The repo-managed agent defaults intentionally set `maxConcurrent=2` to cap the
 main lane while preserving headroom for `autoresearch-pm`. Autoresearch stage
@@ -274,7 +261,7 @@ The script will:
    writing, validate the written result with `openclaw config validate`, and
    inspect the Codex plugin
 10. Install the supervisor service definition, the persistent OpenClaw Gateway
-   runtime-cap, Codex runtime-verifier, and native-crash hardening drop-ins,
+   runtime-cap and native-crash hardening drop-ins,
    then run `systemctl --user daemon-reload`. These four managed systemd files
    are restored to their prior contents, or removed when previously absent, if
    any later install, validation, or reload step fails.
@@ -291,12 +278,10 @@ The script is idempotent — safe to run repeatedly.
 drop-ins. It does not update the environment of an already running
 `openclaw-gateway.service` process. The push script intentionally keeps its
 no-restart behavior; operators must restart the gateway externally when they
-want the runtime caps, Codex runtime verifier, or native-crash hardening to
+want the runtime caps or native-crash hardening to
 take effect. The runtime-cap drop-in's `Upholds` relationship also means that
 stopping the supervisor while the gateway remains up is undone by systemd;
-stop the gateway too, or mask the supervisor first. The verifier then runs before every gateway start and rejects
-unknown OpenClaw package versions or source layouts instead of falling back to
-an API-key compactor.
+stop the gateway too, or mask the supervisor first.
 
 ### 5. Enable the api-version preload for Azure only
 
@@ -348,7 +333,7 @@ control commands communicate with OpenClaw there directly.
 |---|---|
 | Auth | `openclaw models auth login --provider openai`, then push config to sync the OAuth profile into managed agent stores |
 | Runtime | OpenAI provider `agentRuntime.id: "codex"` |
-| Plugin | `@openclaw/codex` exactly `2026.7.1-1`, enabled, embedding `@openai/codex` exactly `0.144.3` |
+| Plugin | `@openclaw/codex` exactly `2026.8.1`, enabled, embedding `@openai/codex` exactly `0.151.0` |
 | Default stage model | `openai/gpt-5.4` |
 | G2 interface model | `openai/gpt-5.4` for `main` |
 | Autoresearch PM model | `openai/gpt-5.6-sol` for `autoresearch-pm` |

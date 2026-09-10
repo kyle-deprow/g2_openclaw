@@ -22,13 +22,15 @@ SKIP_OPTIONAL=false
 HAS_GPU=false
 GPU_NAME=""
 SUMMARY_ITEMS=()
-REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
-REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"
-REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"
+REQUIRED_OPENCLAW_VERSION="2026.8.1"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"
+# OpenClaw 8.1 requires explicit capability consent.  The migration proof
+# supplies this exact local archive; do not resolve a registry or fallback spec.
+CODEX_PLUGIN_INSTALL_SPEC="npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz"
 OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
-OPENCLAW_INSTALLED_PATH=""
 OPENCLAW_LIVE_STATE_DIR="${HOME}/.openclaw"
 OPENCLAW_LIVE_CONFIG="${OPENCLAW_LIVE_STATE_DIR}/openclaw.json"
 OPENCLAW_PREFLIGHT_DIR=""
@@ -60,7 +62,7 @@ What it does:
   1. Checks system prerequisites (Python ≥3.13, uv, Node.js ≥22, npm)
   2. Installs Python dependencies via uv
   3. Installs TypeScript dependencies (g2_app)
-  4. Installs OpenClaw CLI, onboards, installs MemPalace MCP, and pushes repo config
+  4. Verifies the preinstalled OpenClaw CLI, onboards, installs MemPalace MCP, and pushes repo config
   5. Generates environment config via gateway init-env
   6. Installs pre-commit hooks
   7. Optionally installs EvenHub global tools
@@ -197,56 +199,26 @@ require_openclaw_exact_path() {
   ok "OpenClaw CLI ${OPENCLAW_VERSION_RESOLVED} (${OPENCLAW_BIN_RESOLVED})"
 }
 
-install_openclaw_exact() {
-  local package="openclaw@${REQUIRED_OPENCLAW_VERSION}"
-  OPENCLAW_INSTALLED_PATH=""
-  if command -v pnpm &>/dev/null; then
-    local pnpm_home
-    pnpm_home="$(expand_user_path "${PNPM_HOME:-$HOME/.local/share/pnpm}")"
-    mkdir -p "${pnpm_home}"
-    export PNPM_HOME="${pnpm_home}"
-    export PATH="${PNPM_HOME}:${PATH}"
-    info "Installing ${package} via pnpm (${PNPM_HOME})"
-    if ! pnpm add -g "${package}"; then
-      return 1
-    fi
-    OPENCLAW_INSTALLED_PATH="${PNPM_HOME}/openclaw"
-  else
-    local npm_prefix
-    npm_prefix="${NPM_CONFIG_PREFIX:-$HOME/.local}"
-    npm_prefix="$(expand_user_path "${npm_prefix}")"
-    mkdir -p "${npm_prefix}/bin"
-    export PATH="${npm_prefix}/bin:${PATH}"
-    info "Installing ${package} via npm (${npm_prefix})"
-    if ! npm install -g --prefix "${npm_prefix}" "${package}"; then
-      return 1
-    fi
-    OPENCLAW_INSTALLED_PATH="${npm_prefix}/bin/openclaw"
-  fi
-  hash -r
-}
-
 ensure_openclaw_exact_version() {
   if [[ -n "${OPENCLAW_BIN:-}" ]]; then
     preflight_openclaw_override
     return
   fi
 
-  if resolve_openclaw_bin && read_openclaw_version; then
-    if [[ "${OPENCLAW_VERSION_RESOLVED}" == "${REQUIRED_OPENCLAW_VERSION}" ]]; then
-      export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
-      ok "OpenClaw CLI ${OPENCLAW_VERSION_RESOLVED} (${OPENCLAW_BIN_RESOLVED})"
-      return 0
-    fi
-    info "OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} — installing ${REQUIRED_OPENCLAW_VERSION}"
-  else
-    info "OpenClaw CLI not found — installing ${REQUIRED_OPENCLAW_VERSION}"
-  fi
-
-  if ! install_openclaw_exact; then
+  if ! resolve_openclaw_bin; then
+    fail "OpenClaw ${REQUIRED_OPENCLAW_VERSION} is not installed; bootstrap will not access a registry or install a fallback"
     return 1
   fi
-  require_openclaw_exact_path "${OPENCLAW_INSTALLED_PATH}"
+  if ! read_openclaw_version; then
+    fail "Could not read the preinstalled OpenClaw version at ${OPENCLAW_BIN_RESOLVED}"
+    return 1
+  fi
+  if [[ "${OPENCLAW_VERSION_RESOLVED}" != "${REQUIRED_OPENCLAW_VERSION}" ]]; then
+    fail "OpenClaw ${OPENCLAW_VERSION_RESOLVED} at ${OPENCLAW_BIN_RESOLVED} is unsupported — need exactly ${REQUIRED_OPENCLAW_VERSION}"
+    return 1
+  fi
+  export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
+  ok "OpenClaw CLI ${OPENCLAW_VERSION_RESOLVED} (${OPENCLAW_BIN_RESOLVED})"
 }
 
 preflight_openclaw_override() {
@@ -517,23 +489,15 @@ validate_live_state_candidate_openclaw_config_for_preflight() {
 
 reconcile_codex_plugin_in_context() {
   local runner="$1"
-  if ! "${runner}" plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin; then
+  if ! "${runner}" plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --force --accept-capabilities; then
     fail "Exact Codex plugin install failed — required @openclaw/codex ${REQUIRED_CODEX_PLUGIN_VERSION}"
-    return 1
-  fi
-  if ! "${runner}" plugins update codex; then
-    fail "Codex plugin update reconciliation failed"
-    return 1
-  fi
-  if ! "${runner}" plugins enable codex; then
-    fail "Codex plugin enable failed"
     return 1
   fi
 }
 
 require_codex_plugin_exact() {
   local runner="${1:-run_openclaw_cli_for_live_state_candidate_config}"
-  local inspect_json plugin_version app_server_version
+  local inspect_json plugin_version app_server_version app_server_path
   prepare_openclaw_preflight_context || return 1
   if ! inspect_json="$("${runner}" plugins inspect codex --json)"; then
     fail "Could not inspect the required Codex plugin"
@@ -553,12 +517,31 @@ require_codex_plugin_exact() {
     | select(.name == "@openai/codex")
     | .spec
   ' | head -n1)"
+  app_server_path="$(echo "${inspect_json}" | jq -r '
+    .plugin.dependencyStatus.dependencies[]?
+    | select(.name == "@openai/codex")
+    | .resolvedPath
+  ' | head -n1)"
   if [[ "${plugin_version}" != "${REQUIRED_CODEX_PLUGIN_VERSION}" ]]; then
     fail "Codex plugin ${plugin_version:-<unknown>} is unsupported — need exactly ${REQUIRED_CODEX_PLUGIN_VERSION}"
     return 1
   fi
   if [[ "${app_server_version}" != "${REQUIRED_CODEX_APP_SERVER_VERSION}" ]]; then
     fail "Embedded @openai/codex ${app_server_version:-<unknown>} is unsupported — need exactly ${REQUIRED_CODEX_APP_SERVER_VERSION}"
+    return 1
+  fi
+  if [[ -z "${app_server_path}" || ! -f "${app_server_path}/package.json" ]]; then
+    fail "Embedded @openai/codex package manifest is missing — refusing an unproven CLI path"
+    return 1
+  fi
+  if ! jq -e --arg version "${REQUIRED_CODEX_APP_SERVER_VERSION}" \
+    '.name == "@openai/codex" and .version == $version and .bin.codex == "bin/codex.js"' \
+    "${app_server_path}/package.json" >/dev/null; then
+    fail "Embedded Codex CLI is not owned by @openai/codex bin/codex.js"
+    return 1
+  fi
+  if [[ ! -f "${app_server_path}/bin/codex.js" ]]; then
+    fail "Embedded @openai/codex bin/codex.js is missing"
     return 1
   fi
   ok "Codex plugin ${plugin_version} embeds @openai/codex ${app_server_version}"

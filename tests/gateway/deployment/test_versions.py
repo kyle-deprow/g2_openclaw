@@ -39,7 +39,7 @@ def _run_module(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("version", ["2026.7.1-1", "2026.7.2"])
+@pytest.mark.parametrize("version", ["2026.8.0", "2026.8.2"])
 def test_openclaw_version_rejects_older_and_newer_pins(tmp_path: Path, version: str) -> None:
     executable = tmp_path / "openclaw"
     _write_executable(executable, f"printf 'openclaw {version}\\n'")
@@ -75,6 +75,16 @@ def _codex_executable(
     package_root = tmp_path / "codex-package"
     (package_root / "bin/codex.js").parent.mkdir(parents=True)
     (package_root / "bin/codex.js").write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    (package_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@openai/codex",
+                "version": app_server_version,
+                "bin": {"codex": "bin/codex.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
     payload = {
         "plugin": {
             "id": "codex",
@@ -102,7 +112,7 @@ def _codex_executable(
     return executable, package_root
 
 
-@pytest.mark.parametrize("plugin_version", ["2026.7.1-0", "2026.7.1-2"])
+@pytest.mark.parametrize("plugin_version", ["2026.8.0", "2026.8.2"])
 def test_codex_plugin_pin_rejects_older_and_newer_versions(
     tmp_path: Path, plugin_version: str
 ) -> None:
@@ -126,7 +136,7 @@ def test_codex_plugin_pin_rejects_older_and_newer_versions(
     )
 
 
-@pytest.mark.parametrize("app_server_version", ["0.144.2", "0.144.4"])
+@pytest.mark.parametrize("app_server_version", ["0.150.9", "0.151.1"])
 def test_codex_app_server_pin_rejects_older_and_newer_versions(
     tmp_path: Path, app_server_version: str
 ) -> None:
@@ -172,6 +182,37 @@ def test_codex_runtime_accepts_exact_tuple_and_keeps_stderr_separate(tmp_path: P
         f"{REQUIRED_CODEX_PLUGIN_VERSION}\t{REQUIRED_CODEX_APP_SERVER_VERSION}\t{package_root}\n"
     )
     assert result.stderr == ""
+
+
+def test_codex_runtime_rejects_plugin_package_as_cli_owner(tmp_path: Path) -> None:
+    executable, package_root = _codex_executable(
+        tmp_path, REQUIRED_CODEX_PLUGIN_VERSION, REQUIRED_CODEX_APP_SERVER_VERSION
+    )
+    (package_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@openclaw/codex",
+                "version": REQUIRED_CODEX_APP_SERVER_VERSION,
+                "bin": {"codex": "bin/codex.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_module(
+        [
+            "require-codex-runtime-exact",
+            str(executable),
+            str(tmp_path / "config"),
+            str(tmp_path),
+        ]
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "ERROR: Embedded Codex CLI must be owned by the @openai/codex package.\n"
+    )
 
 
 def test_script_version_literals_drift_guard() -> None:

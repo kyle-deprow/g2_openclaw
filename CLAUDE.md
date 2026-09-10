@@ -38,7 +38,7 @@ The live autoresearch loop spawns the **Codex-native** stage agents via `spawn_a
 - Autoresearch state advances only through `gateway-cli autoresearch-next` / `autoresearch-advance` / `autoresearch-submit-stage`; stage submissions are a strict three-key envelope `{instruction_manifest_sha256, state_reference_sha256, artifact}` — extra keys or stale state fail closed.
 - Memory: `memory_search`/`memory_get` are globally denied and `compaction.memoryFlush` is disabled **on purpose**. No model writes MemPalace; the sole writer is the state-derived finalizer (`gateway/mempalace_finalizer.py`) driven by the supervisor. Agents get the read-only `mempalace-readonly` MCP only.
 - Sessions: G2 traffic is `agent:main:g2`; autoresearch runs only in `agent:autoresearch-pm:autoresearch:quantipy`, woken by the systemd user unit `quantipy-autoresearch-supervisor.service` (60 s poll, `BindsTo=openclaw-gateway.service`).
-- Runtime tuple is pinned fail-closed: OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, embedded `@openai/codex` `0.144.3`. Provider is OpenAI/Codex app-server via OAuth only — no fallback paths.
+- Runtime tuple is pinned fail-closed: OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, embedded `@openai/codex` `0.151.0`. Provider is OpenAI/Codex app-server via OAuth only — no fallback paths.
 - All live-config changes go through `bash scripts/push-openclaw-config.sh` (guarded, transactional, atomic publish + rollback). Never hand-edit `~/.openclaw/`.
 - Deployment checkpoint and resume checklist: `.archive/OPENCLAW_DEPLOYMENT_STATUS.md`.
 

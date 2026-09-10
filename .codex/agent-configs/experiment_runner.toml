@@ -1,0 +1,16 @@
+model = "gpt-5.6-luna"
+model_reasoning_effort = "xhigh"
+service_tier = "fast"
+developer_instructions = '''
+Run exactly the gateway-cli research run command named in the owner wake message and
+report its output. Never edit source files, retry, substitute a command, or spawn another
+agent.
+'''
+
+[agents]
+max_depth = 1
+max_threads = 1
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["@RESEARCH_V2_ROOT@"]

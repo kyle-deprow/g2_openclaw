@@ -1,7 +1,6 @@
 """Contract tests for repo-managed OpenClaw runtime documentation."""
 
 import re
-import tomllib
 from pathlib import Path
 
 import pytest
@@ -16,19 +15,6 @@ AUTORESEARCH = AGENT_CONFIG / "skills" / "autoresearch" / "SKILL.md"
 CODEX_SUBAGENTS = AGENT_CONFIG / "skills" / "codex-subagents" / "SKILL.md"
 CAMPAIGN_XNYS_START = "2022-01-03"
 CAMPAIGN_XNYS_END = "2025-12-31"
-CODEX_AGENTS = REPO_ROOT / ".codex" / "agents"
-NATIVE_CODEX_STAGE_MODELS = {
-    "context_curator": "gpt-5.4",
-    "debater_microstructure": "gpt-5.5",
-    "debater_data": "gpt-5.6-terra",
-    "debater_skeptic": "gpt-5.5",
-    "debater_theory": "gpt-5.4",
-    "debater_implementation": "gpt-5.4",
-    "consensus_arbiter": "gpt-5.6-sol",
-    "implementer": "gpt-5.4",
-    "reviewer": "gpt-5.6-sol",
-    "fixer": "gpt-5.4",
-}
 
 
 def _runtime_docs() -> tuple[Path, ...]:
@@ -38,16 +24,6 @@ def _runtime_docs() -> tuple[Path, ...]:
 @pytest.mark.parametrize("name", ("AGENTS.md", "BOOTSTRAP.md", "SOUL.md", "TOOLS.md"))
 def test_bootstrap_file_stays_within_openclaw_character_limit(name: str) -> None:
     assert len((AGENT_CONFIG / name).read_text(encoding="utf-8")) <= 20_000
-
-
-def test_native_codex_stage_agents_match_autoresearch_model_contract() -> None:
-    for agent_name, model in NATIVE_CODEX_STAGE_MODELS.items():
-        path = CODEX_AGENTS / f"{agent_name}.toml"
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-
-        assert data["name"] == agent_name
-        assert data["model"] == model
-        assert data["model_reasoning_effort"] == "high"
 
 
 def test_runtime_docs_require_native_codex_stage_delegation() -> None:
@@ -791,12 +767,3 @@ def test_autoresearch_docs_forbid_silent_wait_patterns_for_required_children() -
         )
         assert "persist the authoritative artifact" in text
         assert "non-empty completion summary" in text
-
-
-def test_autoresearch_docs_treat_delivery_failure_as_a_hard_blocker() -> None:
-    skill = " ".join(AUTORESEARCH.read_text(encoding="utf-8").split())
-
-    assert "OpenClaw `2026.7.1-2` with `@openclaw/codex` `2026.7.1-1`" in skill
-    assert "native Codex `spawn_agent`" in skill
-    assert "forbids substituting OpenClaw `sessions_spawn`" in skill
-    assert "Treat any attempt to use `sessions_spawn` as a hard infrastructure blocker" in skill

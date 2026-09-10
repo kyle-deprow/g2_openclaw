@@ -11,9 +11,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-REQUIRED_OPENCLAW_VERSION = "2026.7.1-2"
-REQUIRED_CODEX_PLUGIN_VERSION = "2026.7.1-1"
-REQUIRED_CODEX_APP_SERVER_VERSION = "0.144.3"
+REQUIRED_OPENCLAW_VERSION = "2026.8.1"
+REQUIRED_CODEX_PLUGIN_VERSION = "2026.8.1"
+REQUIRED_CODEX_APP_SERVER_VERSION = "0.151.0"
 
 
 def expand_user_path(path: str, home: str) -> str:
@@ -173,6 +173,29 @@ def _codex_dependency_values(plugin: object) -> tuple[str, str]:
     return "", ""
 
 
+def _require_codex_app_server_manifest(app_server_path: str) -> None:
+    """Require the embedded CLI to come from the declared @openai/codex package."""
+
+    manifest_path = Path(app_server_path) / "package.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"ERROR: Embedded Codex package manifest is unreadable at {manifest_path}."
+        ) from exc
+    if not isinstance(manifest, dict) or manifest.get("name") != "@openai/codex":
+        raise RuntimeError("ERROR: Embedded Codex CLI must be owned by the @openai/codex package.")
+    if manifest.get("version") != REQUIRED_CODEX_APP_SERVER_VERSION:
+        raise RuntimeError(
+            "ERROR: Embedded @openai/codex package manifest version is unsupported; "
+            f"need exactly {REQUIRED_CODEX_APP_SERVER_VERSION}."
+        )
+    bin_entry = manifest.get("bin")
+    owns_codex_bin = isinstance(bin_entry, dict) and bin_entry.get("codex") == "bin/codex.js"
+    if not owns_codex_bin:
+        raise RuntimeError("ERROR: Embedded @openai/codex package must declare codex=bin/codex.js.")
+
+
 def require_codex_runtime_exact(
     executable: str,
     config_path: str,
@@ -219,6 +242,7 @@ def require_codex_runtime_exact(
             f"need exactly {REQUIRED_CODEX_APP_SERVER_VERSION}.\n"
             "       Run bootstrap to reinstall the pinned plugin and gateway service."
         )
+    _require_codex_app_server_manifest(app_server_path)
     cli_path = f"{app_server_path}/bin/codex.js"
     if not Path(cli_path).is_file():
         raise RuntimeError(f"ERROR: Embedded Codex CLI not found at {cli_path}.")

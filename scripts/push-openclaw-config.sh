@@ -11,7 +11,7 @@
 #
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
-#   - OpenClaw CLI exactly 2026.7.1-2
+#   - OpenClaw CLI exactly 2026.8.1
 #   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai' for main;
 #     this script syncs that OpenClaw-managed Codex OAuth profile into managed
@@ -31,63 +31,116 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 ENV_FILE="${OPENCLAW_PUSH_ENV_FILE:-${REPO_ROOT}/gateway/openclaw_config/.env}"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
-SKILLS_SRC="${REPO_ROOT}/gateway/agent_config/skills"
+SKILLS_SRC="${SKILLS_SRC:-${REPO_ROOT}/gateway/agent_config/skills}"
 CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"
+CODEX_AGENT_CONFIGS_SRC="${REPO_ROOT}/.codex/agent-configs"
+RESEARCH_OWNER_PERSONA_SRC="${RESEARCH_OWNER_PERSONA_SRC:-${REPO_ROOT}/gateway/agent_config/research-orchestrator}"
 MEMPALACE_READONLY_WRAPPER_SRC="${REPO_ROOT}/gateway/mempalace_readonly_server.py"
 G2_CONTROL_MCP_MODULE="gateway.g2_control_mcp_server"
-SUPERVISOR_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
-SUPERVISOR_SERVICE_NAME="quantipy-autoresearch-supervisor.service"
+RESEARCH_OWNER_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/research-owner.service.template"
+RESEARCH_OWNER_SERVICE_NAME="research-owner.service"
 QUANTIPY_API_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-api.service.template"
 QUANTIPY_API_SERVICE_NAME="quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
-CODEX_RUNTIME_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-codex-runtime.conf"
 NATIVE_CRASH_HARDENING_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
-CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"
 NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"
 STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
-SUPERVISOR_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"
+RESEARCH_OWNER_UNIT_DST="${SYSTEMD_USER_DIR}/${RESEARCH_OWNER_SERVICE_NAME}"
 QUANTIPY_API_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
-CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CODEX_RUNTIME_DROPIN_NAME}"
 NATIVE_CRASH_HARDENING_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${NATIVE_CRASH_HARDENING_DROPIN_NAME}"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
-REQUIRED_OPENCLAW_VERSION="2026.7.1-2"
-REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"
-REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"
+REQUIRED_OPENCLAW_VERSION="2026.8.1"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 CODEX_APP_SERVER_CLI_RESOLVED=""
+ACPX_ADAPTER_BIN=""
+RESEARCH_REVIEWER_LAUNCHER="${REPO_ROOT}/scripts/research-reviewer-cli.py"
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
-PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS=(
-  "sessions_spawn"
+RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS=(
   "sessions_yield"
   "agents_list"
   "sessions_list"
   "sessions_history"
+  "g2-control__g2_autoresearch_status"
+  "g2-control__g2_autoresearch_start"
+  "g2-control__g2_autoresearch_stop"
+  "mempalace-readonly__mempalace_status"
+  "mempalace-readonly__mempalace_search"
+  "mempalace-readonly__mempalace_get_drawer"
+  "mempalace-readonly__mempalace_list_drawers"
+  "mempalace-readonly__mempalace_list_wings"
+  "mempalace-readonly__mempalace_list_rooms"
+  "mempalace-readonly__mempalace_get_taxonomy"
+  "mempalace-readonly__mempalace_get_aaak_spec"
+  "mempalace-readonly__mempalace_diary_read"
+  "mempalace-readonly__mempalace_kg_query"
+  "mempalace-readonly__mempalace_kg_timeline"
+  "mempalace-readonly__mempalace_kg_stats"
+  "mempalace-readonly__mempalace_traverse"
+  "mempalace-readonly__mempalace_find_tunnels"
+  "mempalace-readonly__mempalace_follow_tunnels"
+  "mempalace-readonly__mempalace_graph_stats"
+  "mempalace-readonly__mempalace_list_tunnels"
+  "mempalace-readonly__mempalace_list_hallways"
+  "mempalace-readonly__mempalace_memories_filed_away"
 )
-MEMPALACE_READONLY_AGENT_IDS=(
-  "context_curator"
-  "debater_microstructure"
-  "debater_data"
-  "debater_skeptic"
-  "debater_theory"
-  "debater_implementation"
-  "consensus_arbiter"
-  "implementer"
-  "reviewer"
-  "fixer"
+MEMPALACE_READONLY_AGENT_IDS=()
+CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")
+# These are the exact research-role files that earlier route deployments may
+# have installed in a scoped Codex runtime.  The owner config registers the
+# active child layers; remove only this known managed duplicate set from old
+# runtime homes. Manual or unrelated Codex agent files must survive a config
+# push.
+RETIRED_CODEX_RUNTIME_AGENT_FILES=(
+  "context-curator.toml"
+  "debater-microstructure.toml"
+  "debater-data.toml"
+  "debater-skeptic.toml"
+  "debater-theory.toml"
+  "debater-implementation.toml"
+  "consensus-arbiter.toml"
+  "context_curator.toml"
+  "debater_microstructure.toml"
+  "debater_data.toml"
+  "debater_skeptic.toml"
+  "debater_theory.toml"
+  "debater_implementation.toml"
+  "consensus_arbiter.toml"
+  "implementer.toml"
+  "experiment_runner.toml"
+  "reviewer.toml"
+  "fixer.toml"
 )
-CODEX_NATIVE_STAGE_AGENT_IDS=("${MEMPALACE_READONLY_AGENT_IDS[@]}")
-MEMPALACE_READONLY_SERVER_AGENT_IDS=(
-  "main"
-  "autoresearch-pm"
-  "${MEMPALACE_READONLY_AGENT_IDS[@]}"
+# The owner workspace layer directory is a managed route directory, so prune
+# only these exact old research layers there. Unknown/manual TOMLs remain
+# untouched because ownership of them is not established by this route.
+RETIRED_CODEX_RESEARCH_LAYER_FILES=(
+  "context-curator.toml"
+  "debater-microstructure.toml"
+  "debater-data.toml"
+  "debater-skeptic.toml"
+  "debater-theory.toml"
+  "debater-implementation.toml"
+  "consensus-arbiter.toml"
+  "context_curator.toml"
+  "debater_microstructure.toml"
+  "debater_data.toml"
+  "debater_skeptic.toml"
+  "debater_theory.toml"
+  "debater_implementation.toml"
+  "consensus_arbiter.toml"
+  "reviewer.toml"
+  "fixer.toml"
 )
+MEMPALACE_READONLY_SERVER_AGENT_IDS=("main")
 G2_CONTROL_SERVER_AGENT_IDS=("main")
 MAIN_OPENCLAW_TOOL_ALLOW_IDS=(
   "g2-control__g2_autoresearch_status"
@@ -113,19 +166,7 @@ MAIN_OPENCLAW_TOOL_ALLOW_IDS=(
   "mempalace-readonly__mempalace_list_hallways"
   "mempalace-readonly__mempalace_memories_filed_away"
 )
-CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS=(
-  "context-curator"
-  "debater-microstructure"
-  "debater-data"
-  "debater-skeptic"
-  "debater-theory"
-  "debater-implementation"
-  "consensus-arbiter"
-)
 RUNTIME_CAP_ENV_LINES=(
-  '[Unit]'
-  'Upholds=quantipy-autoresearch-supervisor.service'
-  ''
   '[Service]'
   'UMask=0077'
   'Environment="LOKY_MAX_CPU_COUNT=1"'
@@ -175,6 +216,32 @@ expand_user_path() {
     "~/"*) printf '%s/%s\n' "${HOME}" "${path:2}" ;;
     *) printf '%s\n' "${path}" ;;
   esac
+}
+
+validate_bounded_research_roots() {
+  local path
+  for path in "${RESEARCH_V2_ROOT}" "${HYPOTHESIS_WORKTREES_ROOT}"; do
+    if [[ "${path}" != /* || "${path}" == "/" ]]; then
+      echo "ERROR: Research route writable roots must be absolute, non-root task directories: ${path}" >&2
+      return 1
+    fi
+    case "${path}" in
+      "/home"|"/home/"|"/home/dev"|"/home/dev/"|"/home/dev/repos"|"/home/dev/repos/"|"/repos"|"/repos/"|"/tmp"|"/tmp/"|"/var"|"/var/"|"/opt"|"/opt/")
+        echo "ERROR: Research route writable root is too broad: ${path}" >&2
+        return 1
+        ;;
+    esac
+    case "${path}" in
+      *$'\n'*|*$'\r'*|*$'\t'*|*'"'*|*'\\'*|*'@'*|*'%'*)
+        echo "ERROR: Research route writable root contains an unsafe control, quoting, or unresolved-placeholder character: ${path}" >&2
+        return 1
+        ;;
+    esac
+  done
+  if [[ "${HYPOTHESIS_WORKTREES_ROOT}" != "${RESEARCH_V2_ROOT}/hypothesis-worktrees" ]]; then
+    echo "ERROR: Hypothesis worktrees root must remain nested under the canonical research root." >&2
+    return 1
+  fi
 }
 
 OPENCLAW_PUSH_HOME="$(expand_user_path "${OPENCLAW_PUSH_HOME:-${HOME}/.openclaw}")"
@@ -301,17 +368,6 @@ guarded_chmod_reference() {
     guarded-chmod-reference -- "$1" "$2" "$3"
 }
 
-collect_find_results_null() {
-  local output_path="$1"
-  local scan_root="$2"
-  local context="$3"
-  shift 3
-
-  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.guarded_fs \
-    collect-find-results-null -- "${output_path}" "${scan_root}" "${context}" "$@"
-}
-
 guarded_rm_rf() {
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.guarded_fs guarded-rm-rf -- "$1" "$2"
@@ -434,19 +490,7 @@ validate_runtime_caps_dropin_file() {
     return 1
   fi
   if ! diff -u <(printf '%s\n' "${RUNTIME_CAP_ENV_LINES[@]}") "${path}" >&2; then
-    echo "ERROR: OpenClaw gateway runtime caps drop-in must match the repo-managed supervisor relationship and numerical runtime cap set exactly." >&2
-    return 1
-  fi
-}
-
-validate_codex_runtime_dropin_file() {
-  local path="$1"
-  if [[ ! -f "${path}" ]]; then
-    echo "ERROR: Repo-managed OpenClaw Codex runtime drop-in not found at ${path}" >&2
-    return 1
-  fi
-  if ! diff -u "${CODEX_RUNTIME_DROPIN_SRC}" "${path}" >&2; then
-    echo "ERROR: OpenClaw Codex runtime drop-in must match the repo-managed pre-start verifier exactly." >&2
+    echo "ERROR: OpenClaw gateway runtime caps drop-in must match the repo-managed numerical runtime cap set exactly." >&2
     return 1
   fi
 }
@@ -463,20 +507,52 @@ validate_native_crash_hardening_dropin_file() {
   fi
 }
 
-validate_supervisor_unit_file() {
-  local path="$1"
+validate_research_owner_unit_file() {
+  local path="$1" expected_root="${2:-}" exec_start_ok=0 environment_file_ok=0
   if [[ ! -f "${path}" ]]; then
-    echo "ERROR: Repo-managed supervisor unit not found at ${path}" >&2
+    echo "ERROR: Repo-managed research owner unit not found at ${path}" >&2
     return 1
   fi
-  if ! grep -Fxq "Requires=${GATEWAY_SERVICE_NAME}" "${path}" \
+  if grep -Fxq 'ExecStart=@REPO_ROOT@/.venv/bin/gateway-cli research serve --root "@RESEARCH_V2_ROOT@" --session-key agent:research-orchestrator:autoresearch:quantipy-v2 --poll-seconds 60' "${path}"; then
+    exec_start_ok=1
+  elif [[ -n "${expected_root}" ]] && grep -Fxq "ExecStart=${REPO_ROOT}/.venv/bin/gateway-cli research serve --root \"${expected_root}\" --session-key agent:research-orchestrator:autoresearch:quantipy-v2 --poll-seconds 60" "${path}"; then
+    exec_start_ok=1
+  fi
+  if grep -Fxq "EnvironmentFile=@REPO_ROOT@/.env" "${path}" \
+    || grep -Fxq "EnvironmentFile=${REPO_ROOT}/.env" "${path}"; then
+    environment_file_ok=1
+  fi
+  if ! grep -Fxq "Description=G2 research owner loop" "${path}" \
     || ! grep -Fxq "BindsTo=${GATEWAY_SERVICE_NAME}" "${path}" \
     || ! grep -Fxq "After=${GATEWAY_SERVICE_NAME}" "${path}" \
+    || ! grep -Fxq "Type=simple" "${path}" \
+    || [[ "${exec_start_ok}" -ne 1 ]] \
+    || [[ "${environment_file_ok}" -ne 1 ]] \
     || ! grep -Fxq "Restart=on-failure" "${path}" \
+    || ! grep -Fxq "RestartSec=30" "${path}" \
+    || ! grep -Fxq "RestartPreventExitStatus=78" "${path}" \
+    || ! grep -Fxq "KillMode=process" "${path}" \
+    || ! grep -Fxq "UMask=0077" "${path}" \
+    || ! grep -Fxq "WantedBy=default.target" "${path}" \
+    || grep -Fxq "Requires=${GATEWAY_SERVICE_NAME}" "${path}" \
     || grep -Fxq "Restart=always" "${path}"; then
-    echo "ERROR: Supervisor unit must bind to ${GATEWAY_SERVICE_NAME} and must not use Restart=always." >&2
+    echo "ERROR: Research owner unit has an invalid lifecycle or command contract." >&2
     return 1
   fi
+}
+
+validate_research_owner_persona() {
+  local file
+  if [[ ! -d "${RESEARCH_OWNER_PERSONA_SRC}" ]]; then
+    echo "ERROR: research-orchestrator persona not yet delivered (P4)" >&2
+    return 1
+  fi
+  for file in AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md; do
+    if [[ ! -f "${RESEARCH_OWNER_PERSONA_SRC}/${file}" ]]; then
+      echo "ERROR: research-orchestrator persona not yet delivered (P4): missing ${file}" >&2
+      return 1
+    fi
+  done
 }
 
 validate_quantipy_api_unit_file() {
@@ -652,6 +728,89 @@ require_openclaw_supported() {
   return 0
 }
 
+require_acpx_plugin_exact() {
+  local inventory plugin_path resolved
+  if ! inventory="$(run_openclaw_cli plugins list --json 2>&1)"; then
+    echo "ERROR: Unable to inspect the installed ACPX plugin inventory; refusing network or install fallback." >&2
+    printf '%s\n' "${inventory}" >&2
+    return 1
+  fi
+  if plugin_path="$(printf '%s\n' "${inventory}" | jq -r --arg version "2026.7.1" '
+    def plugin_objects:
+      if type == "array" then .[] else .. | objects end;
+    [plugin_objects
+      | select((.id? == "acpx" or .name? == "@openclaw/acpx" or .packageName? == "@openclaw/acpx")
+        and .version? == $version)
+      | (.path? // .root? // .packagePath? // .entrypoint? // empty)
+      | select(type == "string" and length > 0)]
+    | first // empty
+  ' 2>/dev/null)"; then
+    :
+  else
+    plugin_path=""
+  fi
+  if [[ -z "${plugin_path}" ]]; then
+    echo "ERROR: Installed @openclaw/acpx version 2026.7.1 was not found; refusing network or install fallback." >&2
+    return 1
+  fi
+  if ! resolved="$(env -u NODE_OPTIONS node - "${plugin_path}" <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const Module = require("module");
+
+const reported = path.resolve(process.argv[2]);
+let packageRoot = reported;
+if (path.basename(packageRoot) === "package.json") {
+  packageRoot = path.dirname(packageRoot);
+} else {
+  if (path.extname(packageRoot) !== ".json" && path.basename(packageRoot) !== "index.js") {
+    if (!fs.existsSync(path.join(packageRoot, "package.json"))) packageRoot = path.dirname(packageRoot);
+  } else {
+    packageRoot = path.dirname(packageRoot);
+  }
+}
+while (packageRoot !== path.dirname(packageRoot) && !fs.existsSync(path.join(packageRoot, "package.json"))) {
+  packageRoot = path.dirname(packageRoot);
+}
+const packageJsonPath = path.join(packageRoot, "package.json");
+const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+if (packageJson.name !== "@openclaw/acpx" || packageJson.version !== "2026.7.1") {
+  throw new Error("reported ACPX path does not resolve to @openclaw/acpx 2026.7.1");
+}
+const requireFromPlugin = Module.createRequire(packageJsonPath);
+const adapterPackageJsonPath = requireFromPlugin.resolve("@agentclientprotocol/claude-agent-acp/package.json");
+const adapterRoot = path.dirname(adapterPackageJsonPath);
+const adapterPackageJson = JSON.parse(fs.readFileSync(adapterPackageJsonPath, "utf8"));
+if (adapterPackageJson.version !== "0.55.0") {
+  throw new Error(`Claude ACP adapter must be 0.55.0, got ${adapterPackageJson.version || "<missing>"}`);
+}
+const sdkPackageJsonPath = requireFromPlugin.resolve("@agentclientprotocol/sdk/package.json");
+const sdkPackageJson = JSON.parse(fs.readFileSync(sdkPackageJsonPath, "utf8"));
+if (sdkPackageJson.version !== "0.3.198") {
+  throw new Error(`Agent Client Protocol SDK must be 0.3.198, got ${sdkPackageJson.version || "<missing>"}`);
+}
+const bin = typeof adapterPackageJson.bin === "string"
+  ? adapterPackageJson.bin
+  : adapterPackageJson.bin?.["claude-agent-acp"];
+if (typeof bin !== "string" || bin.length === 0) throw new Error("Claude ACP adapter has no claude-agent-acp bin entry");
+const adapterBin = path.resolve(adapterRoot, bin);
+if (!fs.existsSync(adapterBin) || !fs.statSync(adapterBin).isFile() || (fs.statSync(adapterBin).mode & 0o111) === 0) {
+  throw new Error(`Claude ACP adapter binary is missing or not executable: ${adapterBin}`);
+}
+process.stdout.write(`${adapterBin}\n`);
+NODE
+)"; then
+    echo "ERROR: Could not resolve the installed Claude ACP adapter from @openclaw/acpx; refusing network or install fallback." >&2
+    return 1
+  fi
+  ACPX_ADAPTER_BIN="${resolved}"
+  if [[ ! -x "${RESEARCH_REVIEWER_LAUNCHER}" ]]; then
+    echo "ERROR: Research reviewer launcher is missing or not executable: ${RESEARCH_REVIEWER_LAUNCHER}" >&2
+    return 1
+  fi
+  echo "ACPX plugin validated: @openclaw/acpx 2026.7.1; Claude adapter ${ACPX_ADAPTER_BIN}"
+}
+
 require_codex_runtime_exact() {
   local inspect_json plugin_version app_server_version app_server_path
   if ! prepare_repo_config_preflight_copy; then
@@ -695,10 +854,9 @@ POST_COMMIT_CLEANUP_FAILED=0
 MANAGED_UNIT_TRANSACTION_ARMED=0
 MANAGED_UNIT_BACKUP_DIR=""
 MANAGED_UNIT_PATHS=(
-  "${SUPERVISOR_UNIT_DST}"
+  "${RESEARCH_OWNER_UNIT_DST}"
   "${QUANTIPY_API_UNIT_DST}"
   "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
-  "${CODEX_RUNTIME_DROPIN_DST}"
   "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 )
 MANAGED_ARTIFACT_TRANSACTION_ARMED=0
@@ -1039,16 +1197,13 @@ run_deployment_rollback_and_exit() {
   if ! cleanup_deployment_temp_file "${GENERATED_OPENCLAW_CONFIG_TMP:-}"; then
     rollback_step_failed=1
   fi
-  if ! cleanup_deployment_temp_file "${SUPERVISOR_UNIT_TMP:-}"; then
+  if ! cleanup_deployment_temp_file "${RESEARCH_OWNER_UNIT_TMP:-}"; then
     rollback_step_failed=1
   fi
   if ! cleanup_deployment_temp_file "${QUANTIPY_API_UNIT_TMP:-}"; then
     rollback_step_failed=1
   fi
   if ! cleanup_deployment_temp_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-}"; then
-    rollback_step_failed=1
-  fi
-  if ! cleanup_deployment_temp_file "${CODEX_RUNTIME_DROPIN_TMP:-}"; then
     rollback_step_failed=1
   fi
   if ! cleanup_deployment_temp_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP:-}"; then
@@ -1100,11 +1255,6 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
-MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_SERVER_AGENT_IDS[@]}")"
-G2_CONTROL_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${G2_CONTROL_SERVER_AGENT_IDS[@]}")"
-PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON="$(build_string_array_json "${PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS[@]}")"
-MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON="$(build_string_array_json "${MAIN_OPENCLAW_TOOL_ALLOW_IDS[@]}")"
-
 if [[ ! -f "${REPO_CONFIG}" ]]; then
   echo "ERROR: Repo config not found at ${REPO_CONFIG}" >&2
   exit 1
@@ -1116,34 +1266,34 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
   exit 1
 fi
 
-# The quantipy-methodology skill is intentionally a thin pointer to the live
-# Quantipy repo. Fail here if those source-of-truth files are unavailable.
+if ! require_acpx_plugin_exact; then
+  exit 1
+fi
+
+MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_SERVER_AGENT_IDS[@]}")"
+G2_CONTROL_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${G2_CONTROL_SERVER_AGENT_IDS[@]}")"
+RESEARCH_ORCHESTRATOR_DENY_IDS_JSON="$(build_string_array_json "${RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS[@]}")"
+MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON="$(build_string_array_json "${MAIN_OPENCLAW_TOOL_ALLOW_IDS[@]}")"
+
+# The route overlay only requires the repository contract and backend skill.
 REQUIRED_QUANTIPY_FILES=(
   "AGENTS.md"
   ".agents/skills/backend-python/SKILL.md"
-  ".agents/skills/backtesting/SKILL.md"
-  ".agents/skills/data-collection/SKILL.md"
-  ".agents/skills/data-querying/SKILL.md"
-  ".agents/skills/experiment-data/SKILL.md"
-  ".codex/agents/backend-python.toml"
-  ".codex/agents/contrarian.toml"
-  ".codex/agents/explorer.toml"
-  ".codex/agents/orchestrator.toml"
-  ".codex/agents/researcher.toml"
-  ".codex/agents/reviewer.toml"
-  ".codex/agents/theorist.toml"
 )
 for FILE in "${REQUIRED_QUANTIPY_FILES[@]}"; do
   if [[ ! -f "${QUANTIPY_ROOT}/${FILE}" ]]; then
-    echo "ERROR: Required Quantipy methodology file not found at ${QUANTIPY_ROOT}/${FILE}" >&2
-    echo "       The quantipy-methodology skill depends on the live Quantipy repo; restore this file before pushing." >&2
+    echo "ERROR: Required Quantipy route file not found at ${QUANTIPY_ROOT}/${FILE}" >&2
     exit 1
   fi
 done
-echo "Verified Quantipy methodology source files in ${QUANTIPY_ROOT}"
+echo "Verified required route source files in ${QUANTIPY_ROOT}"
 
 if [[ ! -d "${SKILLS_SRC}" ]]; then
   echo "ERROR: Repo-managed skills directory not found at ${SKILLS_SRC}" >&2
+  exit 1
+fi
+
+if ! validate_research_owner_persona; then
   exit 1
 fi
 
@@ -1152,11 +1302,11 @@ if [[ ! -f "${MEMPALACE_READONLY_WRAPPER_SRC}" ]]; then
   exit 1
 fi
 
-if [[ ! -f "${SUPERVISOR_UNIT_TEMPLATE}" ]]; then
-  echo "ERROR: Repo-managed supervisor unit template not found at ${SUPERVISOR_UNIT_TEMPLATE}" >&2
+if [[ ! -f "${RESEARCH_OWNER_UNIT_TEMPLATE}" ]]; then
+  echo "ERROR: Repo-managed research owner unit template not found at ${RESEARCH_OWNER_UNIT_TEMPLATE}" >&2
   exit 1
 fi
-if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TEMPLATE}"; then
+if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TEMPLATE}"; then
   exit 1
 fi
 if [[ ! -f "${QUANTIPY_API_UNIT_TEMPLATE}" ]]; then
@@ -1170,24 +1320,17 @@ fi
 if ! validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_SRC}"; then
   exit 1
 fi
-if [[ ! -x "${REPO_ROOT}/scripts/ensure-openclaw-codex-runtime.mjs" ]]; then
-  echo "ERROR: Codex runtime verifier is missing or not executable at ${REPO_ROOT}/scripts/ensure-openclaw-codex-runtime.mjs" >&2
-  exit 1
-fi
-if ! validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_SRC}"; then
-  exit 1
-fi
 if ! validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_SRC}"; then
   exit 1
 fi
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
-  echo "ERROR: Supervisor Python is missing or not executable at ${PYTHON_BIN}. Run 'uv sync' first." >&2
+  echo "ERROR: Repo Python is missing or not executable at ${PYTHON_BIN}. Run 'uv sync' first." >&2
   exit 1
 fi
 
 if ! systemctl --user show-environment >/dev/null 2>&1; then
-  echo "ERROR: The systemd user manager is unavailable; cannot install ${SUPERVISOR_SERVICE_NAME}." >&2
+  echo "ERROR: The systemd user manager is unavailable; cannot install ${RESEARCH_OWNER_SERVICE_NAME}." >&2
   exit 1
 fi
 
@@ -1204,10 +1347,9 @@ if ! jq -e '
 fi
 
 REQUIRED_REPO_SKILLS=(
-  "autoresearch"
   "codex-subagents"
   "mempalace-readonly"
-  "quantipy-methodology"
+  "research-loop"
 )
 
 mapfile -t CONFIGURED_SKILLS < <(jq -r '
@@ -1256,6 +1398,8 @@ PRESERVE_ENV_VARS=(
   MEMPALACE_EMBEDDING_MODEL
   MEMPALACE_EXPECTED_EMBEDDING_MODEL
   MEMPALACE_EXPECTED_EMBEDDING_DIMENSION
+  RESEARCH_V2_ROOT
+  HYPOTHESIS_WORKTREES_ROOT
 )
 declare -A PRESERVED_ENV=()
 for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
@@ -1276,6 +1420,16 @@ for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
   export "${VAR_NAME}"
 done
 unset OPENCLAW_HOME
+# Resolve the bounded route roots after the optional env file has loaded. An
+# explicitly exported value still wins via PRESERVED_ENV above; otherwise a
+# project-local .env may provide the task-specific roots.
+RESEARCH_V2_ROOT="${RESEARCH_V2_ROOT:-${OPENCLAW_PUSH_HOME}/research-v2}"
+HYPOTHESIS_WORKTREES_ROOT="${HYPOTHESIS_WORKTREES_ROOT:-${RESEARCH_V2_ROOT}/hypothesis-worktrees}"
+export RESEARCH_V2_ROOT HYPOTHESIS_WORKTREES_ROOT
+
+if ! validate_bounded_research_roots; then
+  exit 1
+fi
 
 if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
@@ -1365,17 +1519,17 @@ assemble_openclaw_config() {
       ;;
   esac
 
-  if ! PM_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.config_merge pm-model \
+  if ! RESEARCH_ORCHESTRATOR_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.config_merge orchestrator-model \
     -- "${REPO_CONFIG}")"; then
     return 1
   fi
-  if [[ -z "${PM_MODEL_PRIMARY}" ]]; then
-    echo "ERROR: Repo config must pin agents.list[].id == \"autoresearch-pm\" to a model.primary." >&2
+  if [[ -z "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" ]]; then
+    echo "ERROR: Repo config must pin agents.list[].id == \"research-orchestrator\" to a model.primary." >&2
     return 1
   fi
-  if [[ "${PM_MODEL_PRIMARY}" != openai/* ]]; then
-    echo "ERROR: PM model '${PM_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
+  if [[ "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" != openai/* ]]; then
+    echo "ERROR: Research orchestrator model '${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
     return 1
   fi
 
@@ -1384,8 +1538,10 @@ assemble_openclaw_config() {
     -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
     "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
-    "${G2_CONTROL_MCP_MODULE}" "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
-    "${G2_CONTROL_SERVER_AGENT_IDS_JSON}")"; then
+    "${G2_CONTROL_MCP_MODULE}" "${RESEARCH_V2_ROOT}" \
+    "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+    "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" "${RESEARCH_REVIEWER_LAUNCHER}" \
+    "${ACPX_ADAPTER_BIN}")"; then
     return 1
   fi
   echo "Resolved read-only MemPalace MCP wrapper: ${MEMPALACE_READONLY_WRAPPER_DST}"
@@ -1394,7 +1550,7 @@ assemble_openclaw_config() {
     echo "Resolved env:OPENROUTER_API_KEY (${#OPENROUTER_API_KEY} chars)."
   fi
   echo "Sanitized stale coding-provider config keys: github-copilot copilot-proxy copilot-cli"
-  echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; PM model: ${PM_MODEL_PRIMARY}"
+  echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; research owner: ${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}"
 }
 
 assemble_openclaw_config
@@ -1403,15 +1559,14 @@ assemble_openclaw_config
 # finalizer is the sole write boundary, so stage tool-deny compatibility lists
 # must not survive in the managed config.
 if ! echo "${MERGED}" | jq -e \
-  --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
-  --argjson readonly_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" '
+  --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" '
   def denies: (.tools.deny // []);
-  def is_stage: (.id != "main" and .id != "autoresearch-pm");
-  ([.agents.list[] | select(.id == "autoresearch-pm") | select(denies == $pm_native_codex_denies)] | length) == 1
-  and
-  ([.agents.list[] | select(is_stage) | select(.tools? != null)] | length) == 0
+  ([.agents.list[] | select(.id == "research-orchestrator")
+    | select(denies == $owner_denies)
+    | select((.tools.allow // []) == ["sessions_spawn"])
+  ] | length) == 1
 ' >/dev/null; then
-  echo "ERROR: Autoresearch models must expose only read-only MemPalace and no stage write-tool remnants." >&2
+  echo "ERROR: Research orchestrator tool policy is not the exact bounded route." >&2
   exit 1
 fi
 
@@ -1419,7 +1574,7 @@ fi
 # Fail before writing if a local merge or env selection would violate the
 # repo-managed autoresearch target shape.
 if ! echo "${MERGED}" | jq -e \
-  --arg pm "${PM_MODEL_PRIMARY}" \
+  --arg owner "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" \
   --arg cmd "${MEMPALACE_PYTHON}" \
   --arg palace "${MEMPALACE_PALACE}" \
   --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
@@ -1429,39 +1584,39 @@ if ! echo "${MERGED}" | jq -e \
   --arg repo "${REPO_ROOT}" \
   --arg python "${PYTHON_BIN}" \
   --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
+  --arg research_root "${RESEARCH_V2_ROOT}" \
   --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
   --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
-  --argjson pm_native_codex_denies "${PM_NATIVE_CODEX_DELEGATION_DENY_IDS_JSON}" \
+  --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" \
+  --arg launcher "${RESEARCH_REVIEWER_LAUNCHER}" \
+  --arg adapter "${ACPX_ADAPTER_BIN}" \
   --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
   def denies: (.tools.deny // []);
   def main_allow: (.tools.allow // []);
-  def is_stage: (.id != "main" and .id != "autoresearch-pm");
-  def expected_models: {
-    "main": "openai/gpt-5.4",
-    "autoresearch-pm": $pm,
-    "context_curator": "openai/gpt-5.4",
-    "debater_microstructure": "openai/gpt-5.5",
-    "debater_data": "openai/gpt-5.6-terra",
-    "debater_skeptic": "openai/gpt-5.5",
-    "debater_theory": "openai/gpt-5.4",
-    "debater_implementation": "openai/gpt-5.4",
-    "consensus_arbiter": "openai/gpt-5.6-sol",
-    "implementer": "openai/gpt-5.4",
-    "reviewer": "openai/gpt-5.6-sol",
-    "fixer": "openai/gpt-5.4"
-  };
+  def expected_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
   (.agents.defaults.thinkingDefault == "high")
-  and ((.plugins.allow // []) | contains(["codex"]))
+  and ((.plugins.allow // []) | contains(["codex", "acpx"]))
   and (.plugins.entries.codex.enabled == true)
   and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
   and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
   and (.plugins.entries.codex.config.appServer.sandbox == "workspace-write")
   and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
-  and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir == "/home/dev/.openclaw/autoresearch/model-workspaces")
+  and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir? != "/home/dev/.openclaw/autoresearch/model-workspaces")
   and (.plugins.entries.codex.config.appServer.networkProxy? == null)
+  and (.plugins.entries.acpx.enabled == true)
+  and .plugins.entries.acpx.config == {
+    "agents":{"claude":{"command":"/usr/bin/env","args":[("CLAUDE_CODE_EXECUTABLE=" + $launcher),$adapter]}},
+    "permissionMode":"approve-reads",
+    "nonInteractivePermissions":"fail",
+    "pluginToolsMcpBridge":false,
+    "openClawToolsMcpBridge":false,
+    "mcpServers":{}
+  }
+  and .acp == {"enabled":true,"dispatch":{"enabled":true},"backend":"acpx","allowedAgents":["claude"],"maxConcurrentSessions":1}
   and (.agents.defaults.maxConcurrent == 2)
   and (.agents.defaults.subagents.maxConcurrent == 1)
-  and (.agents.defaults.subagents.maxChildrenPerAgent? == null)
+  and (.agents.defaults.subagents.maxSpawnDepth == 1)
+  and (.agents.defaults.subagents.runTimeoutSeconds == 1800)
   and (.agents.defaults.memorySearch.enabled == false)
   and (.agents.defaults.compaction.mode == "default")
   and (.agents.defaults.compaction.memoryFlush.enabled == false)
@@ -1479,18 +1634,22 @@ if ! echo "${MERGED}" | jq -e \
   and (.mcp.servers."g2-control".args == ["-m", $g2_module])
   and ((.mcp.servers."g2-control".codex.agents // []) == $g2_server_agents)
   and (.mcp.servers."g2-control".codex.defaultToolsApprovalMode == "approve")
-  and (.mcp.servers."g2-control".env == {"PYTHONPATH": $repo})
+  and (.mcp.servers."g2-control".env == {
+    "PYTHONPATH": $repo,
+    "RESEARCH_V2_ROOT": $research_root
+  })
   and (([.agents.list[].id] | sort) == (expected_models | keys | sort))
   and all(.agents.list[]; .model.primary == expected_models[.id])
   and all(.agents.list[]; .thinkingDefault == "high")
   and ([.agents.list[] | select(.id == "main" and .tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
   and ([.agents.list[] | select(
-    .id == "autoresearch-pm"
-    and .model.primary == $pm
+    .id == "research-orchestrator"
+    and .model.primary == $owner
     and .thinkingDefault == "high"
-    and ((.skills // []) == ["mempalace-readonly", "autoresearch"])
-    and denies == $pm_native_codex_denies
-    and (((.subagents.allowAgents? // []) | length) == 0)
+    and ((.skills // []) == ["research-loop"])
+    and denies == $owner_denies
+    and ((.tools.allow // []) == ["sessions_spawn"])
+    and ((.subagents.allowAgents? // []) == ["claude"])
   )] | length) == 1
   and ([.agents.list[] | select(
     .id == "main"
@@ -1501,17 +1660,12 @@ if ! echo "${MERGED}" | jq -e \
     and ((.skills // []) == ["mempalace-readonly"])
     and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
-  and ([.agents.list[] | select((.subagents.allowAgents? // []) | length > 0)] | length) == 0
-  and ([.agents.list[] | select(((.skills // []) | index("mempalace-readonly")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "autoresearch-pm") | select(((.skills // []) | index("autoresearch")) != null)] | length) == 0
-  and ([.agents.list[] | select(is_stage) | select(((.skills // []) | index("quantipy-methodology")) == null)] | length) == 0
-  and ([.agents.list[] | select(.id != "autoresearch-pm" and .id != "main") | select(.tools? != null)] | length) == 0
 ' >/dev/null; then
-  echo "ERROR: Generated OpenClaw config violates repo-managed autoresearch invariants." >&2
-  echo "       Check plugins.allow, Codex app-server config schema, autoresearch-pm model/skills/native Codex delegation denies, main interface restrictions, strict concurrency caps, read-only MemPalace projection, and stage skill scopes." >&2
+  echo "ERROR: Generated OpenClaw config violates the managed route invariants." >&2
+  echo "       Check ACPX wiring, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface split, read-only-only MemPalace projection, autoresearch-pm model and native Codex delegation denies, exact stage models, high reasoning, strict concurrency caps, Quantipy methodology skill, built-in memory disabled."
+echo "Managed invariants validated: main interface, Astra research owner, ACPX Claude route, native Luna roster, strict concurrency caps, and bounded MCP projection."
 
 validate_generated_openclaw_config() {
   local temp_config validate_json validate_status current_hash current_bytes
@@ -1581,21 +1735,24 @@ workspace_dir_for_target() {
   fi
 }
 
-workspace_has_autoresearch_agent() {
+workspace_is_research_orchestrator() {
   local agents_csv="$1"
-  local agent
-  IFS=',' read -ra agent_names <<< "${agents_csv}"
-  for agent in "${agent_names[@]}"; do
-    if [[ "${agent}" != "main" ]]; then
-      return 0
-    fi
-  done
-  return 1
+  [[ "${agents_csv}" == "research-orchestrator" ]]
 }
 
-validate_codex_native_stage_agents_dir() {
+validate_codex_native_stage_agent_sources() {
   local agents_dir="$1"
-  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-stage-agents -- "${agents_dir}"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-stage-agent-sources -- "${agents_dir}"
+}
+
+validate_codex_native_research_runtime_roles() {
+  local config_path="$1"
+  local source_dir="$2"
+  local layer_dir="$3"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-native-research-runtime-roles \
+    -- "${config_path}" "${source_dir}" "${layer_dir}" \
+    "${RESEARCH_V2_ROOT}" "${HYPOTHESIS_WORKTREES_ROOT}"
 }
 
 write_codex_runtime_config() {
@@ -1614,6 +1771,8 @@ write_codex_runtime_config() {
   CODEX_RUNTIME_G2_PYTHON="${PYTHON_BIN}" \
   CODEX_RUNTIME_G2_MODULE="${G2_CONTROL_MCP_MODULE}" \
   CODEX_RUNTIME_REPO_ROOT="${REPO_ROOT}" \
+  CODEX_RUNTIME_RESEARCH_V2_ROOT="${RESEARCH_V2_ROOT}" \
+  CODEX_RUNTIME_HYPOTHESIS_WORKTREES_ROOT="${HYPOTHESIS_WORKTREES_ROOT}" \
   PYTHONSAFEPATH=1 \
   PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PYTHON_BIN}" -m gateway.deployment.codex_agents write-runtime-config
@@ -1625,10 +1784,11 @@ validate_codex_runtime_config() {
   local agent_id="$2"
   local config_path="${codex_home}/config.toml"
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-  "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-mcp-wiring \
+    "${PYTHON_BIN}" -m gateway.deployment.codex_agents validate-mcp-wiring \
     -- "${config_path}" "${agent_id}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_READONLY_WRAPPER_DST}" "${MEMPALACE_PALACE}" \
-    "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}"
+    "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}" \
+    "${RESEARCH_V2_ROOT}" "${HYPOTHESIS_WORKTREES_ROOT}"
   repair_codex_runtime_log_db "${codex_home}"
   repair_codex_runtime_state_db "${codex_home}"
   validate_codex_doctor_owned_checks "${codex_home}" "${config_path}"
@@ -1691,19 +1851,71 @@ validate_codex_doctor_owned_checks() {
   rm -f "${doctor_stdout}" "${doctor_stderr}"
 }
 
-remove_legacy_codex_stage_agents() {
+remove_stale_native_research_agents() {
   local agents_dir="$1"
   [[ -d "${agents_dir}" ]] || return 0
-  for agent_id in "${CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS[@]}"; do
-    local stale_path="${agents_dir}/${agent_id}.toml"
+  local stale_name stale_path
+  for stale_name in "${RETIRED_CODEX_RUNTIME_AGENT_FILES[@]}"; do
+    stale_path="${agents_dir}/${stale_name}"
     if [[ -f "${stale_path}" || -L "${stale_path}" ]]; then
-      guarded_rm "${stale_path}" "removing stale native Codex stage agent ${stale_path}"
-      echo "Removed stale native Codex stage agent ${stale_path}"
+      guarded_rm_f "${stale_path}" "removing duplicate native Codex research agent ${stale_path}"
+      echo "Removed duplicate native Codex research agent ${stale_path}"
     fi
   done
 }
 
-validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"
+remove_retired_codex_runtime_agents() {
+  local agents_dir="$1"
+  [[ -d "${agents_dir}" ]] || return 0
+  local retired_name retired_path
+  for retired_name in "${RETIRED_CODEX_RUNTIME_AGENT_FILES[@]}"; do
+    retired_path="${agents_dir}/${retired_name}"
+    if [[ -f "${retired_path}" || -L "${retired_path}" ]]; then
+      guarded_rm_f "${retired_path}" "removing retired native Codex runtime research agent ${retired_path}"
+      echo "Removed retired native Codex runtime research agent ${retired_path}"
+    fi
+  done
+}
+
+remove_stale_native_research_layers() {
+  local layer_dir="$1"
+  [[ -d "${layer_dir}" ]] || return 0
+  local stale_name stale_path
+  for stale_name in "${RETIRED_CODEX_RESEARCH_LAYER_FILES[@]}"; do
+    stale_path="${layer_dir}/${stale_name}"
+    if [[ -f "${stale_path}" || -L "${stale_path}" ]]; then
+      guarded_rm_f "${stale_path}" "removing stale native Codex research layer ${stale_path}"
+      echo "Removed stale native Codex research layer ${stale_path}"
+    fi
+  done
+}
+
+render_native_research_layer() {
+  local agent_id="$1"
+  local destination_dir="$2"
+  local source="${CODEX_AGENT_CONFIGS_SRC}/${agent_id}.toml"
+  local temporary
+  temporary="$(mktemp "${destination_dir}/.${agent_id}.XXXXXX.toml")"
+  guard_destination_path_chain "${temporary}" "writing rendered native Codex research layer ${temporary}"
+  sed -e "s|@RESEARCH_V2_ROOT@|$(escape_sed_replacement "${RESEARCH_V2_ROOT}")|g" \
+    -e "s|@HYPOTHESIS_WORKTREES_ROOT@|$(escape_sed_replacement "${HYPOTHESIS_WORKTREES_ROOT}")|g" \
+    "${source}" > "${temporary}"
+  guarded_chmod 0600 "${temporary}" "chmod rendered native Codex research layer ${temporary}"
+  guarded_mv_replace "${temporary}" "${destination_dir}/${agent_id}.toml" \
+    "publishing rendered native Codex research layer ${destination_dir}/${agent_id}.toml"
+}
+
+render_native_research_role_config() {
+  local agents_dir="$1"
+  local layer_dir="$2"
+  local config_path="$3"
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.codex_agents write-native-research-role-config \
+    -- "${agents_dir}" "${layer_dir}" "${config_path}"
+  guard_destination_path_chain "${config_path}" "wrote rendered native Codex role config ${config_path}"
+}
+
+validate_codex_native_stage_agent_sources "${CODEX_AGENTS_SRC}"
 
 mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
   def workspace_target:
@@ -1729,6 +1941,7 @@ if [[ "${#BOOTSTRAP_TARGETS[@]}" -eq 0 ]]; then
 fi
 
 declare -A BOOTSTRAP_TARGET_DIRS=()
+RESEARCH_OWNER_WORKSPACE_DST=""
 echo "Copying managed bootstrap files to ${#BOOTSTRAP_TARGETS[@]} configured OpenClaw workspaces:"
 for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
   IFS=$'\t' read -r WORKSPACE_ID AGENTS <<< "${TARGET}"
@@ -1736,26 +1949,47 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
   snapshot_managed_artifact_path "${BOOTSTRAP_DST}"
   BOOTSTRAP_TARGET_DIRS["${BOOTSTRAP_DST}"]=1
   guarded_mkdir_p "${BOOTSTRAP_DST}" "creating managed OpenClaw workspace ${BOOTSTRAP_DST}"
-  for FILE in "${BOOTSTRAP_FILES[@]}"; do
-    guarded_cp_file "${REPO_ROOT}/gateway/agent_config/${FILE}" "${BOOTSTRAP_DST}/${FILE}" "copying managed bootstrap file ${BOOTSTRAP_DST}/${FILE}"
-  done
-  if workspace_has_autoresearch_agent "${AGENTS}"; then
-    CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
-    guarded_mkdir_p "${CODEX_AGENTS_DST}" "creating managed workspace Codex agents directory ${CODEX_AGENTS_DST}"
-    remove_legacy_codex_stage_agents "${CODEX_AGENTS_DST}"
-    for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
-      guarded_cp_file "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_AGENTS_DST}/${AGENT_ID}.toml" "copying managed workspace Codex agent ${CODEX_AGENTS_DST}/${AGENT_ID}.toml"
-    done
-    validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"
+  if workspace_is_research_orchestrator "${AGENTS}"; then
+    BOOTSTRAP_SRC="${RESEARCH_OWNER_PERSONA_SRC}"
+    BOOTSTRAP_FILES_FOR_TARGET=(AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md)
+  elif [[ "${AGENTS}" == "main" ]]; then
+    BOOTSTRAP_SRC="${REPO_ROOT}/gateway/agent_config"
+    BOOTSTRAP_FILES_FOR_TARGET=(AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md)
+  else
+    echo "ERROR: Unsupported OpenClaw workspace agent roster: ${AGENTS}" >&2
+    exit 1
   fi
-  echo "  ${AGENTS} → ${BOOTSTRAP_DST} (${BOOTSTRAP_FILES[*]})"
+  for FILE in "${BOOTSTRAP_FILES_FOR_TARGET[@]}"; do
+    guarded_cp_file "${BOOTSTRAP_SRC}/${FILE}" "${BOOTSTRAP_DST}/${FILE}" "copying managed bootstrap file ${BOOTSTRAP_DST}/${FILE}"
+  done
+  if workspace_is_research_orchestrator "${AGENTS}"; then
+    CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
+    if [[ -d "${CODEX_AGENTS_DST}" ]]; then
+      remove_stale_native_research_agents "${CODEX_AGENTS_DST}"
+    fi
+    CODEX_AGENT_CONFIGS_DST="${BOOTSTRAP_DST}/.codex/agent-configs"
+    guarded_mkdir_p "${CODEX_AGENT_CONFIGS_DST}" "creating managed workspace Codex agent config directory ${CODEX_AGENT_CONFIGS_DST}"
+    remove_stale_native_research_layers "${CODEX_AGENT_CONFIGS_DST}"
+    for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
+      render_native_research_layer "${AGENT_ID}" "${CODEX_AGENT_CONFIGS_DST}"
+    done
+    RESEARCH_OWNER_WORKSPACE_DST="${BOOTSTRAP_DST}"
+  fi
+  echo "  ${AGENTS} → ${BOOTSTRAP_DST} (${BOOTSTRAP_FILES_FOR_TARGET[*]})"
 done
 echo "Local workspace files such as USER.md and IDENTITY.md were left untouched."
 
-# Native Codex resolves agent definitions from the app-server's scoped
-# CODEX_HOME, not from the OpenClaw workspace. Keep that runtime source
-# synchronized for the PM and every configured stage agent.
-CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "autoresearch-pm" "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}")
+if [[ -z "${RESEARCH_OWNER_WORKSPACE_DST:-}" ]]; then
+  echo "ERROR: research-orchestrator workspace destination was not recorded." >&2
+  exit 1
+fi
+
+# Native Codex resolves the active research roles from the owner agent's scoped
+# CODEX_HOME/config.toml. The repository .codex/agents files are source-only
+# metadata templates; rendered layers live in the owner workspace and are
+# registered with absolute paths. Remove only known obsolete duplicate role
+# TOMLs from old workspace/runtime locations; generic manual roles survive.
+CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "research-orchestrator")
 declare -A MANAGED_AGENT_DIR_SNAPSHOT_IDS=()
 for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   MANAGED_AGENT_DIR_SNAPSHOT_IDS["${CODEX_RUNTIME_AGENT_ID}"]=1
@@ -1771,51 +2005,41 @@ done
 for MANAGED_AGENT_ID_FOR_SNAPSHOT in "${!MANAGED_AGENT_DIR_SNAPSHOT_IDS[@]}"; do
   snapshot_managed_artifact_path "${OPENCLAW_PUSH_HOME}/agents/${MANAGED_AGENT_ID_FOR_SNAPSHOT}/agent"
 done
-echo "Copying native Codex stage agents to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
+echo "Writing native Codex runtime configs to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
 for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
   CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
-  CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
-  guarded_mkdir_p "${CODEX_RUNTIME_AGENTS_DST}" "creating managed Codex runtime agents directory ${CODEX_RUNTIME_AGENTS_DST}"
   write_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
-  remove_legacy_codex_stage_agents "${CODEX_RUNTIME_AGENTS_DST}"
-  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then
-    STALE_CODEX_AGENT_SCAN_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/push-openclaw-main-codex-agents.XXXXXX")"
-    guard_destination_path_chain "${STALE_CODEX_AGENT_SCAN_OUTPUT}" "creating stale main Codex runtime agent scan output ${STALE_CODEX_AGENT_SCAN_OUTPUT}" || exit 1
-    if ! collect_find_results_null \
-      "${STALE_CODEX_AGENT_SCAN_OUTPUT}" \
-      "${CODEX_RUNTIME_AGENTS_DST}" \
-      "scanning stale main Codex runtime agents in ${CODEX_RUNTIME_AGENTS_DST}" \
-      -mindepth 1 -maxdepth 1 -type f -name '*.toml'; then
-      exit 1
-    fi
-    while IFS= read -r -d '' STALE_CODEX_AGENT_FILE; do
-      guarded_rm "${STALE_CODEX_AGENT_FILE}" "removing stale main Codex runtime agent ${STALE_CODEX_AGENT_FILE}"
-    done < "${STALE_CODEX_AGENT_SCAN_OUTPUT}"
-    guarded_rm_f "${STALE_CODEX_AGENT_SCAN_OUTPUT}" "removing stale main Codex runtime agent scan output ${STALE_CODEX_AGENT_SCAN_OUTPUT}" || exit 1
-  else
-    for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
-      guarded_cp_file "${CODEX_AGENTS_SRC}/${AGENT_ID}.toml" "${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml" "copying managed Codex runtime agent ${CODEX_RUNTIME_AGENTS_DST}/${AGENT_ID}.toml"
-    done
+  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
+    render_native_research_role_config \
+      "${CODEX_AGENTS_SRC}" \
+      "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs" \
+      "${CODEX_RUNTIME_HOME}/config.toml"
+    validate_codex_native_research_runtime_roles \
+      "${CODEX_RUNTIME_HOME}/config.toml" \
+      "${CODEX_AGENTS_SRC}" \
+      "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs"
+  fi
+  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" || "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
+    CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
+    guarded_mkdir_p "${CODEX_RUNTIME_AGENTS_DST}" "creating managed Codex runtime agents directory ${CODEX_RUNTIME_AGENTS_DST}"
+    remove_retired_codex_runtime_agents "${CODEX_RUNTIME_AGENTS_DST}"
   fi
   validate_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
-  if [[ "${CODEX_RUNTIME_AGENT_ID}" != "main" ]]; then
-    validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"
-  fi
   echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_HOME}"
 done
 
-run_autoresearch_pm_command_contract_probe() {
-  local codex_home="${OPENCLAW_PUSH_HOME}/agents/autoresearch-pm/agent/codex-home"
+run_research_owner_command_contract_probe() {
+  local codex_home="${OPENCLAW_PUSH_HOME}/agents/research-orchestrator/agent/codex-home"
   if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.command_probe probe \
     -- "${codex_home}" "${CODEX_APP_SERVER_CLI_RESOLVED}"; then
-    echo "ERROR: Autoresearch PM command-contract probe failed; rolling back managed deployment from backup ${BACKUP}." >&2
+    echo "ERROR: Research owner command-contract probe failed; rolling back managed deployment from backup ${BACKUP}." >&2
     return 1
   fi
 }
 
 if [[ "${PROVIDER}" == "codex" ]]; then
-  run_autoresearch_pm_command_contract_probe || run_deployment_rollback_and_exit 1
+  run_research_owner_command_contract_probe || run_deployment_rollback_and_exit 1
 fi
 
 # Clean stale copies from wrong bootstrap locations without touching local
@@ -1912,30 +2136,31 @@ if [[ "${current_live_config_hash}" != "${PUBLISHED_OPENCLAW_CONFIG_HASH}" \
   run_deployment_rollback_and_exit 1
 fi
 
-# Install the supervisor definition without starting autonomous work. The
-# human-facing control command owns enable/start and stop transitions.
+# Install the research owner definition without enabling or starting it. The
+# operator owns activation and stop transitions.
 guarded_mkdir_p "${SYSTEMD_USER_DIR}" "creating managed systemd user directory ${SYSTEMD_USER_DIR}"
-SUPERVISOR_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${SUPERVISOR_SERVICE_NAME}.XXXXXX")"
-guard_destination_path_chain "${SUPERVISOR_UNIT_TMP}" "writing generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
+RESEARCH_OWNER_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${RESEARCH_OWNER_SERVICE_NAME}.XXXXXX")"
+guard_destination_path_chain "${RESEARCH_OWNER_UNIT_TMP}" "writing generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
 sed \
   -e "s|@REPO_ROOT@|$(escape_sed_replacement "${REPO_ROOT}")|g" \
   -e "s|@HOME@|$(escape_sed_replacement "${HOME}")|g" \
   -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
+  -e "s|@RESEARCH_V2_ROOT@|$(escape_sed_replacement "${RESEARCH_V2_ROOT}")|g" \
   -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
-  "${SUPERVISOR_UNIT_TEMPLATE}" > "${SUPERVISOR_UNIT_TMP}"
-guard_destination_path_chain "${SUPERVISOR_UNIT_TMP}" "wrote generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
-if grep -q '@[A-Z_][A-Z_]*@' "${SUPERVISOR_UNIT_TMP}"; then
-  echo "ERROR: Unresolved placeholder in generated ${SUPERVISOR_SERVICE_NAME}." >&2
+  "${RESEARCH_OWNER_UNIT_TEMPLATE}" > "${RESEARCH_OWNER_UNIT_TMP}"
+guard_destination_path_chain "${RESEARCH_OWNER_UNIT_TMP}" "wrote generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
+if grep -q '@[A-Z_][A-Z_]*@' "${RESEARCH_OWNER_UNIT_TMP}"; then
+  echo "ERROR: Unresolved placeholder in generated ${RESEARCH_OWNER_SERVICE_NAME}." >&2
   exit 1
 fi
-if ! validate_supervisor_unit_file "${SUPERVISOR_UNIT_TMP}"; then
+if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_V2_ROOT}"; then
   exit 1
 fi
-guarded_chmod 0644 "${SUPERVISOR_UNIT_TMP}" "chmod generated supervisor unit ${SUPERVISOR_UNIT_TMP}"
+guarded_chmod 0644 "${RESEARCH_OWNER_UNIT_TMP}" "chmod generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
 begin_managed_unit_transaction
-guarded_mv_replace "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}" "publishing managed supervisor unit ${SUPERVISOR_UNIT_DST}"
-SUPERVISOR_UNIT_TMP=""
-echo "Installed ${SUPERVISOR_SERVICE_NAME} (not started)."
+guarded_mv_replace "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_OWNER_UNIT_DST}" "publishing managed research owner unit ${RESEARCH_OWNER_UNIT_DST}"
+RESEARCH_OWNER_UNIT_TMP=""
+echo "Installed ${RESEARCH_OWNER_SERVICE_NAME} (not enabled or started)."
 
 QUANTIPY_API_UNIT_TMP="$(mktemp "${SYSTEMD_USER_DIR}/.${QUANTIPY_API_SERVICE_NAME}.XXXXXX")"
 guard_destination_path_chain "${QUANTIPY_API_UNIT_TMP}" "writing generated Quantipy API unit ${QUANTIPY_API_UNIT_TMP}"
@@ -1969,13 +2194,6 @@ validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}"
 guarded_mv_replace "${GATEWAY_RUNTIME_CAPS_DROPIN_TMP}" "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" "publishing managed runtime caps drop-in ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 GATEWAY_RUNTIME_CAPS_DROPIN_TMP=""
 validate_runtime_caps_dropin_file "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
-CODEX_RUNTIME_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${CODEX_RUNTIME_DROPIN_NAME}.XXXXXX")"
-guarded_cp_file "${CODEX_RUNTIME_DROPIN_SRC}" "${CODEX_RUNTIME_DROPIN_TMP}" "staging managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_TMP}"
-guarded_chmod 0644 "${CODEX_RUNTIME_DROPIN_TMP}" "chmod staged managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_TMP}"
-validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_TMP}"
-guarded_mv_replace "${CODEX_RUNTIME_DROPIN_TMP}" "${CODEX_RUNTIME_DROPIN_DST}" "publishing managed Codex runtime drop-in ${CODEX_RUNTIME_DROPIN_DST}"
-CODEX_RUNTIME_DROPIN_TMP=""
-validate_codex_runtime_dropin_file "${CODEX_RUNTIME_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${NATIVE_CRASH_HARDENING_DROPIN_NAME}.XXXXXX")"
 guarded_cp_file "${NATIVE_CRASH_HARDENING_DROPIN_SRC}" "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "staging managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
 guarded_chmod 0644 "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "chmod staged managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_TMP}"
@@ -1996,7 +2214,6 @@ if [[ "${POST_COMMIT_CLEANUP_FAILED:-0}" -ne 0 ]]; then
   exit 1
 fi
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
-echo "Installed ${GATEWAY_SERVICE_NAME} Codex runtime verifier → ${CODEX_RUNTIME_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} native-crash hardening → ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 echo "Reloaded user systemd units; restart ${GATEWAY_SERVICE_NAME} externally for a running gateway to inherit these caps."
 

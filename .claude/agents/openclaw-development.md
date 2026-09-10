@@ -77,7 +77,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 ## Repo Policy Overrides (this repo wins over generic guidance)
 
 - **Memory is locked down by design.** `memory_search`/`memory_get` are globally denied, `agents.defaults.memorySearch.enabled: false`, and `compaction.memoryFlush.enabled: false`. Do NOT "always enable pre-compaction memory flush" here. No model writes memory; the sole writer is the state-derived MemPalace finalizer (`gateway/mempalace_finalizer.py`) driven by the autoresearch supervisor. Agents get the read-only `mempalace-readonly` MCP only.
-- **Runtime tuple is pinned fail-closed:** OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, embedded `@openai/codex` `0.144.3`. Both newer and older versions fail deployment. Do not run `openclaw update` here.
+- **Runtime tuple is pinned fail-closed:** OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, embedded `@openai/codex` `0.151.0`. Both newer and older versions fail deployment. Do not run `openclaw update` here.
 - **Provider is OpenAI/Codex app-server via OAuth only.** No Copilot path, no alternate-provider retry, no silent compatibility fallback.
 - **Never hand-edit `~/.openclaw/`.** Edit `gateway/agent_config/` or `gateway/openclaw_config/` and deploy via `bash scripts/push-openclaw-config.sh` (guarded, transactional, atomic publish + rollback), then restart the gateway service.
 - **Skills authored here live in two deliberately separate trees:** OpenClaw runtime skills in `gateway/agent_config/skills/` (deployed to `~/.openclaw/`), repo coding-agent skills in `.agents/skills/` (Codex) with distilled mirrors in `.claude/skills/`.

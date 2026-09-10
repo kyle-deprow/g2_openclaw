@@ -55,7 +55,6 @@ from gateway.deployment.appserver_probe import (
     AppServerProbeResult,
     probe_appserver,
 )
-from gateway.deployment.codex_agents import CODEX_WRITABLE_ROOTS
 from gateway.research.cli import app as research_app
 
 app = typer.Typer(help="G2 OpenClaw Gateway CLI utilities.")
@@ -71,15 +70,13 @@ _MEMPALACE_PYTHON = Path.home() / ".local/share/mempalace/venv/bin/python"
 _MEMPALACE_HEALTH_SCRIPT = _PROJECT_ROOT / "scripts" / "check-mempalace-health.py"
 _MEMPALACE_CACHE_PATH = Path.home() / ".cache/fastembed"
 _MEMPALACE_EMBEDDING_MODEL = "bge-base"
-_REQUIRED_OPENCLAW_VERSION = (2026, 7, 1)
-_REQUIRED_OPENCLAW_VERSION_TEXT = "2026.7.1-2"
+_REQUIRED_OPENCLAW_VERSION = (2026, 8, 1)
+_REQUIRED_OPENCLAW_VERSION_TEXT = "2026.8.1"
 DEFAULT_AUTORESEARCH_DIR = Path("/home/dev/.openclaw/autoresearch")
 DEFAULT_AUTORESEARCH_STATE_PATH = DEFAULT_AUTORESEARCH_DIR / "quantipy-state.json"
 DEFAULT_AUTORESEARCH_CHECKPOINT_PATH = DEFAULT_AUTORESEARCH_DIR / "owner-recovery.json"
 DEFAULT_AUTORESEARCH_ARTIFACTS_PATH = DEFAULT_AUTORESEARCH_DIR / "artifacts"
-DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH = next(
-    root for root in CODEX_WRITABLE_ROOTS if root.name == "stage-inbox"
-)
+DEFAULT_AUTORESEARCH_STAGE_INBOX_PATH = autoresearch_constants.DEFAULT_AUTORESEARCH_STAGE_INBOX
 DEFAULT_AUTORESEARCH_OWNER_SESSIONS_PATH = Path(
     "/home/dev/.openclaw/agents/autoresearch-pm/sessions/sessions.json"
 )

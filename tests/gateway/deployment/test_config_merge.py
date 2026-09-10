@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 from gateway.deployment.config_merge import (
     AssemblyInputs,
+    JsonNumber,
     JsonObject,
     JsonValue,
     assemble_config,
@@ -25,19 +26,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 REPO_CONFIG = REPO_ROOT / "gateway/openclaw_config/openclaw.json"
 JQ = shutil.which("jq")
 
-STAGE_AGENT_IDS = (
-    "context_curator",
-    "debater_microstructure",
-    "debater_data",
-    "debater_skeptic",
-    "debater_theory",
-    "debater_implementation",
-    "consensus_arbiter",
-    "implementer",
-    "reviewer",
-    "fixer",
-)
-READONLY_AGENTS = ("main", "autoresearch-pm", *STAGE_AGENT_IDS)
+STAGE_AGENT_IDS = ("implementer", "experiment_runner")
+READONLY_AGENTS = ("main",)
 G2_AGENTS = ("main",)
 
 
@@ -107,6 +97,38 @@ def test_deep_merge_serialization_matches_real_jq(
     assert serialize_json(python_value) == _jq_merge(local_path, overlay_path)
 
 
+def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "plugins": {
+                "entries": {
+                    "codex": {
+                        "config": {
+                            "appServer": {
+                                "sandbox": "workspace-write",
+                                "defaultWorkspaceDir": (
+                                    "/home/dev/.openclaw/autoresearch/model-workspaces"
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+
+    merged = assemble_config(local, repo, _assembly_inputs(tmp_path))
+
+    plugins = cast(JsonObject, merged["plugins"])
+    entries = cast(JsonObject, plugins["entries"])
+    codex = cast(JsonObject, entries["codex"])
+    codex_config = cast(JsonObject, codex["config"])
+    app_server = cast(JsonObject, codex_config["appServer"])
+    assert "defaultWorkspaceDir" not in app_server
+
+
 def _assembly_inputs(
     tmp_path: Path,
     *,
@@ -114,9 +136,11 @@ def _assembly_inputs(
     model_primary: str = "openai/gpt-5.4",
     model_provider: str = "openai",
     model_id: str = "gpt-5.4",
+    research_v2_root: str | None = None,
 ) -> AssemblyInputs:
     home = tmp_path / "fake-home"
     push_home = home / ".openclaw"
+    resolved_research_root = research_v2_root or str(push_home / "research-v2")
     return AssemblyInputs(
         repo_root=str(REPO_ROOT),
         python_bin=str(REPO_ROOT / ".venv/bin/python"),
@@ -127,13 +151,16 @@ def _assembly_inputs(
         mempalace_embedding_model="bge-base",
         hf_hub_offline="1",
         g2_module="gateway.g2_control_mcp_server",
+        research_v2_root=resolved_research_root,
         mempalace_readonly_agents=READONLY_AGENTS,
         g2_agents=G2_AGENTS,
         provider=provider,
         model_primary=model_primary,
         model_provider=model_provider,
         model_id=model_id,
-        pm_model_primary="openai/gpt-5.6-sol",
+        orchestrator_model_primary="openai/gpt-6-astra",
+        research_reviewer_launcher=str(REPO_ROOT / "scripts/research-reviewer-cli.py"),
+        acpx_adapter_bin="/opt/acpx/claude-agent-acp",
     )
 
 
@@ -176,6 +203,9 @@ def _jq_full_assembly(
             "--arg",
             "g2_module",
             inputs.g2_module,
+            "--arg",
+            "research_root",
+            inputs.research_v2_root,
             "--argjson",
             "readonly_agents",
             readonly_agents,
@@ -200,7 +230,7 @@ def _jq_full_assembly(
             '      "agents": $g2_agents,\n'
             '      "defaultToolsApprovalMode": "approve"\n'
             "    },\n"
-            '    "env": {"PYTHONPATH": $repo}\n'
+            '    "env": {"PYTHONPATH": $repo, "RESEARCH_V2_ROOT": $research_root}\n'
             "  }\n"
             "}",
         ],
@@ -286,10 +316,14 @@ def _jq_full_assembly(
     merged = _run_jq(
         [
             "--arg",
-            "pm",
-            inputs.pm_model_primary,
-            '(.agents.list[] | select(.id == "autoresearch-pm") | .model.primary) = $pm | '
-            '(.agents.list[] | select(.id == "autoresearch-pm") | .thinkingDefault) = "high"',
+            "owner",
+            inputs.orchestrator_model_primary,
+            '(.agents.list[] | select(.id == "research-orchestrator") | .model.primary) = $owner | '
+            '(.agents.list[] | select(.id == "research-orchestrator") | '
+            '.thinkingDefault) = "high" | '
+            "if .plugins.entries.codex.config.appServer.defaultWorkspaceDir == "
+            '"/home/dev/.openclaw/autoresearch/model-workspaces" then '
+            "del(.plugins.entries.codex.config.appServer.defaultWorkspaceDir) else . end",
         ],
         input_bytes=merged,
     )
@@ -311,6 +345,26 @@ def _jq_full_assembly(
         ],
         input_bytes=merged,
     )
+    merged = _run_jq(
+        [
+            "--arg",
+            "launcher",
+            inputs.research_reviewer_launcher,
+            "--arg",
+            "adapter",
+            inputs.acpx_adapter_bin,
+            '.acp = {"enabled":true,"dispatch":{"enabled":true},'
+            '"backend":"acpx","allowedAgents":["claude"],'
+            '"maxConcurrentSessions":1} | '
+            ".plugins.entries.acpx.config = {"
+            '"agents":{"claude":{"command":"/usr/bin/env","args":[('
+            '"CLAUDE_CODE_EXECUTABLE=" + $launcher),$adapter]}},'
+            '"permissionMode":"approve-reads","nonInteractivePermissions":"fail",'
+            '"pluginToolsMcpBridge":false,"openClawToolsMcpBridge":false,"mcpServers":{}'
+            "}",
+        ],
+        input_bytes=merged,
+    )
     return _run_jq(["."], input_bytes=merged)
 
 
@@ -327,7 +381,18 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
                 "github-copilot": {"apiKey": "stale"},  # pragma: allowlist secret
             }
         },
-        "agents": {"defaults": {"model": {"primary": "local/model"}}, "list": []},
+        "agents": {
+            "defaults": {
+                "model": {"primary": "local/model"},
+                "subagents": {"archiveAfterMinutes": 7, "requireAgentId": True},
+            },
+            "list": [],
+        },
+        "acp": {
+            "stream": {"coalesceIdleMs": 99},
+            "defaultAgent": "legacy-reviewer",
+            "probeAgent": "legacy-probe",
+        },
         "tools": {"allow": ["stale"]},
         "memory": {"legacy": {"enabled": True}},
         "plugins": {
@@ -337,14 +402,25 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
                         "nativeToolSurfaceEnabled": True,
                         "codexDynamicToolsExclude": ["stale"],
                     }
-                }
+                },
+                "acpx": {
+                    "config": {
+                        "stream": {"coalesceIdleMs": 99},
+                        "defaultAgent": "legacy-reviewer",
+                        "probeAgent": "legacy-probe",
+                    },
+                    "machineOnly": True,
+                },
             }
         },
         "mcp": {"servers": {"machine-local": {"command": "stale"}}},
     }
     local_path = tmp_path / "live.json"
     _write_json(local_path, local)
-    inputs = _assembly_inputs(tmp_path)
+    inputs = _assembly_inputs(
+        tmp_path,
+        research_v2_root=str(tmp_path / "custom research root with spaces"),
+    )
 
     python_config = assemble_config(
         cast(JsonObject, load_json(local_path)),
@@ -353,6 +429,44 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
     )
 
     assert serialize_json(python_config) == _jq_full_assembly(local_path, REPO_CONFIG, inputs)
+    mcp = cast(JsonObject, python_config["mcp"])
+    mcp_servers = cast(JsonObject, mcp["servers"])
+    g2_control = cast(JsonObject, mcp_servers["g2-control"])
+    assert g2_control["env"] == {
+        "PYTHONPATH": inputs.repo_root,
+        "RESEARCH_V2_ROOT": inputs.research_v2_root,
+    }
+    assert python_config["acp"] == {
+        "enabled": True,
+        "dispatch": {"enabled": True},
+        "backend": "acpx",
+        "allowedAgents": ["claude"],
+        "maxConcurrentSessions": 1,
+    }
+    defaults = cast(JsonObject, cast(JsonObject, python_config["agents"])["defaults"])
+    subagents = cast(JsonObject, defaults["subagents"])
+    assert subagents["archiveAfterMinutes"] == JsonNumber("7")
+    assert subagents["requireAgentId"] is True
+    plugins = cast(JsonObject, python_config["plugins"])
+    entries = cast(JsonObject, plugins["entries"])
+    acpx = cast(JsonObject, entries["acpx"])
+    assert acpx["machineOnly"] is True
+    assert acpx["config"] == {
+        "agents": {
+            "claude": {
+                "command": "/usr/bin/env",
+                "args": [
+                    "CLAUDE_CODE_EXECUTABLE=" + inputs.research_reviewer_launcher,
+                    inputs.acpx_adapter_bin,
+                ],
+            }
+        },
+        "permissionMode": "approve-reads",
+        "nonInteractivePermissions": "fail",
+        "pluginToolsMcpBridge": False,
+        "openClawToolsMcpBridge": False,
+        "mcpServers": {},
+    }
 
 
 @pytest.mark.skipif(JQ is None, reason="jq is required for byte-equivalence golden tests")
@@ -407,8 +521,11 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
         "bge-base",
         "1",
         "gateway.g2_control_mcp_server",
+        str(tmp_path / "custom research root with spaces"),
         json.dumps(list(READONLY_AGENTS)),
         json.dumps(list(G2_AGENTS)),
+        str(REPO_ROOT / "scripts/research-reviewer-cli.py"),
+        "/opt/acpx/claude-agent-acp",
     ]
     environment = os.environ.copy()
     environment["OPENCLAW_PROVIDER"] = ""

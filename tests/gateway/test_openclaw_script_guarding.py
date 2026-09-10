@@ -17,30 +17,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP_SCRIPT = REPO_ROOT / "scripts/bootstrap.sh"
 PUSH_SCRIPT = REPO_ROOT / "scripts/push-openclaw-config.sh"
 OPENCLAW_CONFIG = REPO_ROOT / "gateway/openclaw_config/openclaw.json"
-SUPERVISOR_UNIT_TEMPLATE = (
-    REPO_ROOT / "gateway/openclaw_config/quantipy-autoresearch-supervisor.service.template"
-)
+RESEARCH_OWNER_UNIT_TEMPLATE = REPO_ROOT / "gateway/openclaw_config/research-owner.service.template"
 QUANTIPY_API_UNIT_TEMPLATE = REPO_ROOT / "gateway/openclaw_config/quantipy-api.service.template"
 GATEWAY_RUNTIME_CAPS_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 )
-CODEX_RUNTIME_DROPIN = REPO_ROOT / "gateway/openclaw_config/openclaw-codex-runtime.conf"
 NATIVE_CRASH_HARDENING_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
 )
 
-STAGE_AGENT_IDS = [
-    "context_curator",
-    "debater_microstructure",
-    "debater_data",
-    "debater_skeptic",
-    "debater_theory",
-    "debater_implementation",
-    "consensus_arbiter",
-    "implementer",
-    "reviewer",
-    "fixer",
-]
+STAGE_AGENT_IDS = ["implementer", "experiment_runner"]
 EXPECTED_MAIN_ALLOW = [
     "g2-control__g2_autoresearch_status",
     "g2-control__g2_autoresearch_start",
@@ -66,9 +52,6 @@ EXPECTED_MAIN_ALLOW = [
     "mempalace-readonly__mempalace_memories_filed_away",
 ]
 EXPECTED_RUNTIME_CAP_LINES = [
-    "[Unit]",
-    "Upholds=quantipy-autoresearch-supervisor.service",
-    "",
     "[Service]",
     "UMask=0077",
     'Environment="LOKY_MAX_CPU_COUNT=1"',
@@ -81,11 +64,6 @@ EXPECTED_RUNTIME_CAP_LINES = [
     'Environment="PYTHONFAULTHANDLER=1"',
 ]
 EXPECTED_RUNTIME_CAP_TEXT = "\n".join(EXPECTED_RUNTIME_CAP_LINES) + "\n"
-EXPECTED_CODEX_RUNTIME_TEXT = CODEX_RUNTIME_DROPIN.read_text(encoding="utf-8")
-EXPECTED_CODEX_RUNTIME_EXECSTARTPRE = (
-    "ExecStartPre=/usr/bin/env node "
-    "/home/dev/repos/g2_openclaw/scripts/ensure-openclaw-codex-runtime.mjs"
-)
 EXPECTED_NATIVE_CRASH_HARDENING_LINES = [
     "[Service]",
     "MemoryHigh=8G",
@@ -435,6 +413,10 @@ printf '%s\t%s\t%s\n' \
   "$*" \
   "${OPENCLAW_STATE_DIR:-<unset>}" \
   "${OPENCLAW_CONFIG_PATH:-<unset>}" >> "${FLOW_LOG}.contexts"
+mkdir -p "$TEST_ROOT/bootstrap-codex/bin"
+printf '{"name":"@openai/codex","version":"0.151.0","bin":{"codex":"bin/codex.js"}}\n' \
+  > "$TEST_ROOT/bootstrap-codex/package.json"
+printf '#!/usr/bin/env node\n' > "$TEST_ROOT/bootstrap-codex/bin/codex.js"
 is_bootstrap_repo_config() {
   case "${OPENCLAW_CONFIG_PATH:-}" in
     "$TEST_ROOT"/g2-openclaw-bootstrap.*/openclaw.repo-preflight.json)
@@ -513,7 +495,7 @@ plugin_state_dir() {
   printf '%s/plugins/codex' "$OPENCLAW_STATE_DIR"
 }
 plugin_artifacts_are_complete() {
-  for artifact in installed updated enabled; do
+  for artifact in installed; do
     [[ -f "$(plugin_state_dir)/$artifact" ]] || return 1
   done
 }
@@ -667,15 +649,21 @@ JSON
           printf 'missing plugin artifact in validation context: %s\n' "$(plugin_state_dir)" >&2
           exit 97
         }
-        cat <<'JSON'
+        cat <<JSON
 {
   "plugin": {
     "id": "codex",
-    "version": "2026.7.1-1",
+    "version": "2026.8.1",
     "enabled": true,
     "status": "loaded",
     "dependencyStatus": {
-      "dependencies": [{"name": "@openai/codex", "spec": "0.144.3"}]
+      "dependencies": [
+        {
+          "name": "@openai/codex",
+          "spec": "0.151.0",
+          "resolvedPath": "${TEST_ROOT}/bootstrap-codex"
+        }
+      ]
     }
   }
 }
@@ -770,10 +758,6 @@ def _runtime_caps_dropin_dst(home: Path) -> Path:
     return home / ".config/systemd/user/openclaw-gateway.service.d/10-quantipy-runtime-caps.conf"
 
 
-def _codex_runtime_dropin_dst(home: Path) -> Path:
-    return home / ".config/systemd/user/openclaw-gateway.service.d/20-openclaw-codex-runtime.conf"
-
-
 def _native_crash_hardening_dropin_dst(home: Path) -> Path:
     return (
         home
@@ -783,7 +767,7 @@ def _native_crash_hardening_dropin_dst(home: Path) -> Path:
 
 
 def _supervisor_unit_dst(home: Path) -> Path:
-    return home / ".config/systemd/user/quantipy-autoresearch-supervisor.service"
+    return home / ".config/systemd/user/research-owner.service"
 
 
 def _quantipy_api_unit_dst(home: Path) -> Path:
@@ -919,7 +903,7 @@ const checks = {
     status: process.env.MOCK_CODEX_DOCTOR_RUNTIME_STATUS || "ok",
     category: "runtime",
     summary: "running npm on linux-x86_64",
-    details: {version: process.env.MOCK_CODEX_DOCTOR_RUNTIME_VERSION || "0.144.3"}
+    details: {version: process.env.MOCK_CODEX_DOCTOR_RUNTIME_VERSION || "0.151.0"}
   },
   "sandbox.helpers": {
     id: "sandbox.helpers",
@@ -1013,7 +997,7 @@ if (process.env.MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK) {
 console.log(JSON.stringify({
   schemaVersion: 1,
   overallStatus: "fail",
-  codexVersion: "0.144.3",
+  codexVersion: "0.151.0",
   checks
 }));
 process.exit(Number(process.env.MOCK_CODEX_DOCTOR_EXIT_STATUS || "1"));
@@ -1087,7 +1071,7 @@ printf '%s %s %s %s %s %s\n' \
   "NODE_OPTIONS=${NODE_OPTIONS:-<unset>}" >> "$OPENCLAW_LOG"
 case "${1:-}" in
   --version)
-    printf 'openclaw 2026.7.1-2\n'
+    printf 'openclaw 2026.8.1\n'
     ;;
   config)
     [[ "${2:-}" == "validate" ]] || exit 44
@@ -1244,6 +1228,25 @@ JSON
     fi
     ;;
   plugins)
+    if [[ "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
+      if [[ "${MOCK_ACPX_PLUGIN_PRESENT:-1}" != "1" ]]; then
+        printf '{"plugins":[]}\n'
+        exit 0
+      fi
+      cat <<JSON
+{
+  "plugins": [
+    {
+      "id": "acpx",
+      "name": "@openclaw/acpx",
+      "version": "2026.7.1",
+      "path": "${MOCK_ACPX_PLUGIN_PATH}"
+    }
+  ]
+}
+JSON
+      exit 0
+    fi
     [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 45
     if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
       printf 'plugin inspect used tracked repo overlay\n' >&2
@@ -1263,14 +1266,14 @@ JSON
 {
   "plugin": {
     "id": "codex",
-    "version": "${MOCK_CODEX_PLUGIN_VERSION:-2026.7.1-1}",
+    "version": "${MOCK_CODEX_PLUGIN_VERSION:-2026.8.1}",
     "enabled": true,
     "status": "loaded",
     "dependencyStatus": {
       "dependencies": [
         {
           "name": "@openai/codex",
-          "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.144.3}",
+          "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.151.0}",
           "resolvedPath": "${MOCK_CODEX_RESOLVED_PATH}"
         }
       ]
@@ -1407,7 +1410,6 @@ case "$*" in
   "--user daemon-reload")
     dropin_dir="$HOME/.config/systemd/user/openclaw-gateway.service.d"
     if [[ -f "$dropin_dir/10-quantipy-runtime-caps.conf" \
-      && -f "$dropin_dir/20-openclaw-codex-runtime.conf" \
       && -f "$dropin_dir/30-openclaw-native-crash-hardening.conf" ]]; then
       printf 'daemon-reload saw managed dropins\n' >> "$SYSTEMCTL_LOG"
     else
@@ -1567,7 +1569,17 @@ def _prepare_push_script_home(
     leaked_state_dir = tmp_path / "inherited-state-dir"
     leaked_config_path = tmp_path / "inherited-config.json"
     home.mkdir()
-    (home / ".openclaw/autoresearch/model-workspaces").mkdir(parents=True)
+    persona_dir = tmp_path / "research-orchestrator-persona"
+    persona_dir.mkdir()
+    for filename in ("AGENTS.md", "SOUL.md", "TOOLS.md", "BOOTSTRAP.md"):
+        (persona_dir / filename).write_text(
+            f"# Test research-orchestrator {filename}\n", encoding="utf-8"
+        )
+    skills_dir = tmp_path / "route-skills"
+    for skill_name in ("codex-subagents", "mempalace-readonly", "research-loop"):
+        skill_dir = skills_dir / skill_name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"# Test {skill_name} skill\n", encoding="utf-8")
     openclaw_home.mkdir()
     auth_db = openclaw_home / "agents/main/agent/openclaw-agent.sqlite"
     auth_db.parent.mkdir(parents=True)
@@ -1600,6 +1612,45 @@ def _prepare_push_script_home(
         gateway_load_state=gateway_load_state,
         gateway_active_state=gateway_active_state,
     )
+    codex_root = (
+        home / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
+    )
+    (codex_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@openai/codex",
+                "version": "0.151.0",
+                "bin": {"codex": "bin/codex.js"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    acpx_root = tmp_path / "mock-acpx/node_modules/@openclaw/acpx"
+    adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
+    sdk_root = acpx_root / "node_modules/@agentclientprotocol/sdk"
+    adapter_bin = adapter_root / "bin/claude-agent-acp"
+    acpx_root.mkdir(parents=True)
+    adapter_root.mkdir(parents=True)
+    sdk_root.mkdir(parents=True)
+    (acpx_root / "package.json").write_text(
+        json.dumps({"name": "@openclaw/acpx", "version": "2026.7.1"}),
+        encoding="utf-8",
+    )
+    (adapter_root / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@agentclientprotocol/claude-agent-acp",
+                "version": "0.55.0",
+                "bin": {"claude-agent-acp": "bin/claude-agent-acp"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (sdk_root / "package.json").write_text(
+        json.dumps({"name": "@agentclientprotocol/sdk", "version": "0.3.198"}),
+        encoding="utf-8",
+    )
+    _write_executable(adapter_bin, "#!/usr/bin/env bash\nexit 0\n")
     env_file = tmp_path / "openclaw-push.env"
     env_file.write_text(
         "\n".join(
@@ -1643,6 +1694,9 @@ def _prepare_push_script_home(
                 home
                 / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
             ),
+            "MOCK_ACPX_PLUGIN_PATH": str(acpx_root),
+            "RESEARCH_OWNER_PERSONA_SRC": str(persona_dir),
+            "SKILLS_SRC": str(skills_dir),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
             "CODEX_SANDBOX_LOG": str(home / "codex-sandbox.log"),
             "SQLITE_LOG": str(home / "sqlite.log"),
@@ -1971,8 +2025,12 @@ def test_push_script_rejects_corrupted_quantipy_api_unit_template(tmp_path: Path
     assert not (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json.bak").exists()
 
 
-def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None:
+def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
+    repo_config_text = json.dumps(config)
+    assert "__RESEARCH_REVIEWER_LAUNCHER__" not in repo_config_text
+    assert "__ACPX_ADAPTER_BIN__" not in repo_config_text
+    assert config["plugins"]["entries"]["acpx"]["config"] == {}
     assert config["agents"]["defaults"]["maxConcurrent"] == 2
     assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 1
     assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
@@ -1989,27 +2047,27 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert "exec" in main["tools"]["deny"]
     assert "sessions_spawn" in main["tools"]["deny"]
 
-    pm = agents["autoresearch-pm"]
-    assert pm["model"]["primary"] == "openai/gpt-5.6-sol"
-    assert pm["thinkingDefault"] == "high"
-    assert pm["skills"] == ["mempalace-readonly", "autoresearch"]
-    assert pm["tools"]["deny"] == [
-        "sessions_spawn",
+    owner = agents["research-orchestrator"]
+    assert owner["model"]["primary"] == "openai/gpt-6-astra"
+    assert owner["thinkingDefault"] == "high"
+    assert owner["workspace"] == "workspace-research-orchestrator"
+    assert owner["skills"] == ["research-loop"]
+    assert owner["subagents"]["allowAgents"] == ["claude"]
+    assert owner["tools"]["profile"] == "full"
+    assert owner["tools"]["allow"] == ["sessions_spawn"]
+    assert owner["tools"]["deny"] == [
         "sessions_yield",
         "agents_list",
         "sessions_list",
         "sessions_history",
+        *[tool for tool in owner["tools"]["deny"] if tool.startswith("g2-control__")],
+        *[tool for tool in owner["tools"]["deny"] if tool.startswith("mempalace-readonly__")],
     ]
-    assert "subagents" not in pm
-    assert all(agent.get("subagents", {}).get("allowAgents", []) == [] for agent in agents.values())
+    assert set(agents) == {"main", "research-orchestrator"}
 
     servers = config["mcp"]["servers"]
     assert list(servers) == ["mempalace-readonly", "g2-control"]
-    assert servers["mempalace-readonly"]["codex"]["agents"] == [
-        "main",
-        "autoresearch-pm",
-        *STAGE_AGENT_IDS,
-    ]
+    assert servers["mempalace-readonly"]["codex"]["agents"] == ["main"]
     assert servers["g2-control"]["codex"]["agents"] == ["main"]
     assert servers["g2-control"]["codex"]["defaultToolsApprovalMode"] == "approve"
     assert servers["g2-control"]["args"] == ["-m", "gateway.g2_control_mcp_server"]
@@ -2017,14 +2075,14 @@ def test_repo_openclaw_config_splits_g2_interface_from_autoresearch_pm() -> None
     assert codex_entry["enabled"] is True
     app_server = codex_entry["config"]["appServer"]
     assert app_server["sandbox"] == "workspace-write"
-    assert app_server["defaultWorkspaceDir"] == "/home/dev/.openclaw/autoresearch/model-workspaces"
+    assert "defaultWorkspaceDir" not in app_server
     assert "networkProxy" not in app_server
     assert "nativeToolSurfaceEnabled" not in codex_entry["config"]
     assert "codexDynamicToolsExclude" not in codex_entry["config"]
     assert "danger-full-access" not in json.dumps(codex_entry)
 
 
-def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
+def test_push_script_invariants_target_research_owner_not_main() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
     config_merge = (REPO_ROOT / "gateway/deployment/config_merge.py").read_text(encoding="utf-8")
 
@@ -2033,15 +2091,18 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert '"copilot-proxy"' in config_merge
     assert '"copilot-cli"' in config_merge
     assert "_walk_remove_keys" in config_merge
-    assert '  "main"\n  "autoresearch-pm"\n  "${MEMPALACE_READONLY_AGENT_IDS[@]}"' in script
-    assert "def pm_model_primary" in config_merge
-    assert 'item.get("id") != "autoresearch-pm"' in config_merge
-    assert "main interface split, read-only-only MemPalace projection" in script
-    assert "PM_NATIVE_CODEX_DELEGATION_DENY_TOOL_IDS" in script
-    assert "autoresearch-pm model/skills/native Codex delegation denies" in script
+    assert "RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS=(" in script
+    assert "def orchestrator_model_primary" in config_merge
+    assert 'item.get("id") != "research-orchestrator"' in config_merge
+    assert "main interface, Astra research owner" in script
+    assert 'CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")' in script
+    assert "Research orchestrator tool policy" in script
     assert ".agents.defaults.maxConcurrent == 2" in script
     assert ".agents.defaults.subagents.maxConcurrent == 1" in script
-    assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" in script
+    assert ".agents.defaults.subagents.maxSpawnDepth == 1" in script
+    assert ".agents.defaults.subagents.runTimeoutSeconds == 1800" in script
+    assert ".agents.defaults.subagents ==" not in script
+    assert ".agents.defaults.subagents.maxChildrenPerAgent? == null" not in script
     assert "sessions_spawn" in script
     assert "G2_CONTROL_MCP_MODULE" in script
     assert "MAIN_OPENCLAW_TOOL_ALLOW_IDS" in script
@@ -2051,7 +2112,7 @@ def test_push_script_invariants_target_autoresearch_pm_not_main() -> None:
     assert "validate_codex_runtime_config" in script
     assert ".subagents.allowAgents?" in script
     assert "strict concurrency caps" in script
-    assert "main interface restrictions" in script
+    assert "main interface" in script
 
 
 @pytest.mark.parametrize("push_impl", ["bash", "Bash"])
@@ -2131,23 +2192,22 @@ def test_installed_runtime_projects_main_mcp_servers_from_codex_agent_scope() ->
     assert "userMcpServersConfigPatch" in mcp_source
 
 
-def test_bootstrap_reconciles_exact_codex_runtime_and_reinstalls_daemon() -> None:
+def test_bootstrap_reconciles_exact_codex_runtime_and_installs_daemon() -> None:
     script = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'REQUIRED_OPENCLAW_VERSION="2026.7.1-2"' in script
-    assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.7.1-1"' in script
-    assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.144.3"' in script
+    assert 'REQUIRED_OPENCLAW_VERSION="2026.8.1"' in script
+    assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"' in script
+    assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"' in script
     install = script.index(
-        'plugins install "@openclaw/codex@${REQUIRED_CODEX_PLUGIN_VERSION}" --force --pin'
+        'plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --force --accept-capabilities'
     )
-    update = script.index("plugins update codex")
     inspect = script.index(
-        "if ! require_codex_plugin_exact run_openclaw_cli_for_candidate_config; then", update
+        "if ! require_codex_plugin_exact run_openclaw_cli_for_candidate_config; then", install
     )
     daemon_install = script.index('daemon install --force --port "${OPENCLAW_GATEWAY_PORT}" --json')
     push = script.index('local push_script="$REPO_ROOT/scripts/push-openclaw-config.sh"')
 
-    assert install < update < inspect < daemon_install < push
+    assert install < inspect < daemon_install < push
     assert "daemon restart" not in script
     assert "daemon start" not in script
 
@@ -2160,15 +2220,15 @@ def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Pa
     assert result.returncode == 0, result.stderr
     assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
         "openclaw daemon install --force --port 18789 --json",
@@ -2201,8 +2261,6 @@ def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Pa
     }
     live_plugin_state = tmp_path / "home/.openclaw/plugins/codex"
     assert (live_plugin_state / "installed").is_file()
-    assert (live_plugin_state / "updated").is_file()
-    assert (live_plugin_state / "enabled").is_file()
     unit = tmp_path / "home/.config/systemd/user/openclaw-gateway.service"
     unit_text = unit.read_text(encoding="utf-8")
     assert f"Environment=OPENCLAW_STATE_DIR={tmp_path / 'home/.openclaw'}" in unit_text
@@ -2226,9 +2284,9 @@ def test_bootstrap_invalid_repo_overlay_aborts_before_onboarding_or_live_writes(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2250,9 +2308,9 @@ def test_bootstrap_rejects_repo_schema_warnings_before_live_writes(tmp_path: Pat
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2275,9 +2333,9 @@ def test_bootstrap_invalid_candidate_overlay_aborts_before_onboarding_or_live_wr
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2299,9 +2357,9 @@ def test_bootstrap_rejects_candidate_schema_warnings_before_inspect_or_daemon(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2330,9 +2388,9 @@ def test_bootstrap_rejects_repo_preflight_topology_replacement_with_identical_by
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
     ]
     assert "Repo OpenClaw config failed schema validation" in result.stdout
@@ -2357,9 +2415,9 @@ def test_bootstrap_rejects_candidate_preflight_topology_replacement_with_identic
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin",
-        "openclaw plugins update codex",
-        "openclaw plugins enable codex",
+        "openclaw plugins install "
+        "npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz "
+        "--force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2451,7 +2509,7 @@ if [[ -n "${NODE_OPTIONS:-}" ]]; then
   printf 'leaked NODE_OPTIONS=%s\n' "$NODE_OPTIONS" >&2
   exit 63
 fi
-printf 'openclaw 2026.7.1-2\n'
+printf 'openclaw 2026.8.1\n'
 """.strip(),
     )
 
@@ -2527,13 +2585,13 @@ def test_mocked_bootstrap_daemon_install_failure_aborts_before_push(tmp_path: Pa
     [
         (
             "MOCK_CODEX_PLUGIN_VERSION",
-            "2026.7.1-2",
-            "Codex plugin 2026.7.1-2 is unsupported; need exactly 2026.7.1-1",
+            "2026.8.0",
+            "Codex plugin 2026.8.0 is unsupported; need exactly 2026.8.1",
         ),
         (
             "MOCK_CODEX_APP_SERVER_VERSION",
             "0.144.4",
-            "Embedded @openai/codex 0.144.4 is unsupported; need exactly 0.144.3",
+            "Embedded @openai/codex 0.144.4 is unsupported; need exactly 0.151.0",
         ),
     ],
 )
@@ -2556,29 +2614,93 @@ def test_push_script_rejects_non_exact_codex_runtime(
     assert "mempalace-readonly-server.py" not in cp_log
 
 
-def test_push_script_installs_but_does_not_start_the_supervisor_service() -> None:
+def test_push_script_missing_pinned_acpx_fails_before_live_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_ACPX_PLUGIN_PRESENT"] = "0"
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "@openclaw/acpx version 2026.7.1 was not found" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not (live_config.parent / "openclaw.json.bak").exists()
+    assert not Path(env["CP_LOG"]).exists() or "openclaw.json.bak" not in _read_cp_log(env)
+
+
+def test_push_script_missing_research_persona_is_explicit_p4_gate(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["RESEARCH_OWNER_PERSONA_SRC"] = str(tmp_path / "missing-persona")
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "research-orchestrator persona not yet delivered (P4)" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not (live_config.parent / "openclaw.json.bak").exists()
+
+
+@pytest.mark.parametrize(
+    "unsafe_root",
+    [
+        "relative-research-root",
+        "${HOME}/research-v2",
+        "/tmp/research root\nwith-control",
+        "/tmp/research-root@placeholder",
+        "/tmp/research-root%h-specifier",
+    ],
+)
+def test_push_script_rejects_unsafe_research_root_before_live_write(
+    tmp_path: Path, unsafe_root: str
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["RESEARCH_V2_ROOT"] = unsafe_root
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    original = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Research route writable root" in result.stderr
+    assert live_config.read_bytes() == original
+    assert not list(live_config.parent.glob("openclaw.json.bak.*"))
+
+
+def test_push_script_installs_but_does_not_start_the_research_owner_service() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
-    template = SUPERVISOR_UNIT_TEMPLATE.read_text(encoding="utf-8")
+    template = RESEARCH_OWNER_UNIT_TEMPLATE.read_text(encoding="utf-8")
     api_template = QUANTIPY_API_UNIT_TEMPLATE.read_text(encoding="utf-8")
 
-    assert "quantipy-autoresearch-supervisor.service" in script
+    assert "research-owner.service" in script
     assert "quantipy-api.service" in script
     assert "systemctl --user daemon-reload" in script
-    assert '"${SYSTEMD_USER_DIR}/quantipy-autoresearch-supervisor.service"' in script
+    assert '"${SYSTEMD_USER_DIR}/${RESEARCH_OWNER_SERVICE_NAME}"' in script
     assert '"${SYSTEMD_USER_DIR}/quantipy-api.service"' in script
     assert "enable --now" not in script
-    assert "start quantipy-autoresearch-supervisor.service" not in script
+    assert "start research-owner.service" not in script
     assert "start quantipy-api.service" not in script
     assert "@REPO_ROOT@" in template
-    assert "@HOME@" in template
     assert "@OPENCLAW_BIN@" not in template
     assert "Environment=OPENCLAW_BIN=" not in template
     assert "Environment=OPENCLAW_HOME=" not in template
-    assert "-m gateway.autoresearch_supervisor" in template
     assert "After=openclaw-gateway.service" in template
-    assert "Requires=openclaw-gateway.service" in template
+    assert "Description=G2 research owner loop" in template
     assert "BindsTo=openclaw-gateway.service" in template
+    assert "Type=simple" in template
+    assert "gateway-cli research serve" in template
+    assert 'research serve --root "@RESEARCH_V2_ROOT@"' in template
+    assert "%h/.openclaw/research-v2" not in template
+    assert "--session-key agent:research-orchestrator:autoresearch:quantipy-v2" in template
+    assert "--poll-seconds 60" in template
+    assert "EnvironmentFile=@REPO_ROOT@/.env" in template
+    assert "Requires=openclaw-gateway.service" not in template
     assert "Restart=on-failure" in template
+    assert "RestartSec=30" in template
+    assert "KillMode=process" in template
+    assert "UMask=0077" in template
     assert "Restart=always" not in template
     assert "Description=Quantipy Data API" in api_template
     assert "WorkingDirectory=/home/dev/repos/quantipy" in api_template
@@ -2603,11 +2725,11 @@ def test_gateway_runtime_caps_dropin_declares_exact_operator_caps() -> None:
     )
 
 
-def test_codex_runtime_dropin_declares_prestart_verifier() -> None:
-    assert EXPECTED_CODEX_RUNTIME_TEXT.splitlines() == [
-        "[Service]",
-        EXPECTED_CODEX_RUNTIME_EXECSTARTPRE,
-    ]
+def test_push_script_does_not_reference_retired_codex_runtime_dropin() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+    assert "openclaw-codex-runtime.conf" not in script
+    assert "ensure-openclaw-codex-runtime.mjs" not in script
+    assert "CODEX_RUNTIME_DROPIN" not in script
 
 
 def test_native_crash_hardening_dropin_contains_memory_and_restart_policy() -> None:
@@ -2639,7 +2761,6 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     ) in script
     assert 'GATEWAY_SERVICE_NAME="openclaw-gateway.service"' in script
     assert 'GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"' in script
-    assert 'CODEX_RUNTIME_DROPIN_NAME="20-openclaw-codex-runtime.conf"' in script
     assert 'NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"' in script
     assert "printf '%s\\n' \"${RUNTIME_CAP_ENV_LINES[@]}\"" in script
     assert (
@@ -2669,11 +2790,9 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     assert "GATEWAY_RUNTIME_CAPS_DROPIN" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_TMP:-" in script
     assert "GATEWAY_RUNTIME_CAPS_DROPIN_DST" in script
-    assert "validate_codex_runtime_dropin_file" in script
-    assert "CODEX_RUNTIME_DROPIN_DST" in script
     assert "validate_native_crash_hardening_dropin_file" in script
     assert "NATIVE_CRASH_HARDENING_DROPIN_DST" in script
-    assert "validate_supervisor_unit_file" in script
+    assert "validate_research_owner_unit_file" in script
     assert "validate_quantipy_api_unit_file" in script
     assert "daemon-reload ||" not in script
     assert (
@@ -2686,12 +2805,12 @@ def test_push_script_installs_gateway_runtime_caps_dropin_fail_closed() -> None:
     backup_write = script.index(
         'guarded_copy_path_topology_preserving_final_symlink_topology "${LOCAL_CONFIG}" "${BACKUP}"'
     )
-    supervisor_unit_write = script.index(
-        'guarded_mv_replace "${SUPERVISOR_UNIT_TMP}" "${SUPERVISOR_UNIT_DST}"'
+    owner_unit_write = script.index(
+        'guarded_mv_replace "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_OWNER_UNIT_DST}"'
     )
     runtime_caps_dir_prepare = script.rindex("\nprepare_runtime_caps_dropin_dir\n")
     assert preflight_loadable_check < backup_write
-    assert preflight_loadable_check < supervisor_unit_write
+    assert preflight_loadable_check < owner_unit_write
     assert preflight_loadable_check < runtime_caps_dir_prepare
 
 
@@ -2761,25 +2880,20 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     assert result.returncode == 0, result.stderr
     dropin = _runtime_caps_dropin_dst(home)
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
-    dropin_lines = dropin.read_text(encoding="utf-8").splitlines()
-    unit_start = dropin_lines.index("[Unit]")
-    service_start = dropin_lines.index("[Service]")
-    assert dropin_lines[unit_start + 1 : service_start] == [
-        "Upholds=quantipy-autoresearch-supervisor.service",
-        "",
-    ]
-    codex_dropin = _codex_runtime_dropin_dst(home)
-    assert codex_dropin.read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
+    assert "Upholds=" not in dropin.read_text(encoding="utf-8")
     native_crash_hardening = _native_crash_hardening_dropin_dst(home)
     assert (
         native_crash_hardening.read_text(encoding="utf-8") == EXPECTED_NATIVE_CRASH_HARDENING_TEXT
     )
-    supervisor_unit = home / ".config/systemd/user/quantipy-autoresearch-supervisor.service"
-    supervisor_text = supervisor_unit.read_text(encoding="utf-8")
-    assert "Requires=openclaw-gateway.service" in supervisor_text
-    assert "BindsTo=openclaw-gateway.service" in supervisor_text
-    assert "Restart=on-failure" in supervisor_text
-    assert "Restart=always" not in supervisor_text
+    owner_unit = _supervisor_unit_dst(home)
+    owner_text = owner_unit.read_text(encoding="utf-8")
+    assert "Requires=openclaw-gateway.service" not in owner_text
+    assert "BindsTo=openclaw-gateway.service" in owner_text
+    assert "After=openclaw-gateway.service" in owner_text
+    assert "Restart=on-failure" in owner_text
+    assert "RestartSec=30" in owner_text
+    assert "Restart=always" not in owner_text
+    assert "gateway-cli research serve" in owner_text
     api_unit = _quantipy_api_unit_dst(home)
     expected_api_text = QUANTIPY_API_UNIT_TEMPLATE.read_text(encoding="utf-8")
     expected_api_text = expected_api_text.replace("@HOME@", str(home)).replace(
@@ -2807,14 +2921,14 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 1
     openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
-    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 5
-    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 5
-    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 5
-    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 1
+    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 6
+    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 6
+    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 6
+    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 2
     assert "OPENCLAW_CONFIG_PATH=" + env["EXPECTED_REPO_OPENCLAW_CONFIG_PATH"] not in openclaw_log
     assert openclaw_log.count("push-openclaw-config-preflight.") == 3
     assert "config validate --json" in openclaw_log
-    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 5
+    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 6
     assert "inherited-openclaw-home" not in openclaw_log
     assert "inherited-state-dir" not in openclaw_log
     assert "inherited-config.json" not in openclaw_log
@@ -2842,61 +2956,139 @@ def test_push_script_ignores_signal_during_final_commit_boundary(
     assert "Done. Config pushed successfully." in result.stdout
 
 
-def test_push_script_installs_native_codex_stage_agents_to_autoresearch_workspaces(
+def test_push_script_renders_native_codex_children_for_owner_workspace(
     tmp_path: Path,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    rendered_research_root = openclaw_home / "custom research root with spaces"
+    env["RESEARCH_V2_ROOT"] = str(rendered_research_root)
 
     result = _run_push_script(env)
 
     assert result.returncode == 0, result.stderr
-    for workspace_name in ("workspace-autoresearch-pm", "workspace-reviewer"):
-        agents_dir = openclaw_home / workspace_name / ".codex/agents"
-        assert agents_dir.is_dir()
-        for agent_id in STAGE_AGENT_IDS:
-            copied = agents_dir / f"{agent_id}.toml"
-            source = REPO_ROOT / ".codex/agents" / f"{agent_id}.toml"
-            assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+    workspace_agents_dir = openclaw_home / "workspace-research-orchestrator/.codex/agents"
+    assert not any(
+        (workspace_agents_dir / f"{agent_id}.toml").exists() for agent_id in STAGE_AGENT_IDS
+    )
+    assert (workspace_agents_dir.parent / "agent-configs/implementer.toml").is_file()
+    assert (workspace_agents_dir.parent / "agent-configs/experiment_runner.toml").is_file()
+    owner_unit = _supervisor_unit_dst(Path(env["HOME"]))
+    owner_root = str(rendered_research_root)
+    owner_unit_text = owner_unit.read_text(encoding="utf-8")
+    assert f'--root "{owner_root}"' in owner_unit_text
+    assert "%h/.openclaw/research-v2" not in owner_unit_text
+    assert "RestartPreventExitStatus=78" in owner_unit_text
+    assert "KillMode=process" in owner_unit_text
     assert not (openclaw_home / "workspace/.codex/agents").exists()
-    for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]:
+    for agent_id in ["main", "research-orchestrator"]:
         codex_home = openclaw_home / "agents" / agent_id / "agent/codex-home"
         config = tomllib.loads((codex_home / "config.toml").read_text(encoding="utf-8"))
         assert config["approval_policy"] == "never"
         assert config["sandbox_mode"] == "workspace-write"
         workspace_write = config["sandbox_workspace_write"]
         assert workspace_write["network_access"] is True
-        assert workspace_write["writable_roots"] == [
-            "/home/dev/.openclaw/autoresearch/model-workspaces",
-            "/home/dev/.openclaw/autoresearch/stage-inbox",
-        ]
+        if agent_id == "main":
+            assert workspace_write["writable_roots"] == []
+        else:
+            assert workspace_write["writable_roots"] == [
+                owner_root,
+                f"{owner_root}/hypothesis-worktrees",
+            ]
+            assert config["agents"]["max_depth"] == 1
+            assert config["agents"]["max_threads"] == 1
+            for child_agent_id in STAGE_AGENT_IDS:
+                expected_role_layer = (
+                    workspace_agents_dir.parent / "agent-configs" / f"{child_agent_id}.toml"
+                ).resolve()
+                assert config["agents"][child_agent_id]["config_file"] == str(expected_role_layer)
         assert "permissions" not in config
         assert "network_proxy" not in config
-        mcp_servers = config["mcp_servers"]
-        expected_servers = (
-            {"mempalace-readonly", "g2-control"} if agent_id == "main" else {"mempalace-readonly"}
-        )
-        assert set(mcp_servers) == expected_servers
-        assert mcp_servers["mempalace-readonly"]["args"][-2:] == [
-            "--palace",
-            str(Path(env["HOME"]) / ".mempalace/palace"),
-        ]
         if agent_id == "main":
+            mcp_servers = config["mcp_servers"]
+            assert set(mcp_servers) == {"mempalace-readonly", "g2-control"}
+            assert mcp_servers["mempalace-readonly"]["args"][-2:] == [
+                "--palace",
+                str(Path(env["HOME"]) / ".mempalace/palace"),
+            ]
             assert mcp_servers["g2-control"]["args"] == ["-m", "gateway.g2_control_mcp_server"]
             assert mcp_servers["g2-control"]["default_tools_approval_mode"] == "approve"
-        agents_dir = codex_home / "agents"
-        assert agents_dir.is_dir()
-        if agent_id == "main":
-            assert list(agents_dir.glob("*.toml")) == []
+            assert mcp_servers["g2-control"]["env"] == {
+                "PYTHONPATH": str(REPO_ROOT),
+                "RESEARCH_V2_ROOT": owner_root,
+            }
         else:
-            for stage_id in STAGE_AGENT_IDS:
-                copied = agents_dir / f"{stage_id}.toml"
-                source = REPO_ROOT / ".codex/agents" / f"{stage_id}.toml"
-                assert copied.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+            assert "mcp_servers" not in config
+        runtime_agents_dir = codex_home / "agents"
+        assert runtime_agents_dir.is_dir()
+        assert list(runtime_agents_dir.glob("*.toml")) == []
+    assert tomllib.loads(
+        (workspace_agents_dir.parent / "agent-configs/implementer.toml").read_text(encoding="utf-8")
+    )["sandbox_workspace_write"]["writable_roots"] == [f"{owner_root}/hypothesis-worktrees"]
+    assert tomllib.loads(
+        (workspace_agents_dir.parent / "agent-configs/experiment_runner.toml").read_text(
+            encoding="utf-8"
+        )
+    )["sandbox_workspace_write"]["writable_roots"] == [owner_root]
     doctor_log = Path(env["CODEX_DOCTOR_LOG"]).read_text(encoding="utf-8")
-    for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]:
+    for agent_id in ["main", "research-orchestrator"]:
         codex_home = openclaw_home / "agents" / agent_id / "agent/codex-home"
         assert f"{codex_home} --strict-config doctor --json" in doctor_log
+
+
+def test_push_script_prunes_only_exact_stale_owner_layer_files(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    owner_layers = openclaw_home / "workspace-research-orchestrator/.codex/agent-configs"
+    owner_layers.mkdir(parents=True)
+    for stale_name in ("reviewer.toml", "debater-data.toml"):
+        (owner_layers / stale_name).write_text("stale research layer\n", encoding="utf-8")
+    manual_layer = owner_layers / "manual-local-layer.toml"
+    manual_layer.write_text("manual layer\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert not (owner_layers / "reviewer.toml").exists()
+    assert not (owner_layers / "debater-data.toml").exists()
+    assert manual_layer.read_text(encoding="utf-8") == "manual layer\n"
+    assert sorted(path.name for path in owner_layers.glob("*.toml")) == sorted(
+        [*(f"{agent_id}.toml" for agent_id in STAGE_AGENT_IDS), "manual-local-layer.toml"]
+    )
+
+
+def test_push_script_uses_recorded_owner_workspace_for_native_layers(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    original_config = OPENCLAW_CONFIG.read_bytes()
+    overridden_workspace = "workspace-research-owner override with spaces"
+    config = json.loads(original_config)
+    for agent in config["agents"]["list"]:
+        if agent["id"] == "research-orchestrator":
+            agent["workspace"] = overridden_workspace
+            break
+    else:
+        pytest.fail("research-orchestrator missing from fixture config")
+    OPENCLAW_CONFIG.write_text(json.dumps(config), encoding="utf-8")
+    try:
+        result = _run_push_script(env)
+    finally:
+        OPENCLAW_CONFIG.write_bytes(original_config)
+
+    assert result.returncode == 0, result.stderr
+    openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
+    owner_workspace = openclaw_home / overridden_workspace
+    layers = owner_workspace / ".codex/agent-configs"
+    assert all((layers / f"{agent_id}.toml").is_file() for agent_id in STAGE_AGENT_IDS)
+    assert not (openclaw_home / "workspace-research-orchestrator").exists()
+    owner_codex_config = tomllib.loads(
+        (openclaw_home / "agents/research-orchestrator/agent/codex-home/config.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for agent_id in STAGE_AGENT_IDS:
+        assert owner_codex_config["agents"][agent_id]["config_file"] == str(
+            (layers / f"{agent_id}.toml").resolve()
+        )
 
 
 def test_push_script_allows_expected_non_owned_codex_doctor_failures(
@@ -2930,7 +3122,7 @@ def test_push_script_runs_all_wake_commands_in_the_managed_sandbox(
     ]
     assert len(invocations) == 4
     assert {invocation["codexHome"] for invocation in invocations} == {
-        str(Path(env["OPENCLAW_PUSH_HOME"]) / "agents/autoresearch-pm/agent/codex-home")
+        str(Path(env["OPENCLAW_PUSH_HOME"]) / "agents/research-orchestrator/agent/codex-home")
     }
     assert {invocation["cwd"] for invocation in invocations} == {
         str(Path(env["HOME"]) / ".openclaw/autoresearch/model-workspaces")
@@ -3443,7 +3635,10 @@ def test_push_script_uses_repo_config_for_runtime_preflight_and_replaces_stale_l
     assert result.returncode == 0, result.stderr
     deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
     assert "nativeToolSurfaceEnabled" not in deployed["plugins"]["entries"]["codex"]["config"]
-    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {"main", "autoresearch-pm"}
+    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {
+        "main",
+        "research-orchestrator",
+    }
     openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
     assert (
         "openclaw plugins inspect codex --json "
@@ -3595,7 +3790,6 @@ def test_push_script_rejects_final_live_config_warnings_and_rolls_back(tmp_path:
     assert not (openclaw_home / "agents/reviewer/agent").exists()
     assert not _supervisor_unit_dst(home).exists()
     assert not _runtime_caps_dropin_dst(home).exists()
-    assert not _codex_runtime_dropin_dst(home).exists()
     assert not _native_crash_hardening_dropin_dst(home).exists()
 
 
@@ -4452,7 +4646,9 @@ def test_push_script_rolls_back_codex_state_db_when_stale_thread_delete_rowcount
     assert "Done. Config pushed successfully." not in result.stdout
 
 
-def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path: Path) -> None:
+def test_push_script_scopes_native_codex_agent_cleanup_to_owner_and_known_runtime_files(
+    tmp_path: Path,
+) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
     legacy_agent_ids = [
@@ -4464,26 +4660,46 @@ def test_push_script_removes_legacy_native_codex_stage_agents_in_place(tmp_path:
         "debater-implementation",
         "consensus-arbiter",
     ]
-    managed_agent_dirs = [
-        *(
-            openclaw_home / workspace / ".codex/agents"
-            for workspace in ("workspace-autoresearch-pm", "workspace-reviewer")
-        ),
-        *(
-            openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
-            for agent_id in ["main", "autoresearch-pm", *STAGE_AGENT_IDS]
-        ),
+    owner_workspace_agents = openclaw_home / "workspace-research-orchestrator/.codex/agents"
+    owner_workspace_agents.mkdir(parents=True)
+    for legacy_agent_id in legacy_agent_ids:
+        (owner_workspace_agents / f"{legacy_agent_id}.toml").write_text(
+            "legacy\n", encoding="utf-8"
+        )
+    manual_owner = owner_workspace_agents / "manual-owner.toml"
+    manual_owner.write_text("manual owner\n", encoding="utf-8")
+    runtime_dirs = [
+        openclaw_home / "agents" / agent_id / "agent/codex-home/agents"
+        for agent_id in ["main", "research-orchestrator"]
     ]
-    for agents_dir in managed_agent_dirs:
+    for agents_dir in runtime_dirs:
         agents_dir.mkdir(parents=True)
         for legacy_agent_id in legacy_agent_ids:
             (agents_dir / f"{legacy_agent_id}.toml").write_text("legacy\n", encoding="utf-8")
+        (agents_dir / "manual-runtime.toml").write_text("manual runtime\n", encoding="utf-8")
+    retired_runtime = runtime_dirs[0] / "implementer.toml"
+    retired_runtime.write_text("retired\n", encoding="utf-8")
+    # These old workspace locations are outside the P3b owner roster and must
+    # not be swept as a side effect of the new route push.
+    old_workspace_agents = openclaw_home / "workspace-autoresearch-pm/.codex/agents"
+    old_workspace_agents.mkdir(parents=True)
+    old_workspace_marker = old_workspace_agents / "context-curator.toml"
+    old_workspace_marker.write_text("old workspace\n", encoding="utf-8")
 
     result = _run_push_script(env)
 
     assert result.returncode == 0, result.stderr
-    for agents_dir in managed_agent_dirs:
+    assert not any(
+        (owner_workspace_agents / f"{agent_id}.toml").exists() for agent_id in legacy_agent_ids
+    )
+    assert manual_owner.read_text(encoding="utf-8") == "manual owner\n"
+    for agents_dir in runtime_dirs:
         assert not any((agents_dir / f"{agent_id}.toml").exists() for agent_id in legacy_agent_ids)
+        assert not (agents_dir / "implementer.toml").exists()
+        assert (agents_dir / "manual-runtime.toml").read_text(encoding="utf-8") == (
+            "manual runtime\n"
+        )
+    assert old_workspace_marker.read_text(encoding="utf-8") == "old workspace\n"
 
 
 def test_push_script_removes_stale_deployed_mempalace_write_skill(tmp_path: Path) -> None:
@@ -4505,15 +4721,24 @@ def test_push_script_invariants_validate_native_codex_stage_agent_roster() -> No
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
     assert 'CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"' in script
-    assert "validate_codex_native_stage_agents_dir" in script
-    assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_SRC}"' in script
-    assert 'validate_codex_native_stage_agents_dir "${CODEX_AGENTS_DST}"' in script
+    assert 'validate_codex_native_stage_agent_sources "${CODEX_AGENTS_SRC}"' in script
+    assert "validate_codex_native_research_runtime_roles" in script
+    assert "write-native-research-role-config" in script
+    assert "repository .codex/agents files are source-only" in script
+    assert "registered with absolute paths" in script
     assert '"${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"' in script
-    assert 'validate_codex_native_stage_agents_dir "${CODEX_RUNTIME_AGENTS_DST}"' in script
-    assert 'CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "autoresearch-pm"' in script
-    assert 'if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" ]]; then' in script
-    assert "CODEX_NATIVE_LEGACY_STAGE_AGENT_IDS" in script
-    assert "remove_legacy_codex_stage_agents" in script
+    assert 'CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "research-orchestrator")' in script
+    assert (
+        'if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" || '
+        '"${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then'
+    ) in script
+    assert "RETIRED_CODEX_RUNTIME_AGENT_FILES" in script
+    assert "remove_retired_codex_runtime_agents" in script
+    assert "RETIRED_CODEX_RESEARCH_LAYER_FILES" in script
+    assert "remove_stale_native_research_layers" in script
+    assert 'RESEARCH_OWNER_WORKSPACE_DST="${BOOTSTRAP_DST}"' in script
+    assert '"${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs"' in script
+    assert "collect_find_results_null" not in script
     assert "must not override inherited MCP servers" in (
         REPO_ROOT / "gateway/deployment/codex_agents.py"
     ).read_text(encoding="utf-8")
@@ -4934,9 +5159,6 @@ def test_push_script_runtime_caps_install_is_idempotent(tmp_path: Path) -> None:
     dropin = _runtime_caps_dropin_dst(home)
     assert dropin.read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
     assert (
-        _codex_runtime_dropin_dst(home).read_text(encoding="utf-8") == EXPECTED_CODEX_RUNTIME_TEXT
-    )
-    assert (
         _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8")
         == EXPECTED_NATIVE_CRASH_HARDENING_TEXT
     )
@@ -4974,7 +5196,6 @@ def test_push_script_daemon_reload_runs_after_dropin_install_and_failure_aborts(
     assert not _supervisor_unit_dst(home).exists()
     assert not _quantipy_api_unit_dst(home).exists()
     assert not _runtime_caps_dropin_dst(home).exists()
-    assert not _codex_runtime_dropin_dst(home).exists()
     assert not _native_crash_hardening_dropin_dst(home).exists()
     assert (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8") == (
         initial_config
@@ -4999,7 +5220,6 @@ def test_push_script_managed_systemd_publication_rolls_back_existing_files(
         _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
         _quantipy_api_unit_dst(home): "[Unit]\nDescription=prior API\n",
         _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
-        _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
         _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",
     }
     for path, content in prior_files.items():
@@ -5062,13 +5282,13 @@ def test_push_script_final_daemon_reload_runs_after_systemd_artifact_restore(
 
 def test_push_script_failed_unit_snapshot_state_retains_original_unit(tmp_path: Path) -> None:
     env = _prepare_push_script_home(tmp_path)
-    env["FAIL_BACKUP_SOURCE_BASENAME"] = "20-openclaw-codex-runtime.conf"
+    env["FAIL_BACKUP_SOURCE_BASENAME"] = "10-quantipy-runtime-caps.conf"
     home = Path(env["HOME"])
-    codex_dropin = _codex_runtime_dropin_dst(home)
-    codex_dropin.parent.mkdir(parents=True)
-    prior_text = "[Service]\nExecStartPre=/bin/true\n"
-    codex_dropin.write_text(prior_text, encoding="utf-8")
-    codex_dropin.chmod(0o600)
+    runtime_caps = _runtime_caps_dropin_dst(home)
+    runtime_caps.parent.mkdir(parents=True)
+    prior_text = "[Service]\nEnvironment=PRIOR_CAP=1\n"
+    runtime_caps.write_text(prior_text, encoding="utf-8")
+    runtime_caps.chmod(0o600)
 
     result = _run_push_script(env)
 
@@ -5076,8 +5296,8 @@ def test_push_script_failed_unit_snapshot_state_retains_original_unit(tmp_path: 
     assert "Failed to snapshot managed systemd file" in result.stderr
     assert "managed systemd snapshot did not complete" in result.stderr
     assert "Failed to remove newly installed managed systemd file" not in result.stderr
-    assert codex_dropin.read_text(encoding="utf-8") == prior_text
-    assert _mode(codex_dropin) == 0o600
+    assert runtime_caps.read_text(encoding="utf-8") == prior_text
+    assert _mode(runtime_caps) == 0o600
     recovery_dirs = sorted((home / ".config/systemd/user").glob(".push-openclaw-config-units.*"))
     assert len(recovery_dirs) == 1
 
@@ -5092,23 +5312,23 @@ def test_push_script_managed_systemd_symlink_fails_closed_and_rolls_back_artifac
     initial_config = openclaw_config.read_bytes()
     wrapper = openclaw_home / "mempalace-readonly-server.py"
     wrapper.write_text("prior wrapper\n", encoding="utf-8")
-    codex_dropin = _codex_runtime_dropin_dst(home)
-    codex_target = home / "linked-codex-runtime.conf"
-    codex_dropin.parent.mkdir(parents=True)
-    codex_target.write_text("[Service]\nExecStartPre=/bin/true\n", encoding="utf-8")
-    codex_target.chmod(0o600)
-    codex_dropin.symlink_to(codex_target)
+    runtime_caps = _runtime_caps_dropin_dst(home)
+    runtime_caps_target = home / "linked-runtime-caps.conf"
+    runtime_caps.parent.mkdir(parents=True)
+    runtime_caps_target.write_text("[Service]\nEnvironment=PRIOR_CAP=1\n", encoding="utf-8")
+    runtime_caps_target.chmod(0o600)
+    runtime_caps.symlink_to(runtime_caps_target)
 
     result = _run_push_script(env)
 
     assert result.returncode == 1
-    assert f"Managed systemd file {codex_dropin} is a symlink" in result.stderr
+    assert f"Managed systemd file {runtime_caps} is a symlink" in result.stderr
     assert "Refusing before mutating managed systemd files" in result.stderr
     assert "Restoring managed OpenClaw artifacts after failed publication." in result.stderr
-    assert codex_dropin.is_symlink()
-    assert os.readlink(codex_dropin) == str(codex_target)
-    assert codex_target.read_text(encoding="utf-8") == "[Service]\nExecStartPre=/bin/true\n"
-    assert _mode(codex_target) == 0o600
+    assert runtime_caps.is_symlink()
+    assert os.readlink(runtime_caps) == str(runtime_caps_target)
+    assert runtime_caps_target.read_text(encoding="utf-8") == "[Service]\nEnvironment=PRIOR_CAP=1\n"
+    assert _mode(runtime_caps_target) == 0o600
     assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
     assert openclaw_config.read_bytes() == initial_config
 
@@ -5118,7 +5338,7 @@ def test_push_script_systemd_restore_failure_keeps_recovery_dir_and_rolls_back_a
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["FAIL_DAEMON_RELOAD"] = "1"
-    env["FAIL_RESTORE_COMMIT_DEST_BASENAME"] = "20-openclaw-codex-runtime.conf"
+    env["FAIL_RESTORE_COMMIT_DEST_BASENAME"] = "10-quantipy-runtime-caps.conf"
     home = Path(env["HOME"])
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
     wrapper = openclaw_home / "mempalace-readonly-server.py"
@@ -5127,7 +5347,6 @@ def test_push_script_systemd_restore_failure_keeps_recovery_dir_and_rolls_back_a
         _supervisor_unit_dst(home): "[Unit]\nDescription=prior supervisor\n",
         _quantipy_api_unit_dst(home): "[Unit]\nDescription=prior API\n",
         _runtime_caps_dropin_dst(home): "[Service]\nEnvironment=PRIOR_CAP=1\n",
-        _codex_runtime_dropin_dst(home): "[Service]\nExecStartPre=/bin/true\n",
         _native_crash_hardening_dropin_dst(home): "[Service]\nOOMPolicy=continue\n",
     }
     for path, content in prior_files.items():
@@ -5351,14 +5570,12 @@ def test_push_script_workspace_bootstrap_directory_destination_fails_before_cp(
         ),
         (
             (
+                "workspace-research-orchestrator",
+                ".codex",
                 "agents",
-                "autoresearch-pm",
-                "agent",
-                "codex-home",
-                "agents",
-                "context_curator.toml",
+                "implementer.toml",
             ),
-            "copying managed Codex runtime agent",
+            "removing duplicate native Codex research agent",
         ),
     ],
 )
@@ -5392,7 +5609,7 @@ def test_push_script_rejects_hardlinked_managed_sqlite_auth_store_before_mutatio
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
-    target_db = openclaw_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+    target_db = openclaw_home / "agents/research-orchestrator/agent/openclaw-agent.sqlite"
     target_db.parent.mkdir(parents=True)
     external_alias = tmp_path / "external-openclaw-agent.sqlite"
     external_alias.write_bytes(b"external sqlite alias bytes\n")
@@ -5416,26 +5633,25 @@ def test_push_script_rejects_hardlinked_managed_systemd_file_before_chmod_or_pub
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     home = Path(env["HOME"])
-    codex_dropin = _codex_runtime_dropin_dst(home)
-    codex_dropin.parent.mkdir(parents=True)
-    external_alias = tmp_path / "external-codex-runtime.conf"
-    external_alias.write_text("[Service]\nExecStartPre=/bin/true\n", encoding="utf-8")
+    runtime_caps = _runtime_caps_dropin_dst(home)
+    runtime_caps.parent.mkdir(parents=True)
+    external_alias = tmp_path / "external-runtime-caps.conf"
+    external_alias.write_text("[Service]\nEnvironment=PRIOR_CAP=1\n", encoding="utf-8")
     external_alias.chmod(0o640)
-    os.link(external_alias, codex_dropin)
+    os.link(external_alias, runtime_caps)
 
     result = _run_push_script(env)
 
     assert result.returncode == 1
     assert "Destination path is a hard-linked regular file" in result.stderr
-    assert str(codex_dropin) in result.stderr
+    assert str(runtime_caps) in result.stderr
     assert "rewriting managed systemd environment file" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
-    assert "Codex runtime verifier" not in result.stdout
-    assert external_alias.read_text(encoding="utf-8") == "[Service]\nExecStartPre=/bin/true\n"
+    assert external_alias.read_text(encoding="utf-8") == "[Service]\nEnvironment=PRIOR_CAP=1\n"
     assert _mode(external_alias) == 0o640
     mv_log = Path(env["MV_LOG"])
     if mv_log.exists():
-        assert str(codex_dropin) not in mv_log.read_text(encoding="utf-8")
+        assert str(runtime_caps) not in mv_log.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
@@ -5447,13 +5663,12 @@ def test_push_script_rejects_hardlinked_managed_systemd_file_before_chmod_or_pub
         ),
         (
             (
-                "autoresearch-pm",
-                "agent",
-                "codex-home",
+                "workspace-research-orchestrator",
+                ".codex",
                 "agents",
-                "context_curator.toml",
+                "implementer.toml",
             ),
-            "copying managed Codex runtime agent",
+            "removing duplicate native Codex research agent",
         ),
     ],
 )
@@ -5470,7 +5685,10 @@ def test_push_script_nested_codex_runtime_symlink_fails_closed_before_write(
     external_target = tmp_path / "external-codex-runtime-target"
     external_bytes = b"external codex runtime target\n"
     external_target.write_bytes(external_bytes)
-    nested_symlink = openclaw_home / "agents" / Path(*path_parts)
+    if path_parts[0].startswith("workspace-"):
+        nested_symlink = openclaw_home / Path(*path_parts)
+    else:
+        nested_symlink = openclaw_home / "agents" / Path(*path_parts)
     nested_symlink.parent.mkdir(parents=True)
     nested_symlink.symlink_to(external_target)
 
@@ -5486,7 +5704,8 @@ def test_push_script_nested_codex_runtime_symlink_fails_closed_before_write(
     assert external_target.read_bytes() == external_bytes
     assert not (openclaw_home / "mempalace-readonly-server.py").exists()
     assert not (openclaw_home / "workspace").exists()
-    assert not list(openclaw_home.glob("workspace-*"))
+    assert not (openclaw_home / "workspace-autoresearch-pm").exists()
+    assert not (openclaw_home / "workspace-reviewer").exists()
     assert not _supervisor_unit_dst(home).exists()
     assert openclaw_config.read_bytes() == initial_config
 
@@ -5499,7 +5718,7 @@ def test_push_script_nested_skill_file_symlink_fails_closed_before_copy(
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
     openclaw_config = openclaw_home / "openclaw.json"
     initial_config = openclaw_config.read_bytes()
-    skill_dir = openclaw_home / "skills" / "autoresearch"
+    skill_dir = openclaw_home / "skills" / "research-loop"
     skill_dir.mkdir(parents=True)
     external_target = tmp_path / "external-skill.md"
     external_bytes = b"external skill target\n"
@@ -5520,70 +5739,19 @@ def test_push_script_nested_skill_file_symlink_fails_closed_before_copy(
     assert not (openclaw_home / "skills/codex-subagents").exists()
     assert not (openclaw_home / "mempalace-readonly-server.py").exists()
     assert not (openclaw_home / "workspace").exists()
-    assert not list(openclaw_home.glob("workspace-*"))
+    assert not (openclaw_home / "workspace-autoresearch-pm").exists()
+    assert not (openclaw_home / "workspace-reviewer").exists()
     assert not _supervisor_unit_dst(home).exists()
     assert openclaw_config.read_bytes() == initial_config
 
 
-@pytest.mark.parametrize(
-    ("fail_root_basename", "stale_path_parts", "expected_context"),
-    [
-        (
-            "openclaw-gateway.service.d",
-            (
-                ".config",
-                "systemd",
-                "user",
-                "openclaw-gateway.service.d",
-                "05-legacy-azure.conf",
-            ),
-            "scanning managed systemd drop-in directory",
-        ),
-        (
-            "agents",
-            (
-                "isolated push root with spaces $literal",
-                "agents",
-                "main",
-                "agent",
-                "codex-home",
-                "agents",
-                "stale-main.toml",
-            ),
-            "scanning stale main Codex runtime agents",
-        ),
-    ],
-)
-def test_push_script_find_scan_failures_abort_without_silently_leaving_stale_files(
-    tmp_path: Path,
-    fail_root_basename: str,
-    stale_path_parts: tuple[str, ...],
-    expected_context: str,
-) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    home = Path(env["HOME"])
-    stale_path = home / Path(*stale_path_parts)
-    stale_path.parent.mkdir(parents=True)
-    stale_path.write_text("stale managed file\n", encoding="utf-8")
-    env["FAIL_FIND_ROOT_BASENAME"] = fail_root_basename
-
-    result = _run_push_script(env)
-
-    assert result.returncode == 1
-    assert "find failed by test" in result.stderr
-    assert "Failed to scan" in result.stderr
-    assert expected_context in result.stderr
-    assert "Done. Config pushed successfully." not in result.stdout
-    assert stale_path.read_text(encoding="utf-8") == "stale managed file\n"
-
-
-def test_push_script_managed_find_scans_are_status_propagating() -> None:
+def test_push_script_does_not_broad_scan_codex_runtime_agent_files() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
-    guarded_fs = (REPO_ROOT / "gateway/deployment/guarded_fs.py").read_text(encoding="utf-8")
 
     assert "< <(find" not in script
-    assert "collect_find_results_null" in script
-    assert "refusing to continue with partial results" in guarded_fs
+    assert "collect_find_results_null" not in script
+    assert "RETIRED_CODEX_RUNTIME_AGENT_FILES" in script
+    assert "remove_retired_codex_runtime_agents" in script
 
 
 def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
@@ -5616,41 +5784,24 @@ def test_push_script_backup_cleanup_failure_keeps_exact_recovery_directories(
     assert "Restoring managed OpenClaw artifacts after failed publication." not in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     deployed = json.loads(openclaw_config.read_text(encoding="utf-8"))
-    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {"main", "autoresearch-pm"}
+    assert {agent["id"] for agent in deployed["agents"]["list"]} >= {
+        "main",
+        "research-orchestrator",
+    }
     assert _runtime_caps_dropin_dst(home).read_text(encoding="utf-8") == EXPECTED_RUNTIME_CAP_TEXT
-    assert _codex_runtime_dropin_dst(home).read_text(encoding="utf-8") == (
-        EXPECTED_CODEX_RUNTIME_TEXT
-    )
     assert _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8") == (
         EXPECTED_NATIVE_CRASH_HARDENING_TEXT
     )
 
 
-def test_bootstrap_npm_install_bypasses_stale_pnpm_candidate(tmp_path: Path) -> None:
+def test_bootstrap_rejects_stale_candidate_without_installing(tmp_path: Path) -> None:
     stale = tmp_path / ".local/share/pnpm/openclaw"
     _write_executable(stale, "printf 'openclaw 2026.6.10\\n'")
 
     mock_bin = tmp_path / "mock-bin"
     npm_log = tmp_path / "npm.log"
     pnpm_log = tmp_path / "pnpm.log"
-    npm = mock_bin / "npm"
-    _write_executable(
-        npm,
-        """
-printf '%s\n' "$*" > "$NPM_LOG"
-prefix=''
-while (($#)); do
-  if [[ "$1" == '--prefix' ]]; then
-    prefix="$2"
-    break
-  fi
-  shift
-done
-/usr/bin/mkdir -p "$prefix/bin"
-printf '#!/usr/bin/env bash\nprintf "openclaw 2026.7.1-2\\\\n"\n' > "$prefix/bin/openclaw"
-/usr/bin/chmod 755 "$prefix/bin/openclaw"
-        """.strip(),
-    )
+    _write_executable(mock_bin / "npm", "printf '%s\\n' called > \"$NPM_LOG\"")
     _write_executable(mock_bin / "pnpm", "printf 'invoked\\n' > \"$PNPM_LOG\"; exit 99")
 
     result = _run_bootstrap_guard(
@@ -5664,48 +5815,15 @@ printf '#!/usr/bin/env bash\nprintf "openclaw 2026.7.1-2\\\\n"\n' > "$prefix/bin
         },
     )
 
-    expected = tmp_path / "npm-global/bin/openclaw"
-    assert result.returncode == 0, result.stderr
-    assert f"RESOLVED={expected}" in result.stdout
-    assert "VERSION=2026.7.1-2" in result.stdout
-    assert npm_log.read_text(encoding="utf-8").strip() == (
-        f"install -g --prefix {tmp_path / 'npm-global'} openclaw@2026.7.1-2"
-    )
+    assert result.returncode == 1
+    assert "unsupported — need exactly 2026.8.1" in result.stdout
+    assert not npm_log.exists()
     assert not pnpm_log.exists()
-
-
-def test_bootstrap_pnpm_install_selects_exact_installed_path(tmp_path: Path) -> None:
-    mock_bin = tmp_path / "mock-bin"
-    pnpm_log = tmp_path / "pnpm.log"
-    _write_executable(
-        mock_bin / "pnpm",
-        """
-printf '%s\n' "$*" > "$PNPM_LOG"
-/usr/bin/mkdir -p "$PNPM_HOME"
-printf '#!/usr/bin/env bash\nprintf "openclaw 2026.7.1-2\\\\n"\n' > "$PNPM_HOME/openclaw"
-/usr/bin/chmod 755 "$PNPM_HOME/openclaw"
-""".strip(),
-    )
-
-    result = _run_bootstrap_guard(
-        tmp_path,
-        {
-            "PATH": f"{mock_bin}:/usr/bin:/bin",
-            "PNPM_HOME": "~/pnpm-home",
-            "PNPM_LOG": str(pnpm_log),
-        },
-    )
-
-    expected = tmp_path / "pnpm-home/openclaw"
-    assert result.returncode == 0, result.stderr
-    assert f"RESOLVED={expected}" in result.stdout
-    assert "VERSION=2026.7.1-2" in result.stdout
-    assert pnpm_log.read_text(encoding="utf-8").strip() == "add -g openclaw@2026.7.1-2"
 
 
 def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: Path) -> None:
     preferred = tmp_path / ".local/share/pnpm/openclaw"
-    _write_executable(preferred, "printf 'openclaw 2026.7.1-2\\n'")
+    _write_executable(preferred, "printf 'openclaw 2026.8.1\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -5726,7 +5844,7 @@ def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: 
 
 def test_bootstrap_accepts_exact_explicit_override_without_installing(tmp_path: Path) -> None:
     override = tmp_path / "override/openclaw"
-    _write_executable(override, "printf 'openclaw 2026.7.1-2\\n'")
+    _write_executable(override, "printf 'openclaw 2026.8.1\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -5810,7 +5928,7 @@ main
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.7.1-2-beta.1", "2026.7.1-2+build", "2026.7.1-2.1"],
+    ["2026.8.1-beta.1", "2026.8.1+build", "2026.8.1.1"],
 )
 def test_bootstrap_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -5827,7 +5945,7 @@ def test_bootstrap_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.7.1-2" in result.stdout
+    assert "need exactly 2026.8.1" in result.stdout
 
 
 def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> None:
@@ -5852,7 +5970,7 @@ def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "unsupported; need exactly 2026.7.1-2" in result.stderr
+    assert "unsupported; need exactly 2026.8.1" in result.stderr
     assert not openclaw_home.exists()
 
 
@@ -5871,7 +5989,7 @@ if [[ -v OPENCLAW_HOME ]]; then
   printf 'leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
   exit 66
 fi
-printf 'openclaw 2026.7.1-2\n'
+printf 'openclaw 2026.8.1\n'
 """.strip(),
     )
 
@@ -5899,7 +6017,7 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     home = tmp_path / "home"
     openclaw_home = home / "openclaw-home"
     executable = home / "bin/openclaw"
-    _write_executable(executable, "printf 'openclaw 2026.7.1-2\\n'")
+    _write_executable(executable, "printf 'openclaw 2026.8.1\\n'")
 
     result = subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
@@ -5917,13 +6035,13 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert f"Using OpenClaw: {executable} (version 2026.7.1-2)" in result.stdout
+    assert f"Using OpenClaw: {executable} (version 2026.8.1)" in result.stdout
     assert f"Local OpenClaw config not found at {openclaw_home / 'openclaw.json'}" in result.stderr
 
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.7.1-2-beta.1", "2026.7.1-2+build", "2026.7.1-2.1"],
+    ["2026.8.1-beta.1", "2026.8.1+build", "2026.8.1.1"],
 )
 def test_push_script_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -5949,5 +6067,5 @@ def test_push_script_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.7.1-2" in result.stderr
+    assert "need exactly 2026.8.1" in result.stderr
     assert not openclaw_home.exists()

@@ -37,7 +37,7 @@ Configure and extend the OpenClaw tool ecosystem: built-in tools, MCP servers, T
 - **`main` agent policy:** tools.profile `minimal` with an exact allowlist — 3 `g2-control__*` tools + 19 `mempalace-readonly__*` tools — and denies `exec` and all `sessions_*` tools.
 - **Global denies:** `memory_search` and `memory_get` are in `tools.deny` in `gateway/openclaw_config/openclaw.json` (deliberate; see openclaw-memory skill).
 - **MemPalace install/health:** `make mempalace-install`, `make mempalace-health` (`scripts/check-mempalace-health.py`).
-- **Pinned runtime:** OpenClaw `2026.7.1-2`, `@openclaw/codex` plugin `2026.7.1-1`, embedded `@openai/codex` `0.144.3` (see `scripts/ensure-openclaw-codex-runtime.mjs`).
+- **Pinned runtime:** OpenClaw `2026.8.1`, `@openclaw/codex` plugin `2026.8.1`, embedded `@openai/codex` `0.151.0`; native 8.1 Codex compaction owns automatic compaction.
 
 ## Repo policy overrides
 

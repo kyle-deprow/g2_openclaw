@@ -41,7 +41,7 @@ def _agent_event(
     data: Mapping[str, object],
     optional_fields: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Build an OpenClaw 2026.7.1 agent event frame."""
+    """Build an OpenClaw 2026.8.1 agent event frame."""
     payload: dict[str, object] = {
         "runId": run_id,
         "seq": seq,
@@ -239,7 +239,7 @@ class TestHappyPath:
                                 "type": "res",
                                 "id": message["id"],
                                 "ok": True,
-                                "payload": {"server": {"version": "2026.7.1-2"}},
+                                "payload": {"server": {"version": "2026.8.1"}},
                             }
                         )
                     )
@@ -264,7 +264,7 @@ class TestHappyPath:
                 "tasks.list",
                 {"status": "running", "limit": 500},
                 timeout_seconds=1.0,
-                required_server_version="2026.7.1-2",
+                required_server_version="2026.8.1",
             )
 
             assert result == {"tasks": []}
@@ -292,7 +292,7 @@ class TestHappyPath:
                                 "type": "res",
                                 "id": message["id"],
                                 "ok": True,
-                                "payload": {"server": {"version": "2026.7.1-2"}},
+                                "payload": {"server": {"version": "2026.8.1"}},
                             }
                         )
                     )
@@ -328,7 +328,7 @@ class TestHappyPath:
                     "idempotencyKey": "idem",
                 },
                 timeout_seconds=1.0,
-                required_server_version="2026.7.1-2",
+                required_server_version="2026.8.1",
             )
         finally:
             server.close()
@@ -404,7 +404,7 @@ class TestHappyPath:
                     "tasks.list",
                     {"status": "running"},
                     timeout_seconds=1.0,
-                    required_server_version="2026.7.1-2",
+                    required_server_version="2026.8.1",
                 )
         finally:
             server.close()

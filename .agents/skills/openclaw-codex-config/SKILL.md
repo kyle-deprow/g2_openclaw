@@ -27,11 +27,9 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 
 ```bash
 node --version                 # must be >= 22
-openclaw --version             # expected local install: exactly 2026.7.1-2
-openclaw plugins install @openclaw/codex@2026.7.1-1 --force --pin
-openclaw plugins update codex
-openclaw plugins enable codex
-openclaw plugins inspect codex --json  # plugin 2026.7.1-1, @openai/codex 0.144.3
+openclaw --version             # expected local install: exactly 2026.8.1
+openclaw plugins install npm-pack:/work/incoming/openclaw-codex-2026.8.1.tgz --force --accept-capabilities
+openclaw plugins inspect codex --json  # plugin 2026.8.1, @openai/codex 0.151.0
 openclaw daemon install --force --port 18789 --json
 openclaw models auth login --provider openai
 openclaw models list --provider openai
@@ -78,8 +76,8 @@ or model.
 
 ## Validation Checklist
 
-1. `openclaw plugins inspect codex --json` reports plugin `2026.7.1-1`, enabled
-   and loaded, with embedded `@openai/codex` `0.144.3`.
+1. `openclaw plugins inspect codex --json` reports plugin `2026.8.1`, enabled
+   and loaded, with embedded `@openai/codex` `0.151.0`.
 2. `openclaw models list --provider openai` lists the selected model.
 3. `openclaw models status --plain` reports a usable OpenAI/Codex route.
 4. `openclaw gateway health` succeeds after restart.
@@ -97,22 +95,17 @@ or model.
   run `bash scripts/push-openclaw-config.sh`; the push script syncs the
   portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
   store. Do not replace this with API-key fallback.
-- Keep `agents.defaults.compaction.mode` at `default` for Codex. In OpenClaw
-  2026.7.1-2, `safeguard` can send automatic CLI-budget compaction through the
-  generic OpenAI API-key path after Codex declines non-manual native
-  compaction. This repo uses Codex OAuth only, so `safeguard` causes false
-  `No API key found for provider "openai"` failures.
-- The gateway pre-start verifier at
-  `scripts/ensure-openclaw-codex-runtime.mjs` is mandatory infrastructure. It
-  patches only the known 2026.7.1-2 branch that turns Codex's intentional
-  automatic-compaction deferral into a generic API-key fallback. It must fail
-  closed when the package version or source shape changes; do not replace it
-  with a provider fallback or an API key.
+- Keep `agents.defaults.compaction.mode` at `default` for Codex. OpenClaw
+  2026.8.1 and its native Codex runtime own automatic compaction; do not add a
+  compatibility shim or generic OpenAI API-key fallback. This repo uses Codex
+  OAuth only.
 - Treat core, plugin, and embedded app-server versions as one exact runtime
-  tuple: OpenClaw `2026.7.1-2`, `@openclaw/codex` `2026.7.1-1`, and
-  `@openai/codex` `0.144.3`. Do not use minimum-version checks or unpinned
-  installs. Bootstrap runs `openclaw plugins update codex` because a core
-  upgrade can leave the tracked plugin stale, then verifies all three versions.
+  tuple: OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, and
+  `@openai/codex` `0.151.0`. Do not use minimum-version checks, registry
+  installs, or unpinned fallbacks. The migration command consumes the reviewed
+  local archive with `--accept-capabilities` and then verifies all three
+  versions. The plugin package has no `bin`; the embedded `@openai/codex`
+  package owns `bin/codex.js`.
 - After every OpenClaw install or upgrade, run
   `openclaw daemon install --force --port 18789 --json`. A package upgrade can
   leave `openclaw-gateway.service` pointing into the old global package. This

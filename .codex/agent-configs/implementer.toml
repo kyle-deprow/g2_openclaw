@@ -1,0 +1,18 @@
+model = "gpt-5.6-luna"
+model_reasoning_effort = "xhigh"
+service_tier = "fast"
+developer_instructions = '''
+Implement one bounded research attempt in the hypothesis worktree named by Astra.
+Never edit the specification, panel, evaluator, owner state, or canonical driver root.
+Do not spawn another agent or invoke gateway-cli state transitions. Run the required
+focused tests and report the implementation_result record and strict test evidence to
+Astra for review and submission.
+'''
+
+[agents]
+max_depth = 1
+max_threads = 1
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["@HYPOTHESIS_WORKTREES_ROOT@"]

@@ -52,13 +52,16 @@ class AssemblyInputs:
     mempalace_embedding_model: str
     hf_hub_offline: str
     g2_module: str
+    research_v2_root: str
     mempalace_readonly_agents: tuple[str, ...]
     g2_agents: tuple[str, ...]
     provider: str
     model_primary: str
     model_provider: str
     model_id: str
-    pm_model_primary: str
+    orchestrator_model_primary: str
+    research_reviewer_launcher: str
+    acpx_adapter_bin: str
 
 
 _NUMBER_RE = re.compile(
@@ -265,7 +268,7 @@ def _provider_selection(
     )
 
 
-def pm_model_primary(repo: JsonObject) -> str:
+def orchestrator_model_primary(repo: JsonObject) -> str:
     agents = _get_object(repo, "agents")
     if agents is None:
         return ""
@@ -273,7 +276,7 @@ def pm_model_primary(repo: JsonObject) -> str:
     if not isinstance(raw_list, list):
         return ""
     for item in raw_list:
-        if not isinstance(item, dict) or item.get("id") != "autoresearch-pm":
+        if not isinstance(item, dict) or item.get("id") != "research-orchestrator":
             continue
         model = item.get("model")
         if isinstance(model, dict):
@@ -321,7 +324,10 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
                     "agents": list(inputs.g2_agents),
                     "defaultToolsApprovalMode": "approve",
                 },
-                "env": {"PYTHONPATH": inputs.repo_root},
+                "env": {
+                    "PYTHONPATH": inputs.repo_root,
+                    "RESEARCH_V2_ROOT": inputs.research_v2_root,
+                },
             },
         }
     }
@@ -385,18 +391,21 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
             "       Add it to gateway/openclaw_config/openclaw.json or choose a configured model."
         )
 
-    if not inputs.pm_model_primary:
+    if not inputs.orchestrator_model_primary:
         raise ConfigMergeError(
-            'ERROR: Repo config must pin agents.list[].id == "autoresearch-pm" to a model.primary.'
+            "ERROR: Repo config must pin agents.list[].id == "
+            '"research-orchestrator" to a model.primary.'
         )
-    if not inputs.pm_model_primary.startswith("openai/"):
+    if not inputs.orchestrator_model_primary.startswith("openai/"):
         raise ConfigMergeError(
-            f"ERROR: PM model '{inputs.pm_model_primary}' must use the OpenAI/Codex provider."
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "must use the OpenAI/Codex provider."
         )
-    pm_model_id = inputs.pm_model_primary.removeprefix("openai/")
-    if not _model_declared(merged, "openai", pm_model_id):
+    orchestrator_model_id = inputs.orchestrator_model_primary.removeprefix("openai/")
+    if not _model_declared(merged, "openai", orchestrator_model_id):
         raise ConfigMergeError(
-            f"ERROR: PM model '{inputs.pm_model_primary}' is not declared in repo config.\n"
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "is not declared in repo config.\n"
             "       Add it to gateway/openclaw_config/openclaw.json before pushing."
         )
 
@@ -408,13 +417,13 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
     managed_agents = agents.get("list")
     if isinstance(managed_agents, list):
         for item in managed_agents:
-            if not isinstance(item, dict) or item.get("id") != "autoresearch-pm":
+            if not isinstance(item, dict) or item.get("id") != "research-orchestrator":
                 continue
             model = item.get("model")
             if not isinstance(model, dict):
                 model = {}
                 item["model"] = model
-            model["primary"] = inputs.pm_model_primary
+            model["primary"] = inputs.orchestrator_model_primary
             item["thinkingDefault"] = "high"
 
     merged = _object(
@@ -431,6 +440,41 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
     if codex_config is not None:
         codex_config.pop("codexDynamicToolsExclude", None)
         codex_config.pop("nativeToolSurfaceEnabled", None)
+        app_server = _get_object(codex_config, "appServer")
+        if app_server is not None and app_server.get("defaultWorkspaceDir") == (
+            "/home/dev/.openclaw/autoresearch/model-workspaces"
+        ):
+            app_server.pop("defaultWorkspaceDir", None)
+    # ACP is a managed research dispatch contract.  Replace the whole object
+    # so machine-local stream/default-agent/probe settings cannot survive the
+    # merge and make the generated route ambiguous.
+    merged["acp"] = {
+        "enabled": True,
+        "dispatch": {"enabled": True},
+        "backend": "acpx",
+        "allowedAgents": ["claude"],
+        "maxConcurrentSessions": 1,
+    }
+    plugins = _object(merged.setdefault("plugins", {}), "merged plugins")
+    entries = _object(plugins.setdefault("entries", {}), "merged plugin entries")
+    acpx = _object(entries.setdefault("acpx", {}), "merged acpx plugin entry")
+    acpx["enabled"] = True
+    acpx["config"] = {
+        "agents": {
+            "claude": {
+                "command": "/usr/bin/env",
+                "args": [
+                    f"CLAUDE_CODE_EXECUTABLE={inputs.research_reviewer_launcher}",
+                    inputs.acpx_adapter_bin,
+                ],
+            }
+        },
+        "permissionMode": "approve-reads",
+        "nonInteractivePermissions": "fail",
+        "pluginToolsMcpBridge": False,
+        "openClawToolsMcpBridge": False,
+        "mcpServers": {},
+    }
     return merged
 
 
@@ -459,7 +503,7 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         os.environ.get("OPENAI_MODEL", "gpt-5.4"),
         os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-20250514"),
     )
-    pm_primary = pm_model_primary(repo)
+    orchestrator_primary = orchestrator_model_primary(repo)
     inputs = AssemblyInputs(
         repo_root=args.repo_root,
         python_bin=args.python_bin,
@@ -470,13 +514,16 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         mempalace_embedding_model=args.mempalace_embedding_model,
         hf_hub_offline=args.hf_hub_offline,
         g2_module=args.g2_module,
+        research_v2_root=args.research_v2_root,
         mempalace_readonly_agents=tuple(cast(list[str], readonly_agents)),
         g2_agents=tuple(cast(list[str], g2_agents)),
         provider=provider,
         model_primary=model_primary,
         model_provider=model_provider,
         model_id=model_id,
-        pm_model_primary=pm_primary,
+        orchestrator_model_primary=orchestrator_primary,
+        research_reviewer_launcher=args.research_reviewer_launcher,
+        acpx_adapter_bin=args.acpx_adapter_bin,
     )
     return serialize_json(assemble_config(local, repo, inputs))
 
@@ -496,11 +543,14 @@ def _build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("mempalace_embedding_model")
     assemble.add_argument("hf_hub_offline")
     assemble.add_argument("g2_module")
+    assemble.add_argument("research_v2_root")
     assemble.add_argument("readonly_agents_json")
     assemble.add_argument("g2_agents_json")
+    assemble.add_argument("research_reviewer_launcher")
+    assemble.add_argument("acpx_adapter_bin")
 
-    pm_parser = subparsers.add_parser("pm-model")
-    pm_parser.add_argument("repo_config")
+    orchestrator_parser = subparsers.add_parser("orchestrator-model")
+    orchestrator_parser.add_argument("repo_config")
     return parser
 
 
@@ -509,9 +559,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "assemble":
             sys.stdout.buffer.write(_assemble_from_files(args))
-        elif args.command == "pm-model":
+        elif args.command == "orchestrator-model":
             repo = _object(load_json(args.repo_config), "repo config")
-            primary = pm_model_primary(repo)
+            primary = orchestrator_model_primary(repo)
             if primary:
                 print(primary)
     except (ConfigMergeError, OSError, UnicodeError) as exc:
