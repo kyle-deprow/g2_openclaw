@@ -27,9 +27,9 @@ stock OpenClaw, but this repo pins `models.providers.openai.agentRuntime.id` to
 
 ```bash
 node --version                 # must be >= 22
-openclaw --version             # expected local install: exactly 2026.8.1
-openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities
-openclaw plugins inspect codex --runtime --json  # loaded runtime proof: plugin 2026.8.1, @openai/codex 0.151.0
+openclaw --version             # expected local install: exactly 2026.9.2
+openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities
+openclaw plugins inspect codex --runtime --json  # loaded runtime proof: plugin 2026.9.2, @openai/codex 0.153.4
 openclaw models auth login --provider openai
 openclaw models list --provider openai
 openclaw models status --plain
@@ -61,7 +61,7 @@ openclaw gateway health
 openclaw models status --plain
 ```
 
-`openclaw daemon install --force` is the final explicit start gate on 2026.8.1:
+`openclaw daemon install --force` is the final explicit start gate on 2026.9.2:
 it writes the unit, enables it, and restarts the service. Do not use
 it as a preparation step or describe it as a no-start unit rewrite.
 
@@ -81,8 +81,8 @@ or model.
 ## Validation Checklist
 
 1. `openclaw plugins inspect codex --runtime --json` reports the loaded plugin
-   `2026.8.1`, enabled
-   and loaded, with embedded `@openai/codex` `0.151.0`.
+   `2026.9.2`, enabled
+   and loaded, with embedded `@openai/codex` `0.153.4`.
 2. `openclaw models list --provider openai` lists the selected model.
 3. `openclaw models status --plain` reports a usable OpenAI/Codex route.
 4. `openclaw gateway health` succeeds after restart.
@@ -105,12 +105,12 @@ or model.
   exception, not an OpenAI OAuth model; do not add it to the OpenAI provider
   catalog or model policy.
 - Keep `agents.defaults.compaction.mode` at `default` for Codex. OpenClaw
-  2026.8.1 and its native Codex runtime own automatic compaction; do not add a
+  2026.9.2 and its native Codex runtime own automatic compaction; do not add a
   compatibility shim or generic OpenAI API-key fallback. This repo uses Codex
   OAuth only.
 - Treat core, plugin, and embedded app-server versions as one exact runtime
-  tuple: OpenClaw `2026.8.1`, `@openclaw/codex` `2026.8.1`, and
-  `@openai/codex` `0.151.0`. Do not use minimum-version checks, unpinned
+  tuple: OpenClaw `2026.9.2`, `@openclaw/codex` `2026.9.2`, and
+  `@openai/codex` `0.153.4`. Do not use minimum-version checks, unpinned
   fallbacks, or `npm-pack:` tarballs. Install the official npm package spec at
   the exact version with `--pin --force --accept-capabilities`, backed by the
   reviewed offline npm cache, and then verify all three versions. The plugin

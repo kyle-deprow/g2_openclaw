@@ -39,7 +39,7 @@ def _run_module(arguments: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-@pytest.mark.parametrize("version", ["2026.8.0", "2026.8.2"])
+@pytest.mark.parametrize("version", ["2026.8.1", "2026.9.1", "2026.9.3"])
 def test_openclaw_version_rejects_older_and_newer_pins(tmp_path: Path, version: str) -> None:
     executable = tmp_path / "openclaw"
     _write_executable(executable, f"printf 'openclaw {version}\\n'")
@@ -112,7 +112,7 @@ def _codex_executable(
     return executable, package_root
 
 
-@pytest.mark.parametrize("plugin_version", ["2026.8.0", "2026.8.2"])
+@pytest.mark.parametrize("plugin_version", ["2026.8.1", "2026.9.1", "2026.9.3"])
 def test_codex_plugin_pin_rejects_older_and_newer_versions(
     tmp_path: Path, plugin_version: str
 ) -> None:
@@ -136,7 +136,7 @@ def test_codex_plugin_pin_rejects_older_and_newer_versions(
     )
 
 
-@pytest.mark.parametrize("app_server_version", ["0.150.9", "0.151.1"])
+@pytest.mark.parametrize("app_server_version", ["0.151.0", "0.153.3", "0.153.5"])
 def test_codex_app_server_pin_rejects_older_and_newer_versions(
     tmp_path: Path, app_server_version: str
 ) -> None:

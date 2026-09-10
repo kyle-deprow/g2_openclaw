@@ -50,7 +50,7 @@ infrastructure refusal.
 
 ## Memory and sessions
 
-The OpenClaw 2026.8.1 / Codex 2026.8.1 / embedded Codex 0.151.0 tuple is
+The OpenClaw 2026.9.2 / Codex 2026.9.2 / embedded Codex 0.153.4 tuple is
 source-pinned to OpenAI/Codex OAuth. `memory_search` and `memory_get` remain
 denied, `agents.defaults.memorySearch.enabled` is `false`, and
 `compaction.memoryFlush.enabled` is `false`. Models receive read-only

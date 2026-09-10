@@ -22,12 +22,12 @@ SKIP_OPTIONAL=false
 HAS_GPU=false
 GPU_NAME=""
 SUMMARY_ITEMS=()
-REQUIRED_OPENCLAW_VERSION="2026.8.1"
-REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"
-REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"
-# OpenClaw 8.1 requires explicit capability consent.  Use the reviewed exact
+REQUIRED_OPENCLAW_VERSION="2026.9.2"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.9.2"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.153.4"
+# OpenClaw 9.2 requires explicit capability consent.  Use the reviewed exact
 # npm package/version with a pinned install; do not use npm-pack or a fallback.
-CODEX_PLUGIN_INSTALL_SPEC="npm:@openclaw/codex@2026.8.1"
+CODEX_PLUGIN_INSTALL_SPEC="npm:@openclaw/codex@2026.9.2"
 OPENCLAW_GATEWAY_PORT="18789"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""

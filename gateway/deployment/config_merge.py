@@ -736,6 +736,18 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
         "sanitized merged config",
     )
     plugins = _get_object(merged, "plugins")
+    if plugins is not None:
+        # Plugin load paths are machine-local source overrides.  In particular,
+        # an old linked ACPX cohort here takes precedence over the official
+        # npm-installed plugin that `plugins inspect --runtime` validated.
+        # Remove the override and let the native catalog/install resolver pick
+        # the trusted package; the adapter path is injected below from that
+        # runtime inspection, never from a hardcoded cohort path.
+        plugin_load = _get_object(plugins, "load")
+        if plugin_load is not None:
+            plugin_load.pop("paths", None)
+            if not plugin_load:
+                plugins.pop("load", None)
     entries = _get_object(plugins if plugins is not None else {}, "entries")
     codex = _get_object(entries if entries is not None else {}, "codex")
     codex_config = _get_object(codex if codex is not None else {}, "config")

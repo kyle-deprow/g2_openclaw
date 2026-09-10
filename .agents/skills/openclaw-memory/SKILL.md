@@ -1,14 +1,14 @@
 ---
 name: openclaw-memory
 description:
-  OpenClaw 2026.8.1 memory configuration and read-only MemPalace boundaries for
+  OpenClaw 2026.9.2 memory configuration and read-only MemPalace boundaries for
   this repository. Use when reviewing memory search, compaction flush, or
   memory-tool policy; do not enable a built-in writer or fallback.
 ---
 
 # OpenClaw Memory Policy
 
-This repository uses the OpenClaw 2026.8.1 memory schema, but its autoresearch
+This repository uses the OpenClaw 2026.9.2 memory schema, but its autoresearch
 models use optional read-only MemPalace context rather than built-in OpenClaw
 memory. The managed configuration and the `mempalace-readonly` runtime skill
 are authoritative for this boundary.
@@ -25,9 +25,9 @@ Markdown memory files as research continuity or authority. If a required
 read-only retrieval fails, report the blocker; do not fall back to built-in
 memory, Markdown files, or unstructured local state.
 
-## Supported 8.1 configuration shape
+## Supported 9.2 configuration shape
 
-The installed 8.1 schema supports these relevant fields:
+The installed 9.2 schema supports these relevant fields:
 
 - `memory.search.enabled` controls built-in memory search. Its runtime default
   is enabled, so this repository explicitly sets it to `false`.

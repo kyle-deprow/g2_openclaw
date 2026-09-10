@@ -163,7 +163,7 @@ def validate_stage_agent_sources() -> None:
 def write_native_research_role_config() -> None:
     """Append scoped owner role registrations with absolute layer paths.
 
-    Codex 0.151.0 accepts ``config_file`` only in the project
+    Codex 0.153.4 accepts ``config_file`` only in the project
     ``[agents.<name>]`` registration.  It rejects that key in standalone role
     TOMLs, so the managed workspace keeps source metadata in ``.codex/agents``
     and the scoped owner ``CODEX_HOME/config.toml`` registers the two layer

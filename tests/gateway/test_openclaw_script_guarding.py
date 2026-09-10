@@ -201,7 +201,7 @@ printf '%s\t%s\t%s\n' \
   "${OPENCLAW_STATE_DIR:-<unset>}" \
   "${OPENCLAW_CONFIG_PATH:-<unset>}" >> "${FLOW_LOG}.contexts"
 mkdir -p "$TEST_ROOT/bootstrap-codex/bin"
-printf '{"name":"@openai/codex","version":"0.151.0","bin":{"codex":"bin/codex.js"}}\n' \
+printf '{"name":"@openai/codex","version":"0.153.4","bin":{"codex":"bin/codex.js"}}\n' \
   > "$TEST_ROOT/bootstrap-codex/package.json"
 printf '#!/usr/bin/env node\n' > "$TEST_ROOT/bootstrap-codex/bin/codex.js"
 is_bootstrap_repo_config() {
@@ -440,14 +440,14 @@ JSON
 {
   "plugin": {
     "id": "codex",
-    "version": "2026.8.1",
+    "version": "2026.9.2",
     "enabled": true,
     "status": "loaded",
     "dependencyStatus": {
       "dependencies": [
         {
           "name": "@openai/codex",
-          "spec": "0.151.0",
+          "spec": "0.153.4",
           "resolvedPath": "${TEST_ROOT}/bootstrap-codex"
         }
       ]
@@ -707,7 +707,7 @@ const checks = {
     status: process.env.MOCK_CODEX_DOCTOR_RUNTIME_STATUS || "ok",
     category: "runtime",
     summary: "running npm on linux-x86_64",
-    details: {version: process.env.MOCK_CODEX_DOCTOR_RUNTIME_VERSION || "0.151.0"}
+    details: {version: process.env.MOCK_CODEX_DOCTOR_RUNTIME_VERSION || "0.153.4"}
   },
   "sandbox.helpers": {
     id: "sandbox.helpers",
@@ -801,7 +801,7 @@ if (process.env.MOCK_CODEX_DOCTOR_DELETE_DETAIL_CHECK) {
 console.log(JSON.stringify({
   schemaVersion: 1,
   overallStatus: "fail",
-  codexVersion: "0.151.0",
+  codexVersion: "0.153.4",
   checks
 }));
 process.exit(Number(process.env.MOCK_CODEX_DOCTOR_EXIT_STATUS || "1"));
@@ -875,7 +875,7 @@ printf '%s %s %s %s %s %s\n' \
   "NODE_OPTIONS=${NODE_OPTIONS:-<unset>}" >> "$OPENCLAW_LOG"
 case "${1:-}" in
   --version)
-    printf 'openclaw 2026.8.1\n'
+    printf 'openclaw 2026.9.2\n'
     ;;
   config)
     [[ "${2:-}" == "validate" ]] || exit 44
@@ -1090,14 +1090,14 @@ JSON
 {
   "plugin": {
     "id": "codex",
-    "version": "${MOCK_CODEX_PLUGIN_VERSION:-2026.8.1}",
+    "version": "${MOCK_CODEX_PLUGIN_VERSION:-2026.9.2}",
     "enabled": true,
     "status": "loaded",
     "dependencyStatus": {
       "dependencies": [
         {
           "name": "@openai/codex",
-          "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.151.0}",
+          "spec": "${MOCK_CODEX_APP_SERVER_VERSION:-0.153.4}",
           "resolvedPath": "${MOCK_CODEX_RESOLVED_PATH}"
         }
       ]
@@ -1431,7 +1431,7 @@ def _prepare_push_script_home(
                 updated_at INTEGER NOT NULL
             );
             INSERT INTO schema_meta VALUES
-                ('primary', 'agent', 19, 'main', '2026.8.1', 1, 1);
+                ('primary', 'agent', 19, 'main', '2026.9.2', 1, 1);
             INSERT INTO auth_profile_store VALUES
                 ('openai:test', '{"provider":"openai","mode":"oauth"}', 1);
             """
@@ -1461,7 +1461,7 @@ def _prepare_push_script_home(
                 updated_at INTEGER NOT NULL
             );
             INSERT INTO schema_meta VALUES
-                ('primary', 'agent', 19, 'research-orchestrator', '2026.8.1', 1, 1);
+                ('primary', 'agent', 19, 'research-orchestrator', '2026.9.2', 1, 1);
             """
         )
     leaked_openclaw_home.mkdir()
@@ -1483,7 +1483,7 @@ def _prepare_push_script_home(
         json.dumps(
             {
                 "name": "@openai/codex",
-                "version": "0.151.0",
+                "version": "0.153.4",
                 "bin": {"codex": "bin/codex.js"},
             }
         ),
@@ -1901,13 +1901,21 @@ def test_installed_codex_native_surface_is_not_enabled_by_main_wildcard_allow() 
     assert "codexDynamicToolsExclude" not in codex_config
 
     candidates = sorted(
-        Path.home().glob(
-            ".openclaw/npm/projects/*/node_modules/@openclaw/codex/dist/provider-capabilities-*.js"
-        )
+        Path.home().glob(".openclaw/npm/projects/*/node_modules/@openclaw/codex/dist/*.js")
     )
     if not candidates:
-        pytest.skip("installed @openclaw/codex provider-capabilities bundle not found")
-    source = candidates[-1].read_text(encoding="utf-8")
+        pytest.skip("installed @openclaw/codex dist bundle not found")
+    source = next(
+        (
+            path.read_text(encoding="utf-8")
+            for path in reversed(candidates)
+            if "function shouldEnableCodexAppServerNativeToolSurface"
+            in path.read_text(encoding="utf-8")
+        ),
+        None,
+    )
+    if source is None:
+        pytest.skip("installed @openclaw/codex native tool-surface function not found")
     function_start = source.index("function shouldEnableCodexAppServerNativeToolSurface")
     function_body = source[function_start : source.index("function ", function_start + 1)]
     assert "if (toolsAllow === void 0)" in function_body
@@ -1938,9 +1946,9 @@ def test_installed_runtime_projects_main_mcp_servers_from_codex_agent_scope() ->
 def test_bootstrap_reconciles_exact_codex_runtime_and_installs_daemon() -> None:
     script = BOOTSTRAP_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'REQUIRED_OPENCLAW_VERSION="2026.8.1"' in script
-    assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"' in script
-    assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"' in script
+    assert 'REQUIRED_OPENCLAW_VERSION="2026.9.2"' in script
+    assert 'REQUIRED_CODEX_PLUGIN_VERSION="2026.9.2"' in script
+    assert 'REQUIRED_CODEX_APP_SERVER_VERSION="0.153.4"' in script
     install = script.index(
         'plugins install "${CODEX_PLUGIN_INSTALL_SPEC}" --pin --force --accept-capabilities'
     )
@@ -1963,11 +1971,11 @@ def test_mocked_bootstrap_openclaw_flow_runs_upgrade_steps_in_order(tmp_path: Pa
     assert result.returncode == 0, result.stderr
     assert OPENCLAW_CONFIG.read_bytes() == repo_config_before
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw plugins inspect codex --json",
         "openclaw daemon install --force --port 18789 --json",
@@ -2023,7 +2031,7 @@ def test_bootstrap_invalid_repo_overlay_aborts_before_onboarding_or_live_writes(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2045,7 +2053,7 @@ def test_bootstrap_rejects_repo_schema_warnings_before_live_writes(tmp_path: Pat
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     expected_error = "Repo OpenClaw config failed schema validation before plugin/runtime preflight"
@@ -2068,7 +2076,7 @@ def test_bootstrap_invalid_candidate_overlay_aborts_before_onboarding_or_live_wr
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2090,7 +2098,7 @@ def test_bootstrap_rejects_candidate_schema_warnings_before_inspect_or_daemon(
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2119,7 +2127,7 @@ def test_bootstrap_rejects_repo_preflight_topology_replacement_with_identical_by
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
     ]
     assert "Repo OpenClaw config failed schema validation" in result.stdout
@@ -2144,7 +2152,7 @@ def test_bootstrap_rejects_candidate_preflight_topology_replacement_with_identic
 
     assert result.returncode == 1
     assert flow_log.read_text(encoding="utf-8").splitlines() == [
-        "openclaw plugins install npm:@openclaw/codex@2026.8.1 --pin --force --accept-capabilities",
+        "openclaw plugins install npm:@openclaw/codex@2026.9.2 --pin --force --accept-capabilities",
         "openclaw config validate --json",
         "openclaw config validate --json",
     ]
@@ -2236,7 +2244,7 @@ if [[ -n "${NODE_OPTIONS:-}" ]]; then
   printf 'leaked NODE_OPTIONS=%s\n' "$NODE_OPTIONS" >&2
   exit 63
 fi
-printf 'openclaw 2026.8.1\n'
+printf 'openclaw 2026.9.2\n'
 """.strip(),
     )
 
@@ -2312,13 +2320,13 @@ def test_mocked_bootstrap_daemon_install_failure_aborts_before_push(tmp_path: Pa
     [
         (
             "MOCK_CODEX_PLUGIN_VERSION",
-            "2026.8.0",
-            "Codex plugin 2026.8.0 is unsupported; need exactly 2026.8.1",
+            "2026.9.1",
+            "Codex plugin 2026.9.1 is unsupported; need exactly 2026.9.2",
         ),
         (
             "MOCK_CODEX_APP_SERVER_VERSION",
-            "0.144.4",
-            "Embedded @openai/codex 0.144.4 is unsupported; need exactly 0.151.0",
+            "0.153.3",
+            "Embedded @openai/codex 0.153.3 is unsupported; need exactly 0.153.4",
         ),
     ],
 )
@@ -5505,14 +5513,14 @@ def test_bootstrap_rejects_stale_candidate_without_installing(tmp_path: Path) ->
     )
 
     assert result.returncode == 1
-    assert "unsupported — need exactly 2026.8.1" in result.stdout
+    assert "unsupported — need exactly 2026.9.2" in result.stdout
     assert not npm_log.exists()
     assert not pnpm_log.exists()
 
 
 def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: Path) -> None:
     preferred = tmp_path / ".local/share/pnpm/openclaw"
-    _write_executable(preferred, "printf 'openclaw 2026.8.1\\n'")
+    _write_executable(preferred, "printf 'openclaw 2026.9.2\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -5533,7 +5541,7 @@ def test_bootstrap_keeps_exact_automatic_candidate_without_installing(tmp_path: 
 
 def test_bootstrap_accepts_exact_explicit_override_without_installing(tmp_path: Path) -> None:
     override = tmp_path / "override/openclaw"
-    _write_executable(override, "printf 'openclaw 2026.8.1\\n'")
+    _write_executable(override, "printf 'openclaw 2026.9.2\\n'")
     mock_bin = tmp_path / "mock-bin"
     install_log = tmp_path / "install.log"
     for manager in ("npm", "pnpm"):
@@ -5617,7 +5625,7 @@ main
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.8.1-beta.1", "2026.8.1+build", "2026.8.1.1"],
+    ["2026.9.2-beta.1", "2026.9.2+build", "2026.9.2.1"],
 )
 def test_bootstrap_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -5634,7 +5642,7 @@ def test_bootstrap_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.8.1" in result.stdout
+    assert "need exactly 2026.9.2" in result.stdout
 
 
 def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> None:
@@ -5659,7 +5667,7 @@ def test_push_script_rejects_newer_openclaw_before_mutation(tmp_path: Path) -> N
     )
 
     assert result.returncode == 1
-    assert "unsupported; need exactly 2026.8.1" in result.stderr
+    assert "unsupported; need exactly 2026.9.2" in result.stderr
     assert not openclaw_home.exists()
 
 
@@ -5678,7 +5686,7 @@ if [[ -v OPENCLAW_HOME ]]; then
   printf 'leaked OPENCLAW_HOME=%s\n' "$OPENCLAW_HOME" >&2
   exit 66
 fi
-printf 'openclaw 2026.8.1\n'
+printf 'openclaw 2026.9.2\n'
 """.strip(),
     )
 
@@ -5706,7 +5714,7 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     home = tmp_path / "home"
     openclaw_home = home / "openclaw-home"
     executable = home / "bin/openclaw"
-    _write_executable(executable, "printf 'openclaw 2026.8.1\\n'")
+    _write_executable(executable, "printf 'openclaw 2026.9.2\\n'")
 
     result = subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
@@ -5724,13 +5732,13 @@ def test_push_script_expands_literal_push_home_override(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 1
-    assert f"Using OpenClaw: {executable} (version 2026.8.1)" in result.stdout
+    assert f"Using OpenClaw: {executable} (version 2026.9.2)" in result.stdout
     assert f"Local OpenClaw config not found at {openclaw_home / 'openclaw.json'}" in result.stderr
 
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.8.1-beta.1", "2026.8.1+build", "2026.8.1.1"],
+    ["2026.9.2-beta.1", "2026.9.2+build", "2026.9.2.1"],
 )
 def test_push_script_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -5756,5 +5764,5 @@ def test_push_script_rejects_unstable_exact_prefix_version(
     )
 
     assert result.returncode == 1
-    assert "need exactly 2026.8.1" in result.stderr
+    assert "need exactly 2026.9.2" in result.stderr
     assert not openclaw_home.exists()

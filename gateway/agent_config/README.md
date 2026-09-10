@@ -7,8 +7,8 @@ research-owner persona. Keep those workspaces and their authorities separate.
 
 ## Runtime contract
 
-OpenClaw is pinned to 2026.8.1, `@openclaw/codex` to 2026.8.1, and embedded
-Codex to 0.151.0. The configured route is OpenAI/Codex OAuth. A missing or
+OpenClaw is pinned to 2026.9.2, `@openclaw/codex` to 2026.9.2, and embedded
+Codex to 0.153.4. The configured route is OpenAI/Codex OAuth. A missing or
 unproven route is a refusal; do not invent an alias or switch providers.
 
 G2 traffic uses `agent:main:g2`. The bounded owner loop uses

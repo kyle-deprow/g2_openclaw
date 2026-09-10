@@ -334,7 +334,7 @@ def test_schema_migration_removes_exact_8_1_paths_and_records_verbatim_values(
         ]
     }
     assert "lastTouchedAt" not in cast(JsonObject, migrated["meta"])
-    assert cast(JsonObject, migrated["meta"])["lastTouchedVersion"] == "2026.8.1"
+    assert cast(JsonObject, migrated["meta"])["lastTouchedVersion"] == "2026.9.2"
     defaults = cast(JsonObject, cast(JsonObject, migrated["agents"])["defaults"])
     assert "memorySearch" not in defaults
     assert cast(JsonObject, defaults["nested"])["memorySearch"] == {"enabled": True}
@@ -791,6 +791,10 @@ def _jq_full_assembly(
         input_bytes=merged,
     )
     merged = _run_jq(
+        ["del(.plugins.load.paths) | if .plugins.load == {} then del(.plugins.load) else . end"],
+        input_bytes=merged,
+    )
+    merged = _run_jq(
         [
             "--arg",
             "launcher",
@@ -854,6 +858,7 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
         "tools": {"allow": ["stale"]},
         "memory": {"legacy": {"enabled": True}},
         "plugins": {
+            "load": {"paths": ["~/.openclaw/plugins/cohorts/2026.8.1/node_modules/@openclaw/acpx"]},
             "entries": {
                 "codex": {
                     "config": {
@@ -869,7 +874,7 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
                     },
                     "machineOnly": True,
                 },
-            }
+            },
         },
         "mcp": {"servers": {"machine-local": {"command": "stale"}}},
     }
@@ -917,6 +922,7 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
     assert subagents["archiveAfterMinutes"] == JsonNumber("7")
     assert subagents["requireAgentId"] is True
     plugins = cast(JsonObject, python_config["plugins"])
+    assert "load" not in plugins
     entries = cast(JsonObject, plugins["entries"])
     acpx = cast(JsonObject, entries["acpx"])
     assert acpx["machineOnly"] is True

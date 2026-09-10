@@ -1,6 +1,6 @@
 ---
 name: openclaw-memory
-description: OpenClaw 2026.8.1 memory configuration and the repository's read-only MemPalace policy.
+description: OpenClaw 2026.9.2 memory configuration and the repository's read-only MemPalace policy.
 ---
 
 # OpenClaw Memory
@@ -20,7 +20,7 @@ gate. There is no automated MemPalace writer. Do not use Markdown memory files
 for research continuity, and do not add a fallback when retrieval is
 unavailable; report the blocker instead.
 
-## OpenClaw 8.1 fields
+## OpenClaw 9.2 fields
 
 - Set `memory.search.enabled` explicitly to `false`; the runtime default is
   enabled.

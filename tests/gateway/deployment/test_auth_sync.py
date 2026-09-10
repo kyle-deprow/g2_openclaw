@@ -56,7 +56,7 @@ def _create_auth_database(
         if native_schema:
             connection.execute(
                 "INSERT INTO schema_meta VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("primary", native_role, native_schema_version, agent_id, "2026.8.1", 1, 1),
+                ("primary", native_role, native_schema_version, agent_id, "2026.9.2", 1, 1),
             )
         if profile_json is not None:
             connection.execute(

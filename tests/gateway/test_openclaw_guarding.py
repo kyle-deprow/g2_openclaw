@@ -87,16 +87,16 @@ def test_require_openclaw_rejects_newer_version(tmp_path: Path) -> None:
         patch("gateway.cli._resolve_openclaw_executable", return_value=executable),
         patch(
             "gateway.cli.subprocess.run",
-            return_value=MagicMock(returncode=0, stdout="openclaw 2026.8.2\n", stderr=""),
+            return_value=MagicMock(returncode=0, stdout="openclaw 2026.9.3\n", stderr=""),
         ),
-        pytest.raises(_OpenClawVersionError, match=r"too new; need exactly 2026\.8\.1"),
+        pytest.raises(_OpenClawVersionError, match=r"too new; need exactly 2026\.9\.2"),
     ):
         _require_openclaw_binary()
 
 
 @pytest.mark.parametrize(
     "version_token",
-    ["2026.8.1-beta.1", "2026.8.1+build", "2026.8.1.1"],
+    ["2026.9.2-beta.1", "2026.9.2+build", "2026.9.2.1"],
 )
 def test_require_openclaw_rejects_unstable_exact_prefix_version(
     tmp_path: Path, version_token: str
@@ -130,7 +130,7 @@ def test_launch_uses_resolved_openclaw_binary_for_start(tmp_path: Path) -> None:
             "gateway.cli._require_openclaw_binary",
             return_value=_ResolvedOpenClaw(
                 Path("/resolved/openclaw"),
-                "2026.8.1",
+                "2026.9.2",
                 (2026, 7, 1),
             ),
         ),

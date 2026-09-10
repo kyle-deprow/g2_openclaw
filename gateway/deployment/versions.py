@@ -11,9 +11,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-REQUIRED_OPENCLAW_VERSION = "2026.8.1"
-REQUIRED_CODEX_PLUGIN_VERSION = "2026.8.1"
-REQUIRED_CODEX_APP_SERVER_VERSION = "0.151.0"
+REQUIRED_OPENCLAW_VERSION = "2026.9.2"
+REQUIRED_CODEX_PLUGIN_VERSION = "2026.9.2"
+REQUIRED_CODEX_APP_SERVER_VERSION = "0.153.4"
 
 
 def expand_user_path(path: str, home: str) -> str:

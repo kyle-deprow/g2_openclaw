@@ -7,8 +7,8 @@ restart services, or run the publish script while reviewing source changes.
 
 ## Runtime tuple and provider
 
-The managed runtime is OpenClaw 2026.8.1, @openclaw/codex 2026.8.1, and
-embedded @openai/codex 0.151.0. The default route is OpenAI/Codex app-server
+The managed runtime is OpenClaw 2026.9.2, @openclaw/codex 2026.9.2, and
+embedded @openai/codex 0.153.4. The default route is OpenAI/Codex app-server
 through OAuth. Its managed `openai` provider uses the native
 `openai-chatgpt-responses` API with
 `https://chatgpt.com/backend-api/codex`, `auth: oauth`, and
@@ -45,7 +45,7 @@ No autoresearch model writes MemPalace: every model is read-only, the built-in
 memory tools memory_search and memory_get are denied, memory flush is disabled,
 and the durable research records are the research store and artifact receipts.
 MemPalace is optional read-only retrieval, never a control ledger or completion
-gate, and this loop has no automated MemPalace writer. The managed OpenClaw 8.1
+gate, and this loop has no automated MemPalace writer. The managed OpenClaw 9.2
 config explicitly sets `memory.search.enabled` and
 `agents.defaults.compaction.memoryFlush.enabled` to `false`; do not enable
 built-in memory or add a provider fallback. It also keeps
@@ -66,7 +66,7 @@ readiness or alpha.
 
 ## Guarded publication
 
-The push script validates the generated JSON against the installed 8.1 schema,
+The push script validates the generated JSON against the installed 9.2 schema,
 the OpenAI/Codex provider, the main and research-owner agent IDs, bounded tool
 profiles, memory denial, and the research-owner unit. It publishes atomically
 with rollback evidence and prunes stale installed copies using its declared

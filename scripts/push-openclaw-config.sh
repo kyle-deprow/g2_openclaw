@@ -11,7 +11,7 @@
 #
 # Prerequisites:
 #   - jq (https://jqlang.github.io/jq/)
-#   - OpenClaw CLI exactly 2026.8.1
+#   - OpenClaw CLI exactly 2026.9.2
 #   - MemPalace installed with 'make mempalace-install'
 #   - For codex: run 'openclaw models auth login --provider openai' for main;
 #     this script syncs that OpenClaw-managed Codex OAuth profile into managed
@@ -90,9 +90,9 @@ NATIVE_CRASH_HARDENING_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${NATIVE_C
 OBSOLETE_CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/20-openclaw-codex-runtime.conf"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
-REQUIRED_OPENCLAW_VERSION="2026.8.1"
-REQUIRED_CODEX_PLUGIN_VERSION="2026.8.1"
-REQUIRED_CODEX_APP_SERVER_VERSION="0.151.0"
+REQUIRED_OPENCLAW_VERSION="2026.9.2"
+REQUIRED_CODEX_PLUGIN_VERSION="2026.9.2"
+REQUIRED_CODEX_APP_SERVER_VERSION="0.153.4"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 CODEX_APP_SERVER_CLI_RESOLVED=""
@@ -2202,6 +2202,7 @@ if ! echo "${MERGED}" | jq -e \
   and ((.agents.entries | type) == "object")
   and all(.agents.entries | to_entries[]; (.value | type) == "object" and ((.value | has("id")) | not))
   and ((.plugins.allow // []) | contains(["codex", "acpx"]))
+  and (.plugins.load.paths? == null)
   and (.plugins.entries.codex.enabled == true)
   and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
   and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
