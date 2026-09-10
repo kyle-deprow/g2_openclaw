@@ -39,6 +39,26 @@ class ConfigMergeError(RuntimeError):
     """Raised when the managed config cannot be assembled safely."""
 
 
+def _validate_contract_file(raw_path: str, *, private: bool, label: str) -> str:
+    """Validate a renderer input without reading secret contents."""
+
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise ConfigMergeError(f"{label} must be an absolute path")
+    try:
+        path_stat = path.lstat()
+    except OSError as exc:
+        raise ConfigMergeError(f"{label} is not readable: {path}") from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise ConfigMergeError(f"{label} must be a regular non-symlink file")
+    if private:
+        if path_stat.st_uid != os.getuid():
+            raise ConfigMergeError(f"{label} must be owned by the deployment user")
+        if stat.S_IMODE(path_stat.st_mode) & 0o077:
+            raise ConfigMergeError(f"{label} must not be group/world accessible")
+    return str(path)
+
+
 STALE_CODING_PROVIDER_KEYS = frozenset({"github-copilot", "copilot-proxy", "copilot-cli"})
 
 # These are native OpenAI/Codex routes used by the managed research owner and
@@ -74,6 +94,10 @@ class AssemblyInputs:
     hf_hub_offline: str
     g2_module: str
     research_v2_root: str
+    research_core_database: str
+    owner_env_file: str
+    openclaw_host: str
+    openclaw_port: str
     mempalace_readonly_agents: tuple[str, ...]
     g2_agents: tuple[str, ...]
     provider: str
@@ -565,6 +589,10 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
                 "env": {
                     "PYTHONPATH": inputs.repo_root,
                     "RESEARCH_V2_ROOT": inputs.research_v2_root,
+                    "RESEARCH_CORE_DATABASE": inputs.research_core_database,
+                    "OPENCLAW_HOST": inputs.openclaw_host,
+                    "OPENCLAW_PORT": inputs.openclaw_port,
+                    "G2_OWNER_ENV_FILE": inputs.owner_env_file,
                 },
             },
         }
@@ -800,6 +828,30 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-20250514"),
     )
     orchestrator_primary = orchestrator_model_primary(repo)
+    owner_env_file = os.environ.get("G2_OWNER_ENV_FILE", "")
+    research_core_database = os.environ.get("RESEARCH_CORE_DATABASE", "")
+    openclaw_host = os.environ.get("OPENCLAW_HOST", "127.0.0.1")
+    openclaw_port = os.environ.get("OPENCLAW_PORT", "18789")
+    if not owner_env_file:
+        raise ConfigMergeError("G2_OWNER_ENV_FILE is required; refusing an unbound MCP env")
+    if not research_core_database:
+        raise ConfigMergeError(
+            "RESEARCH_CORE_DATABASE is required; refusing an unbound MCP database"
+        )
+    owner_env_file = _validate_contract_file(
+        owner_env_file, private=True, label="G2_OWNER_ENV_FILE"
+    )
+    research_core_database = _validate_contract_file(
+        research_core_database, private=False, label="RESEARCH_CORE_DATABASE"
+    )
+    if openclaw_host != "127.0.0.1":
+        raise ConfigMergeError("OPENCLAW_HOST must be the loopback address 127.0.0.1")
+    try:
+        port = int(openclaw_port)
+    except ValueError as exc:
+        raise ConfigMergeError("OPENCLAW_PORT must be a decimal TCP port") from exc
+    if not 1 <= port <= 65535 or str(port) != openclaw_port:
+        raise ConfigMergeError("OPENCLAW_PORT must be a canonical port in range 1..65535")
     inputs = AssemblyInputs(
         repo_root=args.repo_root,
         python_bin=args.python_bin,
@@ -811,6 +863,10 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         hf_hub_offline=args.hf_hub_offline,
         g2_module=args.g2_module,
         research_v2_root=args.research_v2_root,
+        research_core_database=research_core_database,
+        owner_env_file=owner_env_file,
+        openclaw_host=openclaw_host,
+        openclaw_port=openclaw_port,
         mempalace_readonly_agents=tuple(cast(list[str], readonly_agents)),
         g2_agents=tuple(cast(list[str], g2_agents)),
         provider=provider,

@@ -1,6 +1,8 @@
 """Managed OpenClaw Codex deployment helpers extracted from the push script."""
 
 import argparse
+import os
+import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,6 +26,25 @@ class MCPServer(TypedDict, total=False):
     args: list[str]
     env: dict[str, str]
     default_tools_approval_mode: str
+
+
+def _validate_private_env_file(raw_path: str) -> str:
+    """Validate the path-only owner env contract without reading or executing it."""
+
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise SystemExit("G2_OWNER_ENV_FILE must be an absolute path")
+    try:
+        path_stat = path.lstat()
+    except OSError as exc:
+        raise SystemExit(f"G2_OWNER_ENV_FILE is not readable: {path}") from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode):
+        raise SystemExit("G2_OWNER_ENV_FILE must be a regular non-symlink file")
+    if path_stat.st_uid != os.getuid():
+        raise SystemExit("G2_OWNER_ENV_FILE must be owned by the deployment user")
+    if stat.S_IMODE(path_stat.st_mode) & 0o077:
+        raise SystemExit("G2_OWNER_ENV_FILE must not be group/world accessible")
+    return str(path)
 
 
 def ensure_writable_roots(roots: Sequence[Path] | None = None) -> None:
@@ -239,7 +260,6 @@ def write_runtime_config() -> None:
     """Write the managed Codex runtime configuration from deployment environment variables."""
 
     import json
-    import os
     from pathlib import Path
 
     def quoted(value: str) -> str:
@@ -276,6 +296,7 @@ def write_runtime_config() -> None:
         }
         servers["mempalace-readonly"] = mempalace_server
     if agent_id == "main":
+        owner_env_file = _validate_private_env_file(os.environ["CODEX_RUNTIME_OWNER_ENV_FILE"])
         research_root = os.environ["CODEX_RUNTIME_RESEARCH_V2_ROOT"]
         servers["g2-control"] = {
             "command": os.environ["CODEX_RUNTIME_G2_PYTHON"],
@@ -283,6 +304,10 @@ def write_runtime_config() -> None:
             "env": {
                 "PYTHONPATH": os.environ["CODEX_RUNTIME_REPO_ROOT"],
                 "RESEARCH_V2_ROOT": research_root,
+                "RESEARCH_CORE_DATABASE": os.environ["CODEX_RUNTIME_RESEARCH_CORE_DATABASE"],
+                "OPENCLAW_HOST": os.environ["CODEX_RUNTIME_OPENCLAW_HOST"],
+                "OPENCLAW_PORT": os.environ["CODEX_RUNTIME_OPENCLAW_PORT"],
+                "G2_OWNER_ENV_FILE": owner_env_file,
             },
             "default_tools_approval_mode": "approve",
         }
@@ -356,8 +381,12 @@ def validate_mcp_wiring() -> None:
     g2_python = sys.argv[6]
     g2_module = sys.argv[7]
     repo_root = sys.argv[8]
-    research_root = Path(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9] else None
-    hypothesis_root = Path(sys.argv[10]) if len(sys.argv) > 10 and sys.argv[10] else None
+    owner_env_file = sys.argv[9]
+    research_core_database = sys.argv[10]
+    openclaw_host = sys.argv[11]
+    openclaw_port = sys.argv[12]
+    research_root = Path(sys.argv[13]) if len(sys.argv) > 13 and sys.argv[13] else None
+    hypothesis_root = Path(sys.argv[14]) if len(sys.argv) > 14 and sys.argv[14] else None
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     if data.get("approval_policy") != "never":
         raise SystemExit("Codex runtime config must set approval_policy=never")
@@ -426,12 +455,20 @@ def validate_mcp_wiring() -> None:
     if agent_id == "main":
         if research_root is None:
             raise SystemExit("main Codex runtime validation requires RESEARCH_V2_ROOT")
+        expected_owner_env_file = _validate_private_env_file(owner_env_file)
         g2 = servers["g2-control"]
         if g2.get("command") != g2_python or g2.get("args") != ["-m", g2_module]:
             raise SystemExit("Codex runtime g2-control MCP command is not exact")
         if g2.get("default_tools_approval_mode") != "approve":
             raise SystemExit("Codex runtime g2-control MCP approval mode is not exact")
-        if g2.get("env") != {"PYTHONPATH": repo_root, "RESEARCH_V2_ROOT": str(research_root)}:
+        if g2.get("env") != {
+            "PYTHONPATH": repo_root,
+            "RESEARCH_V2_ROOT": str(research_root),
+            "RESEARCH_CORE_DATABASE": research_core_database,
+            "OPENCLAW_HOST": openclaw_host,
+            "OPENCLAW_PORT": openclaw_port,
+            "G2_OWNER_ENV_FILE": expected_owner_env_file,
+        }:
             raise SystemExit("Codex runtime g2-control MCP env is not exact")
 
 
@@ -470,6 +507,10 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_parser.add_argument("g2_python")
     mcp_parser.add_argument("g2_module")
     mcp_parser.add_argument("repo_root")
+    mcp_parser.add_argument("owner_env_file")
+    mcp_parser.add_argument("research_core_database")
+    mcp_parser.add_argument("openclaw_host")
+    mcp_parser.add_argument("openclaw_port")
     mcp_parser.add_argument("research_root", nargs="?")
     mcp_parser.add_argument("hypothesis_root", nargs="?")
 
@@ -518,6 +559,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.g2_python,
             args.g2_module,
             args.repo_root,
+            args.owner_env_file,
+            args.research_core_database,
+            args.openclaw_host,
+            args.openclaw_port,
         ]
         if args.research_root is not None:
             sys.argv.extend([args.research_root, args.hypothesis_root or ""])

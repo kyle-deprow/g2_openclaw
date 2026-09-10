@@ -280,6 +280,9 @@ def test_write_runtime_config_round_trips_through_validator(
 ) -> None:
     roots = (tmp_path / "research-v2", tmp_path / "research-v2/hypothesis")
     config_path = tmp_path / "runtime.toml"
+    owner_env_file = tmp_path / "owner.env"
+    owner_env_file.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+    owner_env_file.chmod(0o600)
     monkeypatch.setattr(codex_agents, "CODEX_WRITABLE_ROOTS", roots)
     runtime_environment = {
         "CODEX_RUNTIME_AGENT_ID": "research-orchestrator",
@@ -292,6 +295,10 @@ def test_write_runtime_config_round_trips_through_validator(
         "CODEX_RUNTIME_HF_HUB_OFFLINE": "1",
         "CODEX_RUNTIME_RESEARCH_V2_ROOT": str(tmp_path / "research-v2"),
         "CODEX_RUNTIME_HYPOTHESIS_WORKTREES_ROOT": str(tmp_path / "research-v2/hypothesis"),
+        "CODEX_RUNTIME_OWNER_ENV_FILE": str(owner_env_file),
+        "CODEX_RUNTIME_RESEARCH_CORE_DATABASE": str(tmp_path / "state/openclaw.sqlite"),
+        "CODEX_RUNTIME_OPENCLAW_HOST": "127.0.0.1",
+        "CODEX_RUNTIME_OPENCLAW_PORT": "18789",
     }
     for key, value in runtime_environment.items():
         monkeypatch.setenv(key, value)
@@ -310,6 +317,10 @@ def test_write_runtime_config_round_trips_through_validator(
             "/opt/g2-python",
             "gateway.g2_control_mcp_server",
             str(tmp_path),
+            str(owner_env_file),
+            str(tmp_path / "state/openclaw.sqlite"),
+            "127.0.0.1",
+            "18789",
             str(tmp_path / "research-v2"),
             str(tmp_path / "research-v2/hypothesis"),
         ],
@@ -333,6 +344,12 @@ def test_main_runtime_config_has_no_retired_research_writable_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = tmp_path / "runtime.toml"
+    owner_env_file = tmp_path / "owner.env"
+    owner_env_file.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+    owner_env_file.chmod(0o600)
+    core_database = tmp_path / "state/openclaw.sqlite"
+    core_database.parent.mkdir()
+    core_database.write_bytes(b"fixture core database\n")
     for key, value in {
         "CODEX_RUNTIME_AGENT_ID": "main",
         "CODEX_RUNTIME_CONFIG_PATH": str(config_path),
@@ -347,6 +364,10 @@ def test_main_runtime_config_has_no_retired_research_writable_roots(
         "CODEX_RUNTIME_REPO_ROOT": str(tmp_path),
         "CODEX_RUNTIME_RESEARCH_V2_ROOT": str(tmp_path / "research-v2"),
         "CODEX_RUNTIME_HYPOTHESIS_WORKTREES_ROOT": str(tmp_path / "research-v2/hypothesis"),
+        "CODEX_RUNTIME_OWNER_ENV_FILE": str(owner_env_file),
+        "CODEX_RUNTIME_RESEARCH_CORE_DATABASE": str(core_database),
+        "CODEX_RUNTIME_OPENCLAW_HOST": "127.0.0.1",
+        "CODEX_RUNTIME_OPENCLAW_PORT": "18789",
     }.items():
         monkeypatch.setenv(key, value)
 
@@ -357,4 +378,24 @@ def test_main_runtime_config_has_no_retired_research_writable_roots(
     assert rendered["mcp_servers"]["g2-control"]["env"] == {
         "PYTHONPATH": str(tmp_path),
         "RESEARCH_V2_ROOT": str(tmp_path / "research-v2"),
+        "RESEARCH_CORE_DATABASE": str(core_database),
+        "OPENCLAW_HOST": "127.0.0.1",
+        "OPENCLAW_PORT": "18789",
+        "G2_OWNER_ENV_FILE": str(owner_env_file),
     }
+
+
+@pytest.mark.parametrize("case", ["missing", "symlink", "public"])
+def test_owner_env_file_contract_rejects_untrusted_paths(tmp_path: Path, case: str) -> None:
+    owner_env_file = tmp_path / "owner.env"
+    if case == "symlink":
+        target = tmp_path / "target.env"
+        target.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+        target.chmod(0o600)
+        owner_env_file.symlink_to(target)
+    elif case == "public":
+        owner_env_file.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+        owner_env_file.chmod(0o644)
+
+    with pytest.raises(SystemExit, match="G2_OWNER_ENV_FILE"):
+        codex_agents._validate_private_env_file(str(owner_env_file))

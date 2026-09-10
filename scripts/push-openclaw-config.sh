@@ -61,6 +61,7 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_CONFIG="${REPO_ROOT}/gateway/openclaw_config/openclaw.json"
 ENV_FILE="${OPENCLAW_PUSH_ENV_FILE:-${REPO_ROOT}/gateway/openclaw_config/.env}"
+APPROVED_OWNER_ENV_FILE="${ENV_FILE}"
 QUANTIPY_ROOT="/home/dev/repos/quantipy"
 SKILLS_SRC="${SKILLS_SRC:-${REPO_ROOT}/gateway/agent_config/skills}"
 CODEX_AGENTS_SRC="${REPO_ROOT}/.codex/agents"
@@ -299,6 +300,36 @@ validate_research_core_database() {
   esac
   if [[ -L "${RESEARCH_CORE_DATABASE}" || ! -f "${RESEARCH_CORE_DATABASE}" ]]; then
     echo "ERROR: RESEARCH_CORE_DATABASE must be an existing regular non-symlink file: ${RESEARCH_CORE_DATABASE}" >&2
+    return 1
+  fi
+}
+
+validate_owner_env_file() {
+  local path="$1" mode owner expected_owner
+  if [[ "${path}" != /* || "${path}" == "/" ]]; then
+    echo "ERROR: G2_OWNER_ENV_FILE must be an absolute non-root path." >&2
+    return 1
+  fi
+  case "${path}" in
+    *$'\n'*|*$'\r'*|*$'\t'*|*' '*|*'@'*|*'%'*)
+      echo "ERROR: G2_OWNER_ENV_FILE contains unsupported path characters." >&2
+      return 1
+      ;;
+  esac
+  if [[ -L "${path}" || ! -f "${path}" ]]; then
+    echo "ERROR: G2_OWNER_ENV_FILE must be an existing regular non-symlink file: ${path}" >&2
+    return 1
+  fi
+  if ! owner="$(stat -c '%u' -- "${path}")" || ! expected_owner="$(id -u)"; then
+    echo "ERROR: Could not inspect G2_OWNER_ENV_FILE ownership: ${path}" >&2
+    return 1
+  fi
+  if [[ "${owner}" != "${expected_owner}" ]]; then
+    echo "ERROR: G2_OWNER_ENV_FILE must be owned by the deployment user: ${path}" >&2
+    return 1
+  fi
+  if ! mode="$(stat -c '%a' -- "${path}")" || (( 8#${mode} & 077 )); then
+    echo "ERROR: G2_OWNER_ENV_FILE must not be group/world accessible: ${path}" >&2
     return 1
   fi
 }
@@ -579,7 +610,7 @@ validate_native_crash_hardening_dropin_file() {
 
 validate_research_owner_unit_file() {
   local path="$1" expected_root="${2:-}" expected_core_database="${3:-}" \
-    exec_start_ok=0 environment_file_ok=0 core_database_ok=0
+    expected_env_file="${4:-}" exec_start_ok=0 environment_file_ok=0 core_database_ok=0
   if [[ ! -f "${path}" ]]; then
     echo "ERROR: Repo-managed research owner unit not found at ${path}" >&2
     return 1
@@ -589,8 +620,9 @@ validate_research_owner_unit_file() {
   elif [[ -n "${expected_root}" ]] && grep -Fxq "ExecStart=${REPO_ROOT}/.venv/bin/gateway-cli research serve --root \"${expected_root}\" --session-key agent:research-orchestrator:autoresearch:quantipy-v2 --poll-seconds 60" "${path}"; then
     exec_start_ok=1
   fi
-  if grep -Fxq "EnvironmentFile=@REPO_ROOT@/.env" "${path}" \
-    || grep -Fxq "EnvironmentFile=${REPO_ROOT}/.env" "${path}"; then
+  if grep -Fxq "EnvironmentFile=@OWNER_ENV_FILE@" "${path}" \
+    || { [[ -n "${expected_env_file}" ]] \
+      && grep -Fxq "EnvironmentFile=${expected_env_file}" "${path}"; }; then
     environment_file_ok=1
   fi
   if grep -Fxq "Environment=RESEARCH_CORE_DATABASE=@RESEARCH_CORE_DATABASE@" "${path}" \
@@ -1800,10 +1832,14 @@ for VAR_NAME in "${PRESERVE_ENV_VARS[@]}"; do
   fi
 done
 
-if [[ -f "${ENV_FILE}" ]]; then
+if ! validate_owner_env_file "${APPROVED_OWNER_ENV_FILE}"; then
+  exit 1
+fi
+
+if [[ -f "${APPROVED_OWNER_ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   set -a
-  if ! source "${ENV_FILE}"; then
+  if ! source "${APPROVED_OWNER_ENV_FILE}"; then
     set +a
     echo "ERROR: OPENCLAW_PUSH_MODE_REQUESTED is immutable and may not be set by OPENCLAW_PUSH_ENV_FILE." >&2
     exit 1
@@ -1830,12 +1866,16 @@ for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
   export "${VAR_NAME}"
 done
 unset OPENCLAW_HOME
-# Resolve the bounded route roots after the optional env file has loaded. An
-# explicitly exported value still wins via PRESERVED_ENV above; otherwise a
-# project-local .env may provide the task-specific roots.
+# Resolve the bounded route roots after the approved env file has loaded. An
+# explicitly exported value still wins via PRESERVED_ENV above; the owner MCP
+# receives only this fixed path and loads a strict allowlist at runtime.
 RESEARCH_V2_ROOT="${RESEARCH_V2_ROOT:-${OPENCLAW_PUSH_HOME}/research-v2}"
 HYPOTHESIS_WORKTREES_ROOT="${HYPOTHESIS_WORKTREES_ROOT:-${RESEARCH_V2_ROOT}/hypothesis-worktrees}"
+OPENCLAW_HOST="${OPENCLAW_HOST:-127.0.0.1}"
+OPENCLAW_PORT="${OPENCLAW_PORT:-18789}"
+G2_OWNER_ENV_FILE="${APPROVED_OWNER_ENV_FILE}"
 export RESEARCH_V2_ROOT HYPOTHESIS_WORKTREES_ROOT
+export OPENCLAW_HOST OPENCLAW_PORT G2_OWNER_ENV_FILE
 
 if ! validate_bounded_research_roots; then
   exit 1
@@ -2041,6 +2081,10 @@ if ! echo "${MERGED}" | jq -e \
   --arg python "${PYTHON_BIN}" \
   --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
   --arg research_root "${RESEARCH_V2_ROOT}" \
+  --arg research_core_database "${RESEARCH_CORE_DATABASE}" \
+  --arg owner_env_file "${G2_OWNER_ENV_FILE}" \
+  --arg openclaw_host "${OPENCLAW_HOST}" \
+  --arg openclaw_port "${OPENCLAW_PORT}" \
   --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
   --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
   --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" \
@@ -2096,7 +2140,11 @@ if ! echo "${MERGED}" | jq -e \
   and (.mcp.servers."g2-control".codex.defaultToolsApprovalMode == "approve")
   and (.mcp.servers."g2-control".env == {
     "PYTHONPATH": $repo,
-    "RESEARCH_V2_ROOT": $research_root
+    "RESEARCH_V2_ROOT": $research_root,
+    "RESEARCH_CORE_DATABASE": $research_core_database,
+    "OPENCLAW_HOST": $openclaw_host,
+    "OPENCLAW_PORT": $openclaw_port,
+    "G2_OWNER_ENV_FILE": $owner_env_file
   })
   and (((.agents.entries // {}) | keys | sort) == (expected_models | keys | sort))
   and all((.agents.entries // {}) | to_entries[]; .value.model.primary == expected_models[.key])
@@ -2246,6 +2294,10 @@ write_codex_runtime_config() {
   CODEX_RUNTIME_REPO_ROOT="${REPO_ROOT}" \
   CODEX_RUNTIME_RESEARCH_V2_ROOT="${RESEARCH_V2_ROOT}" \
   CODEX_RUNTIME_HYPOTHESIS_WORKTREES_ROOT="${HYPOTHESIS_WORKTREES_ROOT}" \
+  CODEX_RUNTIME_OWNER_ENV_FILE="${G2_OWNER_ENV_FILE}" \
+  CODEX_RUNTIME_RESEARCH_CORE_DATABASE="${RESEARCH_CORE_DATABASE}" \
+  CODEX_RUNTIME_OPENCLAW_HOST="${OPENCLAW_HOST}" \
+  CODEX_RUNTIME_OPENCLAW_PORT="${OPENCLAW_PORT}" \
   PYTHONSAFEPATH=1 \
   PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
   "${PYTHON_BIN}" -m gateway.deployment.codex_agents write-runtime-config
@@ -2261,6 +2313,7 @@ validate_codex_runtime_config() {
     -- "${config_path}" "${agent_id}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_READONLY_WRAPPER_DST}" "${MEMPALACE_PALACE}" \
     "${PYTHON_BIN}" "${G2_CONTROL_MCP_MODULE}" "${REPO_ROOT}" \
+    "${G2_OWNER_ENV_FILE}" "${RESEARCH_CORE_DATABASE}" "${OPENCLAW_HOST}" "${OPENCLAW_PORT}" \
     "${RESEARCH_V2_ROOT}" "${HYPOTHESIS_WORKTREES_ROOT}"
   repair_codex_runtime_log_db "${codex_home}"
   repair_codex_runtime_state_db "${codex_home}"
@@ -2635,6 +2688,7 @@ sed \
   -e "s|@PATH@|$(escape_sed_replacement "${PATH}")|g" \
   -e "s|@RESEARCH_V2_ROOT@|$(escape_sed_replacement "${RESEARCH_V2_ROOT}")|g" \
   -e "s|@RESEARCH_CORE_DATABASE@|$(escape_sed_replacement "${RESEARCH_CORE_DATABASE}")|g" \
+  -e "s|@OWNER_ENV_FILE@|$(escape_sed_replacement "${APPROVED_OWNER_ENV_FILE}")|g" \
   -e "s|@PYTHON_BIN@|$(escape_sed_replacement "${PYTHON_BIN}")|g" \
   "${RESEARCH_OWNER_UNIT_TEMPLATE}" > "${RESEARCH_OWNER_UNIT_TMP}"
 guard_destination_path_chain "${RESEARCH_OWNER_UNIT_TMP}" "wrote generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"
@@ -2642,7 +2696,7 @@ if grep -q '@[A-Z_][A-Z_]*@' "${RESEARCH_OWNER_UNIT_TMP}"; then
   echo "ERROR: Unresolved placeholder in generated ${RESEARCH_OWNER_SERVICE_NAME}." >&2
   exit 1
 fi
-if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_V2_ROOT}" "${RESEARCH_CORE_DATABASE}"; then
+if ! validate_research_owner_unit_file "${RESEARCH_OWNER_UNIT_TMP}" "${RESEARCH_V2_ROOT}" "${RESEARCH_CORE_DATABASE}" "${APPROVED_OWNER_ENV_FILE}"; then
   exit 1
 fi
 guarded_chmod 0644 "${RESEARCH_OWNER_UNIT_TMP}" "chmod generated research owner unit ${RESEARCH_OWNER_UNIT_TMP}"

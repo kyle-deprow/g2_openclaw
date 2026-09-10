@@ -1777,6 +1777,7 @@ def _prepare_push_script_home(
         ),
         encoding="utf-8",
     )
+    env_file.chmod(0o600)
     return _base_subprocess_env(
         home,
         {
@@ -3145,7 +3146,7 @@ def test_push_script_installs_but_does_not_start_the_research_owner_service() ->
     assert "%h/.openclaw/research-v2" not in template
     assert "--session-key agent:research-orchestrator:autoresearch:quantipy-v2" in template
     assert "--poll-seconds 60" in template
-    assert "EnvironmentFile=@REPO_ROOT@/.env" in template
+    assert "EnvironmentFile=@OWNER_ENV_FILE@" in template
     assert "Environment=RESEARCH_CORE_DATABASE=@RESEARCH_CORE_DATABASE@" in template
     assert "Requires=openclaw-gateway.service" not in template
     assert "Restart=on-failure" in template
@@ -3679,6 +3680,10 @@ def test_push_script_renders_native_codex_children_for_owner_workspace(
             assert mcp_servers["g2-control"]["env"] == {
                 "PYTHONPATH": str(REPO_ROOT),
                 "RESEARCH_V2_ROOT": owner_root,
+                "RESEARCH_CORE_DATABASE": str(openclaw_home / "state/openclaw.sqlite"),
+                "OPENCLAW_HOST": "127.0.0.1",
+                "OPENCLAW_PORT": "18789",
+                "G2_OWNER_ENV_FILE": env["OPENCLAW_PUSH_ENV_FILE"],
             }
         else:
             assert "mcp_servers" not in config

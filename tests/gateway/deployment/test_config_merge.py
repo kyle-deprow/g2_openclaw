@@ -515,6 +515,12 @@ def _assembly_inputs(
     home = tmp_path / "fake-home"
     push_home = home / ".openclaw"
     resolved_research_root = research_v2_root or str(push_home / "research-v2")
+    owner_env_file = tmp_path / "owner.env"
+    owner_env_file.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+    owner_env_file.chmod(0o600)
+    core_database = push_home / "state/openclaw.sqlite"
+    core_database.parent.mkdir(parents=True, exist_ok=True)
+    core_database.write_bytes(b"fixture core database\n")
     return AssemblyInputs(
         repo_root=str(REPO_ROOT),
         python_bin=str(REPO_ROOT / ".venv/bin/python"),
@@ -526,6 +532,10 @@ def _assembly_inputs(
         hf_hub_offline="1",
         g2_module="gateway.g2_control_mcp_server",
         research_v2_root=resolved_research_root,
+        research_core_database=str(core_database),
+        owner_env_file=str(owner_env_file),
+        openclaw_host="127.0.0.1",
+        openclaw_port="18789",
         mempalace_readonly_agents=READONLY_AGENTS,
         g2_agents=G2_AGENTS,
         provider=provider,
@@ -580,6 +590,18 @@ def _jq_full_assembly(
             "--arg",
             "research_root",
             inputs.research_v2_root,
+            "--arg",
+            "research_core_database",
+            inputs.research_core_database,
+            "--arg",
+            "owner_env_file",
+            inputs.owner_env_file,
+            "--arg",
+            "openclaw_host",
+            inputs.openclaw_host,
+            "--arg",
+            "openclaw_port",
+            inputs.openclaw_port,
             "--argjson",
             "readonly_agents",
             readonly_agents,
@@ -604,7 +626,9 @@ def _jq_full_assembly(
             '      "agents": $g2_agents,\n'
             '      "defaultToolsApprovalMode": "approve"\n'
             "    },\n"
-            '    "env": {"PYTHONPATH": $repo, "RESEARCH_V2_ROOT": $research_root}\n'
+            '    "env": {"PYTHONPATH": $repo, "RESEARCH_V2_ROOT": $research_root, '
+            '"RESEARCH_CORE_DATABASE": $research_core_database, "OPENCLAW_HOST": $openclaw_host, '
+            '"OPENCLAW_PORT": $openclaw_port, "G2_OWNER_ENV_FILE": $owner_env_file}\n'
             "  }\n"
             "}",
         ],
@@ -819,6 +843,10 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
     assert g2_control["env"] == {
         "PYTHONPATH": inputs.repo_root,
         "RESEARCH_V2_ROOT": inputs.research_v2_root,
+        "RESEARCH_CORE_DATABASE": inputs.research_core_database,
+        "OPENCLAW_HOST": inputs.openclaw_host,
+        "OPENCLAW_PORT": inputs.openclaw_port,
+        "G2_OWNER_ENV_FILE": inputs.owner_env_file,
     }
     assert python_config["acp"] == {
         "enabled": True,
@@ -928,8 +956,18 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
         "/opt/acpx/claude-agent-acp",
     ]
     environment = os.environ.copy()
+    owner_env_file = tmp_path / "owner.env"
+    owner_env_file.write_text("OPENCLAW_GATEWAY_TOKEN=fixture\n", encoding="utf-8")
+    owner_env_file.chmod(0o600)
+    core_database = push_home / "state/openclaw.sqlite"
+    core_database.parent.mkdir(parents=True)
+    core_database.write_bytes(b"fixture core database\n")
     environment["OPENCLAW_PROVIDER"] = ""
     environment["OPENAI_MODEL"] = "gpt-5.4"
+    environment["G2_OWNER_ENV_FILE"] = str(owner_env_file)
+    environment["RESEARCH_CORE_DATABASE"] = str(core_database)
+    environment["OPENCLAW_HOST"] = "127.0.0.1"
+    environment["OPENCLAW_PORT"] = "18789"
     environment["PYTHONSAFEPATH"] = "1"
     environment["PYTHONPATH"] = str(REPO_ROOT)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
