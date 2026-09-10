@@ -102,7 +102,14 @@ def _read_protected_owner_env(path_text: str) -> tuple[str | None, str | None]:
 
 
 def _parse_owner_environment(raw: str) -> _OwnerEnvironment:
-    """Parse dotenv syntax while enforcing the exact production allowlist."""
+    """Parse dotenv syntax while selecting only the deployed contract keys.
+
+    The push's protected environment is a complete deployment environment and
+    therefore legitimately contains provider/runtime settings in addition to
+    the owner-control contract.  Unknown keys are deliberately ignored rather
+    than applied; the five selected keys below retain strict duplicate,
+    placeholder, path, and process-contract validation.
+    """
     seen: set[str] = set()
     for line in raw.splitlines():
         candidate = line.strip()
@@ -113,8 +120,10 @@ def _parse_owner_environment(raw: str) -> _OwnerEnvironment:
         if "=" not in candidate:
             return _owner_environment_refusal("malformed")
         key = candidate.split("=", 1)[0].strip()
+        if not key:
+            return _owner_environment_refusal("malformed")
         if key not in _OWNER_ENV_KEYS:
-            return _owner_environment_refusal("unknown_key")
+            continue
         if key in seen:
             return _owner_environment_refusal("duplicate_key")
         seen.add(key)
@@ -122,7 +131,7 @@ def _parse_owner_environment(raw: str) -> _OwnerEnvironment:
         parsed = dotenv_values(stream=StringIO(raw), interpolate=False)
     except (OSError, UnicodeError, ValueError):
         return _owner_environment_refusal("malformed")
-    if set(parsed) != seen:
+    if set(parsed).intersection(_OWNER_ENV_KEYS) != seen:
         return _owner_environment_refusal("malformed")
     values: dict[str, str] = {}
     for key in _OWNER_ENV_KEYS:

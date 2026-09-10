@@ -13,6 +13,7 @@ from gateway.research import readiness
 from gateway.research.control import (
     OpenClawReviewCanceller,
     OwnerControl,
+    _parse_owner_environment,
     production_owner_control,
 )
 from gateway.research.readiness import (
@@ -211,9 +212,18 @@ def test_production_factory_consumes_explicit_deployment_contract(
     monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
 
     control = production_owner_control(tmp_path)
+    parsed = _parse_owner_environment(env_file.read_text(encoding="utf-8"))
 
     assert isinstance(control._review_canceller, OpenClawReviewCanceller)
     assert control._readiness_gate is not None
+    assert parsed.refusal is None
+    assert set(parsed.values) == {
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "RESEARCH_CORE_DATABASE",
+        "RESEARCH_V2_ROOT",
+    }
 
 
 def test_production_factory_gate_uses_file_database_without_process_mutation(
@@ -244,10 +254,40 @@ def test_production_factory_gate_uses_file_database_without_process_mutation(
     assert "RESEARCH_CORE_DATABASE" not in os.environ
 
 
+def test_production_factory_selects_contract_from_full_deployment_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = _native_database(tmp_path / "core.sqlite")
+    for name in (
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+        "RESEARCH_CORE_DATABASE",
+        "RESEARCH_V2_ROOT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    env_file = _owner_env_file(tmp_path / "owner.env", database, tmp_path)
+    extra_deployment_settings = (
+        "OPENCLAW_PROVIDER=codex",
+        "STT_PROVIDER=fixture",
+        "OPENAI_ORG_ID=synthetic",
+    )
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8") + "\n" + "\n".join(extra_deployment_settings) + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    monkeypatch.setenv("G2_OWNER_ENV_FILE", str(env_file))
+
+    control = production_owner_control(tmp_path)
+
+    assert isinstance(control._review_canceller, OpenClawReviewCanceller)
+    assert control._readiness_gate is not None
+
+
 @pytest.mark.parametrize(
     ("content", "mode", "expected"),
     (
-        ("OPENCLAW_HOST=127.0.0.1\nUNKNOWN=value\n", 0o600, "owner_environment_unknown_key"),
         ("OPENCLAW_HOST=127.0.0.1\n", 0o600, "owner_environment_missing_or_empty"),
         (
             "\n".join(
