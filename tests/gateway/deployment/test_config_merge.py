@@ -132,6 +132,24 @@ def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> Non
     assert "defaultWorkspaceDir" not in app_server
 
 
+def test_assembly_disables_implicit_and_explicit_memory_plugin(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {"plugins": {"entries": {"memory-core": {"enabled": True}}}},
+    )
+    assembled = assemble_config(
+        local,
+        cast(JsonObject, load_json(REPO_CONFIG)),
+        _assembly_inputs(tmp_path),
+    )
+
+    plugins = cast(JsonObject, assembled["plugins"])
+    entries = cast(JsonObject, plugins["entries"])
+    slots = cast(JsonObject, plugins["slots"])
+    assert cast(JsonObject, entries["memory-core"])["enabled"] is False
+    assert slots["memory"] == "none"
+
+
 def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
     tmp_path: Path,
 ) -> None:

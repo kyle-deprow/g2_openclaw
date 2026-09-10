@@ -7,6 +7,7 @@
       "openai": {
         "api": "openai-chatgpt-responses",
         "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "auth": "oauth",
         "agentRuntime": {
           "id": "codex"
         },
@@ -343,7 +344,13 @@
       "acpx": {
         "enabled": true,
         "config": {}
+      },
+      "memory-core": {
+        "enabled": false
       }
+    },
+    "slots": {
+      "memory": "none"
     }
   },
   "skills": {

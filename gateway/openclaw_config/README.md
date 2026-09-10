@@ -11,8 +11,9 @@ The managed runtime is OpenClaw 2026.8.1, @openclaw/codex 2026.8.1, and
 embedded @openai/codex 0.151.0. The default route is OpenAI/Codex app-server
 through OAuth. Its managed `openai` provider uses the native
 `openai-chatgpt-responses` API with
-`https://chatgpt.com/backend-api/codex` and `agentRuntime.id: codex`; this
-selects OAuth and does not add an API-key or fallback route. Azure or OpenRouter
+`https://chatgpt.com/backend-api/codex`, `auth: oauth`, and
+`agentRuntime.id: codex`; this selects OAuth and does not add an API-key or
+fallback route. Azure or OpenRouter
 are explicit operator-selected routes only;
 an unavailable route is a fail-closed error, never an invented alias or silent
 provider switch.
@@ -52,7 +53,9 @@ built-in memory or add a provider fallback. It also keeps
 `skills.workshop.autonomous.mode=off`; the host research-owner service is the
 only intended loop owner.
 The provider allowlist retains the bundled `codex`, `acpx`, and `openai`
-plugins; `memory-core` remains excluded.
+plugins; `memory-core` remains explicitly disabled, and the managed
+`plugins.slots.memory` value is `none` so the implicit memory slot cannot be
+re-enabled by a machine-local entry.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed on unknown earnings.

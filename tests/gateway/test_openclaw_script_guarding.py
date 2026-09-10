@@ -1755,11 +1755,14 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     openai_provider = config["models"]["providers"]["openai"]
     assert openai_provider["api"] == "openai-chatgpt-responses"
     assert openai_provider["baseUrl"] == "https://chatgpt.com/backend-api/codex"
+    assert openai_provider["auth"] == "oauth"
     assert openai_provider["agentRuntime"] == {"id": "codex"}
     assert "apiKey" not in openai_provider
     assert "__RESEARCH_REVIEWER_LAUNCHER__" not in repo_config_text
     assert "__ACPX_ADAPTER_BIN__" not in repo_config_text
     assert config["plugins"]["entries"]["acpx"]["config"] == {}
+    assert config["plugins"]["entries"]["memory-core"]["enabled"] is False
+    assert config["plugins"]["slots"]["memory"] == "none"
     assert config["agents"]["defaults"]["maxConcurrent"] == 2
     assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 1
     assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
