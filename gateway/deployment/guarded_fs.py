@@ -273,6 +273,10 @@ def collect_find_results_null(
 def restore_path_topology_from_backup(
     backup_path: str, destination_path: str, restore_stage: str
 ) -> int:
+    prior_stage = os.path.join(
+        os.path.dirname(restore_stage), f"prior.{os.path.basename(restore_stage)}"
+    )
+    prior_staged = False
     try:
         try:
             status = guarded_rm_rf(restore_stage, f"clearing staged restore path {restore_stage}")
@@ -316,19 +320,43 @@ def restore_path_topology_from_backup(
                 f"       staged restore copy preserved at {restore_stage}."
             )
 
-        try:
-            status = guarded_rm_rf(
-                destination_path,
-                f"removing changed path {destination_path} during rollback",
-            )
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-            status = 1
-        if status != 0:
-            raise RuntimeError(
-                f"ERROR: Failed to remove changed path {destination_path} during rollback.\n"
-                f"       staged restore copy preserved at {restore_stage}."
-            )
+        # A regular file or symlink can be replaced atomically by mv -T. Do not
+        # remove it first: if the final move fails, the current managed asset
+        # must remain in place while the journal backup and restore stage stay
+        # recoverable. Existing directories need a same-transaction prior stage
+        # because GNU mv -T will not replace a directory in place.
+        if os.path.isdir(destination_path) and not os.path.islink(destination_path):
+            try:
+                status = guarded_rm_rf(
+                    prior_stage,
+                    f"clearing prior staged path {prior_stage} during rollback",
+                )
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                status = 1
+            if status != 0:
+                raise RuntimeError(
+                    f"ERROR: Failed to clear prior staged path {prior_stage} during rollback.\n"
+                    "       Original artifact path left intact; staged restore copy "
+                    f"preserved at {restore_stage}."
+                )
+            try:
+                status = guarded_mv_replace(
+                    destination_path,
+                    prior_stage,
+                    f"staging current path {destination_path} before rollback replacement",
+                    ("-T",),
+                )
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                status = 1
+            if status != 0:
+                raise RuntimeError(
+                    f"ERROR: Failed to stage current path {destination_path} before rollback.\n"
+                    "       Original artifact path left intact; staged restore copy "
+                    f"preserved at {restore_stage}."
+                )
+            prior_staged = True
 
         try:
             status = guarded_mv_replace(
@@ -341,12 +369,47 @@ def restore_path_topology_from_backup(
             print(str(exc), file=sys.stderr)
             status = 1
         if status != 0:
+            if prior_staged:
+                try:
+                    restore_prior_status = guarded_mv_replace(
+                        prior_stage,
+                        destination_path,
+                        "restoring prior path "
+                        f"{destination_path} after rollback replacement failure",
+                        ("-T",),
+                    )
+                except RuntimeError as exc:
+                    print(str(exc), file=sys.stderr)
+                    restore_prior_status = 1
+                if restore_prior_status != 0:
+                    raise RuntimeError(
+                        "ERROR: Failed to restore prior path "
+                        f"{destination_path} after rollback replacement failure.\n"
+                        f"       Prior path preserved at {prior_stage}; recoverable backup "
+                        f"preserved at {backup_path}; "
+                        f"staged restore copy preserved at {restore_stage}."
+                    )
             raise RuntimeError(
                 f"ERROR: Failed to replace {destination_path} with staged restore "
                 f"{restore_stage}.\n"
                 "       Recoverable backup preserved at "
                 f"{backup_path}; staged restore copy preserved at {restore_stage}."
             )
+        if prior_staged:
+            try:
+                status = guarded_rm_rf(
+                    prior_stage,
+                    f"removing prior staged path {prior_stage} after rollback replacement",
+                )
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                status = 1
+            if status != 0:
+                raise RuntimeError(
+                    f"ERROR: Failed to remove prior staged path {prior_stage} after rollback.\n"
+                    "       Restored path remains in place; recoverable backup preserved at "
+                    f"{backup_path}."
+                )
     except RuntimeError:
         raise
     return 0

@@ -5898,10 +5898,10 @@ def test_push_script_systemd_restore_failure_keeps_recovery_dir_and_rolls_back_a
         _supervisor_unit_dst(home).read_text(encoding="utf-8")
         == prior_files[_supervisor_unit_dst(home)]
     )
-    assert (
-        _runtime_caps_dropin_dst(home).read_text(encoding="utf-8")
-        == prior_files[_runtime_caps_dropin_dst(home)]
-    )
+    assert _runtime_caps_dropin_dst(home).is_file()
+    assert (recovery_dirs[0] / "2").read_text(encoding="utf-8") == prior_files[
+        _runtime_caps_dropin_dst(home)
+    ]
     assert (
         _native_crash_hardening_dropin_dst(home).read_text(encoding="utf-8")
         == prior_files[_native_crash_hardening_dropin_dst(home)]
@@ -5934,7 +5934,8 @@ def test_push_script_artifact_restore_failure_keeps_recovery_dir_and_continues_p
     assert "restore mv failed by test" in result.stderr
     assert "staged restore copy preserved" in result.stderr
     assert wrapper.read_text(encoding="utf-8") == "prior wrapper\n"
-    assert not skills.exists()
+    assert skills.is_dir()
+    assert (skills / "prior.txt").read_text(encoding="utf-8") == "prior skills\n"
     staged_restores = sorted(recovery_dirs[0].glob("restore.*"))
     assert staged_restores
 
