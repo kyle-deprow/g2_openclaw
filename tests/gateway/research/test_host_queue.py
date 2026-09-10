@@ -20,11 +20,12 @@ from gateway.research.contracts import (
     HypothesisDecision,
     ImplementationRecord,
     JobState,
-    ReviewRecord,
 )
 from gateway.research.jobs import JobError, JobRecord
 from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
+
+from tests.gateway.research.conftest import review, verified_review
 
 
 def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
@@ -45,20 +46,7 @@ def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
             "2026-01-01T00:00:00Z",
         ),
     )
-    store.submit_review(
-        attempt.attempt_id,
-        ReviewRecord(
-            attempt.attempt_id,
-            commit,
-            hypothesis.spec_sha256,
-            "PASS",
-            (),
-            "reported-reviewer",
-            "reviewer-actual",
-            "session",
-            "2026-01-01T00:00:00Z",
-        ),
-    )
+    verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
 
 

@@ -14,6 +14,7 @@ from typing import Protocol
 from gateway.openclaw_client import OpenClawClient, OpenClawTransportError
 
 from .contracts import AttemptState, HypothesisState
+from .review_evidence import REVIEW_EFFORT
 from .store import ResearchStore
 
 
@@ -100,6 +101,17 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
                 _key("H0001", None, "NO_HYPOTHESIS", resume_seq),
                 resume_seq,
             )
+        if all(item.state == HypothesisState.DECIDED for item in hypotheses):
+            next_number = max(int(item.hypothesis_id[1:]) for item in hypotheses) + 1
+            next_id = f"H{next_number:04d}"
+            return WakePlan(
+                next_id,
+                None,
+                "ALL_DECIDED",
+                f"Astra: author and freeze the next hypothesis {next_id}; all existing hypotheses are DECIDED.",
+                _key(next_id, None, "ALL_DECIDED", resume_seq),
+                resume_seq,
+            )
         draft = next(
             (item for item in hypotheses if item.state != HypothesisState.DECIDED), hypotheses[-1]
         )
@@ -128,7 +140,14 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
     if attempt.state == AttemptState.OPENED:
         action = f"dispatch coder; submit with `gateway-cli research implementation-submit {attempt.attempt_id} --root ROOT --file impl.json`"
     elif attempt.state == AttemptState.IMPLEMENTED:
-        action = f"dispatch review; submit with `gateway-cli research review-submit {attempt.attempt_id} --root ROOT --file review.json`"
+        action = (
+            f"reserve a committed review bundle with `gateway-cli research review-reserve {attempt.attempt_id} --root ROOT --bundle-dir BUNDLE --owner-key OWNER`, "
+            "spawn the exact ACP reviewer (runtime=acp, agentId=claude, mode=run, thread=false, "
+            f"cwd=BUNDLE, model=claude-opus-5, effort={REVIEW_EFFORT}, label=LABEL), record its child/run ACK with "
+            f"`gateway-cli research review-ack {attempt.attempt_id} --root ROOT --child-session-key CHILD --run-id RUN --mode run`, "
+            "then collect host evidence with "
+            f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT --core-database DB --claude-sessions SESSIONS --claude-projects PROJECTS`"
+        )
     elif attempt.state == AttemptState.REVIEW_PASSED:
         action = f"run with `gateway-cli research run {attempt.attempt_id} --root ROOT`"
     else:

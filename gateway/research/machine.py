@@ -14,6 +14,7 @@ from .contracts import (
     HypothesisSpec,
     HypothesisState,
     ImplementationRecord,
+    ReviewEvidence,
     ReviewRecord,
     RunOutcome,
 )
@@ -103,7 +104,10 @@ def submit_implementation(
 
 
 def submit_review(
-    attempt: Attempt, record: ReviewRecord, spec_sha256: str, updated_at: str
+    attempt: Attempt,
+    record: ReviewEvidence | ReviewRecord,
+    spec_sha256: str,
+    updated_at: str,
 ) -> Attempt:
     if attempt.state != AttemptState.IMPLEMENTED:
         raise IllegalTransition(attempt.state.value, "REVIEW_" + record.verdict)

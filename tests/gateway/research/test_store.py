@@ -9,7 +9,7 @@ import pytest
 from gateway.research.contracts import AttemptDecision, AttemptState, HypothesisSpec
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
-from tests.gateway.research.conftest import implementation, review
+from tests.gateway.research.conftest import implementation, review, verified_review
 
 
 def test_store_evidence_is_idempotent_and_repairs_projection(
@@ -83,8 +83,9 @@ def test_owner_lock_and_closed_attempt_trigger(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(attempt.attempt_id, impl)
-    store.submit_review(
-        attempt.attempt_id, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL")
+    verified_review(
+        store,
+        review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"),
     )
     store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
     with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
@@ -103,7 +104,7 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(attempt.attempt_id, impl)
     record = review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256)
-    store.submit_review(attempt.attempt_id, record)
+    verified_review(store, record)
     projection = (
         store.root
         / "hypotheses"
@@ -113,12 +114,12 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
         / "review.json"
     )
     projection.unlink()
-    store.submit_review(attempt.attempt_id, record)
+    verified_review(store, record)
     assert projection.is_file()
     assert any(event.kind == "projection_repaired" for event in store.events())
     with pytest.raises(StoreConflict):
-        store.submit_review(
-            attempt.attempt_id,
+        verified_review(
+            store,
             record.__class__(
                 record.attempt_id,
                 record.commit,
@@ -166,9 +167,7 @@ def test_run_reservation_is_atomic_before_worker_launch(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
-    store.submit_review(
-        attempt.attempt_id, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256)
-    )
+    verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root
         / "hypotheses"
@@ -219,8 +218,8 @@ def test_pause_close_commits_attempt_and_campaign_together(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
-    store.submit_review(
-        attempt.attempt_id,
+    verified_review(
+        store,
         review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"),
     )
     closed = store.close_attempt(attempt.attempt_id, AttemptDecision.PAUSE, "stop")

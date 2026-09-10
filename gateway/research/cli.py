@@ -9,10 +9,13 @@ import json
 import math
 import os
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
 import typer
+
+from gateway.openclaw_client import OpenClawClient
 
 from .containment import runtime_pins_from_record
 from .contracts import (
@@ -21,7 +24,6 @@ from .contracts import (
     AttemptState,
     HypothesisDecision,
     ImplementationRecord,
-    ReviewRecord,
     RunOutcome,
 )
 from .jobs import (
@@ -35,6 +37,16 @@ from .jobs import (
     preflight,
 )
 from .jobs import cancel as cancel_job
+from .review_evidence import (
+    REVIEW_EFFORT,
+    acknowledge_review,
+    build_review_bundle,
+    cancel_review,
+    collect_review,
+    reconcile_review,
+    request_cancel,
+    reserve_review,
+)
 from .store import OwnerLockHeld, ResearchStore, StoreConflict, now_utc
 from .wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
@@ -140,15 +152,124 @@ def implementation_submit(
         _fail(exc)
 
 
-@app.command("review-submit")
-def review_submit(
+@app.command("review-bundle")
+def review_bundle(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    file: Path = typer.Option(..., "--file"),
+    bundle_dir: Path = typer.Option(..., "--bundle-dir"),
 ) -> None:
     try:
-        record = ReviewRecord.from_json(file.read_text(encoding="utf-8"))
-        typer.echo(ResearchStore(_root(root)).submit_review(attempt_id, record).state.value)
+        typer.echo(build_review_bundle(ResearchStore(_root(root)), attempt_id, bundle_dir))
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("review-reserve")
+def review_reserve(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    bundle_dir: Path = typer.Option(..., "--bundle-dir"),
+    owner_key: str = typer.Option(..., "--owner-key"),
+) -> None:
+    try:
+        reservation = reserve_review(ResearchStore(_root(root)), attempt_id, bundle_dir, owner_key)
+        typer.echo(
+            json.dumps(
+                {
+                    "runtime": "acp",
+                    "agentId": "claude",
+                    "mode": "run",
+                    "thread": False,
+                    "cwd": reservation.bundle_dir,
+                    "model": "claude-opus-5",
+                    "effort": REVIEW_EFFORT,
+                    "label": reservation.label,
+                },
+                sort_keys=True,
+            )
+        )
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("review-ack")
+def review_ack(
+    attempt_id: str,
+    child_session_key: str = typer.Option(..., "--child-session-key"),
+    run_id: str = typer.Option(..., "--run-id"),
+    mode: str = typer.Option(..., "--mode"),
+    run_timeout_seconds: int | None = typer.Option(None, "--run-timeout-seconds"),
+    root: Path = typer.Option(..., "--root"),
+) -> None:
+    try:
+        ack = acknowledge_review(
+            ResearchStore(_root(root)),
+            attempt_id,
+            child_session_key,
+            run_id,
+            mode,
+            run_timeout_seconds,
+        )
+        typer.echo(ack.to_json())
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("review-reconcile")
+def review_reconcile(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    core_database: Path = typer.Option(..., "--core-database"),
+) -> None:
+    try:
+        ack = reconcile_review(ResearchStore(_root(root)), attempt_id, core_database)
+        typer.echo(ack.to_json() if ack is not None else "pending")
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("review-collect")
+def review_collect(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    core_database: Path = typer.Option(..., "--core-database"),
+    claude_sessions: Path = typer.Option(..., "--claude-sessions"),
+    claude_projects: Path = typer.Option(..., "--claude-projects"),
+) -> None:
+    try:
+        typer.echo(
+            collect_review(
+                ResearchStore(_root(root)),
+                attempt_id,
+                core_database,
+                claude_sessions,
+                claude_projects,
+            ).state.value
+        )
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("review-cancel")
+def review_cancel(
+    attempt_id: str,
+    reason: str = typer.Option(..., "--reason"),
+    root: Path = typer.Option(..., "--root"),
+    core_database: Path = typer.Option(..., "--core-database"),
+) -> None:
+    async def request(task_id: str, cancel_reason: str) -> Mapping[str, object]:
+        client = OpenClawClient(
+            os.environ.get("OPENCLAW_HOST", "127.0.0.1"),
+            int(os.environ.get("OPENCLAW_PORT", "18789")),
+            os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""),
+        )
+        return await request_cancel(client.request_once, task_id, cancel_reason)
+
+    try:
+        outcome = cancel_review(
+            ResearchStore(_root(root)), attempt_id, reason, core_database, request
+        )
+        typer.echo(json.dumps({"status": outcome.status, "pending": outcome.pending}))
     except Exception as exc:
         _fail(exc)
 
@@ -401,14 +522,19 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             return reject("queue_identity_mismatch")
         if attempt.review_verdict != "PASS" or attempt.commit is None:
             return reject("review_gate_unavailable")
-        review = ReviewRecord.from_json(store.evidence(attempt_id, "review"))
         implementation = ImplementationRecord.from_json(
             store.evidence(attempt_id, "implementation")
         )
+        try:
+            host_review = json.loads(store.evidence(attempt_id, "review_host_evidence"))
+        except (ValueError, json.JSONDecodeError):
+            return reject("review_gate_unavailable")
         if (
-            review.verdict != "PASS"
-            or review.commit != attempt.commit
-            or review.spec_sha256 != attempt.review_spec_sha256
+            not isinstance(host_review, dict)
+            or host_review.get("verdict") != "PASS"
+            or host_review.get("bound_commit") != attempt.commit
+            or host_review.get("bound_spec_sha256")
+            != store.get_hypothesis(attempt.hypothesis_id).spec_sha256
             or implementation.commit != attempt.commit
         ):
             return reject("review_gate_unavailable")

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from gateway.research.contracts import HypothesisSpec, ImplementationRecord, ReviewRecord
+from gateway.research.contracts import Attempt, HypothesisSpec, ImplementationRecord, ReviewEvidence
 from gateway.research.store import ResearchStore
 
 
@@ -101,9 +101,9 @@ def implementation(attempt_id: str, commit: str | None) -> ImplementationRecord:
 
 def review(
     attempt_id: str, commit: str | None, spec_sha256: str, verdict: str = "PASS"
-) -> ReviewRecord:
+) -> ReviewEvidence:
     assert commit is not None
-    return ReviewRecord(
+    return ReviewEvidence(
         attempt_id,
         commit,
         spec_sha256,
@@ -114,3 +114,43 @@ def review(
         "session",
         "2026-01-01T00:00:00Z",
     )
+
+
+def verified_review(store: ResearchStore, record: ReviewEvidence) -> Attempt:
+    """Test fixture helper for the host-verified review path."""
+    import json
+
+    payload = json.dumps(
+        {
+            "task_id": "fixture-task",
+            "task_status": "succeeded",
+            "task_started_at": 1,
+            "task_ended_at": 2,
+            "acp_session_uuid": record.acp_session_id,
+            "transcript_path": "",
+            "transcript_sha256": "",
+            "assistant_events": 1,
+            "models_seen": ["claude-opus-5"],
+            "efforts_seen": ["high"],
+            "verdict_json": record.to_json(),
+            "bound_commit": record.commit,
+            "bound_spec_sha256": record.spec_sha256,
+            "collected_at": record.submitted_at,
+            "verdict": record.verdict,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    try:
+        existing = store.evidence(record.attempt_id, "review")
+    except ValueError:
+        existing = None
+    if existing is not None and existing != record.to_json():
+        from gateway.research.store import StoreConflict
+
+        raise StoreConflict("review payload differs from stored payload")
+    result = store.collect_review_evidence(record.attempt_id, record, payload)
+    store._repair_evidence_projection(
+        store.get_attempt(record.attempt_id), "review", record.to_json()
+    )
+    return result

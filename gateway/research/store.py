@@ -28,7 +28,7 @@ from .contracts import (
     HypothesisSpec,
     HypothesisState,
     ImplementationRecord,
-    ReviewRecord,
+    ReviewEvidence,
     RunOutcome,
 )
 from .machine import (
@@ -628,51 +628,224 @@ class ResearchStore:
         )
         return updated
 
-    def submit_review(self, attempt_id: str, record: ReviewRecord) -> Attempt:
+    def insert_review_evidence(self, attempt_id: str, kind: str, payload: str, event: str) -> None:
+        """Insert one immutable review lifecycle payload, idempotently."""
+        if kind not in {"review_reservation", "review_ack", "review_cancel"}:
+            raise ValueError("unsupported review lifecycle evidence kind")
         attempt = self.get_attempt(attempt_id)
-        hypothesis = self.get_hypothesis(attempt.hypothesis_id)
-        with self._connect() as conn:
-            old = conn.execute(
-                "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='review'",
-                (attempt_id,),
-            ).fetchone()
-        if old is not None:
-            if old[0] != record.to_json():
-                raise StoreConflict("review payload differs from stored payload")
-            self._repair_evidence_projection(attempt, "review", record.to_json())
-            return attempt
-        updated = submit_review(attempt, record, hypothesis.spec_sha256, now_utc())
-        payload = updated.to_json()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence WHERE attempt_id=? AND kind=?",
+                (attempt_id, kind),
+            ).fetchone()
+            if old is not None:
+                if _digest(str(old[0])) != str(old[1]) or str(old[0]) != payload:
+                    raise StoreConflict(f"{kind} payload differs from stored payload")
+                conn.commit()
+                # The SQLite row is authoritative.  A crash after the row
+                # commit but before the filesystem projection must be
+                # repaired by an idempotent retry.
+                self._repair_evidence_projection(attempt, kind, payload)
+                return
             conn.execute(
                 "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
-                (attempt_id, "review", record.to_json(), _digest(record.to_json())),
+                (attempt_id, kind, payload, _digest(payload)),
             )
-            conn.execute(
-                "UPDATE attempts SET state=?,review_verdict=?,review_commit=?,review_spec_sha256=?,reported_reviewer_model=?,reported_reviewer_actual_model=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?",
-                (
-                    updated.state.value,
-                    updated.review_verdict,
-                    updated.review_commit,
-                    updated.review_spec_sha256,
-                    updated.reported_reviewer_model,
-                    updated.reported_reviewer_actual_model,
-                    updated.updated_at,
-                    payload,
-                    _digest(payload),
-                    attempt_id,
-                ),
+            self._event(
+                conn, attempt.hypothesis_id, attempt_id, event, json.loads(payload), "driver"
             )
+            conn.commit()
+        self._repair_evidence_projection(attempt, kind, payload)
+
+    def record_review_event(self, attempt_id: str, kind: str, detail: object) -> None:
+        attempt = self.get_attempt(attempt_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._event(conn, attempt.hypothesis_id, attempt_id, kind, detail, "driver")
+            conn.commit()
+
+    def record_review_cancel_request(self, attempt_id: str, task_id: str, reason: str) -> bool:
+        """Record one exact cancellation request, returning whether it is new."""
+        attempt = self.get_attempt(attempt_id)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            old = conn.execute(
+                "SELECT detail FROM events WHERE attempt_id=? AND kind='review_cancel_requested' ORDER BY seq DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            if old is not None:
+                try:
+                    detail = json.loads(str(old[0]))
+                except json.JSONDecodeError as exc:
+                    raise StoreConflict("review cancellation request event is malformed") from exc
+                if (
+                    not isinstance(detail, dict)
+                    or detail.get("task_id") != task_id
+                    or detail.get("reason") != reason
+                ):
+                    raise StoreConflict("review cancellation task differs from stored request")
+                conn.commit()
+                return False
             self._event(
                 conn,
                 attempt.hypothesis_id,
                 attempt_id,
-                "review_submitted",
-                {"verdict": record.verdict},
-                "astra",
+                "review_cancel_requested",
+                {"task_id": task_id, "reason": reason},
+                "driver",
             )
             conn.commit()
+        return True
+
+    def record_review_cancel(
+        self, attempt_id: str, task_id: str, reason: str, rpc_result: str
+    ) -> None:
+        payload = to_json(
+            {
+                "task_id": task_id,
+                "reason": reason,
+                "requested_at": now_utc(),
+                "rpc_result": rpc_result,
+            }
+        )
+        self.insert_review_evidence(attempt_id, "review_cancel", payload, "review_cancel_recorded")
+
+    def review_reservation_attempts(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT attempt_id FROM attempt_evidence WHERE kind='review_reservation' ORDER BY attempt_id"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def review_cancel_requested(self, attempt_id: str) -> tuple[str, str] | None:
+        """Return the exact task/reason for an unfinalized cancellation request."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT detail FROM events WHERE attempt_id=? AND kind='review_cancel_requested' ORDER BY seq DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            detail = json.loads(str(row[0]))
+        except json.JSONDecodeError as exc:
+            raise StoreConflict("review cancellation request event is malformed") from exc
+        if (
+            not isinstance(detail, dict)
+            or not isinstance(detail.get("task_id"), str)
+            or not isinstance(detail.get("reason"), str)
+        ):
+            raise StoreConflict("review cancellation request event is malformed")
+        return cast(str, detail["task_id"]), cast(str, detail["reason"])
+
+    def collect_review_evidence(
+        self, attempt_id: str, record: ReviewEvidence, host_payload: str
+    ) -> Attempt:
+        """Atomically insert host evidence and apply the verified transition."""
+        if not isinstance(record, ReviewEvidence):
+            raise TypeError("review collection requires ReviewEvidence")
+        try:
+            host_object = json.loads(host_payload)
+        except json.JSONDecodeError as exc:
+            raise StoreConflict("review host evidence is not JSON") from exc
+        if not isinstance(host_object, dict):
+            raise StoreConflict("review host evidence must be an object")
+        if (
+            host_object.get("bound_commit") != record.commit
+            or host_object.get("bound_spec_sha256") != record.spec_sha256
+            or host_object.get("verdict") != record.verdict
+        ):
+            raise StoreConflict("review host evidence binding differs from verdict")
+        review_payload = record.to_json()
+        attempt = self.get_attempt(attempt_id)
+        hypothesis = self.get_hypothesis(attempt.hypothesis_id)
+        if record.attempt_id != attempt_id or record.commit != attempt.commit:
+            raise StoreConflict("review verdict does not match attempt")
+        if record.spec_sha256 != hypothesis.spec_sha256:
+            raise StoreConflict("review verdict does not match frozen hypothesis")
+        host_digest = _digest(host_payload)
+        replay = False
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if current_row is None:
+                raise ValueError(f"unknown attempt: {attempt_id}")
+            current = self._attempt_from_row(current_row)
+            old_host = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence WHERE attempt_id=? AND kind='review_host_evidence'",
+                (attempt_id,),
+            ).fetchone()
+            old_review = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence WHERE attempt_id=? AND kind='review'",
+                (attempt_id,),
+            ).fetchone()
+            if old_host is not None:
+                if (
+                    _digest(str(old_host[0])) != str(old_host[1])
+                    or str(old_host[0]) != host_payload
+                ):
+                    raise StoreConflict("review host evidence differs from stored payload")
+                if old_review is not None and (
+                    _digest(str(old_review[0])) != str(old_review[1])
+                    or str(old_review[0]) != review_payload
+                ):
+                    raise StoreConflict("review payload differs from stored payload")
+                if current.state in {AttemptState.REVIEW_PASSED, AttemptState.REVIEW_FAILED}:
+                    conn.commit()
+                    replay = True
+            if not replay:
+                updated = submit_review(current, record, hypothesis.spec_sha256, now_utc())
+                updated_payload = updated.to_json()
+                if old_host is None:
+                    conn.execute(
+                        "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                        (attempt_id, "review_host_evidence", host_payload, host_digest),
+                    )
+                if old_review is None:
+                    conn.execute(
+                        "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                        (attempt_id, "review", review_payload, _digest(review_payload)),
+                    )
+                conn.execute(
+                    "UPDATE attempts SET state=?,review_verdict=?,review_commit=?,review_spec_sha256=?,reported_reviewer_model=?,reported_reviewer_actual_model=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?",
+                    (
+                        updated.state.value,
+                        updated.review_verdict,
+                        updated.review_commit,
+                        updated.review_spec_sha256,
+                        updated.reported_reviewer_model,
+                        updated.reported_reviewer_actual_model,
+                        updated.updated_at,
+                        updated_payload,
+                        _digest(updated_payload),
+                        attempt_id,
+                    ),
+                )
+                self._event(
+                    conn,
+                    attempt.hypothesis_id,
+                    attempt_id,
+                    "review_collected",
+                    {"verdict": record.verdict},
+                    "driver",
+                )
+                conn.commit()
+        if replay:
+            self._repair_evidence_projection(attempt, "review_host_evidence", host_payload)
+            self._repair_evidence_projection(attempt, "review", review_payload)
+            return current
+        self._projection(
+            self.root
+            / "hypotheses"
+            / attempt.hypothesis_id
+            / "attempts"
+            / attempt_id
+            / "review_host_evidence.json",
+            host_payload,
+        )
         self._projection(
             self.root
             / "hypotheses"
@@ -680,9 +853,14 @@ class ResearchStore:
             / "attempts"
             / attempt_id
             / "review.json",
-            record.to_json(),
+            review_payload,
         )
         return updated
+
+    def submit_review(self, attempt_id: str, record: ReviewEvidence) -> Attempt:
+        """Reject the old self-report path; collection must include host evidence."""
+        del attempt_id, record
+        raise StoreConflict("review-submit was removed; use review-collect")
 
     def set_state(
         self, attempt: Attempt, *, event: str, actor: str = "driver", detail: object | None = None
@@ -1103,11 +1281,23 @@ class ResearchStore:
         if run_dir.resolve() != expected_run_dir:
             raise StoreConflict("run directory is not the canonical attempt directory")
         implementation = ImplementationRecord.from_json(self.evidence(attempt_id, "implementation"))
+        try:
+            host_review = json.loads(self.evidence(attempt_id, "review_host_evidence"))
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise StoreConflict("verified host review evidence is required") from exc
         config = self.config()
         if attempt.commit is None or attempt.implementation_sha256 is None:
             raise StoreConflict("implementation binding is incomplete")
         if implementation.commit != attempt.commit:
             raise StoreConflict("implementation commit changed")
+        if (
+            attempt.review_verdict != "PASS"
+            or not isinstance(host_review, dict)
+            or host_review.get("verdict") != "PASS"
+            or host_review.get("bound_commit") != attempt.commit
+            or host_review.get("bound_spec_sha256") != hypothesis.spec_sha256
+        ):
+            raise StoreConflict("verified host review evidence is required")
         artifact_paths = {
             "spec": self.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
             "panel": Path(hypothesis.panel_path),

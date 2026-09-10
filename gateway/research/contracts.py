@@ -316,6 +316,61 @@ class ReviewRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewEvidence:
+    """A review verdict after host evidence has been verified.
+
+    This is deliberately distinct from :class:`ReviewRecord`: a caller cannot
+    create review state from a self-reported JSON file.  The review collector
+    constructs this record only after binding the transcript, task, bundle,
+    model, effort, and final verdict to the frozen attempt.
+    """
+
+    attempt_id: str
+    commit: str
+    spec_sha256: str
+    verdict: str
+    findings: tuple[str, ...]
+    reported_reviewer_model: str
+    reported_reviewer_actual_model: str
+    acp_session_id: str
+    submitted_at: str
+
+    def __post_init__(self) -> None:
+        _check_id(self.attempt_id, _A, "attempt_id")
+        _check_commit(self.commit, "commit")
+        require_sha256(self.spec_sha256, "spec_sha256")
+        if self.verdict not in _VERDICTS:
+            raise ValueError("verdict must be PASS or FAIL")
+        if not isinstance(self.findings, tuple):
+            raise ValueError("findings must be a tuple")
+        if any(not isinstance(item, str) or not item for item in self.findings):
+            raise ValueError("findings must contain strings")
+        for value, name in (
+            (self.reported_reviewer_model, "reported_reviewer_model"),
+            (self.reported_reviewer_actual_model, "reported_reviewer_actual_model"),
+            (self.acp_session_id, "acp_session_id"),
+        ):
+            require_str(value, name)
+        require_utc_iso(self.submitted_at, "submitted_at")
+
+    def to_review_record(self) -> ReviewRecord:
+        return ReviewRecord(
+            self.attempt_id,
+            self.commit,
+            self.spec_sha256,
+            self.verdict,
+            self.findings,
+            self.reported_reviewer_model,
+            self.reported_reviewer_actual_model,
+            self.acp_session_id,
+            self.submitted_at,
+        )
+
+    def to_json(self) -> str:
+        return self.to_review_record().to_json()
+
+
+@dataclass(frozen=True, slots=True)
 class RunOutcome:
     attempt_id: str
     job_id: str
