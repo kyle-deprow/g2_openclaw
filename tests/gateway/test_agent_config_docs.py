@@ -310,7 +310,7 @@ def test_repo_config_keeps_current_route_and_memory_guards() -> None:
     owner = next(agent for agent in agents if agent["id"] == "research-orchestrator")
     assert owner["model"]["primary"] == "openai/gpt-6-astra"
     defaults = config["agents"]["defaults"]
-    assert defaults["memorySearch"]["enabled"] is False
+    assert config["memory"]["search"]["enabled"] is False
     assert defaults["compaction"]["memoryFlush"]["enabled"] is False
 
 

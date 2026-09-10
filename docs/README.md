@@ -10,7 +10,6 @@ G2 OpenClaw bridges [Even Realities G2](https://www.evenrealities.com/) AR smart
 | Agent instructions & repo rules | [../AGENTS.md](../AGENTS.md), [../CLAUDE.md](../CLAUDE.md) |
 | OpenClaw platform reference | [reference/openclaw/](reference/openclaw/) |
 | G2 hardware & EvenHub SDK reference | [reference/g2-platform/](reference/g2-platform/) |
-| Quantipy autonomous research plan | [reference/quantipy-autonomous-research-plan.md](reference/quantipy-autonomous-research-plan.md) |
 
 ## Directory Structure
 
@@ -20,7 +19,6 @@ docs/
 └── reference/                         # Reference material
     ├── openclaw/                      # OpenClaw research (agents, context, personas, tools/MCP)
     ├── g2-platform/                   # G2 hardware constraints & EvenHub CLI/SDK/simulator reference
-    └── quantipy-autonomous-research-plan.md  # The autoresearch loop plan of record
 ```
 
 Design/how-to knowledge that used to live in separate docs now lives closer to where agents consume it:
@@ -39,4 +37,3 @@ New to the project? Read these in order:
 2. **[../AGENTS.md](../AGENTS.md)** — stack, layout, rules, and guardrails for working in this repo.
 3. **[reference/g2-platform/g2_reference_guide.md](reference/g2-platform/g2_reference_guide.md)** — G2 hardware constraints.
 4. **[reference/openclaw/](reference/openclaw/)** — OpenClaw internals (overview, agent architecture, personas, tools/MCP).
-5. **[reference/quantipy-autonomous-research-plan.md](reference/quantipy-autonomous-research-plan.md)** — the autonomous research loop design.

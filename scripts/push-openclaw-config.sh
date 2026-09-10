@@ -1909,8 +1909,8 @@ if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
   apply_paused_config_gates || exit 1
 fi
 
-# No model thread is projected a write-capable MemPalace server. The platform
-# finalizer is the sole write boundary, so stage tool-deny compatibility lists
+# No autoresearch model writes MemPalace. Durable research records are the
+# research store and artifact receipts, so stage tool-deny compatibility lists
 # must not survive in the managed config.
 if ! echo "${MERGED}" | jq -e \
   --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" '
