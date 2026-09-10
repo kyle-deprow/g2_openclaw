@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from gateway.openclaw_client import OpenClawClient
+
 from .contracts import Attempt
 from .jobs import JobRecord
 from .jobs import cancel as cancel_job
+from .readiness import build_readiness_gate
+from .review_evidence import cancel_review, request_cancel
 from .status import ResearchStatus, read_status, resolve_research_root
 from .store import ResearchStore
 
@@ -46,6 +51,35 @@ class ReviewCancellation:
 
     state: str
     detail: str | None = None
+
+
+class OpenClawReviewCanceller:
+    """Bind the exact review cancellation protocol to one trusted core DB."""
+
+    def __init__(
+        self,
+        core_database: Path,
+        request_once: Callable[..., Awaitable[Mapping[str, object]]],
+    ) -> None:
+        self._core_database = core_database
+        self._request_once = request_once
+
+    def cancel(self, attempt: Attempt, root: Path, reason: str) -> ReviewCancellation:
+        async def request(task_id: str, cancel_reason: str) -> Mapping[str, object]:
+            return await request_cancel(self._request_once, task_id, cancel_reason)
+
+        outcome = cancel_review(
+            ResearchStore(root),
+            attempt.attempt_id,
+            reason,
+            self._core_database,
+            request,
+        )
+        if outcome.pending:
+            return ReviewCancellation("pending", outcome.status)
+        if outcome.status in {"cancelled", "interrupted"}:
+            return ReviewCancellation("cancelled", outcome.status)
+        return ReviewCancellation("terminal", outcome.status)
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +311,11 @@ class OwnerControl:
             attempt = self._active_run_attempt(store)
             if attempt is not None:
                 if attempt.state == "RUN_QUEUED":
-                    errors.append("queued job cancellation adapter is not integrated")
+                    try:
+                        self._cancel_queued(store, attempt, reason)
+                        job_cancelled = True
+                    except Exception as exc:
+                        errors.append(f"queued job cancellation incomplete: {exc}")
                 else:
                     row = store.job_for(attempt.attempt_id)
                     if row is None:
@@ -332,6 +370,33 @@ class OwnerControl:
         )
 
     @staticmethod
+    def _cancel_queued(store: ResearchStore, attempt: Attempt, reason: str) -> None:
+        """Release one exact queued job and mark its canonical row cancelled."""
+        job_id = attempt.run_job_id
+        if not job_id:
+            raise ControlError("queued attempt has no job identity")
+        store.acquire_run_lock()
+        try:
+            current = store.get_attempt(attempt.attempt_id)
+            row = store.job_for(attempt.attempt_id)
+            if row is None or str(row["job_id"]) != job_id or str(row["state"]) != "QUEUED":
+                raise ControlError("queued job identity is no longer canonical")
+            payload = json.loads(str(row["payload_json"]))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("job_id") != job_id
+                or payload.get("attempt_id") != attempt.attempt_id
+            ):
+                raise ControlError("queued job payload identity does not match")
+            if current.state.value != "RUN_QUEUED" or current.run_job_id != job_id:
+                raise ControlError("queued attempt identity is no longer canonical")
+            store.release_queued_run(attempt.attempt_id, job_id, reason)
+            payload["state"] = "CANCELLED"
+            store.update_job(payload, attempt.attempt_id, event="job_cancelled")
+        finally:
+            store.release_run_lock()
+
+    @staticmethod
     def _active_run_attempt(store: ResearchStore) -> Attempt | None:
         hypotheses = store.hypotheses()
         attempts = [attempt for h in hypotheses for attempt in store.attempts_for(h.hypothesis_id)]
@@ -345,3 +410,35 @@ class OwnerControl:
         hypotheses = store.hypotheses()
         attempts = [attempt for h in hypotheses for attempt in store.attempts_for(h.hypothesis_id)]
         return next((item for item in reversed(attempts) if item.state == "IMPLEMENTED"), None)
+
+
+def _required_environment(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise ControlError(f"{name} is required for production research control")
+    return value
+
+
+def production_owner_control(root: Path | None = None) -> OwnerControl:
+    """Construct the production control surface from deployment-provided env."""
+    core_database = Path(_required_environment("RESEARCH_CORE_DATABASE"))
+    if not core_database.is_absolute() or core_database.is_symlink() or not core_database.is_file():
+        raise ControlError("RESEARCH_CORE_DATABASE must be an absolute regular file")
+    host = _required_environment("OPENCLAW_HOST")
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        raise ControlError("OPENCLAW_HOST must be a loopback host")
+    raw_port = _required_environment("OPENCLAW_PORT")
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ControlError("OPENCLAW_PORT must be an integer") from exc
+    if not 1 <= port <= 65535:
+        raise ControlError("OPENCLAW_PORT must be in the valid TCP range")
+    token = _required_environment("OPENCLAW_GATEWAY_TOKEN")
+    client = OpenClawClient(host, port, token)
+    resolved_root = resolve_research_root(root)
+    return OwnerControl(
+        resolved_root,
+        review_canceller=OpenClawReviewCanceller(core_database, client.request_once),
+        readiness_gate=build_readiness_gate(resolved_root),
+    )

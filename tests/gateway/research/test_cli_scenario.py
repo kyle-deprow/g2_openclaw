@@ -23,6 +23,7 @@ from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import review, verified_review
+from tests.gateway.research.test_readiness import configure_real_readiness
 
 runner = CliRunner()
 
@@ -167,9 +168,7 @@ def test_host_dispatch_revalidates_dirty_source_after_queue(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
     source.chmod(0o755)
     (source / "dirty.txt").write_text("changed", encoding="utf-8")
     store.acquire_owner_lock()
@@ -192,9 +191,7 @@ def test_host_dispatch_runtime_pin_change_is_terminal_before_worker(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
     row = store.job_for(attempt.attempt_id)
     assert row is not None
     payload = json.loads(row["payload_json"])
@@ -224,9 +221,7 @@ def test_serve_once_dispatches_queue_while_wake_is_pending(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
     seen: list[str] = []
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
@@ -289,9 +284,7 @@ def test_terminal_worker_failure_is_not_replaced_by_late_cancel(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
@@ -322,9 +315,7 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
@@ -383,9 +374,7 @@ def test_dispatch_success_without_evaluator_exit_stays_failed(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
@@ -416,7 +405,7 @@ def test_stale_reject_after_cancel_keeps_canonical_terminal(
     _queue(store, attempt.attempt_id)
     cancelled = False
 
-    def cancel_during_precheck(_store: ResearchStore, _attempt_id: str) -> bool:
+    def cancel_during_precheck(_store: ResearchStore, _attempt_id: str) -> str | None:
         nonlocal cancelled
         if not cancelled:
             cancelled = True
@@ -425,7 +414,7 @@ def test_stale_reject_after_cancel_keeps_canonical_terminal(
                 ["research", "cancel", attempt.attempt_id, "--root", str(store.root)],
             )
             assert result.exit_code == 0, result.output
-        return False
+        return "cancelled_during_precheck"
 
     monkeypatch.setattr(research_cli, "_host_execution_ready", cancel_during_precheck)
     store.acquire_owner_lock()
@@ -451,9 +440,7 @@ def test_running_job_is_not_duplicated_when_owner_turn_is_pending(
     attempt = _ready(store, source, hypothesis)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
     launches = 0
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:

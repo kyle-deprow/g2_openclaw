@@ -26,6 +26,7 @@ from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import review, verified_review
+from tests.gateway.research.test_readiness import configure_real_readiness
 
 
 def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
@@ -160,7 +161,9 @@ def test_dispatch_requires_owner_and_explicit_host_native_gates(
         research_cli._dispatch_queued_job(store)
     store.acquire_owner_lock()
     try:
-        assert research_cli._dispatch_queued_job(store) == "host_execution_unavailable"
+        assert research_cli._dispatch_queued_job(store) == (
+            "native_execution_unavailable:native_core_database_unset"
+        )
     finally:
         store.release_owner_lock()
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_FAILED
@@ -176,11 +179,12 @@ def test_budget_gate_is_explicit_when_host_and_native_are_verified(
     _queue(store, attempt.attempt_id)
     _insert_verified(store, attempt.attempt_id, "host_execution")
     _insert_verified(store, attempt.attempt_id, "native_execution")
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch, policy=False)
     store.acquire_owner_lock()
     try:
-        assert research_cli._dispatch_queued_job(store) == "budget_unavailable"
+        assert research_cli._dispatch_queued_job(store) == (
+            "budget_unavailable:budget_campaign_policy_unset"
+        )
     finally:
         store.release_owner_lock()
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_FAILED
@@ -210,9 +214,7 @@ def test_dispatch_claims_once_with_injected_worker_boundary(
     _queue(store, attempt.attempt_id)
     _insert_verified(store, attempt.attempt_id, "host_execution")
     _insert_verified(store, attempt.attempt_id, "native_execution")
-    monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
-    monkeypatch.setattr(research_cli, "_budget_execution_ready", lambda *_: True)
+    configure_real_readiness(store, store.root.parent, monkeypatch)
     launches = 0
 
     def fake_launch(attempt_dir: Path, *_args: object, **kwargs: object) -> JobRecord:
@@ -344,8 +346,6 @@ def test_reserved_pid_zero_restart_is_explicit_failure_without_signal(
     _queue(store, attempt.attempt_id)
     store.acquire_owner_lock()
     try:
-        monkeypatch.setattr(research_cli, "_host_execution_ready", lambda *_: True)
-        monkeypatch.setattr(research_cli, "_native_execution_ready", lambda *_: True)
         store.acquire_run_lock()
         try:
             store.claim_queued_job(attempt.attempt_id, "job-queue-test")

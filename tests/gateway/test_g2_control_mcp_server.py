@@ -130,6 +130,33 @@ def test_g2_control_mcp_dispatches_status_start_and_stop() -> None:
     assert _payload(stop)["completed"] is True
 
 
+def test_g2_control_default_factory_requires_deployment_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "RESEARCH_CORE_DATABASE",
+        "OPENCLAW_HOST",
+        "OPENCLAW_PORT",
+        "OPENCLAW_GATEWAY_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    response = G2ControlMcpServer().handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "g2_autoresearch_status", "arguments": {}},
+        }
+    )
+
+    assert response is not None
+    error = response["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == -32000
+    assert "RESEARCH_CORE_DATABASE" in error["message"]
+
+
 def test_g2_control_mcp_rejects_arbitrary_tool_names() -> None:
     server = G2ControlMcpServer(_FakeControl)
 

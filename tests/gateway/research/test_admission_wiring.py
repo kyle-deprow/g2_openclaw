@@ -522,7 +522,9 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
         "ADMISSION_POLICY_RACE",
         "admission decision differs from stored payload",
     )
-    assert research_cli._budget_execution_ready(store, attempt.attempt_id) is False
+    assert research_cli._budget_execution_ready(store, attempt.attempt_id) == (
+        "budget_campaign_policy_unset"
+    )
 
 
 def test_attempt_cap_pause_cancel_and_status_remain_safe(

@@ -59,6 +59,12 @@ from .jobs import (
     preflight,
 )
 from .jobs import cancel as cancel_job
+from .readiness import (
+    budget_execution_ready,
+    host_execution_ready,
+    native_execution_ready,
+    register_native_capability_receipt,
+)
 from .review_evidence import (
     REVIEW_EFFORT,
     acknowledge_review,
@@ -156,6 +162,20 @@ def exposure_ledger_register(
         registered_path, registered_sha = ResearchStore(_root(root)).register_exposure_ledger(
             path, sha256
         )
+        typer.echo(json.dumps({"path": registered_path, "sha256": registered_sha}, sort_keys=True))
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("native-capability-register")
+def native_capability_register(
+    root: Path = typer.Option(..., "--root"),
+    path: Path = typer.Option(..., "--path"),
+    sha256: str = typer.Option(..., "--sha256"),
+) -> None:
+    """Register an operator-supplied native capability receipt."""
+    try:
+        registered_path, registered_sha = register_native_capability_receipt(root, path, sha256)
         typer.echo(json.dumps({"path": registered_path, "sha256": registered_sha}, sort_keys=True))
     except Exception as exc:
         _fail(exc)
@@ -783,20 +803,16 @@ def _failure(attempt_id: str, job_id: str, status: str, *, exit_code: int = -1) 
     )
 
 
-def _host_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
-    del store, attempt_id
-    return False
+def _host_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
+    return host_execution_ready(store, attempt_id)
 
 
-def _native_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
-    del store, attempt_id
-    return False
+def _native_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
+    return native_execution_ready(store, attempt_id)
 
 
-def _budget_execution_ready(store: ResearchStore, attempt_id: str) -> bool:
-    """Budget/native readiness remains unavailable until separately authorized."""
-    del store, attempt_id
-    return False
+def _budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
+    return budget_execution_ready(store, attempt_id)
 
 
 def _release_admission_pending(store: ResearchStore, attempt_id: str, reason: str) -> None:
@@ -955,12 +971,15 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         admission_reject = _admission_execution_ready(store, attempt_id)
         if admission_reject is not None:
             return admission_reject
-        if not _host_execution_ready(store, attempt_id):
-            return reject("host_execution_unavailable")
-        if not _native_execution_ready(store, attempt_id):
-            return reject("native_execution_unavailable")
-        if not _budget_execution_ready(store, attempt_id):
-            return reject("budget_unavailable")
+        host_reason = _host_execution_ready(store, attempt_id)
+        if host_reason is not None:
+            return reject(f"host_execution_unavailable:{host_reason}")
+        native_reason = _native_execution_ready(store, attempt_id)
+        if native_reason is not None:
+            return reject(f"native_execution_unavailable:{native_reason}")
+        budget_reason = _budget_execution_ready(store, attempt_id)
+        if budget_reason is not None:
+            return reject(f"budget_unavailable:{budget_reason}")
         config = store.config()
         pins = runtime_pins_from_record(dict(config))
         expected = {

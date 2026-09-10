@@ -9,7 +9,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from typing import Protocol, TextIO
 
-from gateway.research.control import ControlError, OwnerControl, StartResult, StopResult
+from gateway.research.control import (
+    ControlError,
+    StartResult,
+    StopResult,
+    production_owner_control,
+)
 from gateway.research.status import ResearchStatus
 
 TOOL_NAMES = (
@@ -70,7 +75,7 @@ class G2ControlMcpServer:
 
     def __init__(
         self,
-        control_factory: Callable[[], _ControlProtocol] = OwnerControl,
+        control_factory: Callable[[], _ControlProtocol] = production_owner_control,
     ) -> None:
         self._control_factory = control_factory
 

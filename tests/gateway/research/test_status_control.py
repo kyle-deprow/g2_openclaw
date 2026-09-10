@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import fcntl
 import json
 import sqlite3
@@ -458,23 +457,22 @@ def test_stop_cancellation_error_does_not_skip_owner_stop(tmp_path: Path) -> Non
     assert any("cancellation incomplete" in error for error in result.errors)
 
 
-def test_stop_reports_queued_cancellation_hook_as_incomplete(tmp_path: Path) -> None:
+def test_stop_cancels_queued_job_without_signalling(tmp_path: Path) -> None:
     store, attempt = _attempt_fixture(tmp_path)
-    queued = dataclasses.replace(
-        attempt,
-        state=AttemptState.RUN_QUEUED,
-        run_job_id="job-queued",
-        updated_at="2026-09-06T00:04:00Z",
+    run_dir = (
+        tmp_path / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt.attempt_id / "run"
     )
-    store.set_state(queued, event="run_queued")
+    queued = store.queue_run_request(attempt.attempt_id, "job-queued", run_dir, 30, 256)
     unit = _FakeUnit("active")
 
     result = OwnerControl(tmp_path, unit=unit).stop()
 
     assert result.owner_stopped is True
-    assert result.job_cancelled is False
-    assert result.completed is False
-    assert any("queued job cancellation adapter" in error for error in result.errors)
+    assert result.job_cancelled is True
+    assert result.completed is True
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.REVIEW_PASSED
+    row = store.job_for(queued.attempt_id)
+    assert row is not None and row["state"] == "CANCELLED"
 
 
 @pytest.mark.parametrize("adapter_state", ["cancelled", "pending", "unknown"])
