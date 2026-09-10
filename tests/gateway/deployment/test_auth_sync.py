@@ -9,6 +9,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUTH_SYNC_MODULE = "gateway.deployment.auth_sync"
 
@@ -20,6 +22,8 @@ def _create_auth_database(
     state_json: str,
     agent_id: str = "reviewer",
     native_schema: bool = True,
+    native_role: str = "agent",
+    native_schema_version: int = 19,
     wal: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +56,7 @@ def _create_auth_database(
         if native_schema:
             connection.execute(
                 "INSERT INTO schema_meta VALUES (?, ?, ?, ?, ?, ?, ?)",
-                ("primary", "agent", 19, agent_id, "2026.8.1", 1, 1),
+                ("primary", native_role, native_schema_version, agent_id, "2026.8.1", 1, 1),
             )
         if profile_json is not None:
             connection.execute(
@@ -274,4 +278,77 @@ def test_sync_refuses_source_without_native_ownership_metadata(tmp_path: Path) -
 
     assert result.returncode == 1
     assert "native ownership metadata" in result.stderr
+    assert "public OpenClaw native initialization" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("native_role", "native_schema_version"),
+    [("owner", 19), ("agent", 18)],
+)
+def test_sync_refuses_target_with_wrong_native_schema(
+    tmp_path: Path,
+    native_role: str,
+    native_schema_version: int,
+) -> None:
+    push_home = tmp_path / "openclaw"
+    source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+    )
+    target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        target_db,
+        profile_json='{"provider":"azure"}',
+        state_json='{"old":true}',
+        agent_id="reviewer",
+        native_role=native_role,
+        native_schema_version=native_schema_version,
+    )
+    prior_bytes = target_db.read_bytes()
+    config = tmp_path / "openclaw.json"
+    _write_config(config, "main", "reviewer")
+
+    result = _run_sync(push_home, config, "/opt/openclaw")
+
+    assert result.returncode == 1
+    assert target_db.read_bytes() == prior_bytes
+    assert "native ownership metadata" in result.stderr
+    assert "public OpenClaw native initialization" in result.stderr
+
+
+@pytest.mark.parametrize("target_kind", ["symlink", "directory", "corrupt"])
+def test_sync_refuses_non_native_target_shapes(tmp_path: Path, target_kind: str) -> None:
+    push_home = tmp_path / "openclaw"
+    source_db = push_home / "agents/main/agent/openclaw-agent.sqlite"
+    _create_auth_database(
+        source_db,
+        profile_json='{"provider":"openai"}',
+        state_json="{}",
+        agent_id="main",
+    )
+    target_db = push_home / "agents/reviewer/agent/openclaw-agent.sqlite"
+    target_db.parent.mkdir(parents=True)
+    if target_kind == "symlink":
+        alias_db = tmp_path / "external.sqlite"
+        _create_auth_database(
+            alias_db,
+            profile_json='{"provider":"azure"}',
+            state_json="{}",
+            agent_id="reviewer",
+        )
+        target_db.symlink_to(alias_db)
+    elif target_kind == "directory":
+        target_db.mkdir()
+    else:
+        target_db.write_bytes(b"not a sqlite database")
+    config = tmp_path / "openclaw.json"
+    _write_config(config, "main", "reviewer")
+
+    result = _run_sync(push_home, config, "/opt/openclaw")
+
+    assert result.returncode == 1
+    assert "Native agent store" in result.stderr
     assert "public OpenClaw native initialization" in result.stderr

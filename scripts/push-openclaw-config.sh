@@ -222,15 +222,7 @@ NATIVE_CRASH_HARDENING_LINES=(
   "OOMPolicy=kill"
   "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ"
 )
-quote_sqlite_literal() {
-  local value="$1"
-  printf "'%s'" "${value//\'/\'\'}"
-}
-
 sync_managed_agent_codex_auth() {
-  local source_agent_dir="${OPENCLAW_PUSH_HOME}/agents/main/agent"
-  local source_db="${source_agent_dir}/openclaw-agent.sqlite"
-  local source_profiles="${source_agent_dir}/auth-profiles.json"
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.auth_sync sync \
     -- "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}" "${OPENCLAW_BIN_RESOLVED}"

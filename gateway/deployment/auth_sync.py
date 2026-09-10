@@ -16,7 +16,7 @@ from .guarded_fs import (
     guard_destination_path_chain,
     guarded_chmod,
     guarded_cp_file,
-    guarded_mkdir_p,
+    path_owned_by_effective_user,
 )
 
 AUTH_PROFILE_QUERY = (
@@ -55,14 +55,9 @@ COMMIT;
 
 
 def quote_sqlite_literal(value: str) -> str:
-    """Quote a SQLite string using the shell helper's exact convention."""
+    """Quote a SQLite string literal for the guarded ATTACH statement."""
 
     return "'" + value.replace("'", "''") + "'"
-
-
-def _guarded_mkdir(path: str, context: str) -> None:
-    if guarded_mkdir_p(path, context) != 0:
-        raise RuntimeError(f"ERROR: Failed to create managed directory {path}.")
 
 
 def _guarded_copy_file(source: str, destination: str, context: str) -> None:
@@ -105,6 +100,12 @@ def _validate_native_agent_database(
     path = Path(database)
     if path.is_symlink() or not path.is_file():
         _raise_native_store_error(database, agent_id, "the existing regular database is missing")
+    if not path_owned_by_effective_user(database):
+        _raise_native_store_error(
+            database,
+            agent_id,
+            "the existing database is not owned by the effective user",
+        )
     try:
         guard_destination_path_chain(
             database,
@@ -216,10 +217,6 @@ def sync_managed_agent_codex_auth(
             agent_id,
             mode="rw",
             context=f"syncing managed OpenClaw agent auth database {target_db}",
-        )
-        _guarded_mkdir(
-            agent_dir,
-            f"creating managed OpenClaw agent auth directory {agent_dir}",
         )
         if os.path.isfile(source_profiles):
             target_profiles = os.path.join(agent_dir, "auth-profiles.json")

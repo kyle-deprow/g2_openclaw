@@ -131,10 +131,13 @@ the scheduled job model.
 
 > **Deployment policy (this repo):** the example model above is illustrative
 > only. `main` and `research-orchestrator` are pinned in
-> `gateway/openclaw_config/openclaw.json`; native Luna and ACP Opus remain
-> bounded child routes on the single OpenAI/Codex OAuth provider. Config is
-> deployed only via `bash scripts/push-openclaw-config.sh`; never hand-edit
-> `~/.openclaw/`.
+> `gateway/openclaw_config/openclaw.json`; native Luna is a bounded
+> OpenAI/Codex child route, while ACP Opus is a separate review-only Claude
+> ACP process. There is no provider fallback. Config is deployed only via
+> `bash scripts/push-openclaw-config.sh`; never hand-edit `~/.openclaw/`.
+> This deployment permanently keeps `cron.enabled=false`, the default
+> heartbeat cadence at `0m`, and workshop autonomous mode `off`; the host
+> research-owner service is the only intended loop owner.
 
 ### `cron-agent-binding`
 Bind cron jobs to specific agents in multi-agent setups:
@@ -274,8 +277,9 @@ OpenClaw ships with these hooks — understand what they do before building cust
 
 > **Deployment policy (this repo):** the `session-memory` hook (transcript
 > indexing into vector memory) is off-policy — `memorySearch.enabled` is
-> `false`, `memory_search`/`memory_get` are denied, and memory writes go only
-> through the non-model MemPalace finalizer. Do not enable it here.
+> `false`, `memory_search`/`memory_get` are denied, and no built-in or
+> automatic MemPalace writer/finalizer is enabled. Do not enable it here;
+> MemPalace remains read-only retrieval.
 
 ### `hook-discovery-order`
 Hooks load from three locations (highest priority first):

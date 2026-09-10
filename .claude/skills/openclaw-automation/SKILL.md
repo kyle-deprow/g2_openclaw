@@ -39,6 +39,6 @@ Schedule tasks, react to lifecycle events, and integrate external systems throug
 
 ## Repo policy overrides
 
-- **No ad hoc model refs in scheduled jobs:** the canonical example (`"model": "openai/gpt-5-mini"`) is illustrative only. This deployment pins `main` to gpt-5.4 and `research-orchestrator` to gpt-6-astra; native Luna and ACP Opus are bounded children on the single OpenAI/Codex OAuth provider.
+- **No ad hoc model refs in scheduled jobs:** the canonical example (`"model": "openai/gpt-5-mini"`) is illustrative only. This deployment pins `main` to gpt-5.4 and `research-orchestrator` to gpt-6-astra; native Luna is a bounded OpenAI/Codex child route, while ACP Opus is a separate review-only Claude ACP process. There is no provider fallback. Cron is permanently disabled, the default heartbeat cadence is `0m`, workshop autonomous mode is `off`, and the host research-owner service is the only loop owner.
 - **Owner-driven automation supersedes in-agent scheduling:** bounded research cadence is external and deterministic, not an agent-created cron job; do not replicate it as a `cron_create` job.
-- **Hooks that write memory are off-policy:** the `session-memory` bundled hook (transcript indexing into vector memory) conflicts with this repo's read-only MemPalace architecture (`memorySearch.enabled: false`, memory tools denied); leave it out of any hook plans.
+- **Hooks that write memory are off-policy:** the `session-memory` bundled hook (transcript indexing into vector memory) conflicts with this repo's read-only MemPalace architecture (`memorySearch.enabled: false`, memory tools denied); no built-in or automatic MemPalace writer/finalizer is enabled; leave it out of any hook plans.
