@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -1245,21 +1246,41 @@ JSON
     fi
     ;;
   plugins)
-    if [[ "${2:-}" == "list" && "${3:-}" == "--json" ]]; then
+    if [[ "${2:-}" == "inspect" \
+      && "${3:-}" == "acpx" \
+      && "${4:-}" == "--runtime" \
+      && "${5:-}" == "--json" ]]; then
+      if [[ -n "${MOCK_ACPX_INSPECT_STDERR:-}" ]]; then
+        printf '%s\n' "$MOCK_ACPX_INSPECT_STDERR" >&2
+      fi
       if [[ "${MOCK_ACPX_PLUGIN_PRESENT:-1}" != "1" ]]; then
-        printf '{"plugins":[]}\n'
-        exit 0
+        cat <<JSON
+{
+  "plugin": {
+    "id": "acpx",
+    "packageName": "@openclaw/acpx",
+    "packageVersion": "2026.8.0",
+    "version": "2026.8.0",
+    "enabled": true,
+    "status": "loaded",
+    "rootDir": "${MOCK_ACPX_PLUGIN_PATH}"
+  }
+}
+JSON
+      exit 0
       fi
       cat <<JSON
 {
-  "plugins": [
-    {
+  "plugin": {
       "id": "acpx",
-      "name": "@openclaw/acpx",
+      "packageName": "@openclaw/acpx",
+      "packageVersion": "2026.8.1",
       "version": "2026.8.1",
-      "path": "${MOCK_ACPX_PLUGIN_PATH}"
-    }
-  ]
+      "source": "${MOCK_ACPX_PLUGIN_PATH}/dist/index.js",
+      "rootDir": "${MOCK_ACPX_PLUGIN_ROOT-${MOCK_ACPX_PLUGIN_PATH}}",
+      "enabled": ${MOCK_ACPX_PLUGIN_ENABLED:-true},
+      "status": "${MOCK_ACPX_PLUGIN_STATUS:-loaded}"
+  }
 }
 JSON
       exit 0
@@ -1690,11 +1711,13 @@ def _prepare_push_script_home(
     )
     acpx_root = tmp_path / "mock-acpx/node_modules/@openclaw/acpx"
     adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
+    plugin_acpx_root = acpx_root / "node_modules/acpx"
     sdk_root = adapter_root / "node_modules/@agentclientprotocol/sdk"
     claude_sdk_root = adapter_root / "node_modules/@anthropic-ai/claude-agent-sdk"
     adapter_bin = adapter_root / "dist/index.js"
     acpx_root.mkdir(parents=True)
     adapter_root.mkdir(parents=True)
+    plugin_acpx_root.mkdir(parents=True)
     sdk_root.mkdir(parents=True)
     claude_sdk_root.mkdir(parents=True)
     (acpx_root / "package.json").write_text(
@@ -1702,7 +1725,10 @@ def _prepare_push_script_home(
             {
                 "name": "@openclaw/acpx",
                 "version": "2026.8.1",
-                "dependencies": {"acpx": "0.13.1"},
+                "dependencies": {
+                    "@agentclientprotocol/claude-agent-acp": "0.70.0",
+                    "acpx": "0.13.1",
+                },
             }
         ),
         encoding="utf-8",
@@ -1719,6 +1745,10 @@ def _prepare_push_script_home(
                 },
             }
         ),
+        encoding="utf-8",
+    )
+    (plugin_acpx_root / "package.json").write_text(
+        json.dumps({"name": "acpx", "version": "0.13.1"}),
         encoding="utf-8",
     )
     (sdk_root / "package.json").write_text(
@@ -2759,6 +2789,36 @@ def test_push_script_missing_pinned_acpx_fails_before_live_write(tmp_path: Path)
     assert not Path(env["CP_LOG"]).exists() or "openclaw.json.bak" not in _read_cp_log(env)
 
 
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("MOCK_ACPX_PLUGIN_ENABLED", "false"),
+        ("MOCK_ACPX_PLUGIN_STATUS", "error"),
+        ("MOCK_ACPX_PLUGIN_ROOT", "relative/acpx"),
+    ],
+)
+def test_push_script_acpx_inspect_schema_mismatch_fails_closed(
+    tmp_path: Path, variable: str, value: str
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env[variable] = value
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "@openclaw/acpx version 2026.8.1 was not found" in result.stderr
+
+
+def test_push_script_acpx_inspect_keeps_stderr_out_of_json_parser(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_ACPX_INSPECT_STDERR"] = "sqlite transaction warning"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "sqlite transaction warning" in result.stderr
+
+
 def test_push_script_acpx_resolver_uses_adapter_owned_sdk_tuple_without_separate_binary() -> None:
     script = PUSH_SCRIPT.read_text(encoding="utf-8")
 
@@ -2775,6 +2835,22 @@ def test_push_script_acpx_resolver_uses_adapter_owned_sdk_tuple_without_separate
     assert 'resolve("acpx/package.json")' not in script
     assert 'require("acpx")' not in script
     assert "claude-agent-acp executable" not in script
+
+
+def test_push_script_acpx_inspect_uses_openclaw_81_plugin_root_schema() -> None:
+    script = PUSH_SCRIPT.read_text(encoding="utf-8")
+
+    assert "plugins inspect acpx --runtime --json" in script
+    assert ".plugin" in script
+    assert '.packageName == "@openclaw/acpx"' in script
+    assert ".packageVersion == $version" in script
+    assert '.status == "loaded"' in script
+    assert '.rootDir | strings | startswith("/")' in script
+    assert ".root?" not in script
+    assert ".path?" not in script
+    assert ".packagePath?" not in script
+    assert ".entrypoint?" not in script
+    assert "2> >(cat >&2)" not in script
 
 
 @pytest.mark.parametrize(
@@ -2831,7 +2907,7 @@ def test_push_script_acpx_rejects_reversed_adapter_sdk_tuple(tmp_path: Path) -> 
     assert "Agent Client Protocol SDK must be 1.3.0" in result.stderr
 
 
-def test_push_script_acpx_rejects_plugin_context_only_sdk(tmp_path: Path) -> None:
+def test_push_script_acpx_accepts_hoisted_adapter_owned_sdk(tmp_path: Path) -> None:
     env = _prepare_push_script_home(tmp_path)
     acpx_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
     adapter_sdk_package_path = (
@@ -2849,8 +2925,37 @@ def test_push_script_acpx_rejects_plugin_context_only_sdk(tmp_path: Path) -> Non
 
     result = _run_push_script(env)
 
+    assert result.returncode == 0, result.stderr
+
+
+def test_push_script_acpx_rejects_adapter_resolved_above_frozen_stage(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    acpx_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
+    nested_adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
+    escaped_adapter_root = tmp_path / "node_modules/@agentclientprotocol/claude-agent-acp"
+    escaped_adapter_root.parent.mkdir(parents=True)
+    shutil.copytree(nested_adapter_root, escaped_adapter_root)
+    shutil.rmtree(nested_adapter_root)
+
+    result = _run_push_script(env)
+
     assert result.returncode != 0
-    assert "adapter-owned node_modules tree" in result.stderr
+    assert "not installed in the declared dependency tree" in result.stderr
+
+
+def test_push_script_acpx_rejects_installed_optional_package_version_mismatch(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    package_path = Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "node_modules/acpx/package.json"
+    package = json.loads(package_path.read_text(encoding="utf-8"))
+    package["version"] = "9.9.9"
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "ACPX plugin package must be acpx 0.13.1" in result.stderr
 
 
 def test_push_script_acpx_rejects_adapter_sdk_declaration_mismatch(tmp_path: Path) -> None:

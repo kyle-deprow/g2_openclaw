@@ -929,20 +929,30 @@ require_openclaw_supported() {
 
 require_acpx_plugin_exact() {
   local inventory plugin_path resolved
-  if ! inventory="$(run_openclaw_cli plugins list --json 2>&1)"; then
-    echo "ERROR: Unable to inspect the installed ACPX plugin inventory; refusing network or install fallback." >&2
+  if ! inventory="$(run_openclaw_cli plugins inspect acpx --runtime --json)"; then
+    echo "ERROR: Unable to inspect the installed ACPX plugin; refusing network or install fallback." >&2
     printf '%s\n' "${inventory}" >&2
     return 1
   fi
-  if plugin_path="$(printf '%s\n' "${inventory}" | jq -r --arg version "2026.8.1" '
-    def plugin_objects:
-      if type == "array" then .[] else .. | objects end;
-    [plugin_objects
-      | select((.id? == "acpx" or .name? == "@openclaw/acpx" or .packageName? == "@openclaw/acpx")
-        and .version? == $version)
-      | (.path? // .root? // .packagePath? // .entrypoint? // empty)
-      | select(type == "string" and length > 0)]
-    | first // empty
+  if plugin_path="$(printf '%s\n' "${inventory}" | jq -se -r --arg version "2026.8.1" '
+    if length != 1 then
+      empty
+    else
+      [
+        .[0].plugin
+        | select(
+            .id == "acpx"
+            and .packageName == "@openclaw/acpx"
+            and .packageVersion == $version
+            and .version == $version
+            and .enabled == true
+            and .status == "loaded"
+            and (.rootDir | strings | startswith("/"))
+          )
+        | .rootDir
+      ]
+      | first // empty
+    end
   ' 2>/dev/null)"; then
     :
   else
@@ -952,52 +962,97 @@ require_acpx_plugin_exact() {
     echo "ERROR: Installed @openclaw/acpx version 2026.8.1 was not found; refusing network or install fallback." >&2
     return 1
   fi
-  if ! resolved="$(env -u NODE_OPTIONS node - "${plugin_path}" <<'NODE'
-const fs = require("fs");
-const path = require("path");
-const Module = require("module");
+  if ! resolved="$(env -u NODE_OPTIONS node --input-type=module - "${plugin_path}" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
 
-const reported = path.resolve(process.argv[2]);
-let packageRoot = reported;
-if (path.basename(packageRoot) === "package.json") {
-  packageRoot = path.dirname(packageRoot);
-} else {
-  if (path.extname(packageRoot) !== ".json" && path.basename(packageRoot) !== "index.js") {
-    if (!fs.existsSync(path.join(packageRoot, "package.json"))) packageRoot = path.dirname(packageRoot);
-  } else {
-    packageRoot = path.dirname(packageRoot);
-  }
-}
-while (packageRoot !== path.dirname(packageRoot) && !fs.existsSync(path.join(packageRoot, "package.json"))) {
-  packageRoot = path.dirname(packageRoot);
-}
+const reported = process.argv[2];
+if (!path.isAbsolute(reported)) throw new Error("reported ACPX rootDir must be absolute");
+const packageRoot = path.resolve(reported);
 const packageJsonPath = path.join(packageRoot, "package.json");
 const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 if (packageJson.name !== "@openclaw/acpx" || packageJson.version !== "2026.8.1") {
   throw new Error("reported ACPX path does not resolve to @openclaw/acpx 2026.8.1");
 }
-const pluginAcpxDependency = packageJson.dependencies?.acpx;
-if (pluginAcpxDependency !== undefined && pluginAcpxDependency !== "0.13.1") {
-  throw new Error(`ACPX plugin dependency acpx must be 0.13.1, got ${pluginAcpxDependency || "<missing>"}`);
+const adapterDependency = packageJson.dependencies?.["@agentclientprotocol/claude-agent-acp"];
+if (adapterDependency !== "0.70.0") {
+  throw new Error(`ACPX Claude adapter dependency must be 0.70.0, got ${adapterDependency || "<missing>"}`);
 }
-const requireFromPlugin = Module.createRequire(packageJsonPath);
-const adapterPackageJsonPath = requireFromPlugin.resolve("@agentclientprotocol/claude-agent-acp/package.json");
-const adapterRoot = path.dirname(adapterPackageJsonPath);
+function stageRootFor(root) {
+  let nodeModulesRoot = root;
+  while (path.basename(nodeModulesRoot) !== "node_modules") {
+    const parent = path.dirname(nodeModulesRoot);
+    if (parent === nodeModulesRoot) throw new Error("reported ACPX rootDir is not inside node_modules");
+    nodeModulesRoot = parent;
+  }
+  return path.dirname(nodeModulesRoot);
+}
+const frozenRoot = stageRootFor(packageRoot);
+function isWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
+}
+function packageRootFor(packageName, ownerRoot) {
+  const segments = packageName.startsWith("@") ? packageName.split("/") : [packageName];
+  let searchRoot = path.resolve(ownerRoot);
+  if (!isWithin(frozenRoot, searchRoot)) {
+    throw new Error(`${packageName} owner is outside the frozen dependency tree`);
+  }
+  while (true) {
+    const candidate = path.join(searchRoot, "node_modules", ...segments);
+    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
+    if (searchRoot === frozenRoot) break;
+    const parent = path.dirname(searchRoot);
+    if (!isWithin(frozenRoot, parent)) break;
+    searchRoot = parent;
+  }
+  throw new Error(`${packageName} is not installed in the declared dependency tree`);
+}
+function packageJsonAt(packageName, ownerRoot) {
+  const root = packageRootFor(packageName, ownerRoot);
+  return { root, path: path.join(root, "package.json") };
+}
+const adapter = packageJsonAt("@agentclientprotocol/claude-agent-acp", packageRoot);
+const adapterRoot = adapter.root;
+const adapterPackageJsonPath = adapter.path;
 const adapterPackageJson = JSON.parse(fs.readFileSync(adapterPackageJsonPath, "utf8"));
 if (adapterPackageJson.name !== "@agentclientprotocol/claude-agent-acp" || adapterPackageJson.version !== "0.70.0") {
   throw new Error(`Claude ACP adapter must be @agentclientprotocol/claude-agent-acp 0.70.0, got ${adapterPackageJson.version || "<missing>"}`);
 }
-const requireFromAdapter = Module.createRequire(adapterPackageJsonPath);
 function resolveAdapterOwned(packageName) {
-  const resolved = requireFromAdapter.resolve(packageName);
-  const relative = path.relative(adapterRoot, resolved);
-  if (path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`)
-      || !relative.startsWith(`node_modules${path.sep}`)) {
-    throw new Error(`${packageName} must resolve from the adapter-owned node_modules tree`);
+  const declared = adapterPackageJson.dependencies?.[packageName];
+  if (typeof declared !== "string") {
+    throw new Error(`${packageName} must be declared by the Claude ACP adapter`);
   }
-  return resolved;
+  const expectedVersions = {
+    "@agentclientprotocol/sdk": "1.3.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.232",
+  };
+  const expected = expectedVersions[packageName];
+  if (declared !== expected) {
+    const label = packageName === "@agentclientprotocol/sdk" ? "ACP SDK" : "Claude Agent SDK";
+    throw new Error(`Adapter ${label} dependency declaration does not match expected ${expected}, got ${declared}`);
+  }
+  return packageJsonAt(packageName, adapterRoot).path;
 }
-const sdkPackageJsonPath = resolveAdapterOwned("@agentclientprotocol/sdk/package.json");
+const pluginAcpxDeclarations = [
+  packageJson.dependencies?.acpx,
+  packageJson.optionalDependencies?.acpx,
+  packageJson.peerDependencies?.acpx,
+].filter((value) => typeof value === "string");
+for (const declared of pluginAcpxDeclarations) {
+  if (declared !== "0.13.1") {
+    throw new Error(`ACPX plugin dependency acpx must be 0.13.1, got ${declared || "<missing>"}`);
+  }
+}
+if (pluginAcpxDeclarations.length > 0) {
+  const pluginAcpxPackageJsonPath = packageJsonAt("acpx", packageRoot).path;
+  const pluginAcpxPackageJson = JSON.parse(fs.readFileSync(pluginAcpxPackageJsonPath, "utf8"));
+  if (pluginAcpxPackageJson.name !== "acpx" || pluginAcpxPackageJson.version !== "0.13.1") {
+    throw new Error(`ACPX plugin package must be acpx 0.13.1, got ${pluginAcpxPackageJson.version || "<missing>"}`);
+  }
+}
+const sdkPackageJsonPath = resolveAdapterOwned("@agentclientprotocol/sdk");
 const sdkPackageJson = JSON.parse(fs.readFileSync(sdkPackageJsonPath, "utf8"));
 if (sdkPackageJson.name !== "@agentclientprotocol/sdk" || sdkPackageJson.version !== "1.3.0") {
   throw new Error(`Agent Client Protocol SDK must be 1.3.0, got ${sdkPackageJson.version || "<missing>"}`);
@@ -1005,7 +1060,7 @@ if (sdkPackageJson.name !== "@agentclientprotocol/sdk" || sdkPackageJson.version
 if (adapterPackageJson.dependencies?.["@agentclientprotocol/sdk"] !== sdkPackageJson.version) {
   throw new Error("Adapter ACP SDK dependency declaration does not match the resolved package");
 }
-const claudeSdkPackageJsonPath = resolveAdapterOwned("@anthropic-ai/claude-agent-sdk/package.json");
+const claudeSdkPackageJsonPath = resolveAdapterOwned("@anthropic-ai/claude-agent-sdk");
 const claudeSdkPackageJson = JSON.parse(fs.readFileSync(claudeSdkPackageJsonPath, "utf8"));
 if (claudeSdkPackageJson.name !== "@anthropic-ai/claude-agent-sdk" || claudeSdkPackageJson.version !== "0.3.232") {
   throw new Error(`Claude Agent SDK must be 0.3.232, got ${claudeSdkPackageJson.version || "<missing>"}`);
