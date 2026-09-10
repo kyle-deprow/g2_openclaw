@@ -434,6 +434,13 @@ REPO_CONFIG_PREFLIGHT_DIR=""
 REPO_CONFIG_PREFLIGHT_HASH=""
 REPO_CONFIG_PREFLIGHT_BYTES=""
 REPO_CONFIG_PREFLIGHT_IDENTITY=""
+ACPX_CONFIG_PREFLIGHT_COPY=""
+ACPX_CONFIG_PREFLIGHT_IDENTITY=""
+ACPX_CONFIG_PREFLIGHT_HASH=""
+ACPX_CONFIG_PREFLIGHT_BYTES=""
+ACPX_CONFIG_SOURCE_IDENTITY=""
+ACPX_CONFIG_SOURCE_HASH=""
+ACPX_CONFIG_SOURCE_BYTES=""
 PUBLISHED_OPENCLAW_CONFIG_IDENTITY=""
 
 run_openclaw_cli() {
@@ -654,12 +661,87 @@ run_openclaw_cli_for_guarded_repo_config() {
   return "${status}"
 }
 
+prepare_acpx_config_preflight_copy() {
+  local load_paths_state local_identity local_hash local_bytes
+  if [[ -n "${ACPX_CONFIG_PREFLIGHT_COPY:-}" ]]; then
+    return 0
+  fi
+  ACPX_CONFIG_SOURCE_IDENTITY="$(guarded_regular_file_identity "${LOCAL_CONFIG}" "capturing local OpenClaw config identity before ACPX preflight")" || return 1
+  ACPX_CONFIG_SOURCE_HASH="$(file_sha256 "${LOCAL_CONFIG}")"
+  ACPX_CONFIG_SOURCE_BYTES="$(file_bytes "${LOCAL_CONFIG}")"
+  if ! load_paths_state="$(jq -e -r '
+    if .plugins?.load?.paths? == null then "absent" else "present" end
+  ' "${LOCAL_CONFIG}" 2>/dev/null)"; then
+    echo "ERROR: Local OpenClaw config cannot be parsed for ACPX preflight." >&2
+    return 1
+  fi
+  if [[ "${load_paths_state}" == "absent" ]]; then
+    ACPX_CONFIG_PREFLIGHT_COPY="${LOCAL_CONFIG}"
+    return 0
+  fi
+
+  prepare_repo_config_preflight_copy || return 1
+  ACPX_CONFIG_PREFLIGHT_COPY="$(mktemp "${REPO_CONFIG_PREFLIGHT_DIR}/openclaw.acpx-preflight.XXXXXX.json")"
+  guard_destination_path_chain "${ACPX_CONFIG_PREFLIGHT_COPY}" "writing ACPX preflight config without machine-local plugin load paths" || return 1
+  if ! jq '
+    del(.plugins.load.paths)
+    | if .plugins.load == {} then del(.plugins.load) else . end
+  ' "${LOCAL_CONFIG}" > "${ACPX_CONFIG_PREFLIGHT_COPY}"; then
+    echo "ERROR: Could not create the ACPX preflight config without local plugin load paths." >&2
+    return 1
+  fi
+  if ! verify_guarded_regular_file_identity_unchanged "${LOCAL_CONFIG}" "${ACPX_CONFIG_SOURCE_IDENTITY}" "creating ACPX preflight config"; then
+    return 1
+  fi
+  local_hash="$(file_sha256 "${LOCAL_CONFIG}")"
+  local_bytes="$(file_bytes "${LOCAL_CONFIG}")"
+  if [[ "${local_hash}" != "${ACPX_CONFIG_SOURCE_HASH}" || "${local_bytes}" != "${ACPX_CONFIG_SOURCE_BYTES}" ]]; then
+    echo "ERROR: Local OpenClaw config changed while creating ACPX preflight config." >&2
+    return 1
+  fi
+  guarded_chmod 0600 "${ACPX_CONFIG_PREFLIGHT_COPY}" "chmod ACPX preflight config ${ACPX_CONFIG_PREFLIGHT_COPY}" || return 1
+  ACPX_CONFIG_PREFLIGHT_IDENTITY="$(guarded_regular_file_identity "${ACPX_CONFIG_PREFLIGHT_COPY}" "capturing ACPX preflight config identity")" || return 1
+  ACPX_CONFIG_PREFLIGHT_HASH="$(file_sha256 "${ACPX_CONFIG_PREFLIGHT_COPY}")"
+  ACPX_CONFIG_PREFLIGHT_BYTES="$(file_bytes "${ACPX_CONFIG_PREFLIGHT_COPY}")"
+}
+
+verify_acpx_config_preflight_unchanged() {
+  local context="$1" current_hash current_bytes
+  if ! verify_guarded_regular_file_identity_unchanged "${LOCAL_CONFIG}" "${ACPX_CONFIG_SOURCE_IDENTITY}" "${context} local config"; then
+    return 1
+  fi
+  current_hash="$(file_sha256 "${LOCAL_CONFIG}")"
+  current_bytes="$(file_bytes "${LOCAL_CONFIG}")"
+  if [[ "${current_hash}" != "${ACPX_CONFIG_SOURCE_HASH}" || "${current_bytes}" != "${ACPX_CONFIG_SOURCE_BYTES}" ]]; then
+    echo "ERROR: External OpenClaw CLI changed local config during ${context}." >&2
+    return 1
+  fi
+  if [[ "${ACPX_CONFIG_PREFLIGHT_COPY}" != "${LOCAL_CONFIG}" ]]; then
+    if ! verify_guarded_regular_file_identity_unchanged "${ACPX_CONFIG_PREFLIGHT_COPY}" "${ACPX_CONFIG_PREFLIGHT_IDENTITY}" "${context} preflight config"; then
+      return 1
+    fi
+    current_hash="$(file_sha256 "${ACPX_CONFIG_PREFLIGHT_COPY}")"
+    current_bytes="$(file_bytes "${ACPX_CONFIG_PREFLIGHT_COPY}")"
+    if [[ "${current_hash}" != "${ACPX_CONFIG_PREFLIGHT_HASH}" || "${current_bytes}" != "${ACPX_CONFIG_PREFLIGHT_BYTES}" ]]; then
+      echo "ERROR: External OpenClaw CLI changed ACPX preflight config during ${context}." >&2
+      return 1
+    fi
+  fi
+}
+
 cleanup_repo_config_preflight_copy() {
   if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
     guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "cleaning guarded repo OpenClaw config preflight directory ${REPO_CONFIG_PREFLIGHT_DIR}" || return 1
   fi
   REPO_CONFIG_PREFLIGHT_COPY=""
   REPO_CONFIG_PREFLIGHT_DIR=""
+  ACPX_CONFIG_PREFLIGHT_COPY=""
+  ACPX_CONFIG_PREFLIGHT_IDENTITY=""
+  ACPX_CONFIG_PREFLIGHT_HASH=""
+  ACPX_CONFIG_PREFLIGHT_BYTES=""
+  ACPX_CONFIG_SOURCE_IDENTITY=""
+  ACPX_CONFIG_SOURCE_HASH=""
+  ACPX_CONFIG_SOURCE_BYTES=""
 }
 
 push_test_checkpoint() {
@@ -1109,9 +1191,15 @@ require_openclaw_supported() {
 
 require_acpx_plugin_exact() {
   local inventory plugin_path resolved
-  if ! inventory="$(run_openclaw_cli plugins inspect acpx --runtime --json)"; then
+  if ! prepare_acpx_config_preflight_copy; then
+    return 1
+  fi
+  if ! inventory="$(run_openclaw_cli_for_config "${ACPX_CONFIG_PREFLIGHT_COPY}" plugins inspect acpx --runtime --json)"; then
     echo "ERROR: Unable to inspect the installed ACPX plugin; refusing network or install fallback." >&2
     printf '%s\n' "${inventory}" >&2
+    return 1
+  fi
+  if ! verify_acpx_config_preflight_unchanged "ACPX plugin inspection"; then
     return 1
   fi
   if plugin_path="$(printf '%s\n' "${inventory}" | jq -se -r --arg version "2026.8.1" '

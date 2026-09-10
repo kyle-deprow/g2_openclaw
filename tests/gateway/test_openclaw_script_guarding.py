@@ -826,7 +826,7 @@ if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_OPENCLAW_STATE_DIR" ]]; then
   exit 68
 fi
 case "${OPENCLAW_CONFIG_PATH:-}" in
-  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
+  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.acpx-preflight.*.json|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
     ;;
   *)
   printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
@@ -1038,6 +1038,11 @@ JSON
       && "${5:-}" == "--json" ]]; then
       if [[ -n "${MOCK_ACPX_INSPECT_STDERR:-}" ]]; then
         printf '%s\n' "$MOCK_ACPX_INSPECT_STDERR" >&2
+      fi
+      if [[ "${MOCK_ACPX_EXPECT_NO_LOAD_PATH:-0}" == "1" ]] \
+        && ! jq -e '.plugins.load.paths? == null' "$OPENCLAW_CONFIG_PATH" >/dev/null; then
+        printf 'ACPX preflight retained a machine-local plugin load path\n' >&2
+        exit 73
       fi
       if [[ "${MOCK_ACPX_PLUGIN_PRESENT:-1}" != "1" ]]; then
         cat <<JSON
@@ -2392,6 +2397,37 @@ def test_push_script_acpx_inspect_keeps_stderr_out_of_json_parser(tmp_path: Path
 
     assert result.returncode == 0, result.stderr
     assert "sqlite transaction warning" in result.stderr
+
+
+def test_push_script_acpx_first_push_ignores_local_load_path_for_adapter_resolution(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    old_linked_root = tmp_path / "old-linked-acpx"
+    config = json.loads(live_config.read_text(encoding="utf-8"))
+    config["plugins"] = {
+        "load": {"paths": [str(old_linked_root)]},
+    }
+    live_config.write_text(json.dumps(config), encoding="utf-8")
+    official_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
+    env["MOCK_ACPX_PLUGIN_ROOT"] = str(official_root)
+    env["MOCK_ACPX_EXPECT_NO_LOAD_PATH"] = "1"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    published = json.loads(live_config.read_text(encoding="utf-8"))
+    adapter_bin = published["plugins"]["entries"]["acpx"]["config"]["agents"]["claude"]["args"][1]
+    assert adapter_bin.startswith(str(official_root))
+    assert str(old_linked_root) not in json.dumps(published)
+    inspect_lines = [
+        line
+        for line in Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8").splitlines()
+        if "plugins inspect acpx --runtime --json" in line
+    ]
+    assert len(inspect_lines) == 1
+    assert str(live_config) not in inspect_lines[0]
 
 
 def test_push_script_acpx_resolver_uses_adapter_owned_sdk_tuple_without_separate_binary() -> None:
