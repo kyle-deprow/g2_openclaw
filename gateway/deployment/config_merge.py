@@ -644,6 +644,13 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             if isinstance(provider, dict) and provider.get("apiKey") == "env:OPENROUTER_API_KEY":
                 provider["apiKey"] = os.environ["OPENROUTER_API_KEY"]
 
+    openai_provider = providers.get("openai")
+    if isinstance(openai_provider, dict) and openai_provider.get("auth") == "oauth":
+        # The managed OpenAI route is subscription-backed Codex OAuth.  Do not
+        # let a machine-local API key survive the right-biased config merge and
+        # turn this route into a mixed credential surface.
+        openai_provider.pop("apiKey", None)
+
     azure_key: JsonValue | None = None
     for key, value in providers.items():
         if not key.startswith("azure-oai-") or not isinstance(value, dict):

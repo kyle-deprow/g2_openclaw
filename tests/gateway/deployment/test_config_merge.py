@@ -150,6 +150,27 @@ def test_assembly_disables_implicit_and_explicit_memory_plugin(tmp_path: Path) -
     assert slots["memory"] == "none"
 
 
+def test_assembly_removes_local_openai_api_key_for_managed_oauth_route(tmp_path: Path) -> None:
+    local = cast(
+        JsonObject,
+        {
+            "models": {
+                "providers": {
+                    "openai": {"apiKey": "fixture-value"}  # pragma: allowlist secret
+                }
+            }
+        },
+    )
+    assembled = assemble_config(
+        local,
+        cast(JsonObject, load_json(REPO_CONFIG)),
+        _assembly_inputs(tmp_path),
+    )
+
+    providers = cast(JsonObject, cast(JsonObject, assembled["models"])["providers"])
+    assert "apiKey" not in cast(JsonObject, providers["openai"])
+
+
 def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
     tmp_path: Path,
 ) -> None:
