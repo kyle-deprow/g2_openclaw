@@ -336,6 +336,36 @@ def test_task_lookup_rejects_multiple_rows_and_conflicting_ack(
         _read_task(host_fixture["db"], ack_run_id="wrong-run")
 
 
+def test_task_lookup_ignores_paired_subagent_row_for_canonical_acp_selection(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    with sqlite3.connect(host_fixture["db"]) as connection:
+        connection.execute(
+            """
+            INSERT INTO task_runs
+            SELECT task_id || '-subagent', 'subagent', task_kind, source_id,
+                   requester_session_key, owner_key, 'session',
+                   child_session_key || '-subagent', 'codex', requester_agent_id,
+                   run_id || '-subagent', label, status, created_at,
+                   started_at, ended_at, error
+              FROM task_runs
+            """
+        )
+
+    record = _read_task(
+        host_fixture["db"],
+        ack_child_session_key=CHILD_KEY,
+        ack_run_id=RUN_ID,
+    )
+
+    assert record.task_id == TASK_ID
+    assert (record.runtime, record.scope_kind, record.agent_id) == (
+        "acp",
+        "session",
+        "claude",
+    )
+
+
 def test_task_lookup_rejects_task_created_before_reservation(
     host_fixture: dict[str, Path | str],
 ) -> None:

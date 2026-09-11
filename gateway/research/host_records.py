@@ -141,6 +141,7 @@ SELECT task_id, runtime, task_kind, source_id, requester_session_key,
        started_at, ended_at
   FROM task_runs
  WHERE owner_key = ? AND label = ?
+   AND runtime = ? AND scope_kind = ? AND agent_id = ?
 """
 
 _ACP_SESSION_QUERY = """
@@ -272,13 +273,23 @@ def read_exact_task_run(
 
     with _readonly_database(database_path) as connection:
         try:
-            rows = connection.execute(_TASK_RUN_QUERY, (owner_key, reservation_label)).fetchall()
+            rows = connection.execute(
+                _TASK_RUN_QUERY,
+                (
+                    owner_key,
+                    reservation_label,
+                    expected_runtime,
+                    expected_scope_kind,
+                    expected_agent_id,
+                ),
+            ).fetchall()
         except sqlite3.Error as exc:
             raise HostRecordError("host task metadata could not be read") from exc
 
     if len(rows) != 1:
         raise HostRecordError(
-            f"host task lookup requires exactly one matching row; found {len(rows)}"
+            "host task lookup requires exactly one matching row after identity filters; "
+            f"found {len(rows)}"
         )
     row = rows[0]
 
