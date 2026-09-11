@@ -10,7 +10,6 @@ from typing import Any, cast
 import pytest
 from gateway.openclaw_client import OpenClawClient
 from gateway.research import readiness
-from gateway.research.contracts import AttemptDecision
 from gateway.research.control import (
     OpenClawReviewCanceller,
     OwnerControl,
@@ -20,10 +19,10 @@ from gateway.research.control import (
 from gateway.research.readiness import (
     NATIVE_CAPABILITY_MODEL,
     NATIVE_OBSERVED_SERVICE_TIER,
-    NATIVE_REQUESTED_SERVICE_TIER,
     budget_execution_ready,
     host_execution_ready,
     native_execution_ready,
+    read_native_service_tier_observation,
     register_native_runtime_record,
     validate_native_runtime_record_registration,
 )
@@ -31,7 +30,6 @@ from gateway.research.status import ResearchStatus
 from gateway.research.store import ResearchStore, StoreConflict
 from gateway.research.wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
-from tests.gateway.research.conftest import implementation, review, verified_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_review_evidence import _prepare_review
 
@@ -183,9 +181,25 @@ def test_old_v1_native_receipt_is_not_a_runtime_record(
         )
 
 
-def test_native_tier_separates_requested_configuration_from_observation() -> None:
-    assert NATIVE_REQUESTED_SERVICE_TIER == "fast"
-    assert NATIVE_OBSERVED_SERVICE_TIER == "unknown"
+def test_native_tier_reads_pinned_configuration_and_keeps_observation_unknown(
+    campaign: tuple[ResearchStore, Path, Any], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis = campaign
+    record, digest = _native_runtime_record(tmp_path / "native-rollout.jsonl")
+    register_native_runtime_record(store.root, record, digest)
+
+    assert read_native_service_tier_observation(store.root) == (
+        "fast",
+        NATIVE_OBSERVED_SERVICE_TIER,
+    )
+
+    alternate_config = tmp_path / "roles"
+    alternate_config.mkdir()
+    (alternate_config / "implementer.toml").write_text(
+        'service_tier = "standard"\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must request service tier fast"):
+        read_native_service_tier_observation(store.root, role_config_root=alternate_config)
 
 
 def test_budget_guard_remains_fail_closed_until_explicit_policy(
@@ -248,31 +262,26 @@ def test_native_guard_reports_database_schema_permissions_and_digest_refusals(
     assert native_execution_ready(store, None) == "native_valueerror"
 
 
-def test_budget_guard_reports_attempt_and_wall_clock_caps(
-    campaign: tuple[ResearchStore, Path, Any], tmp_path: Path
+def test_budget_guard_allows_admitted_attempt_at_cap_one(
+    campaign: tuple[ResearchStore, Path, Any],
 ) -> None:
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
-    store.set_campaign_policy(3, None, "synthetic-cap-fixture")
     admitted = _admit(_document(_payload()))
     first = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
-    store.submit_implementation(first.attempt_id, implementation(first.attempt_id, "a" * 40))
-    verified_review(
-        store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, verdict="FAIL")
-    )
-    store.close_attempt(first.attempt_id, AttemptDecision.RETRY, "cap fixture")
-    second = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(second.attempt_id, implementation(second.attempt_id, "b" * 40))
-    verified_review(
-        store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, verdict="FAIL")
-    )
-    store.close_attempt(second.attempt_id, AttemptDecision.RETRY, "cap fixture")
-    third = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
+    store.set_campaign_policy(1, None, "synthetic-cap-one-fixture")
 
-    assert budget_execution_ready(store, third.attempt_id) is None
+    assert budget_execution_ready(store, first.attempt_id) is None
+    assert budget_execution_ready(store, None) == "budget_attempt_cap_exceeded"
     with pytest.raises(StoreConflict, match="campaign attempt cap exceeded"):
         store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
 
+
+def test_budget_guard_reports_wall_clock_cap(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, _source, _hypothesis = campaign
+    store.set_campaign_policy(3, None, "synthetic-cap-fixture")
     with store._connect() as connection:
         connection.execute(
             "UPDATE campaign SET attempt_cap=10, wall_clock_cap_seconds=1, "

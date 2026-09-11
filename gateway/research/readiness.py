@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import stat
+import tomllib
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,9 +42,9 @@ if TYPE_CHECKING:
     from .store import ResearchStore
 
 NATIVE_RUNTIME_RECORD_REGISTRATION = "native-runtime-record-registration.json"
+NATIVE_ROLE_CONFIG_ROOT = Path(__file__).resolve().parents[2] / ".codex" / "agent-configs"
 NATIVE_CAPABILITY_MODEL = "gpt-5.6-luna"
 NATIVE_CAPABILITY_EFFORT = "xhigh"
-NATIVE_REQUESTED_SERVICE_TIER = "fast"
 NATIVE_OBSERVED_SERVICE_TIER = "unknown"
 NATIVE_CAPABILITY_IDENTITIES = frozenset({"implementer", "experiment_runner"})
 
@@ -116,6 +117,25 @@ def _validate_native_runtime_record(record_path: Path) -> RolloutHostRecord:
     return record
 
 
+def _read_native_requested_service_tier(
+    agent_role: str, config_root: Path = NATIVE_ROLE_CONFIG_ROOT
+) -> str:
+    if agent_role not in NATIVE_CAPABILITY_IDENTITIES:
+        raise ValueError("native runtime record role is not an approved native role")
+    config_path = config_root / f"{agent_role}.toml"
+    raw = _bounded_file(config_path, "native role configuration")
+    try:
+        payload = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("native role configuration is not valid TOML") from exc
+    requested = payload.get("service_tier")
+    if not isinstance(requested, str) or not requested:
+        raise ValueError("native role configuration service tier is missing")
+    if requested != "fast":
+        raise ValueError("native role configuration must request service tier fast")
+    return requested
+
+
 def _read_verified_native_runtime_record(root: Path) -> RolloutHostRecord:
     record_path, registration = _read_registration(root)
     record_bytes = _bounded_file(record_path, "native runtime record")
@@ -131,7 +151,18 @@ def _read_verified_native_runtime_record(root: Path) -> RolloutHostRecord:
 def validate_native_runtime_record_registration(root: Path) -> None:
     """Validate the registered official rollout record and its immutable bytes."""
 
-    _read_verified_native_runtime_record(root)
+    record = _read_verified_native_runtime_record(root)
+    _read_native_requested_service_tier(record.agent_role or "")
+
+
+def read_native_service_tier_observation(
+    root: Path, *, role_config_root: Path = NATIVE_ROLE_CONFIG_ROOT
+) -> tuple[str, str]:
+    """Read the pinned role's requested tier and the host-observed tier."""
+
+    record = _read_verified_native_runtime_record(root)
+    requested = _read_native_requested_service_tier(record.agent_role or "", role_config_root)
+    return requested, NATIVE_OBSERVED_SERVICE_TIER
 
 
 def register_native_runtime_record(root: Path, path: Path, sha256: str) -> tuple[str, str]:
@@ -248,7 +279,8 @@ def native_execution_ready(
             }
         if not {"task_runs", "acp_sessions"}.issubset(tables):
             return _native_failure(store, attempt_id, "core_database_schema")
-        _read_verified_native_runtime_record(store.root)
+        record = _read_verified_native_runtime_record(store.root)
+        _read_native_requested_service_tier(record.agent_role or "")
     except (HostRecordError, OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
         return _native_failure(store, attempt_id, type(exc).__name__.lower())
     return None
@@ -266,14 +298,6 @@ def _admitted_attempt(store: ResearchStore, attempt_id: str) -> bool:
     return isinstance(payload, dict) and payload.get("admitted") is True
 
 
-def _has_admitted_attempt(store: ResearchStore) -> bool:
-    return any(
-        _admitted_attempt(store, attempt.attempt_id)
-        for spec in store.hypotheses()
-        for attempt in store.attempts_for(spec.hypothesis_id)
-    )
-
-
 def budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
     """Require explicit operator policy and remaining bounded allocation."""
     try:
@@ -282,10 +306,7 @@ def budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str 
             return _budget_failure(store, attempt_id, "campaign_policy_unset")
         attempts = sum(len(store.attempts_for(spec.hypothesis_id)) for spec in store.hypotheses())
         admitted = _admitted_attempt(store, attempt_id) if attempt_id is not None else False
-        cap_exhausted = attempts >= policy.attempt_cap
-        if cap_exhausted and (
-            not admitted if attempt_id is not None else not _has_admitted_attempt(store)
-        ):
+        if attempts >= policy.attempt_cap and not admitted:
             return _budget_failure(store, attempt_id, "attempt_cap_exceeded")
         if policy.wall_clock_cap_seconds is not None:
             row = store._campaign_row()
