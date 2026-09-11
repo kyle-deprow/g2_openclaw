@@ -599,6 +599,15 @@ def read_exact_acpx_identity(
             if _ACPX_RECORD_NAME.fullmatch(suffix) is None:
                 raise HostRecordError("ACPX child-prefix candidate has an unsafe filename")
             candidate_record, raw = _read_acpx_candidate(directory_fd, name)
+            last_request_id = candidate_record.get("last_request_id")
+            if last_request_id is None or (
+                isinstance(last_request_id, str) and last_request_id != expected_run_id
+            ):
+                # ACPX creates a retained record before the first request.  It
+                # has the same child prefix but cannot bind this ACK; retain
+                # its parse/path/size safety checks while excluding it before
+                # full identity and cardinality validation.
+                continue
             records.append(
                 _acpx_record_candidate(
                     candidate_record,
@@ -622,7 +631,7 @@ def read_exact_acpx_identity(
         resolved_record = records[0]
         return replace(
             resolved_record,
-            acpx_record_path=Path(acpx_sessions_dir) / matching[0],
+            acpx_record_path=Path(acpx_sessions_dir) / resolved_record.acpx_record_path.name,
             acpx_candidate_count=len(matching),
         )
     finally:

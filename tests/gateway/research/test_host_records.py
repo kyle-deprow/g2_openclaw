@@ -534,9 +534,10 @@ def test_acp_identity_uses_runtime_options_cwd_and_exact_child_session(
     assert record.model == "claude-opus-5"
     assert record.effort == "high"
     assert record.acpx_candidate_count == 1
+    assert record.acpx_record_path.name.endswith("10551e01-0503-456f-9e61-6993c912d478.json")
 
 
-def test_acpx_identity_rejects_ambiguous_or_mismatched_candidates(
+def test_acpx_identity_excludes_null_or_different_run_candidates(
     host_fixture: dict[str, Path | str],
 ) -> None:
     source = next(Path(host_fixture["sessions"]).iterdir())
@@ -545,7 +546,50 @@ def test_acpx_identity_rejects_ambiguous_or_mismatched_candidates(
     payload["acpx_record_id"] = payload["acpx_record_id"].replace("10551e01", "20551e01")
     payload["last_request_id"] = "wrong-run"
     duplicate.write_text(json.dumps(payload))
-    with pytest.raises(HostRecordError, match=r"candidate|last_request_id"):
+    selected = _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
+    assert selected.acpx_record_id.endswith("10551e01-0503-456f-9e61-6993c912d478")
+    assert selected.acpx_record_path.name.endswith("10551e01-0503-456f-9e61-6993c912d478.json")
+    assert selected.acpx_candidate_count == 2
+
+
+def test_acpx_identity_excludes_pre_request_null_record(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    sibling = source.with_name(source.name.replace("10551e01", "30551e01"))
+    payload = json.loads(source.read_text())
+    payload["acpx_record_id"] = payload["acpx_record_id"].replace("10551e01", "30551e01")
+    payload["last_request_id"] = None
+    payload["last_prompt_at"] = None
+    payload["last_seq"] = 0
+    payload["messages"] = []
+    payload["reset_on_next_ensure"] = True
+    sibling.write_text(json.dumps(payload))
+    selected = _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
+    assert selected.acpx_record_id.endswith("10551e01-0503-456f-9e61-6993c912d478")
+    assert selected.acpx_record_path.name.endswith("10551e01-0503-456f-9e61-6993c912d478.json")
+    assert selected.acpx_candidate_count == 2
+
+
+def test_acpx_identity_rejects_duplicate_expected_run_candidates(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    duplicate = source.with_name(source.name.replace("10551e01", "40551e01"))
+    payload = json.loads(source.read_text())
+    payload["acpx_record_id"] = payload["acpx_record_id"].replace("10551e01", "40551e01")
+    duplicate.write_text(json.dumps(payload))
+    with pytest.raises(HostRecordError, match="ambiguous"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
+
+
+def test_acpx_identity_rejects_malformed_nonmatching_candidate(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    malformed = source.with_name(source.name.replace("10551e01", "50551e01"))
+    malformed.write_bytes(b"{")
+    with pytest.raises(HostRecordError, match="not valid JSON"):
         _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
