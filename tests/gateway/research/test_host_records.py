@@ -726,6 +726,28 @@ def test_rollout_returns_observed_metadata_latest_usage_and_byte_hash(tmp_path: 
     assert not hasattr(record, "service_tier")
 
 
+def test_rollout_reads_model_and_effort_from_official_turn_context(tmp_path: Path) -> None:
+    session_meta = _session_meta()
+    session_meta["payload"] = {
+        "id": ROLLOUT_THREAD_ID,
+        "model": None,
+        "reasoning_effort": None,
+        "source": {"subagent": {"thread_spawn": {"agent_role": "implementer"}}},
+    }
+    turn_context = {
+        "type": "turn_context",
+        "payload": {"model": ROLLOUT_MODEL, "effort": ROLLOUT_EFFORT},
+    }
+    path = tmp_path / "turn-context-rollout.jsonl"
+    path.write_bytes(_rollout_bytes(session_meta, turn_context))
+
+    record = read_exact_rollout(path)
+
+    assert record.model == ROLLOUT_MODEL
+    assert record.reasoning_effort == ROLLOUT_EFFORT
+    assert record.agent_role == "implementer"
+
+
 @pytest.mark.parametrize(
     ("usage_event", "source", "context_window"),
     [

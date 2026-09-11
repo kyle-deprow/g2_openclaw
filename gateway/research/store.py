@@ -726,6 +726,10 @@ class ResearchStore:
             if admission.hypothesis_spec.hypothesis_id != hypothesis_id:
                 raise StoreConflict("attempt admission decision does not match hypothesis")
         existing = self.attempts_for(hypothesis_id)
+        policy = self.campaign_policy()
+        attempts = sum(len(self.attempts_for(spec.hypothesis_id)) for spec in self.hypotheses())
+        if policy.is_set and policy.attempt_cap is not None and attempts >= policy.attempt_cap:
+            raise StoreConflict("campaign attempt cap exceeded")
         attempt = machine_open_attempt(spec, existing, str(worktree.resolve()), now_utc())
         payload = attempt.to_json()
         admission_payload = admission.to_json() if admission is not None else None

@@ -118,10 +118,15 @@ class RolloutUsage:
 
 @dataclass(frozen=True, slots=True)
 class RolloutHostRecord:
-    """Observed Codex rollout metadata; service and billing tier are unknown."""
+    """Observed Codex rollout metadata; service and billing tier are unknown.
+
+    The role is read only from the runtime's nested subagent metadata when it
+    is present.  It is never inferred from a caller-supplied label or path.
+    """
 
     path: Path
     thread_id: str
+    agent_role: str | None
     model: str
     reasoning_effort: str
     terminal_state: Literal["succeeded", "failed", "pending"]
@@ -569,10 +574,57 @@ def read_exact_rollout(rollout_path: Path | str) -> RolloutHostRecord:
     if session_meta is None:
         raise HostRecordError("Codex rollout is missing session_meta")
     thread_id = _required_text(session_meta.get("id"), "rollout.thread_id")
-    model = _required_text(session_meta.get("model"), "rollout.model")
-    reasoning_effort = _required_text(
-        session_meta.get("reasoning_effort"), "rollout.reasoning_effort"
+    agent_role: str | None = None
+    source = session_meta.get("source")
+    if isinstance(source, dict):
+        subagent = source.get("subagent")
+        if isinstance(subagent, dict):
+            thread_spawn = subagent.get("thread_spawn")
+            if isinstance(thread_spawn, dict):
+                raw_role = thread_spawn.get("agent_role")
+                if raw_role is not None:
+                    agent_role = _required_text(raw_role, "rollout.agent_role")
+    direct_role = session_meta.get("agent_role")
+    if direct_role is not None:
+        direct_role = _required_text(direct_role, "rollout.agent_role")
+        if agent_role is not None and direct_role != agent_role:
+            raise HostRecordError("Codex rollout role metadata values disagree")
+        agent_role = direct_role
+    model = (
+        _required_text(session_meta["model"], "rollout.model")
+        if session_meta.get("model") is not None
+        else None
     )
+    reasoning_effort = (
+        _required_text(session_meta["reasoning_effort"], "rollout.reasoning_effort")
+        if session_meta.get("reasoning_effort") is not None
+        else None
+    )
+
+    def merge_observation(current: str | None, value: object, field: str) -> str | None:
+        if value is None:
+            return current
+        observed = _required_text(value, field)
+        if current is not None and current != observed:
+            raise HostRecordError(f"Codex rollout {field} values disagree")
+        return observed
+
+    for event in events:
+        if event.get("type") != "turn_context":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise HostRecordError("Codex rollout turn_context payload must be an object")
+        model = merge_observation(model, payload.get("model"), "rollout.model")
+        reasoning_effort = merge_observation(
+            reasoning_effort,
+            payload.get("effort", payload.get("reasoning_effort")),
+            "rollout.reasoning_effort",
+        )
+    if model is None:
+        raise HostRecordError("host record rollout.model must be a non-empty string")
+    if reasoning_effort is None:
+        raise HostRecordError("host record rollout.reasoning_effort must be a non-empty string")
 
     for event in events:
         if event.get("type") != "event_msg":
@@ -594,6 +646,7 @@ def read_exact_rollout(rollout_path: Path | str) -> RolloutHostRecord:
     return RolloutHostRecord(
         path=path,
         thread_id=thread_id,
+        agent_role=agent_role,
         model=model,
         reasoning_effort=reasoning_effort,
         terminal_state=terminal_state,

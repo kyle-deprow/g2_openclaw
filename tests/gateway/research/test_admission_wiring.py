@@ -10,7 +10,6 @@ import pytest
 from gateway.cli import app
 from gateway.research import cli as research_cli
 from gateway.research.admission import (
-    PINNED_RECEIPT_SHA256,
     AdmissionReason,
     CampaignPolicy,
     ExecutionCapability,
@@ -424,7 +423,9 @@ def test_wired_admission_uses_registered_policy_ledger_and_receipt_sessions(
 
     assert decision.admitted
     assert decision.execution_capability.sources == frozenset({"panel"})
-    assert decision.receipt.receipt_sha256 == PINNED_RECEIPT_SHA256
+    assert (
+        decision.receipt.receipt_sha256 == hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest()
+    )
 
 
 @pytest.mark.parametrize(

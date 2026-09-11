@@ -280,7 +280,7 @@ def test_receipt_panel_bounds_must_match_evaluator_bounds(payload: dict[str, obj
     assert result.reason is AdmissionReason.PANEL_BOUNDS_MISMATCH
 
 
-def test_pinned_receipt_fixture_hash_and_exact_wire_shape() -> None:
+def test_receipt_fixture_hash_and_exact_wire_shape() -> None:
     fixture = Path(__file__).parent / "fixtures" / "receipt.json"
     payload_bytes = fixture.read_bytes()
     digest = hashlib.sha256(payload_bytes).hexdigest()
@@ -292,7 +292,6 @@ def test_pinned_receipt_fixture_hash_and_exact_wire_shape() -> None:
         receipt_sha256=digest,
     )
 
-    "d63e1e872ad6dcb5a7362f8474d206e474e2c5362cead9ce4968b71fc193a45f"  # pragma: allowlist secret
     assert set(wire) == {
         "contract_version",
         "coverage",
@@ -325,22 +324,32 @@ def test_pinned_receipt_fixture_hash_and_exact_wire_shape() -> None:
     assert receipt.acceptance_class == "etf_only"
 
 
-def test_pinned_receipt_duplicate_coverage_digest_is_rejected() -> None:
+def test_receipt_duplicate_coverage_digest_is_rejected() -> None:
     fixture = Path(__file__).parent / "fixtures" / "receipt.json"
     wire = json.loads(fixture.read_bytes())
     wire["coverage"]["coverage_sha256"] = hashlib.sha256(b"wrong").hexdigest()
 
-    # Keep the frozen receipt digest on its scanner-audited source line.
-    # The fixture hash is independently checked by the preceding test.
-    # This is public receipt provenance, not a credential.
-    # The assertion below exercises a mutated copy of the parsed wire.
-    "d63e1e872ad6dcb5a7362f8474d206e474e2c5362cead9ce4968b71fc193a45f"  # pragma: allowlist secret
     with pytest.raises(ValueError, match="coverage digests disagree"):
         ValidationReceipt.from_wire(
             wire,
             acceptance_class="etf_only",
             receipt_sha256=hashlib.sha256(fixture.read_bytes()).hexdigest(),
         )
+
+
+def test_structurally_valid_receipt_with_new_artifact_digest_is_accepted() -> None:
+    fixture = Path(__file__).parent / "fixtures" / "receipt.json"
+    wire = json.loads(fixture.read_bytes())
+    wire["exported_at"] = "2026-09-11T00:00:00Z"
+    receipt_bytes = json.dumps(wire, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    receipt = ValidationReceipt.from_wire(
+        wire,
+        acceptance_class="etf_only",
+        receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+    )
+
+    assert receipt.receipt_sha256 == hashlib.sha256(receipt_bytes).hexdigest()
 
 
 def test_coverage_expanded_size_is_part_of_decision_identity(

@@ -61,6 +61,9 @@ minimum evidence, compute limits, and relative deliverable paths.
   owner wake, and read-only main controls. Pause on a missing policy ceiling,
   unproven route, unresolved review, invalid input, or lost job. Do not clear a
   readiness pause autonomously. Invalid inputs remain refusals.
+- Receipt artifact digests bind the exact bytes but do not attest a provider;
+  native readiness reads model, effort, and role from the official rollout,
+  while requested `fast` and observed `unknown` service tiers stay distinct.
 
 ## Review and runner contract
 

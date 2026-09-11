@@ -23,6 +23,9 @@ This mirror carries the same canonical rules as the OpenClaw runtime skill.
 - Read existing research status/control surfaces only. Preserve typed admission
   refusals, policy-unset pause, exhausted-attempt completion, exact cancel,
   owner wake, and read-only main controls.
+- Receipt artifact digests bind exact bytes rather than provider attestation;
+  native readiness uses model, effort, and role from the official rollout, with
+  requested `fast` kept separate from observed `unknown` service tier.
 - Pause on a missing policy ceiling, unproven route, unresolved review, invalid
   inputs, or lost job. Do not clear a readiness pause autonomously. Invalid
   inputs remain refusals.

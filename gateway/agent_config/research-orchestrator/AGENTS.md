@@ -33,6 +33,9 @@
 - Pause on a missing policy ceiling, unproven route, unresolved review, invalid
   input, or lost job. Do not clear a readiness pause autonomously.
 - Keep every refusal and terminal outcome durable and return it to Astra once.
+- Receipt artifact digests bind exact bytes rather than provider attestation;
+  native readiness uses model, effort, and role from the official rollout, with
+  requested `fast` kept separate from observed `unknown` service tier.
 
 ## Scientific boundary
 

@@ -6,10 +6,10 @@ the immutable outer research record, and typed trusted evidence supplied by a
 caller.  In particular, a source label in a hypothesis is a declaration; this
 function only proves membership in the caller-supplied execution capability.
 
-The validation-receipt wire view mirrors the host rerun receipt pinned by the
-admission brief.  Legacy caller-constructed receipts may still carry separate
-raw and semantic evaluation-spec digests; the pinned host wire does not invent
-those fields and is parsed with its exact key sets.
+The validation-receipt wire view mirrors the host rerun receipt.  Legacy
+caller-constructed receipts may still carry separate raw and semantic
+evaluation-spec digests; the host wire does not invent those fields and is
+parsed with its exact key sets.
 """
 
 from __future__ import annotations
@@ -25,9 +25,6 @@ from typing import Self, cast
 from .codec import require_keys_exact, require_sha256, require_str, to_json
 from .contracts import HypothesisSpec
 from .hypothesis import HypothesisDocument
-
-P = "d63e1e872ad6dcb5a7362f8474d206e474e2c5362cead9ce4968b71fc193a45f"  # pragma: allowlist secret
-PINNED_RECEIPT_SHA256 = P
 
 
 class AdmissionPurpose(StrEnum):
@@ -173,7 +170,7 @@ class EvaluatorBounds:
 
 @dataclass(frozen=True, slots=True)
 class DividendCoverage:
-    """The exact dividend coverage object present in the pinned receipt."""
+    """The exact dividend coverage object present in the receipt."""
 
     action_type: str
     start_date: str
@@ -193,7 +190,7 @@ class DividendCoverage:
 
 @dataclass(frozen=True, slots=True)
 class ValidationReceipt:
-    """Typed view of the pinned ``research-price-panel-receipt-v2`` wire."""
+    """Typed view of the ``research-price-panel-receipt-v2`` wire."""
 
     receipt_sha256: str
     request_sha256: str
@@ -306,7 +303,7 @@ class ValidationReceipt:
         acceptance_class: str,
         receipt_sha256: str,
     ) -> Self:
-        """Parse the exact pinned host receipt, with external provenance."""
+        """Parse the exact host receipt, with its external artifact digest."""
 
         outer = require_keys_exact(
             value,
@@ -350,8 +347,6 @@ class ValidationReceipt:
         if not isinstance(tickers, list):
             raise ValueError("price panel receipt.request.tickers must be an array")
         digest = _sha(receipt_sha256, "receipt_sha256")
-        if digest != PINNED_RECEIPT_SHA256:
-            raise ValueError("receipt_sha256 does not match the pinned host receipt")
         receipt = cls(
             receipt_sha256=digest,
             request_sha256=cast(str, outer["request_sha256"]),

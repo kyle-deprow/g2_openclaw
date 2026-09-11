@@ -2,9 +2,9 @@
 
 The checks in this module only consume operator-pinned records and read-only
 host evidence.  They never synthesize a capability receipt or select a
-provider/model.  A successful native check therefore means that a previously
-registered receipt is structurally valid and still matches its bytes; it does
-not manufacture route evidence.
+provider/model.  Native readiness reads the official Codex rollout record and
+checks its actual model, effort, and role; service tier remains unknown unless
+the host record explicitly provides trustworthy evidence.
 """
 
 from __future__ import annotations
@@ -28,17 +28,23 @@ from .containment import (
     verify_runtime_pins,
     which_tools,
 )
-from .host_records import MAX_METADATA_BYTES, HostRecordError, _readonly_database
+from .host_records import (
+    MAX_METADATA_BYTES,
+    HostRecordError,
+    RolloutHostRecord,
+    _readonly_database,
+    read_exact_rollout,
+)
 from .store import StoreConflict
 
 if TYPE_CHECKING:
     from .store import ResearchStore
 
-NATIVE_CAPABILITY_REGISTRATION = "native-capability-registration.json"
-NATIVE_CAPABILITY_SCHEMA = "native-capability-v1"
+NATIVE_RUNTIME_RECORD_REGISTRATION = "native-runtime-record-registration.json"
 NATIVE_CAPABILITY_MODEL = "gpt-5.6-luna"
 NATIVE_CAPABILITY_EFFORT = "xhigh"
-NATIVE_CAPABILITY_SERVICE_TIER = "fast"
+NATIVE_REQUESTED_SERVICE_TIER = "fast"
+NATIVE_OBSERVED_SERVICE_TIER = "unknown"
 NATIVE_CAPABILITY_IDENTITIES = frozenset({"implementer", "experiment_runner"})
 
 
@@ -78,103 +84,87 @@ def _sha256(value: str, label: str) -> str:
     return value
 
 
-def _native_receipt(payload: object) -> dict[str, str]:
-    if not isinstance(payload, dict):
-        raise ValueError("native capability receipt must be an object")
-    expected = {"schema", "identity", "model", "effort", "service_tier"}
-    if set(payload) != expected:
-        raise ValueError("native capability receipt has unexpected fields")
-    if payload.get("schema") != NATIVE_CAPABILITY_SCHEMA:
-        raise ValueError("native capability receipt schema is unsupported")
-    values: dict[str, str] = {}
-    for field in ("identity", "model", "effort", "service_tier"):
-        value = payload.get(field)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"native capability receipt {field} is required")
-        values[field] = value
-    if values["identity"] not in NATIVE_CAPABILITY_IDENTITIES:
-        raise ValueError("native capability receipt identity is not an approved native role")
-    if values["model"] != NATIVE_CAPABILITY_MODEL:
-        raise ValueError("native capability receipt model is not the pinned Luna route")
-    if values["effort"] != NATIVE_CAPABILITY_EFFORT:
-        raise ValueError("native capability receipt effort is not xhigh")
-    if values["service_tier"] != NATIVE_CAPABILITY_SERVICE_TIER:
-        raise ValueError("native capability receipt service tier is not fast")
-    return values
-
-
 def _read_registration(root: Path) -> tuple[Path, dict[str, str]]:
-    registration_path = root / NATIVE_CAPABILITY_REGISTRATION
-    raw = _bounded_file(registration_path, "native capability registration")
+    registration_path = root / NATIVE_RUNTIME_RECORD_REGISTRATION
+    raw = _bounded_file(registration_path, "native runtime registration")
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("native capability registration is not canonical JSON") from exc
+        raise ValueError("native runtime registration is not canonical JSON") from exc
     canonical = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     if raw != canonical:
-        raise ValueError("native capability registration is not canonical JSON")
+        raise ValueError("native runtime registration is not canonical JSON")
     if not isinstance(payload, dict) or set(payload) != {"path", "sha256"}:
-        raise ValueError("native capability registration has unexpected fields")
-    receipt_path = payload.get("path")
+        raise ValueError("native runtime registration has unexpected fields")
+    record_path = payload.get("path")
     digest = payload.get("sha256")
-    if not isinstance(receipt_path, str) or not receipt_path:
-        raise ValueError("native capability registration path is required")
+    if not isinstance(record_path, str) or not record_path:
+        raise ValueError("native runtime registration path is required")
     if not isinstance(digest, str):
-        raise ValueError("native capability registration digest is required")
-    return Path(receipt_path), {"sha256": _sha256(digest, "native capability registration SHA-256")}
+        raise ValueError("native runtime registration digest is required")
+    return Path(record_path), {"sha256": _sha256(digest, "native runtime record SHA-256")}
 
 
-def validate_native_capability_registration(root: Path) -> None:
-    receipt_path, registration = _read_registration(root)
-    receipt_bytes = _bounded_file(receipt_path, "native capability receipt")
-    actual = hashlib.sha256(receipt_bytes).hexdigest()
+def _validate_native_runtime_record(record_path: Path) -> RolloutHostRecord:
+    record = read_exact_rollout(record_path)
+    if record.model != NATIVE_CAPABILITY_MODEL:
+        raise ValueError("native runtime record model is not the pinned Luna route")
+    if record.reasoning_effort != NATIVE_CAPABILITY_EFFORT:
+        raise ValueError("native runtime record effort is not xhigh")
+    if record.agent_role not in NATIVE_CAPABILITY_IDENTITIES:
+        raise ValueError("native runtime record role is not an approved native role")
+    return record
+
+
+def _read_verified_native_runtime_record(root: Path) -> RolloutHostRecord:
+    record_path, registration = _read_registration(root)
+    record_bytes = _bounded_file(record_path, "native runtime record")
+    actual = hashlib.sha256(record_bytes).hexdigest()
     if actual != registration["sha256"]:
-        raise ValueError("native capability receipt SHA-256 does not match registration")
-    try:
-        payload = json.loads(receipt_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("native capability receipt is not canonical JSON") from exc
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if receipt_bytes != canonical:
-        raise ValueError("native capability receipt is not canonical JSON")
-    _native_receipt(payload)
+        raise ValueError("native runtime record SHA-256 does not match registration")
+    record = _validate_native_runtime_record(record_path)
+    # RolloutHostRecord deliberately has no tier field.  Keep the requested
+    # configuration and observed value separate; model/effort cannot prove tier.
+    return record
 
 
-def register_native_capability_receipt(root: Path, path: Path, sha256: str) -> tuple[str, str]:
-    """Register an existing capability receipt without generating evidence."""
+def validate_native_runtime_record_registration(root: Path) -> None:
+    """Validate the registered official rollout record and its immutable bytes."""
+
+    _read_verified_native_runtime_record(root)
+
+
+def register_native_runtime_record(root: Path, path: Path, sha256: str) -> tuple[str, str]:
+    """Register an existing official Codex rollout record without generating evidence."""
     root = root.expanduser()
     if not root.is_absolute():
         raise ValueError("--root must be an absolute path")
-    _sha256(sha256, "native capability receipt SHA-256")
-    receipt_path = path.expanduser()
-    if not receipt_path.is_absolute():
+    _sha256(sha256, "native runtime record SHA-256")
+    record_path = path.expanduser()
+    if not record_path.is_absolute():
         raise ValueError("--path must be an absolute path")
-    receipt_bytes = _bounded_file(receipt_path, "native capability receipt")
-    actual = hashlib.sha256(receipt_bytes).hexdigest()
+    record_bytes = _bounded_file(record_path, "native runtime record")
+    actual = hashlib.sha256(record_bytes).hexdigest()
     if actual != sha256:
-        raise ValueError("native capability receipt SHA-256 does not match file bytes")
+        raise ValueError("native runtime record SHA-256 does not match file bytes")
     try:
-        payload = json.loads(receipt_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError("native capability receipt is not canonical JSON") from exc
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if receipt_bytes != canonical:
-        raise ValueError("native capability receipt is not canonical JSON")
-    _native_receipt(payload)
+        _validate_native_runtime_record(record_path)
+    except HostRecordError as exc:
+        raise ValueError(str(exc)) from exc
     root.mkdir(parents=True, exist_ok=True)
-    registration = root / NATIVE_CAPABILITY_REGISTRATION
+    registration = root / NATIVE_RUNTIME_RECORD_REGISTRATION
     if registration.exists() and registration.is_symlink():
-        raise ValueError("native capability registration must not be a symlink")
+        raise ValueError("native runtime registration must not be a symlink")
     registration.write_text(
         json.dumps(
-            {"path": str(receipt_path), "sha256": sha256},
+            {"path": str(record_path), "sha256": sha256},
             sort_keys=True,
             separators=(",", ":"),
         )
         + "\n",
         encoding="utf-8",
     )
-    return str(receipt_path), sha256
+    return str(record_path), sha256
 
 
 def _host_failure(store: ResearchStore, attempt_id: str | None, reason: str) -> str:
@@ -258,7 +248,7 @@ def native_execution_ready(
             }
         if not {"task_runs", "acp_sessions"}.issubset(tables):
             return _native_failure(store, attempt_id, "core_database_schema")
-        validate_native_capability_registration(store.root)
+        _read_verified_native_runtime_record(store.root)
     except (HostRecordError, OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
         return _native_failure(store, attempt_id, type(exc).__name__.lower())
     return None
@@ -268,6 +258,22 @@ def _budget_failure(store: ResearchStore, attempt_id: str | None, reason: str) -
     return _record_refusal(store, attempt_id, "budget", reason)
 
 
+def _admitted_attempt(store: ResearchStore, attempt_id: str) -> bool:
+    try:
+        payload = json.loads(store.evidence(attempt_id, "admission_decision"))
+    except (StoreConflict, ValueError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("admitted") is True
+
+
+def _has_admitted_attempt(store: ResearchStore) -> bool:
+    return any(
+        _admitted_attempt(store, attempt.attempt_id)
+        for spec in store.hypotheses()
+        for attempt in store.attempts_for(spec.hypothesis_id)
+    )
+
+
 def budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
     """Require explicit operator policy and remaining bounded allocation."""
     try:
@@ -275,7 +281,11 @@ def budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str 
         if not policy.is_set or policy.attempt_cap is None:
             return _budget_failure(store, attempt_id, "campaign_policy_unset")
         attempts = sum(len(store.attempts_for(spec.hypothesis_id)) for spec in store.hypotheses())
-        if attempts >= policy.attempt_cap:
+        admitted = _admitted_attempt(store, attempt_id) if attempt_id is not None else False
+        cap_exhausted = attempts >= policy.attempt_cap
+        if cap_exhausted and (
+            not admitted if attempt_id is not None else not _has_admitted_attempt(store)
+        ):
             return _budget_failure(store, attempt_id, "attempt_cap_exceeded")
         if policy.wall_clock_cap_seconds is not None:
             row = store._campaign_row()

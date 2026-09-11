@@ -63,7 +63,7 @@ from .readiness import (
     budget_execution_ready,
     host_execution_ready,
     native_execution_ready,
-    register_native_capability_receipt,
+    register_native_runtime_record,
 )
 from .review_evidence import (
     REVIEW_EFFORT,
@@ -167,15 +167,15 @@ def exposure_ledger_register(
         _fail(exc)
 
 
-@app.command("native-capability-register")
-def native_capability_register(
+@app.command("native-runtime-register")
+def native_runtime_register(
     root: Path = typer.Option(..., "--root"),
     path: Path = typer.Option(..., "--path"),
     sha256: str = typer.Option(..., "--sha256"),
 ) -> None:
-    """Register an operator-supplied native capability receipt."""
+    """Register an official Codex rollout record for native readiness."""
     try:
-        registered_path, registered_sha = register_native_capability_receipt(root, path, sha256)
+        registered_path, registered_sha = register_native_runtime_record(root, path, sha256)
         typer.echo(json.dumps({"path": registered_path, "sha256": registered_sha}, sort_keys=True))
     except Exception as exc:
         _fail(exc)

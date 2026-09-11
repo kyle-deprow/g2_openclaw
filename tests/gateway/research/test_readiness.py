@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 from gateway.openclaw_client import OpenClawClient
 from gateway.research import readiness
+from gateway.research.contracts import AttemptDecision
 from gateway.research.control import (
     OpenClawReviewCanceller,
     OwnerControl,
@@ -18,16 +19,20 @@ from gateway.research.control import (
 )
 from gateway.research.readiness import (
     NATIVE_CAPABILITY_MODEL,
+    NATIVE_OBSERVED_SERVICE_TIER,
+    NATIVE_REQUESTED_SERVICE_TIER,
     budget_execution_ready,
     host_execution_ready,
     native_execution_ready,
-    register_native_capability_receipt,
-    validate_native_capability_registration,
+    register_native_runtime_record,
+    validate_native_runtime_record_registration,
 )
 from gateway.research.status import ResearchStatus
-from gateway.research.store import ResearchStore
+from gateway.research.store import ResearchStore, StoreConflict
 from gateway.research.wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
+from tests.gateway.research.conftest import implementation, review, verified_review
+from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_review_evidence import _prepare_review
 
 
@@ -52,22 +57,39 @@ def configure_real_readiness(
 ) -> None:
     """Install only synthetic evidence needed by dispatch-focused fixtures."""
     database = _native_database(base / "native-core.sqlite")
-    receipt, digest = _native_receipt(base / "native-receipt.json")
-    register_native_capability_receipt(store.root, receipt, digest)
+    record, digest = _native_runtime_record(base / "native-rollout.jsonl")
+    register_native_runtime_record(store.root, record, digest)
     monkeypatch.setenv("RESEARCH_CORE_DATABASE", str(database))
     if policy:
         store.set_campaign_policy(100, None, "synthetic-dispatch-fixture")
 
 
-def _native_receipt(path: Path, *, identity: str = "implementer") -> tuple[Path, str]:
+def _native_runtime_record(
+    path: Path,
+    *,
+    identity: str = "implementer",
+    model: str = NATIVE_CAPABILITY_MODEL,
+    effort: str = "xhigh",
+) -> tuple[Path, str]:
     payload = {
-        "effort": "xhigh",
-        "identity": identity,
-        "model": NATIVE_CAPABILITY_MODEL,
-        "schema": "native-capability-v1",
-        "service_tier": "fast",
+        "type": "session_meta",
+        "payload": {
+            "id": "native-rollout-001",
+            "model": None,
+            "reasoning_effort": None,
+            "source": {"subagent": {"thread_spawn": {"agent_role": identity}}},
+        },
     }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    turn_context = {
+        "type": "turn_context",
+        "payload": {"model": model, "effort": effort},
+    }
+    raw = (
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+        + json.dumps(turn_context, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
     path.write_bytes(raw)
     return path, hashlib.sha256(raw).hexdigest()
 
@@ -92,30 +114,78 @@ def _owner_env_file(
     return path
 
 
-def test_native_guard_accepts_only_registered_synthetic_receipt(
+def test_native_guard_accepts_only_registered_official_rollout_record(
     campaign: tuple[ResearchStore, Path, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, _source, _hypothesis = campaign
     database = _native_database(tmp_path / "core.sqlite")
-    receipt, digest = _native_receipt(tmp_path / "native-receipt.json")
+    record, digest = _native_runtime_record(tmp_path / "native-rollout.jsonl")
     monkeypatch.setenv("RESEARCH_CORE_DATABASE", str(database))
 
-    register_native_capability_receipt(store.root, receipt, digest)
+    register_native_runtime_record(store.root, record, digest)
 
-    validate_native_capability_registration(store.root)
+    validate_native_runtime_record_registration(store.root)
     assert native_execution_ready(store, None) is None
 
 
-def test_native_guard_rejects_unset_database_and_unapproved_receipt(
+def test_native_guard_rejects_unset_database_and_unapproved_rollout_role(
     campaign: tuple[ResearchStore, Path, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, _source, _hypothesis = campaign
     monkeypatch.delenv("RESEARCH_CORE_DATABASE", raising=False)
     assert native_execution_ready(store, None) == "native_core_database_unset"
 
-    receipt, digest = _native_receipt(tmp_path / "native-receipt.json", identity="reviewer")
+    record, digest = _native_runtime_record(tmp_path / "native-rollout.jsonl", identity="reviewer")
     with pytest.raises(ValueError, match="approved native role"):
-        register_native_capability_receipt(store.root, receipt, digest)
+        register_native_runtime_record(store.root, record, digest)
+
+
+@pytest.mark.parametrize(
+    ("model", "effort", "message"),
+    [
+        ("gpt-5.5", "xhigh", "model"),
+        (NATIVE_CAPABILITY_MODEL, "high", "effort"),
+    ],
+)
+def test_native_guard_requires_verified_rollout_model_and_effort(
+    campaign: tuple[ResearchStore, Path, Any],
+    tmp_path: Path,
+    model: str,
+    effort: str,
+    message: str,
+) -> None:
+    store, _source, _hypothesis = campaign
+    record, digest = _native_runtime_record(
+        tmp_path / f"wrong-{message}.jsonl", model=model, effort=effort
+    )
+
+    with pytest.raises(ValueError, match=message):
+        register_native_runtime_record(store.root, record, digest)
+
+
+def test_old_v1_native_receipt_is_not_a_runtime_record(
+    campaign: tuple[ResearchStore, Path, Any], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis = campaign
+    path = tmp_path / "native-capability-v1.json"
+    payload = {
+        "effort": "xhigh",
+        "identity": "implementer",
+        "model": NATIVE_CAPABILITY_MODEL,
+        "schema": "native-capability-v1",
+        "service_tier": "fast",
+    }
+    path.write_bytes(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+
+    with pytest.raises(ValueError, match="rollout is missing session_meta"):
+        register_native_runtime_record(
+            store.root, path, hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+
+
+def test_native_tier_separates_requested_configuration_from_observation() -> None:
+    assert NATIVE_REQUESTED_SERVICE_TIER == "fast"
+    assert NATIVE_OBSERVED_SERVICE_TIER == "unknown"
 
 
 def test_budget_guard_remains_fail_closed_until_explicit_policy(
@@ -172,9 +242,9 @@ def test_native_guard_reports_database_schema_permissions_and_digest_refusals(
 
     database.unlink()
     _native_database(database)
-    receipt, digest = _native_receipt(tmp_path / "digest-receipt.json")
-    register_native_capability_receipt(store.root, receipt, digest)
-    receipt.write_bytes(b"mutated")
+    record, digest = _native_runtime_record(tmp_path / "digest-rollout.jsonl")
+    register_native_runtime_record(store.root, record, digest)
+    record.write_bytes(b"mutated")
     assert native_execution_ready(store, None) == "native_valueerror"
 
 
@@ -183,9 +253,25 @@ def test_budget_guard_reports_attempt_and_wall_clock_caps(
 ) -> None:
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
-    store.open_attempt(hypothesis.hypothesis_id, source)
-    store.set_campaign_policy(1, None, "synthetic-cap-fixture")
-    assert budget_execution_ready(store, None) == "budget_attempt_cap_exceeded"
+    store.set_campaign_policy(3, None, "synthetic-cap-fixture")
+    admitted = _admit(_document(_payload()))
+    first = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
+    store.submit_implementation(first.attempt_id, implementation(first.attempt_id, "a" * 40))
+    verified_review(
+        store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, verdict="FAIL")
+    )
+    store.close_attempt(first.attempt_id, AttemptDecision.RETRY, "cap fixture")
+    second = store.open_attempt(hypothesis.hypothesis_id, source)
+    store.submit_implementation(second.attempt_id, implementation(second.attempt_id, "b" * 40))
+    verified_review(
+        store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, verdict="FAIL")
+    )
+    store.close_attempt(second.attempt_id, AttemptDecision.RETRY, "cap fixture")
+    third = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
+
+    assert budget_execution_ready(store, third.attempt_id) is None
+    with pytest.raises(StoreConflict, match="campaign attempt cap exceeded"):
+        store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
 
     with store._connect() as connection:
         connection.execute(
@@ -233,8 +319,8 @@ def test_production_factory_gate_uses_file_database_without_process_mutation(
 ) -> None:
     store, _source, _hypothesis = campaign
     database = _native_database(tmp_path / "core.sqlite")
-    receipt, digest = _native_receipt(store.root / "native-receipt.json")
-    register_native_capability_receipt(store.root, receipt, digest)
+    record, digest = _native_runtime_record(store.root / "native-rollout.jsonl")
+    register_native_runtime_record(store.root, record, digest)
     store.set_campaign_policy(2, None, "synthetic-protected-env-fixture")
     for name in (
         "OPENCLAW_HOST",
