@@ -2155,7 +2155,7 @@ assemble_openclaw_config() {
   if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
     --migration-record "${MIGRATION_RECORD_DST}" \
-    -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${PYTHON_BIN}" \
+    -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${OPENCLAW_PUSH_HOME}" "${PYTHON_BIN}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
     "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
     "${G2_CONTROL_MCP_MODULE}" "${RESEARCH_V2_ROOT}" \
@@ -2405,8 +2405,9 @@ echo "Atomically published validated repo config to ${LOCAL_CONFIG}"
 
 # ── Copy bootstrap files ────────────────────────────────────────────────────
 # OpenClaw uses ~/.openclaw/workspace for the main agent when no workspace is
-# configured. Other agents default to workspace-{agent_id}. An explicit
-# .workspace value is used as-is relative to OPENCLAW_PUSH_HOME unless it is absolute.
+# configured. Other agents default to workspace-{agent_id}. The generated
+# research-owner workspace is absolute; other relative targets resolve under
+# OPENCLAW_PUSH_HOME as usual.
 BOOTSTRAP_FILES=(AGENTS.md SOUL.md TOOLS.md BOOTSTRAP.md)
 for FILE in "${BOOTSTRAP_FILES[@]}"; do
   SRC="${REPO_ROOT}/gateway/agent_config/${FILE}"

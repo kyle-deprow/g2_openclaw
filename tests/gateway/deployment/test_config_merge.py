@@ -132,6 +132,23 @@ def test_assembly_drops_retired_main_codex_workspace_root(tmp_path: Path) -> Non
     assert "defaultWorkspaceDir" not in app_server
 
 
+def test_assembly_projects_owner_workspace_under_state_root(tmp_path: Path) -> None:
+    state_root = tmp_path / "fake-home/.openclaw"
+    merged = assemble_config(
+        cast(JsonObject, {}),
+        cast(JsonObject, load_json(REPO_CONFIG)),
+        _assembly_inputs(tmp_path),
+    )
+
+    owner = cast(JsonObject, cast(JsonObject, merged["agents"])["entries"])["research-orchestrator"]
+    assert cast(JsonObject, owner)["workspace"] == str(
+        state_root / "workspace-research-orchestrator"
+    )
+    workspace = cast(JsonObject, owner)["workspace"]
+    assert isinstance(workspace, str)
+    assert Path(workspace).is_absolute()
+
+
 def test_assembly_disables_implicit_and_explicit_memory_plugin(tmp_path: Path) -> None:
     local = cast(
         JsonObject,
@@ -594,6 +611,7 @@ def _assembly_inputs(
     core_database.write_bytes(b"fixture core database\n")
     return AssemblyInputs(
         repo_root=str(REPO_ROOT),
+        openclaw_state_root=str(push_home),
         python_bin=str(REPO_ROOT / ".venv/bin/python"),
         mempalace_python=str(home / ".local/share/mempalace/venv/bin/python"),
         mempalace_palace=str(home / ".mempalace/palace"),
@@ -631,6 +649,9 @@ def _jq_full_assembly(
     g2_agents = json.dumps(list(inputs.g2_agents))
     merged = _run_jq(
         [
+            "--arg",
+            "state_root",
+            inputs.openclaw_state_root,
             "--arg",
             "cmd",
             inputs.mempalace_python,
@@ -791,9 +812,18 @@ def _jq_full_assembly(
             "--arg",
             "owner",
             inputs.orchestrator_model_primary,
+            "--arg",
+            "state_root",
+            inputs.openclaw_state_root,
             '(.agents.entries["research-orchestrator"] | .model.primary) = $owner | '
             '(.agents.entries["research-orchestrator"] | '
             '.thinkingDefault) = "high" | '
+            '(.agents.entries["research-orchestrator"] | .workspace) = '
+            '(if ((.agents.entries["research-orchestrator"].workspace? | type) == "string" '
+            'and (.agents.entries["research-orchestrator"].workspace | length) > 0) '
+            'then .agents.entries["research-orchestrator"].workspace '
+            'else "workspace-research-orchestrator" end '
+            '| if startswith("/") then . else ($state_root + "/" + .) end) | '
             "if .plugins.entries.codex.config.appServer.defaultWorkspaceDir == "
             '"/home/dev/.openclaw/autoresearch/model-workspaces" then '
             "del(.plugins.entries.codex.config.appServer.defaultWorkspaceDir) else . end",
@@ -1031,6 +1061,7 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
         str(local_path),
         str(REPO_CONFIG),
         str(REPO_ROOT),
+        str(push_home),
         str(REPO_ROOT / ".venv/bin/python"),
         str(home / ".local/share/mempalace/venv/bin/python"),
         str(home / ".mempalace/palace"),

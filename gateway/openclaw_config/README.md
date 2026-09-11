@@ -71,8 +71,11 @@ the OpenAI/Codex provider, the main and research-owner agent IDs, main's
 bounded tool profile, the research owner's full native profile, main-only MCP
 projections, memory denial, and the research-owner unit. It publishes
 atomically with rollback evidence and prunes stale installed copies using its
-declared arrays. Keep those prune arrays and route checks unchanged when
-editing this README.
+declared arrays. During assembly, the research-owner workspace is projected to
+an absolute path under the configured OpenClaw state root so the 9.2 runtime
+and bootstrap publication address the same workspace regardless of process
+cwd. Keep those prune arrays and route checks unchanged when editing this
+README.
 
 Before a later authorized deployment, run source-only checks and inspect the
 generated diff. The deployment checkpoint must prove the configured route,

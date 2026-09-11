@@ -1618,7 +1618,9 @@ def _prepare_push_script_home(
     )
 
 
-def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run_push_script(
+    env: dict[str, str], *, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     script_env = env.copy()
     return subprocess.run(
         ["bash", str(PUSH_SCRIPT)],
@@ -1626,6 +1628,7 @@ def _run_push_script(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         env=script_env,
+        cwd=cwd,
     )
 
 
@@ -3266,9 +3269,13 @@ def test_push_script_renders_native_codex_children_for_owner_workspace(
     rendered_research_root = openclaw_home / "custom research root with spaces"
     env["RESEARCH_V2_ROOT"] = str(rendered_research_root)
 
-    result = _run_push_script(env)
+    result = _run_push_script(env, cwd=tmp_path)
 
     assert result.returncode == 0, result.stderr
+    generated_config = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    assert generated_config["agents"]["entries"]["research-orchestrator"]["workspace"] == str(
+        openclaw_home / "workspace-research-orchestrator"
+    )
     workspace_agents_dir = openclaw_home / "workspace-research-orchestrator/.codex/agents"
     assert not any(
         (workspace_agents_dir / f"{agent_id}.toml").exists() for agent_id in STAGE_AGENT_IDS

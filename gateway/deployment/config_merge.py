@@ -85,6 +85,7 @@ class AssemblyInputs:
     """Resolved values substituted into the managed configuration."""
 
     repo_root: str
+    openclaw_state_root: str
     python_bin: str
     mempalace_python: str
     mempalace_palace: str
@@ -727,6 +728,17 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
         owner_entry["model"] = model
     model["primary"] = inputs.orchestrator_model_primary
     owner_entry["thinkingDefault"] = "high"
+    owner_workspace = owner_entry.get("workspace")
+    if not isinstance(owner_workspace, str) or not owner_workspace:
+        owner_workspace = "workspace-research-orchestrator"
+    state_root = Path(inputs.openclaw_state_root)
+    if not state_root.is_absolute():
+        raise ConfigMergeError("ERROR: OpenClaw state root must be an absolute path.")
+    owner_entry["workspace"] = str(
+        Path(owner_workspace)
+        if Path(owner_workspace).is_absolute()
+        else state_root / owner_workspace
+    )
     # The native Codex harness treats finite owner allowlists and unsafe denies
     # as a restricted tool policy and disables multi-agent delegation. Keep the
     # owner on the full native profile; MCP exposure remains bounded by each
@@ -884,6 +896,7 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         raise ConfigMergeError("OPENCLAW_PORT must be a canonical port in range 1..65535")
     inputs = AssemblyInputs(
         repo_root=args.repo_root,
+        openclaw_state_root=args.openclaw_state_root,
         python_bin=args.python_bin,
         mempalace_python=args.mempalace_python,
         mempalace_palace=args.mempalace_palace,
@@ -921,6 +934,7 @@ def _build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("local_config")
     assemble.add_argument("repo_config")
     assemble.add_argument("repo_root")
+    assemble.add_argument("openclaw_state_root")
     assemble.add_argument("python_bin")
     assemble.add_argument("mempalace_python")
     assemble.add_argument("mempalace_palace")
