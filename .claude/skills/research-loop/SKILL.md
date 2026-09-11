@@ -6,6 +6,8 @@ description: Concise mirror of the bounded native research-owner contract.
 # Research loop mirror
 
 This mirror carries the same canonical rules as the OpenClaw runtime skill.
+The reversal text is a proposal and operating contract, not evidence of alpha
+or proof that a current-price ETF feed is installed.
 
 ## Canonical rules
 
@@ -30,15 +32,44 @@ This mirror carries the same canonical rules as the OpenClaw runtime skill.
   inputs, or lost job. Do not clear a readiness pause autonomously. Invalid
   inputs remain refusals.
 - The capability is price-panel-only capability within ETF scope.
+- Stock refusal without trusted point-in-time earnings coverage is mandatory;
+  unknown or unavailable earnings fail closed.
 - Scientific boundary: price-panel-only capability, ETF scope, trusted panel
   sessions, and immutable receipts/ledger/evaluator bounds.
-- Stock refusal without trusted point-in-time earnings coverage is mandatory.
 - Preserve typed admission refusals and trusted panel sessions as caller
   evidence.
 - Use immutable receipts, ledger, and evaluator bounds for scientific evidence.
 - Use trusted panel sessions, immutable receipts, the exposure ledger, and
   evaluator bounds; unknown earnings fail closed.
 - Make no alpha claim from smoke or synthetic data.
+
+## Reversal campaign bounds
+
+- The requested panel window is 2021-01-04 through 2026-07-31 inclusive (first
+  XNYS session 2021-01-04). It is an input bound, not a claim that 2026 is a
+  fresh final holdout; exposure and chronological split evidence establish any
+  holdout.
+- Test a market-adjusted, earlier-volatility-normalized negative intraday shock
+  in dated-evidence-supported liquid, unlevered equity-sector ETFs. ETF
+  eligibility does not remove earnings exposure; cache availability and a
+  retrospectively successful ticker list are not universe evidence.
+- Decide at the close, enter at the next regular open, hold long or cash, and
+  exit by session five; do not credit the close-to-next-open rebound. Fit all
+  betas and scalers on earlier data only. A longer horizon is refused.
+- Use one simple baseline and no more than two predeclared volume/regime
+  variants. Indicators are features, not independent confirmations.
+- Compare unconditional dip-buying, cash, and exposure-matched passive
+  baselines; report net costs, 2x/3x costs, folds, drawdown, concentration,
+  counts, block-aware uncertainty/nulls, a five-session overlap purge, and the
+  exposure ledger. Development exposure is not a fresh final holdout; unknown
+  history blocks FINAL_HOLDOUT.
+- News, Reddit, and regularized ML are later incremental hypotheses requiring
+  supported point-in-time inputs. Historical final engagement or edited-post
+  fields are leakage. Missing news is not no-news evidence; any future
+  information filter requires validated point-in-time news. Later non-earnings
+  continuation, macro-event, and crypto funding/basis ideas are not enabled
+  runtime capability. Reject or inconclusive evidence is useful; smoke, API,
+  process, or zero-trade success is not scientific evidence.
 
 ## Frozen fields and proof boundary
 
@@ -65,7 +96,7 @@ Reserve the immutable review bundle before the one ACP Opus review; collect a
 strict ACK/verdict bound to the child task, run, mode, attempt, commit, and spec.
 An exact cancel is at most once, with unknown correlation left pending and
 paused. Never retype a verdict, respawn after unknown acknowledgement, or launch
-without operator policy and proven route. The runner runs admitted committed
-work only, with no-repair/no-retry, substitution, or invented result.
+without operator policy and proven route. The runner runs admitted committed work
+only, with no-repair/no-retry, substitution, or invented result.
 Synthetic-versus-installed proof boundary: smoke or synthetic data does not
 prove installed readiness. Make no alpha claim from smoke or synthetic data.

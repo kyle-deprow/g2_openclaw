@@ -24,6 +24,33 @@ at most three attempts. On exhaustion Astra explicitly chooses FINISH, ABANDON,
 or PAUSE; a final allocated attempt may complete evidence collection and its
 decision. Every refusal, attempt outcome, and terminal state returns to Astra.
 
+## Campaign capability boundary
+
+The first real-data proposal is conditional short-term reversal: an unusually
+negative market-adjusted open-to-close shock, normalized by earlier volatility,
+in liquid, unlevered equity-sector ETFs. Use dated platform evidence for the
+universe; cache availability or a retrospectively successful ticker list is not
+evidence, and ETF eligibility does not remove earnings exposure. Decide at the
+close, enter at the next regular open, hold long or cash, and exit by session
+five; do not credit the close-to-next-open rebound, and fit betas/scalers only
+from earlier data. Use a simple baseline plus at most two predeclared
+volume/regime variants. Compare unconditional dip-buying, cash, and
+exposure-matched passive baselines with net costs and 2x/3x sensitivity; report
+folds, drawdown, concentration, counts, block-aware uncertainty/nulls, a
+five-session overlap purge, and the exposure ledger. Development history is not
+a fresh final holdout; unknown history blocks FINAL_HOLDOUT. News, Reddit, and
+regularized ML are optional incremental hypotheses only after baseline evidence
+and supported point-in-time inputs; missing news is not no-news evidence.
+Non-earnings continuation, scheduled macro-event, and crypto funding/basis
+ideas are later hypotheses, not silently enabled capability. Reject and
+inconclusive results are useful; smoke, API, process, or zero-trade success is
+not scientific evidence or proof of alpha.
+
+The requested panel window is 2021-01-04 through 2026-07-31 inclusive (first
+XNYS session 2021-01-04). This is an input bound, not a claim that 2026 is a
+fresh final holdout; exposure and chronological split evidence must establish
+any holdout.
+
 ## Command and state boundary
 
 The only supported command vocabulary is the frozen help output:
