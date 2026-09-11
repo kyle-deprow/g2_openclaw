@@ -324,10 +324,16 @@ def test_repo_config_keeps_current_route_and_memory_guards() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
     agents = config["agents"]["entries"]
     assert config["agents"]["ownership"] == "explicit"
-    assert list(agents) == ["main", "research-orchestrator"]
+    assert list(agents) == ["main", "research-orchestrator", "claude"]
     assert all("id" not in agent for agent in agents.values())
     owner = agents["research-orchestrator"]
     assert owner["model"]["primary"] == "openai/gpt-6-astra"
+    assert agents["claude"] == {
+        "runtime": {
+            "type": "acp",
+            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
+        }
+    }
     defaults = config["agents"]["defaults"]
     assert config["memory"]["search"]["enabled"] is False
     assert defaults["compaction"]["memoryFlush"]["enabled"] is False

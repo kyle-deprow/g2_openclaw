@@ -941,7 +941,13 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
     assert assembled_agents["ownership"] == "explicit"
     assert "list" not in assembled_agents
     assembled_entries = cast(JsonObject, assembled_agents["entries"])
-    assert set(assembled_entries) == {"main", "research-orchestrator"}
+    assert set(assembled_entries) == {"main", "research-orchestrator", "claude"}
+    assert assembled_entries["claude"] == {
+        "runtime": {
+            "type": "acp",
+            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
+        }
+    }
     assert all(
         isinstance(entry, dict) and "id" not in entry for entry in assembled_entries.values()
     )

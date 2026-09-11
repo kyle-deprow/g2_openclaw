@@ -1795,7 +1795,13 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert owner["skills"] == ["research-loop"]
     assert owner["subagents"]["allowAgents"] == ["claude"]
     assert owner["tools"] == {"profile": "full"}
-    assert set(agents) == {"main", "research-orchestrator"}
+    assert set(agents) == {"main", "research-orchestrator", "claude"}
+    assert agents["claude"] == {
+        "runtime": {
+            "type": "acp",
+            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
+        }
+    }
 
     servers = config["mcp"]["servers"]
     assert list(servers) == ["mempalace-readonly", "g2-control"]

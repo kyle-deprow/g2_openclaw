@@ -2253,7 +2253,8 @@ if ! echo "${MERGED}" | jq -e \
   --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
   def denies: (.tools.deny // []);
   def main_allow: (.tools.allow // []);
-  def expected_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
+  def expected_native_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
+  def expected_agent_ids: ((expected_native_models | keys) + ["claude"]);
   (.agents.defaults.thinkingDefault == "high")
   and (.agents.ownership == "explicit")
   and ((.agents | has("list")) | not)
@@ -2307,9 +2308,19 @@ if ! echo "${MERGED}" | jq -e \
     "OPENCLAW_PORT": $openclaw_port,
     "G2_OWNER_ENV_FILE": $owner_env_file
   })
-  and (((.agents.entries // {}) | keys | sort) == (expected_models | keys | sort))
-  and all((.agents.entries // {}) | to_entries[]; .value.model.primary == expected_models[.key])
-  and all((.agents.entries // {}) | to_entries[]; .value.thinkingDefault == "high")
+  and (((.agents.entries // {}) | keys | sort) == (expected_agent_ids | sort))
+  and all((.agents.entries // {}) | to_entries[];
+    (.key == "claude")
+    or (.value.model.primary == expected_native_models[.key]
+      and .value.thinkingDefault == "high")
+  )
+  and ([.agents.entries.claude | select(
+    .runtime == {"type":"acp","acp":{"agent":"claude","backend":"acpx","mode":"oneshot"}}
+    and (.model? == null)
+    and (.tools? == null)
+    and (.skills? == null)
+    and (.workspace? == null)
+  )] | length) == 1
   and ([.agents.entries.main | select(.tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
   and ([.agents.entries["research-orchestrator"] | select(
     .model.primary == $owner
@@ -2585,7 +2596,10 @@ mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
     else
       "workspace-\(.id)"
     end;
-  [((.agents.entries // {}) | to_entries[] | .value + {id: .key})
+  # ACP runtime-only roster entries are gateway dispatch registrations, not
+  # native workspaces. They must not receive bootstrap files or Codex layers.
+  [((.agents.entries // {}) | to_entries[] | select(.value.runtime? == null)
+    | .value + {id: .key})
     | {agent: .id, workspace: workspace_target}]
   | group_by(.workspace)
   | map({workspace: .[0].workspace, agents: (map(.agent) | sort | join(","))})

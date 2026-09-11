@@ -242,6 +242,16 @@
         "tools": {
           "profile": "full"
         }
+      },
+      "claude": {
+        "runtime": {
+          "type": "acp",
+          "acp": {
+            "agent": "claude",
+            "backend": "acpx",
+            "mode": "oneshot"
+          }
+        }
       }
     }
   },
