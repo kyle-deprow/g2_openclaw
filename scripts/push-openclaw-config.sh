@@ -99,34 +99,9 @@ CODEX_APP_SERVER_CLI_RESOLVED=""
 ACPX_ADAPTER_BIN=""
 RESEARCH_REVIEWER_LAUNCHER="${REPO_ROOT}/scripts/research-reviewer-cli.py"
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
-RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS=(
-  "sessions_yield"
-  "agents_list"
-  "sessions_list"
-  "sessions_history"
-  "g2-control__g2_autoresearch_status"
-  "g2-control__g2_autoresearch_start"
-  "g2-control__g2_autoresearch_stop"
-  "mempalace-readonly__mempalace_status"
-  "mempalace-readonly__mempalace_search"
-  "mempalace-readonly__mempalace_get_drawer"
-  "mempalace-readonly__mempalace_list_drawers"
-  "mempalace-readonly__mempalace_list_wings"
-  "mempalace-readonly__mempalace_list_rooms"
-  "mempalace-readonly__mempalace_get_taxonomy"
-  "mempalace-readonly__mempalace_get_aaak_spec"
-  "mempalace-readonly__mempalace_diary_read"
-  "mempalace-readonly__mempalace_kg_query"
-  "mempalace-readonly__mempalace_kg_timeline"
-  "mempalace-readonly__mempalace_kg_stats"
-  "mempalace-readonly__mempalace_traverse"
-  "mempalace-readonly__mempalace_find_tunnels"
-  "mempalace-readonly__mempalace_follow_tunnels"
-  "mempalace-readonly__mempalace_graph_stats"
-  "mempalace-readonly__mempalace_list_tunnels"
-  "mempalace-readonly__mempalace_list_hallways"
-  "mempalace-readonly__mempalace_memories_filed_away"
-)
+# Do not add an explicit owner allow/deny list.  The native Codex harness
+# treats finite allowlists and unsafe denies as restricted; the owner stays on
+# profile=full while MCP server projections remain main-only.
 MEMPALACE_READONLY_AGENT_IDS=()
 CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")
 # These are the exact research-role files that earlier route deployments may
@@ -1888,7 +1863,6 @@ fi
 
 MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_SERVER_AGENT_IDS[@]}")"
 G2_CONTROL_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${G2_CONTROL_SERVER_AGENT_IDS[@]}")"
-RESEARCH_ORCHESTRATOR_DENY_IDS_JSON="$(build_string_array_json "${RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS[@]}")"
 MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON="$(build_string_array_json "${MAIN_OPENCLAW_TOOL_ALLOW_IDS[@]}")"
 
 # The route overlay only requires the repository contract and backend skill.
@@ -2241,18 +2215,16 @@ if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
   apply_paused_config_gates || exit 1
 fi
 
-# No autoresearch model writes MemPalace. Durable research records are the
-# research store and artifact receipts, so stage tool-deny compatibility lists
-# must not survive in the managed config.
+# Research orchestrator tool policy: the owner must use the native full harness
+# policy. Finite owner allowlists and unsafe denies trigger native restriction
+# and disable multi-agent delegation; MCP access remains bounded by each
+# server's agent projection.
 if ! echo "${MERGED}" | jq -e \
-  --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" '
-  def denies: (.tools.deny // []);
-  ([.agents.entries["research-orchestrator"] | select(type == "object")
-    | select(denies == $owner_denies)
-    | select((.tools.allow // []) == ["sessions_spawn"])
+  '([.agents.entries["research-orchestrator"] | select(type == "object")
+    | select(.tools == {"profile": "full"})
   ] | length) == 1
 ' >/dev/null; then
-  echo "ERROR: Research orchestrator tool policy is not the exact bounded route." >&2
+  echo "ERROR: Research orchestrator must use the native full tool profile without local filters." >&2
   exit 1
 fi
 
@@ -2277,7 +2249,6 @@ if ! echo "${MERGED}" | jq -e \
   --arg openclaw_port "${OPENCLAW_PORT}" \
   --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
   --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
-  --argjson owner_denies "${RESEARCH_ORCHESTRATOR_DENY_IDS_JSON}" \
   --arg launcher "${RESEARCH_REVIEWER_LAUNCHER}" \
   --arg adapter "${ACPX_ADAPTER_BIN}" \
   --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
@@ -2345,8 +2316,7 @@ if ! echo "${MERGED}" | jq -e \
     .model.primary == $owner
     and .thinkingDefault == "high"
     and ((.skills // []) == ["research-loop"])
-    and denies == $owner_denies
-    and ((.tools.allow // []) == ["sessions_spawn"])
+    and .tools == {"profile": "full"}
     and ((.subagents.allowAgents? // []) == ["claude"])
   )] | length) == 1
   and ([.agents.entries.main | select(

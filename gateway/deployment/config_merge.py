@@ -727,6 +727,17 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
         owner_entry["model"] = model
     model["primary"] = inputs.orchestrator_model_primary
     owner_entry["thinkingDefault"] = "high"
+    # The native Codex harness treats finite owner allowlists and unsafe denies
+    # as a restricted tool policy and disables multi-agent delegation. Keep the
+    # owner on the full native profile; MCP exposure remains bounded by each
+    # server's explicit agent projection below.
+    owner_tools = owner_entry.get("tools")
+    if not isinstance(owner_tools, dict):
+        owner_tools = {}
+        owner_entry["tools"] = owner_tools
+    owner_tools["profile"] = "full"
+    owner_tools.pop("allow", None)
+    owner_tools.pop("deny", None)
 
     merged = _object(
         _walk_remove_keys(

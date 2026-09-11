@@ -1794,16 +1794,7 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert owner["workspace"] == "workspace-research-orchestrator"
     assert owner["skills"] == ["research-loop"]
     assert owner["subagents"]["allowAgents"] == ["claude"]
-    assert owner["tools"]["profile"] == "full"
-    assert owner["tools"]["allow"] == ["sessions_spawn"]
-    assert owner["tools"]["deny"] == [
-        "sessions_yield",
-        "agents_list",
-        "sessions_list",
-        "sessions_history",
-        *[tool for tool in owner["tools"]["deny"] if tool.startswith("g2-control__")],
-        *[tool for tool in owner["tools"]["deny"] if tool.startswith("mempalace-readonly__")],
-    ]
+    assert owner["tools"] == {"profile": "full"}
     assert set(agents) == {"main", "research-orchestrator"}
 
     servers = config["mcp"]["servers"]
@@ -1832,13 +1823,15 @@ def test_push_script_invariants_target_research_owner_not_main() -> None:
     assert '"copilot-proxy"' in config_merge
     assert '"copilot-cli"' in config_merge
     assert "_walk_remove_keys" in config_merge
-    assert "RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS=(" in script
+    assert "RESEARCH_ORCHESTRATOR_DENY_TOOL_IDS" not in script
+    assert "RESEARCH_ORCHESTRATOR_DENY_IDS_JSON" not in script
     assert "def orchestrator_model_primary" in config_merge
     assert 'entries = agents.get("entries")' in config_merge
     assert 'owner = entries.get("research-orchestrator")' in config_merge
     assert "main interface, Astra research owner" in script
     assert 'CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")' in script
     assert "Research orchestrator tool policy" in script
+    assert '.tools == {"profile": "full"}' in script
     assert ".agents.defaults.maxConcurrent == 2" in script
     assert ".agents.defaults.subagents.maxConcurrent == 1" in script
     assert ".agents.defaults.subagents.maxSpawnDepth == 1" in script

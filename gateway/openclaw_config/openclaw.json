@@ -240,38 +240,7 @@
           ]
         },
         "tools": {
-          "profile": "full",
-          "allow": [
-            "sessions_spawn"
-          ],
-          "deny": [
-            "sessions_yield",
-            "agents_list",
-            "sessions_list",
-            "sessions_history",
-            "g2-control__g2_autoresearch_status",
-            "g2-control__g2_autoresearch_start",
-            "g2-control__g2_autoresearch_stop",
-            "mempalace-readonly__mempalace_status",
-            "mempalace-readonly__mempalace_search",
-            "mempalace-readonly__mempalace_get_drawer",
-            "mempalace-readonly__mempalace_list_drawers",
-            "mempalace-readonly__mempalace_list_wings",
-            "mempalace-readonly__mempalace_list_rooms",
-            "mempalace-readonly__mempalace_get_taxonomy",
-            "mempalace-readonly__mempalace_get_aaak_spec",
-            "mempalace-readonly__mempalace_diary_read",
-            "mempalace-readonly__mempalace_kg_query",
-            "mempalace-readonly__mempalace_kg_timeline",
-            "mempalace-readonly__mempalace_kg_stats",
-            "mempalace-readonly__mempalace_traverse",
-            "mempalace-readonly__mempalace_find_tunnels",
-            "mempalace-readonly__mempalace_follow_tunnels",
-            "mempalace-readonly__mempalace_graph_stats",
-            "mempalace-readonly__mempalace_list_tunnels",
-            "mempalace-readonly__mempalace_list_hallways",
-            "mempalace-readonly__mempalace_memories_filed_away"
-          ]
+          "profile": "full"
         }
       }
     }

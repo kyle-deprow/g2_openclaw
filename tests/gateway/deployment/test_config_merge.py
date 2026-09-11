@@ -228,6 +228,34 @@ def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
     }
 
 
+def test_assembly_removes_restrictive_owner_tool_filters(tmp_path: Path) -> None:
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    agents = cast(JsonObject, repo["agents"])
+    entries = cast(JsonObject, agents["entries"])
+    owner = cast(JsonObject, entries["research-orchestrator"])
+    owner["tools"] = {
+        "profile": "full",
+        "allow": ["sessions_spawn"],
+        "deny": ["sessions_yield", "g2-control__g2_autoresearch_status"],
+    }
+
+    assembled = assemble_config(cast(JsonObject, {}), repo, _assembly_inputs(tmp_path))
+
+    assembled_agents = cast(JsonObject, assembled["agents"])
+    assembled_entries = cast(JsonObject, assembled_agents["entries"])
+    assert cast(JsonObject, assembled_entries["research-orchestrator"])["tools"] == {
+        "profile": "full"
+    }
+    mcp = cast(JsonObject, assembled["mcp"])
+    servers = cast(JsonObject, mcp["servers"])
+    readonly = cast(JsonObject, servers["mempalace-readonly"])
+    readonly_codex = cast(JsonObject, readonly["codex"])
+    g2_control = cast(JsonObject, servers["g2-control"])
+    g2_codex = cast(JsonObject, g2_control["codex"])
+    assert readonly_codex["agents"] == ["main"]
+    assert g2_codex["agents"] == ["main"]
+
+
 def test_assembly_keeps_explicit_alternate_interface_route_without_opus_fallback(
     tmp_path: Path,
 ) -> None:
