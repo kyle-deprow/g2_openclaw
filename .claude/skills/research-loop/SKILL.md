@@ -45,8 +45,8 @@ or proof that a current-price ETF feed is installed.
 
 ## Reversal campaign bounds
 
-- The requested panel window is 2021-01-04 through 2026-07-31 inclusive (first
-  XNYS session 2021-01-04). It is an input bound, not a claim that 2026 is a
+- The requested panel window is 2021-10-01 through 2026-07-31 inclusive (first
+  XNYS session 2021-10-01). It is an input bound, not a claim that 2026 is a
   fresh final holdout; exposure and chronological split evidence establish any
   holdout.
 - Test a market-adjusted, earlier-volatility-normalized negative intraday shock

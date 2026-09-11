@@ -46,8 +46,8 @@ ideas are later hypotheses, not silently enabled capability. Reject and
 inconclusive results are useful; smoke, API, process, or zero-trade success is
 not scientific evidence or proof of alpha.
 
-The requested panel window is 2021-01-04 through 2026-07-31 inclusive (first
-XNYS session 2021-01-04). This is an input bound, not a claim that 2026 is a
+The requested panel window is 2021-10-01 through 2026-07-31 inclusive (first
+XNYS session 2021-10-01). This is an input bound, not a claim that 2026 is a
 fresh final holdout; exposure and chronological split evidence must establish
 any holdout.
 

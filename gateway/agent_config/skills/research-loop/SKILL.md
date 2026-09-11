@@ -23,8 +23,8 @@ available.
 
 ## First campaign: conditional short-term reversal
 
-- The requested panel window is 2021-01-04 through 2026-07-31 inclusive (the
-  first XNYS session is 2021-01-04). This window is an input bound, not a claim
+- The requested panel window is 2021-10-01 through 2026-07-31 inclusive (the
+  first XNYS session is 2021-10-01). This window is an input bound, not a claim
   that 2026 is a fresh final holdout; exposure and chronological split evidence
   must establish any holdout.
 - The initial capability is price-panel-only and limited to liquid, unlevered
