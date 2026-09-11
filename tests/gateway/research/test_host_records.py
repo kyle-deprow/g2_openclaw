@@ -7,8 +7,10 @@ import json
 import shutil
 import sqlite3
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
+from urllib.parse import quote
 
 import pytest
 from gateway.research.host_records import (
@@ -18,7 +20,7 @@ from gateway.research.host_records import (
     HostRecordError,
     TaskRunHostRecord,
     derive_claude_transcript_path,
-    read_exact_acp_identity,
+    read_exact_acpx_identity,
     read_exact_claude_transcript,
     read_exact_rollout,
     read_exact_task_run,
@@ -31,7 +33,7 @@ RUN_ID: Final = "run-001"
 LABEL: Final = "H0001-A001-review-nonce-001"
 RESERVED_AT: Final = 1_756_000_000_000
 UUID: Final = "84785a20-b278-4d4a-9c62-fa35e5bb9928"
-OPENCLAW_SESSION_ID: Final = "openclaw-child-session-001"
+OPENCLAW_SESSION_ID: Final = UUID
 EXPECTED_CWD: Final = "/tmp/review worktree/H0001-A001"
 ACP_BACKEND: Final = "acpx"
 ACP_AGENT: Final = "claude"
@@ -67,23 +69,22 @@ def _read_task(
 
 
 def _read_acp(
-    database_path: Path | str,
+    acpx_sessions_dir: Path | str,
     child_session_key: str,
-    claude_sessions_path: Path | str,
     expected_cwd: str,
     *,
     expected_backend: str = ACP_BACKEND,
     expected_agent: str = ACP_AGENT,
     expected_mode: str = ACP_MODE,
 ) -> AcpIdentityHostRecord:
-    return read_exact_acp_identity(
-        database_path,
+    return read_exact_acpx_identity(
+        acpx_sessions_dir,
         child_session_key,
-        claude_sessions_path,
         expected_cwd,
         expected_backend=expected_backend,
         expected_agent=expected_agent,
         expected_mode=expected_mode,
+        expected_run_id=RUN_ID,
     )
 
 
@@ -144,12 +145,6 @@ def host_fixture(tmp_path: Path) -> dict[str, Path | str]:
               requester_agent_id TEXT, run_id TEXT, label TEXT, status TEXT,
               created_at INTEGER, started_at INTEGER, ended_at INTEGER, error TEXT
             );
-            CREATE TABLE acp_sessions (
-              session_key TEXT PRIMARY KEY, session_id TEXT, backend TEXT,
-              agent TEXT, runtime_session_name TEXT, identity_json TEXT,
-              mode TEXT, runtime_options_json TEXT, cwd TEXT, state TEXT,
-              last_activity_at INTEGER, updated_at INTEGER
-            );
             """
         )
         connection.execute(
@@ -181,40 +176,33 @@ def host_fixture(tmp_path: Path) -> dict[str, Path | str]:
                 None,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO acp_sessions (
-              session_key, session_id, backend, agent, runtime_session_name,
-              identity_json, mode, runtime_options_json, cwd, state,
-              last_activity_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                CHILD_KEY,
-                OPENCLAW_SESSION_ID,
-                "acpx",
-                "claude",
-                "claude",
-                json.dumps(
-                    {
-                        "state": "resolved",
-                        "agentSessionId": UUID,
-                        "acpxSessionId": UUID,
-                    }
-                ),
-                "oneshot",
-                json.dumps({"cwd": EXPECTED_CWD}),
-                "/wrong/row-cwd",
-                "active",
-                RESERVED_AT + 300,
-                RESERVED_AT + 300,
-            ),
-        )
-    sessions = tmp_path / "claude-sessions.json"
-    sessions.write_text(
-        json.dumps({CHILD_KEY: {"sessionId": OPENCLAW_SESSION_ID, "updatedAt": RESERVED_AT}}),
-        encoding="utf-8",
-    )
+    sessions = tmp_path / "acpx-sessions"
+    sessions.mkdir()
+    record_uuid = "10551e01-0503-456f-9e61-6993c912d478"
+
+    def as_utc(value: int) -> str:
+        return datetime.fromtimestamp(value / 1000, UTC).isoformat().replace("+00:00", "Z")
+
+    record = {
+        "schema": "acpx.session.v1",
+        "acpx_record_id": f"{CHILD_KEY}:oneshot:{record_uuid}",
+        "acp_session_id": UUID,
+        "cwd": EXPECTED_CWD,
+        "name": CHILD_KEY,
+        "created_at": as_utc(RESERVED_AT + 100),
+        "last_used_at": as_utc(RESERVED_AT + 300),
+        "last_request_id": RUN_ID,
+        "closed": True,
+        "closed_at": as_utc(RESERVED_AT + 400),
+        "title": "review H0001-A001",
+        "messages": [{"User": {"content": []}}],
+        "acpx": {
+            "desired_config_options": {"effort": "high"},
+            "session_options": {"model": "claude-opus-5"},
+        },
+    }
+    record_path = sessions / (quote(f"{CHILD_KEY}:oneshot:{record_uuid}", safe="") + ".json")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
     projects = tmp_path / "claude-projects" / "projects"
     transcript = derive_claude_transcript_path(projects, EXPECTED_CWD, UUID)
     transcript.parent.mkdir(parents=True)
@@ -538,153 +526,71 @@ def test_wal_database_read_keeps_main_contents_unchanged(
 def test_acp_identity_uses_runtime_options_cwd_and_exact_child_session(
     host_fixture: dict[str, Path | str],
 ) -> None:
-    record = _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
+    record = _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
     assert record.canonical_session_uuid == UUID
     assert record.claude_session_id == OPENCLAW_SESSION_ID
     assert record.effective_cwd == EXPECTED_CWD
+    assert record.model == "claude-opus-5"
+    assert record.effort == "high"
+    assert record.acpx_candidate_count == 1
 
 
-@pytest.mark.parametrize(
-    ("column", "value"),
-    [("backend", "other"), ("agent", "codex"), ("mode", "run")],
-)
-def test_acp_identity_rejects_wrong_runtime_identity(
-    host_fixture: dict[str, Path | str], column: str, value: str
-) -> None:
-    statements = {
-        "backend": "UPDATE acp_sessions SET backend = ?",
-        "agent": "UPDATE acp_sessions SET agent = ?",
-        "mode": "UPDATE acp_sessions SET mode = ?",
-    }
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        connection.execute(statements[column], (value,))
-
-    with pytest.raises(HostRecordError, match="ACP identity"):
-        _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("backend", "other"), ("agent", "codex"), ("mode", "run")],
-)
-def test_acp_identity_rejects_wrong_expected_values_without_mutating_row(
-    host_fixture: dict[str, Path | str], field: str, value: str
-) -> None:
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        before = connection.execute("SELECT backend, agent, mode FROM acp_sessions").fetchone()
-
-    with pytest.raises(HostRecordError, match="ACP identity"):
-        if field == "backend":
-            _read_acp(
-                host_fixture["db"],
-                CHILD_KEY,
-                host_fixture["sessions"],
-                EXPECTED_CWD,
-                expected_backend=value,
-            )
-        elif field == "agent":
-            _read_acp(
-                host_fixture["db"],
-                CHILD_KEY,
-                host_fixture["sessions"],
-                EXPECTED_CWD,
-                expected_agent=value,
-            )
-        else:
-            _read_acp(
-                host_fixture["db"],
-                CHILD_KEY,
-                host_fixture["sessions"],
-                EXPECTED_CWD,
-                expected_mode=value,
-            )
-
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        after = connection.execute("SELECT backend, agent, mode FROM acp_sessions").fetchone()
-    assert after == before
-
-
-@pytest.mark.parametrize(
-    "identity",
-    [
-        {"state": "pending", "agentSessionId": UUID},
-        {"state": "resolved", "agentSessionId": UUID, "acpxSessionId": "wrong"},
-        {"state": "resolved", "agentSessionId": "not-a-uuid"},
-    ],
-)
-def test_acp_identity_rejects_unresolved_or_conflicting_uuid(
-    host_fixture: dict[str, Path | str], identity: dict[str, str]
-) -> None:
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        connection.execute("UPDATE acp_sessions SET identity_json = ?", (json.dumps(identity),))
-
-    with pytest.raises(HostRecordError, match=r"(identity|UUID)"):
-        _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
-
-
-def test_acp_identity_accepts_nullable_core_session_id(
+def test_acpx_identity_rejects_ambiguous_or_mismatched_candidates(
     host_fixture: dict[str, Path | str],
 ) -> None:
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        connection.execute("UPDATE acp_sessions SET session_id = NULL")
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    duplicate = source.with_name(source.name.replace("10551e01", "20551e01"))
+    payload = json.loads(source.read_text())
+    payload["acpx_record_id"] = payload["acpx_record_id"].replace("10551e01", "20551e01")
+    payload["last_request_id"] = "wrong-run"
+    duplicate.write_text(json.dumps(payload))
+    with pytest.raises(HostRecordError, match=r"candidate|last_request_id"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
-    record = _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
 
-    assert record.core_session_id is None
-
-
-def test_acp_identity_uses_acpx_uuid_when_agent_uuid_is_absent(
+def test_acpx_identity_rejects_more_than_eight_prefix_candidates(
     host_fixture: dict[str, Path | str],
 ) -> None:
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        connection.execute(
-            "UPDATE acp_sessions SET identity_json = ?",
-            (json.dumps({"state": "resolved", "acpxSessionId": UUID}),),
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    payload = json.loads(source.read_text())
+    for index in range(9):
+        record_uuid = f"10551e01-0503-456f-9e61-6993c912d{index:03d}"
+        candidate = dict(payload)
+        candidate["acpx_record_id"] = f"{CHILD_KEY}:oneshot:{record_uuid}"
+        path = Path(host_fixture["sessions"]) / (
+            quote(f"{CHILD_KEY}:oneshot:{record_uuid}", safe="") + ".json"
         )
-
-    record = _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
-
-    assert record.agent_session_id is None
-    assert record.acpx_session_id == UUID
-    assert record.canonical_session_uuid == UUID
+        path.write_text(json.dumps(candidate))
+    source.unlink()
+    with pytest.raises(HostRecordError, match="bounded limit"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
-def test_acp_identity_rejects_two_different_valid_uuids(
-    host_fixture: dict[str, Path | str],
+def test_acpx_identity_rejects_symlink_candidate(
+    host_fixture: dict[str, Path | str], tmp_path: Path
 ) -> None:
-    with sqlite3.connect(host_fixture["db"]) as connection:
-        connection.execute(
-            "UPDATE acp_sessions SET identity_json = ?",
-            (
-                json.dumps(
-                    {
-                        "state": "resolved",
-                        "agentSessionId": UUID,
-                        "acpxSessionId": "10551e01-0503-456f-9e61-6993c912d478",
-                    }
-                ),
-            ),
-        )
-
-    with pytest.raises(HostRecordError, match="conflict"):
-        _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    target = tmp_path / "candidate.json"
+    target.write_bytes(source.read_bytes())
+    source.unlink()
+    source.symlink_to(target)
+    with pytest.raises(HostRecordError, match="path-unsafe"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
-def test_acp_identity_rejects_stale_sessions_mapping_or_wrong_cwd(
-    host_fixture: dict[str, Path | str],
+@pytest.mark.parametrize("field", ["last_request_id", "cwd", "closed"])
+def test_acpx_identity_rejects_mismatched_record_fields(
+    host_fixture: dict[str, Path | str], field: str
 ) -> None:
-    Path(host_fixture["sessions"]).write_text(
-        json.dumps({CHILD_KEY: {"sessionId": "stale-session"}}), encoding="utf-8"
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    payload = json.loads(source.read_text())
+    payload[field] = (
+        "wrong-run" if field == "last_request_id" else "/wrong" if field == "cwd" else False
     )
-    with pytest.raises(HostRecordError, match="session"):
-        _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], EXPECTED_CWD)
-
-    Path(host_fixture["sessions"]).write_text(
-        json.dumps({CHILD_KEY: {"sessionId": OPENCLAW_SESSION_ID}}), encoding="utf-8"
-    )
-    with pytest.raises(HostRecordError, match="cwd"):
-        _read_acp(host_fixture["db"], CHILD_KEY, host_fixture["sessions"], "/wrong/bundle")
+    source.write_text(json.dumps(payload))
+    with pytest.raises(HostRecordError):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
 def test_transcript_path_encodes_every_non_ascii_alphanumeric_character(
@@ -996,27 +902,27 @@ def test_transcript_rejects_unsafe_exact_input(
         read_exact_claude_transcript(host_fixture["projects"], EXPECTED_CWD, UUID)
 
 
-def test_sessions_json_rejects_symlink_without_following(
+def test_acpx_sessions_directory_rejects_symlink_without_following(
     host_fixture: dict[str, Path | str], tmp_path: Path
 ) -> None:
     sessions = Path(host_fixture["sessions"])
-    sessions.unlink()
-    target = tmp_path / "target-sessions.json"
-    target.write_text("{}", encoding="utf-8")
+    shutil.rmtree(sessions)
+    target = tmp_path / "target-sessions"
+    target.mkdir()
     sessions.symlink_to(target)
 
     with pytest.raises(HostRecordError, match="sessions"):
-        _read_acp(host_fixture["db"], CHILD_KEY, sessions, EXPECTED_CWD)
+        _read_acp(sessions, CHILD_KEY, EXPECTED_CWD)
 
 
-def test_sessions_json_rejects_oversized_input(
+def test_acpx_record_rejects_oversized_input(
     host_fixture: dict[str, Path | str],
 ) -> None:
-    sessions = Path(host_fixture["sessions"])
-    sessions.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
+    record = next(Path(host_fixture["sessions"]).iterdir())
+    record.write_bytes(b"x" * (MAX_METADATA_BYTES + 1))
 
-    with pytest.raises(HostRecordError, match="sessions"):
-        _read_acp(host_fixture["db"], CHILD_KEY, sessions, EXPECTED_CWD)
+    with pytest.raises(HostRecordError, match="ACPX"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
 def test_database_uri_rejects_relative_path_without_creating_it(

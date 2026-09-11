@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import subprocess
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from gateway.cli import app
@@ -87,11 +89,6 @@ def _host_fixture(
               run_id TEXT, label TEXT, status TEXT, created_at INTEGER,
               started_at INTEGER, ended_at INTEGER
             );
-            CREATE TABLE acp_sessions(
-              session_key TEXT, session_id TEXT, backend TEXT, agent TEXT,
-              runtime_session_name TEXT, identity_json TEXT, mode TEXT,
-              runtime_options_json TEXT, cwd TEXT, state TEXT
-            );
             """
         )
         conn.execute(
@@ -115,24 +112,30 @@ def _host_fixture(
                 reserved_ms + 3000,
             ),
         )
-        conn.execute(
-            "INSERT INTO acp_sessions VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (
-                child_key,
-                session_uuid,
-                "acpx",
-                "claude",
-                "review",
-                json.dumps({"state": "resolved", "agentSessionId": session_uuid}),
-                "oneshot",
-                json.dumps({"cwd": str(bundle)}),
-                str(bundle),
-                "running",
-            ),
-        )
         conn.commit()
-    sessions = tmp_path / "sessions.json"
-    sessions.write_text(json.dumps({child_key: {"sessionId": session_uuid}}), encoding="utf-8")
+    sessions = tmp_path / "acpx-sessions"
+    sessions.mkdir()
+    record_uuid = "10551e01-0503-456f-9e61-6993c912d478"
+    record = {
+        "schema": "acpx.session.v1",
+        "acpx_record_id": f"{child_key}:oneshot:{record_uuid}",
+        "acp_session_id": session_uuid,
+        "cwd": str(bundle),
+        "name": child_key,
+        "created_at": (reserved_at + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+        "last_used_at": (reserved_at + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+        "last_request_id": run_id,
+        "closed": True,
+        "closed_at": (reserved_at + timedelta(seconds=4)).isoformat().replace("+00:00", "Z"),
+        "title": f"review {attempt_id}",
+        "messages": [{"User": {"content": []}}],
+        "acpx": {
+            "desired_config_options": {"effort": "high"},
+            "session_options": {"model": "claude-opus-5"},
+        },
+    }
+    record_path = sessions / (quote(f"{child_key}:oneshot:{record_uuid}", safe="") + ".json")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
     encoded = "".join(char if char.isalnum() and char.isascii() else "-" for char in str(bundle))
     project = tmp_path / "projects" / encoded
     project.mkdir(parents=True)
@@ -396,7 +399,9 @@ def test_identity_or_transcript_host_error_is_unresolved(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    sessions.write_text("{}")
+    shutil.rmtree(sessions)
+    sessions.mkdir()
+    (sessions / "malformed.json").write_text("{}")
     with pytest.raises(ReviewUnresolved):
         collect_review(store, attempt_id, core, sessions, projects)
     assert store.get_attempt(attempt_id).state == AttemptState.IMPLEMENTED

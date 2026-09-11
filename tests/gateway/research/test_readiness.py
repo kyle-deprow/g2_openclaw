@@ -39,7 +39,6 @@ def _native_database(path: Path) -> Path:
         connection.executescript(
             """
             CREATE TABLE task_runs (task_id TEXT);
-            CREATE TABLE acp_sessions (session_key TEXT);
             """
         )
     path.chmod(0o600)
@@ -252,7 +251,7 @@ def test_native_guard_reports_database_schema_permissions_and_digest_refusals(
     assert native_execution_ready(store, None) == "native_core_database_permissions"
 
     database.chmod(0o600)
-    assert native_execution_ready(store, None) == "native_core_database_schema"
+    assert native_execution_ready(store, None) == "native_valueerror"
 
     database.unlink()
     _native_database(database)

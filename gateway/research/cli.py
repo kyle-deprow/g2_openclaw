@@ -326,7 +326,7 @@ def review_collect(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
     core_database: Path = typer.Option(..., "--core-database"),
-    claude_sessions: Path = typer.Option(..., "--claude-sessions"),
+    acpx_sessions: Path = typer.Option(..., "--acpx-sessions"),
     claude_projects: Path = typer.Option(..., "--claude-projects"),
 ) -> None:
     try:
@@ -335,7 +335,7 @@ def review_collect(
                 ResearchStore(_root(root)),
                 attempt_id,
                 core_database,
-                claude_sessions,
+                acpx_sessions,
                 claude_projects,
             ).state.value
         )

@@ -16,11 +16,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import quote
@@ -28,6 +30,7 @@ from uuid import UUID
 
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
+MAX_ACPX_CANDIDATES = 8
 TERMINAL_TASK_STATUSES = frozenset({"succeeded", "failed", "timed_out", "cancelled", "lost"})
 
 
@@ -71,23 +74,26 @@ class TaskRunHostRecord:
 
 @dataclass(frozen=True, slots=True)
 class AcpIdentityHostRecord:
-    """The exact resolved ACP identity and Claude session binding."""
+    """The exact ACPX retained record and Claude transcript binding."""
 
     session_key: str
-    core_session_id: str | None
+    acp_session_id: str
     backend: str
     agent: str
-    runtime_session_name: str | None
-    identity_state: str
-    agent_session_id: str | None
-    acpx_session_id: str | None
     canonical_session_uuid: str
     mode: str
-    row_cwd: str | None
-    runtime_options_cwd: str | None
     effective_cwd: str
-    host_state: str | None
     claude_session_id: str
+    acpx_record_id: str
+    acpx_record_path: Path
+    acpx_record_sha256: str
+    acpx_candidate_count: int
+    last_request_id: str
+    created_at_ms: int
+    last_used_at_ms: int
+    closed_at_ms: int
+    model: str
+    effort: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,13 +150,6 @@ SELECT task_id, runtime, task_kind, source_id, requester_session_key,
    AND runtime = ? AND scope_kind = ? AND agent_id = ?
 """
 
-_ACP_SESSION_QUERY = """
-SELECT session_key, session_id, backend, agent, runtime_session_name,
-       identity_json, mode, runtime_options_json, cwd, state
-  FROM acp_sessions
- WHERE session_key = ?
-"""
-
 
 def _required_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
@@ -202,11 +201,6 @@ def _validate_canonical_cwd(value: str, field: str) -> str:
     if os.path.normpath(value) != value:
         raise HostRecordError(f"{field} must be an absolute canonical path")
     return value
-
-
-def _optional_canonical_cwd(value: object, field: str) -> str | None:
-    text = _optional_nonempty_text(value, field)
-    return _validate_canonical_cwd(text, field) if text is not None else None
 
 
 def _validate_ack(value: str | None, field: str) -> str | None:
@@ -358,20 +352,6 @@ def read_exact_task_run(
     )
 
 
-def _json_object(raw: object, field: str, *, allow_null: bool = False) -> dict[str, object] | None:
-    if raw is None and allow_null:
-        return None
-    if not isinstance(raw, str) or not raw:
-        raise HostRecordError(f"host record {field} must contain a JSON object")
-    try:
-        decoded: object = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HostRecordError(f"host record {field} is not valid JSON") from exc
-    if not isinstance(decoded, dict) or any(not isinstance(key, str) for key in decoded):
-        raise HostRecordError(f"host record {field} must contain a JSON object")
-    return {key: cast(object, value) for key, value in decoded.items()}
-
-
 def _canonical_uuid(value: object, field: str) -> str | None:
     if value is None:
         return None
@@ -386,121 +366,286 @@ def _canonical_uuid(value: object, field: str) -> str | None:
     return value
 
 
-def read_exact_acp_identity(
-    database_path: Path | str,
+_ACPX_RECORD_NAME = re.compile(
+    r"(?P<uuid>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.json"
+)
+_ACPX_LIFECYCLE_TOLERANCE_MS = 60_000
+
+
+def _record_time(value: object, field: str) -> int:
+    text = _required_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HostRecordError(f"host record {field} is not an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise HostRecordError(f"host record {field} must be UTC")
+    result = int(parsed.timestamp() * 1000)
+    if result < 0:
+        raise HostRecordError(f"host record {field} must not be before the epoch")
+    return result
+
+
+def _open_acpx_sessions_dir(path: Path | str) -> int:
+    directory = Path(path)
+    if not directory.is_absolute() or directory.is_symlink():
+        raise HostRecordError("ACPX sessions directory must be an absolute non-symlink directory")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(directory, flags)
+        directory_stat = os.fstat(descriptor)
+    except OSError as exc:
+        raise HostRecordError("ACPX sessions directory is missing or unreadable") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode):
+        os.close(descriptor)
+        raise HostRecordError("ACPX sessions path is not a regular directory")
+    return descriptor
+
+
+def _read_acpx_candidate(directory_fd: int, name: str) -> tuple[dict[str, object], bytes]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise HostRecordError("ACPX candidate is missing or path-unsafe") from exc
+    try:
+        initial_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(initial_stat.st_mode):
+            raise HostRecordError("ACPX candidate must be a regular non-symlink file")
+        if initial_stat.st_size > MAX_METADATA_BYTES:
+            raise HostRecordError("ACPX candidate exceeds the bounded size limit")
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_METADATA_BYTES:
+            try:
+                chunk = os.read(descriptor, min(1024 * 1024, MAX_METADATA_BYTES - total + 1))
+            except OSError as exc:
+                raise HostRecordError("ACPX candidate could not be read") from exc
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > MAX_METADATA_BYTES:
+                raise HostRecordError("ACPX candidate exceeds the bounded size limit")
+        final_stat = os.fstat(descriptor)
+        if final_stat.st_size != total:
+            raise HostRecordError("ACPX candidate changed while it was being read")
+        raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    return _json_object_bytes(raw, "ACPX retained session record"), raw
+
+
+def _acpx_record_candidate(
+    record: dict[str, object],
+    raw: bytes,
+    name: str,
     child_session_key: str,
-    claude_sessions_path: Path | str,
     expected_cwd: str,
     *,
     expected_backend: str,
     expected_agent: str,
     expected_mode: str,
+    expected_run_id: str,
+    reservation_at_ms: int | None,
+    task_started_at_ms: int | None,
+    task_ended_at_ms: int | None,
 ) -> AcpIdentityHostRecord:
-    """Read one resolved ACP row with caller-supplied runtime expectations."""
+    match = _ACPX_RECORD_NAME.fullmatch(name[-41:])
+    if match is None:
+        raise HostRecordError("ACPX candidate filename does not contain one canonical UUID")
+    record_uuid = match.group("uuid")
+    record_id = _required_text(record.get("acpx_record_id"), "acpx_record_id")
+    expected_record_id = f"{child_session_key}:oneshot:{record_uuid}"
+    if record_id != expected_record_id:
+        raise HostRecordError("ACPX record id does not match its bounded filename and child key")
+    name_field = _required_text(record.get("name"), "name")
+    if name_field != child_session_key:
+        raise HostRecordError("ACPX record name does not match the exact child session")
+    schema = _required_text(record.get("schema"), "schema")
+    if schema != "acpx.session.v1":
+        raise HostRecordError("ACPX retained session record has an unexpected schema")
+    acp_session_id = _canonical_uuid(record.get("acp_session_id"), "acp_session_id")
+    if acp_session_id is None:
+        raise HostRecordError("ACPX record has no canonical ACP session UUID")
+    cwd = _validate_canonical_cwd(_required_text(record.get("cwd"), "cwd"), "cwd")
+    if cwd != expected_cwd:
+        raise HostRecordError("ACPX record cwd does not match the expected bundle cwd")
+    last_request_id = _required_text(record.get("last_request_id"), "last_request_id")
+    if last_request_id != expected_run_id:
+        raise HostRecordError("ACPX record last_request_id does not match the spawn ACK run id")
+    if record.get("closed") is not True:
+        raise HostRecordError("ACPX record lifecycle is not closed")
+    created_at_ms = _record_time(record.get("created_at"), "created_at")
+    last_used_at_ms = _record_time(record.get("last_used_at"), "last_used_at")
+    closed_at_ms = _record_time(record.get("closed_at"), "closed_at")
+    if not created_at_ms <= last_used_at_ms <= closed_at_ms:
+        raise HostRecordError("ACPX record lifecycle timestamps are not ordered")
+    if reservation_at_ms is not None and created_at_ms < reservation_at_ms:
+        raise HostRecordError("ACPX record was created before the review reservation")
+    if task_started_at_ms is not None and closed_at_ms < task_started_at_ms:
+        raise HostRecordError("ACPX record closed before the task started")
+    if (
+        task_ended_at_ms is not None
+        and closed_at_ms > task_ended_at_ms + _ACPX_LIFECYCLE_TOLERANCE_MS
+    ):
+        raise HostRecordError("ACPX record closed outside the task lifecycle window")
+
+    acpx = record.get("acpx")
+    if not isinstance(acpx, dict):
+        raise HostRecordError("ACPX retained session record is missing acpx metadata")
+    desired = acpx.get("desired_config_options")
+    session_options = acpx.get("session_options")
+    if not isinstance(desired, dict) or not isinstance(session_options, dict):
+        raise HostRecordError("ACPX retained session record has incomplete runtime options")
+    effort = _required_text(desired.get("effort"), "acpx.desired_config_options.effort")
+    model = _required_text(session_options.get("model"), "acpx.session_options.model")
+    if model != "claude-opus-5" or effort != "high":
+        raise HostRecordError("ACPX retained session record model or effort is not Opus 5/high")
+    title = _required_text(record.get("title"), "title")
+    del title  # Title is required record evidence; task identity remains task_runs authority.
+    return AcpIdentityHostRecord(
+        session_key=child_session_key,
+        acp_session_id=acp_session_id,
+        backend=expected_backend,
+        agent=expected_agent,
+        canonical_session_uuid=acp_session_id,
+        mode=expected_mode,
+        effective_cwd=cwd,
+        claude_session_id=acp_session_id,
+        acpx_record_id=record_id,
+        acpx_record_path=Path(name),
+        acpx_record_sha256=hashlib.sha256(raw).hexdigest(),
+        acpx_candidate_count=1,
+        last_request_id=last_request_id,
+        created_at_ms=created_at_ms,
+        last_used_at_ms=last_used_at_ms,
+        closed_at_ms=closed_at_ms,
+        model=model,
+        effort=effort,
+    )
+
+
+def read_exact_acpx_identity(
+    acpx_sessions_dir: Path | str,
+    child_session_key: str,
+    expected_cwd: str,
+    *,
+    expected_backend: str,
+    expected_agent: str,
+    expected_mode: str,
+    expected_run_id: str,
+    reservation_at_ms: int | None = None,
+    task_started_at_ms: int | None = None,
+    task_ended_at_ms: int | None = None,
+) -> AcpIdentityHostRecord:
+    """Resolve exactly one retained ACPX record by a bounded encoded prefix.
+
+    The transient core ACP projection is intentionally not consulted.  A child
+    key plus ACK run ID is insufficient
+    to derive the random ACPX oneshot UUID, so every canonical-UUID candidate
+    under the configured sessions directory is bounded, read safely, and
+    validated before accepting exactly one.
+    """
 
     child_session_key = _validate_lookup_text(child_session_key, "child_session_key")
+    if any(character in child_session_key for character in ("\x00", "/", "\\", "%")):
+        raise HostRecordError("child_session_key contains an unsafe path character")
     expected_cwd = _validate_canonical_cwd(expected_cwd, "expected_cwd")
     expected_backend = _validate_lookup_text(expected_backend, "expected_backend")
     expected_agent = _validate_lookup_text(expected_agent, "expected_agent")
     expected_mode = _validate_lookup_text(expected_mode, "expected_mode")
-
-    with _readonly_database(database_path) as connection:
-        try:
-            rows = connection.execute(_ACP_SESSION_QUERY, (child_session_key,)).fetchall()
-        except sqlite3.Error as exc:
-            raise HostRecordError("ACP session metadata could not be read") from exc
-
-    if len(rows) != 1:
-        raise HostRecordError(
-            f"ACP session lookup requires exactly one matching row; found {len(rows)}"
-        )
-    row = rows[0]
-    session_key = _required_text(_row_value(row, "session_key"), "session_key")
-    core_session_id = _optional_nonempty_text(_row_value(row, "session_id"), "session_id")
-    backend = _required_text(_row_value(row, "backend"), "backend")
-    agent = _required_text(_row_value(row, "agent"), "agent")
-    runtime_session_name = _optional_nonempty_text(
-        _row_value(row, "runtime_session_name"), "runtime_session_name"
-    )
-    identity = _json_object(_row_value(row, "identity_json"), "identity_json")
-    if identity is None:  # Narrowing for the strict type checker.
-        raise HostRecordError("ACP identity_json must contain a JSON object")
-    identity_state = _required_text(identity.get("state"), "identity_json.state")
-    if identity_state != "resolved":
-        raise HostRecordError("ACP identity_json.state is not resolved")
-    agent_session_id = _canonical_uuid(identity.get("agentSessionId"), "agentSessionId")
-    acpx_session_id = _canonical_uuid(identity.get("acpxSessionId"), "acpxSessionId")
-    if agent_session_id is None and acpx_session_id is None:
-        raise HostRecordError("ACP identity has no canonical session UUID")
-    if (
-        agent_session_id is not None
-        and acpx_session_id is not None
-        and agent_session_id != acpx_session_id
+    if expected_backend != "acpx" or expected_mode != "oneshot":
+        raise HostRecordError("ACPX identity has unexpected backend or mode")
+    expected_run_id = _validate_lookup_text(expected_run_id, "expected_run_id")
+    if "\x00" in expected_run_id:
+        raise HostRecordError("expected_run_id contains a NUL byte")
+    if not child_session_key.startswith(f"agent:{expected_agent}:acp:"):
+        raise HostRecordError("child_session_key does not bind the expected ACP agent")
+    for value, field in (
+        (reservation_at_ms, "reservation_at_ms"),
+        (task_started_at_ms, "task_started_at_ms"),
+        (task_ended_at_ms, "task_ended_at_ms"),
     ):
-        raise HostRecordError("ACP identity session UUIDs conflict")
-    canonical_session_uuid = agent_session_id or acpx_session_id
-    if canonical_session_uuid is None:  # Narrowing for the strict type checker.
-        raise HostRecordError("ACP identity has no canonical session UUID")
-    mode = _required_text(_row_value(row, "mode"), "mode")
-    row_cwd = _optional_canonical_cwd(_row_value(row, "cwd"), "cwd")
-    runtime_options = _json_object(
-        _row_value(row, "runtime_options_json"), "runtime_options_json", allow_null=True
-    )
-    runtime_options_cwd = (
-        _optional_canonical_cwd(runtime_options.get("cwd"), "runtime_options_json.cwd")
-        if runtime_options is not None and "cwd" in runtime_options
-        else None
-    )
-    effective_cwd = runtime_options_cwd or row_cwd
-    if effective_cwd is None:
-        raise HostRecordError("ACP session has no effective cwd")
-    host_state = _optional_nonempty_text(_row_value(row, "state"), "state")
+        if value is not None:
+            _required_epoch_ms(value, field)
+    if (
+        task_started_at_ms is not None
+        and task_ended_at_ms is not None
+        and task_ended_at_ms < task_started_at_ms
+    ):
+        raise HostRecordError("task ended before it started")
 
-    if session_key != child_session_key:
-        raise HostRecordError("ACP session key does not match the exact child session")
-    if backend != expected_backend or agent != expected_agent or mode != expected_mode:
-        raise HostRecordError("ACP identity has unexpected backend, agent, or mode")
-    if effective_cwd != expected_cwd:
-        raise HostRecordError("ACP session cwd does not match the expected bundle cwd")
-
-    sessions_bytes = _read_regular_bounded(
-        Path(claude_sessions_path), MAX_METADATA_BYTES, "Claude sessions metadata"
-    )
-    sessions = _json_object_bytes(sessions_bytes, "Claude sessions metadata")
-    entry = sessions.get(child_session_key)
-    if not isinstance(entry, dict):
-        raise HostRecordError("Claude sessions metadata has no exact child session key")
-    claude_session_id = _required_text(entry.get("sessionId"), "Claude sessionId")
-    if core_session_id is not None and core_session_id != claude_session_id:
-        raise HostRecordError("ACP core session_id conflicts with Claude sessions sessionId")
-
-    return AcpIdentityHostRecord(
-        session_key=session_key,
-        core_session_id=core_session_id,
-        backend=backend,
-        agent=agent,
-        runtime_session_name=runtime_session_name,
-        identity_state=identity_state,
-        agent_session_id=agent_session_id,
-        acpx_session_id=acpx_session_id,
-        canonical_session_uuid=canonical_session_uuid,
-        mode=mode,
-        row_cwd=row_cwd,
-        runtime_options_cwd=runtime_options_cwd,
-        effective_cwd=effective_cwd,
-        host_state=host_state,
-        claude_session_id=claude_session_id,
-    )
+    encoded_prefix = quote(child_session_key + ":oneshot:", safe="")
+    directory_fd = _open_acpx_sessions_dir(acpx_sessions_dir)
+    try:
+        try:
+            names = os.listdir(directory_fd)
+        except OSError as exc:
+            raise HostRecordError("ACPX sessions directory could not be listed") from exc
+        matching: list[str] = []
+        for name in names:
+            if not isinstance(name, str) or not name.startswith(encoded_prefix):
+                continue
+            matching.append(name)
+        if not matching:
+            raise HostRecordError("no ACPX retained record matches the exact child prefix")
+        if len(matching) > MAX_ACPX_CANDIDATES:
+            raise HostRecordError("ACPX retained record candidate set exceeds the bounded limit")
+        matching.sort()
+        records: list[AcpIdentityHostRecord] = []
+        for name in matching:
+            suffix = name[len(encoded_prefix) :]
+            if _ACPX_RECORD_NAME.fullmatch(suffix) is None:
+                raise HostRecordError("ACPX child-prefix candidate has an unsafe filename")
+            candidate_record, raw = _read_acpx_candidate(directory_fd, name)
+            records.append(
+                _acpx_record_candidate(
+                    candidate_record,
+                    raw,
+                    name,
+                    child_session_key,
+                    expected_cwd,
+                    expected_backend=expected_backend,
+                    expected_agent=expected_agent,
+                    expected_mode=expected_mode,
+                    expected_run_id=expected_run_id,
+                    reservation_at_ms=reservation_at_ms,
+                    task_started_at_ms=task_started_at_ms,
+                    task_ended_at_ms=task_ended_at_ms,
+                )
+            )
+        if len(records) != 1:
+            raise HostRecordError(
+                "ACPX retained record resolution is ambiguous; expected exactly one candidate"
+            )
+        resolved_record = records[0]
+        return replace(
+            resolved_record,
+            acpx_record_path=Path(acpx_sessions_dir) / matching[0],
+            acpx_candidate_count=len(matching),
+        )
+    finally:
+        os.close(directory_fd)
 
 
 def _json_object_bytes(raw: bytes, field: str) -> dict[str, object]:
     try:
-        decoded: object = json.loads(raw)
+        decoded: object = json.loads(raw, object_pairs_hook=_strict_json_pairs)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HostRecordError(f"{field} is not valid JSON") from exc
     if not isinstance(decoded, dict) or any(not isinstance(key, str) for key in decoded):
         raise HostRecordError(f"{field} must contain a JSON object")
     return {key: cast(object, value) for key, value in decoded.items()}
+
+
+def _strict_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise HostRecordError("ACPX retained session record contains duplicate JSON keys")
+        result[key] = value
+    return result
 
 
 def _required_nonnegative_int(value: object, field: str) -> int:

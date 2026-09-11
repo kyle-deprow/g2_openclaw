@@ -36,7 +36,7 @@ from .host_records import (
     AcpIdentityHostRecord,
     HostRecordError,
     TaskRunHostRecord,
-    read_exact_acp_identity,
+    read_exact_acpx_identity,
     read_exact_claude_transcript,
     read_exact_task_run,
 )
@@ -733,7 +733,7 @@ def verify_review(
     store: ResearchStore,
     attempt_id: str,
     core_database: Path,
-    claude_sessions_path: Path,
+    acpx_sessions_dir: Path,
     claude_projects_root: Path,
     *,
     expected_backend: str = REVIEW_BACKEND,
@@ -778,14 +778,17 @@ def verify_review(
         )
     identity: AcpIdentityHostRecord | None = None
     try:
-        identity = read_exact_acp_identity(
-            core_database,
+        identity = read_exact_acpx_identity(
+            acpx_sessions_dir,
             task.child_session_key,
-            claude_sessions_path,
             reservation.bundle_dir,
             expected_backend=expected_backend,
             expected_agent=REVIEW_AGENT,
             expected_mode=expected_mode,
+            expected_run_id=task.run_id,
+            reservation_at_ms=_epoch_ms(reservation.reserved_at),
+            task_started_at_ms=task.started_at_ms,
+            task_ended_at_ms=task.ended_at_ms,
         )
         transcript = read_exact_claude_transcript(
             claude_projects_root,
@@ -825,9 +828,22 @@ def verify_review(
             raise ReviewEvidenceError("bundle_mutated") from exc
         host = {
             "task_id": task.task_id,
+            "task_owner_key": task.owner_key,
+            "child_session_key": task.child_session_key,
+            "run_id": task.run_id,
             "task_status": task.status,
             "task_started_at": task.started_at_ms,
             "task_ended_at": task.ended_at_ms,
+            "acpx_record_id": identity.acpx_record_id,
+            "acpx_record_path": str(identity.acpx_record_path),
+            "acpx_record_sha256": identity.acpx_record_sha256,
+            "acpx_candidate_count": identity.acpx_candidate_count,
+            "acpx_session_id": identity.acp_session_id,
+            "acpx_created_at": identity.created_at_ms,
+            "acpx_last_used_at": identity.last_used_at_ms,
+            "acpx_closed_at": identity.closed_at_ms,
+            "acpx_model": identity.model,
+            "acpx_effort": identity.effort,
             "acp_session_uuid": identity.canonical_session_uuid,
             "transcript_path": str(transcript.path),
             "transcript_sha256": transcript.sha256,
@@ -1079,7 +1095,7 @@ def collect_review(
     store: ResearchStore,
     attempt_id: str,
     core_database: Path,
-    claude_sessions_path: Path,
+    acpx_sessions_dir: Path,
     claude_projects_root: Path,
     *,
     expected_backend: str = REVIEW_BACKEND,
@@ -1114,7 +1130,7 @@ def collect_review(
         store,
         attempt_id,
         core_database,
-        claude_sessions_path,
+        acpx_sessions_dir,
         claude_projects_root,
         expected_backend=expected_backend,
         expected_mode=expected_mode,

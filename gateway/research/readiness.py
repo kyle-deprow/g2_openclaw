@@ -277,7 +277,7 @@ def native_execution_ready(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()
             }
-        if not {"task_runs", "acp_sessions"}.issubset(tables):
+        if "task_runs" not in tables:
             return _native_failure(store, attempt_id, "core_database_schema")
         record = _read_verified_native_runtime_record(store.root)
         _read_native_requested_service_tier(record.agent_role or "")

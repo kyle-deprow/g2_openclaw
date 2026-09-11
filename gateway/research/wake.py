@@ -151,7 +151,7 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
             f"cwd=BUNDLE, model=claude-opus-5, effort={REVIEW_EFFORT}, label=LABEL), record its child/run ACK with "
             f"`gateway-cli research review-ack {attempt.attempt_id} --root ROOT --child-session-key CHILD --run-id RUN --mode run`, "
             "then collect host evidence with "
-            f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT --core-database DB --claude-sessions SESSIONS --claude-projects PROJECTS`"
+            f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT --core-database DB --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS`"
         )
     elif attempt.state == AttemptState.REVIEW_PASSED:
         action = f"run with `gateway-cli research run {attempt.attempt_id} --root ROOT`"
