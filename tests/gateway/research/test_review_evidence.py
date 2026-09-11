@@ -241,6 +241,25 @@ def test_reservation_accepts_nested_tracked_source_directories(
     )
 
 
+def test_reservation_replay_and_collect_use_frozen_test_evidence_copy(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+    implementation = json.loads(store.evidence(attempt_id, "implementation"))
+    Path(str(implementation["test_evidence_path"])).unlink()
+
+    replay = reserve_review(store, attempt_id, bundle, "owner")
+    assert replay.bundle_sha256 == reservation.bundle_sha256
+    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
+    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
+
+    assert (
+        collect_review(store, attempt_id, core, sessions, projects).state
+        == AttemptState.REVIEW_PASSED
+    )
+
+
 def test_collect_requires_terminal_host_evidence_and_is_idempotent(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
@@ -499,8 +518,8 @@ def test_bundle_mutation_verification_fails_closed(
 ) -> None:
     store, attempt_id, bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
     bundle.chmod(0o755)
-    (bundle / "instructions.md").chmod(0o644)
-    (bundle / "instructions.md").write_text("mutated", encoding="utf-8")
+    (bundle / "test-evidence").chmod(0o644)
+    (bundle / "test-evidence").write_text("mutated", encoding="utf-8")
     assert (
         collect_review(store, attempt_id, core, sessions, projects).state
         == AttemptState.REVIEW_FAILED

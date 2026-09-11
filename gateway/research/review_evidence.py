@@ -266,6 +266,15 @@ def _bundle_digest(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_immutable(path: Path, label: str) -> None:
+    try:
+        mode = path.stat().st_mode
+    except OSError as exc:
+        raise BundleError(f"{label} is missing or unreadable") from exc
+    if mode & 0o222:
+        raise BundleError(f"{label} is mutable")
+
+
 def _readonly_tree(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         if path.is_symlink():
@@ -340,7 +349,18 @@ def build_review_bundle(
     if target_exists:
         if bundle_dir.is_symlink() or not bundle_dir.is_dir():
             raise BundleError("bundle target is not a regular directory")
-        digest = _validate_bundle(store, attempt_id, bundle_dir)
+        reservation_payload = _stored_json(store, attempt_id, "review_reservation")
+        expected_digest = (
+            None
+            if reservation_payload is None
+            else _reservation_from_payload(reservation_payload).bundle_sha256
+        )
+        digest = _validate_bundle(
+            store,
+            attempt_id,
+            bundle_dir,
+            expected_digest=expected_digest,
+        )
         _readonly_tree(bundle_dir)
         return digest
 
@@ -368,13 +388,20 @@ def build_review_bundle(
     return _bundle_digest(bundle_dir)
 
 
-def _validate_bundle(store: ResearchStore, attempt_id: str, root: Path) -> str:
+def _validate_bundle(
+    store: ResearchStore,
+    attempt_id: str,
+    root: Path,
+    *,
+    expected_digest: str | None = None,
+) -> str:
     attempt = store.get_attempt(attempt_id)
     hypothesis = store.get_hypothesis(attempt.hypothesis_id)
     if attempt.commit is None:
         raise BundleError("attempt has no implementation commit")
     if not root.is_absolute() or not root.is_dir() or root.is_symlink():
         raise BundleError("bundle directory is missing or unsafe")
+    _require_immutable(root, "bundle directory")
     allowed = {"spec.json", "diff.patch", "test-evidence", "instructions.md", "source"}
     entries = {path.name for path in root.iterdir()}
     if entries != allowed:
@@ -406,19 +433,19 @@ def _validate_bundle(store: ResearchStore, attempt_id: str, root: Path) -> str:
             continue
         if not path.is_file():
             raise BundleError("bundle source contains a symlink or non-file")
+        _require_immutable(path, f"bundle source {relative}")
         actual[relative] = _read_bounded(path, MAX_BUNDLE_FILE_BYTES, f"bundle source {relative}")
     if actual != expected:
         raise BundleError("bundle source differs from the committed implementation")
     expected_diff = _git_diff(Path(attempt.worktree_path), hypothesis.base_commit, attempt.commit)
     if _read_bounded(root / "diff.patch", MAX_BUNDLE_BYTES, "bundle diff") != expected_diff:
         raise BundleError("bundle diff differs from the committed implementation")
-    implementation = json.loads(store.evidence(attempt_id, "implementation"))
-    test_path = implementation.get("test_evidence_path")
-    if not isinstance(test_path, str) or _read_bounded(
-        Path(test_path), MAX_TEST_EVIDENCE_BYTES, "test evidence"
-    ) != _read_bounded(root / "test-evidence", MAX_TEST_EVIDENCE_BYTES, "bundle test evidence"):
-        raise BundleError("bundle test evidence differs from the submitted evidence")
-    return _bundle_digest(root)
+    _require_immutable(root / "test-evidence", "bundle test evidence")
+    _read_bounded(root / "test-evidence", MAX_TEST_EVIDENCE_BYTES, "bundle test evidence")
+    digest = _bundle_digest(root)
+    if expected_digest is not None and digest != expected_digest:
+        raise BundleError("reserved review bundle was modified")
+    return digest
 
 
 def reserve_review(
@@ -443,11 +470,12 @@ def reserve_review(
             or Path(reservation.bundle_dir) != bundle_dir.resolve()
         ):
             raise StoreConflict("review reservation differs from the stored reservation")
-        if (
-            _validate_bundle(store, attempt_id, Path(reservation.bundle_dir))
-            != reservation.bundle_sha256
-        ):
-            raise BundleError("reserved review bundle was modified")
+        _validate_bundle(
+            store,
+            attempt_id,
+            Path(reservation.bundle_dir),
+            expected_digest=reservation.bundle_sha256,
+        )
         return reservation
     digest = build_review_bundle(store, attempt_id, bundle_dir, instructions=instructions)
     attempt = store.get_attempt(attempt_id)
@@ -787,11 +815,14 @@ def verify_review(
             efforts.add(REVIEW_EFFORT)
         verdict, findings, verdict_json = _final_verdict(events[-1], reservation)
         try:
-            bundle_digest = _validate_bundle(store, attempt_id, Path(reservation.bundle_dir))
+            _validate_bundle(
+                store,
+                attempt_id,
+                Path(reservation.bundle_dir),
+                expected_digest=reservation.bundle_sha256,
+            )
         except BundleError as exc:
             raise ReviewEvidenceError("bundle_mutated") from exc
-        if bundle_digest != reservation.bundle_sha256:
-            raise ReviewEvidenceError("bundle_mutated")
         host = {
             "task_id": task.task_id,
             "task_status": task.status,
