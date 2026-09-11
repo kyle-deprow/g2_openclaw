@@ -219,6 +219,28 @@ def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
     assert json.loads(result.output)["effort"] == "high"
 
 
+def test_reservation_accepts_nested_tracked_source_directories(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    _store, source, _hypothesis = campaign
+    source.chmod(0o755)
+    nested = source / "fixture" / "nested" / "artifact.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "fixture"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "nested fixture"], cwd=source, check=True)
+    source.chmod(0o555)
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+
+    assert (bundle / "source" / "fixture" / "nested" / "artifact.py").read_text() == "VALUE = 1\n"
+    assert (
+        reserve_review(store, attempt_id, bundle, "owner").bundle_sha256
+        == reservation.bundle_sha256
+    )
+
+
 def test_collect_requires_terminal_host_evidence_and_is_idempotent(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:

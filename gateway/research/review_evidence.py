@@ -398,10 +398,14 @@ def _validate_bundle(store: ResearchStore, attempt_id: str, root: Path) -> str:
         expected[relative] = content
     actual: dict[str, bytes] = {}
     for path in (root / "source").rglob("*"):
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
             raise BundleError("bundle source contains a symlink or non-file")
         relative = path.relative_to(root / "source").as_posix()
         _safe_source_path(relative)
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise BundleError("bundle source contains a symlink or non-file")
         actual[relative] = _read_bounded(path, MAX_BUNDLE_FILE_BYTES, f"bundle source {relative}")
     if actual != expected:
         raise BundleError("bundle source differs from the committed implementation")
