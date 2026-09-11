@@ -4195,7 +4195,7 @@ def test_push_script_local_config_rollback_preserves_mode_and_bytes(tmp_path: Pa
     assert ".openclaw.rollback." in cp_log
 
 
-def test_push_script_local_config_rollback_preserves_symlink_topology(
+def test_push_script_rejects_symlink_live_config_before_preflight_without_mutation(
     tmp_path: Path,
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
@@ -4208,22 +4208,34 @@ def test_push_script_local_config_rollback_preserves_symlink_topology(
     symlink_target.chmod(0o640)
     openclaw_config.unlink()
     openclaw_config.symlink_to(symlink_target)
+    initial_link_target = os.readlink(openclaw_config)
+    initial_target_mode = _mode(symlink_target)
     env["MOCK_LIVE_OPENCLAW_CONFIG_VALIDATE_WARN"] = "1"
 
     result = _run_push_script(env)
 
     assert result.returncode == 1
-    assert "live.warning" in result.stderr
+    assert "Guarded file is a symlink while capturing local OpenClaw config identity" in (
+        result.stderr
+    )
+    assert "before ACPX preflight" in result.stderr
+    assert "live.warning" not in result.stderr
     assert openclaw_config.is_symlink()
-    assert os.readlink(openclaw_config) == str(symlink_target)
+    assert os.readlink(openclaw_config) == initial_link_target
     assert openclaw_config.read_bytes() == initial_config
     assert symlink_target.read_bytes() == initial_config
-    assert _mode(symlink_target) == 0o640
+    assert _mode(symlink_target) == initial_target_mode
+    assert not list(openclaw_home.glob("openclaw.json.bak.*"))
+    assert not list(openclaw_home.glob(".push-openclaw-config-artifacts.*"))
+    assert not list(tmp_path.glob("push-openclaw-config-preflight.*"))
     assert not (openclaw_home / "mempalace-readonly-server.py").exists()
+    assert not (openclaw_home / "skills").exists()
+    assert not (openclaw_home / "workspace").exists()
+    assert not list(openclaw_home.glob("workspace-*"))
     assert not _supervisor_unit_dst(home).exists()
-    cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
-    assert f"cp -aT -- {openclaw_config} {openclaw_config}.bak." in cp_log
-    assert ".openclaw.rollback." in cp_log
+    assert not _runtime_caps_dropin_dst(home).exists()
+    assert not _native_crash_hardening_dropin_dst(home).exists()
+    assert not _runtime_caps_dropin_dst(home).parent.exists()
 
 
 @pytest.mark.parametrize(
