@@ -102,7 +102,6 @@ MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 # Do not add an explicit owner allow/deny list.  The native Codex harness
 # treats finite allowlists and unsafe denies as restricted; the owner stays on
 # profile=full while MCP server projections remain main-only.
-MEMPALACE_READONLY_AGENT_IDS=()
 CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")
 # These are the exact research-role files that earlier route deployments may
 # have installed in a scoped Codex runtime.  The owner config registers the
