@@ -73,7 +73,13 @@ def _fixture(
 
 
 def _launch(
-    tmp_path: Path, *, sleep: float = 0.0, mutate: bool = False, timeout: float = 5.0
+    tmp_path: Path,
+    *,
+    sleep: float = 0.0,
+    mutate: bool = False,
+    timeout: float = 5.0,
+    target_out: Path | None = None,
+    before_launch: Callable[[], None] | None = None,
 ) -> tuple[JobRecord, Path]:
     worktree, target, _evaluator, commit, eval_spec, _digest = _fixture(
         tmp_path, sleep=sleep, mutate=mutate
@@ -81,7 +87,9 @@ def _launch(
     eval_spec.chmod(0o444)
     attempt_dir = tmp_path / "H0001-A001"
     (attempt_dir / "run" / "logs").mkdir(parents=True)
-    out = attempt_dir / "run" / "targets.json"
+    out = (
+        target_out or attempt_dir / "run" / "scenarios" / "s000" / "targets-stage" / "targets.json"
+    )
     spec = tmp_path / "spec.json"
     panel = tmp_path / "panel.json"
     receipt = tmp_path / "receipt.json"
@@ -175,6 +183,8 @@ def _launch(
         0.05 if timeout < 1 else 1,
         0.05 if timeout < 1 else 1,
     )
+    if before_launch is not None:
+        before_launch()
     job = launch(
         attempt_dir,
         worktree,
@@ -334,6 +344,39 @@ def test_contained_worker_timeout_is_terminal(tmp_path: Path) -> None:
     assert terminal["run_evidence_sha256"]
     evidence = json.loads((Path(job.run_dir) / "run-evidence.json").read_text(encoding="utf-8"))
     assert evidence["checks"][0]["name"] == "source_before"
+
+
+def test_launch_rejects_target_output_outside_run_before_worker_spawn(tmp_path: Path) -> None:
+    outside_output = tmp_path / "outside-targets.json"
+
+    with pytest.raises(JobError, match="target path is outside"):
+        _launch(tmp_path / "early-target-reject", target_out=outside_output)
+
+    assert not outside_output.exists()
+
+
+def test_launch_rejects_target_output_outside_scenario_stage_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid plan must bind each target writer to its own scenario stage."""
+    launch_root = tmp_path / "scenario-target-reject"
+    wrong_output = launch_root / "H0001-A001" / "run" / "scenarios" / "s000" / "wrong.json"
+    real_popen = subprocess.Popen
+
+    def no_worker_spawn(*args: Any, **kwargs: Any) -> Any:
+        argv = args[0] if args else kwargs.get("args")
+        if isinstance(argv, (tuple, list)) and argv and argv[0] == "git":
+            return real_popen(*args, **kwargs)
+        pytest.fail("invalid scenario target path reached worker spawn")
+
+    with pytest.raises(JobError, match="target path is outside"):
+        _launch(
+            launch_root,
+            target_out=wrong_output,
+            before_launch=lambda: monkeypatch.setattr(subprocess, "Popen", no_worker_spawn),
+        )
+
+    assert not wrong_output.exists()
 
 
 def test_cancel_identity_and_orphan(tmp_path: Path) -> None:
@@ -562,7 +605,7 @@ def test_worker_launch_uses_trusted_package_not_worktree_shadow(
         str(pins.shared_python),
         str(target),
         "--out",
-        str(attempt_dir / "run" / "targets.json"),
+        str(attempt_dir / "run" / "scenarios" / "s000" / "targets-stage" / "targets.json"),
     )
     implementation = ImplementationRecord(
         attempt_dir.name,

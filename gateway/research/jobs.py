@@ -378,7 +378,8 @@ def launch(
     if tuple(targets_argv) != primary.targets_argv:
         raise JobError("primary scenario argv does not match launch argv")
     for scenario in run_plan.scenarios:
-        _validate_targets(scenario.targets_argv, shared_python, worktree, run_dir)
+        target_stage = run_dir / "scenarios" / scenario.scenario_id / "targets-stage"
+        _validate_targets(scenario.targets_argv, shared_python, worktree, target_stage)
         spec_path = evaluation_spec_paths.get(scenario.spec_id)
         if spec_path is None or not spec_path.is_file() or spec_path.is_symlink():
             raise JobError(f"missing evaluation spec {scenario.spec_id}")

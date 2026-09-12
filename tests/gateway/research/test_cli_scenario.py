@@ -18,6 +18,7 @@ from gateway.research.contracts import (
     ImplementationRecord,
     JobState,
     RunPlan,
+    RunScenario,
 )
 from gateway.research.jobs import JobRecord, _starttime
 from gateway.research.store import ResearchStore
@@ -55,14 +56,37 @@ def _fake_worker_evidence(
     status: str,
     run_plan_sha256: str,
     evaluation_spec_set_sha256: str,
+    scenario_spec_sha256: str | None = None,
     result_path: Path | None = None,
 ) -> None:
     scenarios: dict[str, object] = {}
     if result_path is not None:
+        scenario_dir = run_dir / "scenarios" / "s000"
+        target_path = scenario_dir / "targets-stage" / "targets.json"
+        trades_path = scenario_dir / "evaluator-stage" / "out" / "trades.parquet"
+        daily_path = scenario_dir / "evaluator-stage" / "out" / "daily.parquet"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("{}", encoding="utf-8")
+        trades_path.parent.mkdir(parents=True, exist_ok=True)
+        trades_path.write_bytes(b"trades")
+        daily_path.write_bytes(b"daily")
         scenarios["s000"] = {
+            "status": "succeeded",
+            "spec_id": "c000",
+            "spec_sha256": scenario_spec_sha256 or "0" * 64,
+            "targets_sha256": hashlib.sha256(target_path.read_bytes()).hexdigest(),
+            "targets_exit": 0,
+            "evaluator_exit": 0,
             "result_path": str(result_path),
             "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+            "trades_sha256": hashlib.sha256(trades_path.read_bytes()).hexdigest(),
+            "daily_sha256": hashlib.sha256(daily_path.read_bytes()).hexdigest(),
         }
+    validated_inputs = run_dir / "validated-inputs.json"
+    validated_inputs.write_text('{"fixture":true}', encoding="utf-8")
+    analysis = run_dir / "analysis-stage" / "analysis" / "result.json"
+    analysis.parent.mkdir(parents=True, exist_ok=True)
+    analysis.write_text("{}", encoding="utf-8")
     evidence = {
         "contract": "research-run-evidence-v1",
         "status": status,
@@ -71,8 +95,16 @@ def _fake_worker_evidence(
         "run_plan_sha256": run_plan_sha256,
         "evaluation_spec_set_sha256": evaluation_spec_set_sha256,
         "primary_scenario_id": "s000",
+        "validated_inputs_sha256": hashlib.sha256(validated_inputs.read_bytes()).hexdigest(),
         "scenarios": scenarios,
-        "completed_scenarios": [],
+        "completed_scenarios": ["s000"] if status == "succeeded" else [],
+        "analysis": {"analysis/result.json": hashlib.sha256(analysis.read_bytes()).hexdigest()},
+        "analysis_exit": 0,
+        "checks": [
+            {"name": "source_before", "value": "fixture", "ok": True},
+            {"name": "source_after", "value": "fixture", "ok": True},
+        ],
+        "stages": [],
     }
     evidence_path = run_dir / "run-evidence.json"
     evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -100,7 +132,13 @@ def _call(root: Path, *args: str, expect: int = 0) -> Result | Any:
     return result
 
 
-def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
+def _ready(
+    store: ResearchStore,
+    source: Path,
+    hypothesis: Any,
+    *,
+    scenarios: tuple[RunScenario, ...] | None = None,
+) -> Attempt:
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
@@ -115,17 +153,23 @@ def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
         "2026-01-01T00:00:00Z",
     )
     store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record, scenarios=scenarios)
     )
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
 
 
-def _queue(store: ResearchStore, attempt_id: str, job_id: str = "job-cli-test") -> None:
+def _queue(
+    store: ResearchStore,
+    attempt_id: str,
+    job_id: str = "job-cli-test",
+    *,
+    timeout_seconds: int = 30,
+) -> None:
     attempt = store.get_attempt(attempt_id)
     run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
     plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
-    store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
+    store.queue_run_request(attempt_id, job_id, run_dir, timeout_seconds, 256, run_plan=plan)
 
 
 def _verified(store: ResearchStore, attempt_id: str) -> None:
@@ -139,6 +183,136 @@ def _verified(store: ResearchStore, attempt_id: str) -> None:
                 (attempt_id, kind, payload, hashlib.sha256(payload.encode()).hexdigest()),
             )
             conn.commit()
+
+
+def _canonical_terminal_fixture(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> tuple[ResearchStore, Attempt, RunPlan, Path, dict[str, object], dict[str, object]]:
+    """Build the complete evidence shape emitted by the contained worker."""
+    store, source, hypothesis = campaign
+    first = RunScenario(
+        "s000",
+        (sys.executable, "-m", "fixture_target"),
+        "c000",
+        hashlib.sha256(b"eval").hexdigest(),
+    )
+    second = RunScenario(
+        "s001",
+        (sys.executable, "-m", "fixture_target"),
+        "c000",
+        first.evaluation_spec_sha256,
+    )
+    attempt = _ready(store, source, hypothesis, scenarios=(first, second))
+    _queue(store, attempt.attempt_id, job_id="job-terminal-canonical", timeout_seconds=60)
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    plan_digest = hashlib.sha256(plan.to_json().encode()).hexdigest()
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    validated_inputs = run_dir / "validated-inputs.json"
+    validated_inputs.write_text(
+        json.dumps({"specs": {"c000": hashlib.sha256(b"semantic-c000").hexdigest()}}),
+        encoding="utf-8",
+    )
+    analysis_path = run_dir / "analysis-stage" / "analysis" / "result.json"
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
+    analysis_path.write_text('{"summary":"fixture"}', encoding="utf-8")
+    scenarios: dict[str, object] = {}
+    for scenario in plan.scenarios:
+        scenario_dir = run_dir / "scenarios" / scenario.scenario_id
+        target_path = scenario_dir / "targets-stage" / "targets.json"
+        result_path = scenario_dir / "evaluator-stage" / "out" / "result.json"
+        trades_path = scenario_dir / "evaluator-stage" / "out" / "trades.parquet"
+        daily_path = scenario_dir / "evaluator-stage" / "out" / "daily.parquet"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text('{"rows":1}', encoding="utf-8")
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(
+            json.dumps(
+                {
+                    "evaluator_version": "research-evaluator-v2",
+                    "spec_sha256": hashlib.sha256(b"semantic-c000").hexdigest(),
+                    "dividends_sha256": hypothesis.dividends_sha256,
+                    "compliant": True,
+                    "zero_trade": False,
+                    "metrics_available": True,
+                    "acceptance_class": "accepted",
+                    "earnings_provenance": "fixture",
+                }
+            ),
+            encoding="utf-8",
+        )
+        trades_path.write_bytes(b"trades")
+        daily_path.write_bytes(b"daily")
+        scenarios[scenario.scenario_id] = {
+            "status": "succeeded",
+            "spec_id": scenario.spec_id,
+            "spec_sha256": scenario.evaluation_spec_sha256,
+            "targets_sha256": hashlib.sha256(target_path.read_bytes()).hexdigest(),
+            "targets_exit": 0,
+            "evaluator_exit": 0,
+            "result_path": str(result_path),
+            "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+            "trades_sha256": hashlib.sha256(trades_path.read_bytes()).hexdigest(),
+            "daily_sha256": hashlib.sha256(daily_path.read_bytes()).hexdigest(),
+        }
+    evidence: dict[str, object] = {
+        "contract": "research-run-evidence-v1",
+        "status": "succeeded",
+        "job_id": "job-terminal-canonical",
+        "attempt_id": attempt.attempt_id,
+        "run_plan_sha256": plan_digest,
+        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
+        "primary_scenario_id": plan.primary_scenario_id,
+        "validated_inputs_sha256": hashlib.sha256(validated_inputs.read_bytes()).hexdigest(),
+        "scenarios": scenarios,
+        "completed_scenarios": [item.scenario_id for item in plan.scenarios],
+        "analysis": {
+            "analysis/result.json": hashlib.sha256(analysis_path.read_bytes()).hexdigest()
+        },
+        "analysis_exit": 0,
+        "checks": [
+            {"name": "source_before", "value": "fixture-source", "ok": True},
+            {"name": "source_after_validate-c000", "value": "fixture-source", "ok": True},
+            {"name": "source_after_s000", "value": "fixture-source", "ok": True},
+            {"name": "source_after_s001", "value": "fixture-source", "ok": True},
+            {"name": "source_after", "value": "fixture-source", "ok": True},
+        ],
+        "stages": [],
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+    evidence_path = run_dir / "run-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    terminal: dict[str, object] = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-terminal-canonical",
+        "worker_pid": 4242,
+        "worker_starttime": 77,
+        "status": "succeeded",
+        "run_plan_sha256": plan_digest,
+        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
+        "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+        "targets_exit": 0,
+        "evaluator_exit": 0,
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+    return store, attempt, plan, run_dir, evidence, terminal
+
+
+def _rewrite_terminal_evidence(
+    run_dir: Path, evidence: dict[str, object], terminal: dict[str, object]
+) -> None:
+    evidence_path = run_dir / "run-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    terminal["run_evidence_sha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
 
 
 def test_cli_run_bounded_wait_is_queue_observation(
@@ -318,45 +492,33 @@ def test_terminal_outcome_rejects_tampered_run_evidence_digest(
 def test_terminal_outcome_rejects_tampered_primary_result_digest(
     campaign: tuple[ResearchStore, Path, Any],
 ) -> None:
-    store, source, hypothesis = campaign
-    attempt = _ready(store, source, hypothesis)
-    run_dir = (
-        store.root
-        / "hypotheses"
-        / hypothesis.hypothesis_id
-        / "attempts"
-        / attempt.attempt_id
-        / "run"
-    )
-    result_path = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
-    result_path.parent.mkdir(parents=True)
-    result_path.write_text('{"compliant":true}', encoding="utf-8")
-    evidence = {
-        "contract": "research-run-evidence-v1",
-        "status": "succeeded",
-        "job_id": "job-result-tamper",
-        "attempt_id": attempt.attempt_id,
-        "primary_scenario_id": "s000",
-        "scenarios": {
-            "s000": {
-                "result_path": str(result_path),
-                "result_sha256": "0" * 64,
-            }
-        },
-        "completed_scenarios": ["s000"],
-    }
-    evidence_path = run_dir / "run-evidence.json"
-    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    terminal = {
-        "attempt_id": attempt.attempt_id,
-        "job_id": "job-result-tamper",
-        "worker_pid": 4242,
-        "worker_starttime": 77,
-        "status": "succeeded",
-        "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
-        "started_at": "2026-01-01T00:00:00Z",
-        "finished_at": "2026-01-01T00:00:01Z",
-    }
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    primary = scenarios["s000"]
+    assert isinstance(primary, dict)
+    primary["result_sha256"] = "0" * 64
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+def test_terminal_outcome_rejects_tampered_primary_result_file(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, attempt, _plan, _run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    primary = scenarios["s000"]
+    assert isinstance(primary, dict)
+    result_path = Path(str(primary["result_path"]))
+    result_path.write_text('{"tampered":true}', encoding="utf-8")
 
     outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
 
@@ -376,66 +538,171 @@ def test_terminal_outcome_rejects_embedded_binding_mismatch(
     campaign: tuple[ResearchStore, Path, Any], field: str, value: str
 ) -> None:
     """A consistent file digest cannot authenticate mismatched run bindings."""
-    store, source, hypothesis = campaign
-    attempt = _ready(store, source, hypothesis)
-    _queue(store, attempt.attempt_id, job_id="job-embedded-binding")
-    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
-    plan_digest = hashlib.sha256(plan.to_json().encode()).hexdigest()
-    result_path = (
-        store.root
-        / "hypotheses"
-        / hypothesis.hypothesis_id
-        / "attempts"
-        / attempt.attempt_id
-        / "run"
-        / "scenarios"
-        / "s000"
-        / "evaluator-stage"
-        / "out"
-        / "result.json"
-    )
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    result_path.write_text('{"compliant":true}', encoding="utf-8")
-    evidence: dict[str, object] = {
-        "contract": "research-run-evidence-v1",
-        "status": "succeeded",
-        "job_id": "job-embedded-binding",
-        "attempt_id": attempt.attempt_id,
-        "run_plan_sha256": plan_digest,
-        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
-        "primary_scenario_id": "s000",
-        "scenarios": {
-            "s000": {
-                "status": "succeeded",
-                "result_path": str(result_path),
-                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
-            }
-        },
-        "completed_scenarios": ["s000"],
-    }
-    evidence_path = result_path.parents[4] / "run-evidence.json"
-    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    terminal: dict[str, object] = {
-        "attempt_id": attempt.attempt_id,
-        "job_id": "job-embedded-binding",
-        "worker_pid": 4242,
-        "worker_starttime": 77,
-        "status": "succeeded",
-        "run_plan_sha256": plan_digest,
-        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
-        "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
-        "started_at": "2026-01-01T00:00:00Z",
-        "finished_at": "2026-01-01T00:00:01Z",
-    }
-
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
     baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
     assert baseline.status == "succeeded"
 
     evidence[field] = value
-    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
-    terminal["run_evidence_sha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
     outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
 
+    assert outcome.status == "run_evidence_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected"),
+    [
+        ("primary", "s001"),
+        ("missing_completion", ["s000"]),
+        ("reordered_completion", ["s001", "s000"]),
+        ("scenario_spec_id", "c999"),
+        ("scenario_spec_sha256", "0" * 64),
+        ("validated_inputs_sha256", "0" * 64),
+        ("analysis_digest", "0" * 64),
+        ("analysis_manifest_missing", None),
+        ("analysis_manifest_extra", None),
+        ("secondary_result_sha256", "0" * 64),
+        ("failed_check", False),
+        ("noncanonical_result_path", "outside-result.json"),
+    ],
+)
+def test_terminal_outcome_rejects_worker_success_binding_tamper(
+    campaign: tuple[ResearchStore, Path, Any], tamper: str, expected: object
+) -> None:
+    """A worker-shaped success must match every stored plan/run binding."""
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+
+    if tamper == "primary":
+        evidence["primary_scenario_id"] = expected
+    elif tamper in {"missing_completion", "reordered_completion"}:
+        evidence["completed_scenarios"] = expected
+    elif tamper == "scenario_spec_id":
+        scenarios = evidence["scenarios"]
+        assert isinstance(scenarios, dict)
+        scenario = scenarios["s000"]
+        assert isinstance(scenario, dict)
+        scenario["spec_id"] = expected
+    elif tamper == "scenario_spec_sha256":
+        scenarios = evidence["scenarios"]
+        assert isinstance(scenarios, dict)
+        scenario = scenarios["s000"]
+        assert isinstance(scenario, dict)
+        scenario["spec_sha256"] = expected
+    elif tamper == "validated_inputs_sha256":
+        evidence["validated_inputs_sha256"] = expected
+    elif tamper == "analysis_digest":
+        analysis = evidence["analysis"]
+        assert isinstance(analysis, dict)
+        analysis["analysis/result.json"] = expected
+    elif tamper == "analysis_manifest_missing":
+        analysis = evidence["analysis"]
+        assert isinstance(analysis, dict)
+        analysis.pop("analysis/result.json")
+    elif tamper == "analysis_manifest_extra":
+        analysis = evidence["analysis"]
+        assert isinstance(analysis, dict)
+        analysis["analysis/extra.json"] = "0" * 64
+    elif tamper == "secondary_result_sha256":
+        scenarios = evidence["scenarios"]
+        assert isinstance(scenarios, dict)
+        scenario = scenarios["s001"]
+        assert isinstance(scenario, dict)
+        scenario["result_sha256"] = expected
+    elif tamper == "failed_check":
+        checks = evidence["checks"]
+        assert isinstance(checks, list)
+        check = checks[0]
+        assert isinstance(check, dict)
+        check["ok"] = expected
+    elif tamper == "noncanonical_result_path":
+        scenarios = evidence["scenarios"]
+        assert isinstance(scenarios, dict)
+        scenario = scenarios["s000"]
+        assert isinstance(scenario, dict)
+        original = Path(str(scenario["result_path"]))
+        outside = run_dir / str(expected)
+        outside.write_bytes(original.read_bytes())
+        scenario["result_path"] = str(outside)
+    else:
+        raise AssertionError(f"unhandled tamper: {tamper}")
+
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+def test_terminal_outcome_rejects_tampered_secondary_result_file(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, attempt, _plan, _run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    secondary = scenarios["s001"]
+    assert isinstance(secondary, dict)
+    result_path = Path(str(secondary["result_path"]))
+    result_path.write_text('{"tampered":true}', encoding="utf-8")
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+@pytest.mark.parametrize("output_kind", ["missing", "directory", "symlink"])
+def test_terminal_outcome_rejects_nonregular_primary_result_output(
+    campaign: tuple[ResearchStore, Path, Any], output_kind: str
+) -> None:
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    primary = scenarios["s000"]
+    assert isinstance(primary, dict)
+    result_path = Path(str(primary["result_path"]))
+    result_bytes = result_path.read_bytes()
+    result_path.unlink()
+    if output_kind == "missing":
+        pass
+    elif output_kind == "directory":
+        result_path.mkdir()
+    elif output_kind == "symlink":
+        target = run_dir.parent / "result-symlink-target.json"
+        target.write_bytes(result_bytes)
+        result_path.symlink_to(target)
+    else:
+        raise AssertionError(output_kind)
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+@pytest.mark.parametrize("status", ["scenario_failed", "timed_out"])
+def test_terminal_outcome_non_success_requires_primary_but_not_full_coverage(
+    campaign: tuple[ResearchStore, Path, Any], status: str
+) -> None:
+    store, attempt, plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    evidence["status"] = status
+    evidence["completed_scenarios"] = []
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    scenarios.pop("s001")
+    terminal["status"] = status
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == status
+
+    evidence["primary_scenario_id"] = "s001"
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert plan.primary_scenario_id == "s000"
     assert outcome.status == "run_evidence_mismatch"
 
 
@@ -631,6 +898,7 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
             status="succeeded",
             run_plan_sha256=plan_digest,
             evaluation_spec_set_sha256=spec_set_digest,
+            scenario_spec_sha256=hypothesis.evaluation_spec_sha256,
             result_path=result_path,
         )
         return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, 0, 0, str(run_dir))

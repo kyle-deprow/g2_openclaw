@@ -130,6 +130,9 @@ The runner executes scenarios sequentially and performs declared analysis only
 after every scenario has produced its bound result, trades, and daily
 artifacts. Historical H1 rows remain readable, but a fresh launch has no
 argv-only or single-spec fallback.
+Each scenario's target command must write to its own canonical
+`run/scenarios/sNNN/targets-stage/targets.json`; do not use a shared run-root
+target path or another scenario's stage.
 
 ## Scientific proof boundary
 

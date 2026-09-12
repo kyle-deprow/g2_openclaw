@@ -395,6 +395,11 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
     result_digest = hashlib.sha256(result_path.read_bytes()).hexdigest()
     plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
     plan_digest = hashlib.sha256(plan.to_json().encode()).hexdigest()
+    validated_inputs = run_dir / "validated-inputs.json"
+    validated_inputs.write_text('{"fixture":true}', encoding="utf-8")
+    analysis_path = run_dir / "analysis-stage" / "analysis" / "result.json"
+    analysis_path.parent.mkdir(parents=True, exist_ok=True)
+    analysis_path.write_text("{}", encoding="utf-8")
     terminal = run_dir / "terminal.json"
     evidence = run_dir / "run-evidence.json"
     evidence.write_text(
@@ -410,11 +415,20 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
                 "scenarios": {
                     "s000": {
                         "status": "succeeded",
+                        "spec_id": plan.scenarios[0].spec_id,
+                        "spec_sha256": plan.scenarios[0].evaluation_spec_sha256,
                         "result_path": str(result_path),
                         "result_sha256": result_digest,
                     }
                 },
                 "completed_scenarios": ["s000"],
+                "validated_inputs_sha256": hashlib.sha256(
+                    validated_inputs.read_bytes()
+                ).hexdigest(),
+                "analysis": {
+                    "analysis/result.json": hashlib.sha256(analysis_path.read_bytes()).hexdigest()
+                },
+                "checks": [{"name": "source_before", "value": "fixture", "ok": True}],
             }
         ),
         encoding="utf-8",

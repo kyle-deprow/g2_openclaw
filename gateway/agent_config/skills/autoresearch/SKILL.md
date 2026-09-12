@@ -93,6 +93,9 @@ transformation of retained trades. The bounded runner validates each distinct
 spec once, executes scenarios sequentially, and runs declared analysis only
 after all scenario artifacts are complete. H1 historical rows remain
 readable; new launches cannot fall back to an unbound argv or one evaluator.
+Each scenario's target command must write to its own canonical
+`run/scenarios/sNNN/targets-stage/targets.json`; do not use a shared run-root
+target path or another scenario's stage.
 
 ## Scientific boundary
 

@@ -776,6 +776,109 @@ def _run_evidence_mismatch_outcome(
     )
 
 
+def _regular_file_sha256(path: Path) -> str | None:
+    """Digest one canonical regular file without following a symlink."""
+    try:
+        if path.is_symlink() or not path.is_file() or path.resolve() != path:
+            return None
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _scenario_result_path(run_dir: Path, scenario_id: str) -> Path:
+    return run_dir / "scenarios" / scenario_id / "evaluator-stage" / "out" / "result.json"
+
+
+def _validate_scenario_result(
+    run_dir: Path,
+    scenario_id: str,
+    scenario: dict[str, object],
+    *,
+    expected_spec_id: str | None = None,
+    expected_spec_sha256: str | None = None,
+    require_complete: bool,
+) -> tuple[bool, Path | None]:
+    """Validate a worker scenario binding and its canonical result file."""
+    if require_complete and (
+        scenario.get("spec_id") != expected_spec_id
+        or scenario.get("spec_sha256") != expected_spec_sha256
+    ):
+        return False, None
+    if not require_complete and "result_path" not in scenario and "result_sha256" not in scenario:
+        return True, None
+    raw_path = scenario.get("result_path")
+    expected_digest = scenario.get("result_sha256")
+    if not isinstance(raw_path, str) or not isinstance(expected_digest, str):
+        return False, None
+    canonical = _scenario_result_path(run_dir, scenario_id)
+    if Path(raw_path) != canonical or _regular_file_sha256(canonical) != expected_digest:
+        return False, None
+    return True, canonical
+
+
+def _validate_worker_success_evidence(
+    run_dir: Path,
+    plan: RunPlan,
+    evidence: dict[str, object],
+    scenarios: dict[str, object],
+) -> tuple[bool, Path | None]:
+    """Validate complete worker evidence against the immutable run plan."""
+    scenario_ids = tuple(item.scenario_id for item in plan.scenarios)
+    completed = evidence.get("completed_scenarios")
+    if not isinstance(completed, list) or tuple(completed) != scenario_ids:
+        return False, None
+    if set(scenarios) != set(scenario_ids):
+        return False, None
+    primary_path: Path | None = None
+    for item in plan.scenarios:
+        scenario = scenarios.get(item.scenario_id)
+        if not isinstance(scenario, dict) or scenario.get("status") != "succeeded":
+            return False, None
+        valid, result_path = _validate_scenario_result(
+            run_dir,
+            item.scenario_id,
+            scenario,
+            expected_spec_id=item.spec_id,
+            expected_spec_sha256=item.evaluation_spec_sha256,
+            require_complete=True,
+        )
+        if not valid or result_path is None:
+            return False, None
+        if item.scenario_id == plan.primary_scenario_id:
+            primary_path = result_path
+
+    validated_inputs = run_dir / "validated-inputs.json"
+    if not isinstance(evidence.get("validated_inputs_sha256"), str) or _regular_file_sha256(
+        validated_inputs
+    ) != evidence.get("validated_inputs_sha256"):
+        return False, None
+
+    analysis = evidence.get("analysis")
+    analysis_dir = run_dir / "analysis-stage"
+    artifacts = tuple(plan.analysis.artifacts)
+    if (
+        not isinstance(analysis, dict)
+        or set(analysis) != set(artifacts)
+        or analysis_dir.is_symlink()
+        or not analysis_dir.is_dir()
+        or analysis_dir.resolve() != analysis_dir
+    ):
+        return False, None
+    for relative in artifacts:
+        digest = analysis.get(relative)
+        path = analysis_dir / relative
+        if not isinstance(digest, str) or _regular_file_sha256(path) != digest:
+            return False, None
+
+    checks = evidence.get("checks")
+    if not isinstance(checks, list) or any(
+        not isinstance(check, dict) or check.get("ok") is not True for check in checks
+    ):
+        return False, None
+    return primary_path is not None, primary_path
+
+
 def _terminal_outcome(
     store: ResearchStore,
     attempt_id: str,
@@ -798,70 +901,77 @@ def _terminal_outcome(
         return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
     expected_plan_digest = hashlib.sha256(stored_plan.to_json().encode()).hexdigest()
     expected_job_id = attempt.run_job_id
-    result_path = Path(
-        str(
-            store.root
-            / "hypotheses"
-            / attempt.hypothesis_id
-            / "attempts"
-            / attempt_id
-            / "run"
-            / "evaluator-stage"
-            / "out"
-            / "result.json"
-        )
-    )
-    run_evidence_path = result_path.parents[2] / "run-evidence.json"
-    if run_evidence_path.is_file():
-        result_path = run_evidence_path
+    attempt_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id
+    run_dir = attempt_dir / "run"
+    run_evidence_path = run_dir / "run-evidence.json"
+    for key, expected in (
+        ("attempt_id", attempt_id),
+        ("job_id", expected_job_id),
+        ("run_plan_sha256", expected_plan_digest),
+        ("evaluation_spec_set_sha256", stored_plan.evaluation_spec_set_sha256),
+    ):
+        if key in terminal and terminal.get(key) != expected:
+            return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
     result: dict[str, object] = {}
     terminal_evidence_digest = terminal.get("run_evidence_sha256")
     if (
         not isinstance(terminal_evidence_digest, str)
-        or not run_evidence_path.is_file()
-        or hashlib.sha256(run_evidence_path.read_bytes()).hexdigest() != terminal_evidence_digest
+        or _regular_file_sha256(run_evidence_path) != terminal_evidence_digest
     ):
         return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
-    if result_path.is_file():
+    try:
+        loaded = json.loads(run_evidence_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    if not isinstance(loaded, dict):
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    if (
+        loaded.get("attempt_id") != attempt_id
+        or loaded.get("job_id") != expected_job_id
+        or loaded.get("run_plan_sha256") != expected_plan_digest
+        or loaded.get("evaluation_spec_set_sha256") != stored_plan.evaluation_spec_set_sha256
+        or loaded.get("status") != status
+        or loaded.get("primary_scenario_id") != stored_plan.primary_scenario_id
+    ):
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    raw_scenarios = loaded.get("scenarios")
+    if not isinstance(raw_scenarios, dict):
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    primary_data = raw_scenarios.get(stored_plan.primary_scenario_id)
+    primary_path: Path | None = None
+    if isinstance(primary_data, dict):
+        primary_plan = next(
+            item
+            for item in stored_plan.scenarios
+            if item.scenario_id == stored_plan.primary_scenario_id
+        )
+        valid, primary_path = _validate_scenario_result(
+            run_dir,
+            stored_plan.primary_scenario_id,
+            primary_data,
+            expected_spec_id=primary_plan.spec_id if status == "succeeded" else None,
+            expected_spec_sha256=(
+                primary_plan.evaluation_spec_sha256 if status == "succeeded" else None
+            ),
+            require_complete=status == "succeeded",
+        )
+        if not valid:
+            return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    elif status == "succeeded":
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    if status == "succeeded":
+        valid, primary_path = _validate_worker_success_evidence(
+            run_dir, stored_plan, loaded, raw_scenarios
+        )
+        if not valid or primary_path is None:
+            return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
         try:
-            loaded = json.loads(result_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                if (
-                    loaded.get("attempt_id") != attempt_id
-                    or loaded.get("job_id") != expected_job_id
-                    or loaded.get("run_plan_sha256") != expected_plan_digest
-                    or loaded.get("evaluation_spec_set_sha256")
-                    != stored_plan.evaluation_spec_set_sha256
-                ):
-                    return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
-                if result_path.name == "run-evidence.json":
-                    primary_result_valid = False
-                    scenarios = loaded.get("scenarios")
-                    if isinstance(scenarios, dict):
-                        primary = str(loaded.get("primary_scenario_id", "s000"))
-                        primary_data = scenarios.get(primary)
-                        if isinstance(primary_data, dict):
-                            primary_result = primary_data.get("result_path")
-                            expected_result_digest = primary_data.get("result_sha256")
-                            if isinstance(primary_result, str) and isinstance(
-                                expected_result_digest, str
-                            ):
-                                candidate = Path(primary_result)
-                                if (
-                                    candidate.is_file()
-                                    and hashlib.sha256(candidate.read_bytes()).hexdigest()
-                                    == expected_result_digest
-                                ):
-                                    decoded = json.loads(candidate.read_text(encoding="utf-8"))
-                                    if isinstance(decoded, dict):
-                                        result = decoded
-                                        primary_result_valid = True
-                    if status == "succeeded" and not primary_result_valid:
-                        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
-                else:
-                    result = loaded
-        except json.JSONDecodeError:
-            pass
+            decoded = json.loads(primary_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+        if not isinstance(decoded, dict):
+            return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+        result = decoded
     raw_exit = terminal.get("evaluator_exit", terminal.get("targets_exit", -1))
     exit_code = int(raw_exit) if isinstance(raw_exit, (int, float, str)) else -1
     return RunOutcome(
@@ -873,7 +983,7 @@ def _terminal_outcome(
         metrics_available=bool(result.get("metrics_available", False)),
         acceptance_class=str(result.get("acceptance_class", "unknown")),
         earnings_provenance=str(result.get("earnings_provenance", "unknown")),
-        result_path=str(result_path) if status == "succeeded" and result_path.is_file() else "",
+        result_path=str(primary_path) if status == "succeeded" and primary_path is not None else "",
         started_at=str(terminal.get("started_at", now_utc())),
         finished_at=str(terminal.get("finished_at", now_utc())),
         status=status,
