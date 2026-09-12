@@ -103,6 +103,35 @@ def _wire_evaluation_spec_set(store: ResearchStore, spec: HypothesisSpec) -> Non
     store.evaluation_spec_set = fake_spec_set  # type: ignore[method-assign]
 
 
+def _stored_spec_set_digest(store: ResearchStore, hypothesis_id: str = "H0001") -> str:
+    return hashlib.sha256(store.evaluation_spec_set(hypothesis_id).to_json().encode()).hexdigest()
+
+
+def _replace_spec_set_evidence(
+    store: ResearchStore, hypothesis_id: str, payload: str, payload_sha256: str
+) -> None:
+    """Install controlled corrupt evidence in this disposable SQLite fixture."""
+    with store._connect() as conn:
+        conn.execute("DROP TRIGGER immutable_hypothesis_evidence")
+        conn.execute("DROP TRIGGER immutable_hypothesis_evidence_delete")
+        conn.execute(
+            "UPDATE hypothesis_evidence SET payload_json=?,payload_sha256=? "
+            "WHERE hypothesis_id=? AND kind='evaluation_spec_set'",
+            (payload, payload_sha256, hypothesis_id),
+        )
+        conn.executescript(
+            """
+            CREATE TRIGGER immutable_hypothesis_evidence
+            BEFORE UPDATE ON hypothesis_evidence
+            BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
+            CREATE TRIGGER immutable_hypothesis_evidence_delete
+            BEFORE DELETE ON hypothesis_evidence
+            BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
+            """
+        )
+        conn.commit()
+
+
 def test_campaign_policy_is_unset_without_a_default(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
@@ -111,6 +140,35 @@ def test_campaign_policy_is_unset_without_a_default(
     assert store.campaign_policy() == CampaignPolicy(False)
     assert store._campaign_row()["attempt_cap"] is None
     assert store._campaign_row()["policy_set_at"] is None
+
+
+def test_historical_h1_without_spec_set_remains_visible_in_full_status(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, hypothesis = campaign
+    projection = store.root / "hypotheses" / hypothesis.hypothesis_id / "evaluation-spec-set.json"
+    with store._connect() as conn:
+        conn.execute("DROP TRIGGER immutable_hypothesis_evidence_delete")
+        conn.execute(
+            "DELETE FROM hypothesis_evidence WHERE hypothesis_id=? AND kind='evaluation_spec_set'",
+            (hypothesis.hypothesis_id,),
+        )
+        conn.executescript(
+            """
+            CREATE TRIGGER immutable_hypothesis_evidence_delete
+            BEFORE DELETE ON hypothesis_evidence
+            BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
+            """
+        )
+        conn.commit()
+    projection.unlink()
+
+    result = runner.invoke(app, ["research", "status", "--root", str(store.root), "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["hypotheses"][0]["hypothesis_id"] == hypothesis.hypothesis_id
+    assert payload["campaign"][0] in {"ACTIVE", "PAUSED"}
 
 
 def test_policy_cli_store_round_trip_is_explicit(
@@ -134,7 +192,13 @@ def test_policy_cli_status_round_trip_keeps_decision_and_latest_refusal(
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.insert_admission_decision(attempt.attempt_id, _admit(_document(_payload())))
+    store.insert_admission_decision(
+        attempt.attempt_id,
+        _admit(
+            _document(_payload()),
+            evaluation_spec_set_sha256=_stored_spec_set_digest(store, hypothesis.hypothesis_id),
+        ),
+    )
     refusal = _admit(_document(_payload()), capability=ExecutionCapability(frozenset({"reddit"})))
     store.record_admission_refusal(hypothesis.hypothesis_id, refusal)
 
@@ -486,6 +550,79 @@ def test_admission_rejects_second_spec_non_cost_bound_change(
         _admission_for_hypothesis(store, spec.hypothesis_id)
 
 
+@pytest.mark.parametrize("mutation", ["missing", "malformed", "mutated", "symlink"])
+def test_admission_rejects_missing_malformed_mutated_or_symlinked_spec_set(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    store, _source, stored_hypothesis = campaign
+    spec = _wired_spec(stored_hypothesis, tmp_path)
+    evaluation_path = Path(spec.evaluation_spec_path)
+    evaluation_digest = hashlib.sha256(evaluation_path.read_bytes()).hexdigest()
+    set_path = evaluation_path
+    if mutation == "symlink":
+        set_path = tmp_path / "evaluation-spec-link.json"
+        set_path.symlink_to(evaluation_path)
+        spec = replace(
+            spec,
+            evaluation_spec_path=str(set_path),
+            evaluation_spec_sha256=evaluation_digest,
+        )
+    manifest = EvaluationSpecSet(
+        "research-evaluation-spec-set-v1",
+        spec.hypothesis_id,
+        "c000",
+        (EvaluationSpecEntry("c000", str(evaluation_path), evaluation_digest),),
+        "2026-01-01T00:00:00Z",
+    )
+    manifest_raw = json.loads(manifest.to_json())
+    if mutation == "symlink":
+        manifest_raw["specs"][0]["path"] = str(set_path)
+    payload = json.dumps(manifest_raw, sort_keys=True, separators=(",", ":"))
+    if mutation == "missing":
+        _replace_spec_set_evidence(
+            store,
+            spec.hypothesis_id,
+            payload,
+            hashlib.sha256(payload.encode()).hexdigest(),
+        )
+        with store._connect() as conn:
+            conn.execute("DROP TRIGGER immutable_hypothesis_evidence_delete")
+            conn.execute(
+                "DELETE FROM hypothesis_evidence WHERE hypothesis_id=? "
+                "AND kind='evaluation_spec_set'",
+                (spec.hypothesis_id,),
+            )
+            conn.executescript(
+                """
+                CREATE TRIGGER immutable_hypothesis_evidence_delete
+                BEFORE DELETE ON hypothesis_evidence
+                BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
+                """
+            )
+            conn.commit()
+    elif mutation == "malformed":
+        _replace_spec_set_evidence(
+            store, spec.hypothesis_id, "not-json", hashlib.sha256(b"not-json").hexdigest()
+        )
+    elif mutation == "mutated":
+        _replace_spec_set_evidence(store, spec.hypothesis_id, payload, "0" * 64)
+    else:
+        _replace_spec_set_evidence(
+            store, spec.hypothesis_id, payload, hashlib.sha256(payload.encode()).hexdigest()
+        )
+    monkeypatch.setattr(store, "get_hypothesis", lambda _hypothesis_id: spec)
+
+    with pytest.raises(_AdmissionInputError) as caught:
+        _admission_for_hypothesis(store, spec.hypothesis_id)
+    assert caught.value.reason in {
+        "EVALUATION_SPEC_SET_REJECTED",
+        "EVALUATION_SPEC_DIGEST_MISMATCH",
+    }
+
+
 @pytest.mark.parametrize(
     ("instrument_class", "feature_source", "expected"),
     [
@@ -548,7 +685,10 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
 ) -> None:
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
-    admitted = _admit(_document(_payload()))
+    admitted = _admit(
+        _document(_payload()),
+        evaluation_spec_set_sha256=_stored_spec_set_digest(store, hypothesis.hypothesis_id),
+    )
     attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
     record = implementation(attempt.attempt_id, "a" * 40)
     plan = run_plan(store, attempt, record)
@@ -688,7 +828,10 @@ def test_admission_decision_is_insert_only_and_replay_bound(
     store.freeze("H0001")
     attempt = store.open_attempt("H0001", source)
     payload = _payload()
-    decision = _admit(_document(payload))
+    decision = _admit(
+        _document(payload),
+        evaluation_spec_set_sha256=_stored_spec_set_digest(store, "H0001"),
+    )
 
     store.insert_admission_decision(attempt.attempt_id, decision)
     store.insert_admission_decision(attempt.attempt_id, decision)

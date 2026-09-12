@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -127,6 +128,30 @@ def test_queue_limits_reject_nonfinite_negative_and_ceiling(
             )
     with pytest.raises(ValueError):
         store.queue_run_request(attempt.attempt_id, "job-invalid-rss", run_dir, 30, 8193)
+
+
+def test_queue_rejects_run_plan_stage_timeout_above_job_timeout(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, source, hypothesis = campaign
+
+    def long_plan(attempt: Attempt, record: ImplementationRecord) -> RunPlan:
+        base = fixture_run_plan(store, attempt, record)
+        return replace(base, scenario_timeout_seconds=20, analysis_timeout_seconds=20)
+
+    attempt = _ready(store, source, hypothesis, run_plan_factory=long_plan)
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+
+    with pytest.raises(StoreConflict, match="timeouts"):
+        store.queue_run_request(attempt.attempt_id, "job-timeout-cap", run_dir, 10, 256, plan)
 
 
 def test_queue_replay_is_idempotent_and_conflicting_payload_refused(
@@ -325,6 +350,7 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
     result_path = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text('{"compliant":true}', encoding="utf-8")
+    result_digest = hashlib.sha256(result_path.read_bytes()).hexdigest()
     terminal = run_dir / "terminal.json"
     evidence = run_dir / "run-evidence.json"
     evidence.write_text(
@@ -335,8 +361,14 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
                 "job_id": payload["job_id"],
                 "attempt_id": attempt.attempt_id,
                 "primary_scenario_id": "s000",
-                "scenarios": {},
-                "completed_scenarios": [],
+                "scenarios": {
+                    "s000": {
+                        "status": "succeeded",
+                        "result_path": str(result_path),
+                        "result_sha256": result_digest,
+                    }
+                },
+                "completed_scenarios": ["s000"],
             }
         ),
         encoding="utf-8",
@@ -345,6 +377,8 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
         json.dumps(
             {
                 "job_id": payload["job_id"],
+                "worker_pid": worker_pid,
+                "worker_starttime": worker_starttime,
                 "status": "succeeded",
                 "evaluator_exit": 0,
                 "run_evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
@@ -364,6 +398,58 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
     assert "CANCELLED" not in result.output
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_SUCCEEDED
     assert not (run_dir / "cancel.json").exists()
+
+
+def test_running_cancel_publishes_cancel_sidecar_without_worker_evidence(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A running cancel must reconcile its host sidecar as canonical cancellation."""
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    _queue(store, attempt.attempt_id)
+    store.acquire_run_lock()
+    try:
+        store.claim_queued_job(attempt.attempt_id, "job-queue-test")
+    finally:
+        store.release_run_lock()
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None
+    payload = json.loads(str(row["payload_json"]))
+    payload.update(worker_pid=4242, worker_starttime=77, state="LAUNCHED")
+    store.update_job(payload, attempt.attempt_id)
+
+    def publish_cancel(job: JobRecord) -> str:
+        Path(job.run_dir).mkdir(parents=True, exist_ok=True)
+        (Path(job.run_dir) / "cancel.json").write_text(
+            json.dumps(
+                {
+                    "job_id": job.job_id,
+                    "attempt_id": job.attempt_id,
+                    "worker_pid": job.worker_pid,
+                    "worker_starttime": job.worker_starttime,
+                    "status": "cancelled",
+                    "targets_exit": -15,
+                    "evaluator_exit": None,
+                    "started_at": "2026-01-01T00:00:00Z",
+                    "finished_at": "2026-01-01T00:00:01Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return "CANCELLED"
+
+    monkeypatch.setattr(research_cli, "cancel_job", publish_cancel)
+    result = CliRunner().invoke(
+        app,
+        ["research", "cancel", attempt.attempt_id, "--root", str(store.root)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "CANCELLED"
+    stored = store.get_attempt(attempt.attempt_id)
+    assert stored.state == AttemptState.RUN_FAILED
+    assert stored.run_outcome is not None
+    assert json.loads(stored.run_outcome)["status"] == "cancelled"
 
 
 def test_owner_lock_does_not_block_queue_or_cancel(

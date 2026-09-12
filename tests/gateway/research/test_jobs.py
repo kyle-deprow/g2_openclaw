@@ -386,6 +386,7 @@ def test_cancellation_authority_blocks_late_worker_terminalization(
         worker._write_terminal_if_authorized(
             run_dir,
             {"job_id": job.job_id, "status": "targets_failed"},
+            {},
         )
 
     monkeypatch.setattr("gateway.research.jobs._starttime", fake_starttime)

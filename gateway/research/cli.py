@@ -734,10 +734,64 @@ def _record_admission_refusal(
         store.pause(decision.detail or "campaign remains paused until policy is set")
 
 
+def _host_terminal_outcome(
+    attempt_id: str, attempt: Attempt, terminal: dict[str, object]
+) -> RunOutcome:
+    raw_exit = terminal.get("evaluator_exit", terminal.get("targets_exit", -1))
+    exit_code = int(raw_exit) if isinstance(raw_exit, (int, float, str)) else -1
+    raw_status = terminal.get("status")
+    status = raw_status if isinstance(raw_status, str) and raw_status else "unknown"
+    return RunOutcome(
+        attempt_id=attempt_id,
+        job_id=str(terminal.get("job_id", attempt.run_job_id or "")),
+        exit_code=exit_code,
+        compliant=False,
+        zero_trade=False,
+        metrics_available=False,
+        acceptance_class=status,
+        earnings_provenance="none",
+        result_path="",
+        started_at=str(terminal.get("started_at", now_utc())),
+        finished_at=str(terminal.get("finished_at", now_utc())),
+        status=status,
+    )
+
+
+def _run_evidence_mismatch_outcome(
+    attempt_id: str, attempt: Attempt, terminal: dict[str, object]
+) -> RunOutcome:
+    return RunOutcome(
+        attempt_id=attempt_id,
+        job_id=str(terminal.get("job_id", attempt.run_job_id or "")),
+        exit_code=-1,
+        compliant=False,
+        zero_trade=False,
+        metrics_available=False,
+        acceptance_class="unknown",
+        earnings_provenance="unknown",
+        result_path="",
+        started_at=str(terminal.get("started_at", now_utc())),
+        finished_at=str(terminal.get("finished_at", now_utc())),
+        status="run_evidence_mismatch",
+    )
+
+
 def _terminal_outcome(
-    store: ResearchStore, attempt_id: str, terminal: dict[str, object]
+    store: ResearchStore,
+    attempt_id: str,
+    terminal: dict[str, object],
+    *,
+    origin: str | None = None,
 ) -> RunOutcome:
     attempt = store.get_attempt(attempt_id)
+    raw_status = terminal.get("status")
+    status = raw_status if isinstance(raw_status, str) and raw_status else "unknown"
+    if (
+        origin == "cancel.json"
+        or "worker_pid" not in terminal
+        or (origin is None and status in {"cancelled", "cancelling"})
+    ):
+        return _host_terminal_outcome(attempt_id, attempt, terminal)
     result_path = Path(
         str(
             store.root
@@ -761,25 +815,13 @@ def _terminal_outcome(
         or not run_evidence_path.is_file()
         or hashlib.sha256(run_evidence_path.read_bytes()).hexdigest() != terminal_evidence_digest
     ):
-        return RunOutcome(
-            attempt_id=attempt_id,
-            job_id=str(terminal.get("job_id", attempt.run_job_id or "")),
-            exit_code=-1,
-            compliant=False,
-            zero_trade=False,
-            metrics_available=False,
-            acceptance_class="unknown",
-            earnings_provenance="unknown",
-            result_path="",
-            started_at=str(terminal.get("started_at", now_utc())),
-            finished_at=str(terminal.get("finished_at", now_utc())),
-            status="run_evidence_mismatch",
-        )
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
     if result_path.is_file():
         try:
             loaded = json.loads(result_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 if result_path.name == "run-evidence.json":
+                    primary_result_valid = False
                     scenarios = loaded.get("scenarios")
                     if isinstance(scenarios, dict):
                         primary = str(loaded.get("primary_scenario_id", "s000"))
@@ -799,14 +841,15 @@ def _terminal_outcome(
                                     decoded = json.loads(candidate.read_text(encoding="utf-8"))
                                     if isinstance(decoded, dict):
                                         result = decoded
+                                        primary_result_valid = True
+                    if status == "succeeded" and not primary_result_valid:
+                        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
                 else:
                     result = loaded
         except json.JSONDecodeError:
             pass
     raw_exit = terminal.get("evaluator_exit", terminal.get("targets_exit", -1))
     exit_code = int(raw_exit) if isinstance(raw_exit, (int, float, str)) else -1
-    raw_status = terminal.get("status")
-    status = raw_status if isinstance(raw_status, str) and raw_status else "unknown"
     return RunOutcome(
         attempt_id=attempt_id,
         job_id=str(terminal.get("job_id", attempt.run_job_id or "")),
@@ -849,7 +892,7 @@ def _recover_reserved_job(job: JobRecord) -> JobRecord:
     return JobRecord(job.job_id, job.attempt_id, pid, starttime, job.run_dir, "LAUNCHED")
 
 
-def _completion_payload(job: JobRecord) -> dict[str, object] | None:
+def _completion_payload(job: JobRecord) -> tuple[dict[str, object], str] | None:
     for name in ("terminal.json", "cancel.json"):
         path = Path(job.run_dir) / name
         try:
@@ -857,7 +900,7 @@ def _completion_payload(job: JobRecord) -> dict[str, object] | None:
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(payload, dict):
-            return payload
+            return payload, name
     return None
 
 
@@ -1286,8 +1329,8 @@ def _reconcile_jobs(store: ResearchStore) -> None:
         payload = json.loads(str(row["payload_json"]))
         job = _recover_reserved_job(_job_from_row(row))
         if job.worker_pid == 0:
-            terminal = _completion_payload(job)
-            if terminal is None:
+            completion = _completion_payload(job)
+            if completion is None:
                 outcome = _failure(attempt.attempt_id, job.job_id, "interrupted_before_launch")
                 _write_terminal(Path(job.run_dir), outcome)
                 store.acquire_run_lock()
@@ -1299,10 +1342,11 @@ def _reconcile_jobs(store: ResearchStore) -> None:
                 finally:
                     store.release_run_lock()
             else:
+                terminal, origin = completion
                 _finish_if_running(
                     store,
                     attempt.attempt_id,
-                    _terminal_outcome(store, attempt.attempt_id, terminal),
+                    _terminal_outcome(store, attempt.attempt_id, terminal, origin=origin),
                 )
                 _mark_job_state(store, attempt.attempt_id, "EXITED")
             continue
@@ -1319,12 +1363,13 @@ def _reconcile_jobs(store: ResearchStore) -> None:
             if finished.state != AttemptState.RUNNING:
                 _mark_job_state(store, attempt.attempt_id, "ORPHANED")
         elif state in {"EXITED", "TIMED_OUT", "CANCELLED"}:
-            terminal = _completion_payload(job)
-            if terminal is not None:
+            completion = _completion_payload(job)
+            if completion is not None:
+                terminal, origin = completion
                 _finish_if_running(
                     store,
                     attempt.attempt_id,
-                    _terminal_outcome(store, attempt.attempt_id, terminal),
+                    _terminal_outcome(store, attempt.attempt_id, terminal, origin=origin),
                 )
                 _mark_job_state(store, attempt.attempt_id, state)
 
@@ -1431,10 +1476,10 @@ def cancel(attempt_id: str, root: Path = typer.Option(..., "--root")) -> None:
         finally:
             store.release_run_lock()
         cancellation = cancel_job(job)
-        terminal = _completion_payload(job)
+        completion = _completion_payload(job)
         outcome = (
-            _terminal_outcome(store, attempt_id, terminal)
-            if terminal is not None
+            _terminal_outcome(store, attempt_id, completion[0], origin=completion[1])
+            if completion is not None
             else _failure(attempt_id, job.job_id, "cancelled", exit_code=-15)
         )
         _finish_if_running(store, attempt_id, outcome)

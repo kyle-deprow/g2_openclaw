@@ -1041,6 +1041,12 @@ class ResearchStore:
         attempt = self.get_attempt(attempt_id)
         if decision.hypothesis_spec.hypothesis_id != attempt.hypothesis_id:
             raise StoreConflict("admission decision does not match attempt hypothesis")
+        try:
+            spec_set_digest = _digest(self.evaluation_spec_set(attempt.hypothesis_id).to_json())
+        except (StoreConflict, ValueError) as exc:
+            raise StoreConflict("admission decision requires immutable spec-set evidence") from exc
+        if decision.evaluation_spec_set_sha256 != spec_set_digest:
+            raise StoreConflict("admission decision spec-set digest does not match evidence")
         payload = decision.to_json()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1896,13 +1902,10 @@ class ResearchStore:
         if stored_plan.primary_scenario_id not in {s.scenario_id for s in stored_plan.scenarios}:
             raise StoreConflict("run plan primary scenario is missing")
         if (
-            stored_plan.scenario_timeout_seconds > timeout_seconds
-            or stored_plan.analysis_timeout_seconds > timeout_seconds
-            or (
-                stored_plan.scenario_timeout_seconds * len(stored_plan.scenarios)
-                + stored_plan.analysis_timeout_seconds
-                > timeout_seconds
-            )
+            stored_plan.scenario_timeout_seconds
+            * (len(stored_plan.scenarios) + len(spec_set.specs))
+            + stored_plan.analysis_timeout_seconds
+            > timeout_seconds
         ):
             raise StoreConflict("run plan stage timeouts exceed the queued job timeout")
         payload: dict[str, object] = {

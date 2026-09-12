@@ -88,11 +88,16 @@ def _path_present(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
-def _write_terminal_if_authorized(run_dir: Path, terminal: dict[str, object]) -> bool:
-    """Publish terminal evidence unless cancellation owns this run."""
+def _write_terminal_if_authorized(
+    run_dir: Path, terminal: dict[str, object], evidence: dict[str, object]
+) -> bool:
+    """Publish run evidence and its terminal pointer under one lifecycle lock."""
     with lifecycle_lock(run_dir):
         if _path_present(run_dir / "cancel.json"):
             return False
+        evidence_path = run_dir / "run-evidence.json"
+        _write(evidence_path, evidence)
+        terminal["run_evidence_sha256"] = _sha(evidence_path)
         _write_if_absent(run_dir / "terminal.json", terminal)
         return True
 
@@ -363,15 +368,6 @@ def _require_empty_directory(path: Path, label: str) -> None:
         raise ContainmentError(f"{label} contains output from an earlier stage")
 
 
-def _write_run_evidence(run_dir: Path, evidence: dict[str, object]) -> str | None:
-    with lifecycle_lock(run_dir):
-        if _path_present(run_dir / "cancel.json"):
-            return None
-        path = run_dir / "run-evidence.json"
-        _write(path, evidence)
-        return _sha(path)
-
-
 def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     """Execute one immutable multi-spec plan through the fixed stage boundary."""
     global _WORKER_INTERRUPTED
@@ -390,7 +386,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     plan_digest = str(job.get("run_plan_sha256", ""))
     output_hashes: dict[str, object] = {"scenarios": {}, "analysis": {}}
     validated_digest: str | None = None
-    run_evidence_digest: str | None = None
+    pending_evidence: dict[str, object] | None = None
     active_scenario_id: str | None = None
     try:
         _owned_directory(run_dir, "run directory")
@@ -420,16 +416,6 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         ):
             raise ContainmentError("invalid resource limits")
         deadline = time.monotonic() + float(timeout_value)
-        if (
-            plan.scenario_timeout_seconds > float(timeout_value)
-            or plan.analysis_timeout_seconds > float(timeout_value)
-            or (
-                plan.scenario_timeout_seconds * len(plan.scenarios) + plan.analysis_timeout_seconds
-                > float(timeout_value)
-            )
-        ):
-            status = "run_plan_mismatch"
-            raise ContainmentError("run plan stage timeouts exceed the job timeout")
         panel, receipt, dividends = artifacts["panel"], artifacts["receipt"], artifacts["dividends"]
         spec_paths = {
             key.removeprefix("evaluation:"): path
@@ -451,6 +437,11 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         ):
             status = "run_plan_mismatch"
             raise ContainmentError("run plan scenario spec digest mismatch")
+        if plan.scenario_timeout_seconds * (
+            len(plan.scenarios) + len(spec_paths)
+        ) + plan.analysis_timeout_seconds > float(timeout_value):
+            status = "run_plan_mismatch"
+            raise ContainmentError("run plan stage timeouts exceed the job timeout")
         semantic_by_spec: dict[str, str] = {}
         for spec_id, spec_path in sorted(spec_paths.items()):
             validation_command = (
@@ -697,10 +688,15 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         _require_empty_directory(analysis_dir, "analysis stage")
         analysis_out = analysis_dir / "analysis"
         _owned_directory(analysis_out, "analysis output stage")
+        primary_scenario = next(
+            scenario
+            for scenario in plan.scenarios
+            if scenario.scenario_id == plan.primary_scenario_id
+        )
         analysis_inputs = {
             "panel.parquet": panel,
             "receipt.json": receipt,
-            "spec.json": spec_paths[plan.scenarios[0].spec_id],
+            "spec.json": spec_paths[primary_scenario.spec_id],
             "dividends.json": dividends,
             "universe.json": pins.universe,
         }
@@ -738,19 +734,23 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             _stage_deadline(deadline, plan.analysis_timeout_seconds),
         )
         stages.append(_stage_evidence(run_dir, "analysis", analysis_exit, time.monotonic() - tick))
-        declared = set(plan.analysis.artifacts)
-        actual: set[str] = set()
-        for path in analysis_dir.rglob("*"):
-            if path.is_symlink():
-                raise ContainmentError("analysis output contains unsafe entry")
-            if path.is_file():
-                actual.add(path.relative_to(analysis_dir).as_posix())
         if analysis_timeout:
             status = "timed_out"
             raise ContainmentError("analysis timed out")
         if analysis_exit != 0:
             status = "analysis_failed"
             raise ContainmentError("analysis stage failed")
+        verify_runtime_pins(pins)
+        _plan_artifacts(job)
+        declared = set(plan.analysis.artifacts)
+        actual: set[str] = set()
+        for path in analysis_dir.rglob("*"):
+            if path == analysis_out:
+                continue
+            if path.is_symlink() or not path.is_file():
+                status = "analysis_output_invalid"
+                raise ContainmentError("analysis output contains unsafe entry")
+            actual.add(path.relative_to(analysis_dir).as_posix())
         if actual != declared or any(
             not _bounded_regular(analysis_dir / rel, plan.analysis.max_artifact_bytes)
             for rel in declared
@@ -779,7 +779,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
-        run_evidence_digest = _write_run_evidence(run_dir, evidence)
+        pending_evidence = evidence
         return evidence
     except (
         ContainmentError,
@@ -831,10 +831,10 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
-        run_evidence_digest = _write_run_evidence(run_dir, evidence)
+        pending_evidence = evidence
         return evidence
     finally:
-        if not _WORKER_INTERRUPTED:
+        if not _WORKER_INTERRUPTED and pending_evidence is not None:
             # The run-evidence file is the authoritative terminal record for a
             # planned run; terminal.json only carries the lifecycle summary.
             terminal = {
@@ -852,10 +852,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             if isinstance(primary_evidence, dict):
                 terminal["targets_exit"] = primary_evidence.get("targets_exit")
                 terminal["evaluator_exit"] = primary_evidence.get("evaluator_exit")
-            if run_evidence_digest is None and _path_present(run_dir / "run-evidence.json"):
-                run_evidence_digest = _sha(run_dir / "run-evidence.json")
-            terminal["run_evidence_sha256"] = run_evidence_digest
-            _write_terminal_if_authorized(run_dir, terminal)
+            _write_terminal_if_authorized(run_dir, terminal, pending_evidence)
 
 
 def _run(job: dict[str, object]) -> dict[str, object]:

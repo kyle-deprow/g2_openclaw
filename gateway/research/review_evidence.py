@@ -542,10 +542,13 @@ def _validate_bundle(
         raise BundleError("bundle diff differs from the committed implementation")
     _require_immutable(root / "test-evidence", "bundle test evidence")
     _read_bounded(root / "test-evidence", MAX_TEST_EVIDENCE_BYTES, "bundle test evidence")
-    run_plan = RunPlan.from_json((root / "run-plan.json").read_text(encoding="utf-8"))
-    stored_plan = RunPlan.from_json(
-        json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
-    )
+    try:
+        run_plan = RunPlan.from_json((root / "run-plan.json").read_text(encoding="utf-8"))
+        stored_plan = RunPlan.from_json(
+            json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise BundleError("bundle run plan is invalid") from exc
     _require_immutable(root / "run-plan.json", "bundle run plan")
     if run_plan.to_json() != stored_plan.to_json():
         raise BundleError("bundle run plan differs from immutable evidence")

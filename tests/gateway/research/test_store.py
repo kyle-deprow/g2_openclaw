@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -67,6 +69,41 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
             ),
             run_plan=plan,
         )
+
+
+def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    record = implementation(attempt.attempt_id, commit)
+    with pytest.raises(StoreConflict, match="run plan evidence"):
+        store.submit_implementation(attempt.attempt_id, record)
+
+    plan = run_plan(store, attempt, record)
+    changed_record = replace(record, targets_argv=("python", "-m", "different"))
+    changed_plan = replace(
+        plan,
+        implementation_sha256=hashlib.sha256(changed_record.to_json().encode()).hexdigest(),
+    )
+    with pytest.raises(StoreConflict, match="primary scenario argv"):
+        store.submit_implementation(attempt.attempt_id, changed_record, run_plan=changed_plan)
+
+    unbound_plan = replace(
+        plan,
+        scenarios=(
+            plan.scenarios[0].__class__(
+                plan.scenarios[0].scenario_id,
+                plan.scenarios[0].targets_argv,
+                "c999",
+                "d" * 64,
+            ),
+        ),
+    )
+    with pytest.raises(StoreConflict, match="scenario spec does not match evidence"):
+        store.submit_implementation(attempt.attempt_id, record, run_plan=unbound_plan)
 
 
 def test_frozen_hypothesis_and_closed_attempt_are_sqlite_immutable(

@@ -447,6 +447,25 @@ def test_evaluation_spec_copy_tampering_is_rejected(
         reserve_review(store, attempt_id, bundle, "owner")
 
 
+@pytest.mark.parametrize("filename", ["run-plan.json", "evaluation-spec-set.json"])
+def test_run_plan_or_spec_set_bundle_tampering_is_rejected(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    filename: str,
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reserve_review(store, attempt_id, bundle, "owner")
+    bundle.chmod(0o755)
+    target = bundle / filename
+    target.chmod(0o644)
+    target.write_text("{}\n", encoding="utf-8")
+    target.chmod(0o444)
+    bundle.chmod(0o555)
+
+    with pytest.raises(BundleError):
+        reserve_review(store, attempt_id, bundle, "owner")
+
+
 def test_reservation_accepts_nested_tracked_source_directories(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:

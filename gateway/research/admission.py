@@ -546,6 +546,8 @@ class AdmissionDecision:
         _positive_int(self.max_attempts, "decision.max_attempts")
         if self.exposure_ledger_sha256 is not None:
             _sha(self.exposure_ledger_sha256, "decision.exposure_ledger_sha256")
+        if self.admitted and self.evaluation_spec_set_sha256 is None:
+            raise ValueError("admitted decision requires an evaluation spec-set digest")
         if self.evaluation_spec_set_sha256 is not None:
             _sha(self.evaluation_spec_set_sha256, "decision.evaluation_spec_set_sha256")
         if not isinstance(self.overlap_classification, OverlapClassification):

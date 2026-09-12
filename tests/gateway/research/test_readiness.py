@@ -266,7 +266,10 @@ def test_budget_guard_allows_admitted_attempt_at_cap_one(
 ) -> None:
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
-    admitted = _admit(_document(_payload()))
+    spec_set_digest = hashlib.sha256(
+        store.evaluation_spec_set(hypothesis.hypothesis_id).to_json().encode()
+    ).hexdigest()
+    admitted = _admit(_document(_payload()), evaluation_spec_set_sha256=spec_set_digest)
     first = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
     store.set_campaign_policy(1, None, "synthetic-cap-one-fixture")
 

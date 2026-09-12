@@ -345,16 +345,6 @@ def launch(
         raise JobError("evaluator digest does not match the configured runtime pin")
     if run_plan is None:
         raise JobError("immutable run plan is required for launch")
-    if (
-        run_plan.scenario_timeout_seconds > timeout_seconds
-        or run_plan.analysis_timeout_seconds > timeout_seconds
-        or (
-            run_plan.scenario_timeout_seconds * len(run_plan.scenarios)
-            + run_plan.analysis_timeout_seconds
-            > timeout_seconds
-        )
-    ):
-        raise JobError("run plan stage timeouts exceed the job timeout")
     if not dividends_path.is_file():
         raise JobError("dividends file is missing")
     required_artifacts = {"spec", "panel", "receipt", "evaluation_spec", "dividends"}
@@ -374,6 +364,12 @@ def launch(
         or set(evaluation_spec_digests) != expected_spec_ids
     ):
         raise JobError("run plan evaluation spec bindings contain unexpected entries")
+    if (
+        run_plan.scenario_timeout_seconds * (len(run_plan.scenarios) + len(evaluation_spec_paths))
+        + run_plan.analysis_timeout_seconds
+        > timeout_seconds
+    ):
+        raise JobError("run plan stage timeouts exceed the job timeout")
     primary = next(
         scenario
         for scenario in run_plan.scenarios

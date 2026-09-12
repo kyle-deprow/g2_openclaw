@@ -37,6 +37,7 @@ SNAPSHOT_SHA = hashlib.sha256(b"snapshot").hexdigest()
 REQUEST_SHA = hashlib.sha256(b"request").hexdigest()
 UNIVERSE_SHA = hashlib.sha256(b"universe").hexdigest()
 DIVIDENDS_SHA = hashlib.sha256(b"dividends").hexdigest()
+SPEC_SET_SHA = hashlib.sha256(b"evaluation-spec-set-fixture").hexdigest()
 
 
 def _payload() -> dict[str, object]:
@@ -168,6 +169,7 @@ def _admit(
     bounds: EvaluatorBounds | None = None,
     policy: CampaignPolicy | None = None,
     capability: ExecutionCapability | None = None,
+    evaluation_spec_set_sha256: str = SPEC_SET_SHA,
 ) -> AdmissionDecision:
     return admit_hypothesis(
         document,
@@ -177,6 +179,7 @@ def _admit(
         _bounds() if bounds is None else bounds,
         CampaignPolicy(True, 3) if policy is None else policy,
         ExecutionCapability(frozenset({"panel"})) if capability is None else capability,
+        evaluation_spec_set_sha256=evaluation_spec_set_sha256,
     )
 
 

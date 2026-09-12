@@ -59,6 +59,8 @@ def _fake_worker_evidence(
         json.dumps(
             {
                 "job_id": job_id,
+                "worker_pid": 0,
+                "worker_starttime": 0,
                 "status": status,
                 "targets_exit": 0,
                 "evaluator_exit": 0,
@@ -203,6 +205,141 @@ def test_host_failure_terminal_uses_stable_check_name_and_detail(tmp_path: Path)
     payload = json.loads((tmp_path / "terminal.json").read_text(encoding="utf-8"))
     assert payload["checks"] == [{"name": "launch_failed", "ok": False}]
     assert payload["error"] == "worker exploded at stage launch"
+
+
+@pytest.mark.parametrize("status", ["cancelled", "launch_failed", "source_mutated"])
+def test_terminal_outcome_accepts_host_terminal_without_run_evidence(
+    campaign: tuple[ResearchStore, Path, Any], status: str
+) -> None:
+    """Host-owned terminal records are authoritative without worker evidence."""
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    run_dir.mkdir(parents=True)
+    terminal: dict[str, object] = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-host-terminal",
+        "status": status,
+        "targets_exit": -15 if status == "cancelled" else -1,
+        "evaluator_exit": None,
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == status
+    assert outcome.job_id == "job-host-terminal"
+    assert outcome.exit_code in {-15, -1}
+
+
+def test_terminal_outcome_rejects_worker_failure_without_run_evidence(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    terminal = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-worker-failure",
+        "worker_pid": 4242,
+        "worker_starttime": 77,
+        "status": "scenario_failed",
+        "targets_exit": 1,
+        "evaluator_exit": 1,
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+def test_terminal_outcome_rejects_tampered_run_evidence_digest(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    run_dir.mkdir(parents=True)
+    evidence = run_dir / "run-evidence.json"
+    evidence.write_text('{"status":"succeeded"}', encoding="utf-8")
+    terminal = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-evidence-tamper",
+        "worker_pid": 4242,
+        "worker_starttime": 77,
+        "status": "succeeded",
+        "run_evidence_sha256": "0" * 64,
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+def test_terminal_outcome_rejects_tampered_primary_result_digest(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    run_dir = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+    )
+    result_path = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
+    result_path.parent.mkdir(parents=True)
+    result_path.write_text('{"compliant":true}', encoding="utf-8")
+    evidence = {
+        "contract": "research-run-evidence-v1",
+        "status": "succeeded",
+        "job_id": "job-result-tamper",
+        "attempt_id": attempt.attempt_id,
+        "primary_scenario_id": "s000",
+        "scenarios": {
+            "s000": {
+                "result_path": str(result_path),
+                "result_sha256": "0" * 64,
+            }
+        },
+        "completed_scenarios": ["s000"],
+    }
+    evidence_path = run_dir / "run-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    terminal = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-result-tamper",
+        "worker_pid": 4242,
+        "worker_starttime": 77,
+        "status": "succeeded",
+        "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
 
 
 def test_host_dispatch_revalidates_dirty_source_after_queue(

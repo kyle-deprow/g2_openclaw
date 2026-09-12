@@ -220,6 +220,7 @@ def test_evaluation_spec_set_rejects_overflow_gaps_order_and_duplicate_paths(
             ),
             valid.created_at,
         )
+
     with pytest.raises(ValueError, match="contiguous"):
         EvaluationSpecSet(
             valid.contract,
@@ -247,3 +248,96 @@ def test_evaluation_spec_set_rejects_overflow_gaps_order_and_duplicate_paths(
             ),
             valid.created_at,
         )
+
+
+def _contract_run_plan(tmp_path: Path, *, scenarios: int = 1) -> RunPlan:
+    spec = tmp_path / "evaluation.json"
+    spec.write_text("{}", encoding="utf-8")
+    digest = hashlib.sha256(spec.read_bytes()).hexdigest()
+    scenario_values = tuple(
+        RunScenario(
+            f"s{index:03d}",
+            ("/usr/bin/python3", "-m", "targets"),
+            "c000",
+            digest,
+        )
+        for index in range(scenarios)
+    )
+    return RunPlan(
+        "research-run-plan-v1",
+        "H0001-A001",
+        "a" * 40,
+        "b" * 64,
+        "c" * 64,
+        "s000",
+        scenario_values,
+        AnalysisPlan("analysis.module", (), ("analysis/result.json",), 1024),
+        10,
+        10,
+    )
+
+
+def test_run_plan_rejects_seventeenth_scenario_contract_entry(tmp_path: Path) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path).to_json())
+    raw["scenarios"] = [
+        {**raw["scenarios"][0], "scenario_id": f"s{index:03d}"} for index in range(17)
+    ]
+    with pytest.raises(ValueError, match=r"1\.\.16"):
+        RunPlan.from_json(json.dumps(raw))
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        ("gap", "contiguous"),
+        ("order", "contiguous"),
+        ("primary", "primary_scenario_id"),
+    ],
+)
+def test_run_plan_rejects_gap_order_and_unknown_primary(
+    tmp_path: Path, mutation: str, match: str
+) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path, scenarios=2).to_json())
+    if mutation == "gap":
+        raw["scenarios"][1]["scenario_id"] = "s002"
+    elif mutation == "order":
+        raw["scenarios"] = list(reversed(raw["scenarios"]))
+    else:
+        raw["primary_scenario_id"] = "s009"
+    with pytest.raises(ValueError, match=match):
+        RunPlan.from_json(json.dumps(raw))
+
+
+@pytest.mark.parametrize(
+    "artifact", ["/tmp/result.json", "analysis/nested/result.json", "analysis/../result.json"]
+)
+def test_run_plan_rejects_unsafe_analysis_artifact_path(tmp_path: Path, artifact: str) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path).to_json())
+    raw["analysis"]["artifacts"] = [artifact]
+    with pytest.raises(ValueError, match="direct files"):
+        RunPlan.from_json(json.dumps(raw))
+
+
+@pytest.mark.parametrize("token", ["api_token", "password", "secret", "/tmp/input.json"])
+def test_run_plan_rejects_analysis_secret_or_absolute_argument(tmp_path: Path, token: str) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path).to_json())
+    raw["analysis"]["args"] = [token]
+    with pytest.raises(ValueError, match=r"plain|absolute|secret"):
+        RunPlan.from_json(json.dumps(raw))
+
+
+def test_run_plan_rejects_missing_unknown_and_timeout_contract_fields(tmp_path: Path) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path).to_json())
+    missing = dict(raw)
+    del missing["analysis_timeout_seconds"]
+    with pytest.raises(ValueError, match="keys must be exactly"):
+        RunPlan.from_json(json.dumps(missing))
+    unknown = dict(raw)
+    unknown["unreviewed"] = True
+    with pytest.raises(ValueError, match="keys must be exactly"):
+        RunPlan.from_json(json.dumps(unknown))
+    for field, value in (("scenario_timeout_seconds", 0), ("analysis_timeout_seconds", 7201)):
+        invalid = dict(raw)
+        invalid[field] = value
+        with pytest.raises(ValueError, match=r"positive|7200"):
+            RunPlan.from_json(json.dumps(invalid))

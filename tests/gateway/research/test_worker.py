@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from typing import cast
@@ -307,7 +308,206 @@ def test_worker_executes_two_distinct_cost_scenarios_and_records_each(
     assert len(deadlines) == 7
 
 
-@pytest.mark.parametrize("analysis_mode", ["extra", "missing", "oversized"])
+def test_worker_analysis_mount_uses_primary_scenario_spec_when_not_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, _evaluator, first_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    second_spec = tmp_path / "eval-spec-primary.json"
+    second_spec.write_text('{"cost":3}', encoding="utf-8")
+    first_digest = hashlib.sha256(first_spec.read_bytes()).hexdigest()
+    second_digest = hashlib.sha256(second_spec.read_bytes()).hexdigest()
+    first_argv = tuple(cast(list[str], job["targets_argv"]))
+    second_argv = (
+        first_argv[0],
+        first_argv[1],
+        "--out",
+        str(run_dir / "scenarios" / "s001" / "targets-stage" / "targets.json"),
+    )
+    plan = RunPlan(
+        "research-run-plan-v1",
+        "H0001-A001",
+        str(job["expected_commit"]),
+        "a" * 64,
+        "b" * 64,
+        "s001",
+        (
+            RunScenario("s000", first_argv, "c000", first_digest),
+            RunScenario("s001", second_argv, "c001", second_digest),
+        ),
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        1,
+        1,
+    )
+    job["targets_argv"] = list(second_argv)
+    job["run_plan"] = json.loads(plan.to_json())
+    job["run_plan_sha256"] = hashlib.sha256(plan.to_json().encode()).hexdigest()
+    job["evaluation_spec_paths"] = {"c000": str(first_spec), "c001": str(second_spec)}
+    job["evaluation_spec_digests"] = {"c000": first_digest, "c001": second_digest}
+    artifact_digests = job["artifact_digests"]
+    assert isinstance(artifact_digests, dict)
+    analysis_argv: list[str] = []
+
+    def fake_stage(stage: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        if stage.stage.startswith("validate"):
+            spec_id = "c001" if stage.stage.endswith("c001") else "c000"
+            spec_digest = second_digest if spec_id == "c001" else first_digest
+            out.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "spec_sha256_semantic": spec_id,
+                        "spec_sha256_raw": spec_digest,
+                        "panel_sha256": artifact_digests["panel"],
+                        "receipt_sha256": artifact_digests["receipt"],
+                        "universe_file_sha256": job["universe_sha256"],
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif stage.stage.startswith("targets"):
+            scenario_id = stage.stage.removeprefix("targets-")
+            target = run_dir / "scenarios" / scenario_id / "targets-stage" / "targets.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        elif stage.stage.startswith("evaluate"):
+            scenario_id = stage.stage.removeprefix("evaluate-")
+            spec_id = "c001" if scenario_id == "s001" else "c000"
+            output = run_dir / "scenarios" / scenario_id / "evaluator-stage" / "out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "evaluator_version": "research-evaluator-v2",
+                        "spec_sha256": spec_id,
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output / "trades.parquet").write_bytes(b"trades")
+            (output / "daily.parquet").write_bytes(b"daily")
+        else:
+            analysis_argv.extend(stage.argv)
+            output = run_dir / "analysis-stage" / "analysis"
+            (output / "result.json").write_text("{}", encoding="utf-8")
+        return 0, False
+
+    monkeypatch.setattr(worker, "_stage", fake_stage)
+    outcome = run(job)
+
+    assert outcome["status"] == "succeeded"
+    triples = [tuple(analysis_argv[index : index + 3]) for index in range(len(analysis_argv) - 2)]
+    assert ("--ro-bind", str(second_spec), "/inputs/spec.json") in triples
+    assert ("--ro-bind", str(first_spec), "/inputs/spec.json") not in triples
+
+
+def test_worker_partial_scenario_failure_records_restart_safe_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, _evaluator, first_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    second_spec = tmp_path / "eval-spec-second.json"
+    second_spec.write_text('{"cost":3}', encoding="utf-8")
+    first_digest = hashlib.sha256(first_spec.read_bytes()).hexdigest()
+    second_digest = hashlib.sha256(second_spec.read_bytes()).hexdigest()
+    first_argv = tuple(cast(list[str], job["targets_argv"]))
+    second_argv = (
+        first_argv[0],
+        first_argv[1],
+        "--out",
+        str(run_dir / "scenarios" / "s001" / "targets-stage" / "targets.json"),
+    )
+    plan = RunPlan(
+        "research-run-plan-v1",
+        "H0001-A001",
+        str(job["expected_commit"]),
+        "a" * 64,
+        "b" * 64,
+        "s000",
+        (
+            RunScenario("s000", first_argv, "c000", first_digest),
+            RunScenario("s001", second_argv, "c001", second_digest),
+        ),
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        1,
+        1,
+    )
+    job["run_plan"] = json.loads(plan.to_json())
+    job["run_plan_sha256"] = hashlib.sha256(plan.to_json().encode()).hexdigest()
+    job["evaluation_spec_paths"] = {"c000": str(first_spec), "c001": str(second_spec)}
+    job["evaluation_spec_digests"] = {"c000": first_digest, "c001": second_digest}
+    artifact_digests = job["artifact_digests"]
+    assert isinstance(artifact_digests, dict)
+    stages: list[str] = []
+
+    def fake_stage(stage: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        stages.append(stage.stage)
+        if stage.stage.startswith("validate"):
+            spec_id = "c001" if stage.stage.endswith("c001") else "c000"
+            spec_digest = second_digest if spec_id == "c001" else first_digest
+            out.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "spec_sha256_semantic": spec_id,
+                        "spec_sha256_raw": spec_digest,
+                        "panel_sha256": artifact_digests["panel"],
+                        "receipt_sha256": artifact_digests["receipt"],
+                        "universe_file_sha256": job["universe_sha256"],
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif stage.stage == "targets-s000":
+            target = run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        elif stage.stage == "targets-s001":
+            return 1, False
+        elif stage.stage == "evaluate-s000":
+            output = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "evaluator_version": "research-evaluator-v2",
+                        "spec_sha256": "c000",
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output / "trades.parquet").write_bytes(b"trades")
+            (output / "daily.parquet").write_bytes(b"daily")
+        else:
+            pytest.fail("partial scenario failure must not enter analysis")
+        return 0, False
+
+    monkeypatch.setattr(worker, "_stage", fake_stage)
+    outcome = run(job)
+
+    assert outcome["status"] == "scenario_failed"
+    assert stages == [
+        "validate-c000",
+        "validate-c001",
+        "targets-s000",
+        "evaluate-s000",
+        "targets-s001",
+    ]
+    assert outcome["completed_scenarios"] == ["s000"]
+    assert not (run_dir / "analysis-stage").exists()
+    evidence = json.loads((run_dir / "run-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["completed_scenarios"] == ["s000"]
+    assert evidence["scenarios"]["s001"]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "analysis_mode",
+    ["extra", "missing", "oversized", "symlink", "fifo", "socket", "emptydir"],
+)
 def test_worker_rejects_invalid_analysis_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, analysis_mode: str
 ) -> None:
@@ -315,6 +515,7 @@ def test_worker_rejects_invalid_analysis_manifest(
     run_dir = Path(str(job["run_dir"]))
     artifact_digests = job["artifact_digests"]
     assert isinstance(artifact_digests, dict)
+    socket_handle: socket.socket | None = None
 
     def fake_stage(plan: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
         if plan.stage.startswith("validate"):
@@ -360,15 +561,121 @@ def test_worker_rejects_invalid_analysis_manifest(
                 (run_dir / "analysis-stage" / "outside.json").write_text(
                     "unexpected", encoding="utf-8"
                 )
+            elif analysis_mode == "symlink":
+                target = run_dir / "analysis-target.txt"
+                target.write_text("outside", encoding="utf-8")
+                (output / "unsafe-link").symlink_to(target)
+            elif analysis_mode == "fifo":
+                os.mkfifo(output / "unsafe.fifo")
+            elif analysis_mode == "socket":
+                nonlocal socket_handle
+                socket_handle = socket.socket(socket.AF_UNIX)
+                socket_handle.bind(str(output / "unsafe.sock"))
+            elif analysis_mode == "emptydir":
+                (output / "empty").mkdir()
         return 0, False
 
     monkeypatch.setattr(worker, "_stage", fake_stage)
-    outcome = run(job)
+    try:
+        outcome = run(job)
+    finally:
+        if socket_handle is not None:
+            socket_handle.close()
     assert outcome["status"] == "analysis_output_invalid"
     assert (run_dir / "terminal.json").is_file()
     evidence = json.loads((run_dir / "run-evidence.json").read_text(encoding="utf-8"))
     assert evidence["status"] == "analysis_output_invalid"
     assert evidence["completed_scenarios"] == ["s000"]
+
+
+def test_worker_rechecks_frozen_inputs_after_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    artifact_digests = job["artifact_digests"]
+    assert isinstance(artifact_digests, dict)
+    artifact_paths = job["artifact_paths"]
+    assert isinstance(artifact_paths, dict)
+    panel = Path(str(artifact_paths["panel"]))
+
+    def fake_stage(plan: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        if plan.stage.startswith("validate"):
+            out.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "spec_sha256_semantic": "a" * 64,
+                        "spec_sha256_raw": artifact_digests["evaluation_spec"],
+                        "panel_sha256": artifact_digests["panel"],
+                        "receipt_sha256": artifact_digests["receipt"],
+                        "universe_file_sha256": job["universe_sha256"],
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif plan.stage.startswith("targets"):
+            target = run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        elif plan.stage.startswith("evaluate"):
+            output = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "evaluator_version": "research-evaluator-v2",
+                        "spec_sha256": "a" * 64,
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output / "trades.parquet").write_bytes(b"trades")
+            (output / "daily.parquet").write_bytes(b"daily")
+        else:
+            output = run_dir / "analysis-stage" / "analysis"
+            (output / "result.json").write_text("{}", encoding="utf-8")
+            panel.write_text("mutated after analysis", encoding="utf-8")
+        return 0, False
+
+    monkeypatch.setattr(worker, "_stage", fake_stage)
+    outcome = run(job)
+
+    assert outcome["status"] == "input_digest_mismatch"
+    terminal = json.loads((run_dir / "terminal.json").read_text(encoding="utf-8"))
+    assert terminal["status"] == "input_digest_mismatch"
+
+
+def test_worker_rejects_stage_timeout_aggregate_above_job_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    plan = RunPlan.from_json(json.dumps(job["run_plan"]))
+    oversized = RunPlan(
+        plan.contract,
+        plan.attempt_id,
+        plan.commit,
+        plan.implementation_sha256,
+        plan.evaluation_spec_set_sha256,
+        plan.primary_scenario_id,
+        plan.scenarios,
+        plan.analysis,
+        4,
+        2,
+    )
+    job["run_plan"] = json.loads(oversized.to_json())
+    job["run_plan_sha256"] = hashlib.sha256(oversized.to_json().encode()).hexdigest()
+    job["timeout_seconds"] = 5
+    monkeypatch.setattr(worker, "_stage", lambda *_args: pytest.fail("aggregate must refuse"))
+
+    outcome = run(job)
+
+    assert outcome["status"] == "run_plan_mismatch"
+    assert json.loads((Path(str(job["run_dir"])) / "terminal.json").read_text())["status"] == (
+        "run_plan_mismatch"
+    )
 
 
 def test_evaluator_output_is_absent_until_evaluator_launch(
